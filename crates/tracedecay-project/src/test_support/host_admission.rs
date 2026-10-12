@@ -1020,50 +1020,6 @@ impl HostAdmissionTestRuntimeV1 {
         .await
     }
 
-    /// Opens one tracked branch through this retained registered runtime.
-    #[doc(hidden)]
-    pub async fn open_project_branch_for_test(
-        &self,
-        project_root: &Path,
-        branch_name: &str,
-        open_options: TraceDecayOpenOptions,
-    ) -> Result<TraceDecay> {
-        let project_id = self
-            .project_id
-            .as_ref()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "project branch open requires project-scoped test authority".to_owned(),
-            })?;
-        let project_database =
-            self.project_registered
-                .clone()
-                .ok_or_else(|| TraceDecayError::Config {
-                    message: "project branch open requires a registered project session".to_owned(),
-                })?;
-        let store_layout = TraceDecay::resolve_registered_configuration_layout(
-            project_root,
-            &open_options,
-            self.profile_database.as_ref(),
-        )
-        .await?;
-        if store_layout.identity.project_id.as_deref() != Some(project_id.as_str()) {
-            return Err(TraceDecayError::Config {
-                message: "project branch identity differs from registered test authority"
-                    .to_owned(),
-            });
-        }
-        TraceDecay::open_branch_with_registered_configuration(
-            project_root,
-            branch_name,
-            open_options,
-            store_layout,
-            project_database,
-            self.profile_database.clone(),
-            Arc::clone(&self.session_registry),
-        )
-        .await
-    }
-
     /// Reopens an existing graph read-only without inferring authority.
     #[doc(hidden)]
     pub async fn open_project_graph_read_only_for_test(
