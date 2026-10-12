@@ -53,6 +53,18 @@ fn ledger_records_share_the_callers_transaction_boundary() {
 }
 
 #[test]
+fn watermark_reads_on_a_schema_free_store_report_none() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    let transaction = connection.transaction().unwrap();
+    let metadata = metadata("operation.pending", "key.pending", 'a');
+    assert!(
+        current_watermark(&transaction, &binding(&metadata))
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
 fn commit_uses_one_replay_and_conflict_disposition() {
     let mut connection = Connection::open_in_memory().unwrap();
     let original = metadata("operation.original", "key.replay", 'a');
