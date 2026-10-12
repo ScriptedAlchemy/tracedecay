@@ -138,22 +138,14 @@ fn completed_primary_search_is_not_retried_after_graph_admission() {
 
 async fn completed_primary_search_is_not_retried_after_graph_admission_case() {
     let dir = tempfile::TempDir::new().expect("single search attempt isolation");
-    let profile =
-        crate::mcp::tools::handlers::dispatch_test_support::SelectorProfile::new(dir.path());
-    let project = dir.path().join("single-search-attempt");
-    std::fs::create_dir_all(project.join("src")).expect("create search attempt sources");
-    std::fs::write(
-        project.join("src/lib.rs"),
-        "pub fn SparseLexicalWidget() {}\n",
-    )
-    .expect("write search attempt fixture");
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
-        "project.single-search-attempt",
-    )
-    .await
-    .expect("registered search attempt fixture");
+    let (cg, _runtime) =
+        crate::mcp::tools::handlers::dispatch_test_support::registered_lib_fixture(
+            dir.path(),
+            "single-search-attempt",
+            "pub fn SparseLexicalWidget() {}\n",
+            "project.single-search-attempt",
+        )
+        .await;
 
     let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed = std::sync::Arc::clone(&calls);
@@ -206,22 +198,14 @@ fn generation_mismatch_retry_cannot_erase_a_complete_sparse_search() {
 
 async fn generation_mismatch_retry_cannot_erase_a_complete_sparse_search_case() {
     let dir = tempfile::TempDir::new().expect("generation mismatch isolation");
-    let profile =
-        crate::mcp::tools::handlers::dispatch_test_support::SelectorProfile::new(dir.path());
-    let project = dir.path().join("generation-mismatch-search");
-    std::fs::create_dir_all(project.join("src")).expect("create mismatch search sources");
-    std::fs::write(
-        project.join("src/lib.rs"),
-        "pub fn SparseLexicalWidget() {}\n",
-    )
-    .expect("write mismatch search fixture");
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
-        "project.generation-mismatch-search",
-    )
-    .await
-    .expect("registered mismatch search fixture");
+    let (cg, _runtime) =
+        crate::mcp::tools::handlers::dispatch_test_support::registered_lib_fixture(
+            dir.path(),
+            "generation-mismatch-search",
+            "pub fn SparseLexicalWidget() {}\n",
+            "project.generation-mismatch-search",
+        )
+        .await;
 
     let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed = std::sync::Arc::clone(&calls);
@@ -346,22 +330,14 @@ fn search_opens_with_a_freshness_verdict_from_typed_state() {
 
 async fn search_opens_with_a_freshness_verdict_from_typed_state_case() {
     let dir = tempfile::TempDir::new().expect("freshness verdict isolation");
-    let profile =
-        crate::mcp::tools::handlers::dispatch_test_support::SelectorProfile::new(dir.path());
-    let project = dir.path().join("freshness-verdict-search");
-    std::fs::create_dir_all(project.join("src")).expect("create freshness sources");
-    std::fs::write(
-        project.join("src/lib.rs"),
-        "pub fn SparseLexicalWidget() {}\n",
-    )
-    .expect("write freshness fixture");
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
-        "project.freshness-verdict-search",
-    )
-    .await
-    .expect("registered freshness fixture");
+    let (cg, _runtime) =
+        crate::mcp::tools::handlers::dispatch_test_support::registered_lib_fixture(
+            dir.path(),
+            "freshness-verdict-search",
+            "pub fn SparseLexicalWidget() {}\n",
+            "project.freshness-verdict-search",
+        )
+        .await;
     let executor: tracedecay_query::code_search::CodeIndexSearchExecutor =
         std::sync::Arc::new(|_| Box::pin(async { completed_sparse_search() }));
 
@@ -448,22 +424,14 @@ fn graph_reads_carry_the_worktree_freshness_verdict_search_reports() {
 
 async fn graph_reads_carry_the_worktree_freshness_verdict_search_reports_case() {
     let dir = tempfile::TempDir::new().expect("graph read freshness isolation");
-    let profile =
-        crate::mcp::tools::handlers::dispatch_test_support::SelectorProfile::new(dir.path());
-    let project = dir.path().join("freshness-verdict-graph-reads");
-    std::fs::create_dir_all(project.join("src")).expect("create freshness sources");
-    std::fs::write(
-        project.join("src/lib.rs"),
-        "pub fn SparseLexicalWidget() {}\n",
-    )
-    .expect("write freshness fixture");
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
-        "project.freshness-verdict-graph-reads",
-    )
-    .await
-    .expect("registered freshness fixture");
+    let (cg, _runtime) =
+        crate::mcp::tools::handlers::dispatch_test_support::registered_lib_fixture(
+            dir.path(),
+            "freshness-verdict-graph-reads",
+            "pub fn SparseLexicalWidget() {}\n",
+            "project.freshness-verdict-graph-reads",
+        )
+        .await;
     let options = |staleness_state: &str| {
         crate::mcp::tools::handlers::dispatch_test_support::verified_graph_options(
             &cg,
@@ -588,22 +556,14 @@ fn search_lanes_answer_to_the_freshness_the_verdict_reports() {
 /// lane calling itself stale. A newer sealed generation keeps them stale.
 async fn search_lanes_answer_to_the_freshness_the_verdict_reports_case() {
     let dir = tempfile::TempDir::new().expect("lane freshness isolation");
-    let profile =
-        crate::mcp::tools::handlers::dispatch_test_support::SelectorProfile::new(dir.path());
-    let project = dir.path().join("lane-freshness-search");
-    std::fs::create_dir_all(project.join("src")).expect("create lane freshness sources");
-    std::fs::write(
-        project.join("src/lib.rs"),
-        "pub fn SparseLexicalWidget() {}\n",
-    )
-    .expect("write lane freshness fixture");
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
-        "project.lane-freshness-search",
-    )
-    .await
-    .expect("registered lane freshness fixture");
+    let (cg, _runtime) =
+        crate::mcp::tools::handlers::dispatch_test_support::registered_lib_fixture(
+            dir.path(),
+            "lane-freshness-search",
+            "pub fn SparseLexicalWidget() {}\n",
+            "project.lane-freshness-search",
+        )
+        .await;
     let served = "generation.mcp-verified-graph-fixture.1";
     let executor: tracedecay_query::code_search::CodeIndexSearchExecutor = std::sync::Arc::new(
         move |_| {
@@ -684,22 +644,14 @@ fn search_forwards_lexical_routing_and_renders_route_evidence() {
 
 async fn search_forwards_lexical_routing_and_renders_route_evidence_case() {
     let dir = tempfile::TempDir::new().expect("lexical routing isolation");
-    let profile =
-        crate::mcp::tools::handlers::dispatch_test_support::SelectorProfile::new(dir.path());
-    let project = dir.path().join("lexical-routing-search");
-    std::fs::create_dir_all(project.join("src")).expect("create routing sources");
-    std::fs::write(
-        project.join("src/lib.rs"),
-        "pub fn SparseLexicalWidget() {}\n",
-    )
-    .expect("write routing fixture");
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
-        "project.lexical-routing-search",
-    )
-    .await
-    .expect("registered routing fixture");
+    let (cg, _runtime) =
+        crate::mcp::tools::handlers::dispatch_test_support::registered_lib_fixture(
+            dir.path(),
+            "lexical-routing-search",
+            "pub fn SparseLexicalWidget() {}\n",
+            "project.lexical-routing-search",
+        )
+        .await;
 
     let observed_routing = std::sync::Arc::new(std::sync::Mutex::new(None));
     let sink = std::sync::Arc::clone(&observed_routing);
@@ -806,19 +758,14 @@ fn files_names_the_worktree_sources_the_serving_snapshot_omits() {
 
 async fn files_names_the_worktree_sources_the_serving_snapshot_omits_case() {
     let dir = tempfile::TempDir::new().expect("omitted sources isolation");
-    let profile =
-        crate::mcp::tools::handlers::dispatch_test_support::SelectorProfile::new(dir.path());
-    let project = dir.path().join("omitted-sources-files");
-    std::fs::create_dir_all(project.join("src")).expect("create omitted sources tree");
-    std::fs::write(project.join("src/lib.rs"), "pub fn indexed() {}\n")
-        .expect("write omitted sources fixture");
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
-        "project.omitted-sources-files",
-    )
-    .await
-    .expect("registered omitted sources fixture");
+    let (cg, _runtime) =
+        crate::mcp::tools::handlers::dispatch_test_support::registered_lib_fixture(
+            dir.path(),
+            "omitted-sources-files",
+            "pub fn indexed() {}\n",
+            "project.omitted-sources-files",
+        )
+        .await;
 
     let omitted = CodeIndexOmittedSourcesV1 {
         count: 1,

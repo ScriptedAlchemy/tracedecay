@@ -11,7 +11,7 @@ use tracedecay_domain::{
 };
 
 use super::dispatch_test_support::{
-    SelectorProfile, dispatch_on_graph_authority, verified_graph_options,
+    SelectorProfile, dispatch_on_graph_authority, registered_lib_fixture, verified_graph_options,
 };
 use super::*;
 
@@ -206,18 +206,13 @@ fn lexical_search_options(cg: &TraceDecay) -> ToolCallRegistryOptions<'_> {
 #[tokio::test]
 async fn tracedecay_search_preserves_lexical_results_when_graph_admission_is_missing() {
     let dir = TempDir::new().expect("search degradation isolation");
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("search-graph-independence");
-    fs::create_dir_all(project.join("src")).expect("create fixture sources");
-    fs::write(project.join("src/lib.rs"), "pub fn LexicalWidget() {}\n")
-        .expect("write lexical fixture");
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "search-graph-independence",
+        "pub fn LexicalWidget() {}\n",
         "project.search-graph-independence",
     )
-    .await
-    .expect("registered search fixture");
+    .await;
 
     let mut options = lexical_search_options(&cg);
     options.verified_graph_query_port = None;
@@ -270,18 +265,13 @@ async fn tracedecay_search_preserves_lexical_results_when_graph_admission_is_mis
 #[tokio::test]
 async fn tracedecay_search_refuses_foreign_generation_graph_evidence_without_erasing_results() {
     let dir = TempDir::new().expect("graph generation mismatch isolation");
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("search-graph-generation-mismatch");
-    fs::create_dir_all(project.join("src")).expect("create mismatch fixture sources");
-    fs::write(project.join("src/lib.rs"), "pub fn LexicalWidget() {}\n")
-        .expect("write mismatch fixture");
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "search-graph-generation-mismatch",
+        "pub fn LexicalWidget() {}\n",
         "project.search-graph-generation-mismatch",
     )
-    .await
-    .expect("registered mismatch fixture");
+    .await;
 
     let result = crate::mcp::tools::handlers::dispatch_test_support::dispatch_on_graph_authority(
         &cg,
@@ -326,18 +316,13 @@ async fn tracedecay_search_refuses_foreign_generation_graph_evidence_without_era
 #[tokio::test]
 async fn tracedecay_search_does_not_wait_for_slow_graph_admission() {
     let dir = TempDir::new().expect("slow graph isolation");
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("slow-search-graph-admission");
-    fs::create_dir_all(project.join("src")).expect("create slow graph fixture sources");
-    fs::write(project.join("src/lib.rs"), "pub fn LexicalWidget() {}\n")
-        .expect("write slow graph fixture");
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "slow-search-graph-admission",
+        "pub fn LexicalWidget() {}\n",
         "project.slow-search-graph-admission",
     )
-    .await
-    .expect("registered slow graph fixture");
+    .await;
 
     let mut options = lexical_search_options(&cg);
     options.verified_graph_query_port = Some(Arc::new(PendingVerifiedGraphQueryPort));
@@ -413,18 +398,13 @@ async fn tracedecay_search_does_not_wait_for_slow_graph_admission() {
 #[tokio::test]
 async fn tracedecay_context_preserves_fallback_results_while_graph_warms() {
     let dir = TempDir::new().expect("context degradation isolation");
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("context-graph-independence");
-    fs::create_dir_all(project.join("src")).expect("create fixture sources");
-    fs::write(project.join("src/lib.rs"), "pub fn LexicalWidget() {}\n")
-        .expect("write lexical fixture");
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "context-graph-independence",
+        "pub fn LexicalWidget() {}\n",
         "project.context-graph-independence",
     )
-    .await
-    .expect("registered context fixture");
+    .await;
 
     let mut options = lexical_search_options(&cg);
     options.verified_graph_query_port = None;
@@ -494,18 +474,13 @@ async fn tracedecay_context_preserves_fallback_results_while_graph_warms() {
 #[tokio::test]
 async fn tracedecay_context_waits_for_requested_code_graph_admission() {
     let dir = TempDir::new().expect("requested context code isolation");
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("context-requested-code-graph");
-    fs::create_dir_all(project.join("src")).expect("create fixture sources");
-    fs::write(project.join("src/lib.rs"), "pub fn LexicalWidget() {}\n")
-        .expect("write lexical fixture");
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "context-requested-code-graph",
+        "pub fn LexicalWidget() {}\n",
         "project.context-requested-code-graph",
     )
-    .await
-    .expect("registered context fixture");
+    .await;
 
     let mut options = lexical_search_options(&cg);
     options.verified_graph_query_port = Some(Arc::new(YieldingUnavailableVerifiedGraphQueryPort));
@@ -546,21 +521,13 @@ async fn tracedecay_context_waits_for_requested_code_graph_admission() {
 #[tokio::test]
 async fn tracedecay_context_hydrates_search_matches_when_catalog_is_warming() {
     let dir = TempDir::new().expect("warming catalog isolation");
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("context-warming-catalog");
-    fs::create_dir_all(project.join("src")).expect("create fixture sources");
-    fs::write(
-        project.join("src/lib.rs"),
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "context-warming-catalog",
         "pub fn LexicalWidget() {\n    let ready = true;\n    let _ = ready;\n}\n",
-    )
-    .expect("write warming catalog fixture");
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
         "project.context-warming-catalog",
     )
-    .await
-    .expect("registered warming catalog fixture");
+    .await;
 
     let executor: tracedecay_query::code_search::CodeIndexSearchExecutor = Arc::new(|_| {
         Box::pin(async {
@@ -658,20 +625,16 @@ async fn tracedecay_context_hydrates_search_matches_when_catalog_is_warming() {
 #[tokio::test]
 async fn tracedecay_context_keeps_matches_without_inventing_a_declaration_extent() {
     let dir = TempDir::new().expect("attested window isolation");
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("context-attested-window");
-    fs::create_dir_all(project.join("src")).expect("create fixture sources");
     // A byte window identifies the match, but does not attest whether it
     // covers the declaration. Earlier name mentions cannot fill that gap.
     let source = "// LexicalWidget call site\nuse crate::LexicalWidget;\nfn caller() { LexicalWidget(); }\npub fn LexicalWidget() -> u32 { 42 }\n";
-    fs::write(project.join("src/lib.rs"), source).expect("write attested window fixture");
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "context-attested-window",
+        source,
         "project.context-attested-window",
     )
-    .await
-    .expect("registered attested window fixture");
+    .await;
 
     let declared = "pub fn LexicalWidget() -> u32 { 42 }";
     let start = u64::try_from(source.find(declared).expect("declaration offset"))
@@ -804,26 +767,18 @@ async fn tracedecay_context_reports_code_unavailable_when_attested_source_is_mis
 #[tokio::test]
 async fn tracedecay_context_marks_code_unavailable_when_symbol_lines_drift() {
     let dir = TempDir::new().expect("drifted source isolation");
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("context-drifted-source");
-    fs::create_dir_all(project.join("src")).expect("create fixture sources");
     // The file drifted since the published extraction: a comment now
     // occupies the attested line. The lineage extent still stands as the
     // symbol's location, but the live window no longer mints the
     // extraction digest, so the code stage reports typed unavailability
     // instead of serving the comment as the declaration.
-    fs::write(
-        project.join("src/lib.rs"),
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "context-drifted-source",
         "// inserted before the declaration\npub fn LexicalWidget() {}\n",
-    )
-    .expect("write drifted fixture");
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
         "project.context-drifted-source",
     )
-    .await
-    .expect("registered drifted source fixture");
+    .await;
 
     let executor: tracedecay_query::code_search::CodeIndexSearchExecutor = Arc::new(|_| {
         Box::pin(async {
@@ -867,18 +822,14 @@ async fn tracedecay_context_marks_code_unavailable_when_symbol_lines_drift() {
 #[tokio::test]
 async fn tracedecay_context_excludes_file_hits_from_symbols_but_serves_their_window() {
     let dir = TempDir::new().expect("file hit isolation");
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("context-file-hit");
-    fs::create_dir_all(project.join("src")).expect("create fixture sources");
     let source = "fn caller() { LexicalWidget(); }\n";
-    fs::write(project.join("src/lib.rs"), source).expect("write file hit fixture");
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "context-file-hit",
+        source,
         "project.context-file-hit",
     )
-    .await
-    .expect("registered file hit fixture");
+    .await;
 
     // A symbol hit and a file hit answer together. The file hit has no
     // symbol location to attest, so it earns no symbols[] row; its own
@@ -1038,18 +989,13 @@ fn stale_lexical_search() -> tracedecay_query::code_search::CodeIndexSearchOutco
 #[tokio::test]
 async fn tracedecay_context_preserves_stale_lane_coverage_markers() {
     let dir = TempDir::new().expect("stale context isolation");
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("stale-context-coverage");
-    fs::create_dir_all(project.join("src")).expect("create stale context sources");
-    fs::write(project.join("src/lib.rs"), "pub fn LexicalWidget() {}\n")
-        .expect("write stale context fixture");
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "stale-context-coverage",
+        "pub fn LexicalWidget() {}\n",
         "project.stale-context-coverage",
     )
-    .await
-    .expect("registered stale context fixture");
+    .await;
 
     let executor: tracedecay_query::code_search::CodeIndexSearchExecutor =
         Arc::new(|_| Box::pin(async { stale_lexical_search() }));

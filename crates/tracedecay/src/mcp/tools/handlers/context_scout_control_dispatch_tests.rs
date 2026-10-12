@@ -1,4 +1,3 @@
-use std::fs;
 use std::sync::Mutex;
 
 use serde_json::{Value, json};
@@ -6,7 +5,6 @@ use tempfile::TempDir;
 
 use super::dispatch_test_support::*;
 use super::*;
-use tracedecay_project::project::TraceDecay;
 
 #[derive(Default)]
 struct RecordingUnavailableExecutor {
@@ -87,17 +85,13 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RecordingUnavailab
 #[tokio::test]
 async fn context_scout_pause_and_resume_preserve_caller_idempotency_keys() {
     let dir = TempDir::new().unwrap();
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("context-scout-control-dispatch");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "context-scout-control-dispatch",
+        "pub fn probe() {}\n",
         "project.mcp-context-scout-control-dispatch",
     )
-    .await
-    .unwrap();
+    .await;
     let executor = RecordingUnavailableExecutor::default();
     let address = json!({
         "profile_id": vec![1; 16],

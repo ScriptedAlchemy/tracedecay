@@ -111,17 +111,13 @@ async fn retired_file_metadata_is_absent_and_refused_by_public_dispatch() {
 #[tokio::test]
 async fn multi_root_tools_invoke_the_closed_daemon_routes() {
     let dir = TempDir::new().unwrap();
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("multi-root-mcp");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn mcp_multi_root() {}\n").unwrap();
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "multi-root-mcp",
+        "pub fn mcp_multi_root() {}\n",
         "project.mcp-multi-root",
     )
-    .await
-    .unwrap();
+    .await;
     let executor = RecordingMultiRootExecutor::default();
     let requests = [
         (
@@ -275,17 +271,13 @@ fn git_dispatch_family_holds_only_the_internal_branch_add_tool() {
 #[tokio::test]
 async fn advertised_tools_resolve_one_concrete_dispatch_entry() {
     let dir = TempDir::new().unwrap();
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("dispatch-registry");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn dispatch_probe() {}\n").unwrap();
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "dispatch-registry",
+        "pub fn dispatch_probe() {}\n",
         "project.mcp-dispatch-registry",
     )
-    .await
-    .unwrap();
+    .await;
     let options = ToolCallRegistryOptions::default();
     let mut advertised = BTreeSet::new();
 
@@ -542,17 +534,13 @@ async fn status_and_runtime_share_cursor_session_ingest_authority() {
 #[tokio::test]
 async fn status_wait_outcome_rides_beside_the_body_and_the_budget_refusal_names_it() {
     let dir = TempDir::new().unwrap();
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("status-wait-outcome");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "status-wait-outcome",
+        "pub fn probe() {}\n",
         "project.mcp-status-wait-outcome",
     )
-    .await
-    .unwrap();
+    .await;
     let waiter: tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaiter =
         std::sync::Arc::new(|worktree_root, _, _| {
             Box::pin(async move {
@@ -1058,17 +1046,13 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
 #[tokio::test]
 async fn unsupported_selector_tool_rejects_explicit_project_selector() {
     let dir = TempDir::new().unwrap();
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("active");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn active_symbol() {}\n").unwrap();
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "active",
+        "pub fn active_symbol() {}\n",
         "project.mcp-unsupported-selector",
     )
-    .await
-    .unwrap();
+    .await;
 
     let err = handle_tool_call(
         &cg,
@@ -1094,17 +1078,13 @@ async fn unsupported_selector_tool_rejects_explicit_project_selector() {
 #[tokio::test]
 async fn query_search_rejects_cross_project_selector() {
     let dir = TempDir::new().unwrap();
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("active");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn active_symbol() {}\n").unwrap();
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "active",
+        "pub fn active_symbol() {}\n",
         "project.mcp-cross-selector",
     )
-    .await
-    .unwrap();
+    .await;
 
     let err = handle_tool_call(
         &cg,
@@ -1412,17 +1392,13 @@ fn deadline_from_now(offset_micros: i64) -> tracedecay_contracts::Deadline {
 #[tokio::test]
 async fn pr_context_rejects_an_already_elapsed_deadline_without_running_the_walk() {
     let dir = TempDir::new().unwrap();
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("git-deadline-elapsed");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "git-deadline-elapsed",
+        "pub fn probe() {}\n",
         "project.mcp-git-deadline-elapsed",
     )
-    .await
-    .unwrap();
+    .await;
 
     let options = ToolCallRegistryOptions {
         application_deadline: Some(
@@ -1600,21 +1576,13 @@ async fn pr_context_returns_git_evidence_while_verified_graph_is_unavailable() {
 #[tokio::test]
 async fn graph_tools_reject_blank_node_ids_and_zero_depth_with_typed_errors() {
     let dir = TempDir::new().unwrap();
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("blank-node-id");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(
-        project.join("src/lib.rs"),
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "blank-node-id",
         "pub fn blank_probe_callee() {}\npub fn blank_probe() { blank_probe_callee(); }\n",
-    )
-    .unwrap();
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
         "project.blank-node-id",
     )
-    .await
-    .unwrap();
+    .await;
     for (tool_name, operation) in [
         ("tracedecay_impact", ApplicationSurfaceOperation::Impact),
         ("tracedecay_node", ApplicationSurfaceOperation::Node),
@@ -1804,17 +1772,13 @@ fn the_ceiling_reports_a_typed_retryable_problem() {
 #[tokio::test]
 async fn a_warm_call_is_unaffected_by_the_ceiling() {
     let dir = TempDir::new().unwrap();
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("dispatch-ceiling-warm");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "dispatch-ceiling-warm",
+        "pub fn probe() {}\n",
         "project.mcp-dispatch-ceiling-warm",
     )
-    .await
-    .unwrap();
+    .await;
     let started = std::time::Instant::now();
     let result = dispatch_on_graph_authority(
         &cg,
@@ -1856,21 +1820,13 @@ async fn rendered_graph_read(
 #[tokio::test]
 async fn a_stale_served_graph_read_carries_the_typed_freshness_trailer() {
     let dir = TempDir::new().unwrap();
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("stale-graph-trailer");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(
-        project.join("src/lib.rs"),
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "stale-graph-trailer",
         "// TODO: probe\npub fn probe() {}\n",
-    )
-    .unwrap();
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
         "project.mcp-stale-graph-trailer",
     )
-    .await
-    .unwrap();
+    .await;
     let rendered = rendered_graph_read(
         &cg,
         "tracedecay_todos",
@@ -1939,17 +1895,13 @@ async fn a_stale_served_graph_read_carries_the_typed_freshness_trailer() {
 #[tokio::test]
 async fn graph_tool_owner_reports_the_served_generation_for_the_trailer() {
     let dir = TempDir::new().unwrap();
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("graph-tool-trailer");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "graph-tool-trailer",
+        "pub fn probe() {}\n",
         "project.graph-tool-trailer",
     )
-    .await
-    .unwrap();
+    .await;
 
     let stale = super::compute_graph_tool_for_owner(
         &cg,
@@ -2027,17 +1979,13 @@ fn uncataloged_tool_fails_before_handler_dispatch() {
 #[tokio::test]
 async fn unavailable_user_lcm_effect_is_rejected_before_profile_store_open() {
     let dir = TempDir::new().unwrap();
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("retired-user-lcm-effect");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "retired-user-lcm-effect",
+        "pub fn probe() {}\n",
         "project.mcp-retired-user-lcm-effect",
     )
-    .await
-    .unwrap();
+    .await;
     let lcm_profile = tracedecay_runtime_core::config::ProfileRoot::new(
         dir.path().join("retired-user-lcm-profile"),
     );
@@ -2079,17 +2027,13 @@ async fn unavailable_user_lcm_effect_is_rejected_before_profile_store_open() {
 #[tokio::test]
 async fn admin_sync_reports_terminal_publication_corruption_without_queueing() {
     let dir = TempDir::new().expect("temporary project");
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("terminal-code-index-sync");
-    fs::create_dir_all(project.join("src")).expect("project source");
-    fs::write(project.join("src/lib.rs"), "pub fn terminal_sync() {}\n").expect("project source");
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "terminal-code-index-sync",
+        "pub fn terminal_sync() {}\n",
         "project.terminal-code-index-sync",
     )
-    .await
-    .expect("TraceDecay fixture");
+    .await;
     let reconcile_sink: crate::mcp::server::CodeIndexReconcileSink = std::sync::Arc::new(
         move |_, _| {
             Box::pin(async move {
