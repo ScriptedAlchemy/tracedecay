@@ -1,13 +1,12 @@
 //! MCP tool definitions (JSON Schema descriptors).
 //!
-//! Compatibility-owned `def_*` functions return their transport definitions.
+//! Compatibility-owned definitions are rows of [`handwritten::HANDWRITTEN_TOOLS`].
 //! Canonical application definitions project their names, schemas, effects,
 //! and descriptions from the handler/catalog/executable authorities.
 //!
-//! The `def_*` functions live in domain submodules (graph, analysis, git,
-//! testing, edit, lcm, memory, skills, admin); this module keeps the shared
-//! schema helpers, the registry assembly (`get_tool_definitions`), and the
-//! post-processing passes (project selectors, LCM storage scope, format).
+//! This module keeps the shared schema helpers, the registry assembly
+//! (`get_tool_definitions`), and the post-processing passes (project
+//! selectors, LCM storage scope, format).
 
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -21,72 +20,57 @@ use crate::McpCatalogError;
 use crate::ToolDefinition;
 use crate::registered_project_reader_tool_names;
 
-mod admin;
-mod analysis;
 mod application;
 mod application_schema;
 mod edit;
-mod git;
-mod graph;
+mod handwritten;
 mod lcm;
-mod memory;
 mod multi_root;
 mod session;
-mod skills;
-mod testing;
 mod work;
 mod workflow;
 
-use admin::*;
-use analysis::*;
 use application::*;
 pub use application_schema::mcp_input_schema;
 use application_schema::{canonical_application_request_schema, project_input_schema};
-use edit::*;
-use git::*;
-use graph::*;
-use lcm::*;
-use multi_root::*;
-use skills::*;
-use testing::*;
+use handwritten::{HANDWRITTEN_TOOLS, HandwrittenTool, ToolSchema};
 
-/// Read-only annotations shared by every tool.
-fn read_only(title: &str) -> Value {
-    json!({
-        "readOnlyHint": true,
-        "title": title
-    })
-}
-
-/// Build a `ToolDefinition` with `readOnlyHint` annotation and no `_meta`.
-fn def(name: &str, title: &str, description: &str, input_schema: Value) -> ToolDefinition {
+/// Build one handwritten row's definition with `input_schema` and no `_meta`.
+fn handwritten_definition(tool: &HandwrittenTool, input_schema: Value) -> ToolDefinition {
     ToolDefinition {
-        name: name.to_string(),
-        description: description.to_string(),
+        name: tool.name.to_owned(),
+        description: tool.description.to_owned(),
         input_schema,
-        annotations: Some(read_only(title)),
+        annotations: Some(json!({
+            "readOnlyHint": tool.read_only,
+            "title": tool.title
+        })),
         meta: None,
     }
 }
 
-/// Write/exec annotations: tools that mutate files or run subprocesses.
-fn read_write(title: &str) -> Value {
-    json!({
-        "readOnlyHint": false,
-        "title": title
-    })
+fn handwritten_input_schema(
+    tool: &HandwrittenTool,
+    registry: &ExecutableBindingRegistryV1,
+) -> Result<Value, McpCatalogError> {
+    match tool.schema {
+        ToolSchema::Application => {
+            let operation = tool.name.strip_prefix("tracedecay_").ok_or_else(|| {
+                catalog_invalid("handwritten MCP tool name", "must start with tracedecay_")
+            })?;
+            canonical_application_request_schema(registry, operation)
+        }
+        ToolSchema::Handwritten(schema) => Ok(schema()),
+        ToolSchema::Contract(schema) => schema(),
+    }
 }
 
-/// Build a `ToolDefinition` for a tool that writes files or executes
-/// subprocesses (`readOnlyHint: false`, no `_meta`).
-fn def_rw(name: &str, title: &str, description: &str, input_schema: Value) -> ToolDefinition {
-    ToolDefinition {
-        name: name.to_string(),
-        description: description.to_string(),
-        input_schema,
-        annotations: Some(read_write(title)),
-        meta: None,
-    }
+/// Whether `operation` ships a handwritten definition instead of the catalog
+/// projection.
+fn has_handwritten_definition(operation: ApplicationSurfaceOperation) -> bool {
+    HANDWRITTEN_TOOLS
+        .iter()
+        .any(|tool| tool.name == operation.mcp_tool_name())
 }
 
 /// `_meta` flag that keeps a tool's full schema loaded in hosts that defer the
@@ -292,7 +276,11 @@ fn build_search_cli_definition() -> Result<ToolDefinition, McpCatalogError> {
         tracedecay_contracts::retrieval::SearchSurfaceRequestV1
     ))
     .map_err(|error| McpCatalogError::Initialization(error.to_string()))?;
-    let mut definition = def_search(canonical);
+    let search = HANDWRITTEN_TOOLS
+        .iter()
+        .find(|tool| tool.name == "tracedecay_search")
+        .ok_or_else(|| catalog_invalid("search MCP definition", "must be handwritten"))?;
+    let mut definition = handwritten_definition(search, canonical);
     mark_if_always_loaded(&mut definition);
     project_input_schema(&mut definition.input_schema);
     let mut definitions = vec![definition];
@@ -331,106 +319,15 @@ fn build_tool_definitions() -> Result<Vec<ToolDefinition>, McpCatalogError> {
     )?;
     let application_registry = tracedecay_contracts::mcp_executable_binding_registry()
         .map_err(|error| McpCatalogError::Initialization(error.to_string()))?;
-    let request_schema = |operation: &'static str| {
-        canonical_application_request_schema(application_registry, operation)
-    };
-    let mut definitions = vec![
-        def_search(request_schema("search")?),
-        def_grep(request_schema("grep")?),
-        def_ast_grep_search(request_schema("ast_grep_search")?),
-        def_retrieve(request_schema("retrieve")?),
-        def_context(request_schema("context")?),
-        def_impact(request_schema("impact")?),
-        def_node(request_schema("node")?),
-        def_status(request_schema("status")?),
-        def_active_project(request_schema("active_project")?),
-        def_project_list(request_schema("project_list")?),
-        def_project_search(request_schema("project_search")?),
-        def_project_context(request_schema("project_context")?),
-        def_files(request_schema("files")?),
-        def_multi_root_scope_set_read(),
-        def_multi_root_scope_set_compare_and_swap(),
-        def_multi_root_execute()?,
-        def_remote_status_read(request_schema("remote_status")?),
-        def_affected(request_schema("affected")?),
-        def_dead_code(request_schema("dead_code")?),
-        def_diff_context(request_schema("diff_context")?),
-        def_circular(request_schema("circular")?),
-        def_hotspots(request_schema("hotspots")?),
-        def_similar(request_schema("similar")?),
-        def_redundancy(request_schema("redundancy")?),
-        def_rename_preview(request_schema("rename_preview")?),
-        def_unmounted_files(request_schema("unmounted_files")?),
-        def_rank(request_schema("rank")?),
-        def_largest(request_schema("largest")?),
-        def_coupling(request_schema("coupling")?),
-        def_inheritance_depth(request_schema("inheritance_depth")?),
-        def_distribution(request_schema("distribution")?),
-        def_recursion(request_schema("recursion")?),
-        def_complexity(request_schema("complexity")?),
-        def_doc_coverage(request_schema("doc_coverage")?),
-        def_god_class(request_schema("god_class")?),
-        def_changelog(request_schema("changelog")?),
-        def_port_status(request_schema("port_status")?),
-        def_port_order(request_schema("port_order")?),
-        def_commit_context(request_schema("commit_context")?),
-        def_pr_context(request_schema("pr_context")?),
-        def_test_map(request_schema("test_map")?),
-        def_branch_search(request_schema("branch_search")?),
-        def_branch_diff(request_schema("branch_diff")?),
-        def_branch_list(request_schema("branch_list")?),
-        def_str_replace(),
-        def_multi_str_replace(),
-        def_insert_at(),
-        def_ast_grep_rewrite(),
-        def_gini(request_schema("gini")?),
-        def_dependency_depth(request_schema("dependency_depth")?),
-        def_health(request_schema("health")?),
-        def_runtime(request_schema("runtime")?),
-        def_dsm(request_schema("dsm")?),
-        def_test_risk(request_schema("test_risk")?),
-        def_todos(request_schema("todos")?),
-        def_by_qualified_name(request_schema("by_qualified_name")?),
-        def_signature(request_schema("signature")?),
-        def_diagnose(request_schema("diagnose")?),
-        def_derives(request_schema("derives")?),
-        def_run_affected_tests(request_schema("run_affected_tests")?),
-    ];
-    definitions.extend(memory::memory_definitions(&request_schema)?);
-    definitions.extend([
-        def_automation_run_list(request_schema("automation_run_list")?),
-        def_automation_run_view(request_schema("automation_run_view")?),
-        def_automation_run_artifact_view(request_schema("automation_run_artifact_view")?),
-        def_skill_list(request_schema("skill_list")?),
-        def_skill_view(request_schema("skill_view")?),
-        def_hermes_skill_bridge(request_schema("hermes_skill_bridge")?),
-        def_dashboard(request_schema("dashboard")?),
-        def_analytics(request_schema("analytics")?),
-        session::def_session_refresh_begin(request_schema("session_refresh_begin")?),
-        session::def_session_refresh_status(request_schema("session_refresh_status")?),
-        session::def_session_refresh_cancel(request_schema("session_refresh_cancel")?),
-        session::def_message_search(),
-        session::def_sessions_for(),
-        session::def_workflows(),
-        def_lcm_status(),
-        def_lcm_doctor(),
-        def_lcm_load_session(),
-        def_lcm_grep(),
-        def_lcm_describe(),
-        def_lcm_expand(),
-        def_lcm_expand_query(),
-        def_unsafe_patterns(request_schema("unsafe_patterns")?),
-        def_config(request_schema("config")?),
-        def_constructors(request_schema("constructors")?),
-        def_field_sites(request_schema("field_sites")?),
-        def_replace_symbol(),
-        def_insert_at_symbol(),
-        def_move_symbol(),
-        def_rename_symbol(),
-        def_source_edit_reconcile(),
-        def_source_edit_rollback(),
-        def_find_exact_symbol(request_schema("find_exact_symbol")?),
-    ]);
+    let mut definitions = HANDWRITTEN_TOOLS
+        .iter()
+        .map(|tool| {
+            Ok(handwritten_definition(
+                tool,
+                handwritten_input_schema(tool, application_registry)?,
+            ))
+        })
+        .collect::<Result<Vec<_>, McpCatalogError>>()?;
     definitions.extend(application_definitions()?);
     let work = work_worker.join().map_err(|_| {
         McpCatalogError::Initialization(

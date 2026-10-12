@@ -1,213 +1,170 @@
 use serde_json::{Value, json};
 use tracedecay_contracts::retained_surfaces::{MessageRelationshipScopeV1, MessageTypeFilterV1};
 
-use super::{def, def_rw, project_selector_object, string_property, time_filter_schema};
-use crate::ToolDefinition;
+use super::{project_selector_object, string_property, time_filter_schema};
 
-pub(super) fn def_session_refresh_begin(input_schema: Value) -> ToolDefinition {
-    def_rw(
-        "tracedecay_session_refresh_begin",
-        "Session Refresh Begin",
-        "Begin or join one daemon-owned durable session-temporal refresh. The operation is idempotent: repeating it joins the running refresh instead of starting a second one, and the typed started or joined outcome reports what occurred. Returns an opaque handle for tracedecay_session_refresh_status and tracedecay_session_refresh_cancel. Supply the public session, source, target, and scope kind; the daemon binds project, profile, Git-route, store, and root identity from the mounted authority. scope.kind=profile uses the authenticated profile session authority and never redirects through the active project. Unavailable authority fails closed without opening stores or ingesting transcripts.",
-        input_schema,
-    )
-}
-
-pub(super) fn def_session_refresh_status(input_schema: Value) -> ToolDefinition {
-    def(
-        "tracedecay_session_refresh_status",
-        "Session Refresh Status",
-        "Inspect one daemon-owned durable session-temporal refresh using the opaque handle returned by tracedecay_session_refresh_begin, with the same public scope, session, source, and target selectors. Mounted identity remains daemon-owned. Read-only: returns progress or the terminal receipt and never begins, resumes, or cancels a refresh.",
-        input_schema,
-    )
-}
-
-pub(super) fn def_session_refresh_cancel(input_schema: Value) -> ToolDefinition {
-    def_rw(
-        "tracedecay_session_refresh_cancel",
-        "Session Refresh Cancel",
-        "Request durable cancellation of one daemon-owned session-temporal refresh using the opaque handle returned by tracedecay_session_refresh_begin, with the same public scope, session, source, and target selectors. Mounted identity remains daemon-owned. Success is receipt-backed; request abort or deadline outcomes never imply durable cancellation.",
-        input_schema,
-    )
-}
-
-pub(super) fn def_message_search() -> ToolDefinition {
-    def(
-        "tracedecay_message_search",
-        "Message Search",
-        "Read session-temporal message evidence from one authorized project or profile root. This tool never ingests or refreshes provider history. Omitted require_fresh is false; explicit require_fresh=true requires fresh data and returns typed refresh guidance when the selected root is stale or partial. Set goals=true to list each session's latest thread goal; goals mode makes query optional.",
-        json!({
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Full-text query to search in ingested transcript messages. Required unless goals=true."
-                },
-                "goals": {
-                    "type": "boolean",
-                    "default": false,
-                    "description": "When true, list each session's latest Codex goal (kind='goal'), objective as text plus lifecycle status (e.g. active/paused) from metadata, newest first, instead of running a full-text search. query becomes optional; limit and project_key still apply. Scoped to the selected project store."
-                },
-                "provider": {
-                    "type": "string",
-                    "default": "all",
-                    "description": "Optional explicit result scope. Omit or use 'all' for unified cross-provider recall. A scoped freshness precondition applies only to that provider, but this read never catches it up. Use 'hermes' for Hermes agent conversation history already present in the authorized profile store.",
-                    "enum": tracedecay_sessions::MESSAGE_SEARCH_PROVIDER_IDS
-                },
-                "project_key": {
-                    "type": "string",
-                    "description": "Optional provider-level project key/path filter within the selected session-message store. This is not a registered-project selector; use project_selector.project_id to search another registered project's store."
-                },
-                "include_subagents": {
-                    "type": "boolean",
-                    "default": true,
-                    "description": "Whether to include child subagent sessions in results (default: true)."
-                },
-                "require_fresh": {
-                    "type": "boolean",
-                    "default": false,
-                    "description": "Freshness precondition. Omitted/false allows stored data. Explicit true executes the read only when fresh; stale or partial coverage returns refresh_required and a typed tracedecay_session_refresh_begin next action. This tool never refreshes or ingests."
-                },
-                "cursor": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": "Opaque session-temporal continuation cursor returned by a prior compatible request."
-                },
-                "parent_session_id": {
-                    "type": "string",
-                    "description": "Optional parent session id filter. Primarily useful with scope=subagents_only."
-                },
-                "since": time_filter_schema("Optional inclusive minimum message timestamp. Accepts Unix seconds, RFC3339, YYYY-MM-DD, or relative time like 'last hour'."),
-                "until": time_filter_schema("Optional inclusive maximum message timestamp. Accepts Unix seconds, RFC3339, YYYY-MM-DD, or relative time like 'last hour'."),
-                "scope": {
-                    "type": "string",
-                    "default": "all",
-                    "description": "Relationship scope for search results (default: all).",
-                    "enum": MessageRelationshipScopeV1::WIRE,
-                },
-                "message_type": {
-                    "type": "string",
-                    "default": "all",
-                    "description": "Semantic message filter. direct_user excludes provider-mislabeled tool results; tool_result includes role-, kind-, and metadata-identified tool output. Default: all.",
-                    "enum": MessageTypeFilterV1::WIRE,
-                },
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 50,
-                    "default": 10,
-                    "description": "Maximum number of messages to return (default: 10, max: 50)."
-                },
-                "project_selector": project_selector_object(
-                    "Advanced optional registered project selector. Omit to use the active project."
-                ),
-                "branch": string_property("Optional git branch filter: only messages from sessions active on this branch (via the session-git correlation index)."),
-                "worktree": string_property("Optional git worktree root path filter: only messages from sessions active in this worktree (via the session-git correlation index)."),
-                "commit": string_property("Optional commit sha filter (full or >=6-char hex prefix): only messages from sessions attributed to this commit (via the session-git correlation index)."),
-                "workflow_run": string_property("Optional workflow run id (`wf_*`) filter: only messages from sessions that spawned this workflow run (via the workflow-run index). Pair with agent_label to scope to one agent."),
-                "workflow_agent": string_property("Optional workflow agent label filter, used with workflow_run to scope to a single agent of that run."),
-                "format": {
-                    "type": "string",
-                    "enum": ["markdown", "json"],
-                    "default": "markdown",
-                    "description": "Optional output format. MCP defaults to compact Markdown; use json for the full compatibility and temporal envelopes."
-                }
+pub(super) fn message_search_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Full-text query to search in ingested transcript messages. Required unless goals=true."
             },
-            "required": [],
-            "anyOf": [
-                { "required": ["query"] },
-                {
-                    "properties": { "goals": { "const": true } },
-                    "required": ["goals"]
-                }
-            ]
-        }),
-    )
+            "goals": {
+                "type": "boolean",
+                "default": false,
+                "description": "When true, list each session's latest Codex goal (kind='goal'), objective as text plus lifecycle status (e.g. active/paused) from metadata, newest first, instead of running a full-text search. query becomes optional; limit and project_key still apply. Scoped to the selected project store."
+            },
+            "provider": {
+                "type": "string",
+                "default": "all",
+                "description": "Optional explicit result scope. Omit or use 'all' for unified cross-provider recall. A scoped freshness precondition applies only to that provider, but this read never catches it up. Use 'hermes' for Hermes agent conversation history already present in the authorized profile store.",
+                "enum": tracedecay_sessions::MESSAGE_SEARCH_PROVIDER_IDS
+            },
+            "project_key": {
+                "type": "string",
+                "description": "Optional provider-level project key/path filter within the selected session-message store. This is not a registered-project selector; use project_selector.project_id to search another registered project's store."
+            },
+            "include_subagents": {
+                "type": "boolean",
+                "default": true,
+                "description": "Whether to include child subagent sessions in results (default: true)."
+            },
+            "require_fresh": {
+                "type": "boolean",
+                "default": false,
+                "description": "Freshness precondition. Omitted/false allows stored data. Explicit true executes the read only when fresh; stale or partial coverage returns refresh_required and a typed tracedecay_session_refresh_begin next action. This tool never refreshes or ingests."
+            },
+            "cursor": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Opaque session-temporal continuation cursor returned by a prior compatible request."
+            },
+            "parent_session_id": {
+                "type": "string",
+                "description": "Optional parent session id filter. Primarily useful with scope=subagents_only."
+            },
+            "since": time_filter_schema("Optional inclusive minimum message timestamp. Accepts Unix seconds, RFC3339, YYYY-MM-DD, or relative time like 'last hour'."),
+            "until": time_filter_schema("Optional inclusive maximum message timestamp. Accepts Unix seconds, RFC3339, YYYY-MM-DD, or relative time like 'last hour'."),
+            "scope": {
+                "type": "string",
+                "default": "all",
+                "description": "Relationship scope for search results (default: all).",
+                "enum": MessageRelationshipScopeV1::WIRE,
+            },
+            "message_type": {
+                "type": "string",
+                "default": "all",
+                "description": "Semantic message filter. direct_user excludes provider-mislabeled tool results; tool_result includes role-, kind-, and metadata-identified tool output. Default: all.",
+                "enum": MessageTypeFilterV1::WIRE,
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 50,
+                "default": 10,
+                "description": "Maximum number of messages to return (default: 10, max: 50)."
+            },
+            "project_selector": project_selector_object(
+                "Advanced optional registered project selector. Omit to use the active project."
+            ),
+            "branch": string_property("Optional git branch filter: only messages from sessions active on this branch (via the session-git correlation index)."),
+            "worktree": string_property("Optional git worktree root path filter: only messages from sessions active in this worktree (via the session-git correlation index)."),
+            "commit": string_property("Optional commit sha filter (full or >=6-char hex prefix): only messages from sessions attributed to this commit (via the session-git correlation index)."),
+            "workflow_run": string_property("Optional workflow run id (`wf_*`) filter: only messages from sessions that spawned this workflow run (via the workflow-run index). Pair with agent_label to scope to one agent."),
+            "workflow_agent": string_property("Optional workflow agent label filter, used with workflow_run to scope to a single agent of that run."),
+            "format": {
+                "type": "string",
+                "enum": ["markdown", "json"],
+                "default": "markdown",
+                "description": "Optional output format. MCP defaults to compact Markdown; use json for the full compatibility and temporal envelopes."
+            }
+        },
+        "required": [],
+        "anyOf": [
+            { "required": ["query"] },
+            {
+                "properties": { "goals": { "const": true } },
+                "required": ["goals"]
+            }
+        ]
+    })
 }
 
-pub(super) fn def_sessions_for() -> ToolDefinition {
-    def(
-        "tracedecay_sessions_for",
-        "Sessions For Git Ref",
-        "Find agent sessions correlated with a git artifact in the active project: sessions active on a branch or worktree, or sessions with evidence that they produced or observed a commit. Commit queries default to direct producer evidence; use relation=observed/all for weaker historical overlap. Supports time-scoped queries via since/until.",
-        json!({
-            "type": "object",
-            "properties": {
-                "git_ref": {
-                    "type": "string",
-                    "enum": ["branch", "worktree", "commit"],
-                    "description": "Kind of git reference to correlate against."
-                },
-                "value": {
-                    "type": "string",
-                    "description": "The branch name, worktree root path, or commit sha (full or >=6-char hex prefix) to look up."
-                },
-                "since": time_filter_schema("Optional inclusive minimum activity/commit timestamp. Integer strings and timezone-aware ISO/RFC3339 strings are accepted."),
-                "until": time_filter_schema("Optional inclusive maximum activity/commit timestamp. Integer strings and timezone-aware ISO/RFC3339 strings are accepted."),
-                "relation": {
-                    "type": "string",
-                    "enum": ["produced", "observed", "all"],
-                    "description": "Commit relationship to return (default: produced). produced requires direct creation evidence; observed is weaker HEAD/reflog/time-overlap evidence. Ignored for branch/worktree queries."
-                },
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 100,
-                    "description": "Maximum sessions to return (default: 20)."
-                }
+pub(super) fn sessions_for_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "git_ref": {
+                "type": "string",
+                "enum": ["branch", "worktree", "commit"],
+                "description": "Kind of git reference to correlate against."
             },
-            "required": ["git_ref", "value"]
-        }),
-    )
+            "value": {
+                "type": "string",
+                "description": "The branch name, worktree root path, or commit sha (full or >=6-char hex prefix) to look up."
+            },
+            "since": time_filter_schema("Optional inclusive minimum activity/commit timestamp. Integer strings and timezone-aware ISO/RFC3339 strings are accepted."),
+            "until": time_filter_schema("Optional inclusive maximum activity/commit timestamp. Integer strings and timezone-aware ISO/RFC3339 strings are accepted."),
+            "relation": {
+                "type": "string",
+                "enum": ["produced", "observed", "all"],
+                "description": "Commit relationship to return (default: produced). produced requires direct creation evidence; observed is weaker HEAD/reflog/time-overlap evidence. Ignored for branch/worktree queries."
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 100,
+                "description": "Maximum sessions to return (default: 20)."
+            }
+        },
+        "required": ["git_ref", "value"]
+    })
 }
 
-pub(super) fn def_workflows() -> ToolDefinition {
-    def(
-        "tracedecay_workflows",
-        "Workflow Runs",
-        "Recover Claude Code workflow runs (multi-agent `wf_*` orchestrations) and their per-phase agents from the active project. Three modes, chosen by which argument is set: (1) list runs for a parent thread via session_id, or every run on a branch/worktree/commit via branch/worktree/commit (a run inherits its parent session's git spans); (2) show one run's result summary, phases, and agent roster via run_id; (3) drill into one agent's transcript via run_id + agent_label. Read-only; runs that never ran leave no rows.",
-        json!({
-            "type": "object",
-            "properties": {
-                "session_id": {
-                    "type": "string",
-                    "description": "Parent thread/session id: list the workflow runs it spawned (newest first). Mutually exclusive with run_id and the git filters."
-                },
-                "run_id": {
-                    "type": "string",
-                    "description": "A `wf_*` run id: show that run's summary, phases, and agents. Combine with agent_label to drill into one agent."
-                },
-                "agent_label": {
-                    "type": "string",
-                    "description": "With run_id, drill into a single agent of that run by its label (e.g. 'mine:claude-transcripts')."
-                },
-                "branch": string_property("List workflow runs whose parent session was active on this git branch (via the session-git correlation index)."),
-                "worktree": string_property("List workflow runs whose parent session was active in this git worktree root path."),
-                "commit": string_property("List workflow runs whose parent session was attributed to this commit sha (full or >=6-char hex prefix)."),
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 100,
-                    "description": "Maximum runs or agents to return (default: 20)."
-                }
+pub(super) fn workflows_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "session_id": {
+                "type": "string",
+                "description": "Parent thread/session id: list the workflow runs it spawned (newest first). Mutually exclusive with run_id and the git filters."
             },
-            "anyOf": [
-                { "required": ["session_id"] },
-                { "required": ["run_id"] },
-                { "required": ["branch"] },
-                { "required": ["worktree"] },
-                { "required": ["commit"] }
-            ]
-        }),
-    )
+            "run_id": {
+                "type": "string",
+                "description": "A `wf_*` run id: show that run's summary, phases, and agents. Combine with agent_label to drill into one agent."
+            },
+            "agent_label": {
+                "type": "string",
+                "description": "With run_id, drill into a single agent of that run by its label (e.g. 'mine:claude-transcripts')."
+            },
+            "branch": string_property("List workflow runs whose parent session was active on this git branch (via the session-git correlation index)."),
+            "worktree": string_property("List workflow runs whose parent session was active in this git worktree root path."),
+            "commit": string_property("List workflow runs whose parent session was attributed to this commit sha (full or >=6-char hex prefix)."),
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 100,
+                "description": "Maximum runs or agents to return (default: 20)."
+            }
+        },
+        "anyOf": [
+            { "required": ["session_id"] },
+            { "required": ["run_id"] },
+            { "required": ["branch"] },
+            { "required": ["worktree"] },
+            { "required": ["commit"] }
+        ]
+    })
 }
 
 #[cfg(test)]
 mod message_search_definition_tests {
     use serde_json::{Value, json};
 
-    use super::def_message_search;
+    use crate::definitions::tests::handwritten;
 
     fn assert_closed_objects(schema: &Value) {
         if schema.get("type").and_then(Value::as_str) == Some("object") {
@@ -230,7 +187,7 @@ mod message_search_definition_tests {
 
     #[test]
     fn message_search_definition_is_read_only_closed_and_freshness_explicit() {
-        let definition = def_message_search();
+        let definition = handwritten("tracedecay_message_search");
 
         assert_eq!(
             definition.annotations.as_ref().unwrap()["readOnlyHint"],
@@ -245,7 +202,7 @@ mod message_search_definition_tests {
 
     #[test]
     fn message_search_schema_keeps_query_conditional_and_cursor_additive() {
-        let definition = def_message_search();
+        let definition = handwritten("tracedecay_message_search");
         let schema = &definition.input_schema;
 
         assert_eq!(schema["required"].as_array().unwrap().len(), 0);
@@ -267,7 +224,7 @@ mod message_search_definition_tests {
 mod lcm_definition_compatibility_tests {
     use serde_json::Value;
 
-    use super::super::{def_lcm_describe, def_lcm_expand};
+    use crate::definitions::tests::handwritten;
 
     fn assert_closed_objects(schema: &Value) {
         if schema.get("type").and_then(Value::as_str) == Some("object") {
@@ -290,8 +247,8 @@ mod lcm_definition_compatibility_tests {
 
     #[test]
     fn describe_and_expand_keep_closed_string_id_compatibility() {
-        let describe = def_lcm_describe();
-        let expand = def_lcm_expand();
+        let describe = handwritten("tracedecay_lcm_describe");
+        let expand = handwritten("tracedecay_lcm_expand");
 
         assert_closed_objects(&describe.input_schema);
         assert_closed_objects(&expand.input_schema);

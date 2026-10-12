@@ -2,9 +2,6 @@
 
 use serde_json::{Value, json};
 
-use super::{def, def_rw};
-use crate::ToolDefinition;
-
 fn source_edit_schema(mut schema: Value) -> Value {
     let Some(root) = schema.as_object_mut() else {
         unreachable!("source edit input schema must be an object");
@@ -54,563 +51,466 @@ fn source_edit_schema(mut schema: Value) -> Value {
     schema
 }
 
-pub(super) fn def_source_edit_reconcile() -> ToolDefinition {
-    def_rw(
-        "tracedecay_source_edit_reconcile",
-        "Reconcile Source Edit",
-        "ADMIN: conclude one retained source-edit EffectUnknown after you inspect the exact current candidate-file state yourself. This never retries the edit. Pass confirm=true as your own attestation of that inspection. Do not pause for a human to confirm a file-state conclusion you can verify.",
-        json!({
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-                "kind": {
-                    "type": "string",
-                    "enum": [
-                        "str_replace",
-                        "multi_str_replace",
-                        "insert_at",
-                        "ast_grep_rewrite",
-                        "replace_symbol",
-                        "insert_at_symbol",
-                        "move_symbol",
-                        "rename_symbol"
-                    ],
-                    "description": "Original source-edit operation kind retained in the uncertain journal."
-                },
-                "effect_id": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 512,
-                    "description": "Exact effect ID from the EffectUnknown receipt."
-                },
-                "idempotency_key": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 512,
-                    "description": "Original caller-provided idempotency key."
-                },
-                "attempt_idempotency_key": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 512,
-                    "description": "A new idempotency key for this reconciliation attempt. It must differ from the original edit key; exact retries replay this attempt's receipt."
-                },
-                "input_digest": {
-                    "type": "string",
-                    "pattern": "^sha256:[0-9a-f]{64}$",
-                    "description": "Exact input digest from the EffectUnknown receipt."
-                },
-                "disposition": {
-                    "type": "string",
-                    "enum": ["confirm_committed", "confirm_rolled_back"],
-                    "description": "Independent inspection conclusion. Reconciliation verifies the live candidate-file digest."
-                },
-                "committed_state": {
-                    "type": "string",
-                    "pattern": "^sha256:[0-9a-f]{64}$",
-                    "description": "Exact independently observed committed-state digest; required only for confirm_committed."
-                },
-                "confirm": {
-                    "type": "boolean",
-                    "const": true,
-                    "description": "Caller attestation that this concludes a retained uncertain effect without retrying it. Set true after your own inspection; do not ask a human to confirm a reversible file-state conclusion."
-                }
+pub(super) fn source_edit_reconcile_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "kind": {
+                "type": "string",
+                "enum": [
+                    "str_replace",
+                    "multi_str_replace",
+                    "insert_at",
+                    "ast_grep_rewrite",
+                    "replace_symbol",
+                    "insert_at_symbol",
+                    "move_symbol",
+                    "rename_symbol"
+                ],
+                "description": "Original source-edit operation kind retained in the uncertain journal."
             },
-            "required": [
-                "kind",
-                "effect_id",
-                "idempotency_key",
-                "attempt_idempotency_key",
-                "input_digest",
-                "disposition",
-                "confirm"
-            ],
-            "allOf": [{
-                "if": {
-                    "properties": {
-                        "disposition": {"const": "confirm_committed"}
-                    },
-                    "required": ["disposition"]
+            "effect_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512,
+                "description": "Exact effect ID from the EffectUnknown receipt."
+            },
+            "idempotency_key": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512,
+                "description": "Original caller-provided idempotency key."
+            },
+            "attempt_idempotency_key": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512,
+                "description": "A new idempotency key for this reconciliation attempt. It must differ from the original edit key; exact retries replay this attempt's receipt."
+            },
+            "input_digest": {
+                "type": "string",
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "description": "Exact input digest from the EffectUnknown receipt."
+            },
+            "disposition": {
+                "type": "string",
+                "enum": ["confirm_committed", "confirm_rolled_back"],
+                "description": "Independent inspection conclusion. Reconciliation verifies the live candidate-file digest."
+            },
+            "committed_state": {
+                "type": "string",
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "description": "Exact independently observed committed-state digest; required only for confirm_committed."
+            },
+            "confirm": {
+                "type": "boolean",
+                "const": true,
+                "description": "Caller attestation that this concludes a retained uncertain effect without retrying it. Set true after your own inspection; do not ask a human to confirm a reversible file-state conclusion."
+            }
+        },
+        "required": [
+            "kind",
+            "effect_id",
+            "idempotency_key",
+            "attempt_idempotency_key",
+            "input_digest",
+            "disposition",
+            "confirm"
+        ],
+        "allOf": [{
+            "if": {
+                "properties": {
+                    "disposition": {"const": "confirm_committed"}
                 },
-                "then": {"required": ["committed_state"]},
-                "else": {"not": {"required": ["committed_state"]}}
-            }]
-        }),
-    )
+                "required": ["disposition"]
+            },
+            "then": {"required": ["committed_state"]},
+            "else": {"not": {"required": ["committed_state"]}}
+        }]
+    })
 }
 
-pub(super) fn def_source_edit_rollback() -> ToolDefinition {
-    def_rw(
-        "tracedecay_source_edit_rollback",
-        "Roll Back Source Edit",
-        "Restore the exact private preimages retained for one completed move_symbol effect. This is a journaled inverse effect, not a second semantic move. It refuses stale or foreign workspace bytes and requires the original effect receipt identity.",
-        json!({
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-                "effect_id": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 512,
-                    "description": "Exact effect ID from the completed move_symbol receipt."
-                },
-                "original_idempotency_key": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 512,
-                    "description": "Original caller-provided move_symbol idempotency key."
-                },
-                "idempotency_key": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 512,
-                    "description": "A fresh key for this rollback effect. Exact retries replay its durable receipt."
-                },
-                "original_input_digest": {
-                    "type": "string",
-                    "pattern": "^sha256:[0-9a-f]{64}$",
-                    "description": "Exact input digest from the completed move_symbol receipt."
-                },
-                "expected_state": {
-                    "type": "string",
-                    "pattern": "^sha256:[0-9a-f]{64}$",
-                    "description": "Exact committed-state digest from the completed move_symbol receipt. Rollback is refused unless the workspace still matches it."
-                },
-                "confirm": {
-                    "type": "boolean",
-                    "const": true,
-                    "description": "Caller attestation that this restores the retained preimages. Set true yourself; do not pause for a human when the receipt already authorizes the rollback."
-                }
+pub(super) fn source_edit_rollback_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "effect_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512,
+                "description": "Exact effect ID from the completed move_symbol receipt."
             },
-            "required": [
-                "effect_id",
-                "original_idempotency_key",
-                "idempotency_key",
-                "original_input_digest",
-                "expected_state",
-                "confirm"
-            ]
-        }),
-    )
+            "original_idempotency_key": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512,
+                "description": "Original caller-provided move_symbol idempotency key."
+            },
+            "idempotency_key": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512,
+                "description": "A fresh key for this rollback effect. Exact retries replay its durable receipt."
+            },
+            "original_input_digest": {
+                "type": "string",
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "description": "Exact input digest from the completed move_symbol receipt."
+            },
+            "expected_state": {
+                "type": "string",
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "description": "Exact committed-state digest from the completed move_symbol receipt. Rollback is refused unless the workspace still matches it."
+            },
+            "confirm": {
+                "type": "boolean",
+                "const": true,
+                "description": "Caller attestation that this restores the retained preimages. Set true yourself; do not pause for a human when the receipt already authorizes the rollback."
+            }
+        },
+        "required": [
+            "effect_id",
+            "original_idempotency_key",
+            "idempotency_key",
+            "original_input_digest",
+            "expected_state",
+            "confirm"
+        ]
+    })
 }
 
-pub(super) fn def_str_replace() -> ToolDefinition {
-    def_rw(
-        "tracedecay_str_replace",
-        "Edit File",
-        "Replace a unique string in a file with new content. Fails if the old string is not found or matches more than once. This is the safest edit primitive. Use this instead of sed/awk.",
-        source_edit_schema(json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Absolute or project-relative file path"
-                },
-                "old_str": {
-                    "type": "string",
-                    "description": "Exact string to find and replace. Must match exactly once in the file."
-                },
-                "new_str": {
-                    "type": "string",
-                    "description": "Replacement string"
-                },
-                "dry_run": {
-                    "type": "boolean",
-                    "description": "If true, validate and compute the edit but write nothing; the response includes a bounded preview diff of the would-be change (default: false)."
-                },
-                "verify": {
-                    "type": "boolean",
-                    "description": "If true, re-run file-scoped diagnostics after a real edit and include a compact verdict (clean / N new errors) in the response. Ignored for dry runs. Default: false to keep edits fast."
-                }
+pub(super) fn str_replace_schema() -> Value {
+    source_edit_schema(json!({
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Absolute or project-relative file path"
             },
-            "required": ["path", "old_str", "new_str"]
-        })),
-    )
+            "old_str": {
+                "type": "string",
+                "description": "Exact string to find and replace. Must match exactly once in the file."
+            },
+            "new_str": {
+                "type": "string",
+                "description": "Replacement string"
+            },
+            "dry_run": {
+                "type": "boolean",
+                "description": "If true, validate and compute the edit but write nothing; the response includes a bounded preview diff of the would-be change (default: false)."
+            },
+            "verify": {
+                "type": "boolean",
+                "description": "If true, re-run file-scoped diagnostics after a real edit and include a compact verdict (clean / N new errors) in the response. Ignored for dry runs. Default: false to keep edits fast."
+            }
+        },
+        "required": ["path", "old_str", "new_str"]
+    }))
 }
 
-pub(super) fn def_multi_str_replace() -> ToolDefinition {
-    def_rw(
-        "tracedecay_multi_str_replace",
-        "Multi-Edit File",
-        "Apply multiple string replacements atomically in a single file. All replacements must match exactly once. If any replacement fails (0 or >1 matches), the entire operation is aborted and no changes are made.",
-        source_edit_schema(json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Absolute or project-relative file path"
-                },
-                "replacements": {
+pub(super) fn multi_str_replace_schema() -> Value {
+    source_edit_schema(json!({
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Absolute or project-relative file path"
+            },
+            "replacements": {
+                "type": "array",
+                "description": "Array of [old_str, new_str] pairs to replace",
+                "items": {
                     "type": "array",
-                    "description": "Array of [old_str, new_str] pairs to replace",
-                    "items": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "minItems": 2,
-                        "maxItems": 2
-                    }
-                },
-                "dry_run": {
-                    "type": "boolean",
-                    "description": "If true, validate and compute all replacements but write nothing; the response includes a bounded preview diff of the would-be change (default: false)."
-                },
-                "verify": {
-                    "type": "boolean",
-                    "description": "If true, re-run file-scoped diagnostics after a real edit and include a compact verdict (clean / N new errors) in the response. Ignored for dry runs. Default: false to keep edits fast."
+                    "items": {"type": "string"},
+                    "minItems": 2,
+                    "maxItems": 2
                 }
             },
-            "required": ["path", "replacements"]
-        })),
-    )
-}
-
-pub(super) fn def_insert_at() -> ToolDefinition {
-    def_rw(
-        "tracedecay_insert_at",
-        "Insert Into File",
-        "Insert content before or after a unique anchor in a file. The anchor can be a unique string or a 1-indexed line number. Fails if the anchor matches more than one line.",
-        source_edit_schema(json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Absolute or project-relative file path"
-                },
-                "anchor": {
-                    "type": "string",
-                    "description": "Unique string or line number (1-indexed) to insert at"
-                },
-                "content": {
-                    "type": "string",
-                    "description": "Content to insert"
-                },
-                "before": {
-                    "type": "boolean",
-                    "default": false,
-                    "description": "If true, insert before the anchor line; if false, insert after (default: false)"
-                },
-                "dry_run": {
-                    "type": "boolean",
-                    "description": "If true, resolve the anchor and compute the insertion but write nothing; the response includes a bounded preview diff of the would-be change (default: false)."
-                },
-                "verify": {
-                    "type": "boolean",
-                    "description": "If true, re-run file-scoped diagnostics after a real edit and include a compact verdict (clean / N new errors) in the response. Ignored for dry runs. Default: false to keep edits fast."
-                }
+            "dry_run": {
+                "type": "boolean",
+                "description": "If true, validate and compute all replacements but write nothing; the response includes a bounded preview diff of the would-be change (default: false)."
             },
-            "required": ["path", "anchor", "content"]
-        })),
-    )
-}
-
-pub(super) fn def_rename_preview(input_schema: Value) -> ToolDefinition {
-    def(
-        "tracedecay_rename_preview",
-        "Rename Preview",
-        "READ-ONLY preview of what a rename would touch. Given a symbol node and \
-         an optional `new_name`, returns the declaration site plus every graph \
-         reference site (from call/use/etc. edges), each with its current-text \
-         line snippet, and a per-file count of literal textual occurrences of \
-         the name that are NOT graph references ('text-only matches, review \
-         manually'). It does NOT edit anything and does NOT rewrite occurrences. \
-         Pass the reported node identity to `tracedecay_rename_symbol` to \
-         apply the rename. Graph call-edge coverage improves as the resolver \
-         does; text-only counts catch what the graph misses (comments, \
-         strings, dynamic dispatch, unresolved refs).",
-        input_schema,
-    )
-}
-
-pub(super) fn def_rename_symbol() -> ToolDefinition {
-    def_rw(
-        "tracedecay_rename_symbol",
-        "Rename Symbol",
-        "Apply-grade rename of a graph-bound symbol across its declaration and \
-         every graph reference site. Consumes the exact identity reported by \
-         `tracedecay_rename_preview` (node_id, qualified_name, kind, file, \
-         old_name), a bare spelling is never sufficient, and rewrites \
-         whole-identifier occurrences only on graph-attested lines. Text-only \
-         matches (comments, strings, dynamic dispatch, unresolved refs) are \
-         reported and never rewritten. Defaults to a DRY RUN returning the \
-         per-file plan, diff, and the expected_state digest; applying is \
-         opt-in via `dry_run: false` with a fresh `idempotency_key`, the \
-         preview's exact `accepted_preview` manifest, and that `expected_state`. \
-         The apply refuses stale identity, manifest, or drifted files before any \
-         write, and a partial failure restores every preimage.",
-        {
-            let mut schema = source_edit_schema(json!({
-                "type": "object",
-                "properties": {
-                    "node_id": {
-                        "type": "string",
-                        "description": "Exact node ID of the symbol, as reported by tracedecay_rename_preview."
-                    },
-                    "qualified_name": {
-                        "type": "string",
-                        "description": "Exact qualified name the preview reported for the node."
-                    },
-                    "kind": {
-                        "type": "string",
-                        "description": "Exact symbol kind the preview reported (e.g. 'function')."
-                    },
-                    "file": {
-                        "type": "string",
-                        "description": "Exact project-relative defining file the preview reported."
-                    },
-                    "old_name": {
-                        "type": "string",
-                        "description": "Exact current name the preview reported. Apply refuses if the live symbol drifted."
-                    },
-                    "new_name": {
-                        "type": "string",
-                        "description": "New identifier. Must be a valid identifier and must not already occur in any touched file."
-                    },
-                    "accepted_preview": {
-                        "type": "object",
-                        "additionalProperties": false,
-                        "description": "Exact preview manifest returned by the accepted dry run. Required only when applying.",
-                        "properties": {
-                            "preview_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-                            "preview_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-                            "plan_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-                            "repository_revision": {
-                                "type": ["string", "null"],
-                                "description": "Exact repository_revision returned by the accepted preview; copy the string or null value verbatim."
-                            },
-                            "graph_revision": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
-                        },
-                        "required": ["preview_id", "preview_digest", "plan_digest", "repository_revision", "graph_revision"]
-                    },
-                    "dry_run": {
-                        "type": "boolean",
-                        "description": "If true (DEFAULT), bind every site and compute the full plan, per-file diff, and expected_state but write nothing. Set false to apply."
-                    },
-                    "verify": {
-                        "type": "boolean",
-                        "description": "If true (DEFAULT), re-run file-scoped diagnostics after a real rename and include a compact verdict. Ignored for dry runs."
-                    }
-                },
-                "required": ["node_id", "qualified_name", "kind", "file", "old_name", "new_name"]
-            }));
-            // Like move_symbol, rename defaults to preview; only an explicit
-            // dry_run=false selects the apply branch.
-            schema["properties"]["dry_run"]["default"] = json!(true);
-            schema["properties"]["verify"]["default"] = json!(true);
-            schema["allOf"] = json!([
-                {
-                    "if": {
-                        "properties": {"dry_run": {"const": false}},
-                        "required": ["dry_run"]
-                    },
-                    "then": {"required": ["idempotency_key", "expected_state"]}
-                },
-                {
-                    "if": {
-                        "properties": {"dry_run": {"const": false}},
-                        "required": ["dry_run"]
-                    },
-                    "then": {"required": ["accepted_preview"]}
-                }
-            ]);
-            schema
+            "verify": {
+                "type": "boolean",
+                "description": "If true, re-run file-scoped diagnostics after a real edit and include a compact verdict (clean / N new errors) in the response. Ignored for dry runs. Default: false to keep edits fast."
+            }
         },
-    )
+        "required": ["path", "replacements"]
+    }))
 }
 
-pub(super) fn def_ast_grep_search(input_schema: Value) -> ToolDefinition {
-    def(
-        "tracedecay_ast_grep_search",
-        "AST Structural Search",
-        "Structural (AST) code search: find call shapes, argument orders, and other \
-         syntax-tree patterns that a text regex cannot express. Uses ast-grep's SGPattern \
-         syntax (metavariables: `$X` one node, `$$$` many). Runs IN-PROCESS over the project \
-         working tree using the bundled tree-sitter grammars, no external ast-grep binary, no \
-         gating. Each hit resolves its enclosing symbol, so the natural next call is \
-         tracedecay_source_body with that symbol's node_id. Routing: use this when the pattern is structural (e.g. `foo($$$)`, \
-         `if ($C) { $$$ }`); for a literal/regex string use tracedecay_grep; for a symbol name \
-         use tracedecay_search. To rewrite a structural match, pair with tracedecay_ast_grep_rewrite.",
-        input_schema,
-    )
-}
-
-pub(super) fn def_ast_grep_rewrite() -> ToolDefinition {
-    def_rw(
-        "tracedecay_ast_grep_rewrite",
-        "AST Structural Rewrite",
-        "Rewrite every structural match of an ast-grep pattern in one file. The pattern and rewrite use ast-grep's SGPattern syntax ($A captures one node, $$$ a run of nodes); matches in comments and strings are left alone. The language is inferred from the file extension.",
-        source_edit_schema(json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Absolute or project-relative file path"
-                },
-                "pattern": {
-                    "type": "string",
-                    "description": "ast-grep search pattern (SGPattern syntax)"
-                },
-                "rewrite": {
-                    "type": "string",
-                    "description": "ast-grep rewrite rule"
-                },
-                "dry_run": {
-                    "type": "boolean",
-                    "description": "If true, preview the rewrite without applying it: the response returns the would-be change and writes nothing (default: false)."
-                },
-                "verify": {
-                    "type": "boolean",
-                    "description": "If true, re-run file-scoped diagnostics after a real rewrite and include a compact verdict (clean / N new errors) in the response. Ignored for dry runs. Default: false to keep edits fast."
-                }
+pub(super) fn insert_at_schema() -> Value {
+    source_edit_schema(json!({
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Absolute or project-relative file path"
             },
-            "required": ["path", "pattern", "rewrite"]
-        })),
-    )
-}
-
-pub(super) fn def_replace_symbol() -> ToolDefinition {
-    def_rw(
-        "tracedecay_replace_symbol",
-        "Replace Symbol Source",
-        "Replace the full source of a named symbol (function, method, struct, \
-         enum, etc.) with new source text. Resolves the symbol via exact \
-         qualified-name match; on ambiguity, callable kinds win, and if \
-         still ambiguous the edit is refused. The replaced span covers the \
-         item's LEADING doc-comment / attribute block (e.g. `///` docs, `#[...]` \
-         attributes) as well as its body, so `new_source` must itself include \
-         any docs/attributes you want to keep, otherwise they are dropped. \
-         The result's `replaced_span` returns the exact text that was swapped \
-         out (docs/attrs included) so you can recover them; a `message` note \
-         flags when the old span had docs/attrs the replacement appears to omit. \
-         Preserves the surrounding file untouched and reindexes after writing.",
-        source_edit_schema(json!({
-            "type": "object",
-            "properties": {
-                "symbol": {
-                    "type": "string",
-                    "description": "Symbol name. Prefer a fully qualified name for disambiguation."
-                },
-                "new_source": {
-                    "type": "string",
-                    "description": "Full replacement source, must include the symbol's own declaration line, plus any leading doc-comments/attributes to preserve (the replaced span includes the old ones)."
-                },
-                "dry_run": {
-                    "type": "boolean",
-                    "description": "If true, resolve the symbol span and compute the replacement but write nothing; the response includes a bounded preview diff and the replaced_span (default: false)."
-                },
-                "verify": {
-                    "type": "boolean",
-                    "description": "If true, re-run file-scoped diagnostics after a real edit and include a compact verdict (clean / N new errors) in the response. Ignored for dry runs. Default: false to keep edits fast."
-                }
+            "anchor": {
+                "type": "string",
+                "description": "Unique string or line number (1-indexed) to insert at"
             },
-            "required": ["symbol", "new_source"]
-        })),
-    )
-}
-
-pub(super) fn def_move_symbol() -> ToolDefinition {
-    def_rw(
-        "tracedecay_move_symbol",
-        "Move Symbol Across Files",
-        "Move a function (Rust-first) from its file to a destination file, and \
-, the centerpiece, report the full IMPACT of the move: every caller \
-         whose reference breaks, every dependency the body loses at the \
-         destination, visibility that must be escalated, destination collisions, \
-         and missing module declarations. Each finding is an evidence-based hint \
-         { kind, file, line, detail, suggestion } derived from the code graph \
-         (callers/callees) and parse-level facts (identifiers, `use` lines), not \
-         regex guessing. The moved span includes the item's leading \
-         doc-comment / attribute block. Defaults to a DRY RUN, the report and a \
-         combined source+destination preview diff are the product; applying is \
-         opt-in via `dry_run: false`, which removes the span from the source, \
-         inserts it at the destination, and auto-inserts unambiguous needed \
-         imports (returned in `applied_imports`). Caller references are never \
-         auto-edited in v1; the exact change rides in each hint.",
-        {
-            let mut schema = source_edit_schema(json!({
-                "type": "object",
-                "properties": {
-                    "symbol": {
-                        "type": "string",
-                        "description": "Symbol to move. Prefer a fully qualified name for disambiguation; on ambiguity callable kinds win, else the move is refused."
-                    },
-                    "dest_file": {
-                        "type": "string",
-                        "description": "Destination file (project-relative or absolute, within the project). May be a new module file; parent directories are created on apply."
-                    },
-                    "dry_run": {
-                        "type": "boolean",
-                        "description": "If true (DEFAULT), compute the move, the combined preview diff, and the impact report but write nothing. Set false to apply the move."
-                    },
-                    "update_references": {
-                        "type": "boolean",
-                        "description": "Reserved for a future version. In v1 callers are never auto-edited; the exact change is reported as a hint instead (default: false)."
-                    }
-                },
-                "required": ["symbol", "dest_file"]
-            }));
-            // Unlike the other edit tools, move_symbol defaults to preview.
-            // Only an explicit dry_run=false therefore selects the apply branch.
-            schema["allOf"][0]["if"]["required"] = json!(["dry_run"]);
-            schema["properties"]["dry_run"]["default"] = json!(true);
-            schema["properties"]["update_references"]["default"] = json!(false);
-            schema
+            "content": {
+                "type": "string",
+                "description": "Content to insert"
+            },
+            "before": {
+                "type": "boolean",
+                "default": false,
+                "description": "If true, insert before the anchor line; if false, insert after (default: false)"
+            },
+            "dry_run": {
+                "type": "boolean",
+                "description": "If true, resolve the anchor and compute the insertion but write nothing; the response includes a bounded preview diff of the would-be change (default: false)."
+            },
+            "verify": {
+                "type": "boolean",
+                "description": "If true, re-run file-scoped diagnostics after a real edit and include a compact verdict (clean / N new errors) in the response. Ignored for dry runs. Default: false to keep edits fast."
+            }
         },
-    )
+        "required": ["path", "anchor", "content"]
+    }))
 }
 
-pub(super) fn def_insert_at_symbol() -> ToolDefinition {
-    def_rw(
-        "tracedecay_insert_at_symbol",
-        "Insert Near Symbol",
-        "Insert content immediately before or after a named symbol's source \
-         range. Same resolution semantics as `tracedecay_replace_symbol`. \
-         Use `position=\"before\"` or `position=\"after\"` (default: after).",
-        source_edit_schema(json!({
-            "type": "object",
-            "properties": {
-                "symbol": {
-                    "type": "string",
-                    "description": "Symbol name. Prefer a fully qualified name for disambiguation."
-                },
-                "content": {
-                    "type": "string",
-                    "description": "Source text to insert. Newlines are preserved as-is."
-                },
-                "position": {
-                    "type": "string",
-                    "enum": ["before", "after"],
-                    "default": "after",
-                    "description": "Where to insert relative to the symbol's range. Default: after."
-                },
-                "dry_run": {
-                    "type": "boolean",
-                    "description": "If true, resolve the insertion point and compute the change but write nothing; the response includes a bounded preview diff of the would-be change (default: false)."
-                },
-                "verify": {
-                    "type": "boolean",
-                    "description": "If true, re-run file-scoped diagnostics after a real edit and include a compact verdict (clean / N new errors) in the response. Ignored for dry runs. Default: false to keep edits fast."
-                }
+pub(super) fn rename_symbol_schema() -> Value {
+    let mut schema = source_edit_schema(json!({
+        "type": "object",
+        "properties": {
+            "node_id": {
+                "type": "string",
+                "description": "Exact node ID of the symbol, as reported by tracedecay_rename_preview."
             },
-            "required": ["symbol", "content"]
-        })),
-    )
+            "qualified_name": {
+                "type": "string",
+                "description": "Exact qualified name the preview reported for the node."
+            },
+            "kind": {
+                "type": "string",
+                "description": "Exact symbol kind the preview reported (e.g. 'function')."
+            },
+            "file": {
+                "type": "string",
+                "description": "Exact project-relative defining file the preview reported."
+            },
+            "old_name": {
+                "type": "string",
+                "description": "Exact current name the preview reported. Apply refuses if the live symbol drifted."
+            },
+            "new_name": {
+                "type": "string",
+                "description": "New identifier. Must be a valid identifier and must not already occur in any touched file."
+            },
+            "accepted_preview": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "Exact preview manifest returned by the accepted dry run. Required only when applying.",
+                "properties": {
+                    "preview_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+                    "preview_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+                    "plan_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+                    "repository_revision": {
+                        "type": ["string", "null"],
+                        "description": "Exact repository_revision returned by the accepted preview; copy the string or null value verbatim."
+                    },
+                    "graph_revision": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+                },
+                "required": ["preview_id", "preview_digest", "plan_digest", "repository_revision", "graph_revision"]
+            },
+            "dry_run": {
+                "type": "boolean",
+                "description": "If true (DEFAULT), bind every site and compute the full plan, per-file diff, and expected_state but write nothing. Set false to apply."
+            },
+            "verify": {
+                "type": "boolean",
+                "description": "If true (DEFAULT), re-run file-scoped diagnostics after a real rename and include a compact verdict. Ignored for dry runs."
+            }
+        },
+        "required": ["node_id", "qualified_name", "kind", "file", "old_name", "new_name"]
+    }));
+    // Like move_symbol, rename defaults to preview; only an explicit
+    // dry_run=false selects the apply branch.
+    schema["properties"]["dry_run"]["default"] = json!(true);
+    schema["properties"]["verify"]["default"] = json!(true);
+    schema["allOf"] = json!([
+        {
+            "if": {
+                "properties": {"dry_run": {"const": false}},
+                "required": ["dry_run"]
+            },
+            "then": {"required": ["idempotency_key", "expected_state"]}
+        },
+        {
+            "if": {
+                "properties": {"dry_run": {"const": false}},
+                "required": ["dry_run"]
+            },
+            "then": {"required": ["accepted_preview"]}
+        }
+    ]);
+    schema
+}
+
+pub(super) fn ast_grep_rewrite_schema() -> Value {
+    source_edit_schema(json!({
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Absolute or project-relative file path"
+            },
+            "pattern": {
+                "type": "string",
+                "description": "ast-grep search pattern (SGPattern syntax)"
+            },
+            "rewrite": {
+                "type": "string",
+                "description": "ast-grep rewrite rule"
+            },
+            "dry_run": {
+                "type": "boolean",
+                "description": "If true, preview the rewrite without applying it: the response returns the would-be change and writes nothing (default: false)."
+            },
+            "verify": {
+                "type": "boolean",
+                "description": "If true, re-run file-scoped diagnostics after a real rewrite and include a compact verdict (clean / N new errors) in the response. Ignored for dry runs. Default: false to keep edits fast."
+            }
+        },
+        "required": ["path", "pattern", "rewrite"]
+    }))
+}
+
+pub(super) fn replace_symbol_schema() -> Value {
+    source_edit_schema(json!({
+        "type": "object",
+        "properties": {
+            "symbol": {
+                "type": "string",
+                "description": "Symbol name. Prefer a fully qualified name for disambiguation."
+            },
+            "new_source": {
+                "type": "string",
+                "description": "Full replacement source, must include the symbol's own declaration line, plus any leading doc-comments/attributes to preserve (the replaced span includes the old ones)."
+            },
+            "dry_run": {
+                "type": "boolean",
+                "description": "If true, resolve the symbol span and compute the replacement but write nothing; the response includes a bounded preview diff and the replaced_span (default: false)."
+            },
+            "verify": {
+                "type": "boolean",
+                "description": "If true, re-run file-scoped diagnostics after a real edit and include a compact verdict (clean / N new errors) in the response. Ignored for dry runs. Default: false to keep edits fast."
+            }
+        },
+        "required": ["symbol", "new_source"]
+    }))
+}
+
+pub(super) fn move_symbol_schema() -> Value {
+    let mut schema = source_edit_schema(json!({
+        "type": "object",
+        "properties": {
+            "symbol": {
+                "type": "string",
+                "description": "Symbol to move. Prefer a fully qualified name for disambiguation; on ambiguity callable kinds win, else the move is refused."
+            },
+            "dest_file": {
+                "type": "string",
+                "description": "Destination file (project-relative or absolute, within the project). May be a new module file; parent directories are created on apply."
+            },
+            "dry_run": {
+                "type": "boolean",
+                "description": "If true (DEFAULT), compute the move, the combined preview diff, and the impact report but write nothing. Set false to apply the move."
+            },
+            "update_references": {
+                "type": "boolean",
+                "description": "Reserved for a future version. In v1 callers are never auto-edited; the exact change is reported as a hint instead (default: false)."
+            }
+        },
+        "required": ["symbol", "dest_file"]
+    }));
+    // Unlike the other edit tools, move_symbol defaults to preview.
+    // Only an explicit dry_run=false therefore selects the apply branch.
+    schema["allOf"][0]["if"]["required"] = json!(["dry_run"]);
+    schema["properties"]["dry_run"]["default"] = json!(true);
+    schema["properties"]["update_references"]["default"] = json!(false);
+    schema
+}
+
+pub(super) fn insert_at_symbol_schema() -> Value {
+    source_edit_schema(json!({
+        "type": "object",
+        "properties": {
+            "symbol": {
+                "type": "string",
+                "description": "Symbol name. Prefer a fully qualified name for disambiguation."
+            },
+            "content": {
+                "type": "string",
+                "description": "Source text to insert. Newlines are preserved as-is."
+            },
+            "position": {
+                "type": "string",
+                "enum": ["before", "after"],
+                "default": "after",
+                "description": "Where to insert relative to the symbol's range. Default: after."
+            },
+            "dry_run": {
+                "type": "boolean",
+                "description": "If true, resolve the insertion point and compute the change but write nothing; the response includes a bounded preview diff of the would-be change (default: false)."
+            },
+            "verify": {
+                "type": "boolean",
+                "description": "If true, re-run file-scoped diagnostics after a real edit and include a compact verdict (clean / N new errors) in the response. Ignored for dry runs. Default: false to keep edits fast."
+            }
+        },
+        "required": ["symbol", "content"]
+    }))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use serde_json::json;
     use tracedecay_contracts::SourceEditKind;
+
+    use crate::ToolDefinition;
+    use crate::definitions::tests::handwritten;
 
     fn source_edit_definitions() -> [(ToolDefinition, SourceEditKind); 8] {
         [
-            (def_str_replace(), SourceEditKind::StrReplace),
-            (def_multi_str_replace(), SourceEditKind::MultiStrReplace),
-            (def_insert_at(), SourceEditKind::InsertAt),
-            (def_ast_grep_rewrite(), SourceEditKind::AstGrepRewrite),
-            (def_replace_symbol(), SourceEditKind::ReplaceSymbol),
-            (def_insert_at_symbol(), SourceEditKind::InsertAtSymbol),
-            (def_move_symbol(), SourceEditKind::MoveSymbol),
-            (def_rename_symbol(), SourceEditKind::RenameSymbol),
+            (
+                handwritten("tracedecay_str_replace"),
+                SourceEditKind::StrReplace,
+            ),
+            (
+                handwritten("tracedecay_multi_str_replace"),
+                SourceEditKind::MultiStrReplace,
+            ),
+            (
+                handwritten("tracedecay_insert_at"),
+                SourceEditKind::InsertAt,
+            ),
+            (
+                handwritten("tracedecay_ast_grep_rewrite"),
+                SourceEditKind::AstGrepRewrite,
+            ),
+            (
+                handwritten("tracedecay_replace_symbol"),
+                SourceEditKind::ReplaceSymbol,
+            ),
+            (
+                handwritten("tracedecay_insert_at_symbol"),
+                SourceEditKind::InsertAtSymbol,
+            ),
+            (
+                handwritten("tracedecay_move_symbol"),
+                SourceEditKind::MoveSymbol,
+            ),
+            (
+                handwritten("tracedecay_rename_symbol"),
+                SourceEditKind::RenameSymbol,
+            ),
         ]
     }
 
@@ -642,12 +542,12 @@ mod tests {
     #[test]
     fn source_edit_effect_inputs_are_required_only_for_apply() {
         for definition in [
-            def_str_replace(),
-            def_multi_str_replace(),
-            def_insert_at(),
-            def_ast_grep_rewrite(),
-            def_replace_symbol(),
-            def_insert_at_symbol(),
+            handwritten("tracedecay_str_replace"),
+            handwritten("tracedecay_multi_str_replace"),
+            handwritten("tracedecay_insert_at"),
+            handwritten("tracedecay_ast_grep_rewrite"),
+            handwritten("tracedecay_replace_symbol"),
+            handwritten("tracedecay_insert_at_symbol"),
         ] {
             let schema = definition.input_schema;
             assert!(schema["properties"]["idempotency_key"].is_object());
@@ -661,7 +561,10 @@ mod tests {
                 json!(false)
             );
         }
-        for definition in [def_move_symbol(), def_rename_symbol()] {
+        for definition in [
+            handwritten("tracedecay_move_symbol"),
+            handwritten("tracedecay_rename_symbol"),
+        ] {
             let schema = definition.input_schema;
             assert_eq!(schema["allOf"][0]["if"]["required"], json!(["dry_run"]));
             assert_eq!(
@@ -673,7 +576,7 @@ mod tests {
 
     #[test]
     fn rename_acceptance_requires_the_exact_preview_repository_revision() {
-        let definition = def_rename_symbol();
+        let definition = handwritten("tracedecay_rename_symbol");
         assert!(
             definition.input_schema["properties"]["accepted_preview"]["required"]
                 .as_array()
@@ -703,7 +606,7 @@ mod tests {
 
     #[test]
     fn source_edit_reconciliation_requires_exact_identity_and_confirmation() {
-        let schema = def_source_edit_reconcile().input_schema;
+        let schema = handwritten("tracedecay_source_edit_reconcile").input_schema;
         assert_eq!(schema["additionalProperties"], json!(false));
         assert_eq!(
             schema["required"],
@@ -734,7 +637,7 @@ mod tests {
 
     #[test]
     fn source_edit_rollback_requires_original_and_fresh_effect_identity() {
-        let schema = def_source_edit_rollback().input_schema;
+        let schema = handwritten("tracedecay_source_edit_rollback").input_schema;
         assert_eq!(schema["additionalProperties"], json!(false));
         assert_eq!(
             schema["required"],
