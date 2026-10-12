@@ -133,70 +133,68 @@ impl HostKindV1 {
     }
 
     pub fn descriptor(self) -> HostDescriptorV1 {
-        host_descriptor_v1(self)
-    }
-}
+        use HostComponentV1::{Agent, ContextMcp, Core, OperatorMcp};
 
-pub fn host_descriptor_v1(host: HostKindV1) -> HostDescriptorV1 {
-    use HostComponentV1::{Agent, ContextMcp, Core, OperatorMcp};
-
-    let (cli_id, slug, components) = match host {
-        HostKindV1::ClaudeCode => ("claude", "claude-code", vec![Core, ContextMcp, OperatorMcp]),
-        HostKindV1::CursorDesktop => (
-            "cursor",
-            "cursor-desktop",
-            vec![Core, Agent, ContextMcp, OperatorMcp],
-        ),
-        HostKindV1::CursorCloud => ("cursor", "cursor-cloud", vec![]),
-        HostKindV1::Codex => ("codex", "codex", vec![Core, ContextMcp, OperatorMcp]),
-        HostKindV1::Devin => ("devin", "devin", vec![ContextMcp]),
-        HostKindV1::Zed => ("zed", "zed", vec![ContextMcp]),
-        HostKindV1::Antigravity => ("antigravity", "antigravity", vec![ContextMcp]),
-        HostKindV1::Vibe => ("vibe", "vibe", vec![Core, ContextMcp]),
-        HostKindV1::Hermes => ("hermes", "hermes", vec![Core]),
-        HostKindV1::Kiro => ("kiro", "kiro", vec![ContextMcp]),
-        HostKindV1::ClineFamily => ("cline", "cline-family", vec![]),
-        HostKindV1::Cline => ("cline", "cline", vec![ContextMcp]),
-        HostKindV1::RooCode => ("roo-code", "roo-code", vec![ContextMcp]),
-        HostKindV1::Kilo => ("kilo", "kilo", vec![ContextMcp]),
-        HostKindV1::KimiCode => ("kimi", "kimi-code", vec![Core]),
-        // ChatGPT registers a connector or plugin only through its own
-        // interactive surfaces (developer-mode connector setup, the desktop
-        // app's plugin flow); there is no host CLI or local registry file
-        // TraceDecay may write. The lifecycle therefore stages the portable
-        // Agent Plugins bundle as receipt-owned source and defers activation
-        // to the operator, exactly Kimi's shape. There is no project-local
-        // route either.
-        HostKindV1::ChatGpt => ("chatgpt", "chatgpt", vec![Core]),
-        HostKindV1::OpenCode => ("opencode", "opencode", vec![Core, Agent, ContextMcp]),
-        // Gemini CLI owns extension registration through `gemini extensions
-        // install|uninstall`; TraceDecay renders and stages the extension
-        // source and drives those commands. There is no project-local route:
-        // a workspace-scoped extension is installed by running the host CLI
-        // inside that workspace, and the lifecycle admits only the profile
-        // home as the child working directory.
-        HostKindV1::Gemini => ("gemini", "gemini", vec![ContextMcp]),
-        // GitHub Copilot owns its MCP registry through `copilot mcp
-        // add|remove`; TraceDecay drives those commands and never merges
-        // `~/.copilot/mcp-config.json` itself. The one managed artifact is the
-        // receipt-owned component descriptor under `.copilot/tracedecay/`.
-        // Copilot exposes no project-scoped registry command; the workspace
-        // surface that does exist (`.vscode/mcp.json`) is written by the
-        // operator and only ever *read* by this integration.
-        HostKindV1::Copilot => ("copilot", "copilot", vec![ContextMcp]),
-        // Pi registers tools, hooks, and skills through its extension API in
-        // `~/.pi/agent/extensions`; there is no MCP route, so the component
-        // set is Core + Agent only. The extension forwards its lifecycle
-        // events to `hook-pi-event`. There is no project-local route.
-        HostKindV1::Pi => ("pi", "pi", vec![Core, Agent]),
-        // Factory Droid's `droid mcp add|remove` registry owns the MCP
-        // document; TraceDecay drives the commands and owns only the
-        // receipt-backed component descriptor, Copilot's shape exactly.
-        HostKindV1::FactoryDroid => ("droid", "factory-droid", vec![Core, ContextMcp]),
-    };
-    HostDescriptorV1 {
-        cli_id: cli_id.to_owned(),
-        slug: slug.to_owned(),
-        components,
+        let (cli_id, slug, components) = match self {
+            HostKindV1::ClaudeCode => {
+                ("claude", "claude-code", vec![Core, ContextMcp, OperatorMcp])
+            }
+            HostKindV1::CursorDesktop => (
+                "cursor",
+                "cursor-desktop",
+                vec![Core, Agent, ContextMcp, OperatorMcp],
+            ),
+            HostKindV1::CursorCloud => ("cursor", "cursor-cloud", vec![]),
+            HostKindV1::Codex => ("codex", "codex", vec![Core, ContextMcp, OperatorMcp]),
+            HostKindV1::Devin => ("devin", "devin", vec![ContextMcp]),
+            HostKindV1::Zed => ("zed", "zed", vec![ContextMcp]),
+            HostKindV1::Antigravity => ("antigravity", "antigravity", vec![ContextMcp]),
+            HostKindV1::Vibe => ("vibe", "vibe", vec![Core, ContextMcp]),
+            HostKindV1::Hermes => ("hermes", "hermes", vec![Core]),
+            HostKindV1::Kiro => ("kiro", "kiro", vec![ContextMcp]),
+            HostKindV1::ClineFamily => ("cline", "cline-family", vec![]),
+            HostKindV1::Cline => ("cline", "cline", vec![ContextMcp]),
+            HostKindV1::RooCode => ("roo-code", "roo-code", vec![ContextMcp]),
+            HostKindV1::Kilo => ("kilo", "kilo", vec![ContextMcp]),
+            HostKindV1::KimiCode => ("kimi", "kimi-code", vec![Core]),
+            // ChatGPT registers a connector or plugin only through its own
+            // interactive surfaces (developer-mode connector setup, the desktop
+            // app's plugin flow); there is no host CLI or local registry file
+            // TraceDecay may write. The lifecycle therefore stages the portable
+            // Agent Plugins bundle as receipt-owned source and defers activation
+            // to the operator, exactly Kimi's shape. There is no project-local
+            // route either.
+            HostKindV1::ChatGpt => ("chatgpt", "chatgpt", vec![Core]),
+            HostKindV1::OpenCode => ("opencode", "opencode", vec![Core, Agent, ContextMcp]),
+            // Gemini CLI owns extension registration through `gemini extensions
+            // install|uninstall`; TraceDecay renders and stages the extension
+            // source and drives those commands. There is no project-local route:
+            // a workspace-scoped extension is installed by running the host CLI
+            // inside that workspace, and the lifecycle admits only the profile
+            // home as the child working directory.
+            HostKindV1::Gemini => ("gemini", "gemini", vec![ContextMcp]),
+            // GitHub Copilot owns its MCP registry through `copilot mcp
+            // add|remove`; TraceDecay drives those commands and never merges
+            // `~/.copilot/mcp-config.json` itself. The one managed artifact is the
+            // receipt-owned component descriptor under `.copilot/tracedecay/`.
+            // Copilot exposes no project-scoped registry command; the workspace
+            // surface that does exist (`.vscode/mcp.json`) is written by the
+            // operator and only ever *read* by this integration.
+            HostKindV1::Copilot => ("copilot", "copilot", vec![ContextMcp]),
+            // Pi registers tools, hooks, and skills through its extension API in
+            // `~/.pi/agent/extensions`; there is no MCP route, so the component
+            // set is Core + Agent only. The extension forwards its lifecycle
+            // events to `hook-pi-event`. There is no project-local route.
+            HostKindV1::Pi => ("pi", "pi", vec![Core, Agent]),
+            // Factory Droid's `droid mcp add|remove` registry owns the MCP
+            // document; TraceDecay drives the commands and owns only the
+            // receipt-backed component descriptor, Copilot's shape exactly.
+            HostKindV1::FactoryDroid => ("droid", "factory-droid", vec![Core, ContextMcp]),
+        };
+        HostDescriptorV1 {
+            cli_id: cli_id.to_owned(),
+            slug: slug.to_owned(),
+            components,
+        }
     }
 }

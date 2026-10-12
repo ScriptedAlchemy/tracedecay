@@ -77,34 +77,6 @@ impl HostKindV1 {
         Self::FactoryDroid,
         Self::ChatGpt,
     ];
-
-    /// Project a stock host surface into the bounded host observation catalog
-    /// only when a checked-in native event fixture proves that integration.
-    pub const fn fixture_backed_observation_integration_id(self) -> Option<HostIntegrationIdV1> {
-        match self {
-            Self::ClaudeCode => Some(HostIntegrationIdV1::Claude),
-            Self::CursorDesktop => Some(HostIntegrationIdV1::Cursor),
-            Self::Codex => Some(HostIntegrationIdV1::Codex),
-            Self::Hermes => Some(HostIntegrationIdV1::Hermes),
-            Self::Kiro => Some(HostIntegrationIdV1::Kiro),
-            Self::Pi => Some(HostIntegrationIdV1::Pi),
-            Self::Devin
-            | Self::Zed
-            | Self::Antigravity
-            | Self::Vibe
-            | Self::CursorCloud
-            | Self::ClineFamily
-            | Self::Cline
-            | Self::RooCode
-            | Self::Kilo
-            | Self::KimiCode
-            | Self::OpenCode
-            | Self::Gemini
-            | Self::Copilot
-            | Self::FactoryDroid
-            | Self::ChatGpt => None,
-        }
-    }
 }
 
 #[derive(

@@ -206,55 +206,6 @@ fn stable_direct_host_integration_ids_match_provider_ids() {
 }
 
 #[test]
-fn stock_host_kinds_project_only_fixture_backed_observation_integrations() {
-    assert_eq!(
-        HostKindV1::ClaudeCode.fixture_backed_observation_integration_id(),
-        Some(HostIntegrationIdV1::Claude)
-    );
-    assert_eq!(
-        HostKindV1::CursorDesktop.fixture_backed_observation_integration_id(),
-        Some(HostIntegrationIdV1::Cursor)
-    );
-    assert_eq!(
-        HostKindV1::Codex.fixture_backed_observation_integration_id(),
-        Some(HostIntegrationIdV1::Codex)
-    );
-    assert_eq!(
-        HostKindV1::Hermes.fixture_backed_observation_integration_id(),
-        Some(HostIntegrationIdV1::Hermes)
-    );
-    assert_eq!(
-        HostKindV1::Kiro.fixture_backed_observation_integration_id(),
-        Some(HostIntegrationIdV1::Kiro)
-    );
-    assert_eq!(
-        HostKindV1::Pi.fixture_backed_observation_integration_id(),
-        Some(HostIntegrationIdV1::Pi)
-    );
-    for host in [
-        HostKindV1::CursorCloud,
-        HostKindV1::Devin,
-        HostKindV1::Zed,
-        HostKindV1::Antigravity,
-        HostKindV1::Vibe,
-        HostKindV1::ClineFamily,
-        HostKindV1::Cline,
-        HostKindV1::RooCode,
-        HostKindV1::Kilo,
-        HostKindV1::KimiCode,
-        HostKindV1::OpenCode,
-        HostKindV1::Gemini,
-        HostKindV1::Copilot,
-    ] {
-        assert_eq!(
-            host.fixture_backed_observation_integration_id(),
-            None,
-            "{host:?} must not claim a native observation fixture"
-        );
-    }
-}
-
-#[test]
 fn stock_host_capability_matrix_is_sole_capability_authority() {
     let catalog = host_integration_catalog_v1();
     let views = catalog.stock_host_capability_views();

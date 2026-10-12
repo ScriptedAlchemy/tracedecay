@@ -213,8 +213,7 @@ pub use integration::{
     IntegrationCapabilityV1, IntegrationCatalogError, IntegrationDaemonActionV1,
     IntegrationDaemonApiV1, IntegrationDaemonRequirementV1, IntegrationEffectClassV1,
     IntegrationPrivacyClassV1, NativeHostIdentityV1, StockHostCapabilityViewV1,
-    TraceDecayProfileBindingV1, host_descriptor_v1, host_integration_catalog_v1,
-    stock_host_capabilities,
+    TraceDecayProfileBindingV1, host_integration_catalog_v1, stock_host_capabilities,
 };
 pub use memory::{
     FactAssertionKindV1, FactAssertionV1, FactCategoryV1, FactCurationActionV1, FactEvidenceRefV1,
