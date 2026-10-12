@@ -2757,8 +2757,8 @@ mod invocation_problem_tests {
 #[cfg(test)]
 mod wire_input_fail_closed_tests {
     use super::{
-        DaemonInvocationOperation, DaemonInvocationPayload, DaemonInvocationProblem,
-        DaemonInvocationRequest,
+        DaemonInvocationOperation, DaemonInvocationOutcome, DaemonInvocationPayload,
+        DaemonInvocationProblem, DaemonInvocationRequest, parse_daemon_invocation_request,
     };
     use crate::surface::GitReadSurfaceRequest;
     use tracedecay_contracts::git::GitReadRequestV1;
@@ -3025,52 +3025,79 @@ mod wire_input_fail_closed_tests {
     #[test]
     fn raw_only_primitive_bodies_cannot_borrow_an_issued_owner() {
         let meta = serde_json::json!({"temporal":{"kind":"current"}, "page":{"page_size":10}, "projection":"evidence", "order":"source_position"});
-        let window = serde_json::json!({"limit":10});
-        for (primitive, body) in [
-            (
-                "source_read",
-                serde_json::json!({"file":"src/lib.rs", "mode":"full", "include_symbols":false, "meta":meta}),
-            ),
-            (
-                "lexical_grep",
-                serde_json::json!({"pattern":"item", "fixed_strings":true, "case_sensitive":true, "context_lines":0, "window":window}),
-            ),
-            (
-                "ast_grep",
-                serde_json::json!({"pattern":"item", "window":window}),
-            ),
-            ("dependency_depth", serde_json::json!({"window":window})),
-        ] {
-            let request: tracedecay_contracts::retrieval::PrimitiveRequest =
-                serde_json::from_value(serde_json::json!({"primitive":primitive, "request":body}))
-                    .expect("raw body");
-            assert_eq!(request.surface_operation(), None);
-            assert!(
-                request
-                    .application_operation()
-                    .expect("unissued operation")
-                    .is_none()
-            );
-            let frame = DaemonInvocationRequest {
-                protocol: super::DAEMON_INVOCATION_PROTOCOL.to_owned(),
-                revision: super::DAEMON_INVOCATION_REVISION,
-                request_id: "request.raw-only".to_owned(),
-                delivery_route: None,
-                payload: DaemonInvocationPayload::PrimitiveRead {
-                    surface_operation: ApplicationSurfaceOperation::SourceLines,
-                    request,
-                    resolved_scope: None,
-                    observed_at: UtcMicros(1),
-                    deadline: deadline(),
-                    cancellation: cancellation(),
+        let body = serde_json::json!({"file":"src/lib.rs", "mode":"full", "include_symbols":false, "meta":meta});
+        let request: tracedecay_contracts::retrieval::PrimitiveRequest =
+            serde_json::from_value(serde_json::json!({"primitive":"source_read", "request":body}))
+                .expect("raw body");
+        assert_eq!(request.surface_operation(), None);
+        assert!(
+            request
+                .application_operation()
+                .expect("unissued operation")
+                .is_none()
+        );
+        let frame = DaemonInvocationRequest {
+            protocol: super::DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: super::DAEMON_INVOCATION_REVISION,
+            request_id: "request.raw-only".to_owned(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::PrimitiveRead {
+                surface_operation: ApplicationSurfaceOperation::SourceLines,
+                request,
+                resolved_scope: None,
+                observed_at: UtcMicros(1),
+                deadline: deadline(),
+                cancellation: cancellation(),
+            },
+        };
+        let roundtrip: DaemonInvocationRequest =
+            serde_json::from_value(serde_json::to_value(frame).expect("raw frame"))
+                .expect("raw roundtrip");
+        assert_eq!(
+            roundtrip.validate(),
+            Err(DaemonInvocationProblem::InvalidRequest)
+        );
+    }
+
+    #[test]
+    fn retired_unissued_grep_ast_and_depth_primitives_are_refused() {
+        let valid = DaemonInvocationRequest::primitive(
+            "request.retired-primitive",
+            ApplicationSurfaceOperation::StorageStatus,
+            tracedecay_contracts::retrieval::PrimitiveRequest::StorageStatus(
+                tracedecay_contracts::retrieval::StorageStatusPrimitiveRequest {
+                    include_details: false,
                 },
+            ),
+            UtcMicros(1),
+            deadline(),
+            cancellation(),
+        )
+        .expect("storage status is an issued primitive");
+        let mut wire = serde_json::to_value(&valid).expect("frame");
+        for primitive in ["lexical_grep", "ast_grep", "dependency_depth"] {
+            wire["request"] = serde_json::json!({
+                "primitive": primitive,
+                "request": {"window": {"limit": 10}}
+            });
+            let line = serde_json::to_string(&wire).expect("line");
+            let parsed =
+                parse_daemon_invocation_request(&line).expect("protocol frame is answered");
+            let Err(response) = parsed else {
+                panic!("{primitive} deserialized as a live primitive");
             };
-            let roundtrip: DaemonInvocationRequest =
-                serde_json::from_value(serde_json::to_value(frame).expect("raw frame"))
-                    .expect("raw roundtrip");
             assert_eq!(
-                roundtrip.validate(),
-                Err(DaemonInvocationProblem::InvalidRequest)
+                response.outcome,
+                DaemonInvocationOutcome::Problem {
+                    problem: DaemonInvocationProblem::InvalidRequest
+                }
+            );
+            assert!(
+                serde_json::from_value::<tracedecay_contracts::retrieval::PrimitiveRequest>(
+                    wire["request"].clone()
+                )
+                .is_err(),
+                "{primitive} must not deserialize as a primitive request"
             );
         }
     }

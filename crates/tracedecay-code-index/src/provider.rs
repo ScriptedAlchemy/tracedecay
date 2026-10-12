@@ -1,44 +1,15 @@
-//! Read-side provider envelopes for generation-bound code-index joins.
+//! Read-side provider envelope for the generation-bound test-attribution join.
 //!
 //! These values describe one read from an existing authority. They are not a
-//! persistence interface and never copy Git, diagnostic, graph, or test
-//! records into another store.
+//! persistence interface and never copy test records into another store.
 
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracedecay_domain::{
-    CodeGenerationId, FileOccurrenceId, ProviderEvaluationStateV1, RetrievalAnchorId,
-    SymbolOccurrenceId, TestAttributionEvidenceClassV1,
-};
+use tracedecay_domain::{CodeGenerationId, ProviderEvaluationStateV1};
 
 use super::test_attribution::GenerationTestJoinV1;
-
-/// Native graph-impact evidence consumed by generation-bound index joins.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CodeIndexGraphImpactEvidenceV1 {
-    pub affected_files: Vec<FileOccurrenceId>,
-    pub affected_callers: Vec<SymbolOccurrenceId>,
-    pub evidence_anchors: Vec<RetrievalAnchorId>,
-}
-
-/// Native affected-test evidence consumed by generation-bound index joins.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CodeIndexAffectedTestAttributionV1 {
-    pub test: SymbolOccurrenceId,
-    pub evidence_class: TestAttributionEvidenceClassV1,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CodeIndexAffectedTestsEvidenceV1 {
-    pub tests: Vec<SymbolOccurrenceId>,
-    #[serde(default)]
-    pub attributions: Vec<CodeIndexAffectedTestAttributionV1>,
-}
 
 /// Coverage counters reported independently by one provider.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

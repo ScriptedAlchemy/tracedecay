@@ -95,7 +95,7 @@ struct SessionTemporalRefreshSchedulerEntry {
 }
 
 impl SessionTemporalRefreshSchedulerEntry {
-    async fn shutdown(self) {
+    fn cancel(&self) {
         if let Some(history) = self
             .history
             .read()
@@ -105,20 +105,67 @@ impl SessionTemporalRefreshSchedulerEntry {
             history.cancel();
         }
         self.state.cancel();
-        let mut task = self.task;
-        if tokio::time::timeout(crate::DAEMON_CLIENT_DRAIN_DEADLINE, &mut task)
-            .await
-            .is_err()
-        {
-            task.abort();
-            let _ = task.await;
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum SessionTemporalRefreshOwner {
+    Project(StoreOwnerKey),
+    Profile(std::path::PathBuf),
+}
+
+type RetiredSessionTemporalRefreshEntry = (
+    SessionTemporalRefreshOwner,
+    SessionTemporalRefreshSchedulerEntry,
+);
+type RetiredSessionTemporalRefreshEntries =
+    std::sync::Mutex<Vec<RetiredSessionTemporalRefreshEntry>>;
+
+/// Owns entries removed from the registry until their supervisors settle.
+/// Construction cancels every entry, and dropping the join (a shared shutdown
+/// deadline) returns unfinished entries to the registry, so a later drain or a
+/// readmission of the same owner joins those supervisors instead of detaching
+/// lease-owning workers.
+struct SessionTemporalRefreshRetirement<'a> {
+    retired: &'a RetiredSessionTemporalRefreshEntries,
+    entries: Vec<RetiredSessionTemporalRefreshEntry>,
+}
+
+impl<'a> SessionTemporalRefreshRetirement<'a> {
+    fn new(
+        retired: &'a RetiredSessionTemporalRefreshEntries,
+        entries: Vec<RetiredSessionTemporalRefreshEntry>,
+    ) -> Self {
+        for (_, entry) in &entries {
+            entry.cancel();
         }
+        Self { retired, entries }
+    }
+
+    /// Each supervisor bounds its own drain grace and joins its aborted
+    /// workers, so awaiting it proves the worker released its leases.
+    async fn join(mut self) {
+        while let Some((_, entry)) = self.entries.last_mut() {
+            let _ = (&mut entry.task).await;
+            self.entries.pop();
+        }
+    }
+}
+
+impl Drop for SessionTemporalRefreshRetirement<'_> {
+    fn drop(&mut self) {
+        self.entries.retain(|(_, entry)| !entry.task.is_finished());
+        self.retired
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .append(&mut self.entries);
     }
 }
 
 pub struct SessionTemporalRefreshSchedulerRegistry {
     project: tokio::sync::Mutex<HashMap<StoreOwnerKey, SessionTemporalRefreshSchedulerEntry>>,
     profile: tokio::sync::Mutex<HashMap<std::path::PathBuf, SessionTemporalRefreshSchedulerEntry>>,
+    retired: RetiredSessionTemporalRefreshEntries,
     projector: Arc<dyn SessionTemporalRefreshProjector>,
     policy: SessionTemporalRefreshPolicy,
     shutting_down: AtomicBool,
@@ -140,6 +187,7 @@ impl Default for SessionTemporalRefreshSchedulerRegistry {
         Self {
             project: tokio::sync::Mutex::new(HashMap::new()),
             profile: tokio::sync::Mutex::new(HashMap::new()),
+            retired: std::sync::Mutex::new(Vec::new()),
             projector: Arc::new(CanonicalSessionTemporalProjector),
             policy: SessionTemporalRefreshPolicy::default(),
             shutting_down: AtomicBool::new(false),
@@ -163,15 +211,7 @@ impl Drop for SessionTemporalRefreshSchedulerRegistry {
         let project = self.project.get_mut().values();
         let profile = self.profile.get_mut().values();
         for entry in project.chain(profile) {
-            if let Some(history) = entry
-                .history
-                .read()
-                .unwrap_or_else(PoisonError::into_inner)
-                .as_ref()
-            {
-                history.cancel();
-            }
-            entry.state.cancel();
+            entry.cancel();
         }
     }
 }
@@ -262,12 +302,24 @@ impl SessionTemporalRefreshSchedulerRegistry {
                         ),
                         tracing::trace_span!("daemon.scheduler.session_temporal.worker"),
                     ));
-                    let Some(result) = tracing::Instrument::instrument(
-                        workers.join_next(),
-                        tracing::trace_span!("daemon.scheduler.session_temporal.worker_join_wait"),
-                    )
-                    .await
-                    else {
+                    let joined = tokio::select! {
+                        joined = tracing::Instrument::instrument(
+                            workers.join_next(),
+                            tracing::trace_span!("daemon.scheduler.session_temporal.worker_join_wait"),
+                        ) => joined,
+                        () = async {
+                            worker_state.wait_for_cancellation().await;
+                            tokio::time::sleep(crate::DAEMON_CLIENT_DRAIN_DEADLINE).await;
+                        } => {
+                            // An abort only requests cancellation; joining the
+                            // aborted worker proves its lease clones dropped.
+                            workers.abort_all();
+                            while workers.join_next().await.is_some() {}
+                            worker_state.mark_stopped();
+                            return;
+                        }
+                    };
+                    let Some(result) = joined else {
                         worker_state.mark_stopped();
                         return;
                     };
@@ -310,6 +362,27 @@ impl SessionTemporalRefreshSchedulerRegistry {
         }
     }
 
+    fn retire<'a>(
+        &'a self,
+        entries: Vec<RetiredSessionTemporalRefreshEntry>,
+    ) -> SessionTemporalRefreshRetirement<'a> {
+        SessionTemporalRefreshRetirement::new(&self.retired, entries)
+    }
+
+    /// Joins an unfinished retirement of `owner`, so the owner never runs a
+    /// fresh supervisor beside one that still holds its leases.
+    async fn settle_retired(&self, owner: &SessionTemporalRefreshOwner) {
+        let entries = {
+            let mut retired = self.retired.lock().unwrap_or_else(PoisonError::into_inner);
+            let (owned, others) = std::mem::take(&mut *retired)
+                .into_iter()
+                .partition(|(retired_owner, _)| retired_owner == owner);
+            *retired = others;
+            owned
+        };
+        self.retire(entries).join().await;
+    }
+
     pub async fn ensure_project(
         &self,
         owner: StoreOwnerKey,
@@ -331,6 +404,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
         if self.shutting_down.load(Ordering::Acquire) {
             return inert_session_temporal_refresh_wake();
         }
+        let retired_owner = SessionTemporalRefreshOwner::Project(owner.clone());
         if project
             .get(&owner)
             .is_some_and(|entry| entry.task.is_finished())
@@ -344,10 +418,13 @@ impl SessionTemporalRefreshSchedulerRegistry {
                 .read()
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone();
-            finished.shutdown().await;
+            self.retire(vec![(retired_owner.clone(), finished)])
+                .join()
+                .await;
             if self.shutting_down.load(Ordering::Acquire) {
                 return inert_session_temporal_refresh_wake();
             }
+            self.settle_retired(&retired_owner).await;
             let entry = self.spawn_entry(database, Some(route), history);
             let wake = entry.wake.clone();
             project.insert(owner, entry);
@@ -357,6 +434,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
             entry.wake.wake();
             return entry.wake.clone();
         }
+        self.settle_retired(&retired_owner).await;
         let entry = self.spawn_entry(database, None, None);
         let wake = entry.wake.clone();
         project.insert(owner, entry);
@@ -375,6 +453,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
         if self.shutting_down.load(Ordering::Acquire) {
             return inert_session_temporal_refresh_wake();
         }
+        let retired_owner = SessionTemporalRefreshOwner::Profile(database_path.clone());
         if profile
             .get(&database_path)
             .is_some_and(|entry| entry.task.is_finished())
@@ -390,10 +469,13 @@ impl SessionTemporalRefreshSchedulerRegistry {
                 .read()
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone();
-            finished.shutdown().await;
+            self.retire(vec![(retired_owner.clone(), finished)])
+                .join()
+                .await;
             if self.shutting_down.load(Ordering::Acquire) {
                 return inert_session_temporal_refresh_wake();
             }
+            self.settle_retired(&retired_owner).await;
             let entry = self.spawn_entry(database, Some(route), history);
             let wake = entry.wake.clone();
             profile.insert(database_path, entry);
@@ -403,6 +485,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
             entry.wake.wake();
             return entry.wake.clone();
         }
+        self.settle_retired(&retired_owner).await;
         let entry = self.spawn_entry(database, None, None);
         let wake = entry.wake.clone();
         profile.insert(database_path, entry);
@@ -496,7 +579,12 @@ impl SessionTemporalRefreshSchedulerRegistry {
             let staging = Arc::new(SessionTemporalRefreshWakeState::default());
             let retired_state = Arc::clone(&entry.state);
             route.bind(&staging);
-            entry.shutdown().await;
+            self.retire(vec![(
+                SessionTemporalRefreshOwner::Project(old_owner.clone()),
+                entry,
+            )])
+            .join()
+            .await;
             retired_state.transfer_requests_to(&staging);
             (Some(route), Some(staging))
         } else {
@@ -520,6 +608,8 @@ impl SessionTemporalRefreshSchedulerRegistry {
             existing.wake.wake();
             return;
         }
+        self.settle_retired(&SessionTemporalRefreshOwner::Project(new_owner.clone()))
+            .await;
         let entry = self.spawn_entry(database, route, None);
         if let Some(staging) = staging {
             staging.cancel();
@@ -530,9 +620,11 @@ impl SessionTemporalRefreshSchedulerRegistry {
 
     pub async fn retire_project(&self, owner: &StoreOwnerKey) {
         let _lifecycle = self.project_lifecycle.lock().await;
-        if let Some(entry) = self.project.lock().await.remove(owner) {
-            entry.shutdown().await;
-        }
+        let retired = self.project.lock().await.remove(owner);
+        let owner = SessionTemporalRefreshOwner::Project(owner.clone());
+        self.retire(retired.map(|entry| (owner, entry)).into_iter().collect())
+            .join()
+            .await;
     }
 
     pub async fn cancel_historical_ingest(&self) {
@@ -555,25 +647,25 @@ impl SessionTemporalRefreshSchedulerRegistry {
         self.shutting_down.store(true, Ordering::Release);
         let _guard = self.shutdown_guard.lock().await;
         let _project_lifecycle = self.project_lifecycle.lock().await;
-        let project = self
-            .project
-            .lock()
-            .await
-            .drain()
-            .map(|(_, entry)| entry)
-            .collect::<Vec<_>>();
-        let profile = self
-            .profile
-            .lock()
-            .await
-            .drain()
-            .map(|(_, entry)| entry)
-            .collect::<Vec<_>>();
-        let mut retirements = tokio::task::JoinSet::new();
-        for entry in project.into_iter().chain(profile) {
-            retirements.spawn(entry.shutdown());
-        }
-        while retirements.join_next().await.is_some() {}
+        let mut project = self.project.lock().await;
+        let mut profile = self.profile.lock().await;
+        // Removal and retirement share one poll: no await separates an entry
+        // leaving its map from the retirement that cancels and owns it.
+        let mut entries =
+            std::mem::take(&mut *self.retired.lock().unwrap_or_else(PoisonError::into_inner));
+        entries.extend(
+            project
+                .drain()
+                .map(|(owner, entry)| (SessionTemporalRefreshOwner::Project(owner), entry)),
+        );
+        entries.extend(
+            profile
+                .drain()
+                .map(|(path, entry)| (SessionTemporalRefreshOwner::Profile(path), entry)),
+        );
+        let retirement = self.retire(entries);
+        drop((project, profile));
+        retirement.join().await;
     }
 
     #[cfg(any(test, feature = "test-helpers"))]

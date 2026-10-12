@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::path::Path;
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex};
 use tracedecay_domain::errors::Result;
 use tracedecay_domain::{ProviderId, SessionId, UtcMicros};
 use tracedecay_global_db::RegisteredGlobalDb;
@@ -78,22 +78,24 @@ pub fn hook_v2_admission_ledger_root(
         .join(host.hook_key())
 }
 
-/// Bound on distinct ledgers held open at once. A daemon serves one profile, so
-/// this is (projects opened + the profile) x (bound hosts); beyond it admission reports
-/// backpressure and the hook spools the envelope for replay rather than
-/// admitting something it cannot deduplicate.
+/// Bound on distinct ledgers held open at once. A ledger is reopened from its
+/// log on demand, so this bounds simultaneous residency, not the project/host
+/// pairs a daemon serves over its lifetime. When every open ledger still has a
+/// commit in flight, admission reports backpressure and the hook spools the
+/// envelope for replay rather than admitting something it cannot deduplicate.
 const MAX_OPEN_HOOK_V2_ADMISSION_LEDGERS: usize = 64;
 
 /// The daemon is the single writer of every Hook V2 admission ledger, project
 /// or profile scoped: each ledger is opened once, keyed by its root, and kept
 /// here with its cross-process writer lock held, so concurrent admissions
 /// serialize on this map instead of racing that lock.
-type HookV2AdmissionLedgers = BTreeMap<std::path::PathBuf, tracedecay_hooks::HookAdmissionLedgerV1>;
-
-fn hook_v2_admission_ledgers() -> &'static StdMutex<HookV2AdmissionLedgers> {
-    static LEDGERS: OnceLock<StdMutex<HookV2AdmissionLedgers>> = OnceLock::new();
-    LEDGERS.get_or_init(|| StdMutex::new(BTreeMap::new()))
+struct HookV2AdmissionLedgers {
+    capacity: usize,
+    open: StdMutex<BTreeMap<std::path::PathBuf, tracedecay_hooks::HookAdmissionLedgerV1>>,
 }
+
+static HOOK_V2_ADMISSION_LEDGERS: HookV2AdmissionLedgers =
+    HookV2AdmissionLedgers::new(MAX_OPEN_HOOK_V2_ADMISSION_LEDGERS);
 
 /// Where producer work lived before the admission ledger owned it. A project
 /// still holding it is refused for reset with its ledgers.
@@ -110,20 +112,22 @@ fn complete_hook_v2_pending_work(
     data_root: &Path,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
 ) -> bool {
-    let key = hook_v2_admission_ledger_root(data_root, envelope.producer);
-    let Some(mut ledgers) = hook_v2_admission_ledgers().lock().ok() else {
+    let ledger_root = hook_v2_admission_ledger_root(data_root, envelope.producer);
+    // A released ledger reopens from its log; a removed one owes nothing.
+    if !ledger_root.is_dir() {
         return false;
-    };
-    let Some(ledger) = ledgers.get_mut(&key) else {
-        return false;
-    };
-    let commit = match ledger.stage_work_completion(envelope) {
-        Ok(Some(commit)) => commit,
-        Ok(None) => return true,
-        Err(_) => return false,
-    };
-    drop(ledgers);
-    commit.wait().is_ok()
+    }
+    match with_hook_v2_admission_ledger(
+        Some(data_root),
+        ledger_root,
+        envelope.producer,
+        hook_now(),
+        |ledger| ledger.stage_work_completion(envelope),
+    ) {
+        Ok(Ok(Some(commit))) => commit.wait().is_ok(),
+        Ok(Ok(None)) => true,
+        Err(_) | Ok(Err(_)) => false,
+    }
 }
 
 fn hook_v2_work_completion(
@@ -204,11 +208,6 @@ fn stage_hook_v2_admission(
     .flatten()
 }
 
-/// Runs `operation` on the retained ledger at `ledger_root`, opening it on
-/// first use and again after a failed write. A project ledger (`data_root`)
-/// whose pre-ledger pending work remains is refused for reset. An open
-/// failure, reset refusal, poisoned owner, or the open-ledger bound is a
-/// typed error; callers must not treat it as an empty ledger.
 fn with_hook_v2_admission_ledger<T>(
     data_root: Option<&Path>,
     ledger_root: std::path::PathBuf,
@@ -216,22 +215,84 @@ fn with_hook_v2_admission_ledger<T>(
     now: UtcMicros,
     operation: impl FnOnce(&mut tracedecay_hooks::HookAdmissionLedgerV1) -> T,
 ) -> std::result::Result<T, HookV2AdmissionLedgerUnavailable> {
-    let mut ledgers = hook_v2_admission_ledgers()
-        .lock()
-        .map_err(|_| HookV2AdmissionLedgerUnavailable::Poisoned)?;
-    if ledgers
-        .get(&ledger_root)
-        .is_some_and(tracedecay_hooks::HookAdmissionLedgerV1::needs_reopen)
-    {
-        ledgers.remove(&ledger_root);
+    HOOK_V2_ADMISSION_LEDGERS.with_ledger(data_root, ledger_root, host, now, operation)
+}
+
+impl HookV2AdmissionLedgers {
+    const fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            open: StdMutex::new(BTreeMap::new()),
+        }
     }
-    let open_ledgers = ledgers.len();
-    let ledger = match ledgers.entry(ledger_root) {
+
+    /// Runs `operation` on the retained ledger at `ledger_root`, opening it on
+    /// first use and again after a failed write or a release. A project
+    /// ledger (`data_root`) whose pre-ledger pending work remains is refused
+    /// for reset. An open failure, reset refusal, poisoned owner, or a full
+    /// bound is a typed error; callers must not treat it as an empty ledger.
+    fn with_ledger<T>(
+        &self,
+        data_root: Option<&Path>,
+        ledger_root: std::path::PathBuf,
+        host: tracedecay_domain::NativeHostIdentityV1,
+        now: UtcMicros,
+        operation: impl FnOnce(&mut tracedecay_hooks::HookAdmissionLedgerV1) -> T,
+    ) -> std::result::Result<T, HookV2AdmissionLedgerUnavailable> {
+        let mut ledgers = self
+            .open
+            .lock()
+            .map_err(|_| HookV2AdmissionLedgerUnavailable::Poisoned)?;
+        if ledgers
+            .get(&ledger_root)
+            .is_some_and(tracedecay_hooks::HookAdmissionLedgerV1::needs_reopen)
+        {
+            ledgers.remove(&ledger_root);
+        }
+        if !ledgers.contains_key(&ledger_root) && ledgers.len() >= self.capacity {
+            release_one_settled_ledger(&mut ledgers)?;
+        }
+        Ok(operation(open_ledger(
+            &mut ledgers,
+            data_root,
+            ledger_root,
+            host,
+            now,
+        )?))
+    }
+}
+
+/// Every admission, dedupe identity and owed producer work is durable in the
+/// ledger's log, and every operation reaches a ledger through this map, so a
+/// handle with no commit in flight can be dropped (releasing its writer lock)
+/// and reopened from disk on next use.
+fn release_one_settled_ledger(
+    ledgers: &mut BTreeMap<std::path::PathBuf, tracedecay_hooks::HookAdmissionLedgerV1>,
+) -> std::result::Result<(), HookV2AdmissionLedgerUnavailable> {
+    // ponytail: first settled root by path, not least recently used; more
+    // than the bound of ledgers active at once reopen in turn.
+    let settled = ledgers
+        .iter()
+        .find(|(_, ledger)| !ledger.commits_in_flight())
+        .map(|(root, _)| root.clone())
+        .ok_or(HookV2AdmissionLedgerUnavailable::AtCapacity)?;
+    ledgers.remove(&settled);
+    Ok(())
+}
+
+fn open_ledger<'a>(
+    ledgers: &'a mut BTreeMap<std::path::PathBuf, tracedecay_hooks::HookAdmissionLedgerV1>,
+    data_root: Option<&Path>,
+    ledger_root: std::path::PathBuf,
+    host: tracedecay_domain::NativeHostIdentityV1,
+    now: UtcMicros,
+) -> std::result::Result<
+    &'a mut tracedecay_hooks::HookAdmissionLedgerV1,
+    HookV2AdmissionLedgerUnavailable,
+> {
+    Ok(match ledgers.entry(ledger_root) {
         Entry::Occupied(retained) => retained.into_mut(),
         Entry::Vacant(unopened) => {
-            if open_ledgers >= MAX_OPEN_HOOK_V2_ADMISSION_LEDGERS {
-                return Err(HookV2AdmissionLedgerUnavailable::AtCapacity);
-            }
             let opened = match data_root {
                 Some(data_root) => refuse_pre_ledger_pending_work(data_root, host),
                 None => Ok(()),
@@ -257,8 +318,7 @@ fn with_hook_v2_admission_ledger<T>(
                 }
             }
         }
-    };
-    Ok(operation(ledger))
+    })
 }
 
 /// Refuses `host`'s project ledger for reset while the pre-ledger
@@ -282,7 +342,8 @@ fn forget_hook_v2_admission_ledger_for_test(
     data_root: &Path,
     host: tracedecay_domain::NativeHostIdentityV1,
 ) {
-    hook_v2_admission_ledgers()
+    HOOK_V2_ADMISSION_LEDGERS
+        .open
         .lock()
         .unwrap()
         .remove(&hook_v2_admission_ledger_root(data_root, host));

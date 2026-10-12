@@ -119,9 +119,3 @@ genrule(
     tags = ["manual"],
     visibility = ["//visibility:public"],
 )
-
-filegroup(
-    name = "src",
-    srcs = glob(["src/**"]),
-    visibility = ["//visibility:public"],
-)

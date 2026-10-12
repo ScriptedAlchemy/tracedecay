@@ -15,10 +15,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1;
-use tracedecay_contracts::retrieval::grep_analysis::{
-    AstGrepAuthorityV1, DependencyDepthAuthorityV1, GrepAnalysisProblemV1, LexicalGrepAuthorityV1,
-    PrimitiveCoverageV1, PrimitiveOutcomeV1, PrimitivePortContextV1,
-};
+use tracedecay_contracts::retrieval::grep_analysis::PrimitiveCoverageV1;
 use tracedecay_contracts::retrieval::{
     AffectedFileTestsPrimitiveResultV1, HealthDeltaRequest, HealthDeltaResult,
     OperationalRetrievalPort, PrimitiveInvocation, PrimitiveRequest, PrimitiveSupportGap,
@@ -49,7 +46,6 @@ use tracedecay_tool_catalog::SortContractId;
 use url::Url;
 
 use super::concrete::SourceReadAdapter;
-use super::grep_analysis::{TraceDecayAstGrepAuthorityV1, TraceDecayDependencyDepthAuthorityV1};
 use super::symbol_graph::{CanonicalSymbolGraphAdapter, SymbolGraphCursorPort};
 use crate::ProjectSourceAccessSnapshot;
 use crate::code_index::CodeIndexIgnoredDependencyAdmissionPortV1;
@@ -323,7 +319,7 @@ pub trait PrimitiveDispatch: Send + Sync {
 
 /// Owned production authorities supplied by the daemon project-open path.
 ///
-/// The Arc fields are the existing graph/query/source/cursor/test/grep services.
+/// The Arc fields are the existing graph/query/source/cursor/test services.
 /// This is an ownership boundary, not a locator:
 /// every dependency is explicit and no authority can be discovered at call
 /// time.
@@ -332,9 +328,6 @@ struct PrimitiveProjectServices {
     pub symbol_graph: Arc<dyn SymbolGraphPrimitivePort + Send + Sync>,
     pub source: Arc<dyn SourceReadPrimitivePort + Send + Sync>,
     pub tests: Arc<dyn TestPrimitivePort + Send + Sync>,
-    pub lexical_grep: Arc<dyn LexicalGrepAuthorityV1 + Send + Sync>,
-    pub ast_grep: Arc<dyn AstGrepAuthorityV1 + Send + Sync>,
-    pub dependency_depth: Arc<dyn DependencyDepthAuthorityV1 + Send + Sync>,
     pub temporal: Arc<dyn TemporalRetrievalPort + Send + Sync>,
     pub source_lines: Arc<dyn SourceRetrievalPort + Send + Sync>,
     pub health: Arc<dyn OperationalRetrievalPort + Send + Sync>,
@@ -507,9 +500,6 @@ const fn reads_code_index(request: &PrimitiveRequest) -> bool {
         | PrimitiveRequest::SourceRead(_)
         | PrimitiveRequest::TestMap(_)
         | PrimitiveRequest::AffectedFileTests(_)
-        | PrimitiveRequest::LexicalGrep(_)
-        | PrimitiveRequest::AstGrep(_)
-        | PrimitiveRequest::DependencyDepth(_)
         | PrimitiveRequest::QualifiedName(_)
         | PrimitiveRequest::CallChain(_)
         | PrimitiveRequest::FileDependents(_)
@@ -538,7 +528,6 @@ pub fn open_primitive_project_runtime(
     symbol_graph_cursors: Arc<dyn SymbolGraphCursorPort>,
     ignored_dependency_admission: Option<Arc<dyn CodeIndexIgnoredDependencyAdmissionPortV1>>,
     tests: Arc<dyn TestPrimitivePort + Send + Sync>,
-    lexical_grep: Arc<dyn LexicalGrepAuthorityV1 + Send + Sync>,
     temporal: Arc<dyn TemporalRetrievalPort + Send + Sync>,
     source_lines: Arc<dyn SourceRetrievalPort + Send + Sync>,
     health: Arc<dyn OperationalRetrievalPort + Send + Sync>,
@@ -575,14 +564,6 @@ pub fn open_primitive_project_runtime(
         symbol_graph,
         source,
         tests,
-        lexical_grep,
-        ast_grep: Arc::new(TraceDecayAstGrepAuthorityV1::new(
-            Arc::clone(&source_runtime),
-            Arc::clone(&code_graph),
-        )),
-        dependency_depth: Arc::new(TraceDecayDependencyDepthAuthorityV1::new(Arc::clone(
-            &code_graph,
-        ))),
         temporal,
         source_lines,
         health,
@@ -789,51 +770,6 @@ async fn dispatch_admitted(
                 .affected_file_tests(test_context(&context, &operation, observed_at), &request)
                 .await;
             affected_file_tests_outcome(&runtime.access, &context, &operation, outcome)
-        }
-        PrimitiveRequest::LexicalGrep(request) => {
-            let port_context = grep_context(&context, &operation, observed_at);
-            let outcome = runtime
-                .project_runtime
-                .lexical_grep
-                .grep(&port_context, &request)
-                .await;
-            grep_outcome(
-                &runtime.access,
-                &context,
-                &operation,
-                EvidenceDomain::Source,
-                outcome,
-            )
-        }
-        PrimitiveRequest::AstGrep(request) => {
-            let port_context = grep_context(&context, &operation, observed_at);
-            let outcome = runtime
-                .project_runtime
-                .ast_grep
-                .ast_grep(&port_context, &request)
-                .await;
-            grep_outcome(
-                &runtime.access,
-                &context,
-                &operation,
-                EvidenceDomain::Source,
-                outcome,
-            )
-        }
-        PrimitiveRequest::DependencyDepth(request) => {
-            let port_context = grep_context(&context, &operation, observed_at);
-            let outcome = runtime
-                .project_runtime
-                .dependency_depth
-                .dependency_depth(&port_context, &request)
-                .await;
-            grep_outcome(
-                &runtime.access,
-                &context,
-                &operation,
-                EvidenceDomain::Graph,
-                outcome,
-            )
         }
         PrimitiveRequest::SessionLookup(request) => {
             let outcome = match runtime
@@ -1218,19 +1154,6 @@ fn test_context<'a>(
     }
 }
 
-fn grep_context<'a>(
-    context: &'a RequestContext,
-    operation: &'a ApplicationOperation,
-    observed_at: UtcMicros,
-) -> PrimitivePortContextV1<'a> {
-    PrimitivePortContextV1 {
-        request: context,
-        operation,
-        scope_prefix: None,
-        observed_at,
-    }
-}
-
 fn symbol_outcome<T: Serialize + SymbolGraphItem>(
     access: &ProjectSourceAccessSnapshot,
     context: &RequestContext,
@@ -1516,53 +1439,6 @@ fn typed_result<T: Serialize>(
         continuation,
         finished_at,
         budget,
-        TemporalState::current(finished_at),
-        partial,
-    )
-}
-
-fn grep_outcome<T: Serialize>(
-    access: &ProjectSourceAccessSnapshot,
-    context: &RequestContext,
-    operation: &ApplicationOperation,
-    domain: EvidenceDomain,
-    outcome: PrimitiveOutcomeV1<T>,
-) -> Result<ApplicationResult<Value>, ApplicationContractError> {
-    match outcome {
-        PrimitiveOutcomeV1::Completed(page) => {
-            grep_page(access, context, operation, domain, page, false)
-        }
-        PrimitiveOutcomeV1::Partial(page) => {
-            grep_page(access, context, operation, domain, page, true)
-        }
-        PrimitiveOutcomeV1::Cancelled => interrupted(context, operation, true),
-        PrimitiveOutcomeV1::TimedOut => interrupted(context, operation, false),
-        PrimitiveOutcomeV1::Failed(problem) => grep_problem(context, operation, problem),
-    }
-}
-
-fn grep_page<T: Serialize>(
-    access: &ProjectSourceAccessSnapshot,
-    context: &RequestContext,
-    operation: &ApplicationOperation,
-    domain: EvidenceDomain,
-    page: tracedecay_contracts::retrieval::grep_analysis::PrimitivePageV1<T>,
-    partial: bool,
-) -> Result<ApplicationResult<Value>, ApplicationContractError> {
-    let coverage = page.coverage.clone();
-    let continuation = page.continuation.clone();
-    let finished_at = page.finished_at;
-    let payload = value_or_problem!(serde_json::to_value(page), context, operation);
-    evidence_result(
-        access,
-        context,
-        operation,
-        domain,
-        payload,
-        coverage,
-        continuation,
-        finished_at,
-        OperationBudgetUsage::default(),
         TemporalState::current(finished_at),
         partial,
     )
@@ -1897,44 +1773,6 @@ fn primitive_failure<T>(
     failure: tracedecay_contracts::retrieval::PrimitiveFailure,
 ) -> Result<ApplicationResult<T>, ApplicationContractError> {
     problem(context, operation, failure.into_problem())
-}
-
-fn grep_problem<T>(
-    context: &RequestContext,
-    operation: &ApplicationOperation,
-    failure: GrepAnalysisProblemV1,
-) -> Result<ApplicationResult<T>, ApplicationContractError> {
-    match failure {
-        GrepAnalysisProblemV1::Denied => problem(
-            context,
-            operation,
-            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-        ),
-        GrepAnalysisProblemV1::Cancelled => interrupted(context, operation, true),
-        GrepAnalysisProblemV1::TimedOut => interrupted(context, operation, false),
-        GrepAnalysisProblemV1::InvalidRequest(message) => problem(
-            context,
-            operation,
-            ApplicationProblem::invalid_request_without_action(
-                "application.retrieval.invalid-request",
-                message,
-            ),
-        ),
-        GrepAnalysisProblemV1::AuthorityFailed(_) => unavailable(context, operation),
-    }
-}
-
-fn interrupted<T>(
-    context: &RequestContext,
-    operation: &ApplicationOperation,
-    cancelled: bool,
-) -> Result<ApplicationResult<T>, ApplicationContractError> {
-    let problem_value = if cancelled {
-        ApplicationProblem::cancelled_before_admission()
-    } else {
-        ApplicationProblem::timed_out_before_admission()
-    };
-    problem(context, operation, problem_value)
 }
 
 fn invalid_request<T>(
