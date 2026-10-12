@@ -4188,6 +4188,16 @@
         "note": {
           "type": "string"
         },
+        "refusal": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodeIndexRouteRefusalV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "worktrees": {
           "items": {
             "$ref": "#/$defs/CodeIndexWorktreeFreshnessV1"
@@ -4337,6 +4347,22 @@
         "authenticated_completed",
         "authenticated_total",
         "authenticated_remaining"
+      ],
+      "type": "object"
+    },
+    "CodeIndexRouteRefusalV1": {
+      "description": "A policy that keeps the route from being indexed, with the operator step\nthat lifts it.",
+      "properties": {
+        "reason": {
+          "type": "string"
+        },
+        "remediation": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason",
+        "remediation"
       ],
       "type": "object"
     },
