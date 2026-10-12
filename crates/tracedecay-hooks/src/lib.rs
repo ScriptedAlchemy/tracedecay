@@ -385,8 +385,6 @@ pub enum HookTransportDispositionV1 {
 pub enum HookContractError {
     #[error("hook schema version is unsupported")]
     UnsupportedSchemaVersion,
-    #[error("hook envelope is malformed")]
-    MalformedEnvelope,
     #[error("event family is unsupported by the native host binding")]
     UnsupportedFamily,
     #[error("hook envelope identity is invalid")]
@@ -397,14 +395,6 @@ pub enum HookContractError {
     BindingMismatch,
     #[error("event exceeds its structural budget")]
     EventBudgetExceeded,
-    #[error("spool record exceeds its byte budget")]
-    SpoolBudgetExceeded,
-    #[error("spool quota is full")]
-    SpoolFull,
-    #[error("spool entry is expired")]
-    SpoolExpired,
-    #[error("spool checksum does not verify against the exact encoded envelope")]
-    SpoolChecksumInvalid,
     #[error("replay batch exceeds its bound")]
     ReplayBatchExceeded,
     #[error("guidance is not approved for render")]
