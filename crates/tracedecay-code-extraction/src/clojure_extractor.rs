@@ -89,9 +89,9 @@ impl ClojureExtractor {
             "ns" => Self::visit_ns(state, node),
             "defn" | "defn-" => Self::visit_defn(state, node, false),
             "defmacro" => Self::visit_defn(state, node, true),
-            "def" | "defonce" => Self::visit_def(state, node),
+            "def" | "defonce" => Self::visit_def(state, node, NodeKind::Const),
             "defprotocol" | "defrecord" | "deftype" | "definterface" => {
-                Self::visit_deftype(state, node);
+                Self::visit_def(state, node, NodeKind::Class);
             }
             "require" | "use" | "import" => Self::visit_require(state, node),
             _ => Self::visit_children(state, node),
@@ -211,78 +211,19 @@ impl ClojureExtractor {
         Self::extract_calls(state, node, &id, 2);
     }
 
-    fn visit_def(state: &mut ExtractionState, node: TsNode<'_>) {
-        // (def name value)
+    /// `(def name value)` as a Const, or `(deftype name ...)` and friends as a Class.
+    fn visit_def(state: &mut ExtractionState, node: TsNode<'_>, kind: NodeKind) {
         let Some(name) = Self::nth_sym(state, node, 1) else {
             return;
         };
         let start_line = node.start_position().row as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = local_node_id(
-            &state.file_path,
-            state.source,
-            &NodeKind::Const,
-            &name,
-            node,
-        );
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
         let sig = Self::first_line(state, node);
 
         let graph_node = Node {
             id: id.clone(),
-            kind: NodeKind::Const,
-            name,
-            qualified_name,
-            file_path: state.file_path.clone(),
-            start_line,
-            attrs_start_line: start_line,
-            end_line: node.end_position().row as u32,
-            start_column: node.start_position().column as u32,
-            end_column: node.end_position().column as u32,
-            signature: sig,
-            docstring: None,
-            visibility: Visibility::Pub,
-            is_async: false,
-            branches: 0,
-            loops: 0,
-            returns: 0,
-            max_nesting: 0,
-            unsafe_blocks: 0,
-            unchecked_calls: 0,
-            assertions: 0,
-            complexity_analysis: ComplexityAnalysisV1::Complete,
-            updated_at: state.timestamp,
-            parent_id: None,
-        };
-        state.nodes.push(graph_node);
-
-        if let Some(parent_id) = state.parent_node_id() {
-            state.edges.push(Edge {
-                source: parent_id.to_string(),
-                target: id,
-                kind: EdgeKind::Contains,
-                line: Some(start_line),
-            });
-        }
-    }
-
-    fn visit_deftype(state: &mut ExtractionState, node: TsNode<'_>) {
-        let Some(name) = Self::nth_sym(state, node, 1) else {
-            return;
-        };
-        let start_line = node.start_position().row as u32;
-        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = local_node_id(
-            &state.file_path,
-            state.source,
-            &NodeKind::Class,
-            &name,
-            node,
-        );
-        let sig = Self::first_line(state, node);
-
-        let graph_node = Node {
-            id: id.clone(),
-            kind: NodeKind::Class,
+            kind,
             name,
             qualified_name,
             file_path: state.file_path.clone(),
