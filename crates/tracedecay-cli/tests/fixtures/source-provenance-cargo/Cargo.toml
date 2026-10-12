@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace]
+members = ["provenance-json"]
 
 [build-dependencies]
-serde_json = "=1.0.151"
+serde_json = { package = "provenance-json", path = "provenance-json" }

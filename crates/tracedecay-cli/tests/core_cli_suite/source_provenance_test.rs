@@ -373,10 +373,6 @@ fn source_provenance_cargo_fixture() -> std::path::PathBuf {
     package_manifest_directory().join(SOURCE_PROVENANCE_CARGO_FIXTURE)
 }
 
-fn cargo_config_directory(path: &std::path::Path) -> String {
-    toml::Value::String(path.to_string_lossy().into_owned()).to_string()
-}
-
 fn workspace_rustup_toolchain() -> Option<String> {
     if let Ok(existing) = std::env::var("RUSTUP_TOOLCHAIN") {
         return Some(existing);
@@ -404,12 +400,28 @@ struct CargoFixture {
     rustup_toolchain: Option<String>,
 }
 
+const FIXTURE_SOURCES: &[&str] = &[
+    "Cargo.toml",
+    "Cargo.lock",
+    "README.md",
+    "src/main.rs",
+    "provenance-json/Cargo.toml",
+    "provenance-json/src/lib.rs",
+];
+
+fn copy_checked_in_fixture(fixture: &std::path::Path, root: &std::path::Path, relative: &str) {
+    let destination = root.join(relative);
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).unwrap_or_else(|error| {
+            panic!("create fixture directory {}: {error}", parent.display())
+        });
+    }
+    std::fs::copy(fixture.join(relative), destination)
+        .unwrap_or_else(|error| panic!("copy checked-in fixture {relative}: {error}"));
+}
+
 impl CargoFixture {
     fn new() -> Self {
-        Self::with_vendor(&source_provenance_cargo_fixture().join("vendor"))
-    }
-
-    fn with_vendor(vendor: &std::path::Path) -> Self {
         let fixture = source_provenance_cargo_fixture();
         let directory = tempfile::tempdir().expect("fixture directory");
         let root = directory.path().join("repository");
@@ -418,25 +430,10 @@ impl CargoFixture {
         let watched_input = directory.path().join("release-sha.txt");
         std::fs::create_dir_all(&cargo_home).expect("fixture cargo home");
         std::fs::write(&watched_input, ENV_SHA).expect("write watched input");
-        std::fs::create_dir_all(root.join("src")).expect("fixture source directory");
 
-        for relative in ["Cargo.toml", "Cargo.lock", "README.md"] {
-            std::fs::copy(fixture.join(relative), root.join(relative))
-                .unwrap_or_else(|error| panic!("copy checked-in fixture {relative}: {error}"));
+        for relative in FIXTURE_SOURCES {
+            copy_checked_in_fixture(&fixture, &root, relative);
         }
-        std::fs::copy(fixture.join("src/main.rs"), root.join("src/main.rs"))
-            .expect("copy checked-in fixture src/main.rs");
-
-        let vendor_directory = cargo_config_directory(vendor);
-        std::fs::write(
-            cargo_home.join("config.toml"),
-            format!(
-                "[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n\
-                 [source.vendored-sources]\n\
-                 directory = {vendor_directory}\n"
-            ),
-        )
-        .expect("fixture cargo home config");
 
         let shared_provenance =
             package_manifest_directory().join("build-support/source_provenance.rs");
@@ -485,15 +482,10 @@ impl CargoFixture {
         self.dependency_preflight()
             .unwrap_or_else(|error| panic!("{error}"));
         git(&self.root, &["init", "--quiet"]);
-        for path in [
-            "Cargo.toml",
-            "Cargo.lock",
-            "build.rs",
-            "src/main.rs",
-            "README.md",
-        ] {
+        for path in FIXTURE_SOURCES {
             git(&self.root, &["add", path]);
         }
+        git(&self.root, &["add", "build.rs"]);
         git(
             &self.root,
             &[
