@@ -34,19 +34,19 @@ export interface TimelineRow {
   readonly end: number | null;
 }
 
-export interface TimelineBracket {
+interface TimelineBracket {
   readonly kind: 'spawn' | 'join';
   readonly parentRow: number;
   readonly childRow: number;
   readonly at: number;
 }
 
-export interface TimelineDensityStep {
+interface TimelineDensityStep {
   readonly at: number;
   readonly count: number;
 }
 
-export interface TimelineLane {
+interface TimelineLane {
   readonly index: number;
   readonly topId: string;
   readonly firstRow: number;
@@ -60,7 +60,7 @@ export interface TimelineLane {
   readonly unmeasured: number;
 }
 
-export interface DelegationTimelineModel {
+interface DelegationTimelineModel {
   readonly rows: readonly TimelineRow[];
   readonly brackets: readonly TimelineBracket[];
   readonly lanes: readonly TimelineLane[];

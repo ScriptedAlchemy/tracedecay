@@ -20,7 +20,7 @@ import { directoryOf } from './cortexRelief.ts';
 /* ---- register strip ------------------------------------------------------ */
 
 /** One cell of the register: a measured value, or a named absence. */
-export type RegisterReading =
+type RegisterReading =
   | { kind: 'measured'; value: string; unit?: string; note: string }
   | { kind: 'absent'; reason: string };
 
@@ -209,7 +209,7 @@ export function groupNeighbors(rows: readonly GraphNodeV1[], limit: number): Rel
   };
 }
 
-export interface RelationBetween {
+interface RelationBetween {
   readonly kind: string;
   /** `out`: the inspected symbol is the source; `in`: it is the target. */
   readonly direction: 'out' | 'in';

@@ -472,7 +472,7 @@ export function buildCortexModel(measurement: StrataMeasurementV1): CortexModel 
 
 /* ---- what the sheet says about itself ----------------------------------- */
 
-export interface CortexPanel {
+interface CortexPanel {
   readonly label: string;
   readonly reading: string;
   readonly teach: string;

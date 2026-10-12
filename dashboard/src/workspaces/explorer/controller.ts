@@ -153,7 +153,7 @@ function transportBackoffMs(consecutiveFailures: number): number {
 
 /* -------------------------------------------------------------- controller */
 
-export interface ExplorerFacet {
+interface ExplorerFacet {
   readonly lane: SourceLaneId;
   readonly value: string;
 }
@@ -479,7 +479,7 @@ export function useExplorerController(): ExplorerController {
 
 /* ------------------------------------------------------- session inspector */
 
-export interface ExplorerSessionContext {
+interface ExplorerSessionContext {
   readonly size: EnvelopeResult<ExplorerSessionSizeV1> | undefined;
   readonly readContext: EnvelopeResult<ExplorerReadContextV1> | undefined;
   readonly pending: boolean;

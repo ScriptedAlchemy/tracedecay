@@ -52,14 +52,14 @@ export function EvidenceChip({
 
 /** Coverage as the header prints it: a percent only when the authority gave
  * both figures; otherwise the completeness word or a stated absence. */
-export function coverageLegend(summary: EvidenceSummary): string {
+function coverageLegend(summary: EvidenceSummary): string {
   const percent = coveragePercent(summary.coverage);
   if (percent != null) return `coverage ${percent}%`;
   if (summary.coverage) return `coverage ${summary.coverage.completeness}`;
   return 'coverage absent';
 }
 
-export function asOfLegend(summary: EvidenceSummary): string {
+function asOfLegend(summary: EvidenceSummary): string {
   if (summary.observedAtMicros == null) return 'observed. No time published';
   return `as of ${formatMicrosUtc(summary.observedAtMicros)}`;
 }

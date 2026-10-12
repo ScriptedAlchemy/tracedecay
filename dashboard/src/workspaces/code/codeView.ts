@@ -6,10 +6,10 @@
  * selection; Atlas is the exact-files peer whose structural projection is not
  * mounted yet. The order is the one the reader is shown.
  */
-export const CODE_VIEWS = ['cortex', 'trace', 'shared-code', 'compare', 'atlas'] as const;
+const CODE_VIEWS = ['cortex', 'trace', 'shared-code', 'compare', 'atlas'] as const;
 
 export type CodeView = (typeof CODE_VIEWS)[number];
-export type CodeFocusState = 'absent' | 'loading' | 'available' | 'unavailable';
+type CodeFocusState = 'absent' | 'loading' | 'available' | 'unavailable';
 
 export const CODE_VIEW_DEFINITIONS = {
   cortex: {
@@ -56,12 +56,12 @@ export function codeViewsOffered(active: CodeView): readonly CodeView[] {
   );
 }
 
-export interface CodeLocation {
+interface CodeLocation {
   readonly view: CodeView;
   readonly focusId: string | null;
 }
 
-export interface CodeViewBlocker {
+interface CodeViewBlocker {
   readonly kind: 'loading' | 'unavailable';
   readonly title: string;
   readonly detail: string;

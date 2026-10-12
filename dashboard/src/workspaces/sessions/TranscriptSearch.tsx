@@ -18,7 +18,7 @@ import { formatStamp } from '../../ui/format.ts';
 import { rovingRowsKeyDown } from '../../ui/rovingRows.ts';
 import { sameSelection, type SessionSelection } from './model.ts';
 
-export interface TranscriptSearchResultsProps {
+interface TranscriptSearchResultsProps {
   read: ReadState<DashboardEnvelopeV1<LcmSearchPayloadV1>>;
   submitted: string;
   selection: SessionSelection | null;

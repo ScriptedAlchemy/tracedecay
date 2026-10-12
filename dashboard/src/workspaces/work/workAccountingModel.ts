@@ -99,7 +99,7 @@ export function accountingDimensionTitle(dimension: WorkAccountingDimension): st
  * that is down, and a reviewer who greps the kind lands on the projector
  * rather than on a router.
  */
-export function accountingEventKind(dimension: WorkAccountingDimension): string {
+function accountingEventKind(dimension: WorkAccountingDimension): string {
   switch (dimension) {
     case 'concurrency_and_fanout':
       return 'work.execution_topology.sampled.v1';
@@ -160,7 +160,7 @@ export interface WorkAccountingRow {
  * twice over, a metric the plan prohibits the UI from deriving, and a
  * collapse the plan prohibits outright.
  */
-export interface WorkAccountingMatrixCell {
+interface WorkAccountingMatrixCell {
   readonly predicted: 'conflict' | 'no_conflict' | 'abstained' | 'unknown';
   readonly observed: 'conflict' | 'no_conflict' | 'unknown';
   readonly channel: WorkChannel<WorkAccountingFigure>;
@@ -189,7 +189,7 @@ export const OBSERVED: readonly WorkAccountingMatrixCell['observed'][] = [
 /** Right-censored and unknown observations, kept apart. An observation still
  * running is not an observation with an unknown outcome, and folding them
  * would hide the one a longer horizon would fix. */
-export interface WorkAccountingCensoring {
+interface WorkAccountingCensoring {
   readonly censored: number;
   readonly unknown: number;
   readonly note: string;
@@ -208,7 +208,7 @@ export interface WorkAccountingCensoring {
  * separately rather than written into the same slot, so a reader is never
  * shown a version identity under the word "descriptor revision".
  */
-export interface WorkAccountingRevision {
+interface WorkAccountingRevision {
   readonly kind: 'metric_descriptor' | 'source_read_pin';
   readonly value: string;
 }

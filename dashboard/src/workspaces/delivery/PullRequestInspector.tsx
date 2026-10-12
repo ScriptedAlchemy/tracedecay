@@ -305,7 +305,7 @@ export function attentionSourceLabel(source: DeliveryAttentionSourceV1): string 
   }
 }
 
-export function attentionStateKind(state: DeliveryAttentionStateV1): DomainStateKind {
+function attentionStateKind(state: DeliveryAttentionStateV1): DomainStateKind {
   switch (state) {
     case 'active':
       return 'partial';

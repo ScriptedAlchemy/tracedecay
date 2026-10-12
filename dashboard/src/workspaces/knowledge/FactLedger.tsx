@@ -43,7 +43,7 @@ import { factsBelow, type LoadedTrust, type TrustDistribution } from './trust.ts
 /** Two lines of a fact's content, which is the height a 56px row can carry.
  * A row taller than this stops being a list; a row shorter than this shows a
  * ninety-character prefix of a nineteen-hundred-character fact. */
-export const FACT_ROW_HEIGHT = 56;
+const FACT_ROW_HEIGHT = 56;
 
 const FACT_SUMMARY_CHARACTER_SAMPLE = 'abcdefghijklmnopqrstuvwxyz';
 

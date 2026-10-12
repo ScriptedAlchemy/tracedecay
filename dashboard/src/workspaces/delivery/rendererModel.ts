@@ -75,7 +75,7 @@ export function isVerificationSource(source: DeliveryAttentionSourceV1): boolean
   }
 }
 
-export type HeadJoin =
+type HeadJoin =
   | { readonly kind: 'joined'; readonly head: string }
   | { readonly kind: 'provider_head_moved'; readonly providerHead: string; readonly indexedHead: string }
   | { readonly kind: 'not_observed' };
@@ -149,7 +149,7 @@ export function observationWindow(
   return { start: marks[0]!.at, end: marks[marks.length - 1]!.at };
 }
 
-export function basisKindCode(kind: DeliveryMembershipBasisV1['kind']): string {
+function basisKindCode(kind: DeliveryMembershipBasisV1['kind']): string {
   switch (kind) {
     case 'shared_work_objective':
       return 'WORK';

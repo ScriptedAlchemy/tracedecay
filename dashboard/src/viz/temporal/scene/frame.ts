@@ -17,11 +17,11 @@ export interface SceneFrame {
 }
 
 /** Below this row height a lane cannot hold a glyph plate and aggregates. */
-export const LEGIBLE_PITCH_PX = 22;
+const LEGIBLE_PITCH_PX = 22;
 /** Below this gap between neighbouring marks a lane aggregates. */
-export const COLLIDE_PX = 9;
+const COLLIDE_PX = 9;
 /** The oldest record in the page keeps this share of full luminance. */
-export const RECENCY_FLOOR = 0.5;
+const RECENCY_FLOOR = 0.5;
 
 export function focusAlpha(focus: FocusTreatment): number {
   switch (focus) {

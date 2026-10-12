@@ -244,7 +244,7 @@ function SeriesDisclosure({
  * provider with a roving tabindex: Tab lands on the scoped (or first) row,
  * arrows move, Enter/Space scopes, Escape clears. Hover and focus inspect.
  */
-export function ProviderLegend({
+function ProviderLegend({
   ledger,
   inspected,
   selected,

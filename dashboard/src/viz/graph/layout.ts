@@ -23,7 +23,7 @@ export interface PreparedField {
   roominess: number;
 }
 
-export interface PrepareFieldInput {
+interface PrepareFieldInput {
   nodes: readonly GraphCanvasNode[];
   edges: readonly GraphCanvasEdge[];
   /** The canvas box the field has to fit into, in device-independent pixels. */

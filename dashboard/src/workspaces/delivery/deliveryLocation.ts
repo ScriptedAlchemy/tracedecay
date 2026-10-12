@@ -19,7 +19,7 @@ export const DELIVERY_MODES = ['inbox', 'umbrella', 'journey', 'review'] as cons
 export type DeliveryMode = (typeof DELIVERY_MODES)[number];
 
 export const DELIVERY_LAYOUTS = ['field', 'table'] as const;
-export type DeliveryLayout = (typeof DELIVERY_LAYOUTS)[number];
+type DeliveryLayout = (typeof DELIVERY_LAYOUTS)[number];
 
 export interface DeliveryLocation {
   readonly mode: DeliveryMode;

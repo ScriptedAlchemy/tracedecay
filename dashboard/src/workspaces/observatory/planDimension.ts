@@ -150,7 +150,7 @@ export function dimensionState(reading: DimensionReading): DomainStateKind {
  * observed 3 of them, and a card that printed only one of those two numbers
  * would let a three-sample percentile pass for a measured budget.
  */
-export function supportSentence(reading: DimensionReading): string {
+function supportSentence(reading: DimensionReading): string {
   if (reading.kind === 'unpublished') return NOT_PUBLISHED;
   return `${reading.metric.coverage.observed.toLocaleString()} observed`;
 }
@@ -158,7 +158,7 @@ export function supportSentence(reading: DimensionReading): string {
 /** Censored, excluded, and unknown counts, always stated separately. Zero of
  * each is a real reading and prints as such, this line is the one place the
  * absence of censoring must be assertable rather than inferred from silence. */
-export function censoringSentence(reading: DimensionReading): string {
+function censoringSentence(reading: DimensionReading): string {
   if (reading.kind === 'unpublished') return NOT_PUBLISHED;
   const { censored, excluded, unknown } = reading.metric.coverage;
   return `${censored.toLocaleString()} censored · ${excluded.toLocaleString()} excluded · ${unknown.toLocaleString()} unknown`;
@@ -201,7 +201,7 @@ export function anchorSentence(reading: DimensionReading, anchors: ReadAnchors):
 
 /** The descriptor revision a changed definition would have to change, so a
  * redefinition cannot silently rewrite history. */
-export function descriptorRevisionSentence(reading: DimensionReading): string {
+function descriptorRevisionSentence(reading: DimensionReading): string {
   if (reading.kind === 'unpublished') return NOT_PUBLISHED;
   return reading.metric.descriptor_revision;
 }
@@ -241,7 +241,7 @@ export function planDimensionPresentation(
 /** How many dimensions of a set actually carry a figure. A header that said
  * "13 budgets" over eleven unavailable cards would be a claim the read cannot
  * support. */
-export function measuredCount(dimensions: readonly PlanDimension[]): number {
+function measuredCount(dimensions: readonly PlanDimension[]): number {
   return dimensions.filter((dimension) => dimension.reading.kind === 'measured').length;
 }
 

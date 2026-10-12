@@ -71,7 +71,7 @@ export function expansionTargets(
  * query key or a URL from here would be holding a second opinion about how
  * this surface gets its data, which is the thing this module exists to prevent.
  */
-export interface TraceNeighborhood {
+interface TraceNeighborhood {
   /** The focus's own hop-1 read has not answered yet. */
   readonly pending: boolean;
   /** Its outcome, or `undefined` before the first response. */

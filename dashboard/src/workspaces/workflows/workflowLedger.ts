@@ -90,7 +90,7 @@ export function filterRegistry(entries: readonly RegistryEntry[], query: string)
 
 /** What the decoded step graph says about itself. Every count is over the
  * served `steps` array; nothing is inferred about behaviour. */
-export interface DefinitionShape {
+interface DefinitionShape {
   readonly steps: number;
   readonly entrySteps: number;
   readonly terminalSteps: number;
@@ -187,7 +187,7 @@ export const DEFINITION_ABSENCES: readonly { readonly field: string; readonly re
 
 export type PinDelta = 'first' | 'same' | 'changed';
 
-export interface VersionTrackRow {
+interface VersionTrackRow {
   readonly definition: WorkflowDefinition;
   readonly policy: PinDelta;
   readonly configuration: PinDelta;
@@ -265,7 +265,7 @@ export function lifecycleTarget(action: WorkflowLifecycleAction): WorkflowDefini
  * Run projection
  * ----------------------------------------------------------------------- */
 
-export interface RunTiming {
+interface RunTiming {
   /** `occurred_at` of the `admitted` event, or `null` when the served journal
    * carries none. */
   readonly admittedAt: number | null;
@@ -280,7 +280,7 @@ export interface RunTiming {
   readonly elapsedMicros: number | null;
 }
 
-export function isTerminalRunStatus(status: WorkflowRunStatus): boolean {
+function isTerminalRunStatus(status: WorkflowRunStatus): boolean {
   switch (status) {
     case 'completed':
     case 'failed':

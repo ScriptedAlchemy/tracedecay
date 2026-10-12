@@ -46,7 +46,7 @@ export interface ReviewHead {
   readonly revision: string;
 }
 
-export interface Served<T> {
+interface Served<T> {
   readonly state: LaneState;
   readonly value: T | null;
 }

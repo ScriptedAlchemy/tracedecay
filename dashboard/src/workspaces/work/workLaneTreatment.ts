@@ -13,9 +13,9 @@ import type { WorkTaskLane } from './workProductView.ts';
  *   loading       scheduled ahead         solid edge, ice swatch
  *   neutral       declared, not started   solid edge
  */
-export type LaneFamily = 'ready' | 'activity' | 'degraded' | 'disconnected' | 'loading' | 'neutral';
+type LaneFamily = 'ready' | 'activity' | 'degraded' | 'disconnected' | 'loading' | 'neutral';
 
-export interface LaneTreatment {
+interface LaneTreatment {
   readonly family: LaneFamily;
   /** CSS colour the hatch and accents are drawn in, or null for none. */
   readonly tone: string | null;

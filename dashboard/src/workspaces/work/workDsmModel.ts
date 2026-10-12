@@ -13,7 +13,7 @@ import type { WorkDagLayout, WorkDagRelationKind } from './workDagLayout.ts';
  * on either side; they gate nothing and are never called back-edges.
  */
 
-export interface DsmCell {
+interface DsmCell {
   readonly id: string;
   readonly row: number;
   readonly column: number;
@@ -25,13 +25,13 @@ export interface DsmCell {
   readonly intensity: number;
 }
 
-export interface DsmBlock {
+interface DsmBlock {
   readonly depth: number;
   readonly start: number;
   readonly end: number;
 }
 
-export interface DsmModel {
+interface DsmModel {
   readonly order: readonly string[];
   readonly index: ReadonlyMap<string, number>;
   readonly cells: readonly DsmCell[];

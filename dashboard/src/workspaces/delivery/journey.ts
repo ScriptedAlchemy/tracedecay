@@ -90,7 +90,7 @@ export interface JourneyEpisode {
   readonly ref: EpisodeRef;
 }
 
-export interface JourneyLane {
+interface JourneyLane {
   readonly id: JourneyLaneId;
   readonly label: string;
   readonly source: SourceClass;
@@ -286,7 +286,7 @@ function quarantinedDetail(quarantined: readonly DeliveryGitHubQuarantinedCommen
   return [`${quarantined.length} quarantined (${reasons.join(', ')})`];
 }
 
-export interface JourneySelection {
+interface JourneySelection {
   readonly row: DeliveryInboxPullRequestV1;
   readonly edges: readonly DeliveryMembershipEdgeV1[];
 }

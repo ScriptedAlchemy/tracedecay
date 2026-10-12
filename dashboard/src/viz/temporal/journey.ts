@@ -32,7 +32,7 @@ import type {
   LaneEndSource,
 } from './types.ts';
 
-export type HierarchyState = 'loading' | 'loaded' | 'unavailable';
+type HierarchyState = 'loading' | 'loaded' | 'unavailable';
 
 export interface JourneySources {
   temporal: LoomTemporalPayloadV1;

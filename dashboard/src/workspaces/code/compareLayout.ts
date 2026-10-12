@@ -15,7 +15,7 @@ import type {
  * so a pasted link never silently compares a different commit. All four live in
  * the URL so the comparison is restorable and shareable.
  */
-export interface CompareRevisionSelection {
+interface CompareRevisionSelection {
   readonly branch: string;
   readonly revision: string;
 }
@@ -80,7 +80,7 @@ export function isCompareSelectionComplete(selection: CompareSelection): boolean
   );
 }
 
-export const COMPARE_UNION_LAYOUT_ROUTE = '/api/plugins/graph/compare/union-layout';
+const COMPARE_UNION_LAYOUT_ROUTE = '/api/plugins/graph/compare/union-layout';
 
 export function compareUnionLayoutUrl(selection: CompareSelection): string {
   const params = new URLSearchParams();
@@ -111,7 +111,7 @@ export const COMPARE_CHANGE_RULES: Readonly<
   removed: { label: 'removed', rule: 'base only; keeps its outlined former space' },
 };
 
-export interface CompareChangeCounts {
+interface CompareChangeCounts {
   readonly unchanged: number;
   readonly changed: number;
   readonly added: number;

@@ -53,7 +53,7 @@ export interface SceneCluster {
   spacing: number;
 }
 
-export type RelationGrade = 'EXACT' | 'INFERRED';
+type RelationGrade = 'EXACT' | 'INFERRED';
 
 export interface ScenePath {
   source: string;
@@ -62,7 +62,7 @@ export interface ScenePath {
   grade: RelationGrade;
 }
 
-export interface SceneColumn {
+interface SceneColumn {
   label: string;
   bound: string;
   count: number;
@@ -127,7 +127,7 @@ export function sampleFieldPalette(element: HTMLElement): FieldPalette {
   };
 }
 
-export interface FieldRendererOptions {
+interface FieldRendererOptions {
   container: HTMLElement;
   scene: FieldScene;
   field: ActivationField;
@@ -154,7 +154,7 @@ export type FieldRendererFactory = (options: FieldRendererOptions) => FieldRende
  * linearly, so zooming separates positions faster than bodies swell and a
  * packed cell resolves into its members.
  */
-export const BODY_ZOOM_GROWTH = 0.25;
+const BODY_ZOOM_GROWTH = 0.25;
 
 export function bodyScreenRadius(radius: number, scale: number, fitScale: number): number {
   return radius * fitScale * (scale / fitScale) ** BODY_ZOOM_GROWTH;
@@ -201,7 +201,7 @@ export function createSpatialIndex<T extends { x: number; y: number }>(items: re
 /** How long a travelling synapse light takes to cross its one hop. */
 export const SYNAPSE_TRAVEL_MS = 700;
 /** Reduced motion repaints decaying heat in discrete steps, never per frame. */
-export const REDUCED_REPAINT_MS = 1000;
+const REDUCED_REPAINT_MS = 1000;
 
 /** World (field units, y up) to screen (CSS px, y down), fit with padding and
  * a pointer-centred zoom on top. Pure arithmetic so it can be tested and so a
@@ -559,7 +559,7 @@ export function bow(ax: number, ay: number, bx: number, by: number, relation: st
 }
 
 /** An engraved legend: uppercase at the design system's 0.16em tracking. */
-export function engraved(context: CanvasRenderingContext2D, text: string, x: number, y: number): void {
+function engraved(context: CanvasRenderingContext2D, text: string, x: number, y: number): void {
   context.letterSpacing = '0.16em';
   context.fillText(text, x, y);
   context.letterSpacing = '0px';

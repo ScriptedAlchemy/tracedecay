@@ -2,7 +2,7 @@
  * exponentially toward dark, struck by real events (search hits, selection,
  * caller-edge traversal, SSE activity). Pure model, renderers sample it. */
 
-export interface ActivationOptions {
+interface ActivationOptions {
   /** Half-life of a strike, in milliseconds. */
   halfLifeMs?: number;
   /** Heat below this is treated as cold and dropped. */
@@ -125,7 +125,7 @@ export function cssColorToRgb(color: string): [number, number, number] {
   return resolved;
 }
 
-export function lerpRgb(
+function lerpRgb(
   from: [number, number, number],
   to: [number, number, number],
   t: number,

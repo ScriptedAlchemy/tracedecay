@@ -53,7 +53,7 @@ export function storageSourcePresentation(status: StorageFindingKindStatusV1): {
 /** Visual tone for a dimension row. `unset` is deliberately its own tone: a
  * budget the owner has not configured must not read like a budget the server
  * could not determine. */
-export type DimensionTone = 'ready' | 'over' | 'unset' | 'baseline' | 'unknown';
+type DimensionTone = 'ready' | 'over' | 'unset' | 'baseline' | 'unknown';
 
 export interface DimensionPresentation {
   /** Wire state, surfaced as a data attribute for tests and the audit. */
@@ -198,7 +198,7 @@ export function tableGrowthPresentation(growth: TableGrowthDimensionV1): Dimensi
   }
 }
 
-export interface TableGrowthOmissionPresentation {
+interface TableGrowthOmissionPresentation {
   kind: TableGrowthOmissionV1['kind'];
   table: string;
   /** The headline figure this omission actually has: a measured delta for a

@@ -41,7 +41,7 @@ export const PROFILE_WORKER_WRITABILITY: ScopeWritability = {
  * there is nothing to write in any scope, so naming the scope would point at
  * the wrong obstacle. Exhaustive over `ScopeWritability`.
  */
-export function settingsWriteGate(
+function settingsWriteGate(
   authorized: boolean,
   writability: ScopeWritability,
 ): SettingsWriteGate {

@@ -26,18 +26,18 @@ export const CONTOUR_ENCODINGS = [
   'boundary_per_file',
   'coupling_ratio',
 ] as const;
-export type ContourEncodingId = (typeof CONTOUR_ENCODINGS)[number];
+type ContourEncodingId = (typeof CONTOUR_ENCODINGS)[number];
 
 /** The encoding the comparison commits. Tests fail if it stops being the winner. */
 export const COMMITTED_CONTOUR_ENCODING = 'coupling_ratio' as const;
 
-export interface ContourSample {
+interface ContourSample {
   readonly files: number;
   readonly internalEdges: number;
   readonly boundaryEdges: number;
 }
 
-export type ContourSketch =
+type ContourSketch =
   | { readonly kind: 'none' }
   | { readonly kind: 'sealed' }
   | { readonly kind: 'lines'; readonly lines: number; readonly value: number };

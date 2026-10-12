@@ -36,7 +36,7 @@ function rowHeight(): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : ROW_HEIGHT_FALLBACK;
 }
 
-export interface VirtualListProps<T> {
+interface VirtualListProps<T> {
   items: T[];
   renderItem: (item: T, index: number) => ReactNode;
   getKey: (item: T, index: number) => string | number;

@@ -49,7 +49,7 @@ export interface TemporalSceneProps {
 }
 
 /** Height of the time ruler strip across the top of the field. */
-export const RULER = 36;
+const RULER = 36;
 /** Pointer travel under which a drag on the background is a click. */
 const CLICK_SLOP_PX = 3;
 const LABEL_CHAR_PX = 6.2;

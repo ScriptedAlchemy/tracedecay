@@ -40,7 +40,7 @@ import {
 } from '../../contracts/generated.ts';
 import { isRecord } from '../../data/query/responseBody.ts';
 
-export type ConfigRowKind =
+type ConfigRowKind =
   | 'group'
   | 'boolean'
   | 'number'
@@ -115,7 +115,7 @@ export interface ConfigSection {
  * variable is set in the daemon's environment (an override in force) or unset
  * (so whatever default applies, applies).
  */
-export interface EnvOverride {
+interface EnvOverride {
   readonly name: string;
   /** Payload `active`: true when the variable is set in the process env. */
   readonly active: boolean;
@@ -266,7 +266,7 @@ export interface SettingsRevisionConflict {
   readonly actualRevisionId: string | null;
 }
 
-export const MIN_AUTO_TRACK_PR_POLL_SECS = 60;
+const MIN_AUTO_TRACK_PR_POLL_SECS = 60;
 
 /**
  * Recognized top-level groups and how to describe them. `origin` records where
@@ -338,7 +338,7 @@ const SPECIALIZED: Readonly<Record<string, ReadonlySet<string>>> = {
  * is not an envelope at all, and an envelope whose payload the generated
  * contract refuses.
  */
-export type SettingsPayloadRead =
+type SettingsPayloadRead =
   | { readonly outcome: 'settings'; readonly payload: SettingsPayloadV1 }
   | { readonly outcome: 'not_an_envelope' }
   | { readonly outcome: 'unsupported_payload' };

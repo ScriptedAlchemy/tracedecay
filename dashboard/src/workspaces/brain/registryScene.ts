@@ -107,7 +107,7 @@ export function buildRegistryScene(
   };
 }
 
-export interface GraphInput {
+interface GraphInput {
   id: string;
   label: string;
   kind: string;
@@ -189,7 +189,7 @@ function adjacency(paths: readonly ScenePath[]): Map<string, string[]> {
  * (`heartbeat`) is never activity, and a pulse naming no drawn body lights
  * nothing. The hop follows drawn relations only and stops after one step:
  * a checkout's hop is its repository hub, never a sibling checkout. */
-export interface Strike {
+interface Strike {
   touched: string;
   hop: readonly string[];
   energy: number;

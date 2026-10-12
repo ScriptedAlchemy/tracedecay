@@ -37,8 +37,8 @@ import {
   type ScopeWritability,
 } from '../scope/store.ts';
 
-export const codeDiagnosticsKey = ['code-diagnostics'] as const;
-export const codeDiagnosticsUrl = '/api/plugins/code-diagnostics';
+const codeDiagnosticsKey = ['code-diagnostics'] as const;
+const codeDiagnosticsUrl = '/api/plugins/code-diagnostics';
 
 const SEVERITIES = ['error', 'warning', 'information', 'hint'] as const;
 
@@ -209,7 +209,7 @@ function patch(body: Record<string, unknown>): RequestInit {
  * attempt, kept apart for the same reason the scheduler control keeps it:
  * nothing was sent, so nothing changed, and the panel must not imply the broker
  * was asked and refused. */
-export type DiagnosticsControlResult =
+type DiagnosticsControlResult =
   | PayloadWriteResult<DiagnosticsSnapshot>
   | { outcome: 'not_dispatched'; writability: ScopeWritability };
 

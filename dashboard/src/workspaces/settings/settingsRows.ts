@@ -58,7 +58,7 @@ export function filterEffectiveRows(rows: readonly EffectiveRow[], query: string
 /* ------------------------------------------------------------- bindings --*/
 
 /** How a bound key is edited: the control the value's contract calls for. */
-export type SettingsInputKind = 'globs' | 'integer' | 'boolean' | 'duration' | 'workers';
+type SettingsInputKind = 'globs' | 'integer' | 'boolean' | 'duration' | 'workers';
 
 /**
  * A key the daemon accepts a write for, and the draft field it lands in.
@@ -160,7 +160,7 @@ export type WriteCapability =
     }
   | { readonly kind: 'no_write_path' };
 
-export const EDITOR_UNAVAILABLE_REASON =
+const EDITOR_UNAVAILABLE_REASON =
   'GET /api/settings named no configuration revision to hold a write against, so nothing here can be edited until it does.';
 
 export function writeCapability(
@@ -194,7 +194,7 @@ export function writeCapability(
   }
 }
 
-export function gateFor(scope: SettingsScope, gates: WritableScopes): SettingsWriteGate {
+function gateFor(scope: SettingsScope, gates: WritableScopes): SettingsWriteGate {
   switch (scope) {
     case 'project':
       return gates.project;

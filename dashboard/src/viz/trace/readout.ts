@@ -26,7 +26,7 @@ export type ReadoutValue =
   | { readonly kind: 'absent'; readonly why: string };
 
 /** One cell of the header strip. */
-export interface ReadoutCell {
+interface ReadoutCell {
   /** Engraved label, as the approved sheet prints it. */
   readonly label: string;
   readonly value: ReadoutValue;
