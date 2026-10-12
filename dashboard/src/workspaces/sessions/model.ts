@@ -64,8 +64,9 @@ export type RowsPerPage = (typeof ROWS_PER_PAGE_OPTIONS)[number];
  */
 export const TIMELINE_WINDOW_OPTIONS = [30, 90, 400, 2000] as const;
 export type TimelineWindow = (typeof TIMELINE_WINDOW_OPTIONS)[number];
-/** The route's own default when no `limit` is sent. */
-const DEFAULT_TIMELINE_WINDOW: TimelineWindow = 400;
+/** The route's own default when no `limit` is sent, and Loom's busiest-day
+ * window, so the two read one timeline. */
+export const DEFAULT_TIMELINE_WINDOW: TimelineWindow = 400;
 
 export interface SessionsViewState {
   readonly selection: SessionSelection | null;

@@ -1,12 +1,12 @@
-import { useQuery } from '@tanstack/react-query';
 import { useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router';
 import type { ReactNode } from 'react';
 import { Waypoints } from 'lucide-react';
-import { fetchEnvelope, type EnvelopeResult } from '../../data/query/envelope.ts';
+import type { EnvelopeResult } from '../../data/query/envelope.ts';
+import { useLcmTimeline, useSubagentTree } from '../../data/query/sessionReads.ts';
 import { envelopePayload, useEnvelope } from '../../data/query/useEnvelope.ts';
-import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
 import type { DashboardEnvelopeV1 } from '../../contracts/generated.ts';
+import { DEFAULT_TIMELINE_WINDOW } from '../sessions/model.ts';
 import { StateChip, type DomainStateKind } from '../../ui/StateChip';
 import { Legend, Panel, ReadoutBar, WorkspaceHeader } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn';
@@ -46,10 +46,8 @@ import { ThreadChain } from './ThreadChain.tsx';
 import { clampWindow, formatDurationSeconds, formatMoment, isFitted } from './tracks.ts';
 import { useLoomPlayback } from './useLoomPlayback.ts';
 import {
-  AnalyticsSubagentTreePayloadV1Schema,
   type AnalyticsSubagentTreePayloadV1,
   LcmSessionPayloadV1Schema,
-  LcmTimelinePayloadV1Schema,
   type LoomSourceStatusV1,
   type LoomTemporalPayloadV1,
   LoomTemporalPayloadV1Schema,
@@ -72,25 +70,13 @@ import {
  * it is graded inferred.
  */
 export function LoomPage() {
-  const scope = useScope((state) => state.scope);
-  const temporal = useQuery({
-    queryKey: ['loom', 'temporal', scopeKey(scope)],
-    queryFn: () =>
-      fetchEnvelope<LoomTemporalPayloadV1>(
-        scopedUrl(scope, '/api/loom/temporal?limit=200'),
-        LoomTemporalPayloadV1Schema,
-      ),
-  });
-  const timeline = useEnvelope(
-    ['loom', 'timeline'],
-    '/api/plugins/hermes-lcm/timeline',
-    LcmTimelinePayloadV1Schema,
+  const temporal = useEnvelope(
+    ['loom', 'temporal'],
+    '/api/loom/temporal?limit=200',
+    LoomTemporalPayloadV1Schema,
   );
-  const hierarchy = useEnvelope(
-    ['loom', 'hierarchy'],
-    '/api/plugins/analytics/subagent-tree',
-    AnalyticsSubagentTreePayloadV1Schema,
-  );
+  const timeline = useLcmTimeline('day', DEFAULT_TIMELINE_WINDOW);
+  const hierarchy = useSubagentTree();
   const proximity = useLoomProximity();
   const [params, setParams] = useSearchParams();
   const selectedId = params.get(LOOM_PARAMS.session);

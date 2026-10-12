@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LoomPage } from './LoomPage.tsx';
 import { useScope } from '../../data/scope/store.ts';
 import { applicationSuccess } from '../../test/applicationEnvelope.ts';
+import { responseWithBodyPendingUntilAbort } from '../../test/pendingBody.ts';
 
 /**
  * What this suite guards is not layout, it is the surface's claims.
@@ -743,6 +744,41 @@ describe('LoomPage', () => {
     expect(document.querySelectorAll('[data-event][data-kind="test_run"]')).toHaveLength(0);
     await user.click(filter);
     expect(document.querySelectorAll(selector)).toHaveLength(1);
+  });
+
+  it('cancels the temporal read when the reader leaves before it settles', async () => {
+    const signals: (AbortSignal | null | undefined)[] = [];
+    const routed = serve(HAPPY);
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (!String(input).includes('/loom/temporal')) return routed(input);
+      signals.push(init?.signal);
+      return responseWithBodyPendingUntilAbort(200, init?.signal);
+    }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    const { unmount } = render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={['/loom?scope=project-loom']}><LoomPage /></MemoryRouter>
+      </QueryClientProvider>,
+    );
+    await waitFor(() => expect(signals).toHaveLength(1));
+    unmount();
+    expect(signals[0]?.aborted).toBe(true);
+  });
+
+  it('asks the timeline for the day buckets and window it reads the busiest day from', async () => {
+    const fetchMock = serve(HAPPY);
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter><LoomPage /></MemoryRouter>
+      </QueryClientProvider>,
+    );
+    await screen.findByRole('button', { name: 'Select session Deliver Git primitive runtime' });
+    const timeline = fetchMock.mock.calls
+      .map((call) => new URL(String(call[0]), 'http://dashboard.test'))
+      .filter((url) => url.pathname.endsWith('/hermes-lcm/timeline'));
+    expect(timeline.map((url) => url.search)).toEqual(['?bucket=day&limit=400']);
   });
 
   it('uses the Loom temporal read for recorded ends and causal relations', async () => {

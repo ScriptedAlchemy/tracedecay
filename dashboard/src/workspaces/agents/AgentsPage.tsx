@@ -7,13 +7,13 @@ import { MeterRow, Panel, WorkspaceHeader } from '../../ui/instrument.tsx';
 import {
   AnalyticsAgentsPayloadV1Schema,
   AnalyticsDiagnosticsPayloadV1Schema,
-  AnalyticsSubagentTreePayloadV1Schema,
   AnalyticsUnderusedPayloadV1Schema,
   AnalyticsUsageSummaryV1Schema,
   type AnalyticsAgentUsageV1,
   type AnalyticsSubagentNodeV1,
   type AnalyticsSubagentTreePayloadV1,
 } from '../../contracts/generated.ts';
+import { useSubagentTree } from '../../data/query/sessionReads.ts';
 import { envelopePayload, useEnvelope } from '../../data/query/useEnvelope.ts';
 import { logFraction } from '../../viz/scale.ts';
 import { AgentAuthorityRegister } from './AgentAuthorityRegister.tsx';
@@ -99,11 +99,7 @@ export function AgentsPage() {
   // The delegation EDGES, which the rollup above cannot carry: it counts
   // sessions per agent, and a count of two islands never recovers the arrow
   // between them. Served on its own route for the same reason.
-  const subagentTree = useEnvelope(
-    ['analytics', 'subagent-tree'],
-    `${BASE}/subagent-tree`,
-    AnalyticsSubagentTreePayloadV1Schema,
-  );
+  const subagentTree = useSubagentTree();
 
   const [inspectedId, setInspectedId] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
