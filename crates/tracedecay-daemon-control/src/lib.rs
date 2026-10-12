@@ -89,8 +89,7 @@ pub use service::{
     restore_scoop_package_service, service_spec, service_spec_with_remote_tls, service_status,
     socket_path_or_default, start_service, stop_service, systemd_unit_name, uninstall_service,
     unreachable_daemon_detail, verify_installed_service_quiesced_under_lease,
-    wait_for_installed_service_state, with_exclusive_maintenance_window,
-    with_unavailable_daemon_advice,
+    with_exclusive_maintenance_window, with_unavailable_daemon_advice,
 };
 
 /// The daemon client identity of `profile`.
