@@ -180,14 +180,18 @@ impl Drop for SessionTemporalRefreshRetirement<'_> {
 }
 
 /// The obligation a `rekey_project` owes the new owner, retained across a
-/// dropped join: the route and the requests every retired worker's state
-/// still held when this attempt took it, plus whatever `staging` already
-/// collected. A later rekey lands all of it on the new owner's state.
-/// `staging` is cancelled whenever no attempt owns it, so a parked
-/// handoff's route reports no live target until a retry binds a worker.
+/// dropped join: every route that reached the retired owner plus the
+/// requests every retired worker's state still held when this attempt
+/// took it, and whatever `staging` already collected. A later rekey
+/// lands all of it on the new owner's state. `staging` is cancelled
+/// whenever no attempt owns it, so a parked handoff's routes report no
+/// live target until a retry binds a worker.
 #[derive(Clone)]
 struct SessionTemporalRefreshRekeyHandoff {
-    route: SessionTemporalRefreshWake,
+    /// Every route owed to the new owner, oldest first: the parked
+    /// routes plus any distinct live route a re-admitted owner's entry
+    /// carried when a retry retired it again.
+    routes: Vec<SessionTemporalRefreshWake>,
     staging: Arc<SessionTemporalRefreshWakeState>,
     pending_states: Vec<Arc<SessionTemporalRefreshWakeState>>,
 }
@@ -489,9 +493,22 @@ impl SessionTemporalRefreshSchedulerRegistry {
                 {
                     stored.pending_states.push(Arc::clone(&entry.state));
                 }
+                // A re-admitted owner can run under a route its parked
+                // handoff does not hold (a dropped A-to-B, then a C-to-A
+                // readmission installs C's route as A's live wake): keep
+                // every live route so none of its callers is stranded.
+                if !stored
+                    .routes
+                    .iter()
+                    .any(|route| route.same_route(&entry.wake))
+                {
+                    stored.routes.push(entry.wake.clone());
+                }
             }
             let staging = Arc::new(SessionTemporalRefreshWakeState::default());
-            stored.route.bind(&staging);
+            for route in &stored.routes {
+                route.bind(&staging);
+            }
             stored.staging.transfer_requests_to(&staging);
             stored.staging = Arc::clone(&staging);
             return Some(stored.clone());
@@ -499,14 +516,16 @@ impl SessionTemporalRefreshSchedulerRegistry {
         let (_, entry) = entries.last()?;
         let staging = Arc::new(SessionTemporalRefreshWakeState::default());
         let handoff = SessionTemporalRefreshRekeyHandoff {
-            route: entry.wake.clone(),
+            routes: vec![entry.wake.clone()],
             staging: Arc::clone(&staging),
             pending_states: entries
                 .iter()
                 .map(|(_, entry)| Arc::clone(&entry.state))
                 .collect(),
         };
-        handoff.route.bind(&staging);
+        for route in &handoff.routes {
+            route.bind(&staging);
+        }
         handoffs.insert(old_owner.clone(), handoff.clone());
         Some(handoff)
     }
@@ -744,7 +763,9 @@ impl SessionTemporalRefreshSchedulerRegistry {
         let mut project = self.project.lock().await;
         if let Some(existing) = project.get(&new_owner) {
             if let Some(handoff) = &handoff {
-                handoff.route.bind(&existing.state);
+                for route in &handoff.routes {
+                    route.bind(&existing.state);
+                }
                 handoff.staging.cancel();
                 handoff.staging.transfer_requests_to(&existing.state);
             }
@@ -756,10 +777,15 @@ impl SessionTemporalRefreshSchedulerRegistry {
             .await;
         let entry = self.spawn_entry(
             database,
-            handoff.as_ref().map(|handoff| handoff.route.clone()),
+            handoff
+                .as_ref()
+                .and_then(|handoff| handoff.routes.last().cloned()),
             None,
         );
         if let Some(handoff) = &handoff {
+            for route in &handoff.routes {
+                route.bind(&entry.state);
+            }
             handoff.staging.cancel();
             handoff.staging.transfer_requests_to(&entry.state);
         }
