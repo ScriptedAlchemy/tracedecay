@@ -2,49 +2,19 @@
 //! determinism across indexing widths, corrupt-manifest rejection, and the
 //! sealed format-revision gate.
 
-use std::sync::Arc;
-
 use serde_json::Value;
 use tracedecay_code_index::chunks::content_digest;
 use tracedecay_code_index::parallelism::{
     clear_forced_indexing_workers_for_test, force_indexing_workers_for_test,
 };
 use tracedecay_code_index::production::{
-    CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexProductionErrorV1,
-    CodeIndexProductionOwnerV1, SEALED_GENERATION_FORMAT_REVISION_V1,
-};
-use tracedecay_domain::{
-    FileOccurrenceId, LanguageId, SanitizedCodeFileV1, SensitivityLevelV1,
-    SnapshotFileDispositionV1,
+    CodeIndexProductionErrorV1, SEALED_GENERATION_FORMAT_REVISION_V1,
 };
 
 use crate::production_orchestration::{
-    ActiveControl, ApplyingProjectionSink, SharedPublicationStore, config, request_with_source,
+    ActiveControl, add_present_typescript_file, applying_owner, request_with_source,
 };
-use crate::support::{PartitionedSealV1, cold_generation, id, reseal_manifest};
-
-fn add_present_typescript_file(
-    request: &mut CodeIndexBuildRequestV1,
-    occurrence: &str,
-    logical_path: &str,
-    source: &str,
-) {
-    let bytes = source.as_bytes().to_vec();
-    let file_occurrence_id = id::<FileOccurrenceId>(occurrence);
-    request.snapshot.files.push(SanitizedCodeFileV1 {
-        file_occurrence_id: file_occurrence_id.clone(),
-        logical_path: logical_path.to_owned(),
-        language: Some(id::<LanguageId>("typescript")),
-        content_digest: content_digest(&bytes),
-        disposition: SnapshotFileDispositionV1::Present,
-    });
-    request.captured_files.push(CodeIndexCapturedFileV1 {
-        file_occurrence_id,
-        sanitized_bytes: Arc::from(bytes),
-        sensitivity_level: SensitivityLevelV1::Public,
-    });
-    request.changed_files.insert(logical_path.to_owned());
-}
+use crate::support::{PartitionedSealV1, cold_generation, reseal_manifest};
 
 fn sealed_multi_file_generation() -> PartitionedSealV1 {
     let mut request = request_with_source(
@@ -87,12 +57,7 @@ fn sealed_multi_file_generation() -> PartitionedSealV1 {
         .validate()
         .expect("multi-file fixture snapshot is canonical");
 
-    let mut owner = CodeIndexProductionOwnerV1::new(
-        config(),
-        SharedPublicationStore::default(),
-        ApplyingProjectionSink,
-    )
-    .expect("production owner");
+    let mut owner = applying_owner();
     PartitionedSealV1::of(&cold_generation(
         &owner
             .build_and_publish(request, &ActiveControl)

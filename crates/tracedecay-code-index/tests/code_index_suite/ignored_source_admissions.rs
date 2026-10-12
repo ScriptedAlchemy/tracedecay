@@ -4,19 +4,17 @@ use serde_json::Value;
 use tracedecay_code_index::{
     chunks::content_digest,
     production::{
-        CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
-        CodeIndexGenerationScopeV1, CodeIndexIgnoredSourceAdmissionV1, CodeIndexProductionOwnerV1,
+        CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexGenerationScopeV1,
+        CodeIndexIgnoredSourceAdmissionV1, CodeIndexProductionOwnerV1,
         CodeIndexPublishedGenerationV1,
     },
 };
-use tracedecay_domain::{
-    CommitId, FileOccurrenceId, LanguageId, RepositoryDirtyStateV1, SanitizedCodeFileV1,
-    SensitivityLevelV1, SnapshotFileDispositionV1,
-};
+use tracedecay_domain::{CommitId, RepositoryDirtyStateV1, SnapshotFileDispositionV1};
 
 use crate::{
     production_orchestration::{
-        ActiveControl, ApplyingProjectionSink, SharedPublicationStore, config, request_with_source,
+        ActiveControl, ApplyingProjectionSink, SharedPublicationStore, add_present_typescript_file,
+        applying_owner, config, request_with_source,
     },
     support::{PartitionedSealV1, cold_generation, id, reseal_manifest},
 };
@@ -30,29 +28,6 @@ fn admission(logical_path: &str) -> CodeIndexIgnoredSourceAdmissionV1 {
     CodeIndexIgnoredSourceAdmissionV1 {
         logical_path: logical_path.to_owned(),
     }
-}
-
-fn add_present_typescript_file(
-    request: &mut CodeIndexBuildRequestV1,
-    occurrence: &str,
-    logical_path: &str,
-    source: &str,
-) {
-    let bytes = source.as_bytes().to_vec();
-    let file_occurrence_id = id::<FileOccurrenceId>(occurrence);
-    request.snapshot.files.push(SanitizedCodeFileV1 {
-        file_occurrence_id: file_occurrence_id.clone(),
-        logical_path: logical_path.to_owned(),
-        language: Some(id::<LanguageId>("typescript")),
-        content_digest: content_digest(&bytes),
-        disposition: SnapshotFileDispositionV1::Present,
-    });
-    request.captured_files.push(CodeIndexCapturedFileV1 {
-        file_occurrence_id,
-        sanitized_bytes: Arc::from(bytes),
-        sensitivity_level: SensitivityLevelV1::Public,
-    });
-    request.changed_files.insert(logical_path.to_owned());
 }
 
 fn request_with_ignored_sources(
@@ -97,12 +72,7 @@ fn request_with_ignored_sources(
 }
 
 fn publish(request: CodeIndexBuildRequestV1) -> Arc<CodeIndexPublishedGenerationV1> {
-    let mut owner = CodeIndexProductionOwnerV1::new(
-        config(),
-        SharedPublicationStore::default(),
-        ApplyingProjectionSink,
-    )
-    .expect("production owner");
+    let mut owner = applying_owner();
     cold_generation(
         &owner
             .build_and_publish(request, &ActiveControl)

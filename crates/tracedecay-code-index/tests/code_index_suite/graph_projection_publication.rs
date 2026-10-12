@@ -8,9 +8,7 @@ use tracedecay_code_index::{
         code_graph_generation_id, code_graph_projection_identity,
     },
     parallelism,
-    production::{
-        CodeIndexBuildRequestV1, CodeIndexProductionOwnerV1, CodeIndexPublishedGenerationV1,
-    },
+    production::{CodeIndexBuildRequestV1, CodeIndexPublishedGenerationV1},
 };
 use tracedecay_domain::{FileOccurrenceId, LanguageId, SourceSpan};
 use tracedecay_graph_db::{
@@ -19,9 +17,7 @@ use tracedecay_graph_db::{
 };
 
 use crate::{
-    production_orchestration::{
-        ActiveControl, ApplyingProjectionSink, SharedPublicationStore, config, request_with_source,
-    },
+    production_orchestration::{ActiveControl, applying_owner, request_with_source},
     support::{PartitionedSealV1, cold_generation, id},
 };
 
@@ -62,12 +58,7 @@ fn import_request() -> CodeIndexBuildRequestV1 {
 }
 
 fn published_import_generation() -> Arc<CodeIndexPublishedGenerationV1> {
-    let mut owner = CodeIndexProductionOwnerV1::new(
-        config(),
-        SharedPublicationStore::default(),
-        ApplyingProjectionSink,
-    )
-    .expect("production owner");
+    let mut owner = applying_owner();
     cold_generation(
         &owner
             .build_and_publish(import_request(), &ActiveControl)
@@ -310,12 +301,7 @@ const CALL_SOURCE: &str = concat!(
 );
 
 fn published_call_generation() -> Arc<CodeIndexPublishedGenerationV1> {
-    let mut owner = CodeIndexProductionOwnerV1::new(
-        config(),
-        SharedPublicationStore::default(),
-        ApplyingProjectionSink,
-    )
-    .expect("production owner");
+    let mut owner = applying_owner();
     cold_generation(
         &owner
             .build_and_publish(

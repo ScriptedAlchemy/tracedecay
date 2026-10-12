@@ -45,7 +45,7 @@ use tracedecay_runtime_core::resident_memory::{
     detected_process_resident_memory_limit_v1,
 };
 
-use crate::code_index::{
+use tracedecay_code_index::{
     graph_projection::CodeGraphProjectionError,
     languages::StaticLanguageRegistry,
     production::{
@@ -349,7 +349,7 @@ impl CodeIndexSchedulerErrorV1 {
     /// it as superseded instead of reporting the served generation stale.
     pub fn reconcile_interruption(
         &self,
-    ) -> Option<crate::code_index::production::CodeIndexInterruptionV1> {
+    ) -> Option<tracedecay_code_index::production::CodeIndexInterruptionV1> {
         match self {
             Self::Production(CodeIndexProductionErrorV1::Interrupted(interruption)) => {
                 Some(*interruption)
@@ -1177,22 +1177,6 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
             .into());
         }
         Ok(Some(metadata))
-    }
-
-    /// Load an exact durable code generation even after a newer capture has
-    /// superseded every process-local retained slot.
-    #[tracing::instrument(
-        name = "daemon.code_index.historical.published_generation",
-        level = "trace",
-        skip_all
-    )]
-    pub(crate) fn published_generation(
-        &self,
-        generation_id: &CodeGenerationId,
-    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexSchedulerErrorV1> {
-        self.publication
-            .load_generation(generation_id)
-            .map_err(|error| CodeIndexProductionErrorV1::Publication(error).into())
     }
 
     /// Resolve the sealed replay binding for one already-published generation
@@ -2886,7 +2870,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 Ok(captured) => captured,
                 Err(CodeIndexSchedulerErrorV1::Production(
                     CodeIndexProductionErrorV1::Interrupted(
-                        crate::code_index::production::CodeIndexInterruptionV1::Cancelled,
+                        tracedecay_code_index::production::CodeIndexInterruptionV1::Cancelled,
                     ),
                 )) if retry < MAX_SUPERSEDED_RECONCILE_RETRIES
                     && !self.shutting_down.load(Ordering::Acquire) =>
@@ -3017,7 +3001,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             let generation = match generation {
                 Ok(generation) => generation,
                 Err(CodeIndexProductionErrorV1::Interrupted(
-                    crate::code_index::production::CodeIndexInterruptionV1::Cancelled,
+                    tracedecay_code_index::production::CodeIndexInterruptionV1::Cancelled,
                 )) if retry < MAX_SUPERSEDED_RECONCILE_RETRIES
                     && !self.shutting_down.load(Ordering::Acquire) =>
                 {
@@ -4097,12 +4081,12 @@ impl CodeIndexWorktreeSchedulerV1 {
             .collect::<Vec<_>>();
         let admitted_paths = self.ignored_admission_paths();
         let _scan_batch = tracedecay_privacy::code_source_scan_batch();
-        let outcomes = crate::code_index::parallelism::install(|| {
+        let outcomes = tracedecay_code_index::parallelism::install(|| {
             use rayon::prelude::*;
             candidates
                 .par_iter()
                 .map(|logical_path| {
-                    crate::code_index::parallelism::with_background_cpu_permit(|| {
+                    tracedecay_code_index::parallelism::with_background_cpu_permit(|| {
                         if self.shutting_down.load(Ordering::Acquire) {
                             return Err(cancelled_code_index_reconcile());
                         }
@@ -4316,7 +4300,7 @@ pub(crate) fn retained_empty_seat_settles_source(
 
 pub(super) fn cancelled_code_index_reconcile() -> CodeIndexSchedulerErrorV1 {
     CodeIndexProductionErrorV1::Interrupted(
-        crate::code_index::production::CodeIndexInterruptionV1::Cancelled,
+        tracedecay_code_index::production::CodeIndexInterruptionV1::Cancelled,
     )
     .into()
 }

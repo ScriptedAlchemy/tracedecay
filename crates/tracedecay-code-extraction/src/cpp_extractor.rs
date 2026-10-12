@@ -192,7 +192,7 @@ impl CppExtractor {
             "namespace_definition" => Self::visit_namespace(state, node),
             "template_declaration" => Self::visit_template(state, node),
             "using_declaration" => Self::visit_using_declaration(state, node),
-            "preproc_def" => Self::visit_preproc_def(state, node),
+            "preproc_def" => Self::visit_identifier_leaf(state, node, NodeKind::PreprocessorDef),
             "preproc_include" => Self::visit_preproc_include(state, node),
             "access_specifier" => Self::visit_access_specifier(state, node),
             // Comments are picked up as docstrings by the definitions they precede.

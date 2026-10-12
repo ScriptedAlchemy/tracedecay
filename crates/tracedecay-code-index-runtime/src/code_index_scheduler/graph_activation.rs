@@ -18,87 +18,89 @@ use crate::code_graph_seat::{
     CodeGraphBuildAdmissionV1, CodeGraphReplayBindingV1, CodeGraphSeatLeaseV1,
     CodeGraphSeatRuntimePortV1,
 };
-use crate::code_index::graph_projection::{CodeGraphProjectionError, CodeGraphProjectionStore};
-use crate::code_index::production::{CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1};
+use tracedecay_code_index::graph_projection::{CodeGraphProjectionError, CodeGraphProjectionStore};
+use tracedecay_code_index::production::{
+    CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
+};
 
-/// Test-only injected retryable activation failures, keyed by worktree id.
-/// The worktree id is unique per test fixture, while generation ids are
-/// content-derived and collide across tests that share a fixture template. A
-/// positive count makes the memory activation authority fail that many
-/// activations with an unavailable graph runtime so worker retry behavior is
-/// observable.
+/// Test-only graph activation faults, keyed by worktree id. The worktree id
+/// is unique per test fixture, while generation ids are content-derived and
+/// collide across tests that share a fixture template.
 #[cfg(any(test, feature = "test-helpers"))]
-fn injected_activation_failures()
--> &'static std::sync::Mutex<std::collections::BTreeMap<String, usize>> {
-    static FAILURES: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::BTreeMap<String, usize>>,
-    > = std::sync::OnceLock::new();
-    FAILURES.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
-}
-
-/// Test-only injected publication conflicts, keyed by worktree id.
-/// A positive count makes the memory activation authority fail that many
-/// activations with `GraphDbError::Conflict` so a first-conflict retry that
-/// later seats is observable (issue #765).
-#[cfg(any(test, feature = "test-helpers"))]
-fn injected_activation_conflicts()
--> &'static std::sync::Mutex<std::collections::BTreeMap<String, usize>> {
-    static CONFLICTS: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::BTreeMap<String, usize>>,
-    > = std::sync::OnceLock::new();
-    CONFLICTS.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
-}
-
-#[cfg(any(test, feature = "test-helpers"))]
-fn injected_activation_attempts()
--> &'static std::sync::Mutex<std::collections::BTreeMap<String, usize>> {
-    static ATTEMPTS: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::BTreeMap<String, usize>>,
-    > = std::sync::OnceLock::new();
-    ATTEMPTS.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
+#[derive(Default)]
+struct InjectedActivationFaultsV1 {
+    /// A positive count makes the memory activation authority fail that many
+    /// activations with an unavailable graph runtime so worker retry behavior
+    /// is observable.
+    failures: std::collections::BTreeMap<String, usize>,
+    /// A positive count makes the memory activation authority fail that many
+    /// activations with `GraphDbError::Conflict` so a first-conflict retry
+    /// that later seats is observable (issue #765).
+    conflicts: std::collections::BTreeMap<String, usize>,
+    attempts: std::collections::BTreeMap<String, usize>,
+    resident_memory_refusals: std::collections::BTreeSet<String>,
+    /// Publications that run out their background budget: the memory
+    /// activation authority answers every activation of such a worktree with
+    /// the deadline the persistent build reports.
+    publication_deadlines: std::collections::BTreeSet<String>,
+    terminal_failures: std::collections::BTreeSet<String>,
+    gates: std::collections::BTreeMap<String, Arc<InjectedActivationGateStateV1>>,
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
-fn injected_resident_memory_refusals()
--> &'static std::sync::Mutex<std::collections::BTreeSet<String>> {
-    static REFUSALS: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> =
+fn injected_faults() -> std::sync::MutexGuard<'static, InjectedActivationFaultsV1> {
+    static FAULTS: std::sync::OnceLock<std::sync::Mutex<InjectedActivationFaultsV1>> =
         std::sync::OnceLock::new();
-    REFUSALS.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeSet::new()))
+    FAULTS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Test-only publications that run out their background budget, keyed by
-/// worktree id: the memory activation authority answers every activation of
-/// such a worktree with the deadline the persistent build reports.
-#[cfg(any(test, feature = "test-helpers"))]
-fn injected_publication_deadlines() -> &'static std::sync::Mutex<std::collections::BTreeSet<String>>
-{
-    static DEADLINES: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> =
-        std::sync::OnceLock::new();
-    DEADLINES.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeSet::new()))
+#[cfg(test)]
+fn set_injected_count(
+    counts: &mut std::collections::BTreeMap<String, usize>,
+    worktree_id: &WorktreeId,
+    count: usize,
+) {
+    if count == 0 {
+        counts.remove(worktree_id.as_str());
+    } else {
+        counts.insert(worktree_id.as_str().to_owned(), count);
+    }
+}
+
+#[cfg(test)]
+fn set_injected_flag(
+    flags: &mut std::collections::BTreeSet<String>,
+    worktree_id: &WorktreeId,
+    set: bool,
+) {
+    if set {
+        flags.insert(worktree_id.as_str().to_owned());
+    } else {
+        flags.remove(worktree_id.as_str());
+    }
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
-fn injected_terminal_activation_failures()
--> &'static std::sync::Mutex<std::collections::BTreeSet<String>> {
-    static FAILURES: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> =
-        std::sync::OnceLock::new();
-    FAILURES.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeSet::new()))
+fn take_injected_count(
+    counts: &mut std::collections::BTreeMap<String, usize>,
+    worktree_id: &WorktreeId,
+) -> bool {
+    match counts.get_mut(worktree_id.as_str()) {
+        Some(remaining) if *remaining > 0 => {
+            *remaining = remaining.saturating_sub(1);
+            true
+        }
+        _ => false,
+    }
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
 struct InjectedActivationGateStateV1 {
     started: tokio::sync::Notify,
     release: tokio::sync::Notify,
-}
-
-#[cfg(any(test, feature = "test-helpers"))]
-fn injected_activation_gates()
--> &'static std::sync::Mutex<std::collections::BTreeMap<String, Arc<InjectedActivationGateStateV1>>>
-{
-    static GATES: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::BTreeMap<String, Arc<InjectedActivationGateStateV1>>>,
-    > = std::sync::OnceLock::new();
-    GATES.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
 }
 
 #[cfg(test)]
@@ -130,42 +132,26 @@ pub fn install_injected_activation_gate(worktree_id: &WorktreeId) -> InjectedAct
         started: tokio::sync::Notify::new(),
         release: tokio::sync::Notify::new(),
     });
-    injected_activation_gates()
-        .lock()
-        .expect("injected activation gate map must not be poisoned")
+    injected_faults()
+        .gates
         .insert(worktree_id.as_str().to_owned(), Arc::clone(&state));
     InjectedActivationGateV1 { state }
 }
 
 #[cfg(test)]
 pub fn set_injected_activation_failures(worktree_id: &WorktreeId, failures: usize) {
-    let mut injected = injected_activation_failures()
-        .lock()
-        .expect("injected activation failure gate must not be poisoned");
-    if failures == 0 {
-        injected.remove(worktree_id.as_str());
-    } else {
-        injected.insert(worktree_id.as_str().to_owned(), failures);
-    }
+    set_injected_count(&mut injected_faults().failures, worktree_id, failures);
 }
 
 #[cfg(test)]
 pub fn set_injected_activation_conflicts(worktree_id: &WorktreeId, conflicts: usize) {
-    let mut injected = injected_activation_conflicts()
-        .lock()
-        .expect("injected activation conflict gate must not be poisoned");
-    if conflicts == 0 {
-        injected.remove(worktree_id.as_str());
-    } else {
-        injected.insert(worktree_id.as_str().to_owned(), conflicts);
-    }
+    set_injected_count(&mut injected_faults().conflicts, worktree_id, conflicts);
 }
 
 #[cfg(test)]
 pub fn injected_activation_attempt_count(worktree_id: &WorktreeId) -> usize {
-    injected_activation_attempts()
-        .lock()
-        .expect("injected activation attempt map must not be poisoned")
+    injected_faults()
+        .attempts
         .get(worktree_id.as_str())
         .copied()
         .unwrap_or(0)
@@ -173,114 +159,29 @@ pub fn injected_activation_attempt_count(worktree_id: &WorktreeId) -> usize {
 
 #[cfg(test)]
 pub fn set_injected_resident_memory_refusal(worktree_id: &WorktreeId, refused: bool) {
-    let mut refusals = injected_resident_memory_refusals()
-        .lock()
-        .expect("injected resident-memory refusal gate must not be poisoned");
-    if refused {
-        refusals.insert(worktree_id.as_str().to_owned());
-    } else {
-        refusals.remove(worktree_id.as_str());
-    }
+    set_injected_flag(
+        &mut injected_faults().resident_memory_refusals,
+        worktree_id,
+        refused,
+    );
 }
 
 #[cfg(test)]
 pub fn set_injected_publication_deadline(worktree_id: &WorktreeId, exceeded: bool) {
-    let mut deadlines = injected_publication_deadlines()
-        .lock()
-        .expect("injected publication deadline gate must not be poisoned");
-    if exceeded {
-        deadlines.insert(worktree_id.as_str().to_owned());
-    } else {
-        deadlines.remove(worktree_id.as_str());
-    }
+    set_injected_flag(
+        &mut injected_faults().publication_deadlines,
+        worktree_id,
+        exceeded,
+    );
 }
 
 #[cfg(test)]
 pub fn set_injected_terminal_activation_failure(worktree_id: &WorktreeId, failed: bool) {
-    let mut failures = injected_terminal_activation_failures()
-        .lock()
-        .expect("injected terminal activation failure gate must not be poisoned");
-    if failed {
-        failures.insert(worktree_id.as_str().to_owned());
-    } else {
-        failures.remove(worktree_id.as_str());
-    }
-}
-
-#[cfg(any(test, feature = "test-helpers"))]
-#[allow(clippy::expect_used)] // fixture gate: a poisoned injection mutex is a test-harness bug
-fn has_injected_resident_memory_refusal(worktree_id: &WorktreeId) -> bool {
-    injected_resident_memory_refusals()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .contains(worktree_id.as_str())
-}
-
-#[cfg(any(test, feature = "test-helpers"))]
-fn has_injected_publication_deadline(worktree_id: &WorktreeId) -> bool {
-    injected_publication_deadlines()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .contains(worktree_id.as_str())
-}
-
-#[cfg(any(test, feature = "test-helpers"))]
-#[allow(clippy::expect_used)] // fixture gate: a poisoned injection mutex is a test-harness bug
-fn take_injected_activation_failure(worktree_id: &WorktreeId) -> bool {
-    let mut injected = injected_activation_failures()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    match injected.get_mut(worktree_id.as_str()) {
-        Some(remaining) if *remaining > 0 => {
-            *remaining = remaining.saturating_sub(1);
-            true
-        }
-        _ => false,
-    }
-}
-
-#[cfg(any(test, feature = "test-helpers"))]
-#[allow(clippy::expect_used)] // fixture gate: a poisoned injection mutex is a test-harness bug
-fn take_injected_activation_conflict(worktree_id: &WorktreeId) -> bool {
-    let mut injected = injected_activation_conflicts()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    match injected.get_mut(worktree_id.as_str()) {
-        Some(remaining) if *remaining > 0 => {
-            *remaining = remaining.saturating_sub(1);
-            true
-        }
-        _ => false,
-    }
-}
-
-#[cfg(any(test, feature = "test-helpers"))]
-#[allow(clippy::expect_used)] // fixture gate: a poisoned injection mutex is a test-harness bug
-fn record_injected_activation_attempt(worktree_id: &WorktreeId) {
-    *injected_activation_attempts()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .entry(worktree_id.as_str().to_owned())
-        .or_insert(0) += 1;
-}
-
-#[cfg(any(test, feature = "test-helpers"))]
-fn take_injected_terminal_activation_failure(worktree_id: &WorktreeId) -> bool {
-    injected_terminal_activation_failures()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .remove(worktree_id.as_str())
-}
-
-#[cfg(any(test, feature = "test-helpers"))]
-#[allow(clippy::expect_used)] // fixture gate: a poisoned injection mutex is a test-harness bug
-fn take_injected_activation_gate(
-    worktree_id: &WorktreeId,
-) -> Option<Arc<InjectedActivationGateStateV1>> {
-    injected_activation_gates()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .remove(worktree_id.as_str())
+    set_injected_flag(
+        &mut injected_faults().terminal_failures,
+        worktree_id,
+        failed,
+    );
 }
 
 /// The typed reason a generation reports while its native graph is refused by
@@ -641,17 +542,27 @@ impl CodeGraphActivationAuthorityV1 {
             }
             #[cfg(any(test, feature = "test-helpers"))]
             Self::Memory { .. } => {
-                if let Some(gate) = take_injected_activation_gate(worktree_id) {
+                let gate = injected_faults().gates.remove(worktree_id.as_str());
+                if let Some(gate) = gate {
                     gate.started.notify_one();
                     gate.release.notified().await;
                 }
-                record_injected_activation_attempt(worktree_id);
-                if take_injected_terminal_activation_failure(worktree_id) {
+                *injected_faults()
+                    .attempts
+                    .entry(worktree_id.as_str().to_owned())
+                    .or_insert(0) += 1;
+                if injected_faults()
+                    .terminal_failures
+                    .remove(worktree_id.as_str())
+                {
                     return Err(CodeIndexSchedulerErrorV1::Identity(
                         "injected terminal graph activation failure".to_owned(),
                     ));
                 }
-                if has_injected_resident_memory_refusal(worktree_id) {
+                if injected_faults()
+                    .resident_memory_refusals
+                    .contains(worktree_id.as_str())
+                {
                     latest.refuse_graph_activation(RESIDENT_MEMORY_GRAPH_REFUSAL_REASON);
                     return Err(CodeIndexSchedulerErrorV1::GraphProjection(
                         CodeGraphProjectionError::BudgetExhausted {
@@ -664,17 +575,20 @@ impl CodeGraphActivationAuthorityV1 {
                         },
                     ));
                 }
-                if has_injected_publication_deadline(worktree_id) {
+                if injected_faults()
+                    .publication_deadlines
+                    .contains(worktree_id.as_str())
+                {
                     let deadline = CodeGraphProjectionError::DeadlineExceeded;
                     refuse_spent_publication_budget(&latest.text, &deadline);
                     return Err(CodeIndexSchedulerErrorV1::GraphProjection(deadline));
                 }
-                if take_injected_activation_conflict(worktree_id) {
+                if take_injected_count(&mut injected_faults().conflicts, worktree_id) {
                     return Err(CodeIndexSchedulerErrorV1::GraphProjection(
                         GraphDbError::conflict("publication.prepare.expected_prior_head").into(),
                     ));
                 }
-                if take_injected_activation_failure(worktree_id) {
+                if take_injected_count(&mut injected_faults().failures, worktree_id) {
                     return Err(CodeIndexSchedulerErrorV1::GraphProjection(
                         CodeGraphProjectionError::Unavailable(
                             "injected unavailable graph runtime".to_owned(),
