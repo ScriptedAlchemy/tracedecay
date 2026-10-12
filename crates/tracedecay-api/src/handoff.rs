@@ -16,22 +16,17 @@ use crate::http::{
     invalid_request_response,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum HandoffOperation {
-    IssueTaskHandoff,
-    ListTaskHandoffs,
-    OpenInvestigationHandoff,
-    OpenTaskHandoff,
+mounted_operations! {
+    pub enum HandoffOperation;
+    id_prefix = "operation.handoff.",
+    route_prefix = "handoff",
+    IssueTaskHandoff: "issue_task_handoff", "issue-task";
+    ListTaskHandoffs: "list_task_handoffs", "list-task";
+    OpenInvestigationHandoff: "open_investigation_handoff", "open-investigation";
+    OpenTaskHandoff: "open_task_handoff", "open-task";
 }
 
 impl HandoffOperation {
-    pub const ALL: [Self; 4] = [
-        Self::IssueTaskHandoff,
-        Self::ListTaskHandoffs,
-        Self::OpenInvestigationHandoff,
-        Self::OpenTaskHandoff,
-    ];
-
     /// True for operations that only read the grant store.
     ///
     /// The three token operations issue or consume a grant. Enumeration only
@@ -39,15 +34,6 @@ impl HandoffOperation {
     /// mutation for retry and replay purposes.
     pub const fn is_read_only(self) -> bool {
         matches!(self, Self::ListTaskHandoffs)
-    }
-
-    mounted_operation_paths! {
-        id_prefix = "operation.handoff.",
-        route_prefix = "handoff",
-        IssueTaskHandoff: "issue_task_handoff", "issue-task";
-        ListTaskHandoffs: "list_task_handoffs", "list-task";
-        OpenInvestigationHandoff: "open_investigation_handoff", "open-investigation";
-        OpenTaskHandoff: "open_task_handoff", "open-task";
     }
 
     fn parse(segment: &str) -> Option<Self> {
