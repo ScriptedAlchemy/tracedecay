@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use tracedecay_code_index::graph_projection::{
-    CodeGraphCatalogReleaseV1, CodeGraphReadinessRequirement,
+    CodeGraphCatalogReleaseV1, CodeGraphEngineReleaseV1, CodeGraphReadinessRequirement,
 };
 use tracedecay_code_index_runtime::CodeGraphSeatRuntimePortV1;
 use tracedecay_code_index_runtime::code_index_executor::code_index_search_executor;
@@ -2070,6 +2070,49 @@ async fn admitted_graph_read_retains_only_the_catalog_it_requires() {
     );
     drop(read);
     drop(graph);
+    mount.shutdown().await;
+}
+
+/// A worktree parks between a graph read's admission and its reader opening
+/// (the `files` tool reads freshness in that gap). The engine the admission
+/// waited out must still be there when the reader opens.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admitted_graph_read_retains_the_engine_until_its_reader_opens() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let mount = PersistentGraphMountV1::mount(
+        CodeIndexSchedulerRegistryV1::new(1),
+        &fixture,
+        &store,
+        "graph read engine retention",
+    )
+    .await;
+    let context = graph_request_context(mount.scope.clone(), "engine-retention");
+    let port = project_code_graph_projection_read_port(
+        mount.registry.clone(),
+        fixture.path().into(),
+        mount.scope.clone(),
+    );
+    for readiness in [
+        CodeGraphReadinessRequirement::Catalog,
+        CodeGraphReadinessRequirement::Engine,
+    ] {
+        let read = port
+            .open(
+                CodeGraphReadRequest::from_context(&context, now_micros())
+                    .with_readiness(readiness),
+            )
+            .await
+            .expect("admit graph read");
+        let graph = Arc::clone(read.store());
+        assert_eq!(
+            graph.release_serving_engine().expect("park release"),
+            CodeGraphEngineReleaseV1::Busy,
+            "a {readiness:?} read's admission must hold the engine its reader opens on"
+        );
+        read.reader(&context, now_micros())
+            .expect("the admitted read opens on the engine it waited for");
+    }
     mount.shutdown().await;
 }
 
