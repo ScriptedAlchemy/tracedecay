@@ -198,7 +198,7 @@ pub(super) async fn validate_temporal_fts_contracts(
         let sql = row
             .get::<String>(0)
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        if normalize_fts_sql(&sql) != *expected_sql {
+        if normalize_schema_sql(&sql) != *expected_sql {
             return Err(global_db_operation_message(
                 OPERATION,
                 format!("table '{table}' has an incompatible temporal FTS contract"),
@@ -206,10 +206,6 @@ pub(super) async fn validate_temporal_fts_contracts(
         }
     }
     Ok(())
-}
-
-fn normalize_fts_sql(sql: &str) -> String {
-    normalize_schema_sql(sql)
 }
 
 fn normalize_schema_sql(sql: &str) -> String {

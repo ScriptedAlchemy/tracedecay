@@ -537,7 +537,7 @@ async fn production_codex_hook_ingest_survives_message_search_reopen() {
     commit_worktree(&project, "production Codex transcript fixture");
     write_production_codex_rollout(&transcripts, &project);
 
-    let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+    let harness = crate::support::seeded_composition::open_for_session_retrieval(
         &isolation,
         [project.clone()],
     )
@@ -711,7 +711,7 @@ async fn production_codex_hook_ingest_survives_message_search_reopen() {
 
     harness.shutdown().await;
 
-    let restarted = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+    let restarted = crate::support::seeded_composition::open_for_session_retrieval(
         &isolation,
         [project.clone()],
     )
@@ -767,7 +767,7 @@ async fn production_hook_ingest_reads_only_the_pinned_transcript_home() {
         "the rollout must exist only under the process home for this journey"
     );
 
-    let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+    let harness = crate::support::seeded_composition::open_for_session_retrieval(
         &isolation,
         [project.clone()],
     )
@@ -821,7 +821,7 @@ async fn scheduled_session_import_makes_the_final_codex_source_searchable() {
     // consumed every durable Codex frontier after the import returned.
     write_production_codex_rollouts(&transcripts, &project, 33);
 
-    let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+    let harness = crate::support::seeded_composition::open_for_session_retrieval(
         &isolation,
         [project.clone()],
     )
@@ -949,7 +949,7 @@ async fn cursor_record_with_a_dispatch_is_one_searchable_message() {
     )
     .expect("write cursor transcript");
 
-    let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+    let harness = crate::support::seeded_composition::open_for_session_retrieval(
         &isolation,
         [project.clone()],
     )

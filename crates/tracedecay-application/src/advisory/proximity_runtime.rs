@@ -436,11 +436,8 @@ where
         request: &ProximityEvaluationRequestV1,
         threshold: &ProximityThresholdPinV1,
     ) -> ProximityRuntimeOutcomeV1 {
-        if context.cancellation().is_cancelled() {
-            return ProximityRuntimeOutcomeV1::Cancelled;
-        }
-        if context.deadline().is_elapsed_at(now_micros()) {
-            return ProximityRuntimeOutcomeV1::TimedOut;
+        if let Some(interruption) = interrupted(context) {
+            return interruption;
         }
         if request.validate().is_err() || request.scope != self.scope {
             return ProximityRuntimeOutcomeV1::Denied;
@@ -491,11 +488,8 @@ where
         request: &ProximityEvaluationRequestV1,
         expected_configuration_digest: &ManifestDigest,
     ) -> ProximityRuntimeOutcomeV1 {
-        if context.cancellation().is_cancelled() {
-            return ProximityRuntimeOutcomeV1::Cancelled;
-        }
-        if context.deadline().is_elapsed_at(now_micros()) {
-            return ProximityRuntimeOutcomeV1::TimedOut;
+        if let Some(interruption) = interrupted(context) {
+            return interruption;
         }
         if request.validate().is_err() || request.scope != self.scope {
             return ProximityRuntimeOutcomeV1::Denied;
@@ -521,42 +515,6 @@ where
         if threshold.configuration_digest != *expected_configuration_digest {
             return ProximityRuntimeOutcomeV1::Denied;
         }
-        self.evaluate_with_threshold_pin(context, request, &threshold)
-            .await
-    }
-
-    pub async fn evaluate(
-        &self,
-        context: &RequestContext,
-        request: &ProximityEvaluationRequestV1,
-    ) -> ProximityRuntimeOutcomeV1 {
-        if context.cancellation().is_cancelled() {
-            return ProximityRuntimeOutcomeV1::Cancelled;
-        }
-        if context.deadline().is_elapsed_at(now_micros()) {
-            return ProximityRuntimeOutcomeV1::TimedOut;
-        }
-        if request.validate().is_err() || request.scope != self.scope {
-            return ProximityRuntimeOutcomeV1::Denied;
-        }
-        if !context_allows_feedback_operation(
-            context,
-            &request.scope,
-            PROXIMITY_CAPABILITY_ID_V1,
-            PROXIMITY_USE_CASE_ID_V1,
-        ) {
-            return ProximityRuntimeOutcomeV1::Denied;
-        }
-        let Ok(configuration) = self.configuration.current().await else {
-            return ProximityRuntimeOutcomeV1::Unavailable;
-        };
-        if let Some(interruption) = interrupted(context) {
-            return interruption;
-        }
-        let Some(threshold) = ProximityThresholdPinV1::from_current_configuration(&configuration)
-        else {
-            return ProximityRuntimeOutcomeV1::Unavailable;
-        };
         self.evaluate_with_threshold_pin(context, request, &threshold)
             .await
     }

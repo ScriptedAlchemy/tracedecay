@@ -152,8 +152,12 @@ impl ScalaExtractor {
             "enum_definition" => Self::visit_enum(state, node),
             "function_definition" => Self::visit_function_def(state, node),
             "function_declaration" => Self::visit_function_decl(state, node),
-            "val_definition" | "val_declaration" => Self::visit_val(state, node),
-            "var_definition" | "var_declaration" => Self::visit_var(state, node),
+            "val_definition" | "val_declaration" => {
+                Self::visit_val_or_var(state, node, NodeKind::ValField);
+            }
+            "var_definition" | "var_declaration" => {
+                Self::visit_val_or_var(state, node, NodeKind::VarField);
+            }
             "type_definition" => Self::visit_type_def(state, node),
             _ => {
                 Self::visit_children(state, node);
@@ -782,8 +786,8 @@ impl ScalaExtractor {
         Self::extract_annotations(state, node, &id);
     }
 
-    /// Extract a val definition or declaration as a `ValField` node.
-    fn visit_val(state: &mut ExtractionState, node: TsNode<'_>) {
+    /// Extract a val (`ValField`) or var (`VarField`) definition or declaration.
+    fn visit_val_or_var(state: &mut ExtractionState, node: TsNode<'_>, kind: NodeKind) {
         let name = Self::extract_val_var_name(state, node);
         let visibility = Self::extract_visibility(node, state);
         let start_line = node.start_position().row as u32;
@@ -791,86 +795,11 @@ impl ScalaExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = local_node_id(
-            &state.file_path,
-            state.source,
-            &NodeKind::ValField,
-            &name,
-            node,
-        );
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
-            kind: NodeKind::ValField,
-            name,
-            qualified_name,
-            file_path: state.file_path.clone(),
-            start_line,
-            attrs_start_line: start_line,
-            end_line,
-            start_column,
-            end_column,
-            signature: Some(
-                state
-                    .node_text(node)
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .trim()
-                    .to_string(),
-            ),
-            docstring: Self::extract_scaladoc(state, node),
-            visibility,
-            is_async: false,
-            branches: 0,
-            loops: 0,
-            returns: 0,
-            max_nesting: 0,
-            unsafe_blocks: 0,
-            unchecked_calls: 0,
-            assertions: 0,
-            complexity_analysis: ComplexityAnalysisV1::Complete,
-            updated_at: state.timestamp,
-            parent_id: None,
-        };
-        state.nodes.push(graph_node);
-
-        if let Some(parent_id) = state.parent_node_id() {
-            state.edges.push(Edge {
-                source: parent_id.to_string(),
-                target: id.clone(),
-                kind: EdgeKind::Contains,
-                line: Some(start_line),
-            });
-        }
-
-        Self::extract_annotations(state, node, &id);
-
-        if let Some(value) = node.child_by_field_name("value") {
-            Self::extract_call_sites(state, value, &id);
-        }
-    }
-
-    /// Extract a var definition or declaration as a `VarField` node.
-    fn visit_var(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::extract_val_var_name(state, node);
-        let visibility = Self::extract_visibility(node, state);
-        let start_line = node.start_position().row as u32;
-        let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
-        let end_column = node.end_position().column as u32;
-        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = local_node_id(
-            &state.file_path,
-            state.source,
-            &NodeKind::VarField,
-            &name,
-            node,
-        );
-
-        let graph_node = Node {
-            id: id.clone(),
-            kind: NodeKind::VarField,
+            kind,
             name,
             qualified_name,
             file_path: state.file_path.clone(),

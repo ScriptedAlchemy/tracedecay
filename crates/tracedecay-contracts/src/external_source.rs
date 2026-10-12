@@ -129,22 +129,6 @@ impl SourceAuthorityContextV1 {
     pub fn configuration_digest(&self) -> &ManifestDigest {
         &self.configuration_digest
     }
-
-    pub fn sink_revision(&self) -> u64 {
-        self.sink_revision
-    }
-
-    pub fn sink_digest(&self) -> &ManifestDigest {
-        &self.sink_digest
-    }
-
-    pub fn refresh_receipt_digest(&self) -> &ManifestDigest {
-        &self.refresh_receipt_digest
-    }
-
-    pub fn provider_envelope_digest(&self) -> &ManifestDigest {
-        &self.provider_envelope_digest
-    }
 }
 
 /// Opaque, non-serializable proof that the exact authority snapshot was

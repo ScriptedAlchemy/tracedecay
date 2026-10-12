@@ -142,7 +142,7 @@ fn run_status(profile: &ProfileRoot, json: bool) -> Result<()> {
         tracedecay::daemon::live_remote_operational_status(profile)?
     };
     if json {
-        print!("{}", status_json_line(&status)?);
+        print!("{}", canonical_json_line(&status)?);
     } else {
         print!("{}", render_status_human(&status));
     }
@@ -411,10 +411,6 @@ fn canonical_json_line<T: Serialize>(value: &T) -> serde_json::Result<String> {
     Ok(rendered)
 }
 
-fn status_json_line(status: &RemoteOperationalStatusReadV1) -> serde_json::Result<String> {
-    canonical_json_line(status)
-}
-
 fn render_status_human(status: &RemoteOperationalStatusReadV1) -> String {
     match status {
         RemoteOperationalStatusReadV1::Observed {
@@ -501,7 +497,7 @@ mod tests {
 
     use super::{
         RemoteProtocolArgs, build_client, canonical_json_line, emit_protocol_response,
-        render_protocol_response, status_json_line,
+        render_protocol_response,
     };
     use tracedecay_contracts::remote::protocol::{
         RemoteProtocolFailureV1, RemoteProtocolResponseV1, remote_enrollment_result_contract_v1,
@@ -561,7 +557,7 @@ mod tests {
             RemoteOperationalStatusReadV1::Unconfigured,
             RemoteOperationalStatusReadV1::Unavailable,
         ] {
-            let rendered = status_json_line(&status).expect("status JSON line");
+            let rendered = canonical_json_line(&status).expect("status JSON line");
             assert!(rendered.ends_with('\n'));
             assert_eq!(rendered.lines().count(), 1);
             let decoded: RemoteOperationalStatusReadV1 =

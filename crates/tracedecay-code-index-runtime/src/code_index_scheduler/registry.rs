@@ -382,10 +382,47 @@ pub(super) fn text_projection_unfinished_withholds_seat(exact_and_lexical_ready:
     !exact_and_lexical_ready
 }
 
+/// One armed pause: the paused step reports `entered` and waits on `release`.
 #[cfg(any(test, feature = "test-helpers"))]
-struct ColdMountFinalCommitGateV1 {
+struct WorkerStepGateV1 {
     entered: tokio::sync::oneshot::Sender<()>,
     release: tokio::sync::oneshot::Receiver<()>,
+}
+
+/// Arm one pause gate at `key`, returning the receiver that resolves once the
+/// paused step waits there and the sender that releases it.
+#[cfg(any(test, feature = "test-helpers"))]
+fn arm_worker_step_gate<K: Ord>(
+    gates: &Mutex<BTreeMap<K, WorkerStepGateV1>>,
+    key: K,
+    already_armed: std::fmt::Arguments<'_>,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let (entered, entered_observed) = tokio::sync::oneshot::channel();
+    let (released, release) = tokio::sync::oneshot::channel();
+    let replaced = gates
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(key, WorkerStepGateV1 { entered, release });
+    assert!(replaced.is_none(), "{already_armed}");
+    (entered_observed, released)
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn take_worker_step_gate<K, Q>(
+    gates: &Mutex<BTreeMap<K, WorkerStepGateV1>>,
+    key: &Q,
+) -> Option<WorkerStepGateV1>
+where
+    K: Ord + std::borrow::Borrow<Q>,
+    Q: Ord + ?Sized,
+{
+    gates
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(key)
 }
 
 /// Test gates are armed with whatever path spelling the caller holds while the
@@ -400,16 +437,10 @@ pub(super) fn test_gate_root(path: &Path) -> PathBuf {
 /// Armed gates keyed by project root, so tests pausing distinct worktrees in
 /// one process do not contend for a single slot.
 #[cfg(any(test, feature = "test-helpers"))]
-fn cold_mount_final_commit_gate() -> &'static Mutex<BTreeMap<PathBuf, ColdMountFinalCommitGateV1>> {
-    static GATE: std::sync::OnceLock<Mutex<BTreeMap<PathBuf, ColdMountFinalCommitGateV1>>> =
+fn cold_mount_final_commit_gate() -> &'static Mutex<BTreeMap<PathBuf, WorkerStepGateV1>> {
+    static GATE: std::sync::OnceLock<Mutex<BTreeMap<PathBuf, WorkerStepGateV1>>> =
         std::sync::OnceLock::new();
     GATE.get_or_init(|| Mutex::new(BTreeMap::new()))
-}
-
-#[cfg(any(test, feature = "test-helpers"))]
-struct RetainedGraphRecoveryGateV1 {
-    entered: tokio::sync::oneshot::Sender<()>,
-    release: tokio::sync::oneshot::Receiver<()>,
 }
 
 /// Where a restart's retained graph recovery pauses for a fixture.
@@ -428,33 +459,20 @@ pub enum RetainedGraphRecoveryPauseV1 {
 /// accident; the key is the isolation the fixtures already have.
 #[cfg(any(test, feature = "test-helpers"))]
 fn retained_graph_recovery_gate()
--> &'static Mutex<BTreeMap<(PathBuf, RetainedGraphRecoveryPauseV1), RetainedGraphRecoveryGateV1>> {
+-> &'static Mutex<BTreeMap<(PathBuf, RetainedGraphRecoveryPauseV1), WorkerStepGateV1>> {
     static GATE: std::sync::OnceLock<
-        Mutex<BTreeMap<(PathBuf, RetainedGraphRecoveryPauseV1), RetainedGraphRecoveryGateV1>>,
+        Mutex<BTreeMap<(PathBuf, RetainedGraphRecoveryPauseV1), WorkerStepGateV1>>,
     > = std::sync::OnceLock::new();
     GATE.get_or_init(|| Mutex::new(BTreeMap::new()))
-}
-
-#[cfg(any(test, feature = "test-helpers"))]
-struct RetainedTextProjectionGateV1 {
-    entered: tokio::sync::oneshot::Sender<()>,
-    release: tokio::sync::oneshot::Receiver<()>,
 }
 
 /// Armed gates, keyed by the exact worktree they fence, on the same
 /// per-worktree isolation as the recovery gate above.
 #[cfg(any(test, feature = "test-helpers"))]
-fn retained_text_projection_gate() -> &'static Mutex<BTreeMap<PathBuf, RetainedTextProjectionGateV1>>
-{
-    static GATE: std::sync::OnceLock<Mutex<BTreeMap<PathBuf, RetainedTextProjectionGateV1>>> =
+fn retained_text_projection_gate() -> &'static Mutex<BTreeMap<PathBuf, WorkerStepGateV1>> {
+    static GATE: std::sync::OnceLock<Mutex<BTreeMap<PathBuf, WorkerStepGateV1>>> =
         std::sync::OnceLock::new();
     GATE.get_or_init(|| Mutex::new(BTreeMap::new()))
-}
-
-#[cfg(test)]
-struct WorkerStepGateV1 {
-    entered: tokio::sync::oneshot::Sender<()>,
-    release: tokio::sync::oneshot::Receiver<()>,
 }
 
 #[cfg(test)]
@@ -2009,32 +2027,20 @@ impl CodeIndexSchedulerRegistryV1 {
         tokio::sync::oneshot::Receiver<()>,
         tokio::sync::oneshot::Sender<()>,
     ) {
-        let (entered, entered_observed) = tokio::sync::oneshot::channel();
-        let (released, release) = tokio::sync::oneshot::channel();
-        let previous = cold_mount_final_commit_gate()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                test_gate_root(&project_root),
-                ColdMountFinalCommitGateV1 { entered, release },
-            );
-        assert!(
-            previous.is_none(),
-            "only one cold mount final-commit gate may be armed per project root"
-        );
-        (entered_observed, released)
+        arm_worker_step_gate(
+            cold_mount_final_commit_gate(),
+            test_gate_root(&project_root),
+            format_args!("only one cold mount final-commit gate may be armed per project root"),
+        )
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
     async fn wait_for_cold_mount_final_commit_gate(project_root: &Path) {
-        let gate = cold_mount_final_commit_gate()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&test_gate_root(project_root));
-        if let Some(gate) = gate {
-            let _ = gate.entered.send(());
-            let _ = gate.release.await;
-        }
+        let gate = take_worker_step_gate(
+            cold_mount_final_commit_gate(),
+            &test_gate_root(project_root),
+        );
+        Self::pass_worker_step_gate(gate).await;
     }
 
     /// Pause the next retained graph recovery of `project_root` `at` one of
@@ -2053,22 +2059,14 @@ impl CodeIndexSchedulerRegistryV1 {
         tokio::sync::oneshot::Receiver<()>,
         tokio::sync::oneshot::Sender<()>,
     ) {
-        let (entered, entered_observed) = tokio::sync::oneshot::channel();
-        let (released, release) = tokio::sync::oneshot::channel();
-        let mut gates = retained_graph_recovery_gate()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert!(
-            gates
-                .insert(
-                    (test_gate_root(&project_root), at),
-                    RetainedGraphRecoveryGateV1 { entered, release },
-                )
-                .is_none(),
-            "one retained graph recovery {at:?} gate per worktree: {}",
-            project_root.display()
-        );
-        (entered_observed, released)
+        arm_worker_step_gate(
+            retained_graph_recovery_gate(),
+            (test_gate_root(&project_root), at),
+            format_args!(
+                "one retained graph recovery {at:?} gate per worktree: {}",
+                project_root.display()
+            ),
+        )
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
@@ -2076,14 +2074,11 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         at: RetainedGraphRecoveryPauseV1,
     ) {
-        let gate = retained_graph_recovery_gate()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&(test_gate_root(project_root), at));
-        if let Some(gate) = gate {
-            let _ = gate.entered.send(());
-            let _ = gate.release.await;
-        }
+        let gate = take_worker_step_gate(
+            retained_graph_recovery_gate(),
+            &(test_gate_root(project_root), at),
+        );
+        Self::pass_worker_step_gate(gate).await;
     }
 
     /// Hold a restart's retained text projection at its first advance, so a
@@ -2099,35 +2094,33 @@ impl CodeIndexSchedulerRegistryV1 {
         tokio::sync::oneshot::Receiver<()>,
         tokio::sync::oneshot::Sender<()>,
     ) {
-        let (entered, entered_observed) = tokio::sync::oneshot::channel();
-        let (released, release) = tokio::sync::oneshot::channel();
-        let mut gates = retained_text_projection_gate()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert!(
-            gates
-                .insert(
-                    test_gate_root(&project_root),
-                    RetainedTextProjectionGateV1 { entered, release },
-                )
-                .is_none(),
-            "one retained text projection gate per worktree: {}",
-            project_root.display()
-        );
-        (entered_observed, released)
+        arm_worker_step_gate(
+            retained_text_projection_gate(),
+            test_gate_root(&project_root),
+            format_args!(
+                "one retained text projection gate per worktree: {}",
+                project_root.display()
+            ),
+        )
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
     async fn wait_for_retained_text_projection_gate(project_root: &Path) {
-        let gate = retained_text_projection_gate()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&test_gate_root(project_root));
+        let gate = take_worker_step_gate(
+            retained_text_projection_gate(),
+            &test_gate_root(project_root),
+        );
+        Self::pass_worker_step_gate(gate).await;
+    }
+
+    #[cfg(any(test, feature = "test-helpers"))]
+    async fn pass_worker_step_gate(gate: Option<WorkerStepGateV1>) {
         if let Some(gate) = gate {
             let _ = gate.entered.send(());
             let _ = gate.release.await;
         }
     }
+
     /// Construct a registry with an explicit background-reconcile permit count so
     /// tests can deterministically exercise the bounded-admission behavior
     /// (parallelism across distinct stores vs. serialization at a bound of one)
@@ -4013,22 +4006,22 @@ impl tracedecay_application::diagnostics_publication::CodeIndexPublicationIdenti
     }
 }
 
-impl crate::code_index::provider::GenerationTestAttributionJoinReadPort
+impl tracedecay_code_index::provider::GenerationTestAttributionJoinReadPort
     for CodeIndexSchedulerRegistryV1
 {
     fn read_test_attribution(
         &self,
         generation: &CodeGenerationId,
     ) -> Arc<
-        crate::code_index::provider::GenerationProviderReadV1<
-            crate::code_index::test_attribution::GenerationTestJoinV1,
+        tracedecay_code_index::provider::GenerationProviderReadV1<
+            tracedecay_code_index::test_attribution::GenerationTestJoinV1,
         >,
     > {
         let unavailable = || {
             Arc::new(
-                crate::code_index::provider::GenerationProviderReadV1::new(
+                tracedecay_code_index::provider::GenerationProviderReadV1::new(
                     tracedecay_domain::ProviderEvaluationStateV1::Unavailable,
-                    crate::code_index::provider::GenerationProviderCoverageV1::Unavailable,
+                    tracedecay_code_index::provider::GenerationProviderCoverageV1::Unavailable,
                     None,
                 )
                 .unwrap_or_else(|_| panic!("static unavailable attribution read")),

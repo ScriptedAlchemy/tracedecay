@@ -469,14 +469,6 @@ pub struct HealthSnapshotObservedV1 {
     pub dimensions: BTreeMap<String, HealthDimensionObservedV1>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PerformanceDispositionV1 {
-    Promote,
-    Reject,
-    InsufficientEvidence,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -897,14 +889,6 @@ mod tests {
         for (value, expected) in values {
             assert_eq!(serde_json::to_string(&value).unwrap(), expected);
         }
-    }
-
-    #[test]
-    fn performance_disposition_does_not_invent_success() {
-        assert_eq!(
-            serde_json::to_string(&PerformanceDispositionV1::InsufficientEvidence).unwrap(),
-            "\"insufficient_evidence\""
-        );
     }
 
     #[test]

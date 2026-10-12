@@ -7,8 +7,7 @@ use tracedecay_code_index::{
     graph_projection::UnresolvedCallerGapsV1,
     production::{
         CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexProductionErrorV1,
-        CodeIndexProductionOwnerV1, CodeIndexPublishedGenerationV1,
-        SEALED_GENERATION_FORMAT_REVISION_V1,
+        CodeIndexPublishedGenerationV1, SEALED_GENERATION_FORMAT_REVISION_V1,
     },
 };
 use tracedecay_domain::{
@@ -19,9 +18,7 @@ use tracedecay_domain::{
 use tracedecay_graph_db::NeverCancelled;
 
 use crate::{
-    production_orchestration::{
-        ActiveControl, ApplyingProjectionSink, SharedPublicationStore, config, request_with_source,
-    },
+    production_orchestration::{ActiveControl, applying_owner, request_with_source},
     support::{PartitionedSealV1, cold_generation, id},
 };
 
@@ -76,12 +73,7 @@ fn import_request() -> CodeIndexBuildRequestV1 {
 }
 
 fn published_import_generation() -> Arc<CodeIndexPublishedGenerationV1> {
-    let mut owner = CodeIndexProductionOwnerV1::new(
-        config(),
-        SharedPublicationStore::default(),
-        ApplyingProjectionSink,
-    )
-    .expect("production owner");
+    let mut owner = applying_owner();
     cold_generation(
         &owner
             .build_and_publish(import_request(), &ActiveControl)
@@ -146,14 +138,9 @@ fn published_workspace(
         .expect("workspace snapshot is canonical");
 
     cold_generation(
-        &CodeIndexProductionOwnerV1::new(
-            config(),
-            SharedPublicationStore::default(),
-            ApplyingProjectionSink,
-        )
-        .expect("production owner")
-        .build_and_publish(request, &ActiveControl)
-        .expect("workspace generation publishes"),
+        &applying_owner()
+            .build_and_publish(request, &ActiveControl)
+            .expect("workspace generation publishes"),
     )
 }
 

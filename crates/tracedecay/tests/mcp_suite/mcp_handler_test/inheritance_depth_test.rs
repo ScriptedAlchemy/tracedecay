@@ -92,7 +92,7 @@ async fn open_project(files: &[(&str, &str)]) -> OpenedProject {
             "fixture",
         ],
     );
-    let harness = ProductionProjectCompositionHarnessV1::open(dir.path(), [root.clone()])
+    let harness = crate::support::seeded_composition::open(dir.path(), [root.clone()])
         .await
         .expect("production MCP composition");
     let project = OpenedProject {

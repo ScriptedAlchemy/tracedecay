@@ -102,13 +102,6 @@ pub(crate) fn truncate_at_char_boundary(value: &str, max: usize) -> String {
     tracedecay_domain::utf8_prefix_at_or_before(value, max).to_string()
 }
 
-fn coverage(
-    completeness: DoctorCoverageCompletenessV1,
-    statement: &str,
-) -> Result<DoctorCoverageStatementV1, ApplicationContractError> {
-    DoctorCoverageStatementV1::new(completeness, statement)
-}
-
 /// Map an observed retention/size problem into a non-healthy Storage finding.
 fn problem_finding(
     kind: DoctorStorageFindingKindV1,
@@ -138,24 +131,7 @@ fn problem_finding_with_evidence(
         DoctorFindingFamilyV1::Storage,
         state,
         evidence,
-        coverage(completeness, coverage_statement)?,
-    )
-}
-
-/// Map an unobservable evidence source (unsupported/denied/unknown) into a
-/// Storage finding that carries the honest non-healthy state.
-fn unobservable_finding(
-    kind: DoctorStorageFindingKindV1,
-    store: &StoreKeyV1,
-    state: DoctorEvidenceStateV1,
-    detail: &str,
-    coverage_statement: &str,
-) -> Result<DoctorFindingV1, ApplicationContractError> {
-    DoctorFindingV1::new(
-        DoctorFindingFamilyV1::Storage,
-        state,
-        vec![evidence(kind, store, detail)?],
-        coverage(DoctorCoverageCompletenessV1::Unknown, coverage_statement)?,
+        DoctorCoverageStatementV1::new(completeness, coverage_statement)?,
     )
 }
 
@@ -190,7 +166,7 @@ fn clean_finding_with_evidence(
         DoctorFindingFamilyV1::Storage,
         state,
         evidence,
-        coverage(completeness, coverage_statement)?,
+        DoctorCoverageStatementV1::new(completeness, coverage_statement)?,
     )
 }
 
@@ -282,7 +258,7 @@ pub fn table_growth_finding(
         DoctorFindingFamilyV1::Storage,
         state,
         vec![evidence(kind, store, &detail)?],
-        coverage(completeness, statement)?,
+        DoctorCoverageStatementV1::new(completeness, statement)?,
     )?;
     DoctorStorageFindingV1::new(kind, finding)
 }
@@ -351,24 +327,27 @@ pub fn over_budget_finding(
                 )?
             }
         }
-        StorageTelemetryReadV1::Unsupported { store } => unobservable_finding(
+        StorageTelemetryReadV1::Unsupported { store } => problem_finding(
             kind,
             store,
             DoctorEvidenceStateV1::Unsupported,
+            DoctorCoverageCompletenessV1::Unknown,
             "telemetry-unsupported",
             "store size telemetry unsupported on this platform",
         )?,
-        StorageTelemetryReadV1::Denied { store } => unobservable_finding(
+        StorageTelemetryReadV1::Denied { store } => problem_finding(
             kind,
             store,
             DoctorEvidenceStateV1::Denied,
+            DoctorCoverageCompletenessV1::Unknown,
             "telemetry-denied",
             "store size telemetry read denied",
         )?,
-        StorageTelemetryReadV1::Unknown { store } => unobservable_finding(
+        StorageTelemetryReadV1::Unknown { store } => problem_finding(
             kind,
             store,
             DoctorEvidenceStateV1::Unknown,
+            DoctorCoverageCompletenessV1::Unknown,
             "telemetry-unknown",
             "store size telemetry undetermined",
         )?,

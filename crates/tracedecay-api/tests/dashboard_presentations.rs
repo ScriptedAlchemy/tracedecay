@@ -5,7 +5,7 @@ use tracedecay_api::configuration::{
 };
 use tracedecay_api::feedback::{
     FeedbackStatusCoverageV1, FeedbackStatusDenominatorsV1, FeedbackStatusPresentationV1,
-    dashboard_feedback_read_route, feedback_status_envelope,
+    feedback_status_envelope,
 };
 use tracedecay_api::read_model::{
     DashboardCoverageCompletenessV1, DashboardDomainStateV1, DashboardScopeV1,
@@ -61,14 +61,7 @@ fn configuration_patch_and_cas_errors_are_api_owned() {
 }
 
 #[test]
-fn feedback_read_descriptor_and_mapper_keep_unknowns_explicit() {
-    let route =
-        dashboard_feedback_read_route("POST", "feedback/get").expect("feedback get descriptor");
-    assert_eq!(route.application_path, "/get");
-    assert_eq!(route.operation.as_str(), "feedback_get");
-    assert!(dashboard_feedback_read_route("GET", "feedback/get").is_none());
-    assert!(dashboard_feedback_read_route("POST", "feedback/status").is_none());
-
+fn feedback_status_mapper_keeps_unknowns_explicit() {
     let partial = feedback_status_envelope(
         scope(),
         Ok::<_, ()>(FeedbackStatusPresentationV1 {

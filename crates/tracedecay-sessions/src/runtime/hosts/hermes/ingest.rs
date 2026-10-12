@@ -96,45 +96,20 @@ pub async fn ingest_for_project(
     project_id: ProjectId,
 ) -> Option<TranscriptIngestStats> {
     Some(
-        ingest_for_project_capped(admission, project_root, project_id, None)
-            .await?
-            .stats,
+        ingest_for_project_capped_with_admission_and_cancellation(
+            project_root,
+            project_id,
+            admission,
+            None,
+            &ObservationCancellation::default(),
+        )
+        .await?
+        .stats,
     )
 }
 
 /// [`ingest_for_project`] with one aggregate logical source-byte budget shared
 /// across every discovered Hermes profile.
-pub async fn ingest_for_project_capped(
-    admission: &dyn HostAdmission,
-    project_root: &Path,
-    project_id: ProjectId,
-    max_new_bytes: Option<u64>,
-) -> Option<HermesSweepOutcome> {
-    ingest_for_project_capped_with_admission(project_root, project_id, admission, max_new_bytes)
-        .await
-}
-
-/// Project ingestion with the already-prepared central host-admission facade.
-///
-/// The project provider composes repository provenance once from the
-/// authoritative project root and passes it through this path. Direct and
-/// profile entrypoints intentionally continue to construct their own facade.
-pub async fn ingest_for_project_capped_with_admission(
-    project_root: &Path,
-    project_id: ProjectId,
-    admission: &dyn HostAdmission,
-    max_new_bytes: Option<u64>,
-) -> Option<HermesSweepOutcome> {
-    ingest_for_project_capped_with_admission_and_cancellation(
-        project_root,
-        project_id,
-        admission,
-        max_new_bytes,
-        &ObservationCancellation::default(),
-    )
-    .await
-}
-
 pub async fn ingest_for_project_capped_with_admission_and_cancellation(
     project_root: &Path,
     project_id: ProjectId,
@@ -168,16 +143,6 @@ pub struct ProjectIngestDestination<'a> {
 /// scanning each profile `state.db` only once. Every destination retains its
 /// own authoritative source cursor, advanced atomically with canonical
 /// observation persistence or typed complete-record coverage.
-pub async fn ingest_for_projects(
-    destinations: &[ProjectIngestDestination<'_>],
-) -> TranscriptIngestResult<Option<TranscriptIngestStats>> {
-    let Some(homes) = hermes_homes() else {
-        return Ok(None);
-    };
-    Ok(Some(ingest_homes_for_projects(&homes, destinations).await?))
-}
-
-/// Test seam for [`ingest_for_projects`].
 #[tracing::instrument(
     name = "sessions.hosts.hermes.ingest_projects",
     level = "trace",
@@ -257,26 +222,9 @@ pub async fn ingest_homes(
     project_root: &Path,
     project_id: ProjectId,
 ) -> TranscriptIngestStats {
-    ingest_homes_capped(admission, hermes_homes, project_root, project_id, None)
+    ingest_homes_capped_with_admission(hermes_homes, project_root, project_id, admission, None)
         .await
         .stats
-}
-
-pub async fn ingest_homes_capped(
-    admission: &dyn HostAdmission,
-    hermes_homes: &[PathBuf],
-    project_root: &Path,
-    project_id: ProjectId,
-    max_new_bytes: Option<u64>,
-) -> HermesSweepOutcome {
-    ingest_homes_capped_with_admission(
-        hermes_homes,
-        project_root,
-        project_id,
-        admission,
-        max_new_bytes,
-    )
-    .await
 }
 
 pub async fn ingest_homes_capped_with_admission(
@@ -385,15 +333,6 @@ pub(super) async fn ingest_homes_capped_with_admission_and_cancellation(
 /// one aggregate logical source-byte budget shared across every discovered
 /// Hermes profile. Project ingestion separately admits each turn to every
 /// registered project it touched using the same stable message IDs.
-pub async fn ingest_user_sessions_capped(
-    admission: &dyn HostAdmission,
-    registered_roots: &[PathBuf],
-    max_new_bytes: Option<u64>,
-) -> Option<HermesSweepOutcome> {
-    let homes = hermes_homes()?;
-    Some(ingest_user_homes_capped(admission, &homes, registered_roots, max_new_bytes).await)
-}
-
 pub async fn ingest_user_sessions_capped_with_admission(
     admission: &dyn HostAdmission,
     registered_roots: &[PathBuf],

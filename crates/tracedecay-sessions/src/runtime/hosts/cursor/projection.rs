@@ -78,22 +78,6 @@ pub fn try_ingest_cursor_project_sweep_capped_with_admission<'a, S: BuildHasher>
     Box::pin(async move { sweep.await.map(|outcome| outcome.stats) })
 }
 
-pub async fn try_ingest_cursor_user_sweep_capped<S: BuildHasher>(
-    registered_roots: &[PathBuf],
-    admission: &dyn HostAdmission,
-    max_new_bytes: Option<u64>,
-    skip_session_ids: HashSet<String, S>,
-) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
-    try_ingest_cursor_user_sweep_capped_with_admission(
-        registered_roots,
-        admission,
-        max_new_bytes,
-        skip_session_ids,
-        &ObservationCancellation::default(),
-    )
-    .await
-}
-
 pub async fn try_ingest_cursor_user_sweep_capped_with_admission<S: BuildHasher>(
     registered_roots: &[PathBuf],
     admission: &dyn HostAdmission,

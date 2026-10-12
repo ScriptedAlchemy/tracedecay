@@ -261,7 +261,7 @@ async fn open_ranked_project() -> RankedProject {
     git(&project_root, &["add", "src/lib.rs"]);
     commit(&project_root, "touch src/lib.rs");
 
-    let harness = Box::pin(ProductionProjectCompositionHarnessV1::open(
+    let harness = Box::pin(crate::support::seeded_composition::open(
         isolation.path(),
         vec![project_root.clone()],
     ))

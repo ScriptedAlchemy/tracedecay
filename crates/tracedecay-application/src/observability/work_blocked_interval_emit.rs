@@ -5,8 +5,8 @@ use tracedecay_domain::{
 };
 
 use super::{
-    BoundedObservabilityProducerV1, ExecutionOwnerFactInputV1, ObservabilityEmissionOutcomeV1,
-    WorkOwnerObservationResultV1, execution_owner_fact_envelope,
+    BoundedObservabilityProducerV1, ExecutionOwnerFactInputV1, WorkOwnerObservationResultV1,
+    execution_owner_fact_envelope,
 };
 
 /// Offers one exact open or settled interval receipt without awaiting telemetry.
@@ -31,13 +31,7 @@ pub fn record_work_blocked_interval_observation(
         Ok(envelope) => envelope,
         Err(_) => return WorkOwnerObservationResultV1::Unavailable,
     };
-    match producer.try_emit_owner_fact(envelope) {
-        Ok(ObservabilityEmissionOutcomeV1::Enqueued) => WorkOwnerObservationResultV1::Enqueued,
-        Ok(ObservabilityEmissionOutcomeV1::DroppedAtCapacity) => {
-            WorkOwnerObservationResultV1::DroppedAtCapacity
-        }
-        Err(_) => WorkOwnerObservationResultV1::Unavailable,
-    }
+    super::work_retry_leak_emit::offer(producer, envelope)
 }
 
 /// Builds the canonical owner envelope for one blocked-interval revision.

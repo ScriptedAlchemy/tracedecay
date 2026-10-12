@@ -51,32 +51,18 @@ pub(crate) struct VersionCheckState {
     pub(crate) refreshing: bool,
 }
 
-/// Shared compare-and-swap cooldown gate for the lazy staleness check and
-/// background read refresh. Each
-/// wraps one `AtomicI64` timestamp field on [`McpServer`]; `try_claim`
-/// single-flights concurrent callers off that stamp so at most one
-/// caller per window proceeds.
-///
-/// Note: call sites are inconsistent about additionally special-casing
-/// a `0` (never-checked) stamp before calling `try_claim`, some do,
-/// some don't. That inconsistency predates this extraction and is
-/// preserved as-is here rather than harmonized.
-struct CooldownGate;
-
-impl CooldownGate {
-    /// Returns `true` iff at least `window_secs` have elapsed since
-    /// `atomic`'s last stamp and this call won the race to advance it
-    /// to `now`. The loser of a race bails so at most one caller
-    /// within each window proceeds.
-    fn try_claim(&self, atomic: &AtomicI64, now: i64, window_secs: i64) -> bool {
-        let previous = atomic.load(Ordering::Acquire);
-        if now.saturating_sub(previous) < window_secs {
-            return false;
-        }
-        atomic
-            .compare_exchange(previous, now, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+/// Compare-and-swap cooldown gate for the lazy staleness check and background
+/// read refresh. Returns `true` iff at least `window_secs` have elapsed since
+/// `atomic`'s last stamp and this call won the race to advance it to `now`, so
+/// at most one caller per window proceeds.
+fn try_claim_cooldown(atomic: &AtomicI64, now: i64, window_secs: i64) -> bool {
+    let previous = atomic.load(Ordering::Acquire);
+    if now.saturating_sub(previous) < window_secs {
+        return false;
     }
+    atomic
+        .compare_exchange(previous, now, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
 }
 
 impl McpServer {
@@ -242,12 +228,14 @@ impl McpServer {
     }
 
     /// Polls until at least one branch reopen has completed past `after`, or
-    /// until `timeout` elapses. Returns `true` if one landed.
-    ///
-    /// Reopens do not block requests, so tests (and any caller that genuinely
-    /// needs the post-swap state rather than an answer) observe completion here.
-    #[doc(hidden)]
-    pub async fn wait_for_branch_reopen(&self, after: u64, timeout: std::time::Duration) -> bool {
+    /// until `timeout` elapses. Returns `true` if one landed. Reopens do not
+    /// block requests, so tests observe completion here.
+    #[cfg(test)]
+    pub(crate) async fn wait_for_branch_reopen(
+        &self,
+        after: u64,
+        timeout: std::time::Duration,
+    ) -> bool {
         let deadline = tokio::time::Instant::now() + timeout;
         while self.branch_reopen_completions.load(Ordering::Acquire) <= after {
             if tokio::time::Instant::now() >= deadline {
@@ -259,8 +247,8 @@ impl McpServer {
     }
 
     /// Number of branch reopens that have completed so far.
-    #[doc(hidden)]
-    pub fn branch_reopens_completed(&self) -> u64 {
+    #[cfg(test)]
+    pub(crate) fn branch_reopens_completed(&self) -> u64 {
         self.branch_reopen_completions.load(Ordering::Acquire)
     }
 
@@ -357,12 +345,7 @@ impl McpServer {
         }
         let cg = self.cg_snapshot().await;
         let now = tracedecay_runtime_core::tracedecay::current_timestamp();
-        let previous = self.last_staleness_check_at.load(Ordering::Acquire);
-        if previous != 0 && now.saturating_sub(previous) < 30 {
-            return;
-        }
-
-        if !CooldownGate.try_claim(&self.last_staleness_check_at, now, 30) {
+        if !try_claim_cooldown(&self.last_staleness_check_at, now, 30) {
             return;
         }
 
@@ -375,7 +358,7 @@ impl McpServer {
         // the guard only fires on a checkout racing the current call.
         //
         // R4: deliberately resolves its own branch rather than taking the
-        // request memo. The `CooldownGate` claim above rate-limits this path
+        // request memo. The cooldown claim above rate-limits this path
         // to once per 30s, so it is not a per-request cost, and re-reading
         // HEAD here keeps the racing-checkout guard genuine.
         if cg.branch_drifted() {
@@ -431,12 +414,8 @@ impl McpServer {
 
         let now = tracedecay_runtime_core::tracedecay::current_timestamp();
         let cooldown = self.sync_config.read_cooldown_secs as i64;
-        let previous = self.last_background_refresh_at.load(Ordering::Acquire);
-        if previous != 0 && now.saturating_sub(previous) < cooldown {
-            return;
-        }
         // Reserve the cooldown slot. If another read call won the race, bail.
-        if !CooldownGate.try_claim(&self.last_background_refresh_at, now, cooldown) {
+        if !try_claim_cooldown(&self.last_background_refresh_at, now, cooldown) {
             return;
         }
         // Reserve the single-flight slot. If a refresh is already running

@@ -24,7 +24,7 @@ use super::{
     CodeIndexWorktreeSchedulerV1, LatestCompleteCodeIndexV1, SourceContentManifestV1,
     StaticLanguageRegistry, now_micros, projection_key,
 };
-use crate::code_index::languages::LanguageRegistry;
+use tracedecay_code_index::languages::LanguageRegistry;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 pub const ADMITTED_SOURCE_READ_CHUNK_BYTES: usize = 64 * 1024;

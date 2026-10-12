@@ -159,31 +159,6 @@ fn transient_daemon_connect_errors_cover_restart_window_only() {
     ));
 }
 
-#[test]
-fn read_deadline_classifier_accepts_typed_stalled() {
-    let error =
-        tracedecay_daemon_protocol::daemon_response_stalled(std::time::Duration::from_secs(5));
-    assert!(
-        super::super::error_is_read_deadline(&error),
-        "typed stalled must classify as a read deadline"
-    );
-    let prose = tracedecay_domain::errors::TraceDecayError::Config {
-        message: "daemon did not answer after 5s; stalled or saturated".to_owned(),
-    };
-    assert!(
-        !super::super::error_is_read_deadline(&prose),
-        "stalled English prose must not classify as a read deadline"
-    );
-    let down = tracedecay_daemon_protocol::daemon_connect_failure(
-        "/tmp/daemon.sock",
-        &std::io::Error::from(std::io::ErrorKind::NotFound),
-    );
-    assert!(
-        !super::super::error_is_read_deadline(&down),
-        "connect-down must not classify as a read deadline"
-    );
-}
-
 #[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn connect_with_restart_grace_reconnects_once_daemon_rebinds() {

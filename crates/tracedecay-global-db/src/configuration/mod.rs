@@ -15,8 +15,7 @@ pub use schema::{
     fresh_configuration_store_evidence,
 };
 pub use store::{
-    ConfigurationStorageError, GlobalDbConfigurationControlStore,
-    OwnedGlobalDbConfigurationControlStore, ProfileCodeIndexWorkerCommitV1,
-    ProfileCodeIndexWorkerConfigurationV1, ProfileConfigurationCommitV1, ProfileConfigurationStore,
-    ProfileConfigurationV1,
+    GlobalDbConfigurationControlStore, OwnedGlobalDbConfigurationControlStore,
+    ProfileCodeIndexWorkerCommitV1, ProfileCodeIndexWorkerConfigurationV1,
+    ProfileConfigurationCommitV1, ProfileConfigurationStore, ProfileConfigurationV1,
 };

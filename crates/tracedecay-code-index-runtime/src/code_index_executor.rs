@@ -328,7 +328,7 @@ pub struct CodeIndexDisplayPathIndexV1 {
 
 impl CodeIndexDisplayPathIndexV1 {
     pub fn for_generation(
-        generation: &crate::code_index::production::CodeIndexPublishedGenerationV1,
+        generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
     ) -> std::result::Result<Self, tracedecay_query::retrieval::hydrate::HydrationUnavailableV1>
     {
         use tracedecay_query::retrieval::hydrate::HydrationUnavailableV1;
@@ -339,7 +339,7 @@ impl CodeIndexDisplayPathIndexV1 {
             if file.disposition != tracedecay_domain::SnapshotFileDispositionV1::Present {
                 continue;
             }
-            let identity = crate::code_index::chunks::code_file_identity(
+            let identity = tracedecay_code_index::chunks::code_file_identity(
                 snapshot.repository.as_str(),
                 &file.logical_path,
             )
@@ -355,7 +355,7 @@ impl CodeIndexDisplayPathIndexV1 {
 }
 
 pub fn code_index_search_display_binding(
-    generation: &crate::code_index::production::CodeIndexPublishedGenerationV1,
+    generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
     display_paths: &CodeIndexDisplayPathIndexV1,
     request: &tracedecay_domain::RetrievalRequest,
     candidate: &tracedecay_domain::RankedCandidate,
@@ -735,7 +735,7 @@ fn serves_symbol_body(
 /// piece. A signature chunk is the opening line of that first piece, so a
 /// signature match serves the declaration it opens instead of one line.
 fn symbol_body_chunk<'g>(
-    generation: &'g crate::code_index::production::CodeIndexPublishedGenerationV1,
+    generation: &'g tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
     occurrence: &tracedecay_domain::SymbolOccurrenceId,
     matched: Option<&'g tracedecay_domain::CodeSearchChunkV1>,
 ) -> Option<&'g tracedecay_domain::CodeSearchChunkV1> {
@@ -762,7 +762,7 @@ fn published_chunk_window(
 }
 
 fn code_index_symbol_display(
-    symbol: &crate::code_index::lineage::LineageSymbolRecordV1,
+    symbol: &tracedecay_code_index::lineage::LineageSymbolRecordV1,
     display_paths: &CodeIndexDisplayPathIndexV1,
     code_window: Option<code_search::CodeIndexSearchWindowV1>,
 ) -> std::result::Result<

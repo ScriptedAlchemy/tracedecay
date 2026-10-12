@@ -53,8 +53,7 @@ pub use detect::{
     DetectionConfidenceV1, MEMORY_FACT_SANITIZER_VERSION_V1, MemoryFactSanitizationV1,
     PrivacyDetectorV1, SanitizationActionV1, SanitizationEvidenceAnchorV1, SanitizationFindingV1,
     SanitizedPayloadVerificationError, sanitize_memory_fact_payload,
-    serialize_verified_json_payload, verify_memory_fact_sanitization,
-    verify_sanitized_json_payload,
+    verify_memory_fact_sanitization, verify_sanitized_json_payload,
 };
 pub use lcm::{
     LcmSensitiveRedactionPolicyV1, LcmSensitiveRedactionV1, redact_lcm_sensitive_payload,

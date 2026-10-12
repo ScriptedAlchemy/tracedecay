@@ -95,22 +95,6 @@ impl<S> WorkAttemptService<S>
 where
     S: WorkAttemptStoragePort,
 {
-    /// Reads exact current capacity for one task without reserving it.
-    pub fn admission_capacity_against_registered_topology(
-        &self,
-        context: &RequestContext,
-        task_id: &TaskId,
-        registered_topology: &WorkTopologyPolicyV1,
-    ) -> Result<WorkAttemptCapacityV1, ApplicationProblem> {
-        self.admission_capacities_against_registered_topology(
-            context,
-            std::slice::from_ref(task_id),
-            registered_topology,
-        )?
-        .remove(task_id)
-        .ok_or_else(capacity_query_problem)
-    }
-
     /// Reads one coherent capacity snapshot for a canonical task set. Inputs
     /// must be strictly sorted and unique so callers cannot hide duplicate
     /// census work or produce order-dependent evidence.

@@ -13,8 +13,7 @@ use tracedecay_graph_db::{
     GraphGenerationManifest, GraphGenerationRelation, GraphIdempotencyKey, GraphLabel,
     GraphNamespace, GraphProjectionId, GraphProjectionIdentity, GraphProjectorRevision,
     GraphProperty, GraphPropertyName, GraphRelationId, GraphRelationKind, GraphStoreFailureClass,
-    GraphTraversalDirection, GraphWatermark, SourceGeneration, TraversalRequest,
-    VerifiedGraphSnapshot, classify_graph_store_error,
+    GraphWatermark, SourceGeneration, VerifiedGraphSnapshot, classify_graph_store_error,
 };
 
 const WORKFLOW_PROJECTION: &str = "workflow-topology";
@@ -275,76 +274,6 @@ impl WorkflowTopologyStore {
         }
         Ok(ready)
     }
-
-    pub fn descendants(
-        &self,
-        step_id: &WorkflowStepId,
-        max_depth: usize,
-        max_results: usize,
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<Vec<WorkflowStepId>, WorkflowTopologyError> {
-        if max_depth == 0 || max_results == 0 {
-            return Err(WorkflowTopologyError::Contract(
-                "workflow traversal bounds must be positive".to_owned(),
-            ));
-        }
-        let result = self.snapshot.traverse(TraversalRequest {
-            namespace: self.projection.namespace.clone(),
-            start: step_entity_id(step_id)?,
-            relation_kinds: BTreeSet::from([GraphRelationKind::new(PRECEDES_RELATION)?]),
-            direction: GraphTraversalDirection::Outgoing,
-            max_depth,
-            max_visits: max_results.saturating_add(1),
-            max_results,
-            cancellation: Arc::clone(&cancellation),
-        })?;
-        result
-            .visits
-            .into_iter()
-            .map(|visit| step_id_from_ref(&self.snapshot, &visit.entity, Arc::clone(&cancellation)))
-            .filter(|result| result.as_ref() != Ok(step_id))
-            .collect()
-    }
-
-    pub fn topological_order(
-        &self,
-        cancellation: Arc<dyn GraphCancellation>,
-    ) -> Result<Vec<WorkflowStepId>, WorkflowTopologyError> {
-        let mut remaining = BTreeMap::new();
-        for step_id in &self.step_ids {
-            check_cancelled(cancellation.as_ref())?;
-            let step = self
-                .step(step_id, Arc::clone(&cancellation))?
-                .ok_or_else(|| {
-                    WorkflowTopologyError::Corrupt(
-                        "verified workflow topology is missing a step".to_owned(),
-                    )
-                })?;
-            remaining.insert(step_id.clone(), step.predecessors);
-        }
-        let mut ordered = Vec::with_capacity(remaining.len());
-        while !remaining.is_empty() {
-            check_cancelled(cancellation.as_ref())?;
-            let ready = remaining
-                .iter()
-                .filter(|(_, predecessors)| predecessors.is_empty())
-                .map(|(step_id, _)| step_id.clone())
-                .collect::<Vec<_>>();
-            if ready.is_empty() {
-                return Err(WorkflowTopologyError::Corrupt(
-                    "verified workflow topology contains a cycle".to_owned(),
-                ));
-            }
-            for step_id in ready {
-                remaining.remove(&step_id);
-                for predecessors in remaining.values_mut() {
-                    predecessors.remove(&step_id);
-                }
-                ordered.push(step_id);
-            }
-        }
-        Ok(ordered)
-    }
 }
 
 fn step_entity(step: &WorkflowStep) -> Result<GraphEntity, WorkflowTopologyError> {
@@ -381,27 +310,6 @@ fn precedes_relation(
         BTreeMap::new(),
     )
     .map_err(Into::into)
-}
-
-fn step_id_from_ref(
-    snapshot: &VerifiedGraphSnapshot,
-    reference: &GraphEntityRef,
-    cancellation: Arc<dyn GraphCancellation>,
-) -> Result<WorkflowStepId, WorkflowTopologyError> {
-    let entity = snapshot.entity(reference, cancellation)?.ok_or_else(|| {
-        WorkflowTopologyError::Corrupt("workflow traversal reached a missing step".to_owned())
-    })?;
-    let property = entity
-        .properties
-        .get(&GraphPropertyName::new(STEP_ID_PROPERTY)?)
-        .ok_or_else(|| WorkflowTopologyError::Corrupt("workflow step ID is missing".to_owned()))?;
-    let GraphProperty::String(value) = property else {
-        return Err(WorkflowTopologyError::Corrupt(
-            "workflow step ID has the wrong property type".to_owned(),
-        ));
-    };
-    WorkflowStepId::new(value.clone())
-        .map_err(|error| WorkflowTopologyError::Corrupt(error.to_string()))
 }
 
 fn step_entity_id(step_id: &WorkflowStepId) -> Result<GraphEntityId, WorkflowTopologyError> {

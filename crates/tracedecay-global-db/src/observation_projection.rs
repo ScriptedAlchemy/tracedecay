@@ -9,6 +9,7 @@ mod transition;
 
 #[cfg(test)]
 pub(crate) use apply::apply_provider_usage_effects;
+pub(crate) use apply::provider_usage_scope;
 pub(super) use apply::{
     ConvergedRendering, converge_released_output_rendering, derive_projection,
     derive_projection_with_alias, retire_source_record, verify_workflow_effects,

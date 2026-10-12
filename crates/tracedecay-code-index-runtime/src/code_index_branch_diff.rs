@@ -67,7 +67,7 @@ pub struct CodeIndexRevisionPairRequestV1 {
 }
 
 fn generation_counts(
-    generation: &crate::code_index::production::CodeIndexPublishedGenerationV1,
+    generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
 ) -> GenerationCountsV1 {
     GenerationCountsV1 {
         files: generation.snapshot().files.len(),
@@ -149,7 +149,7 @@ pub fn diff_symbols(
 }
 
 pub fn generation_symbols(
-    generation: &crate::code_index::production::CodeIndexPublishedGenerationV1,
+    generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
     file_filter: Option<&str>,
     kind_filter: Option<&str>,
     control: &code_index_scheduler::branch_generations::BranchGenerationReadControlV1,
@@ -219,7 +219,7 @@ pub fn generation_symbols(
 }
 
 fn generation_files(
-    generation: &crate::code_index::production::CodeIndexPublishedGenerationV1,
+    generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
     file_filter: Option<&str>,
 ) -> Result<Vec<CodeIndexRevisionFileV1>, code_search::CodeIndexSearchUnavailableReasonV1> {
     let repository = generation.snapshot().repository.as_str();
@@ -277,7 +277,7 @@ pub async fn revision_pair_layout_inputs(
     {
         return Err(code_search::CodeIndexSearchUnavailableReasonV1::CapacityUnavailable);
     }
-    let read = |generation: &crate::code_index::production::CodeIndexPublishedGenerationV1| {
+    let read = |generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1| {
         let symbols = generation_symbols(
             generation,
             request.file_filter.as_deref(),
@@ -334,8 +334,8 @@ fn page_diff_changes(
 }
 
 pub fn bounded_diff(
-    base: &crate::code_index::production::CodeIndexPublishedGenerationV1,
-    head: &crate::code_index::production::CodeIndexPublishedGenerationV1,
+    base: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
+    head: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
     file_filter: Option<&str>,
     kind_filter: Option<&str>,
     control: &code_index_scheduler::branch_generations::BranchGenerationReadControlV1,

@@ -140,20 +140,6 @@ async fn cursor_session_start_response(
     (root, output)
 }
 
-/// Pure decision logic for Cursor `subagentStart` hook events.
-///
-/// Cursor subagents must be allowed to start.
-///
-/// Earlier versions denied research/explore subagents in favor of tracedecay MCP
-/// tools. In Cursor this can surface as a misleading "bubble creation" timeout,
-/// and it prevents explicit user requests to use agents. Keep this handler
-/// fail-open so stale installs that still register `subagentStart` do not block
-/// subagent creation.
-pub fn evaluate_cursor_subagent_start(event_json: &str) -> Option<String> {
-    let _ = event_json;
-    None
-}
-
 fn format_cursor_post_tool_use_decision(hint: &ToolHint) -> String {
     serde_json::json!({
         "additional_context": format_tool_hint(hint),

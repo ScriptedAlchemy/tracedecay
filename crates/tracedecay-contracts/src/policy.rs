@@ -20,9 +20,9 @@ use tracedecay_policy::analyzer::{
 use tracedecay_policy::identity::PolicyIdentifierV1;
 use tracedecay_policy::routing::{
     CapabilityAvailabilityV1, CapabilityEffectClassV1, CapabilityRouteCandidateV1,
-    CapabilityRoutingCancellationV1, CapabilityRoutingDecisionV1, CapabilityRoutingEvaluator,
-    CapabilityRoutingEvaluatorV1, CapabilityRoutingGrantStateV1, CapabilityRoutingGrantV1,
-    CapabilityRoutingRequestV1, ScopeMatchV1, TruthFreshnessRequirementV1, TruthSourceStateV1,
+    CapabilityRoutingCancellationV1, CapabilityRoutingDecisionV1, CapabilityRoutingEvaluatorV1,
+    CapabilityRoutingGrantStateV1, CapabilityRoutingGrantV1, CapabilityRoutingRequestV1,
+    ScopeMatchV1, TruthFreshnessRequirementV1, TruthSourceStateV1,
     TruthSourceStateV1::{Fresh, Partial, Stale, Unavailable, Unknown},
 };
 use tracedecay_tool_catalog::{AvailabilityContract, EffectClass, UseCaseId};
@@ -190,28 +190,6 @@ pub struct RegisteredPolicyCapabilityV1 {
     catalog_availability: CapabilityAvailabilityV1,
     effect_class: EffectClass,
     capability_digest: ManifestDigest,
-}
-
-impl RegisteredPolicyCapabilityV1 {
-    pub fn capability_id(&self) -> &str {
-        &self.capability_id
-    }
-
-    pub const fn effect_class(&self) -> EffectClass {
-        self.effect_class
-    }
-
-    pub const fn catalog_availability(&self) -> CapabilityAvailabilityV1 {
-        self.catalog_availability
-    }
-
-    pub fn use_case_id(&self) -> &str {
-        &self.use_case_id
-    }
-
-    pub fn capability_digest(&self) -> &ManifestDigest {
-        &self.capability_digest
-    }
 }
 
 /// Production composition of existing pure evaluators.

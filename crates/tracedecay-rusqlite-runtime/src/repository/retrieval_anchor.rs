@@ -36,7 +36,7 @@ impl RetrievalAnchorExecutor {
             };
         }
         let current = current_state(savepoint, record.anchor_id(), record.owner(), &owner_json)?;
-        if !transition_allowed(current, record.state()) {
+        if !AnchorDispositionStateV1::transition_allowed(current, record.state()) {
             return Err(invalid("invalid retrieval anchor disposition transition"));
         }
         savepoint.execute(
@@ -55,7 +55,7 @@ impl RetrievalAnchorExecutor {
                 record_json,
             ],
         )?;
-        if suppresses_derivatives(record.state()) {
+        if record.state().suppresses_derivatives() {
             savepoint.execute(
                 "INSERT INTO retrieval_anchor_derivative_tombstones (
                     source_anchor_id, owner_json, derivative_kind, derivative_id,
@@ -297,24 +297,6 @@ fn read_derivatives(
             .map_err(invalid)
         })?
         .collect()
-}
-
-// The disposition legality rules are owned by `AnchorDispositionStateV1` in
-// `tracedecay-store`, because the root authority in
-// `crates/tracedecay-runtime-core/src/db/retrieval_anchor_authority.rs` appends
-// to the same tables and the two
-// must never disagree about what an anchor's history permits. Only the refusal
-// wording in this module is local, and it is observable, so it stays.
-
-fn transition_allowed(
-    current: Option<AnchorDispositionStateV1>,
-    next: AnchorDispositionStateV1,
-) -> bool {
-    AnchorDispositionStateV1::transition_allowed(current, next)
-}
-
-fn suppresses_derivatives(state: AnchorDispositionStateV1) -> bool {
-    state.suppresses_derivatives()
 }
 
 #[cfg(test)]

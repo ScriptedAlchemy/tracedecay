@@ -120,16 +120,8 @@ impl WorkHandoffFrontierV1 {
         &self.task_id
     }
 
-    pub const fn work_version(&self) -> WorkVersion {
-        self.work_version
-    }
-
     pub fn attempts(&self) -> &[WorkHandoffAttemptFrontierV1] {
         &self.attempts
-    }
-
-    pub fn unknowns(&self) -> &[String] {
-        &self.unknowns
     }
 
     pub fn blockers(&self) -> &[String] {

@@ -13,8 +13,8 @@ use tracedecay_domain::{
 };
 
 use super::{
-    BoundedObservabilityProducerV1, ExecutionOwnerFactInputV1, ObservabilityEmissionOutcomeV1,
-    ObservabilityProducerIdentityV1, WorkOwnerObservationResultV1, execution_owner_fact_envelope,
+    BoundedObservabilityProducerV1, ExecutionOwnerFactInputV1, ObservabilityProducerIdentityV1,
+    WorkOwnerObservationResultV1, execution_owner_fact_envelope,
 };
 
 /// One wall-exhaustion kill measured by the live attempt-execution owner.
@@ -43,13 +43,7 @@ pub fn record_no_progress_observation(
         Ok(envelope) => envelope,
         Err(_) => return WorkOwnerObservationResultV1::Unavailable,
     };
-    match producer.try_emit_owner_fact(envelope) {
-        Ok(ObservabilityEmissionOutcomeV1::Enqueued) => WorkOwnerObservationResultV1::Enqueued,
-        Ok(ObservabilityEmissionOutcomeV1::DroppedAtCapacity) => {
-            WorkOwnerObservationResultV1::DroppedAtCapacity
-        }
-        Err(_) => WorkOwnerObservationResultV1::Unavailable,
-    }
+    super::work_retry_leak_emit::offer(producer, envelope)
 }
 
 /// Builds the canonical owner envelope for one wall-exhaustion kill. The

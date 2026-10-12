@@ -5,7 +5,7 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 use tokio::time::{Duration, timeout};
 
-use super::{DaemonHandshake, projectless_tool_call, write_json_rpc_response};
+use super::{DaemonHandshake, projectless_tool_call, write_daemon_response};
 use tracedecay_contracts::project_open::{ProjectOpenStatusStateV1, ProjectOpenStatusV1};
 use tracedecay_daemon_service::shutdown::DaemonActivity;
 use tracedecay_domain::errors::Result;
@@ -595,7 +595,7 @@ pub(in crate::daemon) async fn write_doctor_runtime_response(
         });
     }
     let result = doctor_runtime_tool_result(value);
-    Box::pin(write_json_rpc_response(
+    Box::pin(write_daemon_response(
         transport,
         &JsonRpcResponse::success(request.id, result),
     ))
@@ -677,7 +677,7 @@ where
             id,
         ))
         .await?;
-        Box::pin(write_json_rpc_response(transport, &response)).await?;
+        Box::pin(write_daemon_response(transport, &response)).await?;
         return Ok(None);
     }
     let Some(request) = doctor_runtime_request(first_request.parsed()) else {
@@ -692,7 +692,7 @@ where
             || super::stalled_project_open_error(project_open),
             super::ProjectOpenFailure::to_error,
         );
-        Box::pin(write_json_rpc_response(
+        Box::pin(write_daemon_response(
             transport,
             &super::project_open_handshake::project_open_error_response(request.id.clone(), &error),
         ))
@@ -714,7 +714,7 @@ where
                     || tracedecay_mcp::reset_required_context(&error).is_some() =>
             {
                 drop(setup_activity);
-                Box::pin(write_json_rpc_response(
+                Box::pin(write_daemon_response(
                     transport,
                     &super::project_open_handshake::project_open_error_response(
                         request.id.clone(),
@@ -808,7 +808,7 @@ mod doctor_runtime_route_tests {
         }
     }
 
-    async fn initialize_test_project(
+    pub(super) async fn initialize_test_project(
         project_root: &Path,
         profile_root: &Path,
     ) -> tracedecay_runtime_core::storage::StoreLayout {

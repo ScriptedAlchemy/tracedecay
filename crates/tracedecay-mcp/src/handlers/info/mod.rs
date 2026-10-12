@@ -3,6 +3,9 @@
 //! Each tool owns a sibling module; this module holds the constants shared by
 //! more than one sibling, and the re-exports the handler dispatcher calls.
 
+use tracedecay_domain::code_intelligence::NodeKind;
+use tracedecay_domain::errors::{Result, TraceDecayError};
+
 mod config;
 mod files;
 mod port_order;
@@ -27,7 +30,7 @@ pub use status::{
 pub use todos::compute_todos;
 
 /// Default node kinds for port comparisons.
-pub(super) const PORT_DEFAULT_KINDS: &[&str] = &[
+const PORT_DEFAULT_KINDS: &[&str] = &[
     "function",
     "method",
     "class",
@@ -37,3 +40,22 @@ pub(super) const PORT_DEFAULT_KINDS: &[&str] = &[
     "enum",
     "module",
 ];
+
+/// The supported node kinds a port request names, or the defaults when it
+/// names none. Unsupported names are skipped; an empty result is refused.
+fn port_kinds(requested: Option<&[String]>) -> Result<Vec<NodeKind>> {
+    let kinds: Vec<NodeKind> = match requested {
+        Some(names) => names.iter().filter_map(|s| NodeKind::from_str(s)).collect(),
+        None => PORT_DEFAULT_KINDS
+            .iter()
+            .filter_map(|s| NodeKind::from_str(s))
+            .collect(),
+    };
+    if kinds.is_empty() {
+        return Err(TraceDecayError::Config {
+            message: "invalid parameter: kinds must contain at least one supported node kind"
+                .to_owned(),
+        });
+    }
+    Ok(kinds)
+}

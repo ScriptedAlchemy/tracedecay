@@ -9,7 +9,6 @@ use std::{
 };
 
 use super::owner_signals::CodeIndexOwnerSignalsV1;
-use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_contracts::code_index_freshness::CodeIndexConvergenceParkedV1;
 use tracedecay_domain::{CodeGenerationId, ProviderEvaluationStateV1};
 use tracedecay_runtime_core::cancellation::CancellationToken;
@@ -176,34 +175,6 @@ impl CodeIndexSchedulerRegistryV1 {
                 .unwrap_or_else(|error| {
                     Err(CodeIndexSchedulerErrorV1::Identity(format!(
                         "sealed replay-binding read task failed: {error}"
-                    )))
-                }),
-        )
-    }
-
-    /// Load one exact code generation through its durable publication store,
-    /// including a source generation superseded in process-local retention.
-    pub async fn published_generation(
-        &self,
-        project_root: &Path,
-        generation_id: &CodeGenerationId,
-    ) -> Option<Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexSchedulerErrorV1>>
-    {
-        let project_root = canonical_existing_identity(project_root).ok()?;
-        let owner = {
-            let mounted = self.mounted.lock().await;
-            mounted
-                .get(&project_root)?
-                .historical_generation_owner
-                .clone()
-        };
-        let generation_id = generation_id.clone();
-        Some(
-            tokio::task::spawn_blocking(move || owner.published_generation(&generation_id))
-                .await
-                .unwrap_or_else(|error| {
-                    Err(CodeIndexSchedulerErrorV1::Identity(format!(
-                        "published-generation read task failed: {error}"
                     )))
                 }),
         )

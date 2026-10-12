@@ -39,7 +39,7 @@ async fn branch_search_reads_committed_symbols_and_reports_a_missing_branch() {
     let commit = git(&project, &["rev-parse", "HEAD"]);
     let tree = git(&project, &["rev-parse", "HEAD^{tree}"]);
 
-    let harness = Box::pin(ProductionProjectCompositionHarnessV1::open(
+    let harness = Box::pin(crate::support::seeded_composition::open(
         isolation.path(),
         [project.clone()],
     ))

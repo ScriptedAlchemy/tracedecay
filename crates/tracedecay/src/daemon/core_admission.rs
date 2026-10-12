@@ -14,7 +14,7 @@ use super::{
     AuthenticatedFirstRequest, BrokerStream, BrokerStreamTransport, DaemonAuthPreface,
     DaemonHandshake, JsonRpcResponse, McpMethod, Result, StoreAdministration, TraceDecayError,
     binary_version, classify_mcp_method, parse_daemon_invocation_request,
-    read_line_handling_wire_oversized, write_json_rpc_response,
+    read_line_handling_wire_oversized, write_daemon_response,
 };
 use tracedecay_contracts::ApplicationProblem;
 use tracedecay_daemon_protocol::DAEMON_SHUTDOWN_METHOD;
@@ -583,7 +583,7 @@ pub(crate) async fn reject_admitted_request(
                 .and_then(|request| request.id.clone())
                 .unwrap_or(serde_json::Value::Null);
             let response = saturation.into_json_rpc_with_id(request_id);
-            write_json_rpc_response(transport, &response).await?;
+            write_daemon_response(transport, &response).await?;
         }
     }
     log_daemon_event("daemon_client", &[("outcome", outcome.to_string())]);
@@ -647,8 +647,7 @@ pub(crate) async fn reject_saturated_daemon_client(
                 .ok()
                 .and_then(|request| request.get("id").cloned())
                 .unwrap_or(serde_json::Value::Null);
-            write_json_rpc_response(&mut transport, &response.into_json_rpc_with_id(request_id))
-                .await
+            write_daemon_response(&mut transport, &response.into_json_rpc_with_id(request_id)).await
         }
     };
     match timeout(DAEMON_SATURATION_RESPONSE_DEADLINE, response).await {

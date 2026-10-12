@@ -9,6 +9,7 @@ use tracedecay_runtime_core::db::engine::params;
 use tracedecay_store::{PROVIDER_USAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION};
 
 use super::RegisteredGlobalDb;
+use crate::observation_projection::provider_usage_scope;
 
 const MAX_PROVIDER_USAGE_READ: usize = 1_000;
 
@@ -112,7 +113,7 @@ impl RegisteredGlobalDb {
         }
         let upper_sequence_i64 = i64::try_from(upper_observation_sequence)
             .map_err(|_| "provider usage upper watermark exceeds integer range".to_owned())?;
-        let (scope_kind, project_id) = persisted_scope(scope);
+        let (scope_kind, project_id) = provider_usage_scope(scope);
         let mut rows = reader
             .query(
                 "SELECT observation_id, usage_ordinal, receipt_id, observation_sequence,
@@ -275,13 +276,6 @@ impl RegisteredGlobalDb {
             upper_observation_sequence,
             next_cursor,
         })
-    }
-}
-
-fn persisted_scope(scope: &ObservationScopeV1) -> (&'static str, Option<&str>) {
-    match scope {
-        ObservationScopeV1::Profile => ("profile", None),
-        ObservationScopeV1::Project { project_id } => ("project", Some(project_id.as_str())),
     }
 }
 

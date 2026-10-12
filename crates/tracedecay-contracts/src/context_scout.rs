@@ -27,7 +27,9 @@ use crate::capability_manifest::{
 use crate::context::{DisclosureClass, ResolvedScope};
 use crate::current_application_bindings;
 use crate::error::ApplicationContractError;
-use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
+use crate::handlers::{
+    ApplicationHandlerDescriptor, ApplicationOperation, capability_executable_schema,
+};
 use crate::result::{
     AuthorityReceipt, EvidenceCoverage, IdempotencyKey, Omission, ResultContractRef,
     RetrieverContributionState, TemporalState,
@@ -877,20 +879,13 @@ where
         .ok_or(ApplicationContractError::Inconsistent {
             field: "Context Scout schema operation",
         })?;
-    let capability_id = capability_id(spec)?;
-    let manifest = contribution
-        .capabilities()
-        .iter()
-        .find(|manifest| manifest.capability_id() == &capability_id)
-        .ok_or(ApplicationContractError::Inconsistent {
-            field: "Context Scout schema capability",
-        })?;
-    Ok(ExecutableSchemaAuthority::for_types_at_paths::<
-        Request,
-        Response,
-    >(
-        manifest, request_rust_type_path, result_rust_type_path
-    )?)
+    capability_executable_schema::<Request, Response>(
+        contribution,
+        &capability_id(spec)?,
+        "Context Scout schema capability",
+        request_rust_type_path,
+        result_rust_type_path,
+    )
 }
 
 pub fn context_scout_surface_handler_descriptors()

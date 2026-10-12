@@ -199,7 +199,7 @@ async fn branch_list_reports_exact_local_refs_and_typed_rejections() {
     let project_root = dir.path().join("project");
     std::fs::create_dir_all(&project_root).expect("project root");
     write_branch_fixture(&project_root);
-    let harness = Box::pin(ProductionProjectCompositionHarnessV1::open(
+    let harness = Box::pin(crate::support::seeded_composition::open(
         dir.path(),
         vec![project_root.clone()],
     ))

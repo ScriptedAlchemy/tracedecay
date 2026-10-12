@@ -81,12 +81,8 @@ impl QBasicExtractor {
                     Self::visit_type_definition(&mut state, node, pending_comment.as_deref());
                     pending_comment = None;
                 }
-                "sub_definition" => {
-                    Self::visit_sub_definition(&mut state, node, pending_comment.as_deref());
-                    pending_comment = None;
-                }
-                "function_definition" => {
-                    Self::visit_function_definition(&mut state, node, pending_comment.as_deref());
+                "sub_definition" | "function_definition" => {
+                    Self::visit_routine_definition(&mut state, node, pending_comment.as_deref());
                     pending_comment = None;
                 }
                 _ => {
@@ -411,8 +407,9 @@ impl QBasicExtractor {
         }
     }
 
-    /// Visit a SUB...END SUB definition and emit a Function node.
-    fn visit_sub_definition(
+    /// Visit a SUB...END SUB or FUNCTION...END FUNCTION definition and emit a
+    /// Function node.
+    fn visit_routine_definition(
         state: &mut ExtractionState,
         node: TsNode<'_>,
         pending_comment: Option<&str>,
@@ -440,81 +437,6 @@ impl QBasicExtractor {
         let signature = text.lines().next().unwrap_or("").trim().to_string();
 
         // Count complexity using the generic counter.
-        let metrics = if node.child_count() > 0 {
-            count_complexity(node, &QBASIC_COMPLEXITY, state.source)
-        } else {
-            ComplexityMetrics::default()
-        };
-
-        let graph_node = Node {
-            id: fn_id.clone(),
-            kind: NodeKind::Function,
-            name: name.to_string(),
-            qualified_name,
-            file_path: state.file_path.clone(),
-            start_line,
-            attrs_start_line: start_line,
-            end_line,
-            start_column,
-            end_column,
-            signature: Some(signature),
-            docstring: pending_comment.map(std::string::ToString::to_string),
-            visibility: Visibility::Pub,
-            is_async: false,
-            branches: metrics.branches,
-            loops: metrics.loops,
-            returns: metrics.returns,
-            max_nesting: metrics.max_nesting,
-            unsafe_blocks: metrics.unsafe_blocks,
-            unchecked_calls: metrics.unchecked_calls,
-            assertions: metrics.assertions,
-            complexity_analysis: metrics.analysis,
-            updated_at: state.timestamp,
-            parent_id: None,
-        };
-        state.nodes.push(graph_node);
-
-        if let Some(parent_id) = state.parent_node_id() {
-            state.edges.push(Edge {
-                source: parent_id.to_string(),
-                target: fn_id.clone(),
-                kind: EdgeKind::Contains,
-                line: Some(start_line),
-            });
-        }
-
-        state.node_stack.push((name.to_string(), fn_id.clone()));
-        Self::walk_for_calls(state, node);
-        state.node_stack.pop();
-    }
-
-    /// Visit a FUNCTION...END FUNCTION definition and emit a Function node.
-    fn visit_function_definition(
-        state: &mut ExtractionState,
-        node: TsNode<'_>,
-        pending_comment: Option<&str>,
-    ) {
-        let Some(name_node) = node.child_by_field_name("name") else {
-            return;
-        };
-        let name = basic_identifier_text(state.source, name_node);
-
-        let start_line = node.start_position().row as u32;
-        let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
-        let end_column = node.end_position().column as u32;
-        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let fn_id = local_node_id(
-            &state.file_path,
-            state.source,
-            &NodeKind::Function,
-            name,
-            node,
-        );
-
-        let text = state.node_text(node);
-        let signature = text.lines().next().unwrap_or("").trim().to_string();
-
         let metrics = if node.child_count() > 0 {
             count_complexity(node, &QBASIC_COMPLEXITY, state.source)
         } else {

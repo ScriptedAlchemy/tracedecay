@@ -191,16 +191,9 @@ impl DaemonHttpApplicationRegistry {
         F: Fn(ProjectId) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Option<Router>>> + Send + 'static,
     {
-        let mut slot = self.resolver.write().map_err(|_| TraceDecayError::Config {
-            message: "daemon HTTP project resolver lock is poisoned".to_owned(),
-        })?;
-        if slot.is_some() {
-            return Err(TraceDecayError::Config {
-                message: "daemon HTTP project resolver is already installed".to_owned(),
-            });
-        }
-        *slot = Some(Arc::new(move |project_id| Box::pin(resolver(project_id))));
-        Ok(())
+        let resolver: ProjectRouterResolver =
+            Arc::new(move |project_id| Box::pin(resolver(project_id)));
+        install_once(&self.resolver, resolver, "daemon HTTP project resolver")
     }
 
     pub(super) fn install_remote(
@@ -209,39 +202,26 @@ impl DaemonHttpApplicationRegistry {
         credentials: Arc<tracedecay_store_runtime::DaemonRemoteCredentialAuthorityV1>,
         runtime: Option<Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>>,
     ) -> Result<()> {
-        let mut slot = self.remote.write().map_err(|_| TraceDecayError::Config {
-            message: "daemon HTTP Remote Brain router lock is poisoned".to_owned(),
-        })?;
-        if slot.is_some() {
-            return Err(TraceDecayError::Config {
-                message: "daemon HTTP Remote Brain router is already installed".to_owned(),
-            });
-        }
-        *slot = Some(RemoteHttpApplicationMount {
-            router,
-            credentials,
-            runtime,
-        });
-        Ok(())
+        install_once(
+            &self.remote,
+            RemoteHttpApplicationMount {
+                router,
+                credentials,
+                runtime,
+            },
+            "daemon HTTP Remote Brain router",
+        )
     }
 
     pub(super) fn install_remote_deletion_runtime_owners(
         &self,
         owners: super::remote_deletion::RemoteDeletionRuntimeOwners,
     ) -> Result<()> {
-        let mut slot =
-            self.remote_deletion_runtime_owners
-                .write()
-                .map_err(|_| TraceDecayError::Config {
-                    message: "daemon remote deletion executor lock is poisoned".to_owned(),
-                })?;
-        if slot.is_some() {
-            return Err(TraceDecayError::Config {
-                message: "daemon remote deletion executor is already installed".to_owned(),
-            });
-        }
-        *slot = Some(owners);
-        Ok(())
+        install_once(
+            &self.remote_deletion_runtime_owners,
+            owners,
+            "daemon remote deletion executor",
+        )
     }
 
     pub(super) fn remote_deletion_runtime_owners(
@@ -400,6 +380,20 @@ impl DaemonHttpApplicationRegistry {
                 .and_then(|remote| remote.runtime.as_ref().map(Arc::clone))
         })
     }
+}
+
+/// Fills a write-once registry slot; a second install is a typed error.
+fn install_once<T>(slot: &SyncRwLock<Option<T>>, value: T, name: &str) -> Result<()> {
+    let mut slot = slot.write().map_err(|_| TraceDecayError::Config {
+        message: format!("{name} lock is poisoned"),
+    })?;
+    if slot.is_some() {
+        return Err(TraceDecayError::Config {
+            message: format!("{name} is already installed"),
+        });
+    }
+    *slot = Some(value);
+    Ok(())
 }
 
 async fn provision_remote_node(
