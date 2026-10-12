@@ -11,7 +11,6 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -19,7 +18,7 @@ use tempfile::TempDir;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
 use super::{
-    DaemonHandshake, enter_test_daemon_database_scope, test_client_identity_for,
+    DaemonHandshake, enter_test_daemon_database_scope, git, test_client_identity_for,
     test_daemon_engine_for_profile, test_handshake_defaults,
 };
 
@@ -279,16 +278,6 @@ async fn run_scope_set_compare_and_swap() {
         .expect("scope-set connection did not terminate")
         .expect("join scope-set connection")
         .expect("serve scope-set connection");
-}
-
-fn git(root: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .status()
-        .expect("run Git fixture command");
-    assert!(status.success(), "git {args:?} in {}", root.display());
 }
 
 fn prepared_project(root: &Path, name: &str, project_id: &str) -> PathBuf {

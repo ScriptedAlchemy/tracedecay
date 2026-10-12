@@ -1,6 +1,4 @@
 use std::fmt::Write;
-use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -16,6 +14,7 @@ use tracedecay_domain::{
 };
 
 use super::super::{code_index_search_display_binding, code_index_text_search_display_binding};
+use super::git;
 use tracedecay_code_index_runtime::code_index_scheduler::{
     CodeIndexWorktreeSchedulerV1, LatestCompleteCodeIndexV1, SharedCodeIndexBytePoolV1,
 };
@@ -263,15 +262,6 @@ fn hydration_budget_rejects_payload_read_after_preflight() {
         page.results[0].outcome,
         HydrationOutcomeV1::Unavailable(HydrationUnavailableV1::BudgetExceeded)
     ));
-}
-
-fn git(root: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .status()
-        .expect("run git");
-    assert!(status.success(), "git {args:?} failed");
 }
 
 /// A sealed production generation over a committed `src/lib.rs`. Fields drop

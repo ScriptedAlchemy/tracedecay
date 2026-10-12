@@ -23,8 +23,8 @@ use tracedecay_contracts::{
 use tracedecay_domain::{ActorId, CommitId, ManifestDigest, UtcMicros};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-use super::journey_test_support::git;
 use super::*;
+use crate::test_support::git::git;
 
 #[tokio::test]
 async fn project_open_registers_the_typed_delivery_gate_without_a_github_remote() {

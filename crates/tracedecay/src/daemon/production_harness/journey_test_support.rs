@@ -8,25 +8,7 @@ use serde_json::Value;
 use tracedecay_mcp::JsonRpcResponse;
 
 use super::ProductionProjectCompositionHarnessV1;
-use crate::test_support::git::GIT_FIXTURE_CONFIG;
-
-pub(super) fn git(project: &Path, arguments: &[&str]) -> String {
-    let output = std::process::Command::new("git")
-        .current_dir(project)
-        .args(GIT_FIXTURE_CONFIG)
-        .args(arguments)
-        .output()
-        .expect("run git");
-    assert!(
-        output.status.success(),
-        "git {arguments:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout)
-        .expect("git output")
-        .trim()
-        .to_owned()
-}
+use crate::test_support::git::git;
 
 /// A one-function Git project for configuration journeys.
 pub(super) fn initialize_project(project: &Path) {

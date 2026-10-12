@@ -9,27 +9,11 @@ use tracedecay_hooks::core_events::DaemonHookEvent;
 use tracedecay_host_admission::{
     HostAdmissionBroker, HostAdmissionRuntime, SharedHostAdmissionBroker, SpoolBounds,
 };
-use tracedecay_runtime_core::path_safety::{plain_git_args, plain_host_path};
 
 use crate::mcp::server::{CodeIndexReconcileSink, McpServer, McpServerConstructionContext};
+use crate::test_support::git::git;
 use tracedecay_project::project::TraceDecay;
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
-
-pub(super) fn git(root: &Path, args: &[&str]) {
-    let output = std::process::Command::new(
-        tracedecay_runtime_core::git::try_git_program()
-            .expect("absolute git executable should resolve"),
-    )
-    .current_dir(plain_host_path(root))
-    .args(plain_git_args(args))
-    .output()
-    .expect("git runs");
-    assert!(
-        output.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
 
 pub(crate) struct WriterTestFixtureAuthority {
     profile: TempDir,

@@ -8,8 +8,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use super::journey_test_support::{git, tool_answer};
+use super::journey_test_support::tool_answer;
 use super::*;
+use crate::test_support::git::git;
 
 const WARMING_CODE: &str = "feedback.advisory-cycle.unavailable";
 

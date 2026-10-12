@@ -9,7 +9,6 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, mpsc};
 use std::thread::ThreadId;
@@ -39,6 +38,7 @@ use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
 
 use super::McpServer;
 use super::construction::McpServerConstructionContext;
+use crate::test_support::git::git;
 use tracedecay_project::project::TraceDecay;
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 
@@ -572,19 +572,6 @@ fn search_call(id: u64, limit: u64) -> Value {
             }
         }
     })
-}
-
-fn git(root: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .output()
-        .expect("git");
-    assert!(
-        output.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
 }
 
 fn journey_query_authority(privacy_domain: PrivacyDomainId) -> Arc<QueryAuthorityV1> {

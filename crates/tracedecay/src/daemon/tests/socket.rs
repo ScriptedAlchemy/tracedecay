@@ -1,6 +1,3 @@
-#[cfg(unix)]
-use std::process::Command;
-
 use super::*;
 #[cfg(unix)]
 use tracedecay_daemon_protocol::{FramePoll, FrameSend};
@@ -1225,21 +1222,10 @@ async fn socket_client_routes_multiple_closed_invocations_without_falling_back_t
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonical() {
-    use std::process::Command;
-
     use tracedecay_contracts::git::GitReadRequestV1;
     use tracedecay_contracts::{CancellationContext, Deadline, IdempotencyKey};
     use tracedecay_daemon_protocol::surface::GitReadSurfaceRequest;
     use tracedecay_domain::{GitIndexTransactionOperationV1, UtcMicros};
-
-    fn git(root: &std::path::Path, args: &[&str]) {
-        let status = Command::new("git")
-            .current_dir(root)
-            .args(args)
-            .status()
-            .expect("run Git fixture command");
-        assert!(status.success(), "git {args:?}");
-    }
 
     let home = TempDir::new().expect("home");
     let home = home.path().canonicalize().expect("canonical home");
@@ -1675,22 +1661,6 @@ async fn daemon_linked_worktree_route_repairs_primary_identity_and_keeps_alias()
     let linked = root.join("linked");
     let profile_root = root.join("profile");
     std::fs::create_dir_all(&primary).expect("primary dir");
-    let git = |cwd: &std::path::Path, args: &[&str]| {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(cwd)
-            .env("GIT_AUTHOR_NAME", "TraceDecay Test")
-            .env("GIT_AUTHOR_EMAIL", "test@tracedecay.local")
-            .env("GIT_COMMITTER_NAME", "TraceDecay Test")
-            .env("GIT_COMMITTER_EMAIL", "test@tracedecay.local")
-            .output()
-            .expect("run git");
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    };
     git(&primary, &["init", "-b", "main", "--quiet"]);
     std::fs::create_dir_all(primary.join("src")).expect("fixture source dir");
     std::fs::write(primary.join("src/main.rs"), "fn main() {}\n").expect("fixture source");

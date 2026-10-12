@@ -3,7 +3,6 @@ use crate::daemon::ProductionProjectCompositionHarnessV1;
 use crate::daemon::{
     AuthenticatedFirstRequest, ProjectServerRequirement, project_server_requirement,
 };
-use std::process::Command;
 #[cfg(unix)]
 use tracedecay_domain::errors::TraceDecayError;
 
@@ -163,23 +162,6 @@ fn hook_event_waits_for_registered_project_authority_publication() {
     );
 }
 
-pub(super) fn run_git(root: &std::path::Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .env("GIT_AUTHOR_NAME", "TraceDecay Test")
-        .env("GIT_AUTHOR_EMAIL", "test@tracedecay.local")
-        .env("GIT_COMMITTER_NAME", "TraceDecay Test")
-        .env("GIT_COMMITTER_EMAIL", "test@tracedecay.local")
-        .output()
-        .expect("run git");
-    assert!(
-        output.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
 #[cfg(unix)]
 fn assert_missing_enrollment_admission(error: &TraceDecayError) {
     assert!(
@@ -318,7 +300,7 @@ async fn durably_enrolled_project_is_admitted_after_a_registry_reset() {
     let profile_root = root.join(".tracedecay");
     let project = root.join("repository");
     std::fs::create_dir_all(&project).expect("create repository");
-    run_git(&project, &["init", "--quiet"]);
+    git(&project, &["init", "--quiet"]);
     let layout = enroll_project_on_disk_only(&project, &profile_root, "proj_forward_boundary");
 
     let _database_scope =
@@ -367,7 +349,7 @@ async fn identity_marker_without_a_store_is_still_rejected() {
     let profile_root = root.join(".tracedecay");
     let project = root.join("repository");
     std::fs::create_dir_all(&project).expect("create repository");
-    run_git(&project, &["init", "--quiet"]);
+    git(&project, &["init", "--quiet"]);
     let layout = enroll_project_on_disk_only(&project, &profile_root, "proj_store_absent");
     std::fs::remove_dir_all(&layout.data_root).expect("remove profile store");
 
@@ -401,7 +383,7 @@ async fn orphaned_store_with_repository_identity_is_readopted_without_aliasing()
     let profile_root = root.join(".tracedecay");
     let project = root.join("repository");
     std::fs::create_dir_all(&project).expect("create repository");
-    run_git(&project, &["init", "--quiet"]);
+    git(&project, &["init", "--quiet"]);
 
     // The durable repository identity marker names a project id that is NOT
     // the path-derived hash of this checkout, so a re-adoption that silently
@@ -1026,7 +1008,7 @@ async fn remote_project_deletion_stays_settling_until_transferred_reaper_joins()
     let profile_root = root.join(".tracedecay");
     let project = root.join("repository");
     std::fs::create_dir_all(&project).expect("create repository");
-    run_git(&project, &["init", "--quiet"]);
+    git(&project, &["init", "--quiet"]);
     let layout = enroll_project_on_disk_only(&project, &profile_root, "proj_reaper_settling");
     std::fs::remove_file(&layout.graph_db_path).expect("remove synthetic graph file");
     let _database_scope =
@@ -1138,7 +1120,7 @@ async fn remote_project_deletion_ignores_unrelated_server_retirement() {
     let profile_root = root.join(".tracedecay");
     let project = root.join("target-repository");
     std::fs::create_dir_all(&project).expect("create target repository");
-    run_git(&project, &["init", "--quiet"]);
+    git(&project, &["init", "--quiet"]);
     let layout = enroll_project_on_disk_only(&project, &profile_root, "proj_retirement_target");
     std::fs::remove_file(&layout.graph_db_path).expect("remove synthetic graph file");
     let _database_scope =
@@ -1199,7 +1181,7 @@ async fn remote_project_deletion_denies_unknown_and_cross_profile_identities_wit
     let other_profile = root.join("other-profile");
     let other_project = root.join("other-repository");
     std::fs::create_dir_all(&other_project).expect("create other repository");
-    run_git(&other_project, &["init", "--quiet"]);
+    git(&other_project, &["init", "--quiet"]);
     enroll_project_on_disk_only(&other_project, &other_profile, "proj_cross_profile");
 
     let _database_scope =
@@ -1240,7 +1222,7 @@ async fn remote_project_deletion_denies_unprovable_corrupt_shard_before_tombston
     let profile_root = root.join(".tracedecay");
     let project = root.join("repository");
     std::fs::create_dir_all(&project).expect("create repository");
-    run_git(&project, &["init", "--quiet"]);
+    git(&project, &["init", "--quiet"]);
     let layout =
         enroll_project_on_disk_only(&project, &profile_root, "proj_remote_partial_cleanup");
     std::fs::remove_dir_all(&layout.data_root).expect("remove synthetic project shard");
@@ -1299,7 +1281,7 @@ async fn remote_account_deletion_removes_all_exact_profile_shards_and_fences_rep
     let second_project = root.join("second-repository");
     for project in [&first_project, &second_project] {
         std::fs::create_dir_all(project).expect("create repository");
-        run_git(project, &["init", "--quiet"]);
+        git(project, &["init", "--quiet"]);
     }
     let first_layout =
         enroll_project_on_disk_only(&first_project, &profile_root, "proj_remote_account_a");
@@ -1657,7 +1639,7 @@ async fn unenrolled_leaf_is_rejected_from_cache_and_direct_open() {
     let profile_root = home.path().join(".tracedecay");
     let repository = home.path().join("repository");
     std::fs::create_dir_all(&repository).expect("create repository");
-    run_git(&repository, &["init", "--quiet"]);
+    git(&repository, &["init", "--quiet"]);
     let leaf_directory = repository.join("leaf");
     std::fs::create_dir_all(&leaf_directory).expect("create leaf directory");
     let _database_scope =
@@ -1705,11 +1687,11 @@ async fn linked_worktree_root_is_admitted_for_explicit_first_touch_init() {
     let linked = root.join("linked");
     let profile_root = root.join("profile");
     std::fs::create_dir_all(&primary).expect("create primary repository");
-    run_git(&primary, &["init", "-b", "main", "--quiet"]);
+    git(&primary, &["init", "-b", "main", "--quiet"]);
     std::fs::write(primary.join("README.md"), "first touch authority\n").expect("fixture");
-    run_git(&primary, &["add", "."]);
-    run_git(&primary, &["commit", "-m", "fixture", "--quiet"]);
-    run_git(
+    git(&primary, &["add", "."]);
+    git(&primary, &["commit", "-m", "fixture", "--quiet"]);
+    git(
         &primary,
         &[
             "worktree",
@@ -1757,11 +1739,11 @@ async fn linked_route_reuses_primary_authority_while_shadow_writer_is_held() {
     let linked = root.join("linked");
     let profile_root = root.join("profile");
     std::fs::create_dir_all(&primary).expect("create primary repository");
-    run_git(&primary, &["init", "-b", "main", "--quiet"]);
+    git(&primary, &["init", "-b", "main", "--quiet"]);
     std::fs::write(primary.join("README.md"), "shared authority\n").expect("fixture");
-    run_git(&primary, &["add", "."]);
-    run_git(&primary, &["commit", "-m", "fixture", "--quiet"]);
-    run_git(
+    git(&primary, &["add", "."]);
+    git(&primary, &["commit", "-m", "fixture", "--quiet"]);
+    git(
         &primary,
         &[
             "worktree",
@@ -1860,10 +1842,10 @@ async fn first_touch_init_from_another_build_leaves_the_profile_untouched() {
     let home = home.path().canonicalize().expect("canonical home");
     let corpus = home.join("scratch-corpus");
     std::fs::create_dir_all(&corpus).expect("create corpus");
-    run_git(&corpus, &["init", "-b", "main", "--quiet"]);
+    git(&corpus, &["init", "-b", "main", "--quiet"]);
     std::fs::write(corpus.join("README.md"), "scratch corpus\n").expect("fixture");
-    run_git(&corpus, &["add", "."]);
-    run_git(&corpus, &["commit", "-m", "fixture", "--quiet"]);
+    git(&corpus, &["add", "."]);
+    git(&corpus, &["commit", "-m", "fixture", "--quiet"]);
 
     let own_build = DaemonHandshake {
         project_path: Some(corpus.clone()),
@@ -1921,10 +1903,10 @@ async fn shutdown_fences_git_index_transactions_and_joins_store_actors() {
     let home = home.path().canonicalize().expect("canonical home");
     let repository = home.join("repository");
     std::fs::create_dir_all(&repository).expect("create repository");
-    run_git(&repository, &["init", "-b", "main", "--quiet"]);
+    git(&repository, &["init", "-b", "main", "--quiet"]);
     std::fs::write(repository.join("README.md"), "shutdown fence fixture\n").expect("fixture");
-    run_git(&repository, &["add", "."]);
-    run_git(&repository, &["commit", "-m", "fixture", "--quiet"]);
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "-m", "fixture", "--quiet"]);
 
     let handshake = DaemonHandshake {
         project_path: Some(repository.clone()),
@@ -3882,26 +3864,17 @@ fn production_composition_probe_node_id(payload: &serde_json::Value) -> Option<&
 }
 
 fn commit_production_composition_project(project: &std::path::Path) {
-    let run_git = |arguments: &[&str]| {
-        let status = std::process::Command::new("git")
-            .current_dir(project)
-            .args(arguments)
-            .status()
-            .expect("run git");
-        assert!(status.success(), "git {arguments:?}");
-    };
-    run_git(&["init", "--quiet"]);
-    run_git(&["add", "."]);
-    run_git(&[
-        "-c",
-        "user.name=TraceDecay Test",
-        "-c",
-        "user.email=tracedecay@example.invalid",
-        "commit",
-        "--quiet",
-        "-m",
-        "test: seed production composition",
-    ]);
+    git(project, &["init", "--quiet"]);
+    git(project, &["add", "."]);
+    git(
+        project,
+        &[
+            "commit",
+            "--quiet",
+            "-m",
+            "test: seed production composition",
+        ],
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

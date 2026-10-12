@@ -13,6 +13,7 @@ use super::writer_test_support::{
 };
 use super::{CodeIndexReconcileSink, McpServer, McpServerConstructionContext};
 use crate::mcp::project_route::HookProjectRouteCache;
+use crate::test_support::git::git;
 use tracedecay_domain::HostIntegrationIdV1;
 use tracedecay_hooks::core_events::{DaemonHookEvent, HookRouteMetadata, HookTerminalReceipt};
 use tracedecay_host_admission::{
@@ -621,8 +622,6 @@ fn add_branch_at_payload(root: PathBuf, branch: &str) -> Vec<u8> {
 }
 
 fn linked_worktree_on(project: &std::path::Path) -> PathBuf {
-    use super::writer_test_support::git;
-
     // Sibling of the unique TempDir root, never a shared /tmp fixed name.
     let worktree = project.with_file_name(format!(
         "{}-admission-wt",
@@ -675,11 +674,11 @@ async fn add_branch_at_replay_rejects_stale_root_after_adversarial_replace() {
     std::fs::remove_dir_all(&worktree).expect("remove worktree");
     std::fs::create_dir_all(worktree.join("src")).expect("replacement dirs");
     std::fs::write(worktree.join("src/a.rs"), "pub fn replaced() {}\n").expect("write");
-    super::writer_test_support::git(&worktree, &["init", "-q", "-b", "main"]);
-    super::writer_test_support::git(&worktree, &["config", "user.email", "t@t.com"]);
-    super::writer_test_support::git(&worktree, &["config", "user.name", "T"]);
-    super::writer_test_support::git(&worktree, &["add", "."]);
-    super::writer_test_support::git(&worktree, &["commit", "-q", "-m", "replacement"]);
+    git(&worktree, &["init", "-q", "-b", "main"]);
+    git(&worktree, &["config", "user.email", "t@t.com"]);
+    git(&worktree, &["config", "user.name", "T"]);
+    git(&worktree, &["add", "."]);
+    git(&worktree, &["commit", "-q", "-m", "replacement"]);
 
     let outcome = Box::pin(server.replay_host_admission(Some(admitted.seq))).await;
     assert_eq!(outcome.status, HostAdmissionStatus::Degraded);
@@ -704,7 +703,7 @@ async fn add_branch_at_replay_rejects_stale_branch_after_switch() {
     let (cg, project, authority) = init_indexed_repo().await;
     let worktree = linked_worktree_on(project.path());
     let payload = add_branch_at_payload(worktree.clone(), "feature/admission");
-    super::writer_test_support::git(&worktree, &["switch", "-c", "feature/other"]);
+    git(&worktree, &["switch", "-c", "feature/other"]);
 
     let spool = TempDir::new().unwrap();
     let broker = default_spool_broker(spool.path());
@@ -741,7 +740,7 @@ async fn add_branch_replay_rejects_stale_branch_after_delayed_switch() {
         .unwrap();
 
     // Delayed switch after admit, before effect/replay.
-    super::writer_test_support::git(project.path(), &["switch", "-c", "feature/other"]);
+    git(project.path(), &["switch", "-c", "feature/other"]);
 
     let outcome = Box::pin(server.replay_host_admission(Some(admitted.seq))).await;
     assert_eq!(outcome.status, HostAdmissionStatus::Degraded);
@@ -771,7 +770,7 @@ async fn add_branch_restart_replay_rejects_stale_branch_after_switch() {
     assert_eq!(broker.pending_count().await, 1);
     drop(broker);
 
-    super::writer_test_support::git(project.path(), &["switch", "-c", "feature/restart"]);
+    git(project.path(), &["switch", "-c", "feature/restart"]);
 
     let broker = default_spool_broker(spool.path());
     let attempted = Arc::new(AtomicUsize::new(0));
@@ -810,7 +809,7 @@ async fn sync_current_branch_replay_rejects_stale_branch_after_delayed_switch() 
         .await
         .unwrap();
 
-    super::writer_test_support::git(project.path(), &["switch", "-c", "feature/sync-other"]);
+    git(project.path(), &["switch", "-c", "feature/sync-other"]);
 
     let outcome = Box::pin(server.replay_host_admission(Some(admitted.seq))).await;
     assert_eq!(outcome.status, HostAdmissionStatus::Degraded);
@@ -840,7 +839,7 @@ async fn sync_current_branch_restart_replay_rejects_stale_branch_after_switch() 
     assert_eq!(broker.pending_count().await, 1);
     drop(broker);
 
-    super::writer_test_support::git(project.path(), &["switch", "-c", "feature/sync-restart"]);
+    git(project.path(), &["switch", "-c", "feature/sync-restart"]);
 
     let broker = default_spool_broker(spool.path());
     let attempted = Arc::new(AtomicUsize::new(0));
@@ -882,11 +881,11 @@ async fn add_branch_at_restart_replay_rejects_common_dir_drift() {
     let stranger = unique_sibling(project.path(), "stranger-repo");
     std::fs::create_dir_all(stranger.join("src")).expect("stranger");
     std::fs::write(stranger.join("src/a.rs"), "pub fn stranger() {}\n").expect("write");
-    super::writer_test_support::git(&stranger, &["init", "-q", "-b", "main"]);
-    super::writer_test_support::git(&stranger, &["config", "user.email", "t@t.com"]);
-    super::writer_test_support::git(&stranger, &["config", "user.name", "T"]);
-    super::writer_test_support::git(&stranger, &["add", "."]);
-    super::writer_test_support::git(&stranger, &["commit", "-q", "-m", "stranger"]);
+    git(&stranger, &["init", "-q", "-b", "main"]);
+    git(&stranger, &["config", "user.email", "t@t.com"]);
+    git(&stranger, &["config", "user.name", "T"]);
+    git(&stranger, &["add", "."]);
+    git(&stranger, &["commit", "-q", "-m", "stranger"]);
     let stranger_git = stranger.join(".git").canonicalize().expect("gitdir");
     let git_pointer = worktree.join(".git");
     assert!(git_pointer.is_file());
@@ -937,11 +936,11 @@ async fn add_branch_at_restart_replay_rejects_symlink_swap() {
     let stranger = unique_sibling(project.path(), "symlink-stranger");
     std::fs::create_dir_all(stranger.join("src")).expect("stranger");
     std::fs::write(stranger.join("src/a.rs"), "pub fn stranger() {}\n").expect("write");
-    super::writer_test_support::git(&stranger, &["init", "-q", "-b", "main"]);
-    super::writer_test_support::git(&stranger, &["config", "user.email", "t@t.com"]);
-    super::writer_test_support::git(&stranger, &["config", "user.name", "T"]);
-    super::writer_test_support::git(&stranger, &["add", "."]);
-    super::writer_test_support::git(&stranger, &["commit", "-q", "-m", "stranger"]);
+    git(&stranger, &["init", "-q", "-b", "main"]);
+    git(&stranger, &["config", "user.email", "t@t.com"]);
+    git(&stranger, &["config", "user.name", "T"]);
+    git(&stranger, &["add", "."]);
+    git(&stranger, &["commit", "-q", "-m", "stranger"]);
     std::fs::remove_file(&alias).expect("remove alias");
     std::os::unix::fs::symlink(&stranger, &alias).expect("swap");
 
