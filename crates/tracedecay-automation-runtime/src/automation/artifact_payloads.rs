@@ -43,7 +43,7 @@ pub(super) struct GeneratedEvalPayloads {
     pub(super) record_integrity_checks: Vec<Value>,
     pub(super) status: &'static str,
     pub(super) validation_decision: &'static str,
-    /// Evals derived from real post-activation outcomes; tracked separately
+    /// Unevaluated observations of post-activation proxies; tracked separately
     /// from the validation examples so the record-integrity check covers only
     /// what the validation report recorded.
     pub(super) outcome_definitions: Vec<Value>,
@@ -120,7 +120,7 @@ fn session_reflection_summary(record: &AutomationRunLedgerRecord) -> Value {
 
 pub(super) fn feedback_payload(ctx: &ArtifactPayloadContext<'_>, trace_ref: &Value) -> Value {
     json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "run_id": ctx.run_id,
         "task": ctx.task_key,
         "loop_stage": "feedback",
@@ -163,7 +163,7 @@ pub(super) fn generated_evals_payload(
 ) -> Value {
     let (trace_ref, feedback_ref) = refs;
     json!({
-        "schema_version": 2,
+        "schema_version": 3,
         "run_id": ctx.run_id,
         "task": ctx.task_key,
         "loop_stage": "generated_evals",
@@ -504,7 +504,9 @@ fn independent_evaluation(ctx: &ArtifactPayloadContext<'_>) -> Value {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::super::outcomes::{SkillOutcomeRecord, SkillOutcomeVerdict};
+    use super::super::outcomes::{
+        FactOutcomeRecord, FactOutcomeVerdict, SkillOutcomeRecord, SkillOutcomeVerdict,
+    };
     use super::super::run_ledger::{AutomationRunStatus, AutomationTrigger};
     use super::*;
     use tracedecay_automation::artifact_policy::artifact_policy;
@@ -513,8 +515,9 @@ mod tests {
         ProvenanceId, RunId,
     };
     use tracedecay_store::{
-        FactCommitReceipt, ProjectMemoryFactCurationOperationEffectV1,
-        ProjectMemoryFactCurationReceiptV1, ProjectMemoryFactIdV1,
+        FactCommitReceipt, ProjectMemoryAutomaticFactStateV1,
+        ProjectMemoryFactCurationOperationEffectV1, ProjectMemoryFactCurationReceiptV1,
+        ProjectMemoryFactIdV1,
     };
 
     fn payload_fixture() -> (
@@ -582,15 +585,15 @@ mod tests {
 
     fn outcomes_snapshot() -> AutomationOutcomesSnapshot {
         AutomationOutcomesSnapshot {
-            schema_version: 2,
+            schema_version: 4,
             skills: vec![SkillOutcomeRecord {
-                skill_id: "ignored-skill".to_string(),
-                title: Some("Ignored skill".to_string()),
+                skill_id: "unmeasured-skill".to_string(),
+                title: Some("Unmeasured skill".to_string()),
                 activated_at: 1_000,
                 days_since_activation: 30,
                 views_since_activation: 2,
                 uses_since_activation: 0,
-                verdict: SkillOutcomeVerdict::Ignored,
+                verdict: SkillOutcomeVerdict::Unknown,
             }],
             facts: Vec::new(),
             skills_refreshed_at: Some(2_000),
@@ -618,12 +621,12 @@ mod tests {
         let section = payload.get("applied_change_outcomes").unwrap();
         assert_eq!(section.get("status").unwrap(), &json!("available"));
         assert_eq!(
-            section.pointer("/skill_verdicts/ignored").unwrap(),
-            &json!(1)
+            section.pointer("/skill_verdicts"),
+            Some(&json!({"unknown": 1}))
         );
         assert_eq!(
             section.pointer("/skills/0/skill_id").unwrap(),
-            &json!("ignored-skill")
+            &json!("unmeasured-skill")
         );
 
         let evals = generated_eval_payloads(&ctx);
@@ -637,13 +640,143 @@ mod tests {
             generated.pointer("/summary/outcome_eval_count").unwrap(),
             &json!(1)
         );
-        assert_eq!(
-            generated
-                .pointer("/outcome_eval_definitions/0/observed_outcome")
-                .unwrap(),
-            &json!("ignored")
-        );
+        let observation = generated.pointer("/outcome_eval_definitions/0").unwrap();
+        assert_eq!(observation["observed_outcome"], "unknown");
+        assert_eq!(observation["status"], "unknown");
+        assert!(observation.get("passed").is_none());
         assert_eq!(evals.count, 0);
+    }
+
+    fn fact_outcome_record(apply_id: &str, verdict: FactOutcomeVerdict) -> FactOutcomeRecord {
+        FactOutcomeRecord {
+            apply_id: apply_id.to_string(),
+            run_id: Some("run-facts".to_string()),
+            state: ProjectMemoryAutomaticFactStateV1::Applied,
+            canonical_fact_id: Some(format!("fact:{apply_id}")),
+            recorded_at: 1_000,
+            days_since_recorded: 30,
+            retrieval_count: None,
+            access_count: None,
+            helpful_count: None,
+            unhelpful_count: None,
+            last_recalled_at: None,
+            still_exists: verdict != FactOutcomeVerdict::Unavailable,
+            verdict,
+        }
+    }
+
+    #[test]
+    fn outcome_evals_publish_unmeasured_use_as_unknown_observations_not_failures() {
+        let (request, response, record) = payload_fixture();
+        let mut outcomes: AutomationOutcomesSnapshot = serde_json::from_value(json!({
+            "schema_version": 3,
+            "skills": [
+                {
+                    "skill_id": "unmeasured-skill",
+                    "activated_at": 1_000,
+                    "days_since_activation": 30,
+                    "views_since_activation": 2,
+                    "uses_since_activation": 0,
+                    "verdict": "ignored",
+                },
+                {
+                    "skill_id": "adopted-skill",
+                    "activated_at": 1_000,
+                    "days_since_activation": 30,
+                    "views_since_activation": 1,
+                    "uses_since_activation": 4,
+                    "verdict": "adopted",
+                },
+            ],
+        }))
+        .unwrap();
+        outcomes.facts = vec![
+            fact_outcome_record("unreadable", FactOutcomeVerdict::Unavailable),
+            fact_outcome_record("idle", FactOutcomeVerdict::NeverRecalled),
+        ];
+        let ctx = ArtifactPayloadContext {
+            run_id: "run-outcomes",
+            task: AgentTaskKind::CombinedReview,
+            task_key: "combined_review",
+            prompt_version: "combined_review:v2",
+            policy: artifact_policy(AgentTaskKind::CombinedReview),
+            request: &request,
+            response: &response,
+            record: &record,
+            outcomes: &outcomes,
+        };
+
+        let evals = generated_eval_payloads(&ctx);
+        let generated = generated_evals_payload(
+            &ctx,
+            (&json!({"kind": "traces"}), &json!({"kind": "feedback"})),
+            &evals,
+        );
+
+        assert_eq!(generated["schema_version"], 3);
+        let definitions = generated["outcome_eval_definitions"].as_array().unwrap();
+        let observed = definitions
+            .iter()
+            .map(|definition| {
+                (
+                    definition["eval_id"].as_str().unwrap(),
+                    definition["status"].as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            observed,
+            vec![
+                (
+                    "combined_review:outcome:skill:unmeasured-skill",
+                    Some("unknown")
+                ),
+                (
+                    "combined_review:outcome:skill:adopted-skill",
+                    Some("observed")
+                ),
+                ("combined_review:outcome:fact:unreadable", Some("unknown")),
+                ("combined_review:outcome:fact:idle", Some("observed")),
+            ]
+        );
+        for definition in definitions {
+            assert!(definition.get("passed").is_none(), "{definition}");
+            assert!(definition.get("expected_outcome").is_none(), "{definition}");
+            assert_eq!(definition["evaluation"], "not_run", "{definition}");
+            assert!(
+                definition["unknowns"]
+                    .as_array()
+                    .is_some_and(|unknowns| unknowns.contains(&json!("task_opportunity"))),
+                "{definition}"
+            );
+        }
+        assert_eq!(definitions[0]["observed_outcome"], "unknown");
+        assert!(
+            definitions[0]["unknowns"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("host_use_telemetry"))
+        );
+        assert_eq!(definitions[3]["observed_outcome"], "never_recalled");
+    }
+
+    #[test]
+    fn feedback_outcomes_declare_task_improvement_unmeasured() {
+        let (request, response, record) = payload_fixture();
+        let outcomes = outcomes_snapshot();
+        let ctx = skill_writer_ctx(&request, &response, &record, &outcomes);
+
+        let payload = feedback_payload(&ctx, &json!({"kind": "traces"}));
+
+        assert_eq!(payload["schema_version"], 2);
+        assert_eq!(
+            payload.pointer("/applied_change_outcomes/signals"),
+            Some(&json!({
+                "skills": "adoption_proxy",
+                "facts": "recall_proxy",
+                "task_improvement": "not_measured",
+            }))
+        );
     }
 
     #[test]

@@ -8790,7 +8790,12 @@ export const SkillOutcomeRecordSchema: z.ZodObject<{
   views_since_activation: z.number().int().min(0),
 });
 
-export const SkillOutcomeVerdictSchema: z.ZodEnum<{ "adopted": "adopted"; "ignored": "ignored"; "too_early": "too_early" }> = z.enum(["adopted", "ignored", "too_early"]);
+/** `adopted` means a use was recorded after activation. It is an adoption
+proxy, not evidence that the skill improved any task. `unknown` means no use was
+recorded and neither task opportunity nor reliable host use telemetry
+exists, so it is never a failure. Snapshots written before that
+distinction stored `unknown` as `ignored`. */
+export const SkillOutcomeVerdictSchema: z.ZodEnum<{ "adopted": "adopted"; "too_early": "too_early"; "unknown": "unknown" }> = z.enum(["adopted", "too_early", "unknown"]);
 
 /** Byte range inside one sanitized source file. Mutable line numbers are
 never part of identity. */
