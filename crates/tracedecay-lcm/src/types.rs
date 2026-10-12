@@ -210,44 +210,6 @@ impl std::str::FromStr for LcmGrepSort {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct LcmGrepRequest {
-    pub provider: String,
-    pub query: String,
-    pub scope: LcmScope,
-    pub session_id: Option<String>,
-    pub include_summaries: bool,
-    pub limit: usize,
-    pub sort: LcmGrepSort,
-    pub source: Option<String>,
-    pub role: Option<String>,
-    pub start_time: Option<i64>,
-    pub end_time: Option<i64>,
-    /// Optional git-scope constraint (branch/worktree/commit). When set,
-    /// hits are limited to sessions correlated with the git ref via EXISTS
-    /// pushdown against the git-correlation tables. Defaults to `None`.
-    #[serde(default, skip_serializing_if = "crate::GitScopeFilter::is_empty")]
-    pub git_filter: crate::GitScopeFilter,
-}
-
-/// Query-only filters layered over the raw LCM request. Kept separate so
-/// compression/replay callers retain their existing request construction while
-/// interactive retrieval can select parent/subagent and semantic message type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LcmGrepFilters {
-    pub relationship_scope: crate::SessionSearchScope,
-    pub message_type: crate::SessionMessageType,
-}
-
-impl Default for LcmGrepFilters {
-    fn default() -> Self {
-        Self {
-            relationship_scope: crate::SessionSearchScope::All,
-            message_type: crate::SessionMessageType::All,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmGrepHit {
     pub kind: String,
     pub provider: String,
@@ -260,29 +222,6 @@ pub struct LcmGrepHit {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
     pub snippet: String,
-}
-
-/// Grep hits plus retrieval-policy disclosure: sessions whose matches were
-/// dropped by the cross-session per-session cap, with dropped-hit counts.
-/// Silent truncation reads as "covered everything"; callers must be able to
-/// see that a session has more matches and rerun with `scope=session`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct LcmGrepOutcome {
-    pub hits: Vec<LcmGrepHit>,
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub capped_sessions: std::collections::BTreeMap<String, usize>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct LcmExpandQueryRequest {
-    pub provider: String,
-    pub session_id: String,
-    pub prompt: String,
-    pub query: Option<String>,
-    pub node_ids: Vec<String>,
-    pub max_results: usize,
-    pub max_tokens: usize,
-    pub context_max_tokens: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

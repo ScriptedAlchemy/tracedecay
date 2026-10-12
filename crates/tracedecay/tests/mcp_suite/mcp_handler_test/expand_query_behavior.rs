@@ -284,3 +284,169 @@ fn problem_identity(envelope: &Value) -> Value {
         "legal_actions": envelope["problem"]["legal_actions"],
     })
 }
+
+const LEMON_SESSION: &str = "lemon-session";
+const TIGHT_BUDGET: u64 = 1024;
+
+/// A context budget smaller than the matched message admits only a prefix of
+/// it and says so, rather than overrunning the budget or dropping the match.
+#[tokio::test]
+async fn lcm_expand_query_reports_a_truncated_block_inside_the_context_budget() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let body = format!("raw lemon details {}", "L".repeat(6000));
+    let lemon =
+        seed_temporal_lcm_session_message(&cg, LEMON_SESSION, "lemon-message", &body, 1).await;
+    let db = open_active_project_session_db(&cg).await;
+    activate_test_temporal_generation(&db, LEMON_SESSION, vec![lemon]).await;
+    let server = real_mcp_server(cg).await;
+
+    let result = handle_real_server_tool_call(
+        &server,
+        "tracedecay_lcm_expand_query",
+        json!({
+            "provider": "cursor",
+            "session_id": LEMON_SESSION,
+            "prompt": "Explain the lemon details",
+            "query": "lemon",
+            "max_tokens": MAX_TOKENS,
+            "context_max_tokens": TIGHT_BUDGET,
+        }),
+    )
+    .await;
+    let payload: Value =
+        serde_json::from_str(extract_real_server_text(&result)).expect("expand-query JSON");
+    let total_chars = u64::try_from(body.chars().count()).unwrap();
+
+    assert_eq!(
+        json!({
+            "needs_synthesis": payload["needs_synthesis"],
+            "context_truncated": payload["context_truncated"],
+            "context_budget": payload["context_budget"],
+            "block_range": payload["context_blocks"][0]["content_range"],
+            "block_count": payload["context_blocks"].as_array().map(Vec::len),
+        }),
+        json!({
+            "needs_synthesis": true,
+            "context_truncated": true,
+            "context_budget": {
+                "requested_max_chars": TIGHT_BUDGET,
+                "used_chars": TIGHT_BUDGET,
+            },
+            "block_range": {
+                "offset": 0,
+                "limit": TIGHT_BUDGET,
+                "returned_chars": TIGHT_BUDGET,
+                "total_chars": total_chars,
+                "truncated": true,
+            },
+            "block_count": 1,
+        }),
+        "{payload}"
+    );
+    let content = payload["context_blocks"][0]["content"]
+        .as_str()
+        .expect("admitted block content");
+    assert!(
+        body.starts_with(content),
+        "the admitted block must be a prefix of the stored message: {content}"
+    );
+
+    server.shutdown().await;
+}
+
+const KIWI_SESSION: &str = "kiwi-session";
+const KIWI_PROSE: &str = "kiwi decision: ship the orchard importer on Friday";
+const KIWI_LISTING: &str =
+    "kiwi orchard files:\nsrc/orchard/mod.rs\nsrc/orchard/importer.rs\nsrc/orchard/schedule.rs";
+
+/// A base64 thinking-signature blob is machine noise and never reaches the
+/// assembled context or the synthesis prompt; readable text, including a
+/// directory listing, still does.
+#[tokio::test]
+async fn lcm_expand_query_filters_signature_blobs_from_the_context() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let signature = "EqQBCkYIBxgCKkBQ7mZ3vT9xR2aLk8sN0pYw4uJ1cHfD6gE5bM".repeat(4);
+    let blob = signature.clone();
+    let mixed =
+        format!("kiwi migration keeps the validated receipt. Diagnostic signature: {signature}");
+    let prose =
+        seed_temporal_lcm_session_message(&cg, KIWI_SESSION, "kiwi-prose", KIWI_PROSE, 1).await;
+    let noise = seed_temporal_lcm_session_message(&cg, KIWI_SESSION, "kiwi-blob", &blob, 2).await;
+    let listing =
+        seed_temporal_lcm_session_message(&cg, KIWI_SESSION, "kiwi-listing", KIWI_LISTING, 3).await;
+    let mixed_source =
+        seed_temporal_lcm_session_message(&cg, KIWI_SESSION, "kiwi-mixed", &mixed, 4).await;
+    let db = open_active_project_session_db(&cg).await;
+    activate_test_temporal_generation(&db, KIWI_SESSION, vec![prose, noise, listing, mixed_source])
+        .await;
+    let server = real_mcp_server(cg).await;
+
+    let payload = expand_query(
+        &server,
+        KIWI_SESSION,
+        "What did we decide about the kiwi orchard?",
+        "kiwi",
+        json!([]),
+    )
+    .await;
+
+    let mut contents: Vec<&str> = payload["context_blocks"]
+        .as_array()
+        .expect("context blocks")
+        .iter()
+        .map(|block| block["content"].as_str().expect("block content"))
+        .collect();
+    contents.sort_unstable();
+    let mut expected = vec![KIWI_PROSE, KIWI_LISTING, mixed.as_str()];
+    expected.sort_unstable();
+    assert_eq!(contents, expected, "{payload}");
+    let synthesis = payload["synthesis_prompt"]["user"]
+        .as_str()
+        .expect("synthesis prompt");
+    assert!(synthesis.contains(&mixed), "{synthesis}");
+    let signature_hits = handle_real_server_tool_call(
+        &server,
+        "tracedecay_lcm_grep",
+        json!({
+            "provider": "cursor",
+            "scope": "session",
+            "session_id": KIWI_SESSION,
+            "query": signature,
+            "limit": 5,
+        }),
+    )
+    .await;
+    let signature_hits: Value =
+        serde_json::from_str(extract_real_server_text(&signature_hits)).expect("signature hits");
+    assert_eq!(signature_hits["status"], "partial", "{signature_hits}");
+    let mut signature_ids: Vec<_> = signature_hits["hits"]
+        .as_array()
+        .expect("signature hit list")
+        .iter()
+        .map(|hit| hit["message_id"].as_str().expect("message identity"))
+        .collect();
+    signature_ids.sort_unstable();
+    assert_eq!(
+        signature_ids,
+        vec!["kiwi-blob", "kiwi-mixed"],
+        "{signature_hits}"
+    );
+    let signature_context = expand_query(
+        &server,
+        KIWI_SESSION,
+        "Which verified receipt accompanies this signature?",
+        &signature,
+        json!([]),
+    )
+    .await;
+    let signature_blocks = signature_context["context_blocks"]
+        .as_array()
+        .expect("signature context blocks");
+    assert_eq!(signature_blocks.len(), 1, "{signature_context}");
+    assert_eq!(
+        signature_blocks[0]["content"], mixed,
+        "the pure signature must be filtered while its prose-bearing counterpart survives: {signature_context}"
+    );
+
+    server.shutdown().await;
+}

@@ -7,12 +7,14 @@
 use crate::support::{
     TemporalLcmProjectionInput, activate_test_temporal_generation,
     application_invalid_request_error, extract_real_server_text, handle_real_server_tool_call_raw,
-    open_active_project_session_db, persist_temporal_lcm_observation, real_mcp_server,
-    retained_envelope_payload, route_refusal, setup_empty_project,
+    lcm_raw_store_id, open_active_project_session_db, persist_temporal_lcm_observation,
+    real_mcp_server, retained_envelope_payload, route_refusal, setup_empty_project,
 };
 use serde_json::{Value, json};
 use tracedecay::mcp::McpServer;
 use tracedecay_domain::{CanonicalMessageRoleV1, UtcMicros};
+use tracedecay_lcm::{LcmSourceRef, LcmSummaryNodeDraft};
+use tracedecay_sessions::admission::HostAdmissionScope;
 
 const SESSION: &str = "ledger-recall-session";
 const OTHER_SESSION: &str = "other-recall-session";
@@ -392,6 +394,132 @@ async fn lcm_grep_returns_the_matching_snippet_and_refuses_a_bad_query() {
         "unsupported_sort": { "refusal": unsupported_sort_refusal() },
     });
     assert_eq!(observed, expected);
+
+    server.shutdown().await;
+}
+
+const TEXT_SESSION: &str = "query-text-session";
+
+/// The matched message ids (or summary node ids) of one grep page, in order.
+fn matched_ids(observed: &Value) -> Value {
+    let Some(hits) = observed["page"]["hits"].as_array() else {
+        return observed.clone();
+    };
+    hits.iter()
+        .map(|hit| {
+            if hit["kind"] == "summary_node" {
+                json!({ "summary_node": hit["node_id"] })
+            } else {
+                hit["message_id"].clone()
+            }
+        })
+        .collect()
+}
+
+/// Query text reaches the index as literal words: punctuation inside a path,
+/// a quoted operator word, a quoted phrase, and CJK text each find the message
+/// that holds them, role names never match message bodies, and summaries join
+/// a page only when the caller asks for them.
+#[tokio::test]
+async fn lcm_grep_matches_literal_query_text_and_gates_summaries() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let messages = [
+        (
+            "msg-path",
+            "The regression lives in src/foo.rs and needs a tokenizer-style query.",
+        ),
+        (
+            "msg-path-words",
+            "Another message mentions src and foo but not the extension token.",
+        ),
+        ("msg-or", "A literal OR token appears in this transcript."),
+        (
+            "msg-no-or",
+            "This message deliberately omits the operator word.",
+        ),
+        ("msg-phrase", "alpha beta phrase canary"),
+        ("msg-split", "alpha phrase beta (not adjacent)"),
+        ("msg-cjk", "这是一个柠檬测试用例"),
+        ("msg-cjk-other", "仅包含苹果关键词"),
+        ("msg-orchard", "raw orchard migration source detail"),
+    ];
+    let mut inputs = Vec::new();
+    for (ordinal, (message_id, text)) in (1_i64..).zip(messages) {
+        inputs.push(
+            seed(
+                &cg,
+                "cursor",
+                TEXT_SESSION,
+                message_id,
+                text,
+                CanonicalMessageRoleV1::Assistant,
+                ordinal,
+                ordinal * 10,
+            )
+            .await,
+        );
+    }
+    let db = open_active_project_session_db(&cg).await;
+    activate_test_temporal_generation(&db, TEXT_SESSION, inputs).await;
+    let orchard_store_id = lcm_raw_store_id(&cg, "msg-orchard").await;
+    let summary = db
+        .lcm_insert_summary_node_for_test(
+            HostAdmissionScope::Project,
+            LcmSummaryNodeDraft {
+                provider: "cursor".to_owned(),
+                conversation_id: TEXT_SESSION.to_owned(),
+                session_id: TEXT_SESSION.to_owned(),
+                depth: 0,
+                summary_text: "summary orchard migration decision".to_owned(),
+                source_refs: vec![LcmSourceRef::RawMessage {
+                    store_id: orchard_store_id,
+                }],
+                source_token_count: 5,
+                summary_token_count: 4,
+                source_time_start: Some(90),
+                source_time_end: Some(90),
+                expand_hint: None,
+                metadata_json: None,
+            },
+        )
+        .await
+        .expect("summary should insert");
+    let server = real_mcp_server(cg).await;
+
+    let grep = |query: &str, include_summaries: bool| {
+        json!({
+            "query": query,
+            "scope": "session",
+            "session_id": TEXT_SESSION,
+            "include_summaries": include_summaries,
+        })
+    };
+    let mut observed = serde_json::Map::new();
+    for (label, query, include_summaries) in [
+        ("path", "src/foo.rs", false),
+        ("quoted_operator", "\"OR\"", false),
+        ("quoted_phrase", "\"alpha beta\"", false),
+        ("cjk", "柠檬", false),
+        ("role_word", "assistant", false),
+        ("summaries_requested", "orchard migration", true),
+        ("summaries_not_requested", "orchard migration", false),
+    ] {
+        let page = call(&server, grep(query, include_summaries)).await;
+        observed.insert(label.to_owned(), matched_ids(&page));
+    }
+
+    assert_eq!(
+        Value::Object(observed),
+        json!({
+            "path": ["msg-path"],
+            "quoted_operator": ["msg-or"],
+            "quoted_phrase": ["msg-phrase"],
+            "cjk": ["msg-cjk"],
+            "role_word": [],
+            "summaries_requested": ["msg-orchard", { "summary_node": summary.node_id }],
+            "summaries_not_requested": ["msg-orchard"],
+        })
+    );
 
     server.shutdown().await;
 }
