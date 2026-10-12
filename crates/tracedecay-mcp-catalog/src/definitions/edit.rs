@@ -195,10 +195,11 @@ pub(super) fn def_source_edit_rollback() -> ToolDefinition {
 }
 
 pub(super) fn def_str_replace() -> ToolDefinition {
-    ToolDefinition {
-        name: "tracedecay_str_replace".to_string(),
-        description: "Replace a unique string in a file with new content. Fails if the old string is not found or matches more than once. This is the safest edit primitive. Use this instead of sed/awk.".to_string(),
-        input_schema: source_edit_schema(json!({
+    def_rw(
+        "tracedecay_str_replace",
+        "Edit File",
+        "Replace a unique string in a file with new content. Fails if the old string is not found or matches more than once. This is the safest edit primitive. Use this instead of sed/awk.",
+        source_edit_schema(json!({
             "type": "object",
             "properties": {
                 "path": {
@@ -224,19 +225,15 @@ pub(super) fn def_str_replace() -> ToolDefinition {
             },
             "required": ["path", "old_str", "new_str"]
         })),
-        annotations: Some(json!({
-            "readOnlyHint": false,
-            "title": "Edit File"
-        })),
-        meta: None,
-    }
+    )
 }
 
 pub(super) fn def_multi_str_replace() -> ToolDefinition {
-    ToolDefinition {
-        name: "tracedecay_multi_str_replace".to_string(),
-        description: "Apply multiple string replacements atomically in a single file. All replacements must match exactly once. If any replacement fails (0 or >1 matches), the entire operation is aborted and no changes are made.".to_string(),
-        input_schema: source_edit_schema(json!({
+    def_rw(
+        "tracedecay_multi_str_replace",
+        "Multi-Edit File",
+        "Apply multiple string replacements atomically in a single file. All replacements must match exactly once. If any replacement fails (0 or >1 matches), the entire operation is aborted and no changes are made.",
+        source_edit_schema(json!({
             "type": "object",
             "properties": {
                 "path": {
@@ -264,19 +261,15 @@ pub(super) fn def_multi_str_replace() -> ToolDefinition {
             },
             "required": ["path", "replacements"]
         })),
-        annotations: Some(json!({
-            "readOnlyHint": false,
-            "title": "Multi-Edit File"
-        })),
-        meta: None,
-    }
+    )
 }
 
 pub(super) fn def_insert_at() -> ToolDefinition {
-    ToolDefinition {
-        name: "tracedecay_insert_at".to_string(),
-        description: "Insert content before or after a unique anchor in a file. The anchor can be a unique string or a 1-indexed line number. Fails if the anchor matches more than one line.".to_string(),
-        input_schema: source_edit_schema(json!({
+    def_rw(
+        "tracedecay_insert_at",
+        "Insert Into File",
+        "Insert content before or after a unique anchor in a file. The anchor can be a unique string or a 1-indexed line number. Fails if the anchor matches more than one line.",
+        source_edit_schema(json!({
             "type": "object",
             "properties": {
                 "path": {
@@ -307,12 +300,7 @@ pub(super) fn def_insert_at() -> ToolDefinition {
             },
             "required": ["path", "anchor", "content"]
         })),
-        annotations: Some(json!({
-            "readOnlyHint": false,
-            "title": "Insert Into File"
-        })),
-        meta: None,
-    }
+    )
 }
 
 pub(super) fn def_rename_preview(input_schema: Value) -> ToolDefinition {
@@ -406,7 +394,6 @@ pub(super) fn def_rename_symbol() -> ToolDefinition {
             }));
             // Like move_symbol, rename defaults to preview; only an explicit
             // dry_run=false selects the apply branch.
-            schema["allOf"][0]["if"]["required"] = json!(["dry_run"]);
             schema["properties"]["dry_run"]["default"] = json!(true);
             schema["properties"]["verify"]["default"] = json!(true);
             schema["allOf"] = json!([
@@ -447,10 +434,11 @@ pub(super) fn def_ast_grep_search(input_schema: Value) -> ToolDefinition {
 }
 
 pub(super) fn def_ast_grep_rewrite() -> ToolDefinition {
-    ToolDefinition {
-        name: "tracedecay_ast_grep_rewrite".to_string(),
-        description: "Rewrite every structural match of an ast-grep pattern in one file. The pattern and rewrite use ast-grep's SGPattern syntax ($A captures one node, $$$ a run of nodes); matches in comments and strings are left alone. The language is inferred from the file extension.".to_string(),
-        input_schema: source_edit_schema(json!({
+    def_rw(
+        "tracedecay_ast_grep_rewrite",
+        "AST Structural Rewrite",
+        "Rewrite every structural match of an ast-grep pattern in one file. The pattern and rewrite use ast-grep's SGPattern syntax ($A captures one node, $$$ a run of nodes); matches in comments and strings are left alone. The language is inferred from the file extension.",
+        source_edit_schema(json!({
             "type": "object",
             "properties": {
                 "path": {
@@ -476,12 +464,7 @@ pub(super) fn def_ast_grep_rewrite() -> ToolDefinition {
             },
             "required": ["path", "pattern", "rewrite"]
         })),
-        annotations: Some(json!({
-            "readOnlyHint": false,
-            "title": "AST Structural Rewrite"
-        })),
-        meta: None,
-    }
+    )
 }
 
 pub(super) fn def_replace_symbol() -> ToolDefinition {

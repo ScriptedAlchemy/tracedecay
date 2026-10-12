@@ -5,7 +5,7 @@ use tracedecay_contracts::retained_surfaces::{
     LcmRoleV1, MessageRelationshipScopeV1, MessageTypeFilterV1,
 };
 
-use super::{def, string_property};
+use super::{def, string_property, time_filter_schema};
 use crate::ToolDefinition;
 
 /// Wire form of the domain `TemporalModeV1`: a `kind`-tagged object whose
@@ -200,34 +200,10 @@ pub(super) fn def_lcm_grep() -> ToolDefinition {
                     "enum": LcmRoleV1::WIRE,
                     "description": "Optional raw-message role filter. When supplied, summary results are omitted."
                 },
-                "start_time": {
-                    "oneOf": [
-                        { "type": "integer", "minimum": 0 },
-                        { "type": "string" }
-                    ],
-                    "description": "Optional inclusive minimum raw-message timestamp. Accepts Unix seconds, RFC3339, YYYY-MM-DD, or relative time like 'last hour'."
-                },
-                "end_time": {
-                    "oneOf": [
-                        { "type": "integer", "minimum": 0 },
-                        { "type": "string" }
-                    ],
-                    "description": "Optional inclusive maximum raw-message timestamp. Accepts Unix seconds, RFC3339, YYYY-MM-DD, or relative time like 'last hour'."
-                },
-                "since": {
-                    "oneOf": [
-                        { "type": "integer", "minimum": 0 },
-                        { "type": "string" }
-                    ],
-                    "description": "Alias for start_time."
-                },
-                "until": {
-                    "oneOf": [
-                        { "type": "integer", "minimum": 0 },
-                        { "type": "string" }
-                    ],
-                    "description": "Alias for end_time."
-                },
+                "start_time": time_filter_schema("Optional inclusive minimum raw-message timestamp. Accepts Unix seconds, RFC3339, YYYY-MM-DD, or relative time like 'last hour'."),
+                "end_time": time_filter_schema("Optional inclusive maximum raw-message timestamp. Accepts Unix seconds, RFC3339, YYYY-MM-DD, or relative time like 'last hour'."),
+                "since": time_filter_schema("Alias for start_time."),
+                "until": time_filter_schema("Alias for end_time."),
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
