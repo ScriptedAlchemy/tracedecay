@@ -16,7 +16,6 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 
 use tempfile::TempDir;
@@ -26,29 +25,15 @@ use tracedecay_code_index_retention::code_index_generations::{
 use tracedecay_domain::{
     CodeGenerationId, ProjectId, SanitizerRevision, UtcMicros, sha256_hex_suffix,
 };
-use tracedecay_runtime_core::path_safety::{
-    canonical_root_identity, plain_git_args, plain_host_path,
-};
+use tracedecay_runtime_core::path_safety::canonical_root_identity;
 
+use super::tests::git;
 use super::{
     CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1,
     DaemonCodeIndexPublicationStoreV1, SharedCodeIndexBytePoolV1,
 };
 use tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
-
-fn git(root: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .current_dir(plain_host_path(root))
-        .args(plain_git_args(args))
-        .output()
-        .expect("run git");
-    assert!(
-        output.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
 
 /// Base directory for fixture temporary roots, resolved through every symlink.
 ///

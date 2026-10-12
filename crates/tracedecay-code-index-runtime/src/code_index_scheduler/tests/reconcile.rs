@@ -52,30 +52,28 @@ use super::{
     wait_for_queryable_text_generation_id, wait_for_quiescent_owner_pass, wait_for_settled_owner,
     wait_for_worker_phase, wait_until_serving_seat, with_untouched_fillers, write,
 };
-use crate::{
-    code_index::{
-        chunks::content_digest,
-        production::{
-            CodeIndexExecutionControlV1, CodeIndexPublishedGenerationV1,
-            DAEMON_CODE_INDEX_CHUNKER_REVISION, UninterruptibleCodeIndexControlV1,
-        },
+use crate::code_index_scheduler::{
+    CodeIndexCadenceOutcomeV1, CodeIndexCadenceTriggerV1, CodeIndexEventToReadyReceiptV1,
+    CodeIndexHintPolicyV1, CodeIndexIgnoredDependencyRequestV1, CodeIndexReconcileAdmissionV1,
+    CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1, CodeIndexWorkerPhaseV1,
+    CodeIndexWorktreeSchedulerV1, GenerationDecodeAdmissionV1, LatestCompleteCodeIndexV1,
+    RetainedGraphRecoveryPauseV1, SharedCodeIndexBytePoolV1,
+    classification::{
+        NonUtf8ClassifiedChangeV1, WorktreeChangeClassV1, WorktreeChangeClassificationV1,
     },
-    code_index_scheduler::{
-        CodeIndexCadenceOutcomeV1, CodeIndexCadenceTriggerV1, CodeIndexEventToReadyReceiptV1,
-        CodeIndexHintPolicyV1, CodeIndexIgnoredDependencyRequestV1, CodeIndexReconcileAdmissionV1,
-        CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1, CodeIndexWorkerPhaseV1,
-        CodeIndexWorktreeSchedulerV1, GenerationDecodeAdmissionV1, LatestCompleteCodeIndexV1,
-        RetainedGraphRecoveryPauseV1, SharedCodeIndexBytePoolV1,
-        classification::{
-            NonUtf8ClassifiedChangeV1, WorktreeChangeClassV1, WorktreeChangeClassificationV1,
-        },
-        feedback_document_identity_from_generation,
-        freshness_witness::RestoreFreshnessWitnessV1,
-        freshness_witness::SourceSweepStatsV1,
-        registry::{
-            ColdMountOpenEventV1, ServingGenerationInstallationOutcomeV1,
-            ServingGenerationRollbackOutcomeV1, dashboard_code_graph_serving,
-        },
+    feedback_document_identity_from_generation,
+    freshness_witness::RestoreFreshnessWitnessV1,
+    freshness_witness::SourceSweepStatsV1,
+    registry::{
+        ColdMountOpenEventV1, ServingGenerationInstallationOutcomeV1,
+        ServingGenerationRollbackOutcomeV1, dashboard_code_graph_serving,
+    },
+};
+use tracedecay_code_index::{
+    chunks::content_digest,
+    production::{
+        CodeIndexExecutionControlV1, CodeIndexPublishedGenerationV1,
+        DAEMON_CODE_INDEX_CHUNKER_REVISION, UninterruptibleCodeIndexControlV1,
     },
 };
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
@@ -1770,12 +1768,12 @@ fn sealed_segment_graph_store(
     binding: &super::super::CodeGraphReplayBindingV1,
     generation_id: &tracedecay_domain::CodeGenerationId,
     scratch: &Path,
-) -> Arc<crate::code_index::graph_projection::CodeGraphProjectionStore> {
+) -> Arc<tracedecay_code_index::graph_projection::CodeGraphProjectionStore> {
     let projector_revision = tracedecay_graph_db::GraphProjectorRevision::try_from(
-        crate::code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
+        tracedecay_code_index::graph_projection::CODE_GRAPH_PROJECTOR_REVISION.to_owned(),
     )
     .expect("projector revision");
-    let projection = crate::code_index::graph_projection::code_graph_projection_identity(
+    let projection = tracedecay_code_index::graph_projection::code_graph_projection_identity(
         tracedecay_graph_db::GraphNamespace::new("code-graph").expect("graph namespace"),
     )
     .expect("projection identity");
@@ -1792,14 +1790,15 @@ fn sealed_segment_graph_store(
             binding.generations_root.parent().expect("store root"),
         );
     let source =
-        crate::code_index::production::SealedGenerationFileWindowsV1::open(&sealed_manifest)
+        tracedecay_code_index::production::SealedGenerationFileWindowsV1::open(&sealed_manifest)
             .expect("sealed manifest opens");
-    let manifest = crate::code_index::graph_projection::build_sealed_code_graph_rows(
+    let manifest = tracedecay_code_index::graph_projection::build_sealed_code_graph_rows(
         projection.clone(),
         &source,
         &mut |request, buffer| {
-            let crate::code_index::production::SealedGenerationSegmentReadV1::Whole {
-                digest, ..
+            let tracedecay_code_index::production::SealedGenerationSegmentReadV1::Whole {
+                digest,
+                ..
             } = request
             else {
                 panic!("the graph build reads whole file segments");
@@ -1826,7 +1825,7 @@ fn sealed_segment_graph_store(
     )
     .expect("verified graph snapshot");
     Arc::new(
-        crate::code_index::graph_projection::CodeGraphProjectionStore::from_verified_snapshot(
+        tracedecay_code_index::graph_projection::CodeGraphProjectionStore::from_verified_snapshot(
             snapshot,
             generation_id.clone(),
         )
@@ -4791,7 +4790,7 @@ async fn a_different_content_successor_pointer_refuses_the_stale_seat() {
 /// `generation_unverified` until the daemon restarted.
 #[test]
 fn graph_publication_conflict_re_arms_activation_instead_of_orphaning_serving() {
-    use crate::code_index::graph_projection::CodeGraphProjectionError;
+    use tracedecay_code_index::graph_projection::CodeGraphProjectionError;
 
     assert!(
         super::super::CodeIndexSchedulerErrorV1::GraphProjection(
@@ -4904,7 +4903,7 @@ fn repeated_identical_conflict_verdict_is_terminal_not_retryable() {
         "different compared evidence is a different verdict"
     );
     let non_conflict = super::super::CodeIndexSchedulerErrorV1::GraphProjection(
-        crate::code_index::graph_projection::CodeGraphProjectionError::DeadlineExceeded,
+        tracedecay_code_index::graph_projection::CodeGraphProjectionError::DeadlineExceeded,
     );
     assert!(
         !super::super::registry::is_repeated_conflict_verdict(

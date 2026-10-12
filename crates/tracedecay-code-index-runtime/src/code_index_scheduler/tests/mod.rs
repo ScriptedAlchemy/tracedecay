@@ -224,7 +224,32 @@ fn copy_dir_recursive(src: &Path, dst: &Path) {
     }
 }
 
-fn git(root: &Path, args: &[&str]) {
+/// Run one Git fixture command under a fixed test author and committer.
+pub(super) fn run_git_in(root: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .env("GIT_AUTHOR_NAME", "TraceDecay Test")
+        .env("GIT_AUTHOR_EMAIL", "test@tracedecay.invalid")
+        .env("GIT_COMMITTER_NAME", "TraceDecay Test")
+        .env("GIT_COMMITTER_EMAIL", "test@tracedecay.invalid")
+        .output()
+        .expect("git command should run");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Initialize `project` on `main` and commit everything already written there.
+pub(super) fn commit_fixture_checkout(project: &Path) {
+    run_git_in(project, &["init", "-q", "-b", "main"]);
+    run_git_in(project, &["add", "."]);
+    run_git_in(project, &["commit", "-qm", "fixture"]);
+}
+
+pub(super) fn git(root: &Path, args: &[&str]) {
     let status = Command::new(
         tracedecay_runtime_core::git::try_git_program()
             .expect("absolute git executable should resolve"),
@@ -252,7 +277,7 @@ pub(super) fn stage_raw_git_path(root: &Path, git_path: &[u8], source: &str) {
     assert!(output.status.success(), "stage raw Git path: {output:?}");
 }
 
-fn git_stdout(root: &Path, args: &[&str]) -> String {
+pub(super) fn git_stdout(root: &Path, args: &[&str]) -> String {
     let output = Command::new(
         tracedecay_runtime_core::git::try_git_program()
             .expect("absolute git executable should resolve"),
@@ -1484,7 +1509,7 @@ async fn hold_scheduler_for_root(
     project_root: &Path,
 ) -> HeldSchedulerV1 {
     let scheduler = registry
-        .scheduler_for_root(project_root)
+        .scheduler_handle(project_root)
         .await
         .expect("mounted scheduler");
     let (release, released) = tokio::sync::oneshot::channel();
