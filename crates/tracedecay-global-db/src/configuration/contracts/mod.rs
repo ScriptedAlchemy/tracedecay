@@ -17,6 +17,6 @@ pub use types::{
     ActivationDriftV1, AuthorizedActor, CONFIGURATION_AUDIT_PAGE_LIMIT,
     ComponentConfigurationState, ConfigurationAuditPage, ConfigurationAuditQuery,
     ConfigurationError, ConfigurationMutationAuthority, ConfigurationMutationReceipt,
-    ConfigurationPlanContext, ConfigurationRollbackRequest, ConfigurationSettlementAuthorityV1,
-    DirectConfigurationMutation, ResolvedSetting, SettingSummary, configuration_layer_scope_digest,
+    ConfigurationRollbackRequest, ConfigurationSettlementAuthorityV1, DirectConfigurationMutation,
+    ResolvedSetting, SettingSummary, configuration_layer_scope_digest,
 };
