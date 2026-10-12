@@ -91,7 +91,7 @@ impl<E: StorageOperationExecutor> RuntimeWriterPersistence<E> {
     }
 }
 
-fn map_ledger_error(error: LedgerError) -> StorageRuntimeErrorV1 {
+pub(crate) fn map_ledger_error(error: LedgerError) -> StorageRuntimeErrorV1 {
     match error {
         LedgerError::Corrupt { .. } => StorageRuntimeErrorV1::Corrupt {
             class: CorruptionClassV1::Authoritative,

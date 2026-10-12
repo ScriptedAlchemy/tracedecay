@@ -226,7 +226,6 @@ fn decode_sequence(raw: i64, field: &'static str) -> Result<CommitSequenceV1, Le
     Ok(CommitSequenceV1(raw))
 }
 
-#[cfg(test)]
 pub(crate) fn current_watermark(
     transaction: &impl LedgerTransaction,
     binding: &StoreRuntimeBindingV1,

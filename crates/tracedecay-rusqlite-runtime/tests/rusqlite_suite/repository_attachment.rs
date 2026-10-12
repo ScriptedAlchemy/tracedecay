@@ -7,6 +7,7 @@ use tracedecay_rusqlite_runtime::StorageOperationExecutor;
 use tracedecay_rusqlite_runtime::repository::{
     ConcreteRepositoryWriteExecutor, RepositoryPhysicalAttachmentFactory,
 };
+use tracedecay_rusqlite_runtime::runtime_ledger::RUNTIME_LEDGER_SCHEMA;
 use tracedecay_store::{
     AdmissionConfigV1, CommitSequenceV1, ConsistencyModeV1, DiagnosticReadOperationV1,
     DiagnosticReadResultV1, GENERATION_DIAGNOSTICS_SCHEMA_DDL, OperationPriorityV1,
@@ -14,9 +15,8 @@ use tracedecay_store::{
     RepositoryWritePayloadV1, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
     RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeReadCoverageV1, RuntimeReadOperationV1,
     RuntimeReadRequestV1, RuntimeReadResultV1, RuntimeRequestControlV1, RuntimeRequestProbeV1,
-    SanitizedCleanDiagnosticSnapshotV1, ShardWatermarkV1, StoreIncarnationV1,
-    StoreRuntimeBindingV1, StoreShardIdV1, VerifiedStoreLocatorV1,
-    single_shard_required_coverage_v1,
+    SanitizedCleanDiagnosticSnapshotV1, StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1,
+    UnavailableReasonV1, VerifiedStoreLocatorV1, single_shard_required_coverage_v1,
 };
 
 use tracedecay_domain::test_fixtures::id;
@@ -146,10 +146,13 @@ fn temporal_health_dispatch_uses_the_reserved_reader_lane() {
 }
 
 #[test]
-fn at_least_reads_report_complete_fenced_coverage_for_the_bound_shard() {
+fn at_least_reads_before_any_commit_report_unavailable_coverage() {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("sessions.db");
-    Connection::open(&path).unwrap();
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch(RUNTIME_LEDGER_SCHEMA)
+        .unwrap();
     let path = path.canonicalize().unwrap();
     let binding = binding();
     let locator = VerifiedStoreLocatorV1::new(
@@ -168,24 +171,17 @@ fn at_least_reads_report_complete_fenced_coverage_for_the_bound_shard() {
 
     let outcome = attachment.dispatch_read(request.clone(), &probe).unwrap();
 
-    let required = ShardWatermarkV1 {
-        shard_id: binding.shard_id.clone(),
-        incarnation: binding.incarnation,
-        authority_epoch: binding.authority_epoch,
-        commit_sequence,
-    };
     assert_eq!(
         outcome.coverage(),
-        &RuntimeReadCoverageV1::Complete {
-            coverage: single_shard_required_coverage_v1(&binding, commit_sequence, [required])
-                .unwrap(),
+        &RuntimeReadCoverageV1::Unavailable {
+            coverage: Some(
+                single_shard_required_coverage_v1(&binding, commit_sequence, []).unwrap()
+            ),
+            reason: UnavailableReasonV1::WatermarkNotReached,
         }
     );
     assert_eq!(outcome.validate_for(&request), Ok(()));
-    assert!(matches!(
-        outcome.value(),
-        Some(RuntimeReadResultV1::TemporalHealth { healthy: true })
-    ));
+    assert!(outcome.value().is_none());
     attachment.drain().unwrap();
     attachment.close_and_join().unwrap();
 }

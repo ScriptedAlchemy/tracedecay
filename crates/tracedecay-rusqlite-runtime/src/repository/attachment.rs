@@ -9,10 +9,11 @@ use std::{
 
 use rusqlite::Transaction;
 use tracedecay_store::{
-    AdmissionConfigV1, ConsistencyModeV1, FrozenWatermarkCoverageV1, FrozenWatermarkVectorV1,
-    RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1,
-    RuntimeReadResultV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1,
-    ShardWatermarkV1, StorageRuntimeErrorV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
+    AdmissionConfigV1, CommitSequenceV1, ConsistencyModeV1, RuntimeReadCoverageV1,
+    RuntimeReadOperationV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1, RuntimeReadResultV1,
+    RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1, StorageRuntimeErrorV1,
+    StoreRuntimeBindingV1, UnavailableReasonV1, VerifiedStoreLocatorV1,
+    single_shard_required_coverage_v1,
 };
 
 use crate::{
@@ -21,6 +22,8 @@ use crate::{
     RuntimeWriteAuthorityStage, WriterActorError, WriterStartError, WriterState,
     connection::{OpenedDatabaseFile, OpenedDatabaseFileError},
     exact_sql::{ExactSqlError, ExactSqlHandle},
+    ledger::{self, LedgerError},
+    persistence::map_ledger_error,
     reader::{
         ExistingReaderLocator, ReaderAcquireError, ReaderCheckpointBlockers, ReaderPool,
         ReaderQueryExecutor, ReaderStartError,
@@ -812,6 +815,20 @@ impl ReaderQueryExecutor for RepositoryRuntimeReadExecutor {
         snapshot: &Transaction<'_>,
         request: &RuntimeReadRequestV1,
     ) -> Result<RuntimeReadOutcomeV1, StorageRuntimeErrorV1> {
+        let coverage = match request.consistency() {
+            ConsistencyModeV1::LatestAvailable => RuntimeReadCoverageV1::Latest { observed: None },
+            ConsistencyModeV1::AtLeast { commit_sequence } => {
+                at_least_coverage(snapshot, request.binding(), *commit_sequence)?
+            }
+        };
+        if matches!(
+            coverage,
+            RuntimeReadCoverageV1::Stale { .. } | RuntimeReadCoverageV1::Unavailable { .. }
+        ) {
+            return RuntimeReadOutcomeV1::new(None, coverage).map_err(|error| {
+                infrastructure(format!("construct repository read outcome: {error}"))
+            });
+        }
         let value = match request.operation() {
             RuntimeReadOperationV1::TemporalHealth => {
                 let healthy = snapshot
@@ -833,29 +850,36 @@ impl ReaderQueryExecutor for RepositoryRuntimeReadExecutor {
                 ));
             }
         };
-        let coverage = match request.consistency() {
-            ConsistencyModeV1::LatestAvailable => RuntimeReadCoverageV1::Latest { observed: None },
-            ConsistencyModeV1::AtLeast { commit_sequence } => {
-                let observed = ShardWatermarkV1 {
-                    shard_id: request.binding().shard_id.clone(),
-                    incarnation: request.binding().incarnation,
-                    authority_epoch: request.binding().authority_epoch,
-                    commit_sequence: *commit_sequence,
-                };
-                let required =
-                    FrozenWatermarkVectorV1::new([observed.clone()]).map_err(|error| {
-                        infrastructure(format!("construct repository required watermark: {error}"))
-                    })?;
-                let coverage =
-                    FrozenWatermarkCoverageV1::new(required, [observed]).map_err(|error| {
-                        infrastructure(format!("construct repository read coverage: {error}"))
-                    })?;
-                RuntimeReadCoverageV1::Complete { coverage }
-            }
-        };
         RuntimeReadOutcomeV1::new(Some(value), coverage)
             .map_err(|error| infrastructure(format!("construct repository read outcome: {error}")))
     }
+}
+
+/// Classifies an `AtLeast` read against the ledger checkpoint visible in the
+/// same snapshot that would serve the page.
+fn at_least_coverage(
+    snapshot: &Transaction<'_>,
+    binding: &StoreRuntimeBindingV1,
+    commit_sequence: CommitSequenceV1,
+) -> Result<RuntimeReadCoverageV1, StorageRuntimeErrorV1> {
+    let (stored, reason) = match ledger::current_watermark(snapshot, binding) {
+        Ok(stored) => (stored, UnavailableReasonV1::WatermarkNotReached),
+        Err(LedgerError::StaleAuthority { .. }) => (None, UnavailableReasonV1::WrongAuthorityEpoch),
+        Err(error) => return Err(map_ledger_error(error)),
+    };
+    let reached = stored.is_some();
+    let coverage = single_shard_required_coverage_v1(binding, commit_sequence, stored)
+        .map_err(|error| infrastructure(format!("construct repository read coverage: {error}")))?;
+    Ok(if coverage.is_complete() {
+        RuntimeReadCoverageV1::Complete { coverage }
+    } else if reached {
+        RuntimeReadCoverageV1::Stale { coverage }
+    } else {
+        RuntimeReadCoverageV1::Unavailable {
+            coverage: Some(coverage),
+            reason,
+        }
+    })
 }
 
 fn infrastructure(operation: impl Into<String>) -> StorageRuntimeErrorV1 {
@@ -871,15 +895,13 @@ mod tests {
     use tempfile::TempDir;
     use tracedecay_domain::LocatorDigest;
     use tracedecay_store::{
-        AdmissionConfigV1, CommitSequenceV1, OperationPriorityV1, RuntimeCancellationIdentityV1,
-        RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestControlV1, StoreIncarnationV1,
-        single_shard_required_coverage_v1,
+        AdmissionConfigV1, OperationPriorityV1, RuntimeCancellationIdentityV1, RuntimeDeadlineV1,
+        RuntimeInterruptionV1, RuntimeRequestControlV1, ShardWatermarkV1, StoreIncarnationV1,
     };
 
     use crate::{
         CheckpointBlockers, CheckpointKind, MaintenanceCheckpointMode, RuntimeWriteAuthorityError,
         exact_sql::{ExactSqlError, ExactSqlStatement, ExactSqlValue},
-        ledger,
         maintenance::{ExclusiveMaintenancePermit, MaintenanceOwnerId},
         test_support,
     };
