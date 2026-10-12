@@ -1,5 +1,6 @@
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_domain::{
     CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
@@ -12,8 +13,7 @@ use tracedecay_store::cursor_dispatch::cursor_model_string;
 
 use crate::git_facts::append_diff_and_pull_request_facts;
 use crate::{
-    ObservationRecordParseErrorV1, parse::canonical_u64_i64, parse::sha256_hex,
-    parse_rfc3339_timestamp_micros,
+    ObservationRecordParseErrorV1, parse::canonical_u64_i64, parse_rfc3339_timestamp_micros,
 };
 
 const PROVIDER: &str = "cursor";
@@ -539,7 +539,7 @@ pub fn cursor_composer_native_record_id(
     hasher.update(bubble_id.as_bytes());
     ObservationId::new(format!(
         "cursor.composer.sha256:{}",
-        sha256_hex(&hasher.finalize())
+        encode_lowercase_hex(&hasher.finalize())
     ))
     .map_err(|error| format!("invalid Cursor composer native identity: {error}"))
 }
@@ -617,7 +617,7 @@ pub fn cursor_composer_envelope_native_record_id(
     hasher.update(checkpoint.to_le_bytes());
     ObservationId::new(format!(
         "cursor.composer.envelope.sha256:{}",
-        sha256_hex(&hasher.finalize())
+        encode_lowercase_hex(&hasher.finalize())
     ))
     .map_err(|error| format!("invalid Cursor composer envelope native identity: {error}"))
 }
