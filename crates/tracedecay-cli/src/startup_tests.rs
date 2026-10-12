@@ -771,7 +771,8 @@ fn serve_selects_a_catalog_profile_by_its_short_name() {
         assert_eq!(profile.name(), "compact");
     }
     let error = Cli::try_parse_from(["tracedecay", "serve", "--catalog-profile=profile.compact"])
-        .expect_err("a catalog profile ID is not its short name");
+        .err()
+        .expect("a catalog profile ID is not its short name");
     assert!(
         error
             .to_string()
