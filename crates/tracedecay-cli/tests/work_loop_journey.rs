@@ -1031,6 +1031,35 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         "admitting execution must not accept the task: {admitted_graph}"
     );
 
+    // The fixture's Git directory lives outside the checkout, so a reader
+    // that opens it by itself sees a bare repository with no worktree.
+    let in_place_preflight = fixture.payload(
+        "clean in-place placement preflight",
+        "/application/work/placement-preflight",
+        &json!({
+            "task_id": TASK_ID,
+            "run_id": RUN_ID,
+            "target": {
+                "kind": "clean_in_place",
+                "root": null,
+                "network_free": true,
+                "in_place_acknowledged": true,
+            },
+            "occurred_at": now_micros(),
+        }),
+    );
+    assert_eq!(
+        in_place_preflight["observation"]["readable"], true,
+        "a --separate-git-dir checkout must read as its worktree: {in_place_preflight}"
+    );
+    assert!(
+        !in_place_preflight["blockers"]
+            .as_array()
+            .expect("preflight blockers")
+            .contains(&json!("target_unreadable")),
+        "{in_place_preflight}"
+    );
+
     let start = start_attempt_body(
         &fixture.project,
         SETTLED_ATTEMPT_ID,
