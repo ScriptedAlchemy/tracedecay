@@ -112,7 +112,7 @@ pub fn assemble_context_parts_with_frames<P: ContextPayload, U: ContextUnavailab
     }
     preserve_rejected_summary_details(&mut bundle, &summary_omissions, control)?;
     for omission in &mut bundle.omissions {
-        if !omission.reason.is_terminal_privacy()
+        if !terminal_omission_reason(omission.reason)
             && omission
                 .anchor_id
                 .as_ref()
@@ -398,7 +398,7 @@ fn validate_privacy_and_anchor_overlap<U: ContextUnavailable>(
         }
     }
     for omission in &frames.omissions {
-        if omission.reason.is_terminal_privacy()
+        if terminal_omission_reason(omission.reason)
             && omission
                 .anchor_id
                 .as_ref()
@@ -649,16 +649,6 @@ fn zeroed_usize_vec(len: usize) -> Result<Vec<usize>, ContextError> {
     try_reserve(&mut values, len)?;
     values.resize(len, 0);
     Ok(values)
-}
-
-trait TerminalPrivacyReason {
-    fn is_terminal_privacy(&self) -> bool;
-}
-
-impl TerminalPrivacyReason for ContextOmissionReasonV1 {
-    fn is_terminal_privacy(&self) -> bool {
-        terminal_omission_reason(*self)
-    }
 }
 
 pub fn validate_bundle(bundle: &CompactContextBundleV1) -> Result<(), ContextError> {
