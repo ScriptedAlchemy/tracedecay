@@ -5,6 +5,7 @@ use super::{
     ConfigurationRevisionId, ConfigurationStoreResult, Executor, QueryExecutor, Row, UtcMicros,
     invalid_store_data, params,
 };
+use tracedecay_rusqlite_runtime::repository::ADVANCE_COMPONENT_DESIRED_STATE_SQL;
 
 #[derive(Clone, Debug)]
 pub(super) struct StoredComponentActivationState {
@@ -191,26 +192,12 @@ pub(super) async fn advance_component_desired_state(
     desired_revision_id: &ConfigurationRevisionId,
     occurred_at: UtcMicros,
 ) -> ConfigurationStoreResult<()> {
-    for prior in latest_component_activation_states(transaction).await? {
-        let observed_revision_id = prior
-            .observed_revision_id
-            .clone()
-            .or_else(|| prior.last_working_revision_id.clone());
-        let restart_required = observed_revision_id.as_ref() != Some(desired_revision_id)
-            || prior.activation_error_code.is_some();
-        insert_component_activation_event(
-            transaction,
-            &StoredComponentActivationState {
-                component: prior.component,
-                desired_revision_id: desired_revision_id.clone(),
-                observed_revision_id,
-                last_working_revision_id: prior.last_working_revision_id,
-                restart_required,
-                activation_error_code: prior.activation_error_code,
-            },
-            occurred_at,
+    transaction
+        .execute(
+            ADVANCE_COMPONENT_DESIRED_STATE_SQL,
+            params![desired_revision_id.as_str(), occurred_at.0],
         )
-        .await?;
-    }
+        .await
+        .map_err(unavailable_store)?;
     Ok(())
 }

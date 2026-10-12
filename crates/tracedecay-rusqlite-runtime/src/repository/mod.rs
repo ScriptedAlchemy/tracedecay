@@ -17,14 +17,17 @@
 //! dispositions and derivatives. The profile/configuration family
 //! ([`RepositoryWritePayloadV1::Configuration`] and every
 //! [`RepositoryReadOperationV1::Profile`] operation) is wired and tested here,
-//! but its live writer is still
+//! and writes the same receipt and desired-state SQL as
 //! `crates/tracedecay-global-db/src/configuration/store.rs`.
 //!
-//! `Code` operations cross the graph-db boundary, while `Effects` operations
-//! are owned by the writer ledger; both dispatch arms here reject them.
+//! Git-index operations cross a boundary this attachment does not own, so that
+//! arm rejects them. Effect payloads are recorded by the writer ledger; this
+//! executor accepts enqueue, inbox, and acknowledge without a domain write so
+//! the ledger can persist that lifecycle.
 
 mod attachment;
 mod configuration;
+mod configuration_receipt;
 mod diagnostics;
 mod external_source;
 mod fact;
@@ -49,6 +52,11 @@ pub use attachment::{
     RepositoryWriterRuntimeSnapshot,
 };
 pub use configuration::ConfigurationExecutor;
+pub use configuration_receipt::{
+    ADVANCE_COMPONENT_DESIRED_STATE_SQL, CONFIGURATION_ACTIVATION_DESIRED_RECORDED,
+    INSERT_CONFIGURATION_MUTATION_RECEIPT_SQL, advance_component_desired_state,
+    configuration_entry_layer, insert_mutation_receipt,
+};
 pub use diagnostics::DiagnosticExecutor;
 pub use external_source::{EXTERNAL_SOURCE_SCHEMA_V1, ExternalSourceExecutor};
 pub use fact::FactExecutor;
@@ -150,16 +158,16 @@ impl StorageOperationExecutor for ConcreteRepositoryWriteExecutor {
                 self.project
                     .execute_retrieval_anchor_derivative_write(savepoint, derivative)?;
             }
-            RepositoryWritePayloadV1::GitIndexTransaction(_)
-            | RepositoryWritePayloadV1::EnqueueOutbox(_)
-            | RepositoryWritePayloadV1::ApplyInbox(_)
-            | RepositoryWritePayloadV1::AcknowledgeOutbox(_) => {
+            RepositoryWritePayloadV1::GitIndexTransaction(_) => {
                 return Err(rusqlite::Error::InvalidParameterName(format!(
                     "repository attachment does not own {}",
                     payload.name()
                 ))
                 .into());
             }
+            RepositoryWritePayloadV1::EnqueueOutbox(_)
+            | RepositoryWritePayloadV1::ApplyInbox(_)
+            | RepositoryWritePayloadV1::AcknowledgeOutbox(_) => {}
         }
         Ok(())
     }
