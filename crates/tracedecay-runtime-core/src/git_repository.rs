@@ -7,6 +7,7 @@ use std::collections::{BTreeSet, HashMap};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, PoisonError};
 
 use gix::bstr::ByteSlice as _;
@@ -121,6 +122,18 @@ pub struct GitRepositoryTopologyV1 {
 #[derive(Default)]
 struct CheckoutTopologySlot {
     state: Mutex<CheckoutTopologyState>,
+    /// [`CHECKOUT_TOPOLOGY_USES`] tick of the last lookup; a full memo drops
+    /// the slot with the oldest tick.
+    last_used: AtomicU64,
+}
+
+impl CheckoutTopologySlot {
+    fn touch(&self) {
+        self.last_used.fetch_max(
+            CHECKOUT_TOPOLOGY_USES.fetch_add(1, Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+    }
 }
 
 #[derive(Default)]
@@ -185,18 +198,22 @@ impl TopologyWalk {
 
 /// Retained checkout-root topologies.
 ///
-/// Bounded by [`MAX_RETAINED_CHECKOUT_TOPOLOGIES`]; a full map is cleared
-/// rather than evicted by age, because every entry is a pure memo that costs
-/// one discovery to rebuild.
+/// Bounded by [`MAX_RETAINED_CHECKOUT_TOPOLOGIES`]; a full map drops its least
+/// recently used settled slot. Clearing it whole instead let a burst of
+/// one-off probes evict the roots a daemon keeps serving, so a deferred route
+/// on a slow volume walked again instead of converging.
 static CHECKOUT_TOPOLOGY: LazyLock<Mutex<HashMap<PathBuf, Arc<CheckoutTopologySlot>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+static CHECKOUT_TOPOLOGY_USES: AtomicU64 = AtomicU64::new(0);
 
 /// A daemon serves few project roots; this bound exists so a long-lived
 /// process that probes many paths cannot grow the memo without limit.
 const MAX_RETAINED_CHECKOUT_TOPOLOGIES: usize = 64;
 
 /// Last branch read from each Git directory's HEAD, keyed by that file's
-/// identity. Bounded and cleared like [`CHECKOUT_TOPOLOGY`].
+/// identity. Bounded like [`CHECKOUT_TOPOLOGY`] but cleared whole when full:
+/// an entry costs one HEAD read to rebuild, not a discovery walk.
 static HEAD_BRANCHES: LazyLock<Mutex<HeadBranchMemo>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -416,6 +433,7 @@ fn retained_checkout_topology(path: &Path) -> Option<Arc<GitRepositoryTopologyV1
             .unwrap_or_else(PoisonError::into_inner)
             .get(path)?,
     );
+    slot.touch();
     live_ready_topology(&slot)
 }
 
@@ -424,14 +442,37 @@ fn checkout_topology_slot(path: &Path) -> Arc<CheckoutTopologySlot> {
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     if let Some(slot) = slots.get(path) {
+        slot.touch();
         return Arc::clone(slot);
     }
-    if slots.len() >= MAX_RETAINED_CHECKOUT_TOPOLOGIES {
-        slots.clear();
-    }
+    while slots.len() >= MAX_RETAINED_CHECKOUT_TOPOLOGIES
+        && evict_least_recently_used_settled_slot(&mut slots)
+    {}
     let slot = Arc::new(CheckoutTopologySlot::default());
+    slot.touch();
     slots.insert(path.to_path_buf(), Arc::clone(&slot));
     slot
+}
+
+/// Drop the least recently used slot whose walk has settled, reporting
+/// whether one was dropped. A slot with a walk in flight stays, because its
+/// owner publishes into that slot and an evicted one would discard the
+/// answer; the map may then exceed its bound until those walks settle and a
+/// later insertion evicts back down to it. `try_lock` skips a slot another
+/// thread holds, since that thread may be waiting for this map lock.
+fn evict_least_recently_used_settled_slot(
+    slots: &mut HashMap<PathBuf, Arc<CheckoutTopologySlot>>,
+) -> bool {
+    let victim = slots
+        .iter()
+        .filter(|(_, slot)| {
+            slot.state
+                .try_lock()
+                .is_ok_and(|state| !matches!(*state, CheckoutTopologyState::Resolving(_)))
+        })
+        .min_by_key(|(_, slot)| slot.last_used.load(Ordering::Relaxed))
+        .map(|(path, _)| path.clone());
+    victim.is_some_and(|victim| slots.remove(&victim).is_some())
 }
 
 /// Whether a retained checkout-root topology still describes the filesystem.
@@ -1614,12 +1655,50 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        GitRepositoryError, GitRepositoryTopologyV1, TopologyResult,
-        block_repository_discovery_for_test, observe_repository_discovery,
-        repository_discovery_count_for_test, repository_topology,
+        GitRepositoryError, GitRepositoryTopologyV1, MAX_RETAINED_CHECKOUT_TOPOLOGIES,
+        TopologyResult, block_repository_discovery_for_test, observe_repository_discovery,
+        observe_repository_discovery_for_test, repository_discovery_count_for_test,
+        repository_topology, repository_topology_resolution_count_for_test,
         reset_repository_discovery_for_test, wait_for_topology_callers_for_test,
         wait_until_repository_discovery_blocks,
     };
+
+    /// A full memo makes room by dropping its least recently used path, so a
+    /// root that keeps being asked for survives churn from many one-off
+    /// probes. Clearing the whole memo instead dropped that root too, and a
+    /// deferred route on a slow volume walked again instead of converging.
+    #[test]
+    fn a_full_topology_memo_keeps_a_recently_used_root() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let repository = temporary.path().join("repository");
+        std::fs::create_dir_all(&repository).expect("repository directory");
+        let status = std::process::Command::new("git")
+            .args(["init", "--quiet", "-b", "main"])
+            .current_dir(&repository)
+            .status()
+            .expect("git init");
+        assert!(status.success());
+        let repository = repository.canonicalize().expect("canonical repository");
+        observe_repository_discovery_for_test(&repository);
+        repository_topology(&repository).expect("retained repository topology");
+
+        let probes = tempfile::tempdir().expect("probe directory");
+        for probe in 0..MAX_RETAINED_CHECKOUT_TOPOLOGIES * 2 {
+            let path = probes.path().join(probe.to_string());
+            std::fs::create_dir_all(&path).expect("probe path");
+            let _ = repository_topology(&path);
+            if probe % 8 == 0 {
+                repository_topology(&repository).expect("repository topology");
+            }
+        }
+
+        assert_eq!(
+            repository_topology_resolution_count_for_test(&repository),
+            1,
+            "a root asked for between probes must stay retained"
+        );
+        reset_repository_discovery_for_test(&repository);
+    }
 
     #[tokio::test]
     async fn discovery_block_retains_entry_for_late_subscribers() {

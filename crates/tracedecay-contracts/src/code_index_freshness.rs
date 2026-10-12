@@ -696,12 +696,23 @@ pub enum CodeIndexFreshnessReadFailureV1 {
     ReadFailed,
     /// The route's last code-index mount failed and no later attempt mounted.
     MountFailed,
+    /// A linked worktree the watch policy keeps out of automatic indexing,
+    /// with nothing mounted or mounting for it.
+    LinkedWorktreeDisabled,
 }
 
 /// Safe operator-facing status for a failed code-index mount.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct CodeIndexMountFailureV1 {
     pub message: String,
+    pub remediation: String,
+}
+
+/// A policy that keeps the route from being indexed, with the operator step
+/// that lifts it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct CodeIndexRouteRefusalV1 {
+    pub reason: String,
     pub remediation: String,
 }
 
@@ -872,6 +883,8 @@ pub struct CodeIndexFreshnessPayloadV1 {
     pub note: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mount_failure: Option<CodeIndexMountFailureV1>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<CodeIndexRouteRefusalV1>,
 }
 
 const LIVE_NOTE: &str = "last daemon scheduler execution state; generation and scope come from the durable sealed generation";
@@ -885,6 +898,12 @@ const MOUNT_FAILED_MESSAGE: &str = "the code-index scheduler could not mount for
 const MOUNT_FAILED_REMEDIATION: &str = "run `tracedecay sync` to retry the code-index mount";
 /// Stable reason code for a failed demand-driven code-index mount.
 pub const CODE_INDEX_MOUNT_FAILED: &str = "code_index_mount_failed";
+const LINKED_WORKTREE_DISABLED_NOTE: &str =
+    "the watch policy keeps this linked worktree out of automatic indexing";
+const LINKED_WORKTREE_DISABLED_REMEDIATION: &str = "this linked worktree is not indexed automatically (sync.watch_linked_worktrees.v1 is false); run `tracedecay sync` in it to index it once, or set sync.watch_linked_worktrees.v1 to true at the project layer to index linked worktrees automatically";
+/// Stable reason code for a linked worktree the watch policy keeps out of
+/// automatic indexing.
+pub const CODE_INDEX_LINKED_WORKTREE_DISABLED: &str = "linked_worktree_disabled";
 
 impl CodeIndexFreshnessPayloadV1 {
     /// Payload after the daemon scheduler registry answered for this project.
@@ -898,6 +917,7 @@ impl CodeIndexFreshnessPayloadV1 {
             worktrees: worktrees.into_iter().collect(),
             note: LIVE_NOTE.to_owned(),
             mount_failure: None,
+            refusal: None,
         }
     }
 
@@ -907,6 +927,7 @@ impl CodeIndexFreshnessPayloadV1 {
             worktrees: Vec::new(),
             note: UNMOUNTED_NOTE.to_owned(),
             mount_failure: None,
+            refusal: None,
         }
     }
 
@@ -916,6 +937,7 @@ impl CodeIndexFreshnessPayloadV1 {
             worktrees: Vec::new(),
             note: UNAVAILABLE_NOTE.to_owned(),
             mount_failure: None,
+            refusal: None,
         }
     }
 
@@ -934,6 +956,7 @@ impl CodeIndexFreshnessPayloadV1 {
                 worktrees: Vec::new(),
                 note: READ_FAILED_NOTE.to_owned(),
                 mount_failure: None,
+                refusal: None,
             },
             CodeIndexFreshnessReadFailureV1::MountFailed => Self {
                 worktrees: Vec::new(),
@@ -941,6 +964,16 @@ impl CodeIndexFreshnessPayloadV1 {
                 mount_failure: Some(CodeIndexMountFailureV1 {
                     message: MOUNT_FAILED_MESSAGE.to_owned(),
                     remediation: MOUNT_FAILED_REMEDIATION.to_owned(),
+                }),
+                refusal: None,
+            },
+            CodeIndexFreshnessReadFailureV1::LinkedWorktreeDisabled => Self {
+                worktrees: Vec::new(),
+                note: LINKED_WORKTREE_DISABLED_NOTE.to_owned(),
+                mount_failure: None,
+                refusal: Some(CodeIndexRouteRefusalV1 {
+                    reason: CODE_INDEX_LINKED_WORKTREE_DISABLED.to_owned(),
+                    remediation: LINKED_WORKTREE_DISABLED_REMEDIATION.to_owned(),
                 }),
             },
         }

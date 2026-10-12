@@ -64,35 +64,39 @@ class SharedRuleCases(unittest.TestCase):
                 self.assertEqual(trim.names_every_query_word(case["name"], case["query"]), case["answers"])
 
 
-class StoredTails(unittest.TestCase):
-    PAGE = (
-        "- **kept** (function, exact_message), rank 1 · utility 2000000\n"
-        "- _Trimmed 3 lower-ranked results (ranks 4-7, 20 bytes): each scored at most half of "
+class TrimMarkers(unittest.TestCase):
+    MARKER = (
+        "- _Trimmed 3 lower-ranked results (ranks 4-6, 120 bytes): each scored at most half of "
         "this page's best utility 2000000. To restore them, call `tracedecay_retrieve` with "
         "handle `rh_0123456789abcdef01234567` (pass the same `project_selector` if this call used one)._\n"
     )
+    KEPT = "### Code\n- **kept** (function), src/lib.rs:1\n"
+    TAIL = "- **a** (field), src/a.rs:4\n- **b** (field), src/b.rs:5\n- **c** (field), src/c.rs:6\n"
+    PAGE = KEPT + MARKER + "\n### Related Symbols\n- **c** (method), src/c.rs:9\n"
 
-    def test_untrimmed_splices_the_stored_tail_back_in_place(self) -> None:
-        text, dead = trim.untrimmed(
-            self.PAGE,
-            lambda handle: "- **a**\n- **b**\n" if handle == "rh_0123456789abcdef01234567" else None,
-        )
-        self.assertEqual(
-            (text, dead),
-            ("- **kept** (function, exact_message), rank 1 · utility 2000000\n- **a**\n- **b**\n", []),
-        )
+    def stored(self, handle: str) -> str | None:
+        return self.TAIL if handle == "rh_0123456789abcdef01234567" else None
 
-    def test_untrimmed_returns_markers_the_store_cannot_answer(self) -> None:
-        text, dead = trim.untrimmed(self.PAGE, lambda handle: None)
-        self.assertEqual(text, self.PAGE)
-        self.assertEqual([match.group("handle") for match in dead], ["rh_0123456789abcdef01234567"])
+    def test_binary_cuts_remove_each_marker_and_keep_its_rows(self) -> None:
+        rest, cuts = trim.binary_cuts(self.PAGE, self.stored)
+        self.assertEqual(rest, self.PAGE.replace(self.MARKER, ""))
+        self.assertEqual(cuts, [trim.Cut(3, 120 - len(self.MARKER.encode()), self.TAIL)])
 
-    def test_unresolved_tail_recovers_rows_and_bytes_from_marker_metadata(self) -> None:
-        match = trim.TRIM_MARKER.search(self.PAGE)
-        rows, saved = trim.unresolved_tail(match)
-        # Sparse context ranks: the rank span 4-7 covers three cut rows.
-        self.assertEqual(rows, 3)
-        self.assertEqual(saved, 20 - len(match.group(0).encode()))
+    def test_a_dead_handle_keeps_the_markers_own_counts(self) -> None:
+        _, cuts = trim.binary_cuts(self.PAGE, lambda handle: None)
+        self.assertEqual(cuts, [trim.Cut(3, 120 - len(self.MARKER.encode()), None)])
+
+    def test_page_trim_counts_code_rows_only_the_binary_could_cut(self) -> None:
+        page = trim.page_trim(self.PAGE, "unrelated", self.stored)
+        self.assertEqual(page.untrimmed_bytes, len(self.PAGE.encode()) + 120 - len(self.MARKER.encode()))
+        self.assertEqual((page.rows, page.unresolved), (3, 0))
+        self.assertEqual(page.cut_rows, trim.listed_rows(self.TAIL))
+        self.assertEqual(trim.LISTED.findall(page.shown), ["kept", "c"])
+
+    def test_page_trim_replays_rows_the_page_still_ranks(self) -> None:
+        page = trim.page_trim(SEARCH_PAGE, "unrelated", self.stored)
+        self.assertEqual([trim.LISTED.findall(row) for row in page.cut_rows], [["weak_a"], ["code-symbol:weak_b"]])
+        self.assertNotIn("weak_a", page.shown)
 
 
 class RenderedPages(unittest.TestCase):
@@ -112,10 +116,10 @@ class RenderedPages(unittest.TestCase):
         cut_bytes = sum(len(row.text.encode()) for row in cut)
         self.assertEqual(saved, cut_bytes - len(trim.marker(cut, 2000000).encode()))
 
-    def test_context_rows_trim_unless_the_page_reports_lexical_anchors(self) -> None:
+    def test_context_rows_trim_after_the_last_anchored_row(self) -> None:
         ((kept, cut, _),) = trim.trimmed(CONTEXT_ROWS, "unrelated")
         self.assertEqual(([row.rank for row in kept], [row.rank for row in cut]), ([1, 2, 3], [4, 5, 6]))
-        anchored = CONTEXT_ROWS + "\n### Lexical Anchors\n- `m4`: matched\n"
+        anchored = CONTEXT_ROWS.replace("rank 6 · utility 1000000\n", "rank 6 · utility 1000000 · via anchor:m6\n")
         ((kept, cut, saved),) = trim.trimmed(anchored, "unrelated")
         self.assertEqual((len(kept), cut, saved), (6, [], 0))
 
