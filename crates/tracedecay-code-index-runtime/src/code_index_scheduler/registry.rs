@@ -2727,13 +2727,30 @@ impl CodeIndexSchedulerRegistryV1 {
                 break;
             }
             let advancing = text.clone();
-            let advance = tracing::Instrument::instrument(
+            let mut shutdown_observed = serving_generation_changed.subscribe();
+            let mut advance = std::pin::pin!(tracing::Instrument::instrument(
                 tokio::task::spawn_blocking(move || {
                     advancing.advance_text_serving(TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1)
                 }),
                 tracing::trace_span!("daemon.code_index.text_projection"),
-            )
-            .await;
+            ));
+            // One advance can stall in a step no cancellation reaches (a
+            // fault under memory pressure, a slow fsync). Shutdown must not
+            // wait it out: the slice sees the cancelled control at its next
+            // checkpoint, and its staging is resumable.
+            let advance = loop {
+                if shutting_down.load(Ordering::Acquire) {
+                    return PublishedTextProjectionOutcomeV1::Shutdown;
+                }
+                tokio::select! {
+                    advance = &mut advance => break advance,
+                    changed = shutdown_observed.changed() => {
+                        if changed.is_err() {
+                            return PublishedTextProjectionOutcomeV1::Shutdown;
+                        }
+                    }
+                }
+            };
             if matches!(advance, Ok(Ok(_)))
                 && let Some(opened) = opened.take()
             {
