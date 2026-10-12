@@ -265,18 +265,6 @@ impl WorkOperation {
         }
     }
 
-    /// Resolve an operation from the final path segment that names it.
-    ///
-    /// The route segment is the one public name a Work operation has, so every
-    /// adapter that accepts an operation by name, the router, the CLI, the
-    /// catalog, resolves it here rather than keeping a second name table.
-    pub fn from_route_segment(segment: &str) -> Option<Self> {
-        Self::ALL
-            .iter()
-            .copied()
-            .find(|operation| operation.route_segment() == segment)
-    }
-
     /// Whether the embedded dashboard has a real operator journey for this
     /// operation. Scheduler-owned attempt start remains available to its owning
     /// surface but is not a dashboard API.

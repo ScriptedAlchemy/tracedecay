@@ -55,13 +55,6 @@ impl WorkflowOperation {
                 | Self::GetRun
         )
     }
-
-    pub fn from_route_segment(segment: &str) -> Option<Self> {
-        Self::ALL
-            .iter()
-            .copied()
-            .find(|operation| operation.route_segment() == segment)
-    }
 }
 
 impl FromStr for WorkflowOperation {

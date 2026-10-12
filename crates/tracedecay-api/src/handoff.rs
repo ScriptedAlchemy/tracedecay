@@ -35,13 +35,6 @@ impl HandoffOperation {
     pub const fn is_read_only(self) -> bool {
         matches!(self, Self::ListTaskHandoffs)
     }
-
-    fn parse(segment: &str) -> Option<Self> {
-        Self::ALL
-            .iter()
-            .copied()
-            .find(|operation| operation.route_segment() == segment)
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -89,7 +82,7 @@ where
     O: HandoffApplicationOwner,
 {
     dispatch_json_operation(
-        HandoffOperation::parse(&segment),
+        HandoffOperation::from_route_segment(&segment),
         request_id,
         body,
         (

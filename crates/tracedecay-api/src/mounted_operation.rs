@@ -47,6 +47,13 @@ macro_rules! mounted_operations {
             /// Every mounted operation, in mounted order.
             pub const ALL: [Self; [$(stringify!($variant)),+].len()] = [$(Self::$variant,)+];
 
+            /// The operation a router path segment names.
+            pub fn from_route_segment(segment: &str) -> Option<Self> {
+                Self::ALL
+                    .into_iter()
+                    .find(|operation| operation.route_segment() == segment)
+            }
+
             /// The catalog operation id, as a literal the route documents can hold.
             pub const fn operation_id_str(self) -> &'static str {
                 match self {
