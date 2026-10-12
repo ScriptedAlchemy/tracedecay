@@ -67,6 +67,7 @@ edition = "2024"
 version = "1.0.0-beta.86"
 
 [workspace.dependencies]
+asupersync = { version = "=0.5.0", default-features = false, features = ["proc-macros", "native-runtime", "tracing-integration", "tls"] }
 # grafeo 0.5.43 from our fork (ScriptedAlchemy/grafeo, main). The
 # published crates carry a tiered-storage
 # arena whose `HotVersionRef` addresses a single 1 MiB chunk, which caps an

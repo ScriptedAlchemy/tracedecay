@@ -1,6 +1,7 @@
 use std::{path::Path, sync::Arc};
 
-use tokio::sync::Mutex;
+use asupersync::sync::Mutex;
+use asupersync::{Budget, Cx, runtime::Runtime};
 
 use tracedecay_rusqlite_runtime::exact_sql::{
     ExactSqlAttachment, ExactSqlTransaction as RuntimeTransaction,
@@ -35,19 +36,30 @@ impl Transaction {
     {
         let runtime = Arc::clone(&self.runtime);
         let statement = statement(sql, params)?;
-        tokio::spawn(async move {
-            runtime
-                .lock()
-                .await
-                .as_ref()
-                .ok_or(super::Error::TransactionClosed)?
-                .execute_async(statement)
-                .await
-                .map_err(super::Error::from)
-        })
-        .await
-        .map_err(join_error)?
-        .map(|result| result.changed_rows as u64)
+        let _caller = Cx::current().ok_or(Error::RuntimeContextUnavailable)?;
+        let settlement = Runtime::current_handle()
+            .ok_or(Error::RuntimeContextUnavailable)?
+            .try_request_cx_with_budget(Budget::INFINITE)
+            .map_err(|error| Error::Runtime(format!("failed to admit SQL settlement: {error}")))?;
+        let mut task = settlement
+            .spawn(move |cx| async move {
+                runtime
+                    .lock(&cx)
+                    .await
+                    .map_err(|error| {
+                        Error::Runtime(format!("SQL transaction gate failed: {error}"))
+                    })?
+                    .as_ref()
+                    .ok_or(super::Error::TransactionClosed)?
+                    .execute_async(statement)
+                    .await
+                    .map_err(super::Error::from)
+            })
+            .map_err(|error| Error::Runtime(format!("failed to spawn SQL settlement: {error}")))?;
+        std::future::poll_fn(|context| task.poll_join(context))
+            .await
+            .map_err(join_error)?
+            .map(|result| result.changed_rows as u64)
     }
 
     #[tracing::instrument(
@@ -61,22 +73,32 @@ impl Transaction {
             .into_iter()
             .map(WriteStatement::into_exact)
             .collect::<Vec<_>>();
-        tokio::spawn(async move {
-            let runtime = runtime.lock().await;
-            let runtime = runtime.as_ref().ok_or(Error::TransactionClosed)?;
-            let mut results = Vec::with_capacity(statements.len());
-            for (index, statement) in statements.into_iter().enumerate() {
-                let result = runtime
-                    .execute_async(statement)
-                    .await
-                    .map_err(Error::from)
-                    .map_err(|error| Error::statement_batch(index, error))?;
-                results.push(result.changed_rows as u64);
-            }
-            Ok(results)
-        })
-        .await
-        .map_err(join_error)?
+        let _caller = Cx::current().ok_or(Error::RuntimeContextUnavailable)?;
+        let settlement = Runtime::current_handle()
+            .ok_or(Error::RuntimeContextUnavailable)?
+            .try_request_cx_with_budget(Budget::INFINITE)
+            .map_err(|error| Error::Runtime(format!("failed to admit SQL settlement: {error}")))?;
+        let mut task = settlement
+            .spawn(move |cx| async move {
+                let runtime = runtime.lock(&cx).await.map_err(|error| {
+                    Error::Runtime(format!("SQL transaction gate failed: {error}"))
+                })?;
+                let runtime = runtime.as_ref().ok_or(Error::TransactionClosed)?;
+                let mut results = Vec::with_capacity(statements.len());
+                for (index, statement) in statements.into_iter().enumerate() {
+                    let result = runtime
+                        .execute_async(statement)
+                        .await
+                        .map_err(Error::from)
+                        .map_err(|error| Error::statement_batch(index, error))?;
+                    results.push(result.changed_rows as u64);
+                }
+                Ok(results)
+            })
+            .map_err(|error| Error::Runtime(format!("failed to spawn SQL settlement: {error}")))?;
+        std::future::poll_fn(|context| task.poll_join(context))
+            .await
+            .map_err(join_error)?
     }
 
     pub async fn attach_database(&self, path: &Path, database_name: &str) -> Result<()> {
@@ -85,18 +107,29 @@ impl Transaction {
             super::Error::invalid_operation("SQLite attachment path is not valid UTF-8")
         })?;
         let attachment = ExactSqlAttachment::new(filename.to_owned(), database_name.to_owned())?;
-        tokio::spawn(async move {
-            runtime
-                .lock()
-                .await
-                .as_ref()
-                .ok_or(super::Error::TransactionClosed)?
-                .attach_database_async(attachment)
-                .await
-                .map_err(super::Error::from)
-        })
-        .await
-        .map_err(join_error)?
+        let _caller = Cx::current().ok_or(Error::RuntimeContextUnavailable)?;
+        let settlement = Runtime::current_handle()
+            .ok_or(Error::RuntimeContextUnavailable)?
+            .try_request_cx_with_budget(Budget::INFINITE)
+            .map_err(|error| Error::Runtime(format!("failed to admit SQL settlement: {error}")))?;
+        let mut task = settlement
+            .spawn(move |cx| async move {
+                runtime
+                    .lock(&cx)
+                    .await
+                    .map_err(|error| {
+                        Error::Runtime(format!("SQL transaction gate failed: {error}"))
+                    })?
+                    .as_ref()
+                    .ok_or(super::Error::TransactionClosed)?
+                    .attach_database_async(attachment)
+                    .await
+                    .map_err(super::Error::from)
+            })
+            .map_err(|error| Error::Runtime(format!("failed to spawn SQL settlement: {error}")))?;
+        std::future::poll_fn(|context| task.poll_join(context))
+            .await
+            .map_err(join_error)?
     }
 
     pub async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
@@ -105,37 +138,59 @@ impl Transaction {
     {
         let runtime = Arc::clone(&self.runtime);
         let statement = statement(sql, params)?;
-        let rows = tokio::spawn(async move {
-            runtime
-                .lock()
-                .await
-                .as_ref()
-                .ok_or(super::Error::TransactionClosed)?
-                .query_async(statement)
-                .await
-                .map_err(super::Error::from)
-        })
-        .await
-        .map_err(join_error)??;
+        let _caller = Cx::current().ok_or(Error::RuntimeContextUnavailable)?;
+        let settlement = Runtime::current_handle()
+            .ok_or(Error::RuntimeContextUnavailable)?
+            .try_request_cx_with_budget(Budget::INFINITE)
+            .map_err(|error| Error::Runtime(format!("failed to admit SQL settlement: {error}")))?;
+        let mut task = settlement
+            .spawn(move |cx| async move {
+                runtime
+                    .lock(&cx)
+                    .await
+                    .map_err(|error| {
+                        Error::Runtime(format!("SQL transaction gate failed: {error}"))
+                    })?
+                    .as_ref()
+                    .ok_or(super::Error::TransactionClosed)?
+                    .query_async(statement)
+                    .await
+                    .map_err(super::Error::from)
+            })
+            .map_err(|error| Error::Runtime(format!("failed to spawn SQL settlement: {error}")))?;
+        let rows = std::future::poll_fn(|context| task.poll_join(context))
+            .await
+            .map_err(join_error)??;
         Ok(Rows::from_exact(rows))
     }
 
     pub async fn execute_batch(&self, sql: &str) -> Result<()> {
         let runtime = Arc::clone(&self.runtime);
         let sql = sql.to_owned();
-        tokio::spawn(async move {
-            runtime
-                .lock()
-                .await
-                .as_ref()
-                .ok_or(super::Error::TransactionClosed)?
-                .execute_batch_async(sql)
-                .await
-                .map(|_| ())
-                .map_err(super::Error::from)
-        })
-        .await
-        .map_err(join_error)?
+        let _caller = Cx::current().ok_or(Error::RuntimeContextUnavailable)?;
+        let settlement = Runtime::current_handle()
+            .ok_or(Error::RuntimeContextUnavailable)?
+            .try_request_cx_with_budget(Budget::INFINITE)
+            .map_err(|error| Error::Runtime(format!("failed to admit SQL settlement: {error}")))?;
+        let mut task = settlement
+            .spawn(move |cx| async move {
+                runtime
+                    .lock(&cx)
+                    .await
+                    .map_err(|error| {
+                        Error::Runtime(format!("SQL transaction gate failed: {error}"))
+                    })?
+                    .as_ref()
+                    .ok_or(super::Error::TransactionClosed)?
+                    .execute_batch_async(sql)
+                    .await
+                    .map(|_| ())
+                    .map_err(super::Error::from)
+            })
+            .map_err(|error| Error::Runtime(format!("failed to spawn SQL settlement: {error}")))?;
+        std::future::poll_fn(|context| task.poll_join(context))
+            .await
+            .map_err(join_error)?
     }
 
     /// Executes one separately authorized authority-revalidated batch without the ordinary
@@ -143,76 +198,120 @@ impl Transaction {
     pub async fn execute_authority_revalidated_batch(&self, sql: &str) -> Result<()> {
         let runtime = Arc::clone(&self.runtime);
         let sql = sql.to_owned();
-        tokio::spawn(async move {
-            runtime
-                .lock()
-                .await
-                .as_ref()
-                .ok_or(super::Error::TransactionClosed)?
-                .execute_authority_revalidated_batch_async(sql)
-                .await
-                .map(|_| ())
-                .map_err(super::Error::from)
-        })
-        .await
-        .map_err(join_error)?
+        let _caller = Cx::current().ok_or(Error::RuntimeContextUnavailable)?;
+        let settlement = Runtime::current_handle()
+            .ok_or(Error::RuntimeContextUnavailable)?
+            .try_request_cx_with_budget(Budget::INFINITE)
+            .map_err(|error| Error::Runtime(format!("failed to admit SQL settlement: {error}")))?;
+        let mut task = settlement
+            .spawn(move |cx| async move {
+                runtime
+                    .lock(&cx)
+                    .await
+                    .map_err(|error| {
+                        Error::Runtime(format!("SQL transaction gate failed: {error}"))
+                    })?
+                    .as_ref()
+                    .ok_or(super::Error::TransactionClosed)?
+                    .execute_authority_revalidated_batch_async(sql)
+                    .await
+                    .map(|_| ())
+                    .map_err(super::Error::from)
+            })
+            .map_err(|error| Error::Runtime(format!("failed to spawn SQL settlement: {error}")))?;
+        std::future::poll_fn(|context| task.poll_join(context))
+            .await
+            .map_err(join_error)?
     }
 
     pub async fn validate(&self, sql: &str) -> Result<()> {
         let runtime = Arc::clone(&self.runtime);
         let statement = statement(sql, ())?;
-        tokio::spawn(async move {
-            runtime
-                .lock()
-                .await
-                .as_ref()
-                .ok_or(super::Error::TransactionClosed)?
-                .validate_async(statement)
-                .await
-                .map_err(super::Error::from)
-        })
-        .await
-        .map_err(join_error)?
+        let _caller = Cx::current().ok_or(Error::RuntimeContextUnavailable)?;
+        let settlement = Runtime::current_handle()
+            .ok_or(Error::RuntimeContextUnavailable)?
+            .try_request_cx_with_budget(Budget::INFINITE)
+            .map_err(|error| Error::Runtime(format!("failed to admit SQL settlement: {error}")))?;
+        let mut task = settlement
+            .spawn(move |cx| async move {
+                runtime
+                    .lock(&cx)
+                    .await
+                    .map_err(|error| {
+                        Error::Runtime(format!("SQL transaction gate failed: {error}"))
+                    })?
+                    .as_ref()
+                    .ok_or(super::Error::TransactionClosed)?
+                    .validate_async(statement)
+                    .await
+                    .map_err(super::Error::from)
+            })
+            .map_err(|error| Error::Runtime(format!("failed to spawn SQL settlement: {error}")))?;
+        std::future::poll_fn(|context| task.poll_join(context))
+            .await
+            .map_err(join_error)?
     }
 
     pub async fn commit(self) -> Result<()> {
         let runtime = Arc::clone(&self.runtime);
-        tokio::spawn(async move {
-            let transaction = runtime
-                .lock()
-                .await
-                .take()
-                .ok_or(Error::TransactionClosed)?;
-            transaction
-                .commit_async()
-                .await
-                .map(|_| ())
-                .map_err(super::Error::from)
-        })
-        .await
-        .map_err(join_error)?
+        let _caller = Cx::current().ok_or(Error::RuntimeContextUnavailable)?;
+        let settlement = Runtime::current_handle()
+            .ok_or(Error::RuntimeContextUnavailable)?
+            .try_request_cx_with_budget(Budget::INFINITE)
+            .map_err(|error| Error::Runtime(format!("failed to admit SQL settlement: {error}")))?;
+        let mut task = settlement
+            .spawn(move |cx| async move {
+                let transaction = runtime
+                    .lock(&cx)
+                    .await
+                    .map_err(|error| {
+                        Error::Runtime(format!("SQL transaction gate failed: {error}"))
+                    })?
+                    .take()
+                    .ok_or(Error::TransactionClosed)?;
+                transaction
+                    .commit_async()
+                    .await
+                    .map(|_| ())
+                    .map_err(super::Error::from)
+            })
+            .map_err(|error| Error::Runtime(format!("failed to spawn SQL settlement: {error}")))?;
+        std::future::poll_fn(|context| task.poll_join(context))
+            .await
+            .map_err(join_error)?
     }
 
     pub async fn rollback(self) -> Result<()> {
         let runtime = Arc::clone(&self.runtime);
-        tokio::spawn(async move {
-            let transaction = runtime
-                .lock()
-                .await
-                .take()
-                .ok_or(Error::TransactionClosed)?;
-            transaction
-                .rollback_async()
-                .await
-                .map(|_| ())
-                .map_err(super::Error::from)
-        })
-        .await
-        .map_err(join_error)?
+        let _caller = Cx::current().ok_or(Error::RuntimeContextUnavailable)?;
+        let settlement = Runtime::current_handle()
+            .ok_or(Error::RuntimeContextUnavailable)?
+            .try_request_cx_with_budget(Budget::INFINITE)
+            .map_err(|error| Error::Runtime(format!("failed to admit SQL settlement: {error}")))?;
+        let mut task = settlement
+            .spawn(move |cx| async move {
+                let transaction = runtime
+                    .lock(&cx)
+                    .await
+                    .map_err(|error| {
+                        Error::Runtime(format!("SQL transaction gate failed: {error}"))
+                    })?
+                    .take()
+                    .ok_or(Error::TransactionClosed)?;
+                transaction
+                    .rollback_async()
+                    .await
+                    .map(|_| ())
+                    .map_err(super::Error::from)
+            })
+            .map_err(|error| Error::Runtime(format!("failed to spawn SQL settlement: {error}")))?;
+        std::future::poll_fn(|context| task.poll_join(context))
+            .await
+            .map_err(join_error)?
     }
 }
 
-fn join_error(error: tokio::task::JoinError) -> super::Error {
+fn join_error(error: asupersync::runtime::JoinError) -> super::Error {
     super::Error::Runtime(format!("exact SQL transaction task failed: {error}"))
 }
 
@@ -234,7 +333,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn only_long_lease_transaction_exposes_authority_revalidated_batches() {
         let directory = tempfile::TempDir::new().unwrap();
         let connection = TestConnection::open_with_write_authority(

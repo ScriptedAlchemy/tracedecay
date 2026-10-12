@@ -1,3 +1,4 @@
+use asupersync::{Cx, runtime::RuntimeHandle};
 use std::{
     error::Error,
     fmt,
@@ -98,16 +99,18 @@ impl RepositoryPhysicalAttachmentFactory {
 
     pub fn attach(
         &self,
+        runtime: &RuntimeHandle,
         binding: StoreRuntimeBindingV1,
         locator: VerifiedStoreLocatorV1,
         path: PathBuf,
         admission: AdmissionConfigV1,
     ) -> Result<RepositoryRuntimePhysicalAttachment, RepositoryAttachmentStartError> {
-        self.attach_with_start_hook(binding, locator, path, admission, &mut |_| {})
+        self.attach_with_start_hook(runtime, binding, locator, path, admission, &mut |_| {})
     }
 
     fn attach_with_start_hook(
         &self,
+        runtime: &RuntimeHandle,
         binding: StoreRuntimeBindingV1,
         locator: VerifiedStoreLocatorV1,
         path: PathBuf,
@@ -117,6 +120,7 @@ impl RepositoryPhysicalAttachmentFactory {
         let opened_database =
             OpenedDatabaseFile::pin(&path).map_err(RepositoryAttachmentStartError::Identity)?;
         self.attach_opened(
+            runtime,
             binding,
             locator,
             path,
@@ -130,6 +134,7 @@ impl RepositoryPhysicalAttachmentFactory {
     #[tracing::instrument(name = "rusqlite.attachment.initialize", level = "trace", skip_all)]
     pub fn initialize(
         &self,
+        runtime: &RuntimeHandle,
         binding: StoreRuntimeBindingV1,
         locator: VerifiedStoreLocatorV1,
         path: PathBuf,
@@ -138,6 +143,7 @@ impl RepositoryPhysicalAttachmentFactory {
         let opened_database = OpenedDatabaseFile::create_new(&path)
             .map_err(RepositoryAttachmentStartError::Identity)?;
         self.attach_opened(
+            runtime,
             binding,
             locator,
             path,
@@ -152,6 +158,7 @@ impl RepositoryPhysicalAttachmentFactory {
     #[tracing::instrument(name = "rusqlite.attachment.attach", level = "trace", skip_all)]
     fn attach_opened(
         &self,
+        runtime: &RuntimeHandle,
         binding: StoreRuntimeBindingV1,
         locator: VerifiedStoreLocatorV1,
         path: PathBuf,
@@ -213,6 +220,7 @@ impl RepositoryPhysicalAttachmentFactory {
         let checkpoint_blockers = ReaderCheckpointBlockers::default();
         start_hook(AttachmentWorkerStartStage::BeforeWriter);
         let writer_result = PersistentWriter::start_with_checkpoint_blockers(
+            runtime,
             writer_locator,
             admission.clone(),
             ConcreteRepositoryWriteExecutor::default(),
@@ -459,6 +467,7 @@ impl RepositoryRuntimePhysicalAttachment {
 
     pub async fn dispatch_submit(
         &self,
+        cx: &Cx,
         request: RuntimeSubmitRequestV1,
         probe: Arc<dyn RuntimeRequestProbeV1>,
         authority: Arc<dyn RuntimeWriteAuthority>,
@@ -474,7 +483,7 @@ impl RepositoryRuntimePhysicalAttachment {
                 .ok_or(RepositoryDispatchError::Closed)?
         };
         writer
-            .submit_authorized(request, probe, authority)
+            .submit_authorized(cx, request, probe, authority)
             .await
             .map_err(|error| match error {
                 WriterActorError::StorageFailure(error) => {
@@ -486,6 +495,7 @@ impl RepositoryRuntimePhysicalAttachment {
 
     pub async fn run_bounded_incremental_compaction(
         &self,
+        cx: &Cx,
         max_pages: u32,
         authority: Arc<dyn RuntimeWriteAuthority>,
     ) -> Result<(), RepositoryDispatchError> {
@@ -500,13 +510,14 @@ impl RepositoryRuntimePhysicalAttachment {
                 .ok_or(RepositoryDispatchError::Closed)?
         };
         writer
-            .bounded_incremental_vacuum(max_pages, authority)
+            .bounded_incremental_vacuum(cx, max_pages, authority)
             .await
             .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))
     }
 
     pub async fn run_checkpoint(
         &self,
+        cx: &Cx,
         request: CheckpointRequest,
         authority: Arc<dyn RuntimeWriteAuthority>,
     ) -> Result<CheckpointOutcome, RepositoryDispatchError> {
@@ -525,7 +536,7 @@ impl RepositoryRuntimePhysicalAttachment {
             .trigger_authorized(request, authority)
             .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))?;
         ticket
-            .wait()
+            .wait(cx)
             .await
             .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))
     }
@@ -582,6 +593,7 @@ impl RepositoryRuntimePhysicalAttachment {
     )]
     pub async fn run_maintenance_checkpoint(
         &self,
+        cx: &Cx,
         request: MaintenanceCheckpointRequest,
         authority: Arc<dyn RuntimeWriteAuthority>,
     ) -> Result<CheckpointOutcome, RepositoryDispatchError> {

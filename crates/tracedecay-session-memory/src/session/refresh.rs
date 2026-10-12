@@ -193,8 +193,11 @@ pub enum SessionRefreshOutcome {
 /// of a bare "unavailable".
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionRefreshUnavailable {
+    RuntimeUnavailable,
     /// The session-temporal store failed the operation; `detail` is its error.
-    Store { detail: String },
+    Store {
+        detail: String,
+    },
     /// The target cannot form a canonical refresh key.
     RefreshKey,
     /// The store answered for a different session or frontier.
@@ -216,6 +219,9 @@ impl SessionRefreshUnavailable {
 impl fmt::Display for SessionRefreshUnavailable {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::RuntimeUnavailable => {
+                formatter.write_str("native refresh execution context is unavailable")
+            }
             Self::Store { detail } => write!(formatter, "session refresh store failed: {detail}"),
             Self::RefreshKey => {
                 formatter.write_str("the refresh target cannot form a canonical refresh key")
@@ -665,6 +671,9 @@ fn request_interruption(
         Some(RequestInterruption::DeadlineExceeded) => {
             Some(SessionRefreshOutcome::DeadlineExceeded)
         }
+        Some(RequestInterruption::RuntimeUnavailable) => Some(SessionRefreshOutcome::Unavailable(
+            SessionRefreshUnavailable::RuntimeUnavailable,
+        )),
         None => None,
     }
 }
@@ -683,6 +692,9 @@ async fn await_with_request_controls<T>(
             Box::new(match interruption {
                 RequestInterruption::Cancelled => SessionRefreshOutcome::Aborted,
                 RequestInterruption::DeadlineExceeded => SessionRefreshOutcome::DeadlineExceeded,
+                RequestInterruption::RuntimeUnavailable => SessionRefreshOutcome::Unavailable(
+                    SessionRefreshUnavailable::RuntimeUnavailable,
+                ),
             })
         })
 }

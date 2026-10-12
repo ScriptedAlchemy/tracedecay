@@ -9,11 +9,11 @@ use tokio::sync::Mutex;
 use tracedecay_contracts::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
 use tracedecay_domain::{BrainNodeId, EnrollmentGrantV1};
 use tracedecay_graph_db::{GraphDbRegistry, GraphDbRegistryConfig};
-use tracedecay_runtime_core::RuntimeOperationTaskOwnerV1;
 use tracedecay_runtime_core::storage::{
     SESSIONS_DB_FILENAME, STORE_MANIFEST_FILENAME, profile_sharded_data_root, read_store_manifest,
     write_store_manifest_to_path,
 };
+use tracedecay_runtime_core::{Runtime, RuntimeOperationTaskOwnerV1};
 #[cfg(any(test, feature = "test-helpers"))]
 use tracedecay_rusqlite_runtime::remote::RemoteRecoverySqliteAuthorityV1;
 use tracedecay_rusqlite_runtime::remote::{
@@ -144,6 +144,17 @@ impl DaemonSessionRuntimeRegistryV1 {
         identity: LocalProfileIdentityAuthorityV1,
         long_lived_session_maintenance: bool,
     ) -> Result<Self> {
+        let operation_runtime =
+            Runtime::current_handle().ok_or_else(|| TraceDecayError::Config {
+                message: "session runtime registry requires a native execution runtime".to_owned(),
+            })?;
+        let operation_task_owner = Arc::new(
+            RuntimeOperationTaskOwnerV1::new(operation_runtime.clone()).map_err(|error| {
+                TraceDecayError::Config {
+                    message: error.to_string(),
+                }
+            })?,
+        );
         let remote_credential_authority = Arc::new(crate::DaemonRemoteCredentialAuthorityV1::new(
             identity.brain_id().clone(),
             identity.profile_id().clone(),
@@ -171,8 +182,14 @@ impl DaemonSessionRuntimeRegistryV1 {
             ),
         ));
         let registry_resolver: Arc<dyn StoreRuntimeResolver> = resolver.clone();
-        let registry =
-            StoreRuntimeRegistry::new(registry_resolver, Arc::new(LifecycleShardRuntimePublisher));
+        let registry = StoreRuntimeRegistry::new(
+            operation_runtime,
+            registry_resolver,
+            Arc::new(LifecycleShardRuntimePublisher),
+        )
+        .map_err(|error| {
+            session_registry_error("create store runtime registry", format!("{error:?}"))
+        })?;
         let graph_manifest_provider =
             Arc::new(super::code_graph_manifest::DaemonCodeGraphManifestProviderV1::default());
         let graph_registry = GraphDbRegistry::new_with_manifest_provider(
@@ -225,7 +242,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             graph_registry,
             graph_manifest_provider,
             graph_lifecycle_cancelled: Arc::new(AtomicBool::new(false)),
-            operation_task_owner: Arc::new(RuntimeOperationTaskOwnerV1::new()),
+            operation_task_owner,
             profile_pin: Mutex::new(Some(profile_pin)),
             profile_database_mount: Mutex::new(()),
             profile_database: std::sync::Mutex::new(None),

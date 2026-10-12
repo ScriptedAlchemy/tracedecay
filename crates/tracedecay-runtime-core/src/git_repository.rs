@@ -235,7 +235,7 @@ impl HeadFileStamp {
 /// shape a dozen times, and each question ran a complete `gix` discovery,
 /// an upward walk to the filesystem root plus a repository open. On a slow
 /// volume that is seconds per question, paid again by every concurrent
-/// client, and it ran inline on the tokio workers that also poll the daemon's
+/// client, and it ran inline on the async workers that also poll the daemon's
 /// accept loop.
 ///
 /// Only a path that **is** its own worktree root is retained. The checkout's
@@ -554,8 +554,8 @@ fn observe_repository_discovery(path: &Path) {
 /// [`DiscoveryBlocked`].
 #[cfg(any(test, feature = "test-helpers"))]
 struct RepositoryDiscoveryBlockGate {
-    entered_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-    entered: tokio::sync::watch::Sender<bool>,
+    entered_tx: Mutex<Option<asupersync::channel::oneshot::Sender<()>>>,
+    entered: asupersync::channel::watch::Sender<bool>,
     release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
 }
 
@@ -570,14 +570,14 @@ impl RepositoryDiscoveryBlockGate {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
-        self.entered.send_replace(true);
+        let _ = self.entered.send(true);
         if let Some(entered) = self
             .entered_tx
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take()
         {
-            let _ = entered.send(());
+            let _ = entered.send_blocking(());
         }
         if let Some(release) = release {
             let _ = release.recv();
@@ -591,15 +591,15 @@ impl RepositoryDiscoveryBlockGate {
 /// walk has reached the blocking section.
 #[cfg(any(test, feature = "test-helpers"))]
 pub struct RepositoryDiscoveryBlock {
-    pub entered: tokio::sync::oneshot::Receiver<()>,
+    pub entered: asupersync::channel::oneshot::Receiver<()>,
     release: std::sync::mpsc::Sender<()>,
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
 impl RepositoryDiscoveryBlock {
     /// Wait until the parked walk has entered its blocking section.
-    pub async fn wait_entered(&mut self) {
-        let _ = (&mut self.entered).await;
+    pub async fn wait_entered(&mut self, cx: &asupersync::Cx) {
+        let _ = self.entered.recv(cx).await;
     }
 
     /// Let the parked walk finish.
@@ -615,9 +615,9 @@ impl RepositoryDiscoveryBlock {
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn block_repository_discovery_for_test(root: &Path) -> RepositoryDiscoveryBlock {
     forget_retained_checkout_topology_for_test(root);
-    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (entered_tx, entered_rx) = asupersync::channel::oneshot::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let (watch_tx, _watch_rx) = tokio::sync::watch::channel(false);
+    let (watch_tx, _watch_rx) = asupersync::channel::watch::channel(false);
     repository_discovery_observations().insert(
         observed_discovery_root(root),
         RepositoryDiscoveryObservation {
@@ -640,7 +640,10 @@ pub fn block_repository_discovery_for_test(root: &Path) -> RepositoryDiscoveryBl
 /// `false` immediately when no block is armed, so production deadlines keep
 /// their own timer.
 #[cfg(any(test, feature = "test-helpers"))]
-pub(crate) async fn wait_until_repository_discovery_blocks(directory: &Path) -> bool {
+pub(crate) async fn wait_until_repository_discovery_blocks(
+    cx: &asupersync::Cx,
+    directory: &Path,
+) -> bool {
     let Some(block) = armed_discovery_block(directory) else {
         return false;
     };
@@ -648,7 +651,7 @@ pub(crate) async fn wait_until_repository_discovery_blocks(directory: &Path) -> 
     if *entered.borrow() {
         return true;
     }
-    while entered.changed().await.is_ok() {
+    while entered.changed(cx).await.is_ok() {
         if *entered.borrow() {
             return true;
         }
@@ -767,6 +770,7 @@ fn observed_count(root: &Path, count: impl Fn(&RepositoryDiscoveryObservation) -
 /// so both end the wait; a caller that did neither within ten seconds fails.
 #[cfg(any(test, feature = "test-helpers"))]
 pub async fn wait_for_topology_callers_for_test(
+    cx: &asupersync::Cx,
     root: &Path,
     callers: u64,
     returned: impl Fn() -> u64,
@@ -777,7 +781,11 @@ pub async fn wait_for_topology_callers_for_test(
             std::time::Instant::now() < deadline,
             "callers neither joined the parked discovery walk nor returned"
         );
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        asupersync::time::sleep(
+            asupersync::time::wall_now(),
+            std::time::Duration::from_millis(5),
+        )
+        .await;
     }
 }
 
@@ -1621,21 +1629,24 @@ mod tests {
         wait_until_repository_discovery_blocks,
     };
 
-    #[tokio::test]
-    async fn discovery_block_retains_entry_for_late_subscribers() {
+    #[asupersync::test]
+    async fn discovery_block_retains_entry_for_late_subscribers(cx: &asupersync::Cx) {
         let root = tempfile::tempdir().expect("discovery root");
         let mut block = block_repository_discovery_for_test(root.path());
         let path = root.path().to_path_buf();
-        let discovery = tokio::task::spawn_blocking(move || observe_repository_discovery(&path));
-        block.wait_entered().await;
+        let mut discovery = cx
+            .spawn_blocking(move |_cx| observe_repository_discovery(&path))
+            .unwrap();
+        block.wait_entered(&cx).await;
 
-        let entered = tokio::time::timeout(
+        let entered = asupersync::time::timeout(
+            asupersync::time::wall_now(),
             Duration::from_secs(1),
-            wait_until_repository_discovery_blocks(root.path()),
+            wait_until_repository_discovery_blocks(&cx, root.path()),
         )
         .await;
         block.release();
-        discovery.await.expect("discovery worker");
+        discovery.join(&cx).await.expect("discovery worker");
         reset_repository_discovery_for_test(root.path());
 
         assert!(entered.expect("late subscriber sees the parked walk"));
@@ -1644,6 +1655,7 @@ mod tests {
     /// Park the first walk of `path`, join it from a second caller, release,
     /// and return both answers with the number of live walks.
     async fn owner_and_joined_answers(
+        cx: &asupersync::Cx,
         root: &Path,
         path: &Path,
     ) -> (TopologyResult, TopologyResult, u64) {
@@ -1652,12 +1664,12 @@ mod tests {
             let path = path.to_path_buf();
             move || repository_topology(&path)
         });
-        block.wait_entered().await;
+        block.wait_entered(&cx).await;
         let joined = std::thread::spawn({
             let path = path.to_path_buf();
             move || repository_topology(&path)
         });
-        wait_for_topology_callers_for_test(root, 1, || u64::from(joined.is_finished())).await;
+        wait_for_topology_callers_for_test(cx, root, 1, || u64::from(joined.is_finished())).await;
         block.release();
         let answers = (
             owner.join().expect("owner"),
@@ -1670,8 +1682,8 @@ mod tests {
 
     /// A subdirectory's walk is not retained under its own path, and a failed
     /// walk is retained nowhere; both still answer the callers that joined it.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn unretained_walks_hand_their_answer_to_joined_callers() {
+    #[asupersync::test(flavor = "multi_thread")]
+    async fn unretained_walks_hand_their_answer_to_joined_callers(cx: &asupersync::Cx) {
         let temporary = tempfile::tempdir().expect("temporary directory");
         let repository = temporary.path().join("repository");
         let package = repository.join("package");
@@ -1685,7 +1697,7 @@ mod tests {
         let repository = repository.canonicalize().expect("canonical repository");
         let package = package.canonicalize().expect("canonical package");
 
-        let (owner, joined, walks) = owner_and_joined_answers(&repository, &package).await;
+        let (owner, joined, walks) = owner_and_joined_answers(&cx, &repository, &package).await;
         let expected = GitRepositoryTopologyV1 {
             worktree_root: Some(repository.clone()),
             git_dir: repository.join(".git"),
@@ -1698,7 +1710,7 @@ mod tests {
         let outside = temporary.path().join("outside");
         std::fs::create_dir_all(&outside).expect("plain directory");
         let outside = outside.canonicalize().expect("canonical plain directory");
-        let (owner, joined, walks) = owner_and_joined_answers(&outside, &outside).await;
+        let (owner, joined, walks) = owner_and_joined_answers(&cx, &outside, &outside).await;
         for answer in [owner, joined] {
             match answer {
                 Err(GitRepositoryError::NotARepository { path }) => {

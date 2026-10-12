@@ -12,7 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tokio::sync::watch;
+use asupersync::channel::watch;
 use tracedecay_store::{
     OperationPriorityV1, ReaderBudgetV1, RuntimeReadRequestV1, RuntimeRequestProbeV1,
     SaturationScopeV1, StoreRuntimeBindingV1, UnavailableReasonV1,

@@ -8,8 +8,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use asupersync::{Budget, channel::mpsc as actor_mpsc, runtime::RuntimeHandle};
 use rusqlite::{Connection, TransactionBehavior, params_from_iter};
-use tokio::sync::mpsc as tokio_mpsc;
 use tracedecay_store::{
     OperationPriorityV1, StoreRuntimeBindingV1, UnavailableReasonV1, VerifiedStoreLocatorV1,
 };
@@ -84,7 +84,7 @@ type TableSizeTelemetryRead = dyn Fn(
 pub struct ExactSqlHandle {
     binding: StoreRuntimeBindingV1,
     locator: VerifiedStoreLocatorV1,
-    writer: Option<tokio_mpsc::Sender<WriterCommand>>,
+    writer: Option<actor_mpsc::Sender<WriterCommand>>,
     query: Arc<ExactSqlQuery>,
     snapshot: Arc<ExactSqlSnapshotFactory>,
     health_snapshot: Arc<ExactSqlHealthSnapshotFactory>,
@@ -95,30 +95,11 @@ pub struct ExactSqlHandle {
     write_authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
 }
 
-/// Waits for the serialized writer actor's reply without stalling the async
-/// worker that issued the command.
-///
-/// Every synchronous storage port in this workspace (`WorkAttemptStoragePort`,
-/// `WorkflowRunStoragePort`, and their siblings) reaches the writer through
-/// these one-shot replies, and the daemon calls those ports from Tokio tasks.
-/// A plain `recv_blocking` therefore parks a whole worker for as long as the
-/// writer's command queue takes to reach this command. On a small runtime two
-/// concurrent waits starve every other task on it, including the HTTP reads
-/// whose admitted deadline then expires. `block_in_place` hands the worker's
-/// run queue to another thread for the wait; it panics outside a multi-thread
-/// runtime, so the flavor is checked first and everything else
-/// (current-thread runtimes, plain threads) keeps the previous inline
-/// behavior. The remaining `block_in_place` panic case is a `LocalSet` on a
-/// multi-thread runtime, which this workspace does not use.
+/// Synchronous storage ports must be called from a blocking task or an OS thread.
 fn recv_writer_reply<T>(
     response: async_channel::Receiver<T>,
 ) -> Result<T, async_channel::RecvError> {
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(|| response.recv_blocking())
-        }
-        _ => response.recv_blocking(),
-    }
+    response.recv_blocking()
 }
 
 impl ExactSqlHandle {
@@ -162,7 +143,7 @@ impl ExactSqlHandle {
     fn from_readers<E: ReaderQueryExecutor>(
         binding: StoreRuntimeBindingV1,
         locator: VerifiedStoreLocatorV1,
-        writer: Option<tokio_mpsc::Sender<WriterCommand>>,
+        writer: Option<actor_mpsc::Sender<WriterCommand>>,
         readers: &ReaderPool<E>,
     ) -> Self {
         let query_readers = readers.downgrade();
@@ -470,9 +451,17 @@ impl ExactSqlHandle {
     /// awaits the same serialized command protocol as ordinary writes.
     pub async fn release_connection_memory_async(
         &self,
+        runtime: &RuntimeHandle,
     ) -> Result<MemoryReleaseOutcome, ExactSqlError> {
         let release_readers = Arc::clone(&self.release_reader_memory);
-        let readers = tokio::task::spawn_blocking(move || release_readers())
+        let cx = runtime
+            .try_request_cx_with_budget(Budget::INFINITE)
+            .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
+        let mut task = cx
+            .spawn_blocking(move |_| release_readers())
+            .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
+        let readers = task
+            .join(&cx)
             .await
             .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))??;
         let writer = if self.writer.is_some() {
@@ -1348,10 +1337,12 @@ fn sqlite_error(operation: &'static str, error: rusqlite::Error) -> ExactSqlErro
     }
 }
 
-fn map_writer_send_error(error: tokio_mpsc::error::TrySendError<WriterCommand>) -> ExactSqlError {
+fn map_writer_send_error(error: actor_mpsc::SendError<WriterCommand>) -> ExactSqlError {
     match error {
-        tokio_mpsc::error::TrySendError::Full(_) => ExactSqlError::Busy,
-        tokio_mpsc::error::TrySendError::Closed(_) => ExactSqlError::WriterUnavailable,
+        actor_mpsc::SendError::Full(_) => ExactSqlError::Busy,
+        actor_mpsc::SendError::Disconnected(_) | actor_mpsc::SendError::Cancelled(_) => {
+            ExactSqlError::WriterUnavailable
+        }
     }
 }
 

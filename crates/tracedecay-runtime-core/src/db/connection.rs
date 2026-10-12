@@ -118,13 +118,13 @@ enum DatabaseHealth {
     Corrupt(String),
 }
 
-static DATABASE_HEALTH_GATE: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+static DATABASE_HEALTH_GATE: OnceLock<asupersync::sync::Mutex<()>> = OnceLock::new();
 
 /// A writer connection that cannot outlive the canonical database's writer
 /// lane. It is another capability over the same physical attachment, never a
 /// second path-derived `SQLite` open.
 pub struct DatabaseWriterConnection<'a> {
-    _guard: tokio::sync::MutexGuard<'a, ()>,
+    _guard: asupersync::sync::MutexGuard<'a, ()>,
     conn: Connection,
     _client_guard: DatabaseClientGuardV1,
 }
@@ -228,7 +228,7 @@ pub enum DatabaseMemoryTransaction<'a> {
 /// transaction commits, rolls back, or is dropped.
 pub struct DatabaseWriteTransaction<'a> {
     transaction: Transaction,
-    guard: tokio::sync::MutexGuard<'a, ()>,
+    guard: asupersync::sync::MutexGuard<'a, ()>,
     _client_guard: DatabaseClientGuardV1,
 }
 

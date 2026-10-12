@@ -671,8 +671,17 @@ impl Database {
         locators.insert(profile_key, profile_locator);
         locators.insert(target_key, target_locator);
         let resolver = Arc::new(ExactTestRuntimeResolver { locators });
+        let runtime = asupersync::runtime::Runtime::current_handle().ok_or_else(|| {
+            TraceDecayError::Config {
+                message: "test database runtime publication requires an Asupersync runtime"
+                    .to_owned(),
+            }
+        })?;
         let registry =
-            StoreRuntimeRegistry::new(resolver, Arc::new(LifecycleShardRuntimePublisher));
+            StoreRuntimeRegistry::new(runtime, resolver, Arc::new(LifecycleShardRuntimePublisher))
+                .map_err(|error| {
+                    test_runtime_error("construct test runtime registry", format!("{error:?}"))
+                })?;
         let profile_authority = if target_is_profile {
             authority.clone()
         } else {
@@ -900,7 +909,7 @@ fn test_runtime_open_failure(
 mod tests {
     use super::*;
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn daemon_scoped_registered_fixture_requires_exact_daemon_authority() {
         let root = tempfile::tempdir().expect("daemon-scoped fixture root");
         let _scope = crate::db::enter_daemon_database_scope(

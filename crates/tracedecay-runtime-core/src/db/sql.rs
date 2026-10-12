@@ -282,7 +282,7 @@ mod tests {
     /// A single query over this many rows is refused by the `SQLite` runtime, so
     /// a whole-table read has to page. The scan must still return every row,
     /// exactly once, in `rowid` order.
-    #[tokio::test]
+    #[asupersync::test]
     async fn rowid_pages_complete_a_scan_larger_than_the_runtime_limit() {
         const ROWS: i64 = 10_001;
         let directory = TempDir::new().expect("scan tempdir");

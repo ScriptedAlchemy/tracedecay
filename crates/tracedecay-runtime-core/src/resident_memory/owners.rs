@@ -23,7 +23,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
-use tokio::sync::watch;
+use asupersync::channel::watch;
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, ProjectId, WorktreeId};
 
 use super::advance_headroom_epoch;
@@ -300,7 +300,7 @@ impl ResidentOwnersV1 {
         Self {
             idle_window,
             state: Mutex::new(OwnersStateV1::default()),
-            headroom: watch::Sender::new(0),
+            headroom: watch::channel(0).0,
         }
     }
 
@@ -998,16 +998,13 @@ mod tests {
         );
 
         assert_eq!(owners.release_idle(start).len(), 0);
-        assert!(
-            !headroom.has_changed().unwrap(),
-            "a sweep that frees nothing"
-        );
+        assert!(!headroom.has_changed(), "a sweep that frees nothing");
 
         assert_eq!(
             owners.release_idle(start + Duration::from_secs(301)).len(),
             1
         );
-        assert!(headroom.has_changed().unwrap());
+        assert!(headroom.has_changed());
         assert_eq!(*headroom.borrow_and_update(), 1);
 
         owners.note_headroom();

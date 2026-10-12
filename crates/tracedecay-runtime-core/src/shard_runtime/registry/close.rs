@@ -3,6 +3,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use asupersync::Cx;
+use asupersync::channel::watch;
+
 use tracedecay_store::{RuntimeMaintenanceStateV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
 
 use super::capacity::drain_and_close_physical;
@@ -45,6 +48,42 @@ struct CloseReservation {
     key: StoreRuntimeKey,
     attempt: u64,
     owner: Arc<StoreRuntimeOwnerAttachment>,
+    completion: watch::Sender<Option<Result<ClosedStoreRuntime, StoreRuntimeRegistryFailure>>>,
+}
+
+struct CloseAttemptGuard {
+    registry: StoreRuntimeRegistry,
+    reservation: Option<CloseReservation>,
+}
+
+impl CloseAttemptGuard {
+    fn complete(mut self, outcome: Result<(), StoreRuntimeRegistryFailure>) {
+        if let Some(reservation) = self.reservation.take() {
+            let completion = reservation.completion.clone();
+            let result = self.registry.finish_exact_close(reservation, outcome);
+            if let Err(error) = completion.send(Some(result)) {
+                tracing::error!(%error, "failed to publish registered runtime close completion");
+            }
+        }
+    }
+}
+
+impl Drop for CloseAttemptGuard {
+    fn drop(&mut self) {
+        if let Some(reservation) = self.reservation.take() {
+            let completion = reservation.completion.clone();
+            let result = self.registry.finish_exact_close(
+                reservation,
+                Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                    operation: "settle exact registered runtime close",
+                    message: "native close task ended without completing".to_owned(),
+                }),
+            );
+            if let Err(error) = completion.send(Some(result)) {
+                tracing::error!(%error, "failed to publish registered runtime close failure");
+            }
+        }
+    }
 }
 
 impl StoreRuntimeRegistry {
@@ -64,7 +103,10 @@ impl StoreRuntimeRegistry {
         skip_all
     )]
     pub async fn close_idle_for_shutdown(&self) -> Result<usize, StoreRuntimeRegistryFailure> {
-        self.cancel_and_join_opens_for_shutdown().await;
+        let cx = Cx::current().ok_or(StoreRuntimeRegistryFailure::RuntimeUnavailable {
+            operation: "close idle registered runtimes for shutdown",
+        })?;
+        self.cancel_and_join_opens_for_shutdown(&cx).await?;
         let (reservations, reserve_failure) = {
             let mut state = self.lock_state();
             let mut idle = Vec::new();
@@ -114,19 +156,55 @@ impl StoreRuntimeRegistry {
             .into_iter()
             .map(|reservation| {
                 let registry = self.clone();
-                tokio::task::spawn_blocking(move || registry.complete_eviction(reservation))
+                let (completion, receiver) = watch::channel(None);
+                let spawned = self.inner.operations.retain_blocking(move || {
+                    let result = registry.complete_eviction(reservation);
+                    if let Err(error) = completion.send(Some(result)) {
+                        tracing::error!(%error, "failed to publish registered runtime shutdown close");
+                    }
+                });
+                (spawned, receiver)
             })
             .collect::<Vec<_>>();
         let closed = closes.len();
         let mut first_failure = reserve_failure;
-        for close in closes {
-            if let Err(failure) = close.await.unwrap_or_else(|error| {
-                Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                    operation: "join shutdown close of idle registered runtimes",
+        if let Err(error) = self.inner.operations.shutdown(&cx).await {
+            first_failure.get_or_insert(match error {
+                crate::operation_task_owner::RuntimeOperationShutdownError::WaitCancelled => {
+                    StoreRuntimeRegistryFailure::WaitCancelled {
+                        operation: "drain registered runtime settlement tasks for shutdown",
+                    }
+                }
+                error => StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                    operation: "drain registered runtime settlement tasks for shutdown",
                     message: error.to_string(),
-                })
-            }) {
-                first_failure.get_or_insert(failure);
+                },
+            });
+        }
+        for (spawned, mut completion) in closes {
+            if let Err(error) = spawned {
+                first_failure.get_or_insert(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                    operation: "spawn shutdown close of idle registered runtimes",
+                    message: error.to_string(),
+                });
+                continue;
+            }
+            loop {
+                if let Some(result) = completion.borrow().clone() {
+                    if let Err(failure) = result {
+                        first_failure.get_or_insert(failure);
+                    }
+                    break;
+                }
+                if let Err(error) = completion.changed(&cx).await {
+                    first_failure.get_or_insert(
+                        StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                            operation: "join shutdown close of idle registered runtimes",
+                            message: error.to_string(),
+                        },
+                    );
+                    break;
+                }
             }
         }
         first_failure.map_or(Ok(closed), Err)
@@ -205,63 +283,74 @@ impl StoreRuntimeRegistry {
         authority: &DatabaseAuthority,
         stale_opened_file_identity: Option<u64>,
     ) -> Result<ClosedStoreRuntime, StoreRuntimeRegistryFailure> {
+        let cx = Cx::current().ok_or(StoreRuntimeRegistryFailure::RuntimeUnavailable {
+            operation: "close exact registered runtime",
+        })?;
         let reservation =
             self.reserve_exact_close(expected, authority, stale_opened_file_identity)?;
-        let registry = self.clone();
-        // The completion task owns the reservation. Dropping this caller's
-        // join handle detaches the task, so physical close still reaches the
-        // matching lifecycle transition and `finish_exact_close`.
-        tokio::spawn(async move {
-            let physical = reservation.owner.clone();
-            let mut outcome =
-                tokio::task::spawn_blocking(move || drain_and_close_physical(&physical))
-                    .await
-                    .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                        operation: "join exact registered runtime close",
-                        message: error.to_string(),
-                    })
-                    .and_then(|result| result);
-
-            if outcome.is_ok() {
-                outcome = match stale_opened_file_identity {
-                    Some(expected_identity)
-                        if reservation.owner.opened_file_identity() == Some(expected_identity) =>
-                    {
-                        Ok(())
-                    }
-                    Some(_) => Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                        operation: "complete stale registered runtime close",
-                        message: "retained opened identity changed during stale close".to_owned(),
-                    }),
-                    None => reservation
-                        .owner
-                        .validate_opened_file_identity("complete exact registered runtime close")
-                        .map(|_| ()),
-                };
+        let mut completion = reservation.completion.subscribe();
+        let owner = reservation.owner.clone();
+        let guard = CloseAttemptGuard {
+            registry: self.clone(),
+            reservation: Some(reservation),
+        };
+        self.inner
+            .operations
+            .retain_blocking(move || {
+                let mut outcome = drain_and_close_physical(&owner);
+                if outcome.is_ok() {
+                    outcome = match stale_opened_file_identity {
+                        Some(expected_identity)
+                            if owner.opened_file_identity() == Some(expected_identity) =>
+                        {
+                            Ok(())
+                        }
+                        Some(_) => Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                            operation: "complete stale registered runtime close",
+                            message: "retained opened identity changed during stale close"
+                                .to_owned(),
+                        }),
+                        None => owner
+                            .validate_opened_file_identity(
+                                "complete exact registered runtime close",
+                            )
+                            .map(|_| ()),
+                    };
+                }
+                if outcome.is_ok() {
+                    outcome = owner
+                        .runtime()
+                        .transition(RuntimeMaintenanceStateV1::Closed)
+                        .map_err(
+                            |error| StoreRuntimeRegistryFailure::RuntimeLifecycleFailed {
+                                message: error.to_string(),
+                            },
+                        );
+                } else {
+                    let _ = owner
+                        .runtime()
+                        .transition(RuntimeMaintenanceStateV1::Faulted);
+                }
+                guard.complete(outcome);
+            })
+            .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "spawn exact registered runtime close",
+                message: error.to_string(),
+            })?;
+        loop {
+            if let Some(result) = completion.borrow().clone() {
+                return result;
             }
-            if outcome.is_ok() {
-                outcome = reservation
-                    .owner
-                    .runtime()
-                    .transition(RuntimeMaintenanceStateV1::Closed)
-                    .map_err(
-                        |error| StoreRuntimeRegistryFailure::RuntimeLifecycleFailed {
-                            message: error.to_string(),
-                        },
-                    );
-            } else {
-                let _ = reservation
-                    .owner
-                    .runtime()
-                    .transition(RuntimeMaintenanceStateV1::Faulted);
-            }
-            registry.finish_exact_close(reservation, outcome)
-        })
-        .await
-        .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-            operation: "join cancellation-safe exact registered runtime close",
-            message: error.to_string(),
-        })?
+            completion.changed(&cx).await.map_err(|error| match error {
+                watch::RecvError::Cancelled => StoreRuntimeRegistryFailure::WaitCancelled {
+                    operation: "wait for exact registered runtime close",
+                },
+                error => StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                    operation: "wait for exact registered runtime close",
+                    message: error.to_string(),
+                },
+            })?;
+        }
     }
 
     fn reserve_exact_close(
@@ -417,6 +506,7 @@ impl StoreRuntimeRegistry {
             });
         }
         let owner = ready.owner;
+        let (completion, _) = watch::channel(None);
         state.entries.insert(
             key.clone(),
             RegistryEntry::Evicting(EvictingRuntime {
@@ -428,6 +518,7 @@ impl StoreRuntimeRegistry {
             key,
             attempt,
             owner,
+            completion,
         })
     }
 
@@ -594,9 +685,11 @@ mod tests {
         rusqlite::Connection::open(&profile_path).unwrap();
         let profile_path = profile_path.canonicalize().unwrap();
         let registry = StoreRuntimeRegistry::new(
+            asupersync::runtime::Runtime::current_handle().unwrap(),
             Arc::new(FixtureResolver { profile_path }),
             Arc::new(LifecycleShardRuntimePublisher),
-        );
+        )
+        .unwrap();
         let incarnation = StoreIncarnationV1::new(1).unwrap();
         let profile = match registry
             .open(StoreRuntimeOpenRequest::new(
@@ -632,7 +725,7 @@ mod tests {
         (registry, profile, code, authority)
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn close_path_rejects_single_runtime_without_retained_authority() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("runtime.db");
@@ -655,7 +748,7 @@ mod tests {
         drop(profile);
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn close_path_detects_duplicate_path_before_authority_validation() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("runtime.db");
@@ -663,11 +756,13 @@ mod tests {
         let authority =
             DatabaseAuthority::for_runtime(&path, "mount duplicate-path code runtime").unwrap();
         let registry = StoreRuntimeRegistry::new(
+            asupersync::runtime::Runtime::current_handle().unwrap(),
             Arc::new(FixtureResolver {
                 profile_path: path.clone(),
             }),
             Arc::new(LifecycleShardRuntimePublisher),
-        );
+        )
+        .unwrap();
         let incarnation = StoreIncarnationV1::new(1).unwrap();
         let profile = match registry
             .open(StoreRuntimeOpenRequest::new_read_only(
@@ -722,7 +817,7 @@ mod tests {
         drop(profile);
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn exact_close_refuses_every_live_client_lease_before_closing() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("runtime.db");
@@ -775,7 +870,7 @@ mod tests {
         drop(profile);
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn exact_close_refuses_an_operation_token_after_the_client_drops() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("runtime.db");
@@ -815,7 +910,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
+    #[asupersync::test]
     async fn stale_exact_close_uses_retained_binding_authority_and_opened_identity() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("runtime.db");
@@ -838,7 +933,7 @@ mod tests {
         drop(profile);
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn destructive_reservation_fences_open_until_preserved_store_reopens() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("runtime.db");
@@ -862,27 +957,34 @@ mod tests {
         };
         let open_registry = registry.clone();
         let open_authority = authority.clone();
-        let pending = tokio::spawn(async move {
-            open_registry
-                .open(StoreRuntimeOpenRequest::new_authorized(
-                    code_shard(),
-                    StoreIncarnationV1::new(1).unwrap(),
-                    Some(pin),
-                    open_authority,
-                ))
-                .await
-        });
-        tokio::task::yield_now().await;
+        let mut pending = asupersync::Cx::current()
+            .unwrap()
+            .spawn(move |_| async move {
+                open_registry
+                    .open(StoreRuntimeOpenRequest::new_authorized(
+                        code_shard(),
+                        StoreIncarnationV1::new(1).unwrap(),
+                        Some(pin),
+                        open_authority,
+                    ))
+                    .await
+            })
+            .unwrap();
+        asupersync::runtime::yield_now().await;
         assert!(
             !pending.is_finished(),
             "ordinary opens must wait for destructive maintenance"
         );
 
         reservation.abort_preserved().unwrap();
-        let reopened = match tokio::time::timeout(Duration::from_secs(2), pending)
-            .await
-            .expect("reserved open must wake")
-            .unwrap()
+        let reopened = match asupersync::time::timeout(
+            asupersync::Cx::current().unwrap().now(),
+            Duration::from_secs(2),
+            pending.join(&asupersync::Cx::current().unwrap()),
+        )
+        .await
+        .expect("reserved open must wake")
+        .unwrap()
         {
             StoreRuntimeOpenResult::Published(handle) => handle,
             StoreRuntimeOpenResult::Failed(failure) => {
@@ -901,7 +1003,7 @@ mod tests {
         drop(profile);
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn destructive_reservation_atomically_rejects_open_begin() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("runtime.db");
@@ -935,7 +1037,7 @@ mod tests {
         drop(profile);
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn failed_destructive_close_releases_reservation_for_retry() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("runtime.db");
@@ -963,7 +1065,7 @@ mod tests {
         drop(profile);
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn destructive_reservation_does_not_block_unrelated_database_under_same_root() {
         let temporary = tempfile::tempdir().unwrap();
         let reserved_path = temporary.path().join("reserved.db");
@@ -984,7 +1086,8 @@ mod tests {
         let authority =
             DatabaseAuthority::for_runtime(&unrelated_path, "mount unrelated database").unwrap();
 
-        let unrelated = tokio::time::timeout(
+        let unrelated = asupersync::time::timeout(
+            asupersync::Cx::current().unwrap().now(),
             Duration::from_secs(2),
             registry.open(StoreRuntimeOpenRequest::new_authorized(
                 code_shard_for("worktree.unrelated"),
@@ -1064,7 +1167,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn failed_exact_close_retains_a_faulted_evicting_runtime() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("runtime.db");
@@ -1075,6 +1178,7 @@ mod tests {
         rusqlite::Connection::open(&profile_path).unwrap();
         let profile_path = profile_path.canonicalize().unwrap();
         let registry = StoreRuntimeRegistry::with_config(
+            asupersync::runtime::Runtime::current_handle().unwrap(),
             Arc::new(FixtureResolver { profile_path }),
             Arc::new(FailingPublisher),
             StoreRuntimeRegistryConfig::default(),

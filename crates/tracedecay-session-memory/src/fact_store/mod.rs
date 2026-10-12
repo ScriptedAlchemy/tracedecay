@@ -114,6 +114,7 @@ pub enum ProjectMemoryGraphReconciliationScheduleV1 {
     AlreadyScheduled,
     Retiring,
     LifecycleClosed,
+    RuntimeUnavailable,
 }
 
 /// Internal daemon mount/write hook for derived verified-graph catch-up.
@@ -144,18 +145,14 @@ impl FactStore for DatabaseFactStore<'_> {
             Some(retained) => {
                 let db = (*self.db).clone();
                 let write_control = write_control.clone();
-                // The task owns the retained-dispatch receipt path so caller
-                // cancellation cannot strand a durable commit before its
-                // derived graph reconciliation trigger is recorded.
-                tokio::spawn(async move {
+                envelope::settle_fact_write(COMMIT_OPERATION, move |cx| async move {
                     let outcome = runtime::commit_fact(&retained, batch, &write_control).await?;
                     if matches!(&outcome, FactCommitOutcome::Committed(_)) {
-                        graph::publish_project_memory_graph_after_write(db.clone()).await;
+                        graph::publish_project_memory_graph_after_write(&cx, db.clone()).await;
                     }
                     Ok(outcome)
                 })
                 .await
-                .map_err(|error| storage_error(COMMIT_OPERATION, error))?
             }
             None => self.commit_batch(&batch, write_control).await,
         }

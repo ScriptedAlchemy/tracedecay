@@ -214,7 +214,9 @@ async fn terminal_shutdown_truncates_every_released_session_store_wal() {
     // The daemon's terminal owner order: join terminal and reconciliation
     // tasks, then drain the owners and close.
     registry
-        .shutdown_terminal_tasks()
+        .shutdown_terminal_tasks(
+            &tracedecay_runtime_core::Cx::current().expect("native fixture execution context"),
+        )
         .await
         .expect("terminal tasks join");
     registry.cancel_memory_graph_reconciliation_tasks();

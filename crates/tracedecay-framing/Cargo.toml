@@ -16,8 +16,5 @@ doctest = false
 test-helpers = []
 
 [dependencies]
-tokio = { version = "1", features = ["io-util"] }
+asupersync.workspace = true
 tracing = "0.1"
-
-[dev-dependencies]
-tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "test-util", "time"] }

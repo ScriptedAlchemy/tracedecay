@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
+use asupersync::channel::watch;
 #[cfg(target_os = "macos")]
 use mach2::{
     kern_return::KERN_SUCCESS,
@@ -18,7 +19,6 @@ use mach2::{
     traps::mach_task_self,
 };
 use sysinfo::{MemoryRefreshKind, RefreshKind, System};
-use tokio::sync::watch;
 use tracedecay_domain::process_heap::installed_process_allocator_release_v1;
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 
@@ -757,7 +757,7 @@ impl ResidentMemoryPressureV1 {
             observed_bytes: AtomicU64::new(0),
             observed: AtomicBool::new(false),
             over_budget: AtomicBool::new(false),
-            headroom: watch::Sender::new(0),
+            headroom: watch::channel(0).0,
             waiting: Mutex::new(Vec::new()),
             any_waiting: AtomicBool::new(false),
             state: Mutex::new(ResidentMemoryPressureReclaimerStateV1::default()),
@@ -1028,7 +1028,9 @@ impl Drop for ResidentMemoryPressureRegistrationV1 {
 }
 
 fn advance_headroom_epoch(epoch: &watch::Sender<u64>) {
-    epoch.send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+    if let Err(error) = epoch.send_modify(|epoch| *epoch = epoch.wrapping_add(1)) {
+        tracing::error!(%error, "resident memory headroom channel closed");
+    }
 }
 
 static PROCESS_RESIDENT_MEMORY_PRESSURE_V1: OnceLock<Arc<ResidentMemoryPressureV1>> =

@@ -154,8 +154,18 @@ impl Database {
     ///
     /// Writable handles opened for the same database share one `DatabaseInner`,
     /// so this guard coordinates MCP, dashboard, and automation mutations.
-    pub async fn writer(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.inner.writer.lock().await
+    pub async fn writer(&self) -> Result<asupersync::sync::MutexGuard<'_, ()>> {
+        let cx = asupersync::Cx::current().ok_or_else(|| TraceDecayError::Config {
+            message: "database writer admission requires an Asupersync context".to_owned(),
+        })?;
+        self.inner
+            .writer
+            .lock(&cx)
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("database writer admission failed: {error}"),
+                operation: "acquire database writer lane".to_owned(),
+            })
     }
 
     pub(super) fn require_active_write_scope(&self, operation: &str) -> Result<()> {
@@ -185,7 +195,7 @@ impl Database {
     /// The handle cannot escape the guard, preventing raw DML from bypassing
     /// serialization or joining a transaction on the retained reader.
     pub async fn writer_connection(&self, operation: &str) -> Result<DatabaseWriterConnection<'_>> {
-        let guard = self.writer().await;
+        let guard = self.writer().await?;
         let conn = self.open_writer_connection_unguarded(operation)?;
         Ok(DatabaseWriterConnection {
             _guard: guard,
@@ -249,7 +259,7 @@ impl Database {
         &self,
         operation: &str,
     ) -> Result<DatabaseWriteTransaction<'_>> {
-        let guard = self.writer().await;
+        let guard = self.writer().await?;
         let conn = self.open_writer_connection_unguarded(operation)?;
         let transaction = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -276,7 +286,7 @@ impl Database {
         &self,
         operation: &str,
     ) -> Result<DatabaseWriteTransaction<'_>> {
-        let guard = self.writer().await;
+        let guard = self.writer().await?;
         let conn = self.open_writer_connection_unguarded(operation)?;
         let transaction = conn
             .authorized_long_lease_transaction()

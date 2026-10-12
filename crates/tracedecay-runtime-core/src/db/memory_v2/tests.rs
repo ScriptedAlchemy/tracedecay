@@ -38,7 +38,7 @@ async fn string_column(conn: &Connection, sql: &str) -> Vec<String> {
     values
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn fresh_store_carries_only_the_final_memory_shape() {
     let (runtime, _dir) = database().await;
     let conn = (*runtime).clone();
@@ -104,7 +104,7 @@ async fn fresh_store_carries_only_the_final_memory_shape() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn feedback_history_permits_only_detail_redaction() {
     let (runtime, _dir) = database().await;
     let conn = (*runtime).clone();

@@ -3011,13 +3011,15 @@ async fn concurrent_worktree_scopes_publish_with_one_corpus_build_and_bounded_rs
 
 #[test]
 fn off_thread_staging_release_retains_its_permit_and_leases_until_terminal_drain() {
-    let executor = tokio::runtime::Builder::new_multi_thread()
+    let executor = asupersync::runtime::RuntimeBuilder::multi_thread()
         .worker_threads(2)
-        .max_blocking_threads(1)
-        .enable_all()
+        .blocking_threads(1, 1)
+        .enable_time()
+        .enable_platform_reactor(true)
         .build()
         .expect("isolated blocking-pool runtime");
     executor.block_on(async {
+        let cx = asupersync::Cx::current().expect("native fixture execution context");
         let temporary = tempfile::tempdir().expect("temporary fixture parent");
         let root = temporary
             .path()
@@ -3122,12 +3124,14 @@ fn off_thread_staging_release_retains_its_permit_and_leases_until_terminal_drain
         // Occupy the actual blocking-pool slot. Dropping the sender on any
         // assertion failure also releases this worker, so teardown cannot hang.
         let (release, blocked) = std::sync::mpsc::channel::<()>();
-        let (started, entered) = tokio::sync::oneshot::channel();
-        let blocker = tokio::task::spawn_blocking(move || {
-            started.send(()).unwrap();
-            let _ = blocked.recv();
-        });
-        entered.await.unwrap();
+        let (started, mut entered) = asupersync::channel::oneshot::channel();
+        let mut blocker = cx
+            .spawn_blocking(move |_| {
+                started.send_blocking(()).unwrap();
+                let _ = blocked.recv();
+            })
+            .expect("native blocking-pool admission");
+        entered.recv(&cx).await.unwrap();
         std::thread::scope(|scope| {
             scope
                 .spawn(|| runtime.release_sealed_staging_rows(build, projection))
@@ -3147,26 +3151,26 @@ fn off_thread_staging_release_retains_its_permit_and_leases_until_terminal_drain
 
         // Poll the operation owner itself: terminal shutdown has other blocking
         // phases, which must not make a detached release falsely pass this test.
-        let mut operation_drain = std::pin::pin!(runtime.operation_task_owner.shutdown());
+        let mut operation_drain = std::pin::pin!(runtime.operation_task_owner.shutdown(&cx));
         std::future::poll_fn(|cx| {
             assert!(std::future::Future::poll(operation_drain.as_mut(), cx).is_pending());
             std::task::Poll::Ready(())
         })
         .await;
-        let mut terminal_drain = std::pin::pin!(registry.shutdown_terminal_tasks());
+        let mut terminal_drain = std::pin::pin!(registry.shutdown_terminal_tasks(&cx));
         std::future::poll_fn(|cx| {
             assert!(std::future::Future::poll(terminal_drain.as_mut(), cx).is_pending());
             std::task::Poll::Ready(())
         })
         .await;
-        assert!(!runtime.operation_task_owner.retain(async {}));
+        assert!(runtime.operation_task_owner.retain_blocking(|| {}).is_err());
         assert!(
             Arc::clone(&runtime.publication_locks.build)
                 .try_lock_owned()
                 .is_err()
         );
         release.send(()).unwrap();
-        blocker.await.unwrap();
+        blocker.join(&cx).await.unwrap();
         operation_drain.await.expect("accepted sweep is joined");
         terminal_drain
             .await

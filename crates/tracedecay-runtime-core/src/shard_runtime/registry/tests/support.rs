@@ -127,7 +127,7 @@ pub(super) struct TestPublisher {
     pub(super) calls: AtomicUsize,
     pub(super) block: AtomicBool,
     pub(super) mode: AtomicU8,
-    pub(super) release: tokio::sync::Notify,
+    pub(super) release: asupersync::sync::Notify,
     pub(super) bindings: Mutex<Vec<StoreRuntimeBindingV1>>,
 }
 
@@ -188,8 +188,13 @@ pub(super) fn registry(
 ) -> (StoreRuntimeRegistry, Arc<TestResolver>, Arc<TestPublisher>) {
     let resolver = Arc::new(TestResolver::default());
     let publisher = Arc::new(TestPublisher::default());
-    let registry =
-        StoreRuntimeRegistry::with_config(resolver.clone(), publisher.clone(), config).unwrap();
+    let registry = StoreRuntimeRegistry::with_config(
+        asupersync::runtime::Runtime::current_handle().unwrap(),
+        resolver.clone(),
+        publisher.clone(),
+        config,
+    )
+    .unwrap();
     (registry, resolver, publisher)
 }
 
@@ -243,11 +248,15 @@ pub(super) fn profile_sessions_request(pin: &ProfileAuthorityPin) -> StoreRuntim
 }
 
 pub(super) async fn wait_for_calls(calls: &AtomicUsize, expected: usize) {
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while calls.load(Ordering::SeqCst) < expected {
-            tokio::task::yield_now().await;
-        }
-    })
+    asupersync::time::timeout(
+        asupersync::Cx::current().unwrap().now(),
+        Duration::from_secs(2),
+        async {
+            while calls.load(Ordering::SeqCst) < expected {
+                asupersync::runtime::yield_now().await;
+            }
+        },
+    )
     .await
     .expect("publisher made progress");
 }

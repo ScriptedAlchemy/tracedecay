@@ -8,6 +8,10 @@ pub mod read_cache;
 mod registered_scope;
 
 use std::fmt;
+use std::future::Future;
+use std::task::Poll;
+
+use asupersync::Cx;
 
 use tracedecay_contracts::now_micros;
 use tracedecay_domain::{
@@ -349,6 +353,7 @@ impl RequestBudgets {
 pub enum RequestInterruption {
     Cancelled,
     DeadlineExceeded,
+    RuntimeUnavailable,
 }
 
 /// Composes immutable session admission authority into one application grant
@@ -431,7 +436,12 @@ where
         .min(context.grant().expires_at.0);
     let remaining_micros = terminal_at.saturating_sub(application_observed_at().0);
     let remaining_micros = u64::try_from(remaining_micros).unwrap_or(0);
+    let Some(cx) = Cx::current() else {
+        on_interruption();
+        return Err(RequestInterruption::RuntimeUnavailable);
+    };
     race_application_request_wait(
+        &cx,
         remaining_micros,
         cancellation.cancelled(),
         future,
@@ -457,31 +467,47 @@ pub async fn run_deadline_signal_interruptible<T>(
     }
     let remaining_micros = deadline.expires_at.0.saturating_sub(observed_at.0);
     let remaining_micros = u64::try_from(remaining_micros).unwrap_or(0);
-    race_application_request_wait(remaining_micros, cancellation.cancelled(), future, || {}).await
+    let cx = Cx::current().ok_or(RequestInterruption::RuntimeUnavailable)?;
+    race_application_request_wait(
+        &cx,
+        remaining_micros,
+        cancellation.cancelled(),
+        future,
+        || {},
+    )
+    .await
 }
 
 async fn race_application_request_wait<T>(
+    cx: &Cx,
     remaining_micros: u64,
     cancelled: impl std::future::Future<Output = ()>,
     future: impl std::future::Future<Output = T>,
     on_interruption: impl FnOnce(),
 ) -> Result<T, RequestInterruption> {
-    tokio::pin!(cancelled);
-    let deadline = tokio::time::sleep(std::time::Duration::from_micros(remaining_micros));
-    tokio::pin!(deadline);
-    tokio::pin!(future);
-    tokio::select! {
-        biased;
-        result = &mut future => Ok(result),
-        () = &mut cancelled => {
-            on_interruption();
-            Err(RequestInterruption::Cancelled)
+    let mut cancelled = std::pin::pin!(cancelled);
+    let mut deadline = std::pin::pin!(asupersync::time::sleep(
+        cx.now(),
+        std::time::Duration::from_micros(remaining_micros),
+    ));
+    let mut future = std::pin::pin!(future);
+    let result = std::future::poll_fn(|task| {
+        if let Poll::Ready(value) = future.as_mut().poll(task) {
+            return Poll::Ready(Ok(value));
         }
-        () = &mut deadline => {
-            on_interruption();
-            Err(RequestInterruption::DeadlineExceeded)
+        if cancelled.as_mut().poll(task).is_ready() {
+            return Poll::Ready(Err(RequestInterruption::Cancelled));
         }
+        if deadline.as_mut().poll(task).is_ready() {
+            return Poll::Ready(Err(RequestInterruption::DeadlineExceeded));
+        }
+        Poll::Pending
+    })
+    .await;
+    if result.is_err() {
+        on_interruption();
     }
+    result
 }
 
 /// The explicit failure states when the root orchestration context crosses
@@ -823,8 +849,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn application_interruptible_observes_live_transport_cancellation() {
+    #[asupersync::test]
+    async fn application_interruptible_observes_live_transport_cancellation(cx: &Cx) {
         let scope = project_identity().application_scope().unwrap();
         let application = application_context(
             scope.clone(),
@@ -834,10 +860,12 @@ mod tests {
         );
         let cancellation = CancellationToken::new();
         let trigger = cancellation.clone();
-        tokio::spawn(async move {
-            tokio::task::yield_now().await;
-            trigger.cancel();
-        });
+        let mut trigger_task = cx
+            .spawn(move |_cx| async move {
+                asupersync::runtime::yield_now().await;
+                trigger.cancel();
+            })
+            .expect("spawn cancellation trigger");
 
         let result = run_application_request_interruptible(
             &application,
@@ -847,6 +875,10 @@ mod tests {
         )
         .await;
 
+        trigger_task
+            .join(cx)
+            .await
+            .expect("join cancellation trigger");
         assert_eq!(result, Err(RequestInterruption::Cancelled));
         assert!(
             !application.cancellation().is_cancelled(),
