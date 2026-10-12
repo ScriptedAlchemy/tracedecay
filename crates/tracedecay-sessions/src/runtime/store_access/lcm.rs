@@ -6,12 +6,11 @@ use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 
 use tracedecay_lcm::raw::{message_body_from_record_row, stored_message_record_select_columns};
 use tracedecay_lcm::{
-    LcmDescribeRequest, LcmDescribeResponse, LcmError, LcmExpandQueryRequest,
-    LcmExpandQueryResponse, LcmExpandRequest, LcmExpandResponse, LcmGcConfig, LcmGcReport,
-    LcmGrepFilters, LcmGrepOutcome, LcmGrepRequest, LcmLoadSessionPage, LcmLoadSessionRequest,
-    LcmPreflightRequest, LcmPreflightResponse, LcmRecentSession, LcmSessionBoundaryRequest,
-    LcmSessionBoundaryResponse, LcmSessionReplayRequest, LcmSessionReplaySlice, LcmStatus,
-    LcmSummaryExpansion, compression, dag, gc, payload, query, raw,
+    LcmDescribeRequest, LcmDescribeResponse, LcmError, LcmExpandRequest, LcmExpandResponse,
+    LcmGcConfig, LcmGcReport, LcmLoadSessionPage, LcmLoadSessionRequest, LcmPreflightRequest,
+    LcmPreflightResponse, LcmRecentSession, LcmSessionBoundaryRequest, LcmSessionBoundaryResponse,
+    LcmSessionReplayRequest, LcmSessionReplaySlice, LcmStatus, LcmSummaryExpansion, compression,
+    dag, gc, payload, query, raw,
 };
 
 use crate::runtime::SessionMessageRecord;
@@ -180,33 +179,6 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
     ) -> Result<LcmSummaryExpansion, LcmError> {
         let snapshot = self.lcm_read_snapshot().await?;
         dag::expand_summary_node(&snapshot, provider, session_id, node_id).await
-    }
-
-    pub async fn lcm_expand_query(
-        &self,
-        request: LcmExpandQueryRequest,
-    ) -> Result<LcmExpandQueryResponse, LcmError> {
-        let snapshot = self.lcm_read_snapshot().await?;
-        query::expand_query(&snapshot, request).await
-    }
-
-    /// Grep after the caller has already resolved any git-scope pre-pass.
-    ///
-    /// The temporal git-scope resolution lives above this crate; global-db
-    /// runs that pre-pass and then calls this method.
-    pub async fn lcm_grep(
-        &self,
-        request: LcmGrepRequest,
-        git_scope_session_ids: Option<&[(String, String)]>,
-    ) -> Result<LcmGrepOutcome, LcmError> {
-        let snapshot = self.lcm_read_snapshot().await?;
-        query::grep(
-            &snapshot,
-            request,
-            LcmGrepFilters::default(),
-            git_scope_session_ids,
-        )
-        .await
     }
 
     #[tracing::instrument(name = "global_db.registered.lcm.load", level = "trace", skip_all)]
