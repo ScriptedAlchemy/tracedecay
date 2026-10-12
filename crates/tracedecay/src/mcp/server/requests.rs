@@ -1450,6 +1450,9 @@ impl McpServer {
             Err(response) => return response,
         };
         let refusal_arguments = json!({ "format": arguments.get("format") });
+        let refuse = |id, error: &TraceDecayError| {
+            crate::mcp::tools::tool_refusal_response(id, &tool_name, error, &refusal_arguments)
+        };
         let memory_request_scope = connection.memory_request_scope().to_owned();
         // Resolve the exact execution server before creating cancellation,
         // deadline, settlement, or accounting state. A failed/ambiguous route
@@ -1477,12 +1480,7 @@ impl McpServer {
         {
             Some(Ok(routed)) => routed,
             Some(Err(error)) => {
-                return crate::mcp::tools::tool_refusal_response(
-                    id,
-                    &tool_name,
-                    &error,
-                    &refusal_arguments,
-                );
+                return refuse(id, &error);
             }
             // Cancel won before route selection installed dispatch authority.
             // That is transport abandonment, not an admitted tool cancel:
@@ -1507,12 +1505,7 @@ impl McpServer {
                         true,
                         "MCP server was released before retained dispatch admission",
                     );
-                    return crate::mcp::tools::tool_refusal_response(
-                        id,
-                        &tool_name,
-                        &error,
-                        &refusal_arguments,
-                    );
+                    return refuse(id, &error);
                 }
             },
         };
@@ -1541,12 +1534,7 @@ impl McpServer {
         ) {
             Ok(prepared) => prepared,
             Err(error) => {
-                return crate::mcp::tools::tool_refusal_response(
-                    id,
-                    &tool_name,
-                    &error,
-                    &refusal_arguments,
-                );
+                return refuse(id, &error);
             }
         };
 
@@ -1569,15 +1557,13 @@ impl McpServer {
             biased;
             guard = tracing::Instrument::instrument(response_gate.read_owned(), tracing::trace_span!("mcp.server.response_gate.wait")) => guard,
             () = request_cancelled => {
-                return crate::mcp::tools::tool_refusal_response(
+                return refuse(
                     id,
-                    &tool_name,
                     &dispatch_cancelled_error(
                         &tool_name,
                         DispatchSettlement::NotStarted,
                         tool_carries_effect(&tool_name),
                     ),
-                    &refusal_arguments,
                 );
             }
         };
@@ -1590,12 +1576,7 @@ impl McpServer {
                         true,
                         "the retained project server was retired before response admission",
                     );
-                    crate::mcp::tools::tool_refusal_response(
-                        id,
-                        &tool_name,
-                        &error,
-                        &refusal_arguments,
-                    )
+                    refuse(id, &error)
                 });
         }
         connection.install_selected_response_lease(
@@ -1672,12 +1653,7 @@ impl McpServer {
             Ok(dispatch) => dispatch,
             Err(failure) => {
                 connection.clear_selected_response_lease();
-                return crate::mcp::tools::tool_refusal_response(
-                    id,
-                    &tool_name,
-                    failure.error(),
-                    &refusal_arguments,
-                );
+                return refuse(id, failure.error());
             }
         };
         if let Some(response) = dispatch_server.project_server_revoked_response(&id, &tool_name) {
