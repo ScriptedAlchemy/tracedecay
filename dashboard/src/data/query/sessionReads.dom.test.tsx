@@ -54,8 +54,11 @@ describe('session reads shared across workspaces', () => {
         <LoomPage />
       </>,
     );
-    await screen.findByText(/^\d+ sessions · \d+ drawn · \d+ generations$/);
-    await screen.findAllByRole('button', { name: /^Select session / });
+    await waitFor(() => {
+      expect(reads('/plugins/analytics/usage').length).toBeGreaterThan(0);
+      expect(reads('/loom/temporal').length).toBeGreaterThan(0);
+      expect(reads('/subagent-tree').length).toBeGreaterThan(0);
+    });
     expect(reads('/subagent-tree')).toHaveLength(1);
   });
 
@@ -66,8 +69,11 @@ describe('session reads shared across workspaces', () => {
         <LoomPage />
       </>,
     );
-    await screen.findAllByRole('button', { name: /^Select session / });
-    await waitFor(() => expect(reads('/hermes-lcm/timeline').length).toBeGreaterThan(0));
+    await waitFor(() => {
+      expect(reads('/plugins/hermes-lcm/overview').length).toBeGreaterThan(0);
+      expect(reads('/loom/temporal').length).toBeGreaterThan(1);
+      expect(reads('/hermes-lcm/timeline').length).toBeGreaterThan(0);
+    });
     const timeline = reads('/hermes-lcm/timeline');
     expect(timeline).toHaveLength(1);
     expect(timeline[0]!.searchParams.get('bucket')).toBe('day');
