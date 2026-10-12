@@ -18,9 +18,8 @@ use tracedecay_global_db::configuration::contracts::ports::{
 };
 use tracedecay_global_db::configuration::contracts::types::ConfigurationError;
 use tracedecay_policy::configuration::{
-    ConfigurationMutationGrantSnapshotV1, ConfigurationMutationPolicyEvaluator,
-    ConfigurationMutationPolicyEvaluatorV1, ConfigurationMutationRecheckDispositionV1,
-    ConfigurationMutationRecheckInputV1,
+    ConfigurationMutationGrantSnapshotV1, ConfigurationMutationPolicyEvaluatorV1,
+    ConfigurationMutationRecheckDispositionV1, ConfigurationMutationRecheckInputV1,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,30 +51,20 @@ pub trait ConfigurationMutationGrantAuthority: Send + Sync {
     ) -> ConfigurationMutationGrantAuthorityFuture<'a>;
 }
 
-pub struct PolicyBackedConfigurationMutationAuthorization<Authority, Evaluator> {
+pub struct PolicyBackedConfigurationMutationAuthorization<Authority> {
     authority: Authority,
-    evaluator: Evaluator,
 }
 
-impl<Authority>
-    PolicyBackedConfigurationMutationAuthorization<
-        Authority,
-        ConfigurationMutationPolicyEvaluatorV1,
-    >
-{
+impl<Authority> PolicyBackedConfigurationMutationAuthorization<Authority> {
     pub fn new(authority: Authority) -> Self {
-        Self {
-            authority,
-            evaluator: ConfigurationMutationPolicyEvaluatorV1,
-        }
+        Self { authority }
     }
 }
 
-impl<Authority, Evaluator> ConfigurationMutationAuthorizationPort
-    for PolicyBackedConfigurationMutationAuthorization<Authority, Evaluator>
+impl<Authority> ConfigurationMutationAuthorizationPort
+    for PolicyBackedConfigurationMutationAuthorization<Authority>
 where
     Authority: ConfigurationMutationGrantAuthority + Sync,
-    Evaluator: ConfigurationMutationPolicyEvaluator + Sync,
 {
     fn recheck<'a>(
         &'a self,
@@ -102,7 +91,7 @@ where
                         ConfigurationError::Unavailable
                     }
                 })?;
-            let disposition = self.evaluator.evaluate(
+            let disposition = ConfigurationMutationPolicyEvaluatorV1.evaluate(
                 &current,
                 ConfigurationMutationRecheckInputV1 {
                     receipt,

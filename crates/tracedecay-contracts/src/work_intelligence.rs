@@ -23,8 +23,8 @@ use tracedecay_domain::{
 };
 use tracedecay_policy::work_loop::{
     WorkEvidenceFrontierV1, WorkPriorOutcomeV1, WorkProposalCancellationV1, WorkProposalDecisionV1,
-    WorkProposalEvaluator, WorkProposalEvaluatorV1, WorkProposalPolicyInputV1,
-    WorkProposalReasonV1, WorkProposalRuntimeCoverageV1, WorkRouteCandidateV1,
+    WorkProposalEvaluatorV1, WorkProposalPolicyInputV1, WorkProposalReasonV1,
+    WorkProposalRuntimeCoverageV1, WorkRouteCandidateV1,
 };
 
 use crate::work::work_authority;
