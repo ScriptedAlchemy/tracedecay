@@ -596,6 +596,15 @@ fn run_combined_review_for_retrieval_inner<'a>(
             }
             tracing::warn!(error = %err, "failed to refresh fact outcomes");
         }
+        if let Err(err) = super::outcomes::refresh_skill_outcomes(
+            &skill_bundle.profile_root,
+            &dashboard_root,
+            current_timestamp(),
+        )
+        .await
+        {
+            tracing::warn!(error = %err, "failed to refresh skill outcomes");
+        }
 
         let run_id = options
             .run_id
