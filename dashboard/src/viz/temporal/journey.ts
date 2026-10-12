@@ -17,6 +17,8 @@ import type {
   LcmMessageV1,
   LoomTemporalPayloadV1,
 } from '../../contracts/generated.ts';
+import { gradeKind } from '../../ui/EvidenceGrade.tsx';
+import { commitEvidence } from '../../workspaces/sessions/model.ts';
 import { proximityThreadId, proximityTone } from '../proximity/proximity.ts';
 import type {
   EvidenceGrade,
@@ -651,13 +653,14 @@ export function projectJourney(sources: JourneySources): JourneyProjection {
     const detail =
       `${commit.relation} · ${commit.evidence}` +
       (commit.span_overlap_kind ? ` · ${commit.span_overlap_kind}` : '');
+    const graded = commitEvidence(commit);
     pushRecorded({
       id: `commit:${laneId}:${commit.commit_sha}`,
       laneId,
       kind: 'commit',
       time: commit.committed_at,
       sequence: 0,
-      grade: commit.evidence === 'transcript' ? 'exact' : 'inferred',
+      grade: graded ? gradeKind(graded.grade) : 'unavailable',
       source: 'commit',
       label: commit.commit_sha.slice(0, 7),
       detail,

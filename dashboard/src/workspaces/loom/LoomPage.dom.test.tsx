@@ -279,7 +279,7 @@ const TEMPORAL = {
         branch: 'main',
         worktree: '/work/tracedecay',
         relation: 'produced',
-        evidence: 'transcript',
+        evidence: 'tool_result',
         confidence: 100,
         span_overlap_kind: 'within_span',
       },

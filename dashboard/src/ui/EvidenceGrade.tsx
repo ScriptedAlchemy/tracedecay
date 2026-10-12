@@ -96,6 +96,20 @@ const LABEL: Record<EvidenceGradeKind, string> = {
   unavailable: 'UNAVAILABLE',
 };
 
+const KIND: Record<EvidenceGrade, EvidenceGradeKind> = {
+  EXACT: 'exact',
+  EXPLICIT: 'explicit',
+  INFERRED: 'inferred',
+  AMBIGUOUS: 'ambiguous',
+  STALE: 'stale',
+  UNAVAILABLE: 'unavailable',
+};
+
+/** The tag ladder's grade on the field's ladder: one ladder in two cases. */
+export function gradeKind(grade: EvidenceGrade): EvidenceGradeKind {
+  return KIND[grade];
+}
+
 const INK: Record<EvidenceGradeKind, string> = {
   exact: 'text-text-secondary',
   explicit: 'text-text-secondary',
