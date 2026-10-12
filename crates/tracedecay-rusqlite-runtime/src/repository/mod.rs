@@ -20,10 +20,8 @@
 //! and writes the same receipt and desired-state SQL as
 //! `crates/tracedecay-global-db/src/configuration/store.rs`.
 //!
-//! Outbox enqueue, dispatch, and acknowledgement are writer-ledger bookkeeping
-//! with no domain write, so this executor accepts them. Applying an inbox
-//! effect and git-index operations need a domain this attachment does not own,
-//! so those arms reject them.
+//! Git-index operations need a domain this attachment does not own, so that
+//! arm rejects them.
 
 mod attachment;
 mod configuration;
@@ -81,10 +79,10 @@ pub use scope_set::{
 
 pub use tracedecay_store::{
     CodeReadOperationV1, CodeReadResultV1, DiagnosticReadOperationV1, DiagnosticReadResultV1,
-    EffectsReadOperationV1, EffectsReadResultV1, ExternalSourceReadOperationV1,
-    ExternalSourceReadResultV1, FactReadOperationV1, FactReadResultV1, ObservationReadOperationV1,
-    ObservationReadResultV1, ProfileReadOperationV1, ProfileReadResultV1, ProjectReadOperationV1,
-    ProjectReadResultV1, RepositoryReadOperationV1, RepositoryReadResultV1, StoredObservationRowV1,
+    ExternalSourceReadOperationV1, ExternalSourceReadResultV1, FactReadOperationV1,
+    FactReadResultV1, ObservationReadOperationV1, ObservationReadResultV1, ProfileReadOperationV1,
+    ProfileReadResultV1, ProjectReadOperationV1, ProjectReadResultV1, RepositoryReadOperationV1,
+    RepositoryReadResultV1, StoredObservationRowV1,
 };
 
 #[derive(Default)]
@@ -164,16 +162,13 @@ impl StorageOperationExecutor for ConcreteRepositoryWriteExecutor {
                 self.project
                     .execute_retrieval_anchor_derivative_write(savepoint, derivative)?;
             }
-            RepositoryWritePayloadV1::GitIndexTransaction(_)
-            | RepositoryWritePayloadV1::ApplyInbox(_) => {
+            RepositoryWritePayloadV1::GitIndexTransaction(_) => {
                 return Err(rusqlite::Error::InvalidParameterName(format!(
                     "repository attachment does not own {}",
                     payload.name()
                 ))
                 .into());
             }
-            RepositoryWritePayloadV1::EnqueueOutbox(_)
-            | RepositoryWritePayloadV1::AcknowledgeOutbox(_) => {}
         }
         Ok(())
     }
@@ -207,9 +202,6 @@ impl ConcreteRepositoryReadExecutor {
                 .map(RepositoryReadResultV1::ExternalSource),
             RepositoryReadOperationV1::Code(_) => Err(rusqlite::Error::InvalidParameterName(
                 "repository attachment does not own code reads".to_owned(),
-            )),
-            RepositoryReadOperationV1::Effects(_) => Err(rusqlite::Error::InvalidParameterName(
-                "repository attachment does not own effects reads".to_owned(),
             )),
         }
     }

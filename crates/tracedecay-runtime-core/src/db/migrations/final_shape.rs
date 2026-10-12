@@ -52,6 +52,7 @@ fn build_expected_final_shape() -> std::result::Result<SchemaInventory, String> 
         tracedecay_rusqlite_runtime::repository::EXTERNAL_SOURCE_SCHEMA_V1,
         tracedecay_rusqlite_runtime::repository::GRAPH_PUBLICATION_SCHEMA_V1,
         tracedecay_rusqlite_runtime::runtime_ledger::RUNTIME_LEDGER_SCHEMA,
+        super::RETIRED_RUNTIME_EFFECTS_SCHEMA_V39,
     ] {
         connection
             .execute_batch(schema)
