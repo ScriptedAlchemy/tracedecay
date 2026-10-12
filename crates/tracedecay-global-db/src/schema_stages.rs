@@ -23,7 +23,9 @@ use tracedecay_runtime_core::{
 };
 use tracedecay_rusqlite_runtime::handoff::HANDOFF_OPEN_SCHEMA_V1;
 use tracedecay_rusqlite_runtime::repository::AUTHORIZED_SCOPE_SET_SCHEMA_V1;
-use tracedecay_rusqlite_runtime::runtime_ledger::RUNTIME_LEDGER_SCHEMA;
+use tracedecay_rusqlite_runtime::runtime_ledger::{
+    RETIRE_RUNTIME_EFFECTS_V1, RUNTIME_LEDGER_SCHEMA,
+};
 use tracedecay_rusqlite_runtime::work::{
     RETIRE_WORK_EVENT_JOURNAL_V1, WORK_PRODUCT_SCHEMA_V1 as WORK_PRODUCT_GRAPH_JOURNAL_SCHEMA_V1,
     WORK_SCHEMA_V1,
@@ -1002,6 +1004,10 @@ async fn install_registered_schema_stage_sequence(
         .execute_batch(RUNTIME_LEDGER_SCHEMA)
         .await
         .map_err(|error| global_db_operation_error("initialize runtime writer ledger", error))?;
+    transaction
+        .execute_batch(RETIRE_RUNTIME_EFFECTS_V1)
+        .await
+        .map_err(|error| global_db_operation_error("retire runtime effects ledger", error))?;
     // Projection raw-twin triggers sit on `lcm_raw_messages`. The table has to
     // exist before those triggers are created, including on a fresh store
     // whose authority triggers are installed in this same transaction.
@@ -1688,6 +1694,37 @@ mod tests {
             !details.iter().any(|detail| detail.contains("TEMP B-TREE")),
             "project/provider session lookup regressed to an explicit sort: {details:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn existing_store_drops_the_retired_runtime_effects_tables() {
+        let directory = TempDir::new().unwrap();
+        let database_path = directory.path().join("sessions.db");
+        install_registered_schema(&database_path).await;
+        {
+            let connection = rusqlite::Connection::open(&database_path).unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE td_runtime_writer_outbox_v1 (effect_id TEXT PRIMARY KEY);
+                     CREATE TABLE td_runtime_writer_inbox_v1 (effect_id TEXT PRIMARY KEY);",
+                )
+                .expect("shape a store written before the effects ledger was retired");
+        }
+
+        install_registered_schema(&database_path).await;
+
+        let connection = rusqlite::Connection::open(&database_path).unwrap();
+        let remaining: Vec<String> = connection
+            .prepare(
+                "SELECT name FROM sqlite_schema
+                 WHERE name IN ('td_runtime_writer_outbox_v1', 'td_runtime_writer_inbox_v1')",
+            )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(remaining, Vec::<String>::new());
     }
 
     #[tokio::test]

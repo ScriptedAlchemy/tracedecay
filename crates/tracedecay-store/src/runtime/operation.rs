@@ -8,7 +8,7 @@ use crate::{
     ObservationCursorAdvance, RemoteObservationReplayWriteV1, RemoteWriterFenceInstallV1,
     RetrievalAnchorDerivativeV1, RetrievalAnchorDispositionRecordV1,
     SanitizedCleanDiagnosticSnapshotV1, SourceAcquisitionQueueCasV1, SourceCommitV1,
-    SourceProjectionCommitV1, TransactionalInboxReceiptV1, TransactionalOutboxEntryV1,
+    SourceProjectionCommitV1,
 };
 
 use super::identity::{canonical_id, validate_canonical_id};
@@ -41,7 +41,7 @@ pub const IDLE_BURST_READER_RETIRE_MS: u64 = 60_000;
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DurabilityClassV1 {
-    /// Canonical state, receipts, configuration, outbox, and migrations.
+    /// Canonical state, receipts, configuration, and migrations.
     Full,
     /// Fully rebuildable code projections only.
     RebuildableProjection,
@@ -790,9 +790,6 @@ pub enum RepositoryWritePayloadV1 {
     RetrievalAnchorDisposition(Box<RetrievalAnchorDispositionRecordV1>),
     RetrievalAnchorDerivative(Box<RetrievalAnchorDerivativeV1>),
     GitIndexTransaction(Box<GitIndexTransactionRecordV1>),
-    EnqueueOutbox(Box<TransactionalOutboxEntryV1>),
-    ApplyInbox(Box<TransactionalOutboxEntryV1>),
-    AcknowledgeOutbox(Box<TransactionalInboxReceiptV1>),
 }
 
 impl RepositoryWritePayloadV1 {
@@ -813,9 +810,6 @@ impl RepositoryWritePayloadV1 {
             Self::RetrievalAnchorDisposition(_) => "append retrieval anchor disposition",
             Self::RetrievalAnchorDerivative(_) => "publish retrieval anchor derivative",
             Self::GitIndexTransaction(_) => "record git index transaction",
-            Self::EnqueueOutbox(_) => "enqueue outbox effect",
-            Self::ApplyInbox(_) => "apply inbox effect",
-            Self::AcknowledgeOutbox(_) => "acknowledge outbox effect",
         }
     }
 
@@ -840,7 +834,6 @@ impl RepositoryWritePayloadV1 {
             | Self::ExternalSourceProjection(_)
             | Self::ExternalSourceAcquisition(_) => "external_source",
             Self::GitIndexTransaction(_) => "code",
-            Self::EnqueueOutbox(_) | Self::ApplyInbox(_) | Self::AcknowledgeOutbox(_) => "effects",
         }
     }
 
@@ -927,9 +920,6 @@ impl RepositoryWritePayloadV1 {
                     ..
                 }
             ),
-            Self::EnqueueOutbox(_) | Self::ApplyInbox(_) | Self::AcknowledgeOutbox(_) => {
-                scope.is_mutable()
-            }
         }
     }
 
@@ -948,9 +938,6 @@ impl RepositoryWritePayloadV1 {
                             payload: self.name(),
                         }
                     }),
-                    Self::EnqueueOutbox(entry) => entry.validate(),
-                    Self::ApplyInbox(entry) => entry.validate(),
-                    Self::AcknowledgeOutbox(inbox) => inbox.validate(),
                     Self::RetrievalAnchorDisposition(record) => record.validate().map_err(|_| {
                         StorageRuntimeContractErrorV1::InvalidRepositoryPayload {
                             payload: self.name(),

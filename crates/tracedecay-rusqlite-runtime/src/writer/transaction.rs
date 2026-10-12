@@ -380,7 +380,7 @@ fn apply_new<E: StorageOperationExecutor>(
                 };
             }
             let corrupt = is_corrupt(&error);
-            let error = rollback_or(savepoint, error, "rollback receipt/checkpoint/outbox");
+            let error = rollback_or(savepoint, error, "rollback receipt/checkpoint");
             return processed(item, Err(error.clone()), corrupt || is_corrupt(&error));
         }
     };

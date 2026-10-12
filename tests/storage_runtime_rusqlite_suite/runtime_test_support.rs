@@ -20,8 +20,8 @@ use tracedecay_store::{
     RuntimeCancellationIdentityV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeReadCoverageV1,
     RuntimeReadOutcomeV1, RuntimeReadRequestV1, RuntimeReadResultV1, RuntimeRequestControlV1,
     RuntimeRequestProbeV1, RuntimeSubmitRequestV1, RuntimeTransactionIdV1,
-    RuntimeTransactionScopeV1, ShardWatermarkV1, StorageRuntimeErrorV1, StoreOperationMetadataV1,
-    StoreRuntimeBindingV1, TransactionalOutboxEntryV1, VerifiedStoreLocatorV1,
+    RuntimeTransactionScopeV1, SanitizedCleanDiagnosticSnapshotV1, ShardWatermarkV1,
+    StorageRuntimeErrorV1, StoreOperationMetadataV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
 };
 
 pub(crate) struct ReaderRuntimeFixture {
@@ -37,9 +37,6 @@ pub(crate) struct ReaderBudgetFixture {
 
 pub(crate) struct WriterRuntimeFixture {
     pub(crate) origin_binding: StoreRuntimeBindingV1,
-    pub(crate) target_binding: StoreRuntimeBindingV1,
-    pub(crate) effect_id: &'static str,
-    pub(crate) ordering_key: &'static str,
     pub(crate) commit_sequences: [u64; 2],
 }
 
@@ -125,16 +122,6 @@ pub(crate) fn writer_runtime_fixture() -> WriterRuntimeFixture {
             5,
             13,
         ),
-        target_binding: project_scope_binding(
-            "brain.runtime-writer",
-            "profile.runtime-writer",
-            "project_sessions",
-            "project.runtime-writer-origin",
-            6,
-            17,
-        ),
-        effect_id: "effect.runtime.writer",
-        ordering_key: "project.runtime-writer.serialized",
         commit_sequences: [1, 2],
     }
 }
@@ -309,12 +296,9 @@ pub(crate) fn read_request(
     .expect("valid acceptance read request")
 }
 
-pub(crate) fn outbox_request(
+pub(crate) fn diagnostics_request(
     binding: &StoreRuntimeBindingV1,
-    target: &StoreRuntimeBindingV1,
     operation_id: &str,
-    effect_id: &str,
-    ordering_key: &str,
 ) -> RuntimeSubmitRequestV1 {
     let digest = format!("sha256:{}", "a".repeat(64));
     let metadata: StoreOperationMetadataV1 = serde_json::from_value(json!({
@@ -333,33 +317,6 @@ pub(crate) fn outbox_request(
         "admitted_at": 1
     }))
     .expect("valid acceptance operation metadata");
-    let source_shard = serde_json::to_value(&binding.shard_id).expect("encode source shard");
-    let target_shard = serde_json::to_value(&target.shard_id).expect("encode target shard");
-    let outbox: TransactionalOutboxEntryV1 = serde_json::from_value(json!({
-        "identity": {
-            "effect_id": effect_id,
-            "command_digest": format!("sha256:{}", "e".repeat(64)),
-            "ordering_key": ordering_key,
-            "source_watermark": {
-                "shard_id": source_shard,
-                "incarnation": binding.incarnation,
-                "authority_epoch": binding.authority_epoch,
-                "commit_sequence": 0
-            },
-            "target_watermark": {
-                "shard_id": target_shard,
-                "incarnation": target.incarnation,
-                "authority_epoch": target.authority_epoch,
-                "commit_sequence": 0
-            }
-        },
-        "effect": "publish_observation",
-        "state": "pending",
-        "acknowledgement": null,
-        "enqueued_at": 1,
-        "updated_at": 1
-    }))
-    .expect("valid acceptance outbox entry");
     let transaction_scope = RuntimeTransactionScopeV1 {
         transaction_id: RuntimeTransactionIdV1::new(format!("transaction.{operation_id}"))
             .expect("valid acceptance transaction id"),
@@ -379,7 +336,14 @@ pub(crate) fn outbox_request(
     RuntimeSubmitRequestV1::new(
         RepositoryOperationEnvelopeV1 {
             metadata,
-            payload: RepositoryWritePayloadV1::EnqueueOutbox(Box::new(outbox)),
+            payload: RepositoryWritePayloadV1::Diagnostics(Box::new(
+                SanitizedCleanDiagnosticSnapshotV1::new(
+                    tracedecay_domain::CodeGenerationId::new("generation.runtime.acceptance")
+                        .expect("valid acceptance generation id"),
+                    Vec::new(),
+                )
+                .expect("valid acceptance diagnostics snapshot"),
+            )),
         },
         transaction_scope,
         control,

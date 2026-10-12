@@ -3,26 +3,20 @@ use std::sync::Arc;
 use tracedecay_store::RuntimeSubmitOutcomeV1;
 
 use super::runtime_test_support::{
-    Probe, TestDatabase, outbox_request, run, writer, writer_runtime_fixture,
+    Probe, TestDatabase, diagnostics_request, run, writer, writer_runtime_fixture,
 };
 
 #[test]
 fn writer_serializes_concurrent_commits_into_ordered_receipts() {
     let fixture = writer_runtime_fixture();
     let database = TestDatabase::new("writer-serialized.sqlite3");
-    let first = outbox_request(
+    let first = diagnostics_request(
         &fixture.origin_binding,
-        &fixture.target_binding,
         "operation.runtime.serialized.first",
-        &format!("{}.first", fixture.effect_id),
-        &format!("{}.first", fixture.ordering_key),
     );
-    let second = outbox_request(
+    let second = diagnostics_request(
         &fixture.origin_binding,
-        &fixture.target_binding,
         "operation.runtime.serialized.second",
-        &format!("{}.second", fixture.effect_id),
-        &format!("{}.second", fixture.ordering_key),
     );
     let writer = Arc::new(writer(&database, &fixture.origin_binding));
 
