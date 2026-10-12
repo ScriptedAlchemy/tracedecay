@@ -704,16 +704,24 @@ impl SessionTemporalRefreshSchedulerRegistry {
             retired.remove(&new_owner);
         }
         let old_key = SessionTemporalRefreshOwner::Project(old_owner.clone());
+        // The map lock is acquired before `take_retired`: a drop while
+        // waiting on it then leaves the retired entries joinable instead
+        // of detaching workers no retirement will ever join again. After
+        // the lock is held there is no await before the retirement guard
+        // owns the entries.
+        let mut project = self.project.lock().await;
         // A dropped attempt leaves its entry in `retired`; a retry joins it
         // again instead of finding an empty map and skipping the wait.
         let mut entries = self.take_retired(&old_key);
-        let mapped = self.project.lock().await.remove(old_owner);
+        let mapped = project.remove(old_owner);
+        drop(project);
         let handoff = self.rekey_handoff(
             old_owner,
             mapped
                 .as_ref()
                 .or_else(|| entries.last().map(|(_, entry)| entry)),
         );
+        entries.extend(mapped.map(|entry| (old_key, entry)));
         // Every joined state drains into staging: a retry may find a worker
         // retired by another attempt whose queued requests were never
         // transferred.
@@ -721,7 +729,6 @@ impl SessionTemporalRefreshSchedulerRegistry {
             .iter()
             .map(|(_, entry)| Arc::clone(&entry.state))
             .collect();
-        entries.extend(mapped.map(|entry| (old_key, entry)));
         self.retire(entries).join().await;
         if let Some(handoff) = &handoff {
             for state in joined_states {
@@ -764,17 +771,16 @@ impl SessionTemporalRefreshSchedulerRegistry {
     pub async fn retire_project(&self, owner: &StoreOwnerKey) {
         let _lifecycle = self.project_lifecycle.lock().await;
         let retired_owner = SessionTemporalRefreshOwner::Project(owner.clone());
+        // The map lock is acquired before `take_retired` for the same
+        // reason as `rekey_project`: a drop while waiting on it must not
+        // detach already-taken entries from join authority.
+        let mut project = self.project.lock().await;
         // A dropped drain returns the entry to `retired`; joining the
         // mapped entry alone would return while that worker still holds
         // the owner's leases.
         let mut entries = self.take_retired(&retired_owner);
-        entries.extend(
-            self.project
-                .lock()
-                .await
-                .remove(owner)
-                .map(|entry| (retired_owner, entry)),
-        );
+        entries.extend(project.remove(owner).map(|entry| (retired_owner, entry)));
+        drop(project);
         // Retiring the owner abandons a rekey handoff it still owes: its
         // route reports no live target and the staged requests die with it.
         if let Some(handoff) = self
@@ -842,6 +848,13 @@ impl SessionTemporalRefreshSchedulerRegistry {
         let retirement = self.retire(entries);
         drop((project, profile));
         retirement.join().await;
+    }
+
+    /// Holds the project map so a test can drop a caller waiting on it
+    /// and prove no retired entry was detached from join authority.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn hold_project_map_for_test(&self) -> impl Send {
+        self.project.lock().await
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
