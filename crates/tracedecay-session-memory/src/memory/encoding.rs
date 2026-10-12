@@ -1,7 +1,8 @@
-//! Deterministic FHRR encodings for memory facts, entities, and queries.
+//! Deterministic MAP-C encodings for memory facts, entities, and queries.
 //!
-//! Vectors hold only the real FHRR coefficients; every imaginary part is zero,
-//! so binding is the componentwise product and similarity is the cosine.
+//! MAP-C is the real-valued multiply-add vector algebra: atoms are uniform
+//! coefficients in [-1, 1], binding is the componentwise product, bundling is
+//! the normalized average, and similarity is the cosine.
 
 use std::sync::LazyLock;
 
@@ -36,6 +37,9 @@ pub struct HolographicQueryVector {
 
 impl HolographicEncoder {
     pub const DIMENSIONS: usize = 2048;
+    /// The algebra label memory status reports. Responses from releases before
+    /// this label carry `amari_fhrr` for the same bit-identical encoding.
+    pub const ALGEBRA: &'static str = "map_c";
     pub const ROLE_CONTENT: &'static str = "__hrr_role_content__";
     pub const ROLE_ENTITY: &'static str = "__hrr_role_entity__";
 
@@ -211,7 +215,7 @@ fn normalize_coefficients(mut coefficients: Vec<f64>) -> Vec<f64> {
 /// Vectors below this norm compare as orthogonal to everything.
 const SIMILARITY_NORM_FLOOR: f64 = 1e-10;
 
-/// FHRR binding of real phasors: the componentwise product.
+/// MAP-C binding: the componentwise product.
 fn bind(role: &[f64], value: &[f64]) -> Vec<f64> {
     role.iter()
         .zip(value)

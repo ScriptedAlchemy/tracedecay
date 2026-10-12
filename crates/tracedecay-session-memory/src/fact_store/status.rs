@@ -27,7 +27,9 @@ struct StatusCounts {
     rated_fact_count: u64,
 }
 
-/// The FHRR superposition capacity estimate D / ln(D), not a fact-store limit.
+/// D / ln(D): roughly how many bound items one bundled vector can superpose
+/// before cosine similarity degrades. Each fact is encoded into its own vector,
+/// so this bounds neither how many facts the store holds nor what recall finds.
 fn estimated_holographic_capacity() -> u64 {
     let dimensions = HolographicEncoder::DIMENSIONS as f64;
     (dimensions / dimensions.ln()) as u64
@@ -161,7 +163,7 @@ pub(super) async fn project_memory_status_tx(
         counts.fact_count,
         entity_count,
         ProjectMemoryMemoryAlgebraV1::new(
-            "amari_fhrr".to_owned(),
+            HolographicEncoder::ALGEBRA.to_owned(),
             HolographicEncoder::DIMENSIONS as u64,
             estimated_holographic_capacity(),
         )?,
