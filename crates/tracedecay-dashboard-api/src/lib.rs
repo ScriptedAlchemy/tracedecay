@@ -6,8 +6,8 @@
 //!   topology, and deterministic FHRR projections derived on read
 //! - `/api/plugins/hermes-lcm/*`   → LCM session store
 //!   (`lcm_raw_messages` / `session_summary_nodes` in the resolved active project
-//!   store where transcript ingest writes; see [`resolve_lcm_store`] for the
-//!   fail-closed authority selection)
+//!   store where transcript ingest writes; the daemon-registered session store
+//!   is the only authority, and its absence fails closed)
 //!
 //! `/api/capabilities` advertises which current TraceDecay authorities are
 //! mounted for the selected project.
@@ -753,19 +753,6 @@ impl DashboardState {
         }
     }
 
-    fn retain_admitted_authorities(
-        &mut self,
-        code_diagnostics_authority: Option<
-            crate::application::dashboard_diagnostics::DashboardDiagnosticsAuthorityV1,
-        >,
-        doctor_report_reader: Option<DoctorReportReader>,
-        remote_operational_status_reader: Option<RemoteOperationalStatusReader>,
-    ) {
-        self.code_diagnostics_authority = code_diagnostics_authority;
-        self.doctor_report_reader = doctor_report_reader;
-        self.remote_operational_status_reader = remote_operational_status_reader;
-    }
-
     fn mount_session_authorities(&mut self, authorities: DashboardSessionAuthoritiesV1) {
         self.lcm_db_path = authorities.project_sessions.db_path().display().to_string();
         self.lcm_db = Some(authorities.project_sessions);
@@ -777,20 +764,15 @@ impl DashboardState {
     }
 }
 
-/// The retained session store for legacy dashboard routes.
-pub struct LcmStoreSelection {
-    pub lcm_db: Option<RegisteredGlobalDbLeaseV1>,
-    pub path: String,
-    pub scope: String,
+/// The retained session store for the dashboard's session-backed routes.
+struct LcmStoreSelection {
+    lcm_db: Option<RegisteredGlobalDbLeaseV1>,
+    path: String,
+    scope: String,
 }
 
-pub async fn resolve_lcm_store(
-    cg: &DashboardProjectContext,
-    registered_project_session_db: Option<RegisteredGlobalDbLeaseV1>,
-) -> LcmStoreSelection {
-    resolve_lcm_store_for_layout(&cg.store_layout, registered_project_session_db)
-}
-
+/// Selects the registered project session store, failing closed to an
+/// unavailable selection when the daemon retained none.
 fn resolve_lcm_store_for_layout(
     layout: &StoreLayout,
     registered_project_session_db: Option<RegisteredGlobalDbLeaseV1>,
@@ -813,13 +795,6 @@ pub fn storage_mode_label(mode: &StorageMode) -> &'static str {
     match mode {
         StorageMode::ProfileSharded => "profile_sharded",
     }
-}
-
-pub fn resolve_project_memory_store(cg: &DashboardProjectContext) -> (String, Arc<Database>) {
-    (
-        cg.dashboard_db_path.display().to_string(),
-        Arc::clone(&cg.dashboard_database),
-    )
 }
 
 /// Resolves the immutable fact owner from the validated project layout.
@@ -871,7 +846,8 @@ async fn build_state_inner(
         application_invocation_executor,
         delivery_settlement_authority,
     } = composition;
-    let (mem_db_path, mem_db) = resolve_project_memory_store(cg);
+    let mem_db_path = cg.dashboard_db_path.display().to_string();
+    let mem_db = Arc::clone(&cg.dashboard_database);
     let memory_owner = project_memory_owner(cg)?;
     let (session_authorities, session_authority, session_mount) = match project_sessions {
         DashboardSessionMountV1::Ready(authorities) => (
@@ -897,11 +873,10 @@ async fn build_state_inner(
                     authorities.git_correlation_read_authority.clone(),
                 )
             });
-    let lcm = resolve_lcm_store(
-        cg,
+    let lcm = resolve_lcm_store_for_layout(
+        &cg.store_layout,
         session_authorities.map(|authorities| authorities.project_sessions),
-    )
-    .await;
+    );
     let dashboard_root = cg.store_layout.dashboard_root.clone();
     let store_root = cg.store_layout.data_root.clone();
     let storage_mode = storage_mode_label(&cg.store_layout.storage_mode).to_string();
@@ -931,7 +906,7 @@ async fn build_state_inner(
     events_delivery::DashboardDeliverySettlementRegistryV1::mount_deadline_reaper(
         &delivery_settlements,
     );
-    let mut state = DashboardState {
+    let state = DashboardState {
         build_version,
         host_io: cg.host_io,
         project_id: cg.store_layout.identity.project_id.clone(),
@@ -974,22 +949,17 @@ async fn build_state_inner(
         profile_code_index_worker_settings,
         token_counts: Arc::new(token_count::TokenCountCache::new()),
         derived_snapshots: Arc::new(snapshot_cache::DerivedSnapshotCaches::new()),
-        code_diagnostics_authority: None,
+        code_diagnostics_authority,
         automation_authority,
         automation_observation,
         automation_scheduler_reconciler,
         automation_writer,
-        doctor_report_reader: None,
-        remote_operational_status_reader: None,
+        doctor_report_reader,
+        remote_operational_status_reader,
         application_invocation_executor,
         delivery_settlements,
         event_source_poll: events_api::SharedSourcePoll::default(),
     };
-    state.retain_admitted_authorities(
-        code_diagnostics_authority,
-        doctor_report_reader,
-        remote_operational_status_reader,
-    );
     // Pre-count non-usage messages in the background so the first Savings
     // tab paint doesn't pay the initial BPE pass over the session store.
     if warm_token_counts {
@@ -1097,57 +1067,7 @@ pub async fn run_until_shutdown_for_tests_with_host_admission<F>(
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    let project_graph_resolver = project_graphs.resolver();
-    run_until_shutdown_inner(
-        cg.as_ref(),
-        DashboardRunRequest {
-            host: endpoint.host,
-            port: endpoint.port,
-            access: endpoint.access,
-            build_version,
-            spa_routes,
-            test_authority: Some(&authority),
-            test_project_graph_resolver: Some(project_graph_resolver),
-            test_project_graph: Some(Arc::clone(&cg)),
-        },
-        shutdown,
-    )
-    .await
-}
-
-#[cfg(feature = "test-transport")]
-struct DashboardRunRequest<'a> {
-    host: &'a str,
-    port: u16,
-    access: DashboardAccessToken,
-    /// The owning composition's build version; served surfaces must report the
-    /// caller's product runtime, never a crate-local substitute.
-    build_version: &'static str,
-    spa_routes: Router,
-    test_authority: Option<&'a DashboardHostAdmissionTestAuthorityV1>,
-    test_project_graph_resolver: Option<crate::project_graph::RetainedProjectGraphResolver>,
-    test_project_graph: Option<Arc<DashboardProjectContext>>,
-}
-
-#[cfg(feature = "test-transport")]
-async fn run_until_shutdown_inner<F>(
-    cg: &DashboardProjectContext,
-    request: DashboardRunRequest<'_>,
-    shutdown: F,
-) -> Result<()>
-where
-    F: std::future::Future<Output = ()> + Send + 'static,
-{
-    let DashboardRunRequest {
-        host,
-        port,
-        access,
-        build_version,
-        spa_routes,
-        test_authority,
-        test_project_graph_resolver,
-        test_project_graph,
-    } = request;
+    let DashboardTestEndpointV1 { host, port, access } = endpoint;
     // A directly served dashboard is not handed a daemon-owned analyzer broker,
     // so it opens the same one the MCP server mounts. Without it the code
     // diagnostics surface would answer unsupported purely because of which
@@ -1160,56 +1080,46 @@ where
         )
         .await;
     let state = build_state_inner(
-        cg,
-        test_project_graph,
+        cg.as_ref(),
+        Some(Arc::clone(&cg)),
         // The test harness is the only remaining direct-serve entry; the
         // production dashboard is served by the daemon MCP tool, which warms
         // token counts through its own composition.
         false,
         DashboardStateCompositionV1 {
             build_version,
-            project_graph_resolver: test_project_graph_resolver,
-            code_graph_read_admission: test_authority
-                .and_then(|authority| authority.code_graph_read_admission.clone()),
-            code_graph_projection_read_port: test_authority
-                .and_then(|authority| authority.code_graph_projection_read_port.clone()),
-            code_read_authority: test_authority
-                .and_then(|authority| authority.code_read_authority.clone()),
-            project_sessions: match test_authority {
-                Some(authority) => match &authority.opening_project_sessions {
-                    Some(publication) => DashboardSessionMountV1::Opening(publication.clone()),
-                    None => DashboardSessionMountV1::Ready(authority.project_session_authorities()),
-                },
-                None => DashboardSessionMountV1::Unavailable,
+            project_graph_resolver: Some(project_graphs.resolver()),
+            code_graph_read_admission: authority.code_graph_read_admission.clone(),
+            code_graph_projection_read_port: authority.code_graph_projection_read_port.clone(),
+            code_read_authority: authority.code_read_authority.clone(),
+            project_sessions: match &authority.opening_project_sessions {
+                Some(publication) => DashboardSessionMountV1::Opening(publication.clone()),
+                None => DashboardSessionMountV1::Ready(authority.project_session_authorities()),
             },
-            profile_code_index_worker_settings: test_authority
-                .and_then(|authority| authority.profile_code_index_worker_settings.clone()),
-            delivery_read_authority: test_authority
-                .and_then(|authority| authority.delivery_read_authority.clone()),
-            registered_savings_db: test_authority
-                .map(|authority| authority.profile_database.clone()),
-            automation_authority: test_authority
-                .and_then(|authority| authority.automation_authority.clone()),
+            profile_code_index_worker_settings: authority
+                .profile_code_index_worker_settings
+                .clone(),
+            delivery_read_authority: authority.delivery_read_authority.clone(),
+            registered_savings_db: Some(authority.profile_database.clone()),
+            automation_authority: authority.automation_authority.clone(),
             automation_observation: None,
             automation_scheduler_reconciler: None,
-            automation_writer: test_authority
-                .and_then(|authority| authority.automation_writer.clone())
+            automation_writer: authority
+                .automation_writer
+                .clone()
                 .unwrap_or_else(standalone_dashboard_automation_writer),
             doctor_report_reader: None,
             remote_operational_status_reader: None,
-            code_index_freshness_reader: test_authority
-                .and_then(|authority| authority.code_index_freshness_reader.clone()),
+            code_index_freshness_reader: authority.code_index_freshness_reader.clone(),
             feedback_status_reader: None,
-            pr_autotrack_reader: test_authority
-                .and_then(|authority| authority.pr_autotrack_reader.clone()),
+            pr_autotrack_reader: authority.pr_autotrack_reader.clone(),
             code_diagnostics_broker: Some(code_diagnostics_broker),
-            application_invocation_executor: test_authority
-                .and_then(|authority| authority.application_invocation_executor.clone()),
+            application_invocation_executor: authority.application_invocation_executor.clone(),
             delivery_settlement_authority: None,
         },
     )
     .await?;
-    let app = router(cg, state, spa_routes).await?;
+    let app = router(cg.as_ref(), state, spa_routes).await?;
     let (listener, addr) = bind_dashboard(host, port).await?;
     let url = access.launch_url(addr);
     let app = with_dashboard_http_admission(app, addr, access);
@@ -1964,15 +1874,12 @@ async fn project_scoped_api_gateway(
     mut req: Request<Body>,
 ) -> Response {
     if is_profile_owned_automation_skills_route(&tail) {
-        return (
+        return gateway_problem(
             StatusCode::NOT_FOUND,
-            Json(json!({
-                "status": "not_project_scoped",
-                "detail": "managed automation skills are profile-owned and are not available through project-qualified routes",
-                "project_id": project_id,
-            })),
-        )
-            .into_response();
+            "not_project_scoped",
+            "managed automation skills are profile-owned and are not available through project-qualified routes",
+            Some(&project_id),
+        );
     }
     if is_graph_search_tail(&tail)
         && let Some(refusal) = graph_binding::refuse_graph_search_scope(
@@ -1992,15 +1899,12 @@ async fn project_scoped_api_gateway(
         && application_read.is_none()
         && !event_delivery_ack
     {
-        return (
+        return gateway_problem(
             StatusCode::METHOD_NOT_ALLOWED,
-            Json(json!({
-                "status": "read_only_project",
-                "detail": "project-scoped dashboard APIs are read-only for non-active projects",
-                "project_id": project_id,
-            })),
-        )
-            .into_response();
+            "read_only_project",
+            "project-scoped dashboard APIs are read-only for non-active projects",
+            Some(&project_id),
+        );
     }
 
     let selected = match runtime.selected_project_state(&project_id).await {
@@ -2022,15 +1926,12 @@ async fn project_scoped_api_gateway(
             .into_response();
         }
         Err(projects::SelectedProjectError::Failed(err)) => {
-            return (
+            return gateway_problem(
                 StatusCode::NOT_FOUND,
-                Json(json!({
-                    "status": "not_found",
-                    "detail": err.to_string(),
-                    "project_id": project_id,
-                })),
-            )
-                .into_response();
+                "not_found",
+                err.to_string(),
+                Some(&project_id),
+            );
         }
     };
 
@@ -2041,15 +1942,12 @@ async fn project_scoped_api_gateway(
         .unwrap_or_default();
     if let Some(read) = application_read {
         let Some(project_graph) = selected.state.project_graph.as_deref() else {
-            return (
+            return gateway_problem(
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({
-                    "status": "unavailable",
-                    "detail": format!("selected project {read} authority is unavailable"),
-                    "project_id": project_id,
-                })),
-            )
-                .into_response();
+                "unavailable",
+                format!("selected project {read} authority is unavailable"),
+                Some(&project_id),
+            );
         };
         let application_runtime =
             if runtime.active_project_id().as_deref() == Some(project_id.as_str()) {
@@ -2064,17 +1962,12 @@ async fn project_scoped_api_gateway(
                 ) {
                     Ok(application_runtime) => application_runtime,
                     Err(err) => {
-                        return (
+                        return gateway_problem(
                             StatusCode::SERVICE_UNAVAILABLE,
-                            Json(json!({
-                                "status": "unavailable",
-                                "detail": format!(
-                                    "selected project {read} authority is unavailable: {err}"
-                                ),
-                                "project_id": project_id,
-                            })),
-                        )
-                            .into_response();
+                            "unavailable",
+                            format!("selected project {read} authority is unavailable: {err}"),
+                            Some(&project_id),
+                        );
                     }
                 }
             };
@@ -2084,17 +1977,12 @@ async fn project_scoped_api_gateway(
         ) {
             Ok(application) => application,
             Err(err) => {
-                return (
+                return gateway_problem(
                     StatusCode::SERVICE_UNAVAILABLE,
-                    Json(json!({
-                        "status": "unavailable",
-                        "detail": format!(
-                            "selected project {read} authority is unavailable: {err}"
-                        ),
-                        "project_id": project_id,
-                    })),
-                )
-                    .into_response();
+                    "unavailable",
+                    format!("selected project {read} authority is unavailable: {err}"),
+                    Some(&project_id),
+                );
             }
         };
         let (router, family) = match read {
@@ -2107,14 +1995,12 @@ async fn project_scoped_api_gateway(
             SelectedProjectApplicationRead::Workflow => (application.http_router, "application/"),
         };
         let Some(operation) = tail.strip_prefix(family) else {
-            return (
+            return gateway_problem(
                 StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "status": "bad_request",
-                    "detail": format!("invalid project-scoped {read} path"),
-                })),
-            )
-                .into_response();
+                "bad_request",
+                format!("invalid project-scoped {read} path"),
+                None,
+            );
         };
         let rewritten = format!("/{operation}{query}");
         return match rewritten.parse::<Uri>() {
@@ -2122,24 +2008,20 @@ async fn project_scoped_api_gateway(
                 *req.uri_mut() = uri;
                 match router.oneshot(req).await {
                     Ok(response) => response,
-                    Err(err) => (
+                    Err(err) => gateway_problem(
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({
-                            "status": "error",
-                            "detail": format!("dashboard {read} route failed: {err}"),
-                        })),
-                    )
-                        .into_response(),
+                        "error",
+                        format!("dashboard {read} route failed: {err}"),
+                        None,
+                    ),
                 }
             }
-            Err(err) => (
+            Err(err) => gateway_problem(
                 StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "status": "bad_request",
-                    "detail": format!("invalid project-scoped {read} path: {err}"),
-                })),
-            )
-                .into_response(),
+                "bad_request",
+                format!("invalid project-scoped {read} path: {err}"),
+                None,
+            ),
         };
     }
     let rewritten = format!("/api/{tail}{query}");
@@ -2148,15 +2030,28 @@ async fn project_scoped_api_gateway(
             *req.uri_mut() = uri;
             forward_project_request(runtime.project_api_router(), selected.state, req).await
         }
-        Err(err) => (
+        Err(err) => gateway_problem(
             StatusCode::BAD_REQUEST,
-            Json(json!({
-                "status": "bad_request",
-                "detail": format!("invalid project-scoped dashboard path: {err}"),
-            })),
-        )
-            .into_response(),
+            "bad_request",
+            format!("invalid project-scoped dashboard path: {err}"),
+            None,
+        ),
     }
+}
+
+/// One gateway refusal body; `project_id` is echoed when the refusal is about
+/// that selected project.
+fn gateway_problem(
+    status: StatusCode,
+    label: &str,
+    detail: impl Into<String>,
+    project_id: Option<&str>,
+) -> Response {
+    let mut body = json!({ "status": label, "detail": detail.into() });
+    if let Some(project_id) = project_id {
+        body["project_id"] = json!(project_id);
+    }
+    (status, Json(body)).into_response()
 }
 
 fn is_profile_owned_automation_skills_route(tail: &str) -> bool {
@@ -2620,7 +2515,7 @@ mod authority_tests {
 
     /// The router as production serves it.
     ///
-    /// [`run_until_shutdown_inner`] wraps every served route in
+    /// [`run_until_shutdown_for_tests_with_host_admission`] wraps every served route in
     /// [`with_dashboard_http_admission`], which is what supplies the
     /// [`DashboardHttpRequestControlV1`] extension every canonical read
     /// requires. A bare [`router_with_active_application`] is not a stack that

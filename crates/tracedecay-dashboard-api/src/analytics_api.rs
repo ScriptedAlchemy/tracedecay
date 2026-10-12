@@ -1117,6 +1117,10 @@ pub fn hint_summary_from_events(events: &[AnalyticsEventRecord]) -> AnalyticsHin
         }
     }
 
+    hints_payload(by_category)
+}
+
+fn hints_payload(by_category: BTreeMap<String, HintCounts>) -> AnalyticsHintsPayloadV1 {
     AnalyticsHintsPayloadV1 {
         available: true,
         source: "analytics_events".to_owned(),
@@ -1154,21 +1158,7 @@ pub fn hint_summary_from_counts(counts: &[AnalyticsHintCounts]) -> AnalyticsHint
             },
         );
     }
-    AnalyticsHintsPayloadV1 {
-        available: true,
-        source: "analytics_events".to_owned(),
-        error: None,
-        by_category: by_category
-            .into_iter()
-            .map(|(category, counts)| AnalyticsHintCategoryV1 {
-                category,
-                emitted: counts.emitted,
-                followed: counts.followed,
-                ignored: counts.ignored,
-                suppressed: counts.suppressed,
-            })
-            .collect(),
-    }
+    hints_payload(by_category)
 }
 
 async fn hint_summary(
