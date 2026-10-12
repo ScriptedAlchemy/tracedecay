@@ -29,6 +29,10 @@ use super::{
 struct PreviewSource {
     text: String,
     line_starts: Vec<usize>,
+    /// Line starts in the byte space the index captured when commit-time
+    /// normalization folded every `\r\n` into `\n`; empty when the text has
+    /// no `\r` to fold.
+    folded_starts: Vec<usize>,
 }
 
 struct PreviewWalkControl {
@@ -72,7 +76,27 @@ impl PreviewSource {
             control.check()?;
             line_starts.push(offset + 1);
         }
-        Ok(Self { text, line_starts })
+        let mut folded_starts = Vec::new();
+        if text.as_bytes().contains(&b'\r') {
+            folded_starts.reserve(line_starts.len());
+            let mut folded = 0usize;
+            for (index, &start) in line_starts.iter().enumerate() {
+                folded_starts.push(folded);
+                let terminated = index + 1 < line_starts.len();
+                let end = if terminated {
+                    line_starts[index + 1] - 1
+                } else {
+                    text.len()
+                };
+                folded += (end - start) + usize::from(terminated)
+                    - usize::from(terminated && text.as_bytes().get(end - 1) == Some(&b'\r'));
+            }
+        }
+        Ok(Self {
+            text,
+            line_starts,
+            folded_starts,
+        })
     }
 
     fn line(&self, index: usize) -> Option<&str> {
@@ -92,7 +116,19 @@ impl PreviewSource {
         })
     }
 
+    #[cfg(test)]
     fn line_for_byte_offset(&self, byte_offset: u64) -> Result<u32> {
+        self.line_for_evidence_offset(byte_offset, "")
+    }
+
+    /// Maps a graph evidence byte offset to a line in the current text. The
+    /// index records offsets in the byte space of the captured source, which
+    /// loses one byte per `\r\n` that commit-time normalization folded into
+    /// `\n`. Both candidate spaces are tried and the one where the offset
+    /// lands on the renamed token wins; an offset that lands on no token keeps
+    /// the worktree space so drifted-but-readable evidence still reports a
+    /// line.
+    fn line_for_evidence_offset(&self, byte_offset: u64, symbol: &str) -> Result<u32> {
         let offset = usize::try_from(byte_offset).map_err(|_| {
             graph_symbol_corrupt("graph evidence byte offset exceeds this platform".to_owned())
         })?;
@@ -102,9 +138,35 @@ impl PreviewSource {
                 self.text.len()
             )));
         }
+        if self.text.as_bytes()[offset..].starts_with(symbol.as_bytes()) {
+            return self.line_at(offset);
+        }
+        if let Some(line) = self.folded_line(offset, symbol) {
+            return Ok(line);
+        }
+        self.line_at(offset)
+    }
+
+    fn line_at(&self, offset: usize) -> Result<u32> {
         let line = self.line_starts.partition_point(|start| *start <= offset) - 1;
         u32::try_from(line)
             .map_err(|_| graph_symbol_corrupt("graph evidence line exceeds u32".to_owned()))
+    }
+
+    /// The line `offset` lands on in the folded (`\r\n` -> `\n`) capture space,
+    /// kept only when the renamed token sits at the mapped position.
+    fn folded_line(&self, offset: usize, symbol: &str) -> Option<u32> {
+        if self.folded_starts.is_empty() {
+            return None;
+        }
+        let index = self.folded_starts.partition_point(|start| *start <= offset) - 1;
+        // Folding only removed line terminators, so the folded column is the
+        // raw column inside the same line.
+        let position = self.line_starts[index] + (offset - self.folded_starts[index]);
+        if self.text.as_bytes()[position..].starts_with(symbol.as_bytes()) {
+            return u32::try_from(index).ok();
+        }
+        None
     }
 }
 
@@ -215,7 +277,8 @@ impl PreviewFileWalk {
             }
             while let Some(input) = reference_inputs.next_if(|input| input.file == file) {
                 self.control.check()?;
-                let line = source.line_for_byte_offset(input.evidence_start_byte)?;
+                let line = source
+                    .line_for_evidence_offset(input.evidence_start_byte, &self.result.symbol)?;
                 let snippet = reference_line_snippet(&source, Some(line), &self.result.symbol);
                 references.push((
                     input.ordinal,
@@ -443,5 +506,39 @@ mod tests {
                 assert!(source.line_for_byte_offset(offset).is_err());
             }
         }
+    }
+
+    #[test]
+    fn evidence_offsets_resolve_against_the_folded_capture_space() {
+        let control = PreviewWalkControl {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            cancellation: None,
+            deadline: None,
+            budget: crate::tools::dispatch_ceiling::TOOL_DISPATCH_CEILING,
+        };
+        // The index captures the committed bytes; commit-time CRLF folding
+        // removes one byte per line while the worktree keeps `\r\n`.
+        let text = "// \u{e9}\u{1f600} pad\r\n".repeat(3) + "call reserve_stock()\r\ntail\r\n";
+        let source = PreviewSource::new(text.clone(), &control).unwrap();
+        let folded_offset = text.replace("\r\n", "\n").find("reserve_stock").unwrap() as u64;
+        let raw_offset = text.find("reserve_stock").unwrap() as u64;
+        assert_ne!(folded_offset, raw_offset);
+        assert_eq!(
+            source
+                .line_for_evidence_offset(folded_offset, "reserve_stock")
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            source
+                .line_for_evidence_offset(raw_offset, "reserve_stock")
+                .unwrap(),
+            3
+        );
+        // An offset that lands on no token in either space keeps the raw line.
+        assert_eq!(
+            source.line_for_evidence_offset(2, "reserve_stock").unwrap(),
+            0
+        );
     }
 }
