@@ -196,7 +196,7 @@ authorized, sanitized, classified records under their remote policy.
 Network-capable effects are separate from core retrieval:
 
 - Worldwide counter: when opted in, sends the pending aggregate token-savings
-  amount and may fetch the public total/country display data.
+  amount, and `tracedecay doctor` reads the public total to check reachability.
 - GitHub release checks and updates: contact GitHub release endpoints. An
   explicitly configured private GitHub review source can use a read-only
   credential from the operating-system keyring; missing, ambiguous,

@@ -3140,6 +3140,18 @@ fn status_plain_renders_from_tracedecay_status_only() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
+        stdout.contains("TraceDecay v"),
+        "plain status must render the version row, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("code index freshness unavailable"),
+        "plain status must name the absent freshness reading, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Branch: master"),
+        "plain status must render the serving branch, got:\n{stdout}"
+    );
+    assert!(
         stdout.contains("graph census unavailable: authority_unavailable"),
         "plain status must render the daemon census, got:\n{stdout}"
     );

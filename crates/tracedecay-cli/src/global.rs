@@ -99,11 +99,9 @@ pub(crate) fn try_flush(
     }
 
     config.last_flush_attempt_at = now;
-    if let Some(worldwide_total) = crate::cloud::flush_pending(config.pending_upload) {
+    if crate::cloud::flush_pending(config.pending_upload).is_some() {
         config.pending_upload = 0;
         config.last_upload_at = now;
-        config.last_worldwide_total = worldwide_total;
-        config.last_worldwide_fetch_at = now;
     }
 }
 
