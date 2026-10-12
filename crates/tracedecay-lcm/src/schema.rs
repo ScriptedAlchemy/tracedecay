@@ -76,6 +76,9 @@ pub const RAW_MESSAGE_UNPUBLISHED_SQL: &str = "NOT EXISTS (
 
 const MIGRATION_NAME: &str = "lcm";
 
+const RETIRE_LEGACY_GREP_INDEX_SQL: &str =
+    "DROP INDEX IF EXISTS idx_lcm_raw_direct_user_candidate;";
+
 /// Indexes that keep expensive LCM reads off the message-body table pages.
 ///
 /// `lcm_status` aggregates whole-store counts on every probe. Without these
@@ -92,22 +95,16 @@ const MIGRATION_NAME: &str = "lcm";
 /// Each partial-index predicate must stay byte-identical to the query term
 /// that relies on it: SQLite substitutes a partial index only when its query
 /// terms structurally imply the index's WHERE clause. The status predicates
-/// live in [`super::query`]; the raw direct-user candidate predicate lives in
-/// [`super::query::grep`].
+/// live in [`super::query`].
 pub const LCM_STATUS_PERFORMANCE_INDEX_SQL: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_lcm_raw_lossy_ingest
          ON lcm_raw_messages(provider, session_id)
          WHERE metadata_json IS NOT NULL
            AND json_valid(metadata_json)
            AND json_type(metadata_json, '$.ingest_protection.lossy') = 'true';",
-    // Raw LIKE retrieval must retain infix and lossless-content semantics, so
-    // FTS cannot be its candidate authority. Direct-user retrieval instead
-    // admits the complete `role = 'user'` superset through this narrow index,
-    // then applies the metadata-sensitive tool-result exclusion exactly over
-    // that bounded set.
-    "CREATE INDEX IF NOT EXISTS idx_lcm_raw_direct_user_candidate
-         ON lcm_raw_messages(provider, store_id)
-         WHERE role = 'user';",
+    // Only the retired SQL LCM grep engine read this index; dropping it keeps
+    // user-message writes from maintaining it.
+    RETIRE_LEGACY_GREP_INDEX_SQL,
     // The byte-count variant covers the status COUNT+SUM without touching
     // payload metadata rows and fully supersedes the plain owner index
     // (same leading columns), so the replacement and the drop commit as one
@@ -118,10 +115,7 @@ pub const LCM_STATUS_PERFORMANCE_INDEX_SQL: &[&str] = &[
 ];
 
 /// The single message FTS index. Session message search ranks over every
-/// column (`bm25` weights 10/2/1/1/1), while LCM grep keeps hermes-lcm
-/// `build_message_fts_spec` (store.py:173-204) semantics by qualifying its
-/// MATCH with [`RAW_FTS_CONTENT_COLUMN_FILTER`]: an unqualified LCM MATCH would
-/// over-match rows through role, kind, model, or tool names.
+/// column (`bm25` weights 10/2/1/1/1).
 const RAW_FTS_DDL: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS lcm_raw_messages_fts USING fts5(
         index_text, role, kind, model, tool_names,
         content='lcm_raw_messages',
@@ -227,10 +221,6 @@ async fn ensure_payload_gc_candidates(conn: &(impl Executor + ?Sized)) -> Result
     }
     Ok(())
 }
-
-/// FTS5 column filter that restricts a MATCH to the message body, e.g.
-/// `format!("{RAW_FTS_CONTENT_COLUMN_FILTER}({query})")`.
-pub const RAW_FTS_CONTENT_COLUMN_FILTER: &str = "index_text : ";
 
 /// Returns whether the raw-message FTS table and all three synchronization
 /// triggers use the current five-column contracts.
@@ -394,6 +384,7 @@ pub async fn ensure_lcm_schema_in_transaction(
 ) -> Result<(), LcmError> {
     match require_admissible_lcm_schema(conn).await? {
         LcmSchemaAdmission::Current => {
+            conn.execute_batch(RETIRE_LEGACY_GREP_INDEX_SQL).await?;
             conn.execute_batch(CANONICAL_BODIES_TABLE_SQL).await?;
             ensure_raw_identity_schema(conn).await?;
             ensure_payload_gc_candidates(conn).await?;
@@ -1053,7 +1044,7 @@ mod tests {
     /// superseded plain payload owner index is gone, its replacement covers
     /// the same leading columns.
     #[tokio::test]
-    async fn fresh_schema_installs_status_performance_indexes() -> Result<(), String> {
+    async fn schema_installs_current_indexes_and_retires_legacy_grep_index() -> Result<(), String> {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let conn = TestConnection::open(&temp.path().join("sessions.db"));
         conn.execute_batch(
@@ -1073,7 +1064,6 @@ mod tests {
 
         for index in [
             "idx_lcm_raw_lossy_ingest",
-            "idx_lcm_raw_direct_user_candidate",
             "idx_lcm_external_payloads_owner_bytes",
         ] {
             assert!(
@@ -1090,6 +1080,12 @@ mod tests {
             "the superseded plain payload owner index must not be reinstalled"
         );
         assert!(
+            !schema_object_exists(&*conn, "idx_lcm_raw_direct_user_candidate")
+                .await
+                .map_err(|error| error.to_string())?,
+            "the retired SQL grep candidate index must not be installed"
+        );
+        assert!(
             schema_object_exists(&*conn, "lcm_raw_predecessor_ranges")
                 .await
                 .map_err(|error| error.to_string())?,
@@ -1101,6 +1097,48 @@ mod tests {
                 .map_err(|error| error.to_string())?,
             "fresh LCM schema is missing the bounded native-range lookup index"
         );
+        conn.execute_batch(
+            "CREATE INDEX idx_lcm_raw_direct_user_candidate
+             ON lcm_raw_messages(provider, store_id) WHERE role = 'user';
+             INSERT INTO sessions(provider, session_id, project_key, project_path)
+             VALUES ('cursor', 'session-1', 'project-1', '/fixture');",
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        conn.execute(
+            "INSERT INTO lcm_raw_messages(provider, message_id, session_id, role,
+                ordinal, content, content_hash, storage_kind)
+             VALUES ('cursor', 'message-1', 'session-1', 'user', 1, ?1, ?2, 'inline')",
+            params!["retained source", projected_content_hash("retained source")],
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        ensure_lcm_schema(&conn)
+            .await
+            .map_err(|error| error.to_string())?;
+        assert!(
+            !schema_object_exists(&*conn, "idx_lcm_raw_direct_user_candidate")
+                .await
+                .map_err(|error| error.to_string())?,
+            "a current-schema store must retire the legacy grep index too"
+        );
+        let mut rows = conn
+            .query(
+                "SELECT content FROM lcm_raw_messages WHERE message_id = 'message-1'",
+                params![],
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| error.to_string())?
+            .expect("retained row");
+        assert_eq!(
+            row.get::<String>(0).map_err(|error| error.to_string())?,
+            "retained source"
+        );
+        drop(rows);
         conn.execute_batch("DROP TABLE lcm_raw_predecessor_ranges;")
             .await
             .map_err(|error| error.to_string())?;

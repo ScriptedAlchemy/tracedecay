@@ -420,7 +420,7 @@ pub(super) fn def_lcm_expand_query() -> ToolDefinition {
     def(
         "tracedecay_lcm_expand_query",
         "LCM Expand Query",
-        "Assemble bounded LCM retrieval context for a prompt from the active project store and, when an automation backend is configured and available, synthesize the answer directly (returned first as `answer`, with `needs_synthesis:false`). Pure-noise blocks (base64 signature blobs, directory listings) are filtered from the context. When no backend is available it falls back to returning the raw context with `needs_synthesis:true` for the host to synthesize.",
+        "Assemble bounded LCM retrieval context for a prompt from the active project store and, when an automation backend is configured and available, synthesize the answer directly (returned first as `answer`, with `needs_synthesis:false`). Base64 signature blobs are filtered from the context. When no backend is available it falls back to returning the raw context with `needs_synthesis:true` for the host to synthesize.",
         json!({
             "type": "object",
             "properties": {
