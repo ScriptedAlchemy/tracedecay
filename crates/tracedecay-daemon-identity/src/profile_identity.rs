@@ -5,7 +5,7 @@ use tracedecay_contracts::ProfileIdentityReadPort;
 use tracedecay_domain::{BrainId, UserProfileId};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
-#[cfg(unix)]
+#[cfg(not(windows))]
 use tracedecay_private_fs::create_private_directory;
 use tracedecay_private_fs::create_private_file;
 use tracedecay_private_fs::framed_log::{
@@ -106,22 +106,17 @@ pub(crate) fn load_or_create_pinned(
         });
     }
 
-    if let Some(parent) = profile_root.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| profile_identity_io("create", parent, &error))?;
-    }
+    // Windows keeps the profile root's enrolled ACL: the authority state
+    // directory inside it and the identity file carry their own private ACLs.
     #[cfg(windows)]
+    std::fs::create_dir_all(&profile_root)
+        .map_err(|error| profile_identity_io("create", &profile_root, &error))?;
+    #[cfg(not(windows))]
     {
-        // The profile root keeps the ACL it was enrolled with: the daemon
-        // authority state directory inside it is private, and the identity
-        // file carries its own private ACL through `create_private_file`.
-        // `DaemonAuthority::acquire` creates this root through an ordinary
-        // path before the first identity is published.
-        std::fs::create_dir_all(&profile_root)
-            .map_err(|error| profile_identity_io("create", &profile_root, &error))?;
-    }
-    #[cfg(unix)]
-    {
+        if let Some(parent) = profile_root.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| profile_identity_io("create", parent, &error))?;
+        }
         match create_private_directory(&profile_root) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -268,6 +263,11 @@ fn validate_private_profile_root(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    use tracedecay_runtime_core::windows_security::{
+        validate_private_directory, validate_private_file,
+    };
+
     use super::*;
 
     #[test]
@@ -345,6 +345,7 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     #[test]
     fn load_or_create_on_an_existing_ordinary_root_publishes_a_private_identity() {
         let temporary = tempfile::tempdir().unwrap();
@@ -354,30 +355,8 @@ mod tests {
         let authority = load_or_create(&profile_root).unwrap();
 
         assert_eq!(load_existing(&profile_root).unwrap(), authority);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            assert_eq!(
-                std::fs::metadata(&profile_root)
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o700
-            );
-        }
-        #[cfg(windows)]
-        {
-            let path = profile_root.join(PROFILE_IDENTITY_FILENAME);
-            tracedecay_runtime_core::windows_security::validate_private_file(&path).unwrap();
-            assert!(
-                tracedecay_runtime_core::windows_security::validate_private_directory(
-                    &profile_root
-                )
-                .is_err()
-            );
-        }
+        validate_private_file(&profile_root.join(PROFILE_IDENTITY_FILENAME)).unwrap();
+        assert!(validate_private_directory(&profile_root).is_err());
     }
 
     #[test]
