@@ -44,17 +44,9 @@ use query::{
     ngram_document_query, retain_bounded, term_frequency, visit_document_ids, visit_lexical_rows,
 };
 use query::{ArtifactQueryV1, FuzzyVocabularyV1};
-#[cfg(test)]
-use roaring::RoaringBitmap;
-#[cfg(test)]
-use rusqlite::types::Value;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use sha2::{Digest, Sha256};
-#[cfg(test)]
-use std::cmp::Reverse;
 use std::collections::BTreeMap;
-#[cfg(test)]
-use std::collections::{BTreeSet, BinaryHeap};
 use std::fs::{File, Metadata};
 use std::io::{Read, Seek, SeekFrom};
 use std::num::NonZeroU64;

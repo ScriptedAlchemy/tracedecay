@@ -100,8 +100,6 @@ use tracedecay_code_index::production::{
     VerifiedSealedLexicalSourceReceiptV1, advance_import_dictionary_digest,
     initial_import_dictionary_digest,
 };
-#[cfg(test)]
-use tracedecay_domain::CodeGenerationId;
 use tracedecay_domain::ManifestDigest;
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, sync_parent_directory};
 use tracedecay_private_fs::{create_private_file_retained, open_private_file};
