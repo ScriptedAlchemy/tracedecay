@@ -852,12 +852,6 @@ impl ReaderQueryExecutor for RepositoryRuntimeReadExecutor {
                     })?;
                 RuntimeReadCoverageV1::Complete { coverage }
             }
-            ConsistencyModeV1::ExactSnapshot { .. }
-            | ConsistencyModeV1::FrozenWatermarkVector { .. } => {
-                return Err(infrastructure(
-                    "repository reader does not support snapshot consistency",
-                ));
-            }
         };
         RuntimeReadOutcomeV1::new(Some(value), coverage)
             .map_err(|error| infrastructure(format!("construct repository read outcome: {error}")))

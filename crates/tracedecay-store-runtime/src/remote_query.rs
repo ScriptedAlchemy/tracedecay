@@ -346,7 +346,6 @@ fn current_frontier(
         } => Err(RemoteExactObservationQueryErrorV1::DeadlineElapsed),
         RuntimeReadCoverageV1::Latest { .. }
         | RuntimeReadCoverageV1::Complete { .. }
-        | RuntimeReadCoverageV1::Partial { .. }
         | RuntimeReadCoverageV1::Stale { .. }
         | RuntimeReadCoverageV1::Unavailable { .. } => {
             Err(RemoteExactObservationQueryErrorV1::AuthorityUnavailable)
