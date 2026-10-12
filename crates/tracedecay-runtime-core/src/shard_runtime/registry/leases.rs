@@ -1,15 +1,13 @@
 use std::sync::Arc;
 
-#[cfg(test)]
-use tracedecay_store::RuntimeLeaseIdV1;
 use tracedecay_store::{
-    RuntimeLeaseV1, RuntimeMaintenanceStateV1, StoreIncarnationV1, StoreRuntimeBindingV1,
-    StoreShardIdV1, StoreShardScopeV1,
+    RuntimeMaintenanceStateV1, StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1,
+    StoreShardScopeV1,
 };
 
 use super::{
     RegistryEntry, RegistryState, StoreRuntimeKey, StoreRuntimeRegistry,
-    StoreRuntimeRegistryFailure, utc_now,
+    StoreRuntimeRegistryFailure,
 };
 
 #[derive(Clone)]
@@ -164,25 +162,6 @@ impl StoreRuntimeOpenRequest {
 }
 
 #[derive(Clone, Debug)]
-pub enum StoreRuntimeLeaseAcquireResult {
-    Acquired(Box<RuntimeLeaseV1>),
-    Opening {
-        key: Box<StoreRuntimeKey>,
-    },
-    Evicting {
-        key: Box<StoreRuntimeKey>,
-    },
-    Missing {
-        key: Box<StoreRuntimeKey>,
-    },
-    Fenced {
-        expected: Box<StoreRuntimeBindingV1>,
-        actual: Box<StoreRuntimeBindingV1>,
-    },
-    Rejected(StoreRuntimeRegistryFailure),
-}
-
-#[derive(Clone, Debug)]
 pub enum ProfileAuthorityPinResult {
     Pinned(ProfileAuthorityPin),
     Opening { key: Box<StoreRuntimeKey> },
@@ -191,111 +170,6 @@ pub enum ProfileAuthorityPinResult {
 }
 
 impl StoreRuntimeRegistry {
-    #[tracing::instrument(
-        name = "runtime_core.registry.lease_acquire",
-        level = "trace",
-        skip_all
-    )]
-    pub fn acquire_lease(&self, lease: RuntimeLeaseV1) -> StoreRuntimeLeaseAcquireResult {
-        if let Err(error) = lease.validate() {
-            return StoreRuntimeLeaseAcquireResult::Rejected(
-                StoreRuntimeRegistryFailure::InvalidLease {
-                    message: error.to_string(),
-                },
-            );
-        }
-        let expected = lease.binding.clone();
-        let key = StoreRuntimeKey::from_binding(&expected);
-        let runtime = {
-            let state = self.lock_state();
-            match state.entries.get(&key) {
-                Some(RegistryEntry::Ready(ready)) => {
-                    let actual = ready.owner.binding();
-                    if actual.authority_epoch != expected.authority_epoch {
-                        return StoreRuntimeLeaseAcquireResult::Fenced {
-                            expected: Box::new(expected),
-                            actual: Box::new(actual.clone()),
-                        };
-                    }
-                    Arc::clone(ready.owner.runtime())
-                }
-                Some(RegistryEntry::Opening(_)) => {
-                    return StoreRuntimeLeaseAcquireResult::Opening { key: Box::new(key) };
-                }
-                Some(RegistryEntry::Evicting(_)) => {
-                    return StoreRuntimeLeaseAcquireResult::Evicting { key: Box::new(key) };
-                }
-                Some(RegistryEntry::Retiring(_)) => {
-                    return StoreRuntimeLeaseAcquireResult::Rejected(
-                        StoreRuntimeRegistryFailure::RuntimeRetirementInProgress {
-                            key: Box::new(key),
-                        },
-                    );
-                }
-                Some(RegistryEntry::Committing(_)) => {
-                    return StoreRuntimeLeaseAcquireResult::Rejected(
-                        StoreRuntimeRegistryFailure::RuntimeRetirementCommitting {
-                            key: Box::new(key),
-                        },
-                    );
-                }
-                Some(RegistryEntry::Faulted(_)) => {
-                    return StoreRuntimeLeaseAcquireResult::Rejected(
-                        StoreRuntimeRegistryFailure::RuntimeRetirementFaulted {
-                            key: Box::new(key),
-                        },
-                    );
-                }
-                Some(RegistryEntry::DurabilityUncertain(_)) => {
-                    return StoreRuntimeLeaseAcquireResult::Rejected(
-                        StoreRuntimeRegistryFailure::RuntimeRetirementDurabilityUncertain {
-                            key: Box::new(key),
-                        },
-                    );
-                }
-                None => {
-                    return StoreRuntimeLeaseAcquireResult::Missing { key: Box::new(key) };
-                }
-            }
-        };
-        match runtime.acquire_runtime_lease(lease.clone(), utc_now()) {
-            Ok(acquired) if acquired.binding == lease.binding => {
-                StoreRuntimeLeaseAcquireResult::Acquired(Box::new(acquired))
-            }
-            Ok(acquired) => StoreRuntimeLeaseAcquireResult::Rejected(
-                StoreRuntimeRegistryFailure::LeaseBindingMismatch {
-                    expected: Box::new(lease.binding),
-                    actual: Box::new(acquired.binding),
-                },
-            ),
-            Err(error) => StoreRuntimeLeaseAcquireResult::Rejected(
-                StoreRuntimeRegistryFailure::LeaseRejected {
-                    message: error.to_string(),
-                },
-            ),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn release_lease(
-        &self,
-        binding: &StoreRuntimeBindingV1,
-        lease_id: &RuntimeLeaseIdV1,
-    ) -> bool {
-        let key = StoreRuntimeKey::from_binding(binding);
-        let runtime = {
-            let state = self.lock_state();
-            let Some(RegistryEntry::Ready(ready)) = state.entries.get(&key) else {
-                return false;
-            };
-            if ready.owner.binding() != binding {
-                return false;
-            }
-            Arc::clone(ready.owner.runtime())
-        };
-        runtime.release_runtime_lease(lease_id)
-    }
-
     pub fn profile_authority_pin(
         &self,
         profile_shard: &StoreShardIdV1,

@@ -31,6 +31,13 @@ pub async fn hold_after_project_sessions_for_test() -> Result<()> {
     hold_for_test("TRACEDECAY_TEST_HOLD_AFTER_PROJECT_SESSIONS", b"sessions").await
 }
 
+/// Park a project open after its independent production owners registered,
+/// the Hook V2 replay consumer among them, when
+/// `TRACEDECAY_TEST_HOLD_AFTER_INDEPENDENT_OWNERS` names a file.
+pub async fn hold_after_independent_owners_for_test() -> Result<()> {
+    hold_for_test("TRACEDECAY_TEST_HOLD_AFTER_INDEPENDENT_OWNERS", b"owners").await
+}
+
 /// Releases `store`'s interactive catalog once nothing holds it. `Busy` means
 /// ask again later: after a test drops its own readers, a background catalog
 /// warm or residency pass can still hold the catalog for a moment.

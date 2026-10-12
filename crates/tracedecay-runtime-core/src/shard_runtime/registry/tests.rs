@@ -316,11 +316,9 @@ async fn profile_pin_budget_and_all_runtime_blockers_are_authoritative() {
     let held = open_published(&registry, code_request("worktree.held", &pin)).await;
     let leased = open_published(&registry, code_request("worktree.leased", &pin)).await;
     let leased_binding = leased.binding().clone();
-    let lease = active_lease(&leased_binding, "lease.registry.blocker");
-    assert!(matches!(
-        registry.acquire_lease(lease.clone()),
-        StoreRuntimeLeaseAcquireResult::Acquired(_)
-    ));
+    let StoreRuntimeLookup::Ready(retained) = registry.lookup(&leased_binding) else {
+        panic!("a published runtime issues an independent client lease");
+    };
     drop(leased);
 
     assert!(matches!(
@@ -335,8 +333,8 @@ async fn profile_pin_budget_and_all_runtime_blockers_are_authoritative() {
     ));
     assert!(matches!(
         registry.lookup(&leased_binding),
-        // The lookup itself is one client token and the explicit registry
-        // lease is the second retirement-visible lifetime.
+        // The lookup itself is one client token and the retained client is
+        // the second retirement-visible lifetime.
         StoreRuntimeLookup::Ready(handle) if handle.health_snapshot().client_leases == 2
     ));
 
@@ -347,7 +345,7 @@ async fn profile_pin_budget_and_all_runtime_blockers_are_authoritative() {
         registry.lookup(&held_binding),
         StoreRuntimeLookup::Missing { .. }
     ));
-    assert!(registry.release_lease(&leased_binding, &lease.lease_id));
+    drop(retained);
 
     force_ready_runtime_state(&registry, pin.binding(), RuntimeMaintenanceStateV1::Faulted);
     assert!(matches!(

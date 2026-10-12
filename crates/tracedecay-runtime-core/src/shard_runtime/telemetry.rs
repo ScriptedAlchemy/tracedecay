@@ -11,10 +11,14 @@ use tracedecay_store::{
 };
 
 use super::registry::{PhysicalRuntimeSnapshot, PhysicalWriterRuntimeSnapshot};
-use super::shard::{
-    ShardRuntimeEvictionEligibility, ShardRuntimeHealth, ShardRuntimeHealthSnapshot,
-    ShardRuntimeObservation,
-};
+use super::shard::{ShardRuntimeEvictionEligibility, ShardRuntimeHealthSnapshot};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShardRuntimeHealth {
+    Unknown,
+    Degraded,
+    Faulted,
+}
 
 /// Maximum number of per-shard detail rows returned by one projection.
 ///
@@ -34,12 +38,16 @@ pub struct RuntimeRegistryInventoryEntry {
     pub physical: PhysicalRuntimeSnapshot,
 }
 
-impl From<ShardRuntimeObservation> for RuntimeRegistryInventoryEntry {
-    fn from(observation: ShardRuntimeObservation) -> Self {
-        Self {
-            health: observation.health,
-            eviction: observation.eviction,
-            physical: PhysicalRuntimeSnapshot::default(),
+impl RuntimeRegistryInventoryEntry {
+    /// The physical `healthy` bit only reports the absence of a faulted
+    /// writer, which is not positive evidence of health, so it stays `Unknown`.
+    fn runtime_health(&self) -> ShardRuntimeHealth {
+        if self.health.state == RuntimeMaintenanceStateV1::Faulted {
+            ShardRuntimeHealth::Faulted
+        } else if self.physical.healthy {
+            ShardRuntimeHealth::Unknown
+        } else {
+            ShardRuntimeHealth::Degraded
         }
     }
 }
@@ -59,30 +67,6 @@ pub struct RuntimeRegistryInventory {
     pub entries: Vec<RuntimeRegistryInventoryEntry>,
 }
 
-/// Counted leases held by a shard at one health-snapshot instant.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ShardRuntimeLeaseCounts {
-    pub general_readers: u32,
-    pub health_readers: u32,
-    pub snapshots: u32,
-    pub watchers: u32,
-    pub schedulers: u32,
-    pub clients: u32,
-}
-
-impl ShardRuntimeLeaseCounts {
-    fn from_health(health: &ShardRuntimeHealthSnapshot) -> Self {
-        Self {
-            general_readers: health.general_reader_leases,
-            health_readers: health.health_reader_leases,
-            snapshots: health.snapshot_leases,
-            watchers: health.watcher_leases,
-            schedulers: health.scheduler_leases,
-            clients: health.client_leases,
-        }
-    }
-}
-
 /// Driver-neutral telemetry detail for one daemon-owned runtime publication.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShardRuntimeTelemetry {
@@ -97,7 +81,7 @@ pub struct ShardRuntimeTelemetry {
     pub physical_reader_handles: u32,
     pub general_reader_waiters: u16,
     pub health_reader_waiters: u16,
-    pub leases: ShardRuntimeLeaseCounts,
+    pub client_leases: u32,
     pub writer_busy_events: u64,
     pub writer: Option<PhysicalWriterRuntimeSnapshot>,
     pub wal_bytes: Option<u64>,
@@ -141,7 +125,6 @@ impl RuntimeStateCounts {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RuntimeHealthCounts {
     pub unknown: u32,
-    pub healthy: u32,
     pub degraded: u32,
     pub faulted: u32,
 }
@@ -150,7 +133,6 @@ impl RuntimeHealthCounts {
     fn observe(&mut self, health: ShardRuntimeHealth) {
         let count = match health {
             ShardRuntimeHealth::Unknown => &mut self.unknown,
-            ShardRuntimeHealth::Healthy => &mut self.healthy,
             ShardRuntimeHealth::Degraded => &mut self.degraded,
             ShardRuntimeHealth::Faulted => &mut self.faulted,
         };
@@ -190,13 +172,7 @@ pub struct RuntimeTelemetryAggregate {
     pub health_lane_services: u64,
     pub queued_operations: u64,
     pub queued_bytes: u64,
-    pub general_reader_leases: u64,
-    pub health_reader_leases: u64,
-    pub snapshot_leases: u64,
-    pub watcher_leases: u64,
-    pub scheduler_leases: u64,
     pub client_leases: u64,
-    pub total_leases: u64,
     /// Sum of current WAL samples, present only when every observed shard was sampled.
     pub wal_bytes: Option<u64>,
     /// Sum of current memory estimates, present only when every observed shard was sampled.
@@ -209,7 +185,7 @@ impl RuntimeTelemetryAggregate {
     fn observe(&mut self, entry: &RuntimeRegistryInventoryEntry) {
         let health = &entry.health;
         self.states.observe(health.state);
-        self.health.observe(health.health);
+        self.health.observe(entry.runtime_health());
         self.pinned_profiles = self
             .pinned_profiles
             .saturating_add(count_if(health.pinned_profile));
@@ -218,7 +194,7 @@ impl RuntimeTelemetryAggregate {
             .saturating_add(count_if(entry.eviction.is_eligible()));
         self.writer_present = self
             .writer_present
-            .saturating_add(count_if(health.writer_present));
+            .saturating_add(count_if(entry.physical.writer_present));
         self.physical_reader_handles = self
             .physical_reader_handles
             .saturating_add(u64::from(entry.physical.reader_handles));
@@ -271,33 +247,13 @@ impl RuntimeTelemetryAggregate {
         }
         self.queued_operations = self
             .queued_operations
-            .saturating_add(u64::from(health.queued_operations));
-        self.queued_bytes = self.queued_bytes.saturating_add(health.queued_bytes);
-        self.general_reader_leases = self
-            .general_reader_leases
-            .saturating_add(u64::from(health.general_reader_leases));
-        self.health_reader_leases = self
-            .health_reader_leases
-            .saturating_add(u64::from(health.health_reader_leases));
-        self.snapshot_leases = self
-            .snapshot_leases
-            .saturating_add(u64::from(health.snapshot_leases));
-        self.watcher_leases = self
-            .watcher_leases
-            .saturating_add(u64::from(health.watcher_leases));
-        self.scheduler_leases = self
-            .scheduler_leases
-            .saturating_add(u64::from(health.scheduler_leases));
+            .saturating_add(u64::from(entry.physical.queued_operations));
+        self.queued_bytes = self
+            .queued_bytes
+            .saturating_add(entry.physical.queued_bytes);
         self.client_leases = self
             .client_leases
             .saturating_add(u64::from(health.client_leases));
-        let lease_total = u64::from(health.general_reader_leases)
-            .saturating_add(u64::from(health.health_reader_leases))
-            .saturating_add(u64::from(health.snapshot_leases))
-            .saturating_add(u64::from(health.watcher_leases))
-            .saturating_add(u64::from(health.scheduler_leases))
-            .saturating_add(u64::from(health.client_leases));
-        self.total_leases = self.total_leases.saturating_add(lease_total);
         self.wal_bytes = sum_complete_sample(self.wal_bytes, entry.physical.wal_bytes);
         self.memory_estimate_bytes = sum_complete_sample(
             self.memory_estimate_bytes,
@@ -382,19 +338,19 @@ fn project_shard(
         state: health.state,
         queue_budget: admission.per_shard_queue.clone(),
         global_queue_budget_bytes: admission.global_queue_max_bytes,
-        queued_operations: health.queued_operations,
-        queued_bytes: health.queued_bytes,
-        writer_present: health.writer_present,
+        queued_operations: entry.physical.queued_operations,
+        queued_bytes: entry.physical.queued_bytes,
+        writer_present: entry.physical.writer_present,
         physical_reader_handles: entry.physical.reader_handles,
         general_reader_waiters: entry.physical.general_reader_waiters,
         health_reader_waiters: entry.physical.health_reader_waiters,
-        leases: ShardRuntimeLeaseCounts::from_health(health),
+        client_leases: health.client_leases,
         writer_busy_events: entry.physical.writer_busy_events,
         writer: entry.physical.writer.clone(),
         wal_bytes: entry.physical.wal_bytes,
         wal_budget: admission.wal.clone(),
         memory_estimate_bytes: entry.physical.memory_estimate_bytes,
-        health: health.health,
+        health: entry.runtime_health(),
         pinned_profile: health.pinned_profile,
         idle_for_ms: crate::tracedecay::saturating_duration_millis(entry.eviction.idle_for),
         eviction_eligible: entry.eviction.is_eligible(),
@@ -429,9 +385,9 @@ mod tests {
     use tracedecay_store::{StoreAuthorityEpochV1, StoreIncarnationV1, StoreShardIdV1};
 
     use super::*;
-    use crate::shard_runtime::shard::{
-        ShardRuntime, ShardRuntimeEvictionBlocker, ShardRuntimeLeaseKind,
-    };
+    use std::sync::Arc;
+
+    use crate::shard_runtime::shard::{ShardRuntime, ShardRuntimeEvictionBlocker};
 
     use tracedecay_domain::test_fixtures::id;
 
@@ -456,20 +412,9 @@ mod tests {
             binding: binding(project, incarnation, 7),
             state,
             pinned_profile: false,
-            writer_present: false,
-            queued_operations: 3,
-            queued_bytes: 768,
-            general_reader_leases: 2,
-            health_reader_leases: 1,
-            snapshot_leases: 1,
-            watcher_leases: 1,
-            scheduler_leases: 1,
-            client_leases: 1,
+            client_leases: 2,
             operation_leases: 0,
-            wal_bytes: 8_192,
-            memory_estimate_bytes: 16_384,
             idle_for: Duration::from_mins(1),
-            health: ShardRuntimeHealth::Healthy,
         }
     }
 
@@ -478,8 +423,11 @@ mod tests {
         blockers: Vec<ShardRuntimeEvictionBlocker>,
     ) -> RuntimeRegistryInventoryEntry {
         let physical = PhysicalRuntimeSnapshot {
-            wal_bytes: Some(health.wal_bytes),
-            memory_estimate_bytes: Some(health.memory_estimate_bytes),
+            healthy: true,
+            queued_operations: 3,
+            queued_bytes: 768,
+            wal_bytes: Some(8_192),
+            memory_estimate_bytes: Some(16_384),
             ..PhysicalRuntimeSnapshot::default()
         };
         RuntimeRegistryInventoryEntry {
@@ -504,8 +452,7 @@ mod tests {
     #[test]
     fn projection_is_deterministic_bounded_and_aggregates_full_inventory() {
         let last = fixture_health("project.z", 1, RuntimeMaintenanceStateV1::Ready);
-        let mut first = fixture_health("project.a", 2, RuntimeMaintenanceStateV1::Faulted);
-        first.health = ShardRuntimeHealth::Faulted;
+        let first = fixture_health("project.a", 2, RuntimeMaintenanceStateV1::Faulted);
         let middle = fixture_health("project.m", 1, RuntimeMaintenanceStateV1::Ready);
         let inventory = inventory(vec![
             entry(last, vec![]),
@@ -528,11 +475,11 @@ mod tests {
         assert_eq!(projection.aggregate.omitted_shards, 1);
         assert_eq!(projection.aggregate.states.ready, 2);
         assert_eq!(projection.aggregate.states.faulted, 1);
-        assert_eq!(projection.aggregate.health.healthy, 2);
+        assert_eq!(projection.aggregate.health.unknown, 2);
         assert_eq!(projection.aggregate.health.faulted, 1);
         assert_eq!(projection.aggregate.queued_operations, 9);
         assert_eq!(projection.aggregate.queued_bytes, 2_304);
-        assert_eq!(projection.aggregate.total_leases, 21);
+        assert_eq!(projection.aggregate.client_leases, 6);
         assert_eq!(projection.aggregate.wal_bytes, Some(24_576));
         assert_eq!(projection.aggregate.memory_estimate_bytes, Some(49_152));
         assert_eq!(projection.aggregate.global_queued_bytes, Some(2_048));
@@ -548,8 +495,7 @@ mod tests {
 
     #[test]
     fn projection_preserves_passive_writer_and_reader_contention() {
-        let mut health = fixture_health("project.contention", 1, RuntimeMaintenanceStateV1::Ready);
-        health.writer_present = true;
+        let health = fixture_health("project.contention", 1, RuntimeMaintenanceStateV1::Ready);
         let projection =
             project_runtime_telemetry(&inventory(vec![RuntimeRegistryInventoryEntry {
                 health,
@@ -558,6 +504,7 @@ mod tests {
                     blockers: vec![],
                 },
                 physical: PhysicalRuntimeSnapshot {
+                    writer_present: true,
                     reader_handles: 3,
                     general_reader_waiters: 5,
                     health_reader_waiters: 2,
@@ -627,7 +574,10 @@ mod tests {
         assert_eq!(projection.aggregate.returned_shards, 1);
         assert_eq!(projection.aggregate.omitted_shards, 2);
         assert_eq!(projection.aggregate.states.opening, 2);
-        assert_eq!(projection.aggregate.health.unknown, 2);
+        assert_eq!(
+            projection.aggregate.health.unknown, 3,
+            "both admitted opens plus the ready shard"
+        );
         assert_eq!(projection.aggregate.wal_bytes, None);
         assert_eq!(projection.aggregate.memory_estimate_bytes, None);
     }
@@ -650,10 +600,11 @@ mod tests {
 
     #[test]
     fn projection_marks_missing_active_writer_metrics_as_partial() {
-        let mut health = fixture_health("project.partial", 1, RuntimeMaintenanceStateV1::Ready);
-        health.writer_present = true;
+        let health = fixture_health("project.partial", 1, RuntimeMaintenanceStateV1::Ready);
+        let mut entry = entry(health, vec![]);
+        entry.physical.writer_present = true;
 
-        let projection = project_runtime_telemetry(&inventory(vec![entry(health, vec![])]));
+        let projection = project_runtime_telemetry(&inventory(vec![entry]));
 
         assert_eq!(projection.aggregate.writer_present, 1);
         assert_eq!(projection.aggregate.writer_telemetry_shards, 0);
@@ -662,19 +613,14 @@ mod tests {
 
     #[test]
     fn projection_preserves_actual_shard_health_identity_and_eviction_decision() {
-        let runtime = ShardRuntime::new(binding("project.live", 3, 9), true);
+        let runtime = Arc::new(ShardRuntime::new(binding("project.live", 3, 9), true));
         runtime
             .transition(RuntimeMaintenanceStateV1::Opening)
             .unwrap();
         runtime
             .transition(RuntimeMaintenanceStateV1::Ready)
             .unwrap();
-        runtime.record_storage_usage(65_536, 131_072);
-        runtime.set_health(ShardRuntimeHealth::Degraded).unwrap();
-        let queue = runtime.queue_work(4, 1_024).unwrap();
-        let reader = runtime
-            .acquire_lease(ShardRuntimeLeaseKind::GeneralReader)
-            .unwrap();
+        let client = ShardRuntime::issue_client_lifetime_lease(Arc::clone(&runtime)).unwrap();
         let health = runtime.health_snapshot();
         let eviction = runtime.eviction_eligibility_at(
             runtime.last_activity() + Duration::from_mins(1),
@@ -684,7 +630,12 @@ mod tests {
             project_runtime_telemetry(&inventory(vec![RuntimeRegistryInventoryEntry {
                 health,
                 eviction,
-                physical: PhysicalRuntimeSnapshot::default(),
+                physical: PhysicalRuntimeSnapshot {
+                    healthy: false,
+                    queued_operations: 4,
+                    queued_bytes: 1_024,
+                    ..PhysicalRuntimeSnapshot::default()
+                },
             }]));
         let shard = projection.shards.first().unwrap();
 
@@ -692,24 +643,23 @@ mod tests {
         assert_eq!(shard.state, RuntimeMaintenanceStateV1::Ready);
         assert_eq!(shard.queued_operations, 4);
         assert_eq!(shard.queued_bytes, 1_024);
-        assert_eq!(shard.leases.general_readers, 1);
+        assert_eq!(shard.client_leases, 1);
         assert_eq!(shard.wal_bytes, None);
         assert_eq!(shard.memory_estimate_bytes, None);
         assert_eq!(shard.health, ShardRuntimeHealth::Degraded);
         assert!(shard.pinned_profile);
         assert!(!shard.eviction_eligible);
-        assert!(shard.eviction_blocker_count >= 3);
+        assert_eq!(shard.eviction_blocker_count, 2);
 
-        reader.release();
-        queue.release();
+        drop(client);
     }
 
     #[test]
     fn aggregate_counts_saturate_instead_of_wrapping() {
         let mut first = fixture_health("project.one", 1, RuntimeMaintenanceStateV1::Ready);
-        first.general_reader_leases = u32::MAX;
+        first.client_leases = u32::MAX;
         let mut second = fixture_health("project.two", 1, RuntimeMaintenanceStateV1::Ready);
-        second.general_reader_leases = 1;
+        second.client_leases = 1;
         let mut first = entry(first, vec![]);
         first.physical.writer = Some(PhysicalWriterRuntimeSnapshot {
             deadline_exceeded_operations: u64::MAX,
@@ -722,11 +672,7 @@ mod tests {
         });
         let projection = project_runtime_telemetry(&inventory(vec![first, second]));
 
-        assert_eq!(
-            projection.aggregate.general_reader_leases,
-            u64::from(u32::MAX) + 1
-        );
-        assert_eq!(projection.aggregate.total_leases, u64::from(u32::MAX) + 11);
+        assert_eq!(projection.aggregate.client_leases, u64::from(u32::MAX) + 1);
         assert_eq!(projection.aggregate.deadline_exceeded_operations, u64::MAX);
     }
 }

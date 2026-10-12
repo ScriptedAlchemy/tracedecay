@@ -502,12 +502,11 @@ mod tests {
     use std::time::Duration;
 
     use tracedecay_domain::{
-        BrainId, LocatorDigest, ProjectId, RepositoryId, UserProfileId, UtcMicros, WorktreeId,
+        BrainId, LocatorDigest, ProjectId, RepositoryId, UserProfileId, WorktreeId,
     };
     use tracedecay_store::{
-        CodeShardScopeV1, RuntimeLeaseIdV1, RuntimeLeaseV1, RuntimeMaintenanceStateV1,
-        StoreClientIdV1, StoreIncarnationV1, StoreShardIdV1, StoreShardScopeV1,
-        VerifiedStoreLocatorV1,
+        CodeShardScopeV1, RuntimeMaintenanceStateV1, StoreIncarnationV1, StoreShardIdV1,
+        StoreShardScopeV1, VerifiedStoreLocatorV1,
     };
 
     use super::*;
@@ -633,17 +632,6 @@ mod tests {
         (registry, profile, code, authority)
     }
 
-    fn active_lease(binding: &StoreRuntimeBindingV1) -> RuntimeLeaseV1 {
-        let now = super::super::utc_now();
-        RuntimeLeaseV1 {
-            lease_id: RuntimeLeaseIdV1::new("lease.close-exact").unwrap(),
-            binding: binding.clone(),
-            holder: StoreClientIdV1::new("client.close-exact").unwrap(),
-            acquired_at: UtcMicros(now.0.saturating_sub(1_000_000)),
-            expires_at: UtcMicros(now.0.saturating_add(60_000_000)),
-        }
-    }
-
     #[tokio::test]
     async fn close_path_rejects_single_runtime_without_retained_authority() {
         let temporary = tempfile::tempdir().unwrap();
@@ -735,7 +723,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exact_close_refuses_client_and_direct_leases_before_closing() {
+    async fn exact_close_refuses_every_live_client_lease_before_closing() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("runtime.db");
         let (registry, profile, code, authority) = mount_code_runtime(path.clone()).await;
@@ -756,11 +744,9 @@ mod tests {
             RuntimeMaintenanceStateV1::Ready
         );
 
-        let lease = active_lease(&binding);
-        assert!(matches!(
-            registry.acquire_lease(lease.clone()),
-            super::super::StoreRuntimeLeaseAcquireResult::Acquired(_)
-        ));
+        let StoreRuntimeLookup::Ready(independent) = registry.lookup(&binding) else {
+            panic!("a ready runtime issues an independent client lease");
+        };
         drop(code);
         assert!(matches!(
             registry.close_exact(&binding, &authority).await,
@@ -772,7 +758,7 @@ mod tests {
                 ..
             })
         ));
-        assert!(registry.release_lease(&binding, &lease.lease_id));
+        drop(independent);
 
         let proof = registry.close_exact(&binding, &authority).await.unwrap();
         assert_eq!(proof.binding(), &binding);

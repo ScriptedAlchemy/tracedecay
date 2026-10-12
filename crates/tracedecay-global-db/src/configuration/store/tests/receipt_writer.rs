@@ -1,7 +1,7 @@
 //! Configuration receipts and outbox effects through the production registry.
 //!
-//! Both journeys publish a profile store with `open_registered_test_database_fixture`
-//! (the registry and schema installer production admission uses) and submit
+//! Every journey publishes a profile store with `open_registered_test_database_fixture`
+//! (the registry and schema installer production admission uses) and submits
 //! through that publication's writer. Row checks read the committed tables.
 
 use std::sync::Arc;
@@ -26,7 +26,7 @@ use tracedecay_store::{
 
 use super::super::revision::insert_revision;
 use super::super::{ConfigurationStoreError, GlobalDbConfigurationControlStore};
-use super::{id, root_revision};
+use super::{id, protected_commit, root_revision, source_binding_snapshot};
 use crate::registered::RegisteredGlobalDb;
 use crate::tests::harness::open_registered_test_database_fixture;
 
@@ -570,26 +570,75 @@ fn inbox_receipt(entry: &TransactionalOutboxEntryV1) -> TransactionalInboxReceip
 }
 
 #[tokio::test]
-async fn dispatched_outbox_without_a_pending_row_names_that_cause() {
+async fn outbox_transitions_without_an_enqueued_row_name_that_cause() {
     let (_directory, db, _owner) = publish_profile("profile-outbox-missing.db").await;
-    let mut dispatched = outbox_entry(db.binding(), "effect.parity.missing");
+    let pending = outbox_entry(db.binding(), "effect.parity.missing");
+    let mut dispatched = pending.clone();
     dispatched
         .transition(OutboxEffectStateV1::Dispatched, UtcMicros(2_000))
         .expect("dispatch transition");
+    let transitions = [
+        (
+            "operation.outbox.missing.dispatch",
+            RepositoryWritePayloadV1::EnqueueOutbox(Box::new(dispatched)),
+        ),
+        (
+            "operation.outbox.missing.acknowledge",
+            RepositoryWritePayloadV1::AcknowledgeOutbox(Box::new(inbox_receipt(&pending))),
+        ),
+    ];
+    for (operation_id, payload) in transitions {
+        let request = submit_request(db.binding(), operation_id, operation_id, 2_000, payload);
+        let error = dispatch(&db, request)
+            .await
+            .expect_err("a transition of an effect that was never enqueued must fail");
+        let rendered = format!("{error:?}");
+        assert!(
+            rendered.contains("outbox effect was never enqueued"),
+            "{operation_id} without an enqueued row reported: {rendered}"
+        );
+    }
+    assert_eq!(
+        count_rows(&db, "SELECT COUNT(*) FROM td_runtime_writer_outbox_v1").await,
+        0
+    );
+}
+
+/// The repository attachment owns no effect domain, so it cannot apply an
+/// inbox effect; recording an `applied` receipt here would claim work that
+/// never ran.
+#[tokio::test]
+async fn repository_attachment_rejects_applying_an_inbox_effect() {
+    let (_directory, db, _owner) = publish_profile("profile-inbox.db").await;
+    let binding = db.binding().clone();
+    let mut source = serde_json::to_value(&binding.shard_id).expect("shard json");
+    source["scope"] = json!({ "kind": "project_sessions", "project_id": "project.inbox" });
+    let mut entry = serde_json::to_value(outbox_entry(&binding, "effect.parity.inbox"))
+        .expect("outbox entry json");
+    entry["identity"]["target_watermark"]["shard_id"] =
+        entry["identity"]["source_watermark"]["shard_id"].take();
+    entry["identity"]["source_watermark"]["shard_id"] = source;
+    entry["state"] = json!("dispatched");
+    let entry: TransactionalOutboxEntryV1 =
+        serde_json::from_value(entry).expect("inbound outbox entry");
     let request = submit_request(
-        db.binding(),
-        "operation.outbox.missing",
-        "key.outbox.missing",
+        &binding,
+        "operation.inbox.apply",
+        "key.inbox.apply",
         2_000,
-        RepositoryWritePayloadV1::EnqueueOutbox(Box::new(dispatched)),
+        RepositoryWritePayloadV1::ApplyInbox(Box::new(entry)),
     );
     let error = dispatch(&db, request)
         .await
-        .expect_err("a dispatched effect with no pending row must fail");
+        .expect_err("the repository attachment must not apply an inbox effect");
     let rendered = format!("{error:?}");
     assert!(
-        rendered.contains("no pending row"),
-        "dispatched outbox without a pending row reported: {rendered}"
+        rendered.contains("repository attachment does not own apply inbox effect"),
+        "apply inbox through the repository attachment reported: {rendered}"
+    );
+    assert_eq!(
+        count_rows(&db, "SELECT COUNT(*) FROM td_runtime_writer_inbox_v1").await,
+        0
     );
 }
 
@@ -660,6 +709,255 @@ async fn outbox_enqueue_dispatch_and_acknowledge_commit_through_the_registry() {
     );
     assert_eq!(
         count_rows(&db, "SELECT COUNT(*) FROM td_runtime_writer_outbox_v1").await,
+        1
+    );
+}
+
+/// A repository commit lands the same immutable projections the global-db
+/// writer writes: a snapshot carrying source bindings leaves a
+/// `configuration_source_bindings` row for the new revision.
+#[tokio::test]
+async fn repository_commit_writes_configuration_projection_rows() {
+    let root = root_revision();
+    let (_directory, db, _owner) = publish_profile("profile-projections.db").await;
+    seed_root(&db, &root).await;
+    let mut commit = child_commit(&root, "projected");
+    commit.next_revision.snapshot = source_binding_snapshot(&commit.next_revision.revision_id);
+    let request = submit_request(
+        db.binding(),
+        "operation.configuration.projected",
+        "key.configuration.projected",
+        21,
+        RepositoryWritePayloadV1::Configuration(Box::new(commit.clone())),
+    );
+    let outcome = dispatch(&db, request)
+        .await
+        .unwrap_or_else(|error| panic!("repository projected commit failed: {error:?}"));
+    require_committed(outcome, "repository projected commit");
+
+    assert_eq!(
+        i64_cell(
+            &db,
+            "SELECT COUNT(*) FROM configuration_source_bindings WHERE revision_id = ?1",
+            commit.next_revision.revision_id.as_str(),
+        )
+        .await,
+        1,
+        "the repository writer projects the snapshot's source bindings"
+    );
+    let binding_id = text_cell(
+        &db,
+        "SELECT binding_id FROM configuration_source_bindings WHERE revision_id = ?1",
+        commit.next_revision.revision_id.as_str(),
+    )
+    .await;
+    assert_eq!(binding_id, "binding.authoritative.fixture");
+    assert_eq!(
+        text_cell(
+            &db,
+            "SELECT authority_kind FROM configuration_source_bindings WHERE revision_id = ?1",
+            commit.next_revision.revision_id.as_str(),
+        )
+        .await,
+        "project"
+    );
+}
+
+/// A malformed stored activation row must stop the desired-state advance
+/// instead of being copied into a new event: both writers fail typed and
+/// leave no revision behind.
+#[tokio::test]
+async fn both_writers_reject_a_malformed_stored_activation_row() {
+    let root = root_revision();
+    let (_directory, db, _owner) = publish_profile("profile-corrupt-activation.db").await;
+    seed_root(&db, &root).await;
+    let transaction = db
+        .begin_write_transaction()
+        .await
+        .expect("corrupt row transaction");
+    transaction
+        .execute(
+            "INSERT INTO configuration_component_activation_events (
+                component, desired_revision_id, observed_revision_id,
+                last_working_revision_id, restart_required, activation_error_code, occurred_at
+             ) VALUES ('corrupt ', ?1, NULL, NULL, 0, NULL, 2)",
+            params![root.revision_id.as_str()],
+        )
+        .await
+        .expect("seed corrupt activation row");
+    transaction.commit().await.expect("commit corrupt row");
+
+    let commit = child_commit(&root, "corrupt-advance");
+    let request = submit_request(
+        db.binding(),
+        "operation.configuration.corrupt-advance",
+        "key.configuration.corrupt-advance",
+        22,
+        RepositoryWritePayloadV1::Configuration(Box::new(commit.clone())),
+    );
+    let error = dispatch(&db, request)
+        .await
+        .expect_err("a malformed stored activation row must fail the commit");
+    let rendered = format!("{error:?}");
+    assert!(
+        rendered.contains("component name"),
+        "malformed stored activation reported: {rendered}"
+    );
+    assert_eq!(
+        count_rows(&db, "SELECT COUNT(*) FROM configuration_revisions").await,
+        1,
+        "the rejected commit leaves no revision row"
+    );
+    assert_eq!(
+        count_rows(
+            &db,
+            "SELECT COUNT(*) FROM configuration_component_activation_events WHERE component = 'corrupt '",
+        )
+        .await,
+        1,
+        "the malformed row is not propagated into a new event"
+    );
+
+    let store_error = GlobalDbConfigurationControlStore::new_registered(&db)
+        .commit(commit)
+        .await
+        .expect_err("the global-db writer fails the same malformed row");
+    assert!(
+        matches!(store_error, ConfigurationStoreError::InvalidData(_)),
+        "global-db reports the malformed row as invalid data: {store_error}"
+    );
+    assert_eq!(
+        count_rows(&db, "SELECT COUNT(*) FROM configuration_revisions").await,
+        1
+    );
+}
+
+/// The repository writer binds a plan commit to the stored plan: a commit
+/// naming a plan that was never saved is stale and writes nothing; once the
+/// plan exists, the same commit lands and appends its terminal event.
+#[tokio::test]
+async fn repository_commit_requires_the_stored_change_plan() {
+    let root = root_revision();
+    let (_directory, db, _owner) = publish_profile("profile-plan-binding.db").await;
+    seed_root(&db, &root).await;
+    let (plan_record, commit) = protected_commit(&root);
+
+    let request = submit_request(
+        db.binding(),
+        "operation.configuration.stale-plan",
+        "key.configuration.stale-plan",
+        23,
+        RepositoryWritePayloadV1::Configuration(Box::new(commit.clone())),
+    );
+    let error = dispatch(&db, request)
+        .await
+        .expect_err("a commit naming an unsaved plan is stale");
+    let rendered = format!("{error:?}");
+    assert!(
+        rendered.contains("stale"),
+        "unsaved plan reported: {rendered}"
+    );
+    assert_eq!(
+        count_rows(&db, "SELECT COUNT(*) FROM configuration_revisions").await,
+        1
+    );
+
+    let store = GlobalDbConfigurationControlStore::new_registered(&db);
+    ConfigurationRevisionStore::save_change_plan(&store, &plan_record)
+        .await
+        .expect("save the plan the commit names");
+    let request = submit_request(
+        db.binding(),
+        "operation.configuration.bound-plan",
+        "key.configuration.bound-plan",
+        24,
+        RepositoryWritePayloadV1::Configuration(Box::new(commit.clone())),
+    );
+    let outcome = dispatch(&db, request)
+        .await
+        .unwrap_or_else(|error| panic!("bound plan commit failed: {error:?}"));
+    require_committed(outcome, "bound plan commit");
+    assert_eq!(
+        count_rows(&db, "SELECT COUNT(*) FROM configuration_revisions").await,
+        2
+    );
+    assert_eq!(
+        text_cell(
+            &db,
+            "SELECT event_kind FROM configuration_change_plan_events
+             WHERE plan_id = ?1 ORDER BY sequence DESC LIMIT 1",
+            commit.change_plan.as_ref().unwrap().plan_id.as_str(),
+        )
+        .await,
+        "applied",
+        "the repository writer appends the terminal plan event"
+    );
+}
+
+/// A saved plan carrying an operation row outside the canonical contract is
+/// corrupt, not bound: both writers reject the commit instead of treating the
+/// extra payload as invisible.
+#[tokio::test]
+async fn both_writers_reject_a_plan_with_extra_operation_rows() {
+    let root = root_revision();
+    let (_directory, db, _owner) = publish_profile("profile-extra-plan-ops.db").await;
+    seed_root(&db, &root).await;
+    let (plan_record, commit) = protected_commit(&root);
+    let store = GlobalDbConfigurationControlStore::new_registered(&db);
+    ConfigurationRevisionStore::save_change_plan(&store, &plan_record)
+        .await
+        .expect("save the plan the commit names");
+
+    let transaction = db
+        .begin_write_transaction()
+        .await
+        .expect("extra operation transaction");
+    transaction
+        .execute(
+            "INSERT INTO configuration_change_plan_operations (
+                plan_id, sequence, payload_schema_revision, sealed_typed_operation,
+                operation_digest
+             ) VALUES (?1, 1, 2, X'00', 'sha256:extrarow')",
+            params![plan_record.plan.plan_id.as_str()],
+        )
+        .await
+        .expect("seed extra plan operation row");
+    transaction
+        .commit()
+        .await
+        .expect("commit extra operation row");
+
+    let request = submit_request(
+        db.binding(),
+        "operation.configuration.extra-plan-ops",
+        "key.configuration.extra-plan-ops",
+        25,
+        RepositoryWritePayloadV1::Configuration(Box::new(commit.clone())),
+    );
+    let error = dispatch(&db, request)
+        .await
+        .expect_err("a plan with extra operation rows must fail the commit");
+    let rendered = format!("{error:?}");
+    assert!(
+        rendered.contains("operation payload"),
+        "extra operation rows reported: {rendered}"
+    );
+    assert_eq!(
+        count_rows(&db, "SELECT COUNT(*) FROM configuration_revisions").await,
+        1,
+        "the rejected commit leaves no revision row"
+    );
+
+    let store_error = store
+        .commit(commit)
+        .await
+        .expect_err("the global-db writer rejects the same stored plan");
+    assert!(
+        matches!(store_error, ConfigurationStoreError::InvalidData(_)),
+        "global-db reports the corrupted plan as invalid data: {store_error}"
+    );
+    assert_eq!(
+        count_rows(&db, "SELECT COUNT(*) FROM configuration_revisions").await,
         1
     );
 }

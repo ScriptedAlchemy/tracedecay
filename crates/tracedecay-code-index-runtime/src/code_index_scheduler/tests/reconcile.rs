@@ -1939,17 +1939,37 @@ fn linked_worktrees_share_identity_for_identical_content_and_never_serve_diverge
     second_scheduler.notify_path(linked.join("src/lib.rs"));
     second_scheduler.notify_path(linked.join("src/renamed.rs"));
     let before_rename = registry.byte_pool_stats();
-    published(
+    let renamed_publish = published(
         second_scheduler
             .reconcile_now()
             .expect("renamed linked-worktree publish"),
     );
     // A rename adds and removes a path, so the successor builds whole: the
-    // untouched `src/other.rs` reuses its own artifact, the renamed file none.
+    // untouched `src/other.rs` is carried from the sealed parent, and the
+    // renamed file is parsed again because parse/chunk artifacts are path-bound.
     assert_eq!(
         registry.byte_pool_stats().parse_chunk_reused,
-        before_rename.parse_chunk_reused + 1,
+        before_rename.parse_chunk_reused,
         "same content at a new logical path must not reuse path-bound parse/chunk artifacts"
+    );
+    let carried_shared = first_publish
+        .file_occurrence_ids
+        .iter()
+        .filter(|occurrence| renamed_publish.file_occurrence_ids.contains(occurrence))
+        .count();
+    assert_eq!(
+        carried_shared, 1,
+        "the carried file keeps the identity it shares with the primary worktree: {:?} vs {:?}",
+        first_publish.file_occurrence_ids, renamed_publish.file_occurrence_ids
+    );
+    let renamed = second_scheduler
+        .latest_complete()
+        .expect("renamed linked generation")
+        .generation;
+    assert_eq!(
+        names(&renamed),
+        BTreeSet::from(["only_in_linked".to_owned(), "other".to_owned()]),
+        "the renamed generation serves the carried file and the renamed content only"
     );
 }
 

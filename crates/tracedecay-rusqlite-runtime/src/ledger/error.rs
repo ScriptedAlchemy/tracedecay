@@ -24,7 +24,7 @@ pub(crate) enum LedgerError {
     ConcurrentCheckpointUpdate,
     ConcurrentIdempotencyWrite,
     OutboxEffectConflict,
-    DispatchedOutboxWithoutPending,
+    OutboxEffectNotEnqueued,
     ReplayBindingMismatch {
         field: &'static str,
     },
@@ -73,8 +73,8 @@ impl fmt::Display for LedgerError {
             Self::OutboxEffectConflict => {
                 formatter.write_str("runtime ledger outbox effect identity already exists")
             }
-            Self::DispatchedOutboxWithoutPending => {
-                formatter.write_str("runtime ledger dispatched outbox effect has no pending row")
+            Self::OutboxEffectNotEnqueued => {
+                formatter.write_str("runtime ledger outbox effect was never enqueued")
             }
             Self::ReplayBindingMismatch { field } => {
                 write!(

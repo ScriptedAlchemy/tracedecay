@@ -20,13 +20,14 @@
 //! and writes the same receipt and desired-state SQL as
 //! `crates/tracedecay-global-db/src/configuration/store.rs`.
 //!
-//! Git-index operations cross a boundary this attachment does not own, so that
-//! arm rejects them. Effect payloads are recorded by the writer ledger; this
-//! executor accepts enqueue, inbox, and acknowledge without a domain write so
-//! the ledger can persist that lifecycle.
+//! Outbox enqueue, dispatch, and acknowledgement are writer-ledger bookkeeping
+//! with no domain write, so this executor accepts them. Applying an inbox
+//! effect and git-index operations need a domain this attachment does not own,
+//! so those arms reject them.
 
 mod attachment;
 mod configuration;
+mod configuration_projection;
 mod configuration_receipt;
 mod diagnostics;
 mod external_source;
@@ -52,10 +53,15 @@ pub use attachment::{
     RepositoryWriterRuntimeSnapshot,
 };
 pub use configuration::ConfigurationExecutor;
+pub use configuration_projection::configuration_projection_statements;
 pub use configuration_receipt::{
     ADVANCE_COMPONENT_DESIRED_STATE_SQL, CONFIGURATION_ACTIVATION_DESIRED_RECORDED,
-    INSERT_CONFIGURATION_MUTATION_RECEIPT_SQL, advance_component_desired_state,
-    configuration_entry_layer, insert_mutation_receipt,
+    CONFIGURATION_PLAN_PAYLOAD_SCHEMA_VERSION, INSERT_CONFIGURATION_MUTATION_RECEIPT_SQL,
+    LATEST_COMPONENT_ACTIVATION_STATES_SQL, STORED_CHANGE_PLAN_SQL, StoredChangePlanColumns,
+    StoredComponentActivationState, StoredConfigurationPlanPayload,
+    StoredConfigurationProtectedOperationV1, advance_component_desired_state,
+    configuration_entry_layer, decode_stored_change_plan_row, decode_stored_change_plan_rows,
+    insert_mutation_receipt, validate_activation_error_code, validate_component_name,
 };
 pub use diagnostics::DiagnosticExecutor;
 pub use external_source::{EXTERNAL_SOURCE_SCHEMA_V1, ExternalSourceExecutor};
@@ -158,7 +164,8 @@ impl StorageOperationExecutor for ConcreteRepositoryWriteExecutor {
                 self.project
                     .execute_retrieval_anchor_derivative_write(savepoint, derivative)?;
             }
-            RepositoryWritePayloadV1::GitIndexTransaction(_) => {
+            RepositoryWritePayloadV1::GitIndexTransaction(_)
+            | RepositoryWritePayloadV1::ApplyInbox(_) => {
                 return Err(rusqlite::Error::InvalidParameterName(format!(
                     "repository attachment does not own {}",
                     payload.name()
@@ -166,7 +173,6 @@ impl StorageOperationExecutor for ConcreteRepositoryWriteExecutor {
                 .into());
             }
             RepositoryWritePayloadV1::EnqueueOutbox(_)
-            | RepositoryWritePayloadV1::ApplyInbox(_)
             | RepositoryWritePayloadV1::AcknowledgeOutbox(_) => {}
         }
         Ok(())

@@ -56,8 +56,8 @@ pub use graph::{
     CanonicalGraphStoreOwnerAttachmentV1, CanonicalGraphStoreOwnerRetirementTargetV1,
 };
 pub use leases::{
-    ProfileAuthorityPin, ProfileAuthorityPinResult, StoreRuntimeAccessMode,
-    StoreRuntimeLeaseAcquireResult, StoreRuntimeOpenMode, StoreRuntimeOpenRequest,
+    ProfileAuthorityPin, ProfileAuthorityPinResult, StoreRuntimeAccessMode, StoreRuntimeOpenMode,
+    StoreRuntimeOpenRequest,
 };
 #[cfg(test)]
 pub(crate) use open::StoreRuntimeOpenBegin;
@@ -1293,13 +1293,6 @@ pub enum StoreRuntimeRegistryFailure {
     ProfileAuthorityShardIsNotProfile {
         shard_id: Box<StoreShardIdV1>,
     },
-    InvalidLease {
-        message: String,
-    },
-    LeaseBindingMismatch {
-        expected: Box<StoreRuntimeBindingV1>,
-        actual: Box<StoreRuntimeBindingV1>,
-    },
     LeaseRejected {
         message: String,
     },
@@ -1675,31 +1668,12 @@ impl StoreRuntimeRegistry {
         let entries = sources
             .into_iter()
             .map(|source| {
-                let mut observation = source.runtime().observe(self.inner.config.eviction_idle());
-                let physical = source.physical_snapshot();
-                observation.health.writer_present |= physical.writer_present;
-                observation.health.queued_operations = observation
-                    .health
-                    .queued_operations
-                    .saturating_add(physical.queued_operations);
-                observation.health.queued_bytes = observation
-                    .health
-                    .queued_bytes
-                    .saturating_add(physical.queued_bytes);
-                if let Some(wal_bytes) = physical.wal_bytes {
-                    observation.health.wal_bytes = wal_bytes;
+                let observation = source.runtime().observe(self.inner.config.eviction_idle());
+                RuntimeRegistryInventoryEntry {
+                    health: observation.health,
+                    eviction: observation.eviction,
+                    physical: source.physical_snapshot(),
                 }
-                if let Some(memory_estimate_bytes) = physical.memory_estimate_bytes {
-                    observation.health.memory_estimate_bytes = memory_estimate_bytes;
-                }
-                if !physical.healthy
-                    && observation.health.health != super::shard::ShardRuntimeHealth::Faulted
-                {
-                    observation.health.health = super::shard::ShardRuntimeHealth::Degraded;
-                }
-                let mut entry = RuntimeRegistryInventoryEntry::from(observation);
-                entry.physical = physical;
-                entry
             })
             .collect();
         RuntimeRegistryInventory {
