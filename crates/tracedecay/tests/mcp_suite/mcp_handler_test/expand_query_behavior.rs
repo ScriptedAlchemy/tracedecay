@@ -353,3 +353,50 @@ async fn lcm_expand_query_reports_a_truncated_block_inside_the_context_budget() 
 
     server.shutdown().await;
 }
+
+const KIWI_SESSION: &str = "kiwi-session";
+const KIWI_PROSE: &str = "kiwi decision: ship the orchard importer on Friday";
+const KIWI_LISTING: &str =
+    "kiwi orchard files:\nsrc/orchard/mod.rs\nsrc/orchard/importer.rs\nsrc/orchard/schedule.rs";
+
+/// A base64 thinking-signature blob is machine noise and never reaches the
+/// assembled context or the synthesis prompt; readable text, including a
+/// directory listing, still does.
+#[tokio::test]
+async fn lcm_expand_query_filters_signature_blobs_from_the_context() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let signature = "EqQBCkYIBxgCKkBQ7mZ3vT9xR2aLk8sN0pYw4uJ1cHfD6gE5bM".repeat(4);
+    let blob = format!("kiwi signature {signature}");
+    let prose =
+        seed_temporal_lcm_session_message(&cg, KIWI_SESSION, "kiwi-prose", KIWI_PROSE, 1).await;
+    let noise = seed_temporal_lcm_session_message(&cg, KIWI_SESSION, "kiwi-blob", &blob, 2).await;
+    let listing =
+        seed_temporal_lcm_session_message(&cg, KIWI_SESSION, "kiwi-listing", KIWI_LISTING, 3).await;
+    let db = open_active_project_session_db(&cg).await;
+    activate_test_temporal_generation(&db, KIWI_SESSION, vec![prose, noise, listing]).await;
+    let server = real_mcp_server(cg).await;
+
+    let payload = expand_query(
+        &server,
+        KIWI_SESSION,
+        "What did we decide about the kiwi orchard?",
+        "kiwi",
+        json!([]),
+    )
+    .await;
+
+    let mut contents: Vec<&str> = payload["context_blocks"]
+        .as_array()
+        .expect("context blocks")
+        .iter()
+        .map(|block| block["content"].as_str().expect("block content"))
+        .collect();
+    contents.sort_unstable();
+    assert_eq!(contents, vec![KIWI_PROSE, KIWI_LISTING], "{payload}");
+    let synthesis = payload["synthesis_prompt"]["user"]
+        .as_str()
+        .expect("synthesis prompt");
+    assert!(!synthesis.contains(&signature), "{synthesis}");
+
+    server.shutdown().await;
+}

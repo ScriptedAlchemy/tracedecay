@@ -105,6 +105,45 @@ pub fn is_inventory_text(text: &str) -> bool {
     is_branch_inventory(&lower)
 }
 
+/// True when a context block is machine noise rather than readable text: a
+/// base64/hex thinking-signature blob or comparable binary-ish payload. Such
+/// blocks never help answer a query and only waste the synthesis budget.
+///
+/// Prose never contains an unbroken ~160-char run of pure base64/hex-alphabet
+/// characters, whereas signature blobs are exactly that. Whitespace-delimited
+/// tokens are checked so URLs and paths, whose separators break the alphabet,
+/// are never misclassified.
+pub fn is_noise_block_content(content: &str) -> bool {
+    const NOISE_TOKEN_MIN_CHARS: usize = 160;
+    let trimmed = content.trim();
+    if trimmed.len() < NOISE_TOKEN_MIN_CHARS {
+        return false;
+    }
+    trimmed
+        .split_whitespace()
+        .any(|token| token_is_signature_blob(token, NOISE_TOKEN_MIN_CHARS))
+}
+
+fn token_is_signature_blob(token: &str, min_chars: usize) -> bool {
+    if token.chars().count() < min_chars {
+        return false;
+    }
+    let mut has_lower = false;
+    let mut has_upper = false;
+    let mut has_digit = false;
+    for c in token.chars() {
+        if !(c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '-' | '_')) {
+            return false;
+        }
+        has_lower |= c.is_ascii_lowercase();
+        has_upper |= c.is_ascii_uppercase();
+        has_digit |= c.is_ascii_digit();
+    }
+    // Real base64 entropy mixes case and digits. A run of one repeated
+    // character, long padding or a giant single-case word is not a blob.
+    has_lower && has_upper && has_digit
+}
+
 fn derived_text_with_cap(raw: &str, max_chars: usize) -> String {
     if raw.chars().count() <= max_chars {
         return raw.to_string();
@@ -268,6 +307,22 @@ mod tests {
             normalized_content_identity("open pull requests to fix"),
             normalized_content_identity("open pull requests to review")
         );
+    }
+
+    #[test]
+    fn only_high_entropy_base64_tokens_are_noise_blocks() {
+        let blob = "Ab3Cd9Ef2Gh7Jk1Lm5".repeat(10);
+        assert!(is_noise_block_content(&format!("signature {blob}")));
+        assert!(!is_noise_block_content(&"a".repeat(200)));
+        assert!(!is_noise_block_content(&"ABC123".repeat(40)));
+        assert!(!is_noise_block_content(&format!(
+            "see https://example.com/{}",
+            "Ab3/Cd9.Ef2?".repeat(20)
+        )));
+        assert!(!is_noise_block_content(&format!(
+            "{} ",
+            "Ab3Cd9Ef2 ".repeat(30)
+        )));
     }
 
     #[test]
