@@ -3,9 +3,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use serde_json::{Value, json};
-use tracedecay_agent_hosts::hooks::{
-    codex_apply_patch_rel_paths, cursor_session_start_json, native_capture_material,
-};
+use tracedecay_agent_hosts::hooks::{cursor_session_start_json, native_capture_material};
 use tracedecay_agent_hosts::ports::hook_runtime;
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::NativeHostIdentityV1;
@@ -13,18 +11,6 @@ use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{ProjectId, UtcMicros};
 use tracedecay_hooks::{DaemonHookEvent, NativeHookCaptureSourceV1, NativeHookDecodeError};
 use tracedecay_runtime_core::config::ProfileRoot;
-use tracedecay_runtime_core::storage::StoreLayout;
-
-#[test]
-fn codex_apply_patch_paths_stay_inside_the_project() {
-    let project_root = Path::new("/workspace/project");
-    let command = "*** Begin Patch\n*** Update File: src/lib.rs\n*** Add File: ../secret.txt\n*** Move to: src/moved.rs\n*** End Patch";
-
-    assert_eq!(
-        codex_apply_patch_rel_paths(command, project_root, project_root),
-        ["src/lib.rs", "src/moved.rs"]
-    );
-}
 
 #[test]
 fn cursor_session_behavior_preserves_workspace_identity() {
@@ -117,17 +103,6 @@ async fn two_hook_runtime_handles_coexist_without_first_registration_wins() {
         fn initialized(_: &ProfileRoot, _: &Path) -> bool {
             false
         }
-        fn layout<'a>(
-            _: &'a ProfileRoot,
-            _: &'a Path,
-        ) -> Pin<Box<dyn Future<Output = tracedecay_domain::errors::Result<StoreLayout>> + Send + 'a>>
-        {
-            Box::pin(async {
-                Err(TraceDecayError::Config {
-                    message: "fixture has no store layout".to_owned(),
-                })
-            })
-        }
         hook_runtime::HookRuntimeV1 {
             profile,
             daemon_tool,
@@ -136,7 +111,6 @@ async fn two_hook_runtime_handles_coexist_without_first_registration_wins() {
             event_notifier: notify,
             timing_gate,
             project_initialization_gate: initialized,
-            store_layout_resolver: layout,
         }
     }
     fn timings_on(_: &ProfileRoot, _: &Path) -> Option<bool> {

@@ -157,6 +157,17 @@ pub fn load_json_file_strict(path: &Path) -> Result<serde_json::Value> {
     JsonConfigDialect::Json.parse_for_edit(path, &contents)
 }
 
+/// Exact bytes of a host config file, or `None` when it does not exist.
+pub(crate) fn read_optional_config_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(TraceDecayError::Config {
+            message: format!("failed to read {}: {error}", path.display()),
+        }),
+    }
+}
+
 /// Write a JSON value to a file via atomic rename.
 ///
 /// # Strategy

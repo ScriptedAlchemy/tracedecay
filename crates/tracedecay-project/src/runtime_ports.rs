@@ -107,7 +107,6 @@ pub fn hook_runtime_with(
         event_notifier: daemon_client.event_notifier,
         timing_gate: hook_timings_enabled,
         project_initialization_gate: crate::project::TraceDecay::is_initialized_in_profile,
-        store_layout_resolver: resolve_hook_store_layout,
     }
 }
 
@@ -223,23 +222,6 @@ fn hook_timings_enabled(profile: &ProfileRoot, project_root: &Path) -> Option<bo
         .map(|telemetry| telemetry.timings)
 }
 
-fn resolve_hook_store_layout<'a>(
-    profile: &'a ProfileRoot,
-    project_root: &'a Path,
-) -> Pin<Box<dyn Future<Output = Result<tracedecay_runtime_core::storage::StoreLayout>> + Send + 'a>>
-{
-    Box::pin(tracing::Instrument::instrument(
-        async move {
-            crate::project::TraceDecay::resolve_store_layout_for_identity_with_options(
-                project_root,
-                &crate::project::TraceDecayOpenOptions::for_profile(profile),
-            )
-            .await
-        },
-        tracing::trace_span!("runtime_ports.resolve_store_layout"),
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,39 +248,17 @@ mod tests {
         let profile = ProfileRoot::under_home(profile_home.path());
         let runtime = hook_runtime(profile.clone()).expect("registered daemon client");
         let unregistered = tempfile::tempdir().expect("tempdir");
-        // The layout keeps the caller's spelling of the root, so hand it the
-        // canonical form up front: macOS temp roots live behind the
-        // `/var` -> `/private/var` symlink.
-        let checkout = unregistered
-            .path()
-            .canonicalize()
-            .expect("canonical checkout");
+        let checkout = unregistered.path();
 
-        assert!(!(runtime.project_initialization_gate)(&profile, &checkout));
+        assert!(!(runtime.project_initialization_gate)(&profile, checkout));
         assert!(
-            (runtime.project_root_resolver)(&profile, &checkout)
+            (runtime.project_root_resolver)(&profile, checkout)
                 .await
                 .is_none()
         );
         assert!(
-            (runtime.timing_gate)(&profile, &checkout).is_none(),
+            (runtime.timing_gate)(&profile, checkout).is_none(),
             "an unregistered checkout has no published telemetry override"
-        );
-        let layout = (runtime.store_layout_resolver)(&profile, &checkout)
-            .await
-            .expect("the root resolves a canonical layout for any checkout");
-        assert_eq!(layout.project_root, checkout);
-        let project_id = layout
-            .identity
-            .project_id
-            .expect("the layout carries a project identity");
-        let again = (runtime.store_layout_resolver)(&profile, &checkout)
-            .await
-            .expect("the same checkout resolves again");
-        assert_eq!(
-            again.identity.project_id,
-            Some(project_id),
-            "one checkout resolves to one stable project identity"
         );
     }
 }
