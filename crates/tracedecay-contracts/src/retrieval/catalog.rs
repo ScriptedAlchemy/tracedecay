@@ -441,7 +441,7 @@ fn clone_family_surface_bindings(
 fn primitive_read_description(operation: &str) -> &'static str {
     match operation {
         "code_signature_search" => {
-            "Find functions and methods by signature shape: `returns` (return-type substring), `params` (substrings that must all appear in the parameter list), or `is_async`; narrow with `scope.path_prefix`. At least one filter is required. Use symbol search for name or concept searches."
+            "Find functions and methods by signature shape: return-type substring `returns`, parameter substrings `params` (all must appear), or `is_async`, narrowed by `scope.path_prefix`. At least one filter is required. Use signature to read one known symbol's signature, and code_symbol_search for name or concept searches."
         }
         "code_implementations" => {
             "Find every type implementing a trait (`selector: {\"selector\": \"trait\", \"name\": ...}`) or every function or method with a name (`selector: {\"selector\": \"method\", \"name\": ...}`). Each match carries its exact source body. Use type_hierarchy to traverse extends and implements relationships from a known node ID."
@@ -459,7 +459,7 @@ fn primitive_read_description(operation: &str) -> &'static str {
             "Return retrieval anchors for one exact session ID from the mounted session store. Use message_search when you need to find session content rather than look up a known session."
         }
         "qualified_name" => {
-            "Resolve an exact qualified symbol name to matching symbol records and node IDs, including ambiguous matches. Use code_symbol_search for partial names or concepts."
+            "Resolve one exact, case-sensitive qualified name to every matching symbol record and node ID, up to 10000, including ambiguous matches. The required `page` never splits the result. Use find_exact_symbol for a bare name and code_symbol_search for partial names or concepts."
         }
         "call_chain" => {
             "Find the shortest Calls path between two symbol node IDs, bounded by maximum depth. Obtain node IDs from code_symbol_search, qualified_name, or another graph read; use code_callers for an inbound neighborhood."
@@ -1335,7 +1335,7 @@ pub(crate) fn symbol_search_contribution_with(
         routing: RoutingContractV1::new(
             1,
             "Search symbols",
-            "Search the admitted single-root query symbol evidence.",
+            "Find indexed symbols whose simple or qualified name contains `query` (case-insensitive), exact simple-name hits first and then source order, with node IDs for graph reads. Use search for ranked discovery over bodies, signatures, paths, and docs.",
             vec!["Find this symbol".to_owned()],
         )?,
         request_schema: request_schema.clone(),
