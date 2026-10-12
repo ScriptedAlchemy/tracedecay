@@ -490,10 +490,3 @@ export function jobScheduleWord(job: Pick<AutomationJob, 'schedule' | 'interval_
   if (job.schedule == null || job.schedule === '') return 'manual';
   return job.schedule;
 }
-
-/** `task_key` → the job id it names, or null for a built-in task. */
-export function jobIdFromTaskKey(taskKey: string | null): string | null {
-  if (taskKey === null || !taskKey.startsWith('user_job:')) return null;
-  const id = taskKey.slice('user_job:'.length);
-  return id.length > 0 ? id : null;
-}

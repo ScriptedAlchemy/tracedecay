@@ -69,10 +69,6 @@ export function setMotionPreference(next: MotionPreference): void {
   for (const listener of listeners) listener();
 }
 
-export function getMotionPreference(): MotionPreference {
-  return readStored();
-}
-
 /** Resolve a preference against the OS setting. Exported for tests. */
 export function resolveReducedMotion(
   preference: MotionPreference,

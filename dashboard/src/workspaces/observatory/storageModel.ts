@@ -8,7 +8,6 @@ import type {
   StoreGrowthDimensionV1,
   TableGrowthDimensionV1,
   TableGrowthOmissionV1,
-  DashboardLegalActionRefV1,
 } from '../../contracts/generated.ts';
 
 const FINDING_LABELS: Partial<Record<DoctorStorageFindingKindV1, string>> = {
@@ -49,10 +48,6 @@ export function storageSourcePresentation(status: StorageFindingKindStatusV1): {
     default:
       return assertNever(status.state);
   }
-}
-
-export function refreshOperation(actions: DashboardLegalActionRefV1[]): string | undefined {
-  return actions.find((action) => action.kind === 'refresh')?.operation;
 }
 
 /** Visual tone for a dimension row. `unset` is deliberately its own tone: a
@@ -253,11 +248,4 @@ export function storeRolesLabel(roles: string[]): string {
 export function formatBytes(bytes: number | null): string {
   const { value, unit } = splitSignedBytes(bytes);
   return unit ? `${value} ${unit}` : value;
-}
-
-/** Growth is signed on the wire; a shrinking store must read as a shrink and an
- * unchanged store must not read as "grew by nothing measured". */
-export function formatSignedBytes(bytes: number): string {
-  if (bytes === 0) return 'no size change';
-  return `${bytes > 0 ? '+' : '−'}${formatBytes(Math.abs(bytes))}`;
 }

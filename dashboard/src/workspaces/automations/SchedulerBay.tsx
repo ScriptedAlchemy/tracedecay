@@ -6,7 +6,6 @@ import type {
   AutomationTaskStatusV1,
   AutomationRunRowV1,
 } from '../../contracts/generated.ts';
-import type { SchedulerControlResult } from '../../data/query/automation.ts';
 import { scopeWriteSentence, type ScopeWritability } from '../../data/scope/store.ts';
 import { cn } from '../../ui/cn';
 import { Panel, ReadoutBar, type ReadoutItem } from '../../ui/instrument.tsx';
