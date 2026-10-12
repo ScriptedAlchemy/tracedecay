@@ -529,4 +529,143 @@ exit 0"#;
             "the refusal must name the Codex-owned state it protected: {message}"
         );
     }
+
+    /// Body for a fake `codex` whose registry rewrites only the
+    /// `[mcp_servers.tracedecay]` table and keeps every other byte in place.
+    #[cfg(unix)]
+    const FAKE_TABLE_SCOPED_REGISTRY_BODY: &str = r#"config="$HOME/.codex/config.toml"
+/bin/mkdir -p "$HOME/.codex"
+: >> "$config"
+/usr/bin/awk '/^\[/ { owned = ($0 == "[mcp_servers.tracedecay]") } !owned' "$config" > "$config.next"
+if [ "$1 $2" = "mcp add" ]; then
+  printf '[mcp_servers.tracedecay]\ncommand = "%s"\nargs = ["serve"]\n' "$7" >> "$config.next"
+fi
+/bin/mv "$config.next" "$config"
+exit 0"#;
+
+    /// One receipt-backed component-set transaction for a Codex MCP-only
+    /// selection, through the production registration authority.
+    #[cfg(unix)]
+    fn run_mcp_only_selection(
+        home: &Path,
+        lifecycle: &Path,
+        selection: HostComponentV1,
+        operation: crate::agents::host_bundle::HostBundleLifecycleOpV1,
+        operation_id: u8,
+        tracedecay_bin: &str,
+    ) -> Result<(), crate::agents::host_bundle::HostBundleError> {
+        use crate::agents::host_bundle::{
+            HostBundleWriterV1, HostComponentSetExecutionRequestV1,
+            HostComponentSetLifecycleRequestV1, HostComponentSetTransactionV1, HostKindV1,
+        };
+
+        let selected =
+            crate::agents::host_bundle_registry::verified_embedded_host_component_set_with_tracedecay_bin(
+                HostKindV1::Codex,
+                &[selection],
+                0,
+                tracedecay_bin,
+                crate::agents::TEST_GENERATOR_COMMIT,
+            )
+            .unwrap();
+        let request = HostComponentSetExecutionRequestV1 {
+            lifecycle: HostComponentSetLifecycleRequestV1 {
+                operation,
+                expected_host: HostKindV1::Codex,
+                expected_components: selected
+                    .component_set
+                    .components
+                    .iter()
+                    .map(|component| component.manifest.component)
+                    .collect(),
+                explicit_confirmation: true,
+                hermes_profile_bindings: 0,
+                explicit_adoption: false,
+            },
+            operation_id: [operation_id; 16],
+        };
+        let mut writer = HostBundleWriterV1::open_with_lifecycle_root(home, lifecycle).unwrap();
+        let mut registration =
+            crate::agents::host_component_registration::CatalogHostComponentRegistrationAuthority::new_with_tracedecay_bin(
+                &tracedecay_runtime_core::config::ProfileRoot::under_home(home),
+                "codex",
+                home,
+                operation,
+                tracedecay_bin.to_string(),
+            )
+            .unwrap();
+        HostComponentSetTransactionV1::new(&mut writer)
+            .execute(
+                &selected.component_set,
+                &request,
+                &selected,
+                &mut registration,
+            )
+            .map(drop)
+    }
+
+    #[cfg(unix)]
+    fn tracedecay_servers(config_path: &Path) -> Vec<String> {
+        let Ok(text) = std::fs::read_to_string(config_path) else {
+            return Vec::new();
+        };
+        let config: toml::Table = toml::from_str(&text).unwrap();
+        config
+            .get(CODEX_MCP_SERVERS_KEY)
+            .and_then(toml::Value::as_table)
+            .map(|servers| servers.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// A fresh MCP-only install ends with exactly one standalone server that
+    /// launches the installed binary, beside the operator's own servers, and
+    /// its uninstall removes only that server.
+    #[cfg(unix)]
+    #[test]
+    fn mcp_only_lifecycle_owns_exactly_one_standalone_server() {
+        use crate::agents::host_bundle::HostBundleLifecycleOpV1;
+
+        const BIN: &str = "/opt/tracedecay/bin/tracedecay";
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let bin_dir = tempfile::tempdir().unwrap();
+        fake_codex_cli(
+            &bin_dir.path().join("codex"),
+            &bin_dir.path().join("invocations.log"),
+            FAKE_TABLE_SCOPED_REGISTRY_BODY,
+        );
+        let _codex_cli =
+            tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(bin_dir.path());
+        let config_path = codex_config_path(home.path());
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        let operator = "[mcp_servers.other]\ncommand = \"other\"\n\n";
+        std::fs::write(&config_path, operator).unwrap();
+
+        run_mcp_only_selection(
+            home.path(),
+            lifecycle.path(),
+            HostComponentV1::ContextMcp,
+            HostBundleLifecycleOpV1::Install,
+            50,
+            BIN,
+        )
+        .expect("a fresh MCP-only install verifies its standalone server");
+
+        assert_eq!(tracedecay_servers(&config_path), ["other", "tracedecay"]);
+        let config: toml::Table =
+            toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(server_command(&config, "tracedecay"), Some(BIN));
+
+        run_mcp_only_selection(
+            home.path(),
+            lifecycle.path(),
+            HostComponentV1::ContextMcp,
+            HostBundleLifecycleOpV1::Uninstall,
+            51,
+            BIN,
+        )
+        .expect("the MCP-only uninstall verifies the server is gone");
+
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), operator);
+    }
 }
