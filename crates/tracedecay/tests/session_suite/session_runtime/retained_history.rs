@@ -524,11 +524,9 @@ async fn retained_history_worker_wakes_again_after_idle() {
             ingestor.clone(),
         )
         .await;
-    assert!(
-        registry
-            .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
-            .await
-    );
+    registry
+        .wait_profile_idle(authority.database().db_path())
+        .await;
     assert_eq!(ingestor.passes.load(Ordering::Acquire), 1);
 
     let second = registry
@@ -546,11 +544,9 @@ async fn retained_history_worker_wakes_again_after_idle() {
         )
         .await
     );
-    assert!(
-        registry
-            .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
-            .await
-    );
+    registry
+        .wait_profile_idle(authority.database().db_path())
+        .await;
 
     registry.shutdown().await;
 }
@@ -575,11 +571,9 @@ async fn blocked_history_is_not_rewoken_by_ensure() {
             ingestor.clone(),
         )
         .await;
-    assert!(
-        registry
-            .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
-            .await
-    );
+    registry
+        .wait_profile_idle(authority.database().db_path())
+        .await;
     assert_eq!(ingestor.passes.load(Ordering::Acquire), 1);
     assert_eq!(
         first.serving_status().state,
@@ -639,11 +633,9 @@ async fn history_only_retry_does_not_admit_projection_snapshots() {
             ingestor.clone(),
         )
         .await;
-    assert!(
-        registry
-            .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
-            .await
-    );
+    registry
+        .wait_profile_idle(authority.database().db_path())
+        .await;
     let baseline_projection_calls = projector.calls.load(Ordering::Acquire);
     assert!(baseline_projection_calls > 0);
 
@@ -668,11 +660,9 @@ async fn history_only_retry_does_not_admit_projection_snapshots() {
     );
 
     ingestor.release_third.notify_waiters();
-    assert!(
-        registry
-            .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
-            .await
-    );
+    registry
+        .wait_profile_idle(authority.database().db_path())
+        .await;
     assert_eq!(
         projector.calls.load(Ordering::Acquire),
         after_explicit_wake,
@@ -736,11 +726,9 @@ async fn worker_restart_retains_historical_ingest_owner() {
         )
         .await
     );
-    assert!(
-        registry
-            .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
-            .await
-    );
+    registry
+        .wait_profile_idle(authority.database().db_path())
+        .await;
 
     registry.shutdown().await;
 }
@@ -819,12 +807,9 @@ async fn saturated_history_admission_defers_the_pass_and_resumes() {
         0,
         "a saturated admission must not run the historical pass"
     );
-    assert!(
-        registry
-            .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
-            .await,
-        "the worker keeps serving between deferred history retries"
-    );
+    registry
+        .wait_profile_idle(authority.database().db_path())
+        .await;
     assert_eq!(ingestor.passes.load(Ordering::Acquire), 0);
 
     drop(held);
@@ -836,11 +821,9 @@ async fn saturated_history_admission_defers_the_pass_and_resumes() {
         .await,
         "the deferred pass must run once a permit frees"
     );
-    assert!(
-        registry
-            .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
-            .await
-    );
+    registry
+        .wait_profile_idle(authority.database().db_path())
+        .await;
 
     registry.shutdown().await;
 }
@@ -886,12 +869,9 @@ async fn a_saturated_history_pass_runs_with_the_permit_its_queue_turn_grants() {
         )
         .await
     );
-    assert!(
-        registry
-            .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
-            .await,
-        "the refused worker waits in the admission queue"
-    );
+    registry
+        .wait_profile_idle(authority.database().db_path())
+        .await;
 
     let next_waiter = tokio::spawn(Arc::clone(&admission).acquire_owned());
     tokio::task::yield_now().await;
@@ -990,12 +970,9 @@ async fn blocked_cursor_failure_projects_healthy_provider_progress_once_across_r
         .await,
         "the initial historical sweep must run"
     );
-    assert!(
-        registry
-            .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
-            .await,
-        "healthy provider progress must request temporal projection even while Cursor is blocked"
-    );
+    registry
+        .wait_profile_idle(authority.database().db_path())
+        .await;
     assert_eq!(
         wake.serving_status().state,
         SessionProjectionServingState::Stale {
@@ -1050,11 +1027,9 @@ async fn blocked_cursor_failure_projects_healthy_provider_progress_once_across_r
         .await,
         "the restarted worker must replay the retained historical source"
     );
-    assert!(
-        restarted
-            .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
-            .await
-    );
+    restarted
+        .wait_profile_idle(authority.database().db_path())
+        .await;
     assert_eq!(
         restarted_wake.serving_status().state,
         SessionProjectionServingState::Stale {
