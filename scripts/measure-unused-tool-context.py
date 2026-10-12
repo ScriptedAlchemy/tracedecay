@@ -71,6 +71,7 @@ import re
 import subprocess
 import sys
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -666,6 +667,7 @@ def main() -> int:
     parser.add_argument("--providers", help="comma-separated provider filter, e.g. claude,codex,kimi")
     parser.add_argument("--storage-scope", default="project", choices=("project", "user"))
     parser.add_argument("--max-sessions", type=int, default=0, help="0 = no limit")
+    parser.add_argument("--jobs", type=int, default=4, help="sessions loaded concurrently (each load is a chain of CLI calls)")
     parser.add_argument("--json", type=Path, help="write aggregate rows and coverage as JSON")
     parser.add_argument("--examples", type=int, default=0, help="print N sanitized scored calls per tool (path/symbol keys only; no source quotes)")
     args = parser.parse_args()
@@ -687,28 +689,34 @@ def main() -> int:
     if args.max_sessions:
         ordered = ordered[: args.max_sessions]
 
+    def load(key: tuple[str, str]) -> list[dict] | ToolProblem:
+        try:
+            return load_messages(client, key[0], key[1], args.storage_scope)
+        except ToolProblem as problem:
+            return problem
+
     coverage: Counter = Counter()
     by_provider: dict[str, Counter] = defaultdict(Counter)
     reports: list[CallReport] = []
-    for number, (provider, session) in enumerate(ordered, 1):
-        stats = by_provider[provider]
-        stats["discovered"] += 1
-        try:
-            messages = load_messages(client, provider, session, args.storage_scope)
-        except ToolProblem as problem:
-            stats["unreadable:" + problem.code.rsplit(".", 1)[-1]] += 1
-            continue
-        if not messages:
-            stats["empty"] += 1
-            continue
-        stats["loaded"] += 1
+    with ThreadPoolExecutor(max(1, args.jobs)) as pool:
+        # map yields in discovery order while later sessions keep loading.
+        for number, ((provider, session), messages) in enumerate(zip(ordered, pool.map(load, ordered)), 1):
+            stats = by_provider[provider]
+            stats["discovered"] += 1
+            if isinstance(messages, ToolProblem):
+                stats["unreadable:" + messages.code.rsplit(".", 1)[-1]] += 1
+                continue
+            if not messages:
+                stats["empty"] += 1
+                continue
+            stats["loaded"] += 1
 
-        found, unpaired = analyze(events_from_messages(messages), session)
-        coverage["calls_without_result"] += unpaired
-        if found:
-            stats["with_tracedecay_calls"] += 1
-        reports += found
-        print(f"[{number}/{len(ordered)}] {provider} {len(messages)} messages, {len(found)} tracedecay calls", file=sys.stderr)
+            found, unpaired = analyze(events_from_messages(messages), session)
+            coverage["calls_without_result"] += unpaired
+            if found:
+                stats["with_tracedecay_calls"] += 1
+            reports += found
+            print(f"[{number}/{len(ordered)}] {provider} {len(messages)} messages, {len(found)} tracedecay calls", file=sys.stderr)
 
     rows = aggregate(reports)
     coverage["sessions_with_calls"] = len({report.session for report in reports})
