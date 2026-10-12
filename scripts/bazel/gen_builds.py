@@ -118,6 +118,7 @@ TEST_DATA = {
     ("tracedecay-cli", "core_cli_suite"): [
         "//:product_git_sha",
         ":build-support/source_provenance.rs",
+        ":build-support/source_provenance_git.rs",
         ":build-support/watched_input_file.rs",
     ],
     ("tracedecay-cli", "tracedecay_unit_test"): ["//:.github/release-targets.json"],

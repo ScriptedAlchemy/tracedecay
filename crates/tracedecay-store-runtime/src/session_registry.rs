@@ -379,6 +379,44 @@ impl ProjectRuntimeOwnerRegistryV1 {
         }
     }
 
+    /// Waits for the mounted project memory owner's background graph open to
+    /// settle. Returns `false` when this map holds no runtime for the project,
+    /// so no mount owns its graph shard.
+    async fn wait_for_memory_graph(&self, project_id: &ProjectId) -> Result<bool> {
+        let waiter = {
+            let entries = self.lock().map_err(|_| {
+                session_registry_error(
+                    "await project memory graph",
+                    "project runtime owner map lock is poisoned".to_owned(),
+                )
+            })?;
+            match entries.get(project_id) {
+                None => return Ok(false),
+                Some(ProjectRuntimeOwnerStateV1::Ready(owners)) => owners
+                    .memory
+                    .as_ref()
+                    .map(|owner| (Arc::clone(&owner.graph), Arc::clone(&owner.graph_settled))),
+                Some(_) => None,
+            }
+        };
+        let Some((graph, graph_settled)) = waiter else {
+            return Ok(true);
+        };
+        loop {
+            let notified = graph_settled.notified();
+            let warming = matches!(
+                &*graph
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+                MemoryGraphAttachmentStateV1::Warming { .. }
+            );
+            if !warming {
+                return Ok(true);
+            }
+            notified.await;
+        }
+    }
+
     fn take_unattached_session_owner(
         &self,
         project_id: &ProjectId,
@@ -650,6 +688,7 @@ impl ProjectSessionRetirementOwnerV1 {
 struct MemoryStoreOwnerV1 {
     database: DatabaseOwnerWeakLeaseIssuerV1,
     graph: Arc<StdMutex<MemoryGraphAttachmentStateV1>>,
+    graph_settled: Arc<tokio::sync::Notify>,
     graph_open_task_key: String,
 }
 

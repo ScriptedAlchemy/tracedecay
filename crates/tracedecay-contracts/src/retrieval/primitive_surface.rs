@@ -260,6 +260,10 @@ pub struct ContextSearchMatchV1 {
     pub exact_class: String,
     pub rank: u32,
     pub utility_micros: u64,
+    /// Lexical anchors, the caller's and then the task's identifiers, whose
+    /// route ranked this match; the anchor receipt counts it as returned.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub anchors: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
