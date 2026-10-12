@@ -485,6 +485,20 @@ impl CodeGraphProjectionStore {
         self.interactive_catalog.release()
     }
 
+    /// Retry `release` once the last live graph reader on this store drops:
+    /// a park release that found catalog or engine `Busy` under a read
+    /// re-runs from that drain instead of stranding the owners it could not
+    /// free. When no reader is live the read that held them already ended,
+    /// so the release runs now.
+    pub fn park_release_after_reads_drain(&self, release: Arc<dyn Fn() + Send + Sync>) {
+        if let Some(release) = self
+            .interactive_catalog
+            .park_release_after_reads_drain(release)
+        {
+            release();
+        }
+    }
+
     /// What a graph read would find right now: warm, or the warming state it
     /// would answer because the engine or the catalog is not resident.
     pub fn serving_warmth(&self) -> Result<CodeGraphServingWarmthV1, CodeGraphProjectionError> {

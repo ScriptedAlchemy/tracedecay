@@ -106,6 +106,12 @@ pub(super) struct InteractiveCatalogCache {
     /// read turns every later catalog lookup into the typed warming answer
     /// the reader could not have waited out.
     readers: std::sync::atomic::AtomicUsize,
+    /// One-shot retry a park release armed when a live read answered Busy:
+    /// without it the catalog and engine it could not free would stay
+    /// resident until an unrelated release ran. The last reader's lease drop
+    /// takes and runs it; while armed it is also the drain of record, so an
+    /// arm that lands after the drain would strand nothing newer.
+    park_release_on_reads_drain: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     clock: Arc<WarmClock>,
 }
 
@@ -132,9 +138,23 @@ impl InteractiveCatalogReaderLeaseV1 {
 
 impl Drop for InteractiveCatalogReaderLeaseV1 {
     fn drop(&mut self) {
-        self.cache
+        if self
+            .cache
             .readers
-            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
+            != 1
+        {
+            return;
+        }
+        let release = self
+            .cache
+            .park_release_on_reads_drain
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(release) = release {
+            release();
+        }
     }
 }
 
@@ -191,7 +211,29 @@ impl InteractiveCatalogCache {
             scan_builds: std::sync::atomic::AtomicUsize::new(0),
             ready_bytes: std::sync::atomic::AtomicU64::new(0),
             readers: std::sync::atomic::AtomicUsize::new(0),
+            park_release_on_reads_drain: Mutex::new(None),
             clock,
+        }
+    }
+
+    /// Arm `release` for the moment the last live reader drops, when a park
+    /// release that answered `Busy` under this cache's reads runs again.
+    /// With no reader live there is no drain to wait on, so the armed
+    /// release is handed back for the caller to run now; either way exactly
+    /// one run happens and the slot is free for the next arm.
+    pub(super) fn park_release_after_reads_drain(
+        &self,
+        release: Arc<dyn Fn() + Send + Sync>,
+    ) -> Option<Arc<dyn Fn() + Send + Sync>> {
+        let mut armed = self
+            .park_release_on_reads_drain
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *armed = Some(release);
+        if self.readers.load(std::sync::atomic::Ordering::Acquire) == 0 {
+            armed.take()
+        } else {
+            None
         }
     }
 

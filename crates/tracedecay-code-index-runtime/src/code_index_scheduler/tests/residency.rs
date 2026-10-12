@@ -1684,11 +1684,13 @@ async fn a_refused_refresh_waits_for_a_release_without_passive_reads_holding_its
     registry.shutdown().await;
 }
 
-/// A serving graph an open read held Busy while a refresh waits on resident
-/// memory is freed by the park release instead, and that release announces
-/// as headroom other owners gave back, so the parked headroom reader counts
-/// it as the waiting refresh's retry rather than the worktree's own release
-/// (issue #3588 follow-up: the decode the retry reloads stays the
+/// An open read holds the serving graph's catalog and engine Busy through a
+/// park release while a refresh waits on resident memory, so nothing
+/// announces while it reads. The drain retry armed on that Busy runs when
+/// the read's last lease drops, frees the owners, and announces their
+/// release as headroom other owners gave back — the parked headroom reader
+/// counts it as the waiting refresh's retry rather than the worktree's own
+/// release (issue #3588 follow-up: the decode the retry reloads stays the
 /// worktree's own).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_parked_serving_graph_release_retries_the_refresh_waiting_on_it() {
@@ -1743,20 +1745,34 @@ async fn a_parked_serving_graph_release_retries_the_refresh_waiting_on_it() {
     registry
         .set_refresh_waits_for_memory_for_test(fixture.path(), true)
         .await;
+    drop(pass);
 
-    // The read finishing lets the park release free the whole serving
-    // graph. Its headroom is the refused refresh's retry.
+    // The open read holds the catalog and engine Busy through the park
+    // release, so nothing is freed or announced while it reads: the armed
+    // drain retry is what lets their release reach the refused refresh.
     let released_by_others = registry
         .park_headroom_released_by_others_for_test(fixture.path())
         .await;
+    registry
+        .release_decode_when_parked_for_test(fixture.path())
+        .await;
+    for _ in 0..4 {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert_eq!(
+            registry
+                .park_headroom_released_by_others_for_test(fixture.path())
+                .await,
+            released_by_others,
+            "the read still holds the graph owners Busy, so no release announces"
+        );
+    }
+
+    // The read ending drains its holds into the armed retry: the park
+    // release it resumes frees the serving graph and announces it as
+    // headroom other owners gave back — the refused refresh's retry.
     drop(reader);
-    drop(pass);
-    // A release claimed busy still announces once the pass settles.
     let announce_deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        registry
-            .release_decode_when_parked_for_test(fixture.path())
-            .await;
         let seen = registry
             .park_headroom_released_by_others_for_test(fixture.path())
             .await;
