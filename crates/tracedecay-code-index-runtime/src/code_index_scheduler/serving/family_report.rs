@@ -6,7 +6,7 @@ use tracedecay_code_index::clones::{
 use tracedecay_code_index::production::{CodeIndexExecutionControlV1, CodeIndexInterruptionV1};
 use tracedecay_contracts::retrieval::{
     RedundancyCoverageV1, RedundancyFamilyV1, RedundancyPartialReasonV1, RedundancyRankingV1,
-    RedundancyResultV1, SimilarFamilyV1, SimilarMatchClassV1, SimilarOccurrenceV1,
+    RedundancyResultV1, SimilarFamilyV1, SimilarMatchClassV1,
 };
 use tracedecay_domain::canonical_sha256;
 use tracedecay_query::code_search::{CodeIndexRedundancyQueryV1, CodeIndexRedundancyScopeV1};
@@ -111,11 +111,11 @@ impl ProductionCodeIndexQueryOwnersV1 {
             work_spent = work_spent.saturating_add(read.work_spent);
             examined_members = examined_members.saturating_add(read.work_spent);
             let mut members = Vec::with_capacity(read.members.len().saturating_add(1));
-            members.push(similar_occurrence(&source.occurrence));
+            members.push(source.occurrence.similar_occurrence());
             members.extend(
                 read.members
                     .iter()
-                    .map(|member| similar_occurrence(&member.occurrence)),
+                    .map(|member| member.occurrence.similar_occurrence()),
             );
             work_exhausted |= read.work_exhausted;
             report_continuation = Some(candidate.continuation);
@@ -282,21 +282,6 @@ fn is_generated_path(path: &str) -> bool {
                     .is_some_and(tracedecay_domain::is_generated_dir_segment)
         )
     })
-}
-
-fn similar_occurrence(
-    occurrence: &tracedecay_code_index::clones::CloneBodyOccurrenceV1,
-) -> SimilarOccurrenceV1 {
-    SimilarOccurrenceV1 {
-        project_id: occurrence.project_id.clone(),
-        repository_id: occurrence.repository_id.clone(),
-        worktree_id: occurrence.worktree_id.clone(),
-        source_generation: occurrence.source_generation.clone(),
-        snapshot_digest: occurrence.snapshot_digest.clone(),
-        symbol_occurrence_id: occurrence.symbol_occurrence_id.clone(),
-        path: occurrence.path.clone(),
-        body_span: occurrence.body_span,
-    }
 }
 
 fn redundancy_coverage(
