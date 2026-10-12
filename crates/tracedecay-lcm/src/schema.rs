@@ -76,6 +76,9 @@ pub const RAW_MESSAGE_UNPUBLISHED_SQL: &str = "NOT EXISTS (
 
 const MIGRATION_NAME: &str = "lcm";
 
+const RETIRE_LEGACY_GREP_INDEX_SQL: &str =
+    "DROP INDEX IF EXISTS idx_lcm_raw_direct_user_candidate;";
+
 /// Indexes that keep expensive LCM reads off the message-body table pages.
 ///
 /// `lcm_status` aggregates whole-store counts on every probe. Without these
@@ -101,7 +104,7 @@ pub const LCM_STATUS_PERFORMANCE_INDEX_SQL: &[&str] = &[
            AND json_type(metadata_json, '$.ingest_protection.lossy') = 'true';",
     // Only the retired SQL LCM grep engine read this index; dropping it keeps
     // user-message writes from maintaining it.
-    "DROP INDEX IF EXISTS idx_lcm_raw_direct_user_candidate;",
+    RETIRE_LEGACY_GREP_INDEX_SQL,
     // The byte-count variant covers the status COUNT+SUM without touching
     // payload metadata rows and fully supersedes the plain owner index
     // (same leading columns), so the replacement and the drop commit as one
@@ -381,6 +384,7 @@ pub async fn ensure_lcm_schema_in_transaction(
 ) -> Result<(), LcmError> {
     match require_admissible_lcm_schema(conn).await? {
         LcmSchemaAdmission::Current => {
+            conn.execute_batch(RETIRE_LEGACY_GREP_INDEX_SQL).await?;
             conn.execute_batch(CANONICAL_BODIES_TABLE_SQL).await?;
             ensure_raw_identity_schema(conn).await?;
             ensure_payload_gc_candidates(conn).await?;
@@ -1040,7 +1044,7 @@ mod tests {
     /// superseded plain payload owner index is gone, its replacement covers
     /// the same leading columns.
     #[tokio::test]
-    async fn fresh_schema_installs_status_performance_indexes() -> Result<(), String> {
+    async fn schema_installs_current_indexes_and_retires_legacy_grep_index() -> Result<(), String> {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let conn = TestConnection::open(&temp.path().join("sessions.db"));
         conn.execute_batch(
@@ -1093,6 +1097,48 @@ mod tests {
                 .map_err(|error| error.to_string())?,
             "fresh LCM schema is missing the bounded native-range lookup index"
         );
+        conn.execute_batch(
+            "CREATE INDEX idx_lcm_raw_direct_user_candidate
+             ON lcm_raw_messages(provider, store_id) WHERE role = 'user';
+             INSERT INTO sessions(provider, session_id, project_key, project_path)
+             VALUES ('cursor', 'session-1', 'project-1', '/fixture');",
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        conn.execute(
+            "INSERT INTO lcm_raw_messages(provider, message_id, session_id, role,
+                ordinal, content, content_hash, storage_kind)
+             VALUES ('cursor', 'message-1', 'session-1', 'user', 1, ?1, ?2, 'inline')",
+            params!["retained source", projected_content_hash("retained source")],
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        ensure_lcm_schema(&conn)
+            .await
+            .map_err(|error| error.to_string())?;
+        assert!(
+            !schema_object_exists(&*conn, "idx_lcm_raw_direct_user_candidate")
+                .await
+                .map_err(|error| error.to_string())?,
+            "a current-schema store must retire the legacy grep index too"
+        );
+        let mut rows = conn
+            .query(
+                "SELECT content FROM lcm_raw_messages WHERE message_id = 'message-1'",
+                params![],
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| error.to_string())?
+            .expect("retained row");
+        assert_eq!(
+            row.get::<String>(0).map_err(|error| error.to_string())?,
+            "retained source"
+        );
+        drop(rows);
         conn.execute_batch("DROP TABLE lcm_raw_predecessor_ranges;")
             .await
             .map_err(|error| error.to_string())?;

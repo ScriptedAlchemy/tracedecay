@@ -366,14 +366,19 @@ const KIWI_LISTING: &str =
 async fn lcm_expand_query_filters_signature_blobs_from_the_context() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let signature = "EqQBCkYIBxgCKkBQ7mZ3vT9xR2aLk8sN0pYw4uJ1cHfD6gE5bM".repeat(4);
-    let blob = format!("kiwi signature {signature}");
+    let blob = signature.clone();
+    let mixed =
+        format!("kiwi migration keeps the validated receipt. Diagnostic signature: {signature}");
     let prose =
         seed_temporal_lcm_session_message(&cg, KIWI_SESSION, "kiwi-prose", KIWI_PROSE, 1).await;
     let noise = seed_temporal_lcm_session_message(&cg, KIWI_SESSION, "kiwi-blob", &blob, 2).await;
     let listing =
         seed_temporal_lcm_session_message(&cg, KIWI_SESSION, "kiwi-listing", KIWI_LISTING, 3).await;
+    let mixed_source =
+        seed_temporal_lcm_session_message(&cg, KIWI_SESSION, "kiwi-mixed", &mixed, 4).await;
     let db = open_active_project_session_db(&cg).await;
-    activate_test_temporal_generation(&db, KIWI_SESSION, vec![prose, noise, listing]).await;
+    activate_test_temporal_generation(&db, KIWI_SESSION, vec![prose, noise, listing, mixed_source])
+        .await;
     let server = real_mcp_server(cg).await;
 
     let payload = expand_query(
@@ -392,11 +397,56 @@ async fn lcm_expand_query_filters_signature_blobs_from_the_context() {
         .map(|block| block["content"].as_str().expect("block content"))
         .collect();
     contents.sort_unstable();
-    assert_eq!(contents, vec![KIWI_PROSE, KIWI_LISTING], "{payload}");
+    let mut expected = vec![KIWI_PROSE, KIWI_LISTING, mixed.as_str()];
+    expected.sort_unstable();
+    assert_eq!(contents, expected, "{payload}");
     let synthesis = payload["synthesis_prompt"]["user"]
         .as_str()
         .expect("synthesis prompt");
-    assert!(!synthesis.contains(&signature), "{synthesis}");
+    assert!(synthesis.contains(&mixed), "{synthesis}");
+    let signature_hits = handle_real_server_tool_call(
+        &server,
+        "tracedecay_lcm_grep",
+        json!({
+            "provider": "cursor",
+            "scope": "session",
+            "session_id": KIWI_SESSION,
+            "query": signature,
+            "limit": 5,
+        }),
+    )
+    .await;
+    let signature_hits: Value =
+        serde_json::from_str(extract_real_server_text(&signature_hits)).expect("signature hits");
+    assert_eq!(signature_hits["status"], "partial", "{signature_hits}");
+    let mut signature_ids: Vec<_> = signature_hits["hits"]
+        .as_array()
+        .expect("signature hit list")
+        .iter()
+        .map(|hit| hit["message_id"].as_str().expect("message identity"))
+        .collect();
+    signature_ids.sort_unstable();
+    assert_eq!(
+        signature_ids,
+        vec!["kiwi-blob", "kiwi-mixed"],
+        "{signature_hits}"
+    );
+    let signature_context = expand_query(
+        &server,
+        KIWI_SESSION,
+        "Which verified receipt accompanies this signature?",
+        &signature,
+        json!([]),
+    )
+    .await;
+    let signature_blocks = signature_context["context_blocks"]
+        .as_array()
+        .expect("signature context blocks");
+    assert_eq!(signature_blocks.len(), 1, "{signature_context}");
+    assert_eq!(
+        signature_blocks[0]["content"], mixed,
+        "the pure signature must be filtered while its prose-bearing counterpart survives: {signature_context}"
+    );
 
     server.shutdown().await;
 }

@@ -105,23 +105,15 @@ pub fn is_inventory_text(text: &str) -> bool {
     is_branch_inventory(&lower)
 }
 
-/// True when a context block is machine noise rather than readable text: a
-/// base64/hex thinking-signature blob or comparable binary-ish payload. Such
-/// blocks never help answer a query and only waste the synthesis budget.
-///
-/// Prose never contains an unbroken ~160-char run of pure base64/hex-alphabet
-/// characters, whereas signature blobs are exactly that. Whitespace-delimited
-/// tokens are checked so URLs and paths, whose separators break the alphabet,
-/// are never misclassified.
+/// Recognizes a whole block shaped as one long base64 signature token.
+/// Readable evidence containing such a token remains eligible for retrieval.
 pub fn is_noise_block_content(content: &str) -> bool {
     const NOISE_TOKEN_MIN_CHARS: usize = 160;
     let trimmed = content.trim();
     if trimmed.len() < NOISE_TOKEN_MIN_CHARS {
         return false;
     }
-    trimmed
-        .split_whitespace()
-        .any(|token| token_is_signature_blob(token, NOISE_TOKEN_MIN_CHARS))
+    token_is_signature_blob(trimmed, NOISE_TOKEN_MIN_CHARS)
 }
 
 fn token_is_signature_blob(token: &str, min_chars: usize) -> bool {
@@ -312,7 +304,7 @@ mod tests {
     #[test]
     fn only_high_entropy_base64_tokens_are_noise_blocks() {
         let blob = "Ab3Cd9Ef2Gh7Jk1Lm5".repeat(10);
-        assert!(is_noise_block_content(&format!("signature {blob}")));
+        assert!(is_noise_block_content(&blob));
         assert!(!is_noise_block_content(&"a".repeat(200)));
         assert!(!is_noise_block_content(&"ABC123".repeat(40)));
         assert!(!is_noise_block_content(&format!(
@@ -323,6 +315,17 @@ mod tests {
             "{} ",
             "Ab3Cd9Ef2 ".repeat(30)
         )));
+    }
+
+    #[test]
+    fn noise_filter_keeps_prose_with_a_signature() {
+        let signature = "Ab3Cd9Ef2Gh7Jk1Lm5".repeat(10);
+        let prose =
+            format!("Keep the verified migration decision. Diagnostic signature: {signature}");
+        assert!(
+            !is_noise_block_content(&prose),
+            "a signature token must not discard readable evidence"
+        );
     }
 
     #[test]
