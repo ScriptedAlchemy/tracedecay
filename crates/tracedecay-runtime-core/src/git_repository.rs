@@ -7,6 +7,7 @@ use std::collections::{BTreeSet, HashMap};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, PoisonError};
 
 use gix::bstr::ByteSlice as _;
@@ -121,6 +122,18 @@ pub struct GitRepositoryTopologyV1 {
 #[derive(Default)]
 struct CheckoutTopologySlot {
     state: Mutex<CheckoutTopologyState>,
+    /// [`CHECKOUT_TOPOLOGY_USES`] tick of the last lookup; a full memo drops
+    /// the slot with the oldest tick.
+    last_used: AtomicU64,
+}
+
+impl CheckoutTopologySlot {
+    fn touch(&self) {
+        self.last_used.store(
+            CHECKOUT_TOPOLOGY_USES.fetch_add(1, Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+    }
 }
 
 #[derive(Default)]
@@ -185,18 +198,22 @@ impl TopologyWalk {
 
 /// Retained checkout-root topologies.
 ///
-/// Bounded by [`MAX_RETAINED_CHECKOUT_TOPOLOGIES`]; a full map is cleared
-/// rather than evicted by age, because every entry is a pure memo that costs
-/// one discovery to rebuild.
+/// Bounded by [`MAX_RETAINED_CHECKOUT_TOPOLOGIES`]; a full map drops its least
+/// recently used settled slot. Clearing it whole instead let a burst of
+/// one-off probes evict the roots a daemon keeps serving, so a deferred route
+/// on a slow volume walked again instead of converging.
 static CHECKOUT_TOPOLOGY: LazyLock<Mutex<HashMap<PathBuf, Arc<CheckoutTopologySlot>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+static CHECKOUT_TOPOLOGY_USES: AtomicU64 = AtomicU64::new(0);
 
 /// A daemon serves few project roots; this bound exists so a long-lived
 /// process that probes many paths cannot grow the memo without limit.
 const MAX_RETAINED_CHECKOUT_TOPOLOGIES: usize = 64;
 
 /// Last branch read from each Git directory's HEAD, keyed by that file's
-/// identity. Bounded and cleared like [`CHECKOUT_TOPOLOGY`].
+/// identity. Bounded like [`CHECKOUT_TOPOLOGY`] but cleared whole when full:
+/// an entry costs one HEAD read to rebuild, not a discovery walk.
 static HEAD_BRANCHES: LazyLock<Mutex<HeadBranchMemo>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -416,6 +433,7 @@ fn retained_checkout_topology(path: &Path) -> Option<Arc<GitRepositoryTopologyV1
             .unwrap_or_else(PoisonError::into_inner)
             .get(path)?,
     );
+    slot.touch();
     live_ready_topology(&slot)
 }
 
@@ -424,14 +442,35 @@ fn checkout_topology_slot(path: &Path) -> Arc<CheckoutTopologySlot> {
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
     if let Some(slot) = slots.get(path) {
+        slot.touch();
         return Arc::clone(slot);
     }
     if slots.len() >= MAX_RETAINED_CHECKOUT_TOPOLOGIES {
-        slots.clear();
+        evict_least_recently_used_settled_slot(&mut slots);
     }
     let slot = Arc::new(CheckoutTopologySlot::default());
+    slot.touch();
     slots.insert(path.to_path_buf(), Arc::clone(&slot));
     slot
+}
+
+/// Drop the least recently used slot whose walk has settled. A slot with a
+/// walk in flight stays, because its owner publishes into that slot and an
+/// evicted one would discard the answer. `try_lock` skips a slot another
+/// thread holds, since that thread may be waiting for this map lock.
+fn evict_least_recently_used_settled_slot(slots: &mut HashMap<PathBuf, Arc<CheckoutTopologySlot>>) {
+    let victim = slots
+        .iter()
+        .filter(|(_, slot)| {
+            slot.state
+                .try_lock()
+                .is_ok_and(|state| !matches!(*state, CheckoutTopologyState::Resolving(_)))
+        })
+        .min_by_key(|(_, slot)| slot.last_used.load(Ordering::Relaxed))
+        .map(|(path, _)| path.clone());
+    if let Some(victim) = victim {
+        slots.remove(&victim);
+    }
 }
 
 /// Whether a retained checkout-root topology still describes the filesystem.
