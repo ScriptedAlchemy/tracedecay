@@ -11,6 +11,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::LazyLock;
 
 use tracedecay_application::observability::record_adoption_eligibility;
 use tracedecay_contracts::{
@@ -49,8 +50,18 @@ fn adoption_family(capability_id: &str) -> Option<&'static str> {
 
 /// Enumerates the complete composed catalog into per-family eligibility
 /// observations. Only families with a non-zero eligible population appear.
+///
+/// The catalog is built from `const` descriptors, so the census is taken once
+/// per process rather than on every project open.
 #[tracing::instrument(name = "daemon.adoption.census", level = "trace", skip_all)]
 pub fn adoption_eligibility_census()
+-> Result<Vec<AdoptionEligibilityObservedV1>, ApplicationContractError> {
+    static CENSUS: LazyLock<Result<Vec<AdoptionEligibilityObservedV1>, ApplicationContractError>> =
+        LazyLock::new(take_adoption_eligibility_census);
+    CENSUS.clone()
+}
+
+fn take_adoption_eligibility_census()
 -> Result<Vec<AdoptionEligibilityObservedV1>, ApplicationContractError> {
     let contributions = application_catalog_contributions()?;
     let default_profile = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)?;

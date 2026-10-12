@@ -91,12 +91,10 @@ canonical_id!(
 );
 canonical_id!(RuntimeOperationPermitIdV1, "runtime operation permit id");
 canonical_id!(RuntimeTransactionIdV1, "runtime transaction id");
-// Application-layer effect and idempotency identities cannot be imported here:
-// `tracedecay-store` deliberately depends only on `tracedecay-domain`. These
-// names make the storage ownership explicit, while the checked string
+// Application-layer idempotency identities cannot be imported here:
+// `tracedecay-store` deliberately depends only on `tracedecay-domain`. This
+// name makes the storage ownership explicit, while the checked string
 // conversions above provide the lossless adapter boundary.
-canonical_id!(StoreEffectIdV1, "store effect id");
-canonical_id!(StoreEffectOrderingKeyV1, "store effect ordering key");
 canonical_id!(StoreIdempotencyKeyV1, "store idempotency key");
 
 pub(super) fn validate_canonical_id(

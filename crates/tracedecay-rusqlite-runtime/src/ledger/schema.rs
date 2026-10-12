@@ -34,75 +34,15 @@ CREATE TABLE IF NOT EXISTS td_runtime_writer_idempotency_v2 (
     committed_at_micros INTEGER NOT NULL,
     PRIMARY KEY (shard_json, incarnation, authority_epoch, idempotency_key)
 ) WITHOUT ROWID;
-
-CREATE TABLE IF NOT EXISTS td_runtime_writer_outbox_v1 (
-    source_shard_json TEXT NOT NULL,
-    source_incarnation INTEGER NOT NULL CHECK (source_incarnation > 0),
-    source_authority_epoch INTEGER NOT NULL CHECK (source_authority_epoch > 0),
-    effect_id TEXT NOT NULL,
-    ordering_key TEXT NOT NULL,
-    source_sequence INTEGER NOT NULL CHECK (source_sequence >= 0),
-    state TEXT NOT NULL CHECK (
-        state IN ('pending', 'dispatched', 'effect_unknown', 'acknowledged')
-    ),
-    entry_json TEXT NOT NULL,
-    source_receipt_json TEXT NOT NULL,
-    transaction_scope_json TEXT NOT NULL,
-    operation_id TEXT NOT NULL,
-    durability_json TEXT NOT NULL,
-    updated_at_micros INTEGER NOT NULL,
-    PRIMARY KEY (source_shard_json, source_incarnation, source_authority_epoch, effect_id)
-) WITHOUT ROWID;
-
-CREATE INDEX IF NOT EXISTS td_runtime_writer_outbox_ordering_v1
-ON td_runtime_writer_outbox_v1 (
-    source_shard_json,
-    source_incarnation,
-    source_authority_epoch,
-    ordering_key,
-    source_sequence,
-    effect_id
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS td_runtime_writer_outbox_effect_v1
-ON td_runtime_writer_outbox_v1 (source_shard_json, effect_id);
-
-CREATE INDEX IF NOT EXISTS td_runtime_writer_outbox_state_v1
-ON td_runtime_writer_outbox_v1 (
-    source_shard_json,
-    source_incarnation,
-    source_authority_epoch,
-    state,
-    updated_at_micros
-);
-
-CREATE TABLE IF NOT EXISTS td_runtime_writer_inbox_v1 (
-    target_shard_json TEXT NOT NULL,
-    target_incarnation INTEGER NOT NULL CHECK (target_incarnation > 0),
-    target_authority_epoch INTEGER NOT NULL CHECK (target_authority_epoch > 0),
-    effect_id TEXT NOT NULL,
-    ordering_key TEXT NOT NULL,
-    source_sequence INTEGER NOT NULL CHECK (source_sequence >= 0),
-    target_sequence INTEGER NOT NULL CHECK (target_sequence > 0),
-    identity_json TEXT NOT NULL,
-    receipt_json TEXT NOT NULL,
-    committed_at_micros INTEGER NOT NULL,
-    PRIMARY KEY (target_shard_json, target_incarnation, target_authority_epoch, effect_id)
-) WITHOUT ROWID;
-
-CREATE INDEX IF NOT EXISTS td_runtime_writer_inbox_ordering_v1
-ON td_runtime_writer_inbox_v1 (
-    target_shard_json,
-    target_incarnation,
-    target_authority_epoch,
-    ordering_key,
-    source_sequence,
-    effect_id
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS td_runtime_writer_inbox_effect_v1
-ON td_runtime_writer_inbox_v1 (target_shard_json, effect_id);
 "#;
+
+/// Drops the transactional outbox and inbox tables, which no production code
+/// ever wrote. Registered stores run it on every schema install, so a store
+/// created before the retirement converges to the same shape as a fresh one.
+pub const RETIRE_RUNTIME_EFFECTS_V1: &str = "
+DROP TABLE IF EXISTS td_runtime_writer_outbox_v1;
+DROP TABLE IF EXISTS td_runtime_writer_inbox_v1;
+";
 
 /// Installs the runtime ledger tables.
 ///

@@ -262,14 +262,6 @@ pub struct CodeCloneIndexCoverageV1 {
     pub payloads_reused: Option<u64>,
     /// Conservative and rename-normalized exact posting rows.
     pub exact_postings: Option<u64>,
-    /// Eligible bodies represented by positional fingerprints.
-    pub near_fingerprint_bodies: Option<u64>,
-    /// Positional fingerprint posting rows retained by the artifact.
-    pub near_fingerprint_postings: Option<u64>,
-    /// Fingerprint posting lists above the interactive read threshold.
-    pub hot_postings_skipped: Option<u64>,
-    /// Positional rows omitted when those hot posting lists are skipped.
-    pub hot_posting_rows_skipped: Option<u64>,
     /// Bodies excluded because they are below the automatic-discovery minimum.
     pub excluded_too_small_bodies: Option<u64>,
     /// Bodies excluded because they exceed the automatic-discovery token maximum.
@@ -282,16 +274,10 @@ pub struct CodeCloneIndexCoverageV1 {
     pub rename_unsupported_bodies: Option<u64>,
 }
 
-/// Fixed per-request clone candidate and verification budgets.
+/// Fixed automatic clone-discovery limits.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct CodeCloneIndexBudgetsV1 {
-    pub posting_rows: u64,
-    pub candidate_bodies: u64,
-    pub verification_bodies: u64,
-    pub verification_token_work: u64,
-    pub hot_posting_rows: u64,
     pub minimum_body_tokens: u64,
-    pub minimum_directional_coverage_millionths: u64,
 }
 
 /// Measured resources and update accounting for one clone-index generation.
@@ -331,7 +317,7 @@ pub enum CodeCloneIndexStatusV1 {
         observation: CodeCloneIndexObservationV1,
         omission_reasons: Vec<String>,
     },
-    /// Required exact and fingerprint postings cover every eligible body.
+    /// Required exact postings cover every eligible body.
     Ready {
         observation: CodeCloneIndexObservationV1,
     },

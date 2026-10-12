@@ -31,7 +31,7 @@ Four default phases run against the real production pipeline with no daemon.
 | one-body refresh | the same, after one generated Java body changes structurally | clone payload recomputation and reuse |
 | sealed page drain | `VerifiedSealedLexicalPageSourceV1::next_page_batch_if` | `code_index.lexical_source.batch_stage` |
 | artifact ingest | `CodeLexicalArtifactBuilderV1::append_pages` | `query.artifact.append_pages`, `query.artifact.batch.*`, `query.artifact.finalization.advance_wake` |
-| clone reads | `CodeLexicalArtifactReaderV1` | first-reader and warm exact lookup, fingerprint accounting, cancellation, and reopen |
+| clone reads | `CodeLexicalArtifactReaderV1` | first-reader and warm exact lookup, and reopen |
 
 Read the report as service demand, not wall time: extraction runs on the
 rayon pool, so `code_index.extract.parser_artifact` totals CPU across
@@ -121,9 +121,8 @@ hauler exec -- cargo run --release -p tracedecay-query \
 
 The JSON result records source bytes, symbols, clone bodies, body tokens,
 language counts, artifact bytes, wall times, peak RSS, exact lookup samples,
-fingerprint accounting, cancellation, and restart. First-reader latency runs
-in the artifact writer process after finalization, so it does not claim a cold
-OS page cache. The one-body refresh is available for the committed generated
+and restart. First-reader latency runs in the artifact writer process after
+finalization, so it does not claim a cold OS page cache. The one-body refresh is available for the committed generated
 corpus. A custom corpus without the generated Java body reports that
 measurement as unavailable.
 

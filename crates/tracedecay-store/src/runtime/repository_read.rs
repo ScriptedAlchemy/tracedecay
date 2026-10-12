@@ -27,19 +27,18 @@ use crate::{
     RepositoryProvenanceAttachmentV1, RetrievalAnchorDerivativeV1,
     RetrievalAnchorDispositionRecordV1, RetrievalAnchorTombstoneV1, SourceAcquisitionQueueStateV1,
     SourceCommitReceiptSummaryV1, SourcePendingProjectionV1, SourceStoreStateV1,
-    StorageRuntimeContractErrorV1, StoreEffectIdV1, StoreRuntimeBindingV1, StoreShardIdV1,
-    StoreShardScopeV1, StoredFactV1, TransactionalInboxReceiptV1, TransactionalOutboxEntryV1,
+    StorageRuntimeContractErrorV1, StoreRuntimeBindingV1, StoreShardIdV1, StoreShardScopeV1,
+    StoredFactV1,
 };
 
 /// One repository read operation, dispatched across the profile, project,
-/// external-source, session, code, and effects families.
+/// external-source, session, and code families.
 ///
 /// This enum mirrors [`RepositoryWritePayloadV1`](crate::RepositoryWritePayloadV1)
 /// family for family: the write payload is a single closed enum spanning all
 /// typed families even though no single executor owns every family. The
-/// repository attachment executes profile/project/session and rejects
-/// code/effects (which the graph shard and the writer ledger own); the read
-/// contract keeps the same unified vocabulary with the same ownership split.
+/// repository attachment executes profile/project/session and rejects code
+/// (which the graph shard owns); the read contract keeps the same unified vocabulary with the same ownership split.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RepositoryReadOperationV1 {
@@ -47,7 +46,6 @@ pub enum RepositoryReadOperationV1 {
     Project(ProjectReadOperationV1),
     ExternalSource(ExternalSourceReadOperationV1),
     Code(CodeReadOperationV1),
-    Effects(EffectsReadOperationV1),
 }
 
 impl RepositoryReadOperationV1 {
@@ -73,7 +71,6 @@ impl RepositoryReadOperationV1 {
                 retrieval_owner_matches_shard(retrieval_read_owner(operation), &binding.shard_id)
             }
             Self::Code(operation) => code_read_matches_shard(operation, &binding.shard_id),
-            Self::Effects(operation) => effects_read_binding(operation) == binding,
         };
         if valid {
             Ok(())
@@ -211,15 +208,6 @@ fn code_read_matches_shard(operation: &CodeReadOperationV1, shard: &StoreShardId
     }
 }
 
-fn effects_read_binding(operation: &EffectsReadOperationV1) -> &StoreRuntimeBindingV1 {
-    match operation {
-        EffectsReadOperationV1::OutboxEntry { binding, .. }
-        | EffectsReadOperationV1::InboxReceipt { binding, .. } => binding,
-        EffectsReadOperationV1::OutboxPage(query) => &query.binding,
-        EffectsReadOperationV1::InboxPage(query) => &query.binding,
-    }
-}
-
 fn shard_family(scope: &StoreShardScopeV1) -> &'static str {
     match scope {
         StoreShardScopeV1::Profile => "profile",
@@ -240,7 +228,6 @@ pub enum RepositoryReadResultV1 {
     Project(Box<ProjectReadResultV1>),
     ExternalSource(ExternalSourceReadResultV1),
     Code(Box<CodeReadResultV1>),
-    Effects(Box<EffectsReadResultV1>),
 }
 
 /// Profile-family (configuration) read operations.
@@ -535,71 +522,6 @@ pub struct CodeRecoveryRepositoriesPageV1 {
     pub next: Option<RepositoryId>,
 }
 
-/// Effects-family (transactional outbox/inbox) read operations.
-///
-/// Point lookups mirror the ledger's `outbox_entry`/inbox receipt reads; the
-/// page walks are keyset-paginated because both ledger tables grow without
-/// bound. Outbox pages walk `(source_sequence, effect_id)` and inbox pages walk
-/// `(target_sequence, effect_id)`, the exact orderings the ledger indexes.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum EffectsReadOperationV1 {
-    OutboxEntry {
-        binding: StoreRuntimeBindingV1,
-        effect_id: StoreEffectIdV1,
-    },
-    OutboxPage(EffectsOutboxPageQueryV1),
-    InboxReceipt {
-        binding: StoreRuntimeBindingV1,
-        effect_id: StoreEffectIdV1,
-    },
-    InboxPage(EffectsInboxPageQueryV1),
-}
-
-/// Keyset-paginated request for a source shard's outbox entries.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EffectsOutboxPageQueryV1 {
-    pub binding: StoreRuntimeBindingV1,
-    /// Exclusive lower bound in `(source_sequence, effect_id)` order.
-    pub after: Option<EffectsOutboxCursorV1>,
-    /// Maximum entries returned. Zero yields an empty page.
-    pub limit: u32,
-}
-
-/// Keyset cursor into a source shard's outbox ordering.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EffectsOutboxCursorV1 {
-    pub source_sequence: u64,
-    pub effect_id: StoreEffectIdV1,
-}
-
-/// Keyset-paginated request for a target shard's inbox receipts.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EffectsInboxPageQueryV1 {
-    pub binding: StoreRuntimeBindingV1,
-    /// Exclusive lower bound in `(target_sequence, effect_id)` order.
-    pub after: Option<EffectsInboxCursorV1>,
-    /// Maximum receipts returned. Zero yields an empty page.
-    pub limit: u32,
-}
-
-/// Keyset cursor into a target shard's inbox ordering.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EffectsInboxCursorV1 {
-    pub target_sequence: u64,
-    pub effect_id: StoreEffectIdV1,
-}
-
-/// Effects-family read results.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum EffectsReadResultV1 {
-    OutboxEntry(Option<Box<TransactionalOutboxEntryV1>>),
-    OutboxPage(EffectsOutboxPageV1),
-    InboxReceipt(Option<Box<TransactionalInboxReceiptV1>>),
-    InboxPage(EffectsInboxPageV1),
-}
-
 #[cfg(test)]
 mod tests {
     use tracedecay_domain::{
@@ -713,7 +635,7 @@ mod tests {
     }
 
     #[test]
-    fn repository_code_and_effect_reads_cannot_cross_bound_runtime_identity() {
+    fn repository_code_reads_cannot_cross_bound_runtime_identity() {
         let repository_a = RepositoryId::new("repository.a").unwrap();
         let repository_b = RepositoryId::new("repository.b").unwrap();
         let code_binding = binding(
@@ -740,36 +662,5 @@ mod tests {
                 .to_string(),
             "operation repository read is incompatible with shard family code"
         );
-
-        let profile_binding = binding("profile.a", StoreShardScopeV1::Profile);
-        let mut wrong_binding = profile_binding.clone();
-        wrong_binding.authority_epoch = StoreAuthorityEpochV1::new(2).unwrap();
-        let effects = RepositoryReadOperationV1::Effects(EffectsReadOperationV1::OutboxEntry {
-            binding: wrong_binding,
-            effect_id: StoreEffectIdV1::new("effect.fixture").unwrap(),
-        });
-        assert_eq!(
-            effects
-                .validate_for_binding(&profile_binding)
-                .unwrap_err()
-                .to_string(),
-            "operation repository read is incompatible with shard family profile"
-        );
     }
-}
-
-/// One keyset page of outbox entries.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EffectsOutboxPageV1 {
-    pub entries: Vec<TransactionalOutboxEntryV1>,
-    /// Cursor to resume after the last returned entry, or `None` at the end.
-    pub next: Option<EffectsOutboxCursorV1>,
-}
-
-/// One keyset page of inbox receipts.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EffectsInboxPageV1 {
-    pub receipts: Vec<TransactionalInboxReceiptV1>,
-    /// Cursor to resume after the last returned receipt, or `None` at the end.
-    pub next: Option<EffectsInboxCursorV1>,
 }

@@ -1,9 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use sha2::{Digest, Sha256};
-use tracedecay_code_index::clones::{
-    CloneExactKeyV1, CloneFingerprintPositionV1, CloneNormalizationClassV1, CodeIndexCloneBodyV1,
-};
+use tracedecay_code_index::clones::{CloneExactKeyV1, CodeIndexCloneBodyV1};
 use tracedecay_code_index::production::{CodeIndexExecutionControlV1, VerifiedSealedLexicalPageV1};
 use tracedecay_domain::{ExactFieldV1, ManifestDigest, NodeKind};
 
@@ -120,15 +118,6 @@ pub(super) struct PreparedCloneBodyV1 {
     pub(super) body_start: u64,
     pub(super) body_end: u64,
     pub(super) exact_keys: Vec<CloneExactKeyV1>,
-    pub(super) fingerprint_stream: Option<PreparedCloneFingerprintStreamV1>,
-}
-
-#[derive(Debug)]
-pub(super) struct PreparedCloneFingerprintStreamV1 {
-    pub(super) language: String,
-    pub(super) class: CloneNormalizationClassV1,
-    pub(super) normalization_revision: u16,
-    pub(super) positions: Vec<CloneFingerprintPositionV1>,
 }
 
 #[derive(Debug)]
@@ -340,21 +329,6 @@ fn prepare_clone_body(
     metadata: &CodeLexicalProjectionMetadataV1,
     body: &CodeIndexCloneBodyV1,
 ) -> Result<PreparedCloneBodyV1, CodeLexicalArtifactErrorV1> {
-    let fingerprint_stream = body
-        .payload
-        .fingerprint_stream(body.occurrence.eligibility)
-        .map(|stream| {
-            Ok(PreparedCloneFingerprintStreamV1 {
-                language: body.payload.language.clone(),
-                class: stream.class,
-                normalization_revision: stream.normalization_revision,
-                positions: body
-                    .payload
-                    .fingerprint_positions(body.occurrence.eligibility)
-                    .map_err(CodeLexicalArtifactErrorV1::Contract)?,
-            })
-        })
-        .transpose()?;
     // Only content is stored; the opener's route supplies project,
     // repository, worktree, generation, and snapshot. A generation's file
     // pages name no worktree, so a body from another project or repository
@@ -382,7 +356,6 @@ fn prepare_clone_body(
         body_start: occurrence.body_span.start_byte,
         body_end: occurrence.body_span.end_byte,
         exact_keys: body.payload.exact_keys(occurrence.eligibility),
-        fingerprint_stream,
     })
 }
 
@@ -801,18 +774,6 @@ fn prepared_clone_body_retained_bytes(
                             .sum::<usize>(),
                     )
                 })
-                .and_then(|bytes| match &body.fingerprint_stream {
-                    Some(stream) => {
-                        bytes
-                            .checked_add(stream.language.capacity())
-                            .and_then(|bytes| {
-                                bytes.checked_add(stream.positions.capacity().saturating_mul(
-                                    std::mem::size_of::<CloneFingerprintPositionV1>(),
-                                ))
-                            })
-                    }
-                    None => Some(bytes),
-                })
                 .ok_or_else(prepared_charge_overflow)
         })
 }
@@ -884,13 +845,7 @@ fn estimated_clone_body_writes(
         .iter()
         .try_fold((0usize, 0usize), |(rows, bytes), body| {
             let rows = rows
-                .checked_add(
-                    2usize.saturating_add(body.exact_keys.len()).saturating_add(
-                        body.fingerprint_stream
-                            .as_ref()
-                            .map_or(0, |stream| stream.positions.len()),
-                    ),
-                )
+                .checked_add(2usize.saturating_add(body.exact_keys.len()))
                 .ok_or_else(prepared_write_overflow)?;
             let bytes = bytes
                 .checked_add(body.payload_digest.len().saturating_mul(2))
@@ -904,18 +859,6 @@ fn estimated_clone_body_writes(
                             .saturating_add(key.digest.as_str().len())
                             .saturating_add(16)
                     }))
-                })
-                .and_then(|bytes| match &body.fingerprint_stream {
-                    Some(stream) => bytes.checked_add(
-                        stream.positions.len().saturating_mul(
-                            stream
-                                .language
-                                .len()
-                                .saturating_add(body.symbol_occurrence_id.len())
-                                .saturating_add(32),
-                        ),
-                    ),
-                    None => Some(bytes),
                 })
                 .ok_or_else(prepared_write_overflow)?;
             Ok((rows, bytes))

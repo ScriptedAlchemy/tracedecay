@@ -4,19 +4,15 @@
 
 use std::collections::BTreeMap;
 
-use rusqlite::types::Value;
 use rusqlite::{Transaction, params};
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 
 use super::super::builder::stored_digest_key;
 use super::super::clone_codec::digest_key;
-use super::super::format::{
-    contract_number, decode_fingerprint_postings, encode_fingerprint_postings,
-};
+use super::super::format::contract_number;
 use super::super::prepared::PreparedCloneBodyV1;
 use super::super::row_codec::stored_symbol_key;
 use super::super::{CodeLexicalArtifactErrorV1, checkpoint, sqlite_error};
-use super::postings::{scan_window, transform_window};
 use super::{ReplacedFilesV1, ShiftV1, shift_rowid_keys, shifted};
 
 /// One successor clone body with the occurrence ordinal it takes.
@@ -89,7 +85,6 @@ pub(super) fn carry_clone_rows(
             }
         }
     }
-    carry_fingerprint_postings(transaction, clones, &bodies, control)?;
     transaction
         .execute(
             &format!(
@@ -164,150 +159,6 @@ fn clone_range_image(
         .checked_sub(1)
         .map_or(0, |previous| clones.growth[previous]);
     shifted(start, growth_before)
-}
-
-fn carry_fingerprint_postings(
-    transaction: &Transaction<'_>,
-    clones: &ShiftV1,
-    bodies: &[CarriedCloneV1<'_>],
-    control: &dyn CodeIndexExecutionControlV1,
-) -> Result<(), CodeLexicalArtifactErrorV1> {
-    type KeyV1 = (String, i64, i64, i64);
-    let mut additions = BTreeMap::<KeyV1, Vec<(u32, u32)>>::new();
-    for carried in bodies {
-        let Some(stream) = &carried.body.fingerprint_stream else {
-            continue;
-        };
-        let ordinal = u32::try_from(carried.ordinal).map_err(contract_number)?;
-        for position in &stream.positions {
-            additions
-                .entry((
-                    stream.language.clone(),
-                    i64::from(stream.class as u8),
-                    i64::from(stream.normalization_revision),
-                    i64::try_from(position.fingerprint).map_err(contract_number)?,
-                ))
-                .or_default()
-                .push((ordinal, position.token_position));
-        }
-    }
-    for postings in additions.values_mut() {
-        postings.sort_unstable();
-    }
-    let mut last: Option<KeyV1> = None;
-    loop {
-        checkpoint(control)?;
-        let window = scan_window(
-            transaction,
-            "SELECT language, class, normalization_revision, fingerprint, postings FROM clone_fingerprint_postings ORDER BY language, class, normalization_revision, fingerprint LIMIT ?1",
-            "SELECT language, class, normalization_revision, fingerprint, postings FROM clone_fingerprint_postings WHERE (language, class, normalization_revision, fingerprint) > (?1, ?2, ?3, ?4) ORDER BY language, class, normalization_revision, fingerprint LIMIT ?5",
-            &last,
-            |(language, class, revision, fingerprint)| {
-                vec![
-                    Value::Text(language.clone()),
-                    Value::Integer(*class),
-                    Value::Integer(*revision),
-                    Value::Integer(*fingerprint),
-                ]
-            },
-            |row| {
-                Ok((
-                    (
-                        row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, i64>(3)?,
-                    ),
-                    row.get::<_, Vec<u8>>(4)?,
-                ))
-            },
-        )?;
-        let Some((final_key, _)) = window.last() else {
-            break;
-        };
-        last = Some(final_key.clone());
-        let jobs: Vec<_> = window
-            .into_iter()
-            .map(|(key, stored)| {
-                let key_additions = additions.remove(&key).unwrap_or_default();
-                (key, stored, key_additions)
-            })
-            .collect();
-        let carried = transform_window(&jobs, |(_, stored, key_additions)| {
-            carry_fingerprint_row(stored, clones, key_additions)?
-                .map(|postings| {
-                    Ok::<_, CodeLexicalArtifactErrorV1>((
-                        i64::try_from(postings.len()).map_err(contract_number)?,
-                        (!postings.is_empty())
-                            .then(|| encode_fingerprint_postings(&postings))
-                            .transpose()?,
-                    ))
-                })
-                .transpose()
-        })?;
-        for ((key, _, _), sealed) in jobs.iter().zip(carried) {
-            let Some((posting_count, sealed)) = sealed else {
-                continue;
-            };
-            let Some(sealed) = sealed else {
-                transaction
-                    .execute(
-                        "DELETE FROM clone_fingerprint_postings WHERE language = ?1 AND class = ?2 AND normalization_revision = ?3 AND fingerprint = ?4",
-                        params![key.0, key.1, key.2, key.3],
-                    )
-                    .map_err(sqlite_error)?;
-                continue;
-            };
-            transaction
-                .execute(
-                    "UPDATE clone_fingerprint_postings SET posting_count = ?5, postings = ?6 WHERE language = ?1 AND class = ?2 AND normalization_revision = ?3 AND fingerprint = ?4",
-                    params![key.0, key.1, key.2, key.3, posting_count, sealed],
-                )
-                .map_err(sqlite_error)?;
-        }
-    }
-    for ((language, class, revision, fingerprint), postings) in additions {
-        checkpoint(control)?;
-        transaction
-            .execute(
-                "INSERT INTO clone_fingerprint_postings(language, class, normalization_revision, fingerprint, posting_count, postings) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    language,
-                    class,
-                    revision,
-                    fingerprint,
-                    i64::try_from(postings.len()).map_err(contract_number)?,
-                    encode_fingerprint_postings(&postings)?
-                ],
-            )
-            .map_err(sqlite_error)?;
-    }
-    Ok(())
-}
-
-/// One fingerprint's postings after the carry, or `None` when unchanged.
-fn carry_fingerprint_row(
-    stored: &[u8],
-    clones: &ShiftV1,
-    additions: &[(u32, u32)],
-) -> Result<Option<Vec<(u32, u32)>>, CodeLexicalArtifactErrorV1> {
-    let mut changed = !additions.is_empty();
-    let mut postings = Vec::new();
-    for (ordinal, position) in decode_fingerprint_postings(stored)? {
-        match clones.map_u32(ordinal)? {
-            Some(mapped) => {
-                changed |= mapped != ordinal;
-                postings.push((mapped, position));
-            }
-            None => changed = true,
-        }
-    }
-    if !changed {
-        return Ok(None);
-    }
-    postings.extend_from_slice(additions);
-    postings.sort_unstable();
-    Ok(Some(postings))
 }
 
 /// Number payloads by first use over the occurrence sequence, retire the

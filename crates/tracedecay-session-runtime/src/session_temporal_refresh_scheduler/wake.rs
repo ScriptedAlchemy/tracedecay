@@ -916,7 +916,7 @@ impl SessionTemporalRefreshWake {
             .unwrap_or_else(PoisonError::into_inner) = Arc::downgrade(state);
     }
 
-    #[cfg(any(test, feature = "test-helpers"))]
+    /// Two handles on one route bind and wake the same target together.
     pub fn same_route(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.route, &other.route)
     }

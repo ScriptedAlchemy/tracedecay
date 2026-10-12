@@ -1,9 +1,10 @@
 use sha2::{Digest, Sha256};
+use tracedecay_domain::CodeGenerationId;
 use tracedecay_store::{
     CommandDigestV1, RepositoryOperationEnvelopeV1, RepositoryWritePayloadV1,
     RuntimeBatchCompatibilityV1, RuntimeRequestControlV1, RuntimeSubmitRequestV1,
-    RuntimeTransactionIdV1, RuntimeTransactionScopeV1, StoreOperationMetadataV1,
-    StoreRuntimeBindingV1, TransactionalOutboxEntryV1,
+    RuntimeTransactionIdV1, RuntimeTransactionScopeV1, SanitizedCleanDiagnosticSnapshotV1,
+    StoreOperationMetadataV1, StoreRuntimeBindingV1,
 };
 
 pub(crate) fn digest(byte: char) -> CommandDigestV1 {
@@ -59,41 +60,8 @@ pub(crate) fn binding(metadata: &StoreOperationMetadataV1) -> StoreRuntimeBindin
     )
 }
 
-pub(crate) fn outbox(metadata: &StoreOperationMetadataV1) -> TransactionalOutboxEntryV1 {
-    serde_json::from_value(serde_json::json!({
-        "identity": {
-            "effect_id": format!("effect.{}", metadata.operation_id.as_str()),
-            "command_digest": digest('e'),
-            "ordering_key": "project.runtime.observations",
-            "source_watermark": {
-                "shard_id": metadata.shard_id,
-                "incarnation": metadata.incarnation,
-                "authority_epoch": metadata.authority_epoch,
-                "commit_sequence": 0
-            },
-            "target_watermark": {
-                "shard_id": {
-                    "brain_id": "brain.runtime",
-                    "profile_id": "profile.runtime",
-                    "scope": { "kind": "project_sessions", "project_id": "project.runtime" }
-                },
-                "incarnation": 1,
-                "authority_epoch": 7,
-                "commit_sequence": 0
-            }
-        },
-        "effect": "publish_observation",
-        "state": "pending",
-        "acknowledgement": null,
-        "enqueued_at": 1,
-        "updated_at": 1
-    }))
-    .unwrap()
-}
-
 pub(crate) fn request(metadata: StoreOperationMetadataV1) -> RuntimeSubmitRequestV1 {
     let transaction_scope = scope(&metadata);
-    let entry = outbox(&metadata);
     let control: RuntimeRequestControlV1 = serde_json::from_value(serde_json::json!({
         "requested_at": 1,
         "deadline": { "deadline_id": "deadline.runtime" },
@@ -103,7 +71,13 @@ pub(crate) fn request(metadata: StoreOperationMetadataV1) -> RuntimeSubmitReques
     RuntimeSubmitRequestV1::new(
         RepositoryOperationEnvelopeV1 {
             metadata,
-            payload: RepositoryWritePayloadV1::EnqueueOutbox(Box::new(entry)),
+            payload: RepositoryWritePayloadV1::Diagnostics(Box::new(
+                SanitizedCleanDiagnosticSnapshotV1::new(
+                    CodeGenerationId::new("generation.runtime").unwrap(),
+                    Vec::new(),
+                )
+                .unwrap(),
+            )),
         },
         transaction_scope,
         control,

@@ -382,6 +382,11 @@ pub fn required_string_list(
 fn partition_index_patterns(
     patterns: Vec<String>,
 ) -> (Vec<String>, Vec<ConfigurationSettingFindingV1>) {
+    // One set compiles when every member does; only a failing list needs the
+    // per-pattern compiles that name its invalid members.
+    if validate_index_path_patterns(&patterns).is_ok() {
+        return (patterns, Vec::new());
+    }
     let mut applied = Vec::with_capacity(patterns.len());
     let mut findings = Vec::new();
     for pattern in patterns {

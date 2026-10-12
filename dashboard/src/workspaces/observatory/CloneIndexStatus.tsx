@@ -114,33 +114,14 @@ function CloneIndexObservation({ observation }: { observation: CodeCloneIndexObs
         <Field label="prior payload reuse">{figure(coverage.payloads_reused)} occurrences</Field>
         <Field label="unique payloads">{figure(coverage.unique_payloads)}</Field>
         <Field label="exact postings">{figure(coverage.exact_postings)}</Field>
-        <Field label="near fingerprints">
-          {ratio(coverage.near_fingerprint_bodies, coverage.eligible_source_bodies)} ·{' '}
-          {figure(coverage.near_fingerprint_postings)} postings
-        </Field>
-        <Field label="hot postings skipped">
-          {figure(coverage.hot_postings_skipped)} lists ·{' '}
-          {figure(coverage.hot_posting_rows_skipped)} rows
-        </Field>
         <Field label="coverage exclusions">{coverageExclusionSummary(coverage)}</Field>
         <Field label="rename limitations">{renameLimitationSummary(coverage)}</Field>
       </dl>
       <div className="mt-2 grid gap-2 text-sm sm:grid-cols-2">
         <section className="rounded-[var(--radius-chip)] bg-surface-1 p-2">
-          <h3 className="font-medium text-text-secondary">Candidate and verification budgets</h3>
+          <h3 className="font-medium text-text-secondary">Discovery limits</h3>
           <p className="mt-1 text-text-muted">
-            {figure(observation.budgets.posting_rows)} posting rows ·{' '}
-            {figure(observation.budgets.candidate_bodies)} candidates ·{' '}
-            {figure(observation.budgets.verification_bodies)} body comparisons ·{' '}
-            {figure(observation.budgets.verification_token_work)} token work
-          </p>
-          <p className="mt-1 text-text-muted">
-            hot posting above {figure(observation.budgets.hot_posting_rows)} rows · minimum{' '}
-            {figure(observation.budgets.minimum_body_tokens)} tokens
-          </p>
-          <p className="mt-1 text-text-muted">
-            minimum directional coverage ·{' '}
-            {formatMillionths(observation.budgets.minimum_directional_coverage_millionths)}
+            minimum {figure(observation.budgets.minimum_body_tokens)} tokens
           </p>
         </section>
         <section className="rounded-[var(--radius-chip)] bg-surface-1 p-2">
@@ -196,8 +177,4 @@ function renameLimitationSummary(coverage: CodeCloneIndexCoverageV1): string {
     ['rename unsupported', coverage.rename_unsupported_bodies],
   ] as const;
   return values.map(([label, value]) => `${figure(value)} ${label}`).join(' · ');
-}
-
-function formatMillionths(value: number): string {
-  return `${(value / 10_000).toFixed(1)}%`;
 }

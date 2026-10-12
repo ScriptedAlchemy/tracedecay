@@ -7,56 +7,21 @@ use std::{error::Error, fmt};
 use rusqlite::Savepoint;
 use tracedecay_domain::ObservationSourceCursorV1;
 use tracedecay_store::{
-    CursorAdvanceLedgerDisagreementV1, OutboxEffectStateV1, RepositoryWritePayloadV1,
-    RuntimeSubmitRequestV1, StorageRuntimeContractErrorV1, TransactionalInboxReceiptV1,
-    TransactionalOutboxEntryV1,
+    CursorAdvanceLedgerDisagreementV1, RepositoryWritePayloadV1, RuntimeSubmitRequestV1,
+    StorageRuntimeContractErrorV1,
 };
 
 /// Executes one store-owned payload through the writer's request savepoint.
 ///
 /// The closed payload enum is the dispatch authority. Implementors do not echo
-/// receipt material, outbox data, byte estimates, or result digests back to the
-/// runtime; the validated request and ledger already own those values.
+/// receipt material, byte estimates, or result digests back to the runtime; the
+/// validated request and ledger already own those values.
 pub trait StorageOperationExecutor {
     fn execute(
         &mut self,
         savepoint: &Savepoint<'_>,
         payload: &RepositoryWritePayloadV1,
     ) -> rusqlite::Result<()>;
-
-    fn enqueue_outbox(
-        &mut self,
-        savepoint: &Savepoint<'_>,
-        entry: &TransactionalOutboxEntryV1,
-    ) -> rusqlite::Result<()> {
-        if entry.state == OutboxEffectStateV1::Pending {
-            self.execute(
-                savepoint,
-                &RepositoryWritePayloadV1::EnqueueOutbox(Box::new(entry.clone())),
-            )
-        } else {
-            Ok(())
-        }
-    }
-
-    fn apply_inbox(
-        &mut self,
-        savepoint: &Savepoint<'_>,
-        entry: &TransactionalOutboxEntryV1,
-    ) -> rusqlite::Result<()> {
-        self.execute(
-            savepoint,
-            &RepositoryWritePayloadV1::ApplyInbox(Box::new(entry.clone())),
-        )
-    }
-
-    fn acknowledge_outbox(
-        &mut self,
-        _savepoint: &Savepoint<'_>,
-        _receipt: &TransactionalInboxReceiptV1,
-    ) -> rusqlite::Result<()> {
-        Ok(())
-    }
 
     fn execute_closed(
         &mut self,
@@ -126,30 +91,6 @@ impl StorageOperationExecutor for Box<dyn StorageOperationExecutor + Send> {
         (**self).execute(savepoint, payload)
     }
 
-    fn enqueue_outbox(
-        &mut self,
-        savepoint: &Savepoint<'_>,
-        entry: &TransactionalOutboxEntryV1,
-    ) -> rusqlite::Result<()> {
-        (**self).enqueue_outbox(savepoint, entry)
-    }
-
-    fn apply_inbox(
-        &mut self,
-        savepoint: &Savepoint<'_>,
-        entry: &TransactionalOutboxEntryV1,
-    ) -> rusqlite::Result<()> {
-        (**self).apply_inbox(savepoint, entry)
-    }
-
-    fn acknowledge_outbox(
-        &mut self,
-        savepoint: &Savepoint<'_>,
-        receipt: &TransactionalInboxReceiptV1,
-    ) -> rusqlite::Result<()> {
-        (**self).acknowledge_outbox(savepoint, receipt)
-    }
-
     fn execute_closed(
         &mut self,
         savepoint: &Savepoint<'_>,
@@ -165,16 +106,5 @@ pub(crate) fn execute<E: StorageOperationExecutor>(
     executor: &mut E,
 ) -> Result<(), StorageOperationError> {
     validation::validate(request).map_err(StorageOperationError::Contract)?;
-    match &request.envelope().payload {
-        RepositoryWritePayloadV1::EnqueueOutbox(entry) => executor
-            .enqueue_outbox(savepoint, entry)
-            .map_err(StorageOperationError::Native),
-        RepositoryWritePayloadV1::ApplyInbox(entry) => executor
-            .apply_inbox(savepoint, entry)
-            .map_err(StorageOperationError::Native),
-        RepositoryWritePayloadV1::AcknowledgeOutbox(receipt) => executor
-            .acknowledge_outbox(savepoint, receipt)
-            .map_err(StorageOperationError::Native),
-        payload => executor.execute_closed(savepoint, payload),
-    }
+    executor.execute_closed(savepoint, &request.envelope().payload)
 }

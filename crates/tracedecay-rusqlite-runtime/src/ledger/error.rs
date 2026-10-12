@@ -23,13 +23,9 @@ pub(crate) enum LedgerError {
     SequenceExhausted,
     ConcurrentCheckpointUpdate,
     ConcurrentIdempotencyWrite,
-    OutboxEffectConflict,
-    OutboxEffectNotEnqueued,
     ReplayBindingMismatch {
         field: &'static str,
     },
-    OutboxRequiresFullDurability,
-    OutboxSourceWatermarkMismatch,
 }
 
 impl fmt::Display for LedgerError {
@@ -70,23 +66,12 @@ impl fmt::Display for LedgerError {
             Self::ConcurrentIdempotencyWrite => {
                 formatter.write_str("runtime ledger idempotency record changed during commit")
             }
-            Self::OutboxEffectConflict => {
-                formatter.write_str("runtime ledger outbox effect identity already exists")
-            }
-            Self::OutboxEffectNotEnqueued => {
-                formatter.write_str("runtime ledger outbox effect was never enqueued")
-            }
             Self::ReplayBindingMismatch { field } => {
                 write!(
                     formatter,
                     "runtime ledger replay binding mismatched at {field}"
                 )
             }
-            Self::OutboxRequiresFullDurability => {
-                formatter.write_str("runtime ledger outbox records require full durability")
-            }
-            Self::OutboxSourceWatermarkMismatch => formatter
-                .write_str("runtime ledger outbox source watermark does not bind to its receipt"),
         }
     }
 }

@@ -11,7 +11,7 @@ use super::super::history::{
     SessionHistoricalIngestor, SharedSessionHistoricalIngestor,
 };
 use super::super::wake::SessionTemporalRefreshWakeState;
-use super::{SessionTemporalRefreshOwner, SessionTemporalRefreshSchedulerRegistry};
+use super::SessionTemporalRefreshSchedulerRegistry;
 use crate::StoreOwnerKey;
 
 /// A history pass that ignores cancellation until the test releases it. The
@@ -67,53 +67,6 @@ fn project_owner(name: &str) -> StoreOwnerKey {
         store_root: root.join("store"),
         graph_db_path: root.join("graph.db"),
     }
-}
-
-#[tokio::test]
-async fn a_dropped_rekey_keeps_requests_after_its_worker_has_finished() {
-    let harness = RegisteredGlobalDbHarness::open("refresh-finished-rekey").await;
-    let registry = SessionTemporalRefreshSchedulerRegistry::default();
-    let old_owner = project_owner("finished-rekey-old");
-    let new_owner = project_owner("finished-rekey-new");
-    let history = mount_held_project(&registry, &harness, &old_owner, HeldHistory::default()).await;
-    let state = registry.project_state(&old_owner).await.expect("old owner");
-    state.requeue_request(tracedecay_store::SessionRefreshBeginOrJoinRequestV1::new(
-        tracedecay_domain::SessionId::new("session.finished-rekey").unwrap(),
-        tracedecay_store::SessionRefreshFrontierV1::new(0, 0).unwrap(),
-    ));
-    {
-        let mut rekey = Box::pin(registry.rekey_project(
-            &old_owner,
-            new_owner.clone(),
-            harness.registered.clone(),
-        ));
-        assert!(rekey.as_mut().now_or_never().is_none());
-        history.release.notify_one();
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while {
-                registry
-                    .live
-                    .lock()
-                    .unwrap()
-                    .contains_key(&SessionTemporalRefreshOwner::Project(old_owner.clone()))
-            } {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the cancelled supervisor finishes before the rekey is dropped");
-        assert!(!history.worker_holds_pass());
-    }
-    registry
-        .rekey_project(&old_owner, new_owner.clone(), harness.registered.clone())
-        .await;
-    let resumed = registry.project_state(&new_owner).await.expect("new owner");
-    assert_eq!(
-        resumed.queued_request_count(),
-        1,
-        "a dropped rekey must retain requests even when its join already finished"
-    );
-    registry.shutdown().await;
 }
 
 async fn mount_held_project(
@@ -315,11 +268,12 @@ async fn a_repeated_retirement_joins_the_retired_worker() {
     registry.shutdown().await;
 }
 
-/// A rekey dropped while it joins the retired worker must keep the old route
-/// bound and the transfer owed, so a retry lands the retired owner's queued
-/// requests on the new owner instead of spawning it without them.
+/// A rekey dropped while it joins the retired worker leaves that worker, its
+/// route, and its queued requests in `retired`. Until a retry runs, the route
+/// reports no live target; the retry joins the worker and lands both on the
+/// new owner instead of spawning it beside a live worker without them.
 #[tokio::test]
-async fn a_dropped_rekey_keeps_its_route_and_queued_requests() {
+async fn a_retried_rekey_recovers_the_dropped_attempts_route_and_requests() {
     let harness = RegisteredGlobalDbHarness::open("refresh-dropped-rekey").await;
     let registry = SessionTemporalRefreshSchedulerRegistry::default();
     let old_owner = project_owner("dropped-rekey-old");
@@ -351,8 +305,8 @@ async fn a_dropped_rekey_keeps_its_route_and_queued_requests() {
         "the rekey cannot finish while the retired worker holds its history pass"
     );
     assert!(
-        old_wake.wake(),
-        "a dropped rekey must keep the old route bound to a live target"
+        !old_wake.wake(),
+        "no worker owns the route of a dropped rekey, so a wake must not be accepted"
     );
 
     let mut rekey = std::pin::pin!(registry.rekey_project(
@@ -384,6 +338,234 @@ async fn a_dropped_rekey_keeps_its_route_and_queued_requests() {
         "the old route must reach the new owner once the rekey completes"
     );
     assert!(new_state.take_dirty());
+
+    registry.shutdown().await;
+}
+
+/// A rekey dropped after its join — the retirement consumed the finished
+/// worker's entry, so neither `retired` nor the map has anything for a
+/// retry to join — keeps the old route and the queued requests in the
+/// parked handoff. The route reports no live target until a retry lands
+/// them on the new owner.
+#[tokio::test]
+async fn a_dropped_rekey_keeps_its_route_and_requests_after_the_worker_finished() {
+    let harness = RegisteredGlobalDbHarness::open("refresh-finished-rekey").await;
+    let registry = SessionTemporalRefreshSchedulerRegistry::default();
+    let old_owner = project_owner("finished-rekey-old");
+    let new_owner = project_owner("finished-rekey-new");
+    let history = Arc::new(HeldHistory::default());
+    let old_wake = registry
+        .ensure_project_with_history(
+            old_owner.clone(),
+            harness.registered.clone(),
+            Arc::clone(&history) as SharedSessionHistoricalIngestor,
+        )
+        .await;
+    history.entered.notified().await;
+    let old_state = registry
+        .project_state(&old_owner)
+        .await
+        .expect("project entry");
+    old_state.requeue_request(tracedecay_store::SessionRefreshBeginOrJoinRequestV1::new(
+        tracedecay_domain::SessionId::new("session.finished-rekey").unwrap(),
+        tracedecay_store::SessionRefreshFrontierV1::new(0, 0).unwrap(),
+    ));
+    assert_eq!(old_state.queued_request_count(), 1);
+
+    {
+        let mut rekey = std::pin::pin!(registry.rekey_project(
+            &old_owner,
+            new_owner.clone(),
+            harness.registered.clone(),
+        ));
+        assert!(
+            rekey.as_mut().now_or_never().is_none(),
+            "the rekey cannot finish while the retired worker holds its history pass"
+        );
+        // The rekey released the map lock before its join; holding it now
+        // parks the attempt at the lock it reacquires after joining, so the
+        // drop below lands past the finished worker's join.
+        let hold = registry.project.lock().await;
+        history.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while history.worker_holds_pass() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the cancelled supervisor finishes before the rekey is dropped");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), rekey.as_mut())
+                .await
+                .is_err(),
+            "the rekey must wait on the held map lock once its join finished"
+        );
+        drop(hold);
+    }
+    assert!(
+        !old_wake.wake(),
+        "a rekey dropped after its join must leave the route without a live target"
+    );
+
+    registry
+        .rekey_project(&old_owner, new_owner.clone(), harness.registered.clone())
+        .await;
+    let resumed = registry
+        .project_state(&new_owner)
+        .await
+        .expect("new owner entry");
+    assert_eq!(
+        resumed.queued_request_count(),
+        1,
+        "a rekey dropped after its join must retain the requests it staged"
+    );
+    assert!(
+        old_wake.wake(),
+        "the old route must reach the new owner once the retry completes"
+    );
+
+    registry.shutdown().await;
+}
+
+/// A dropped A-to-B parks A's route. A C-to-A readmission then installs C's
+/// route as A's live wake, so the next A-to-D rekey must land both routes —
+/// the parked one and the live one — on D, or callers holding either handle
+/// are stranded on a cancelled state.
+#[tokio::test]
+async fn a_rekey_after_a_readmission_lands_every_route_and_request() {
+    let harness = RegisteredGlobalDbHarness::open("refresh-readmitted-rekey").await;
+    let registry = SessionTemporalRefreshSchedulerRegistry::default();
+    let a_owner = project_owner("readmitted-rekey-old");
+    let b_owner = project_owner("readmitted-rekey-first");
+    let c_owner = project_owner("readmitted-rekey-carrier");
+    let d_owner = project_owner("readmitted-rekey-final");
+    let e_owner = project_owner("readmitted-rekey-last");
+
+    let a_history = Arc::new(HeldHistory::default());
+    let a_wake = registry
+        .ensure_project_with_history(
+            a_owner.clone(),
+            harness.registered.clone(),
+            Arc::clone(&a_history) as SharedSessionHistoricalIngestor,
+        )
+        .await;
+    a_history.entered.notified().await;
+    let a_state = registry
+        .project_state(&a_owner)
+        .await
+        .expect("project entry");
+    a_state.requeue_request(tracedecay_store::SessionRefreshBeginOrJoinRequestV1::new(
+        tracedecay_domain::SessionId::new("session.readmitted-a").unwrap(),
+        tracedecay_store::SessionRefreshFrontierV1::new(0, 0).unwrap(),
+    ));
+
+    {
+        let mut rekey = std::pin::pin!(registry.rekey_project(
+            &a_owner,
+            b_owner.clone(),
+            harness.registered.clone(),
+        ));
+        assert!(
+            rekey.as_mut().now_or_never().is_none(),
+            "the rekey cannot finish while the retired worker holds its history pass"
+        );
+        // Same placement as the finished-join drop: hold the map lock so the
+        // attempt drops after its join consumed the entry, parking the
+        // handoff with nothing left in `retired` or the map.
+        let hold = registry.project.lock().await;
+        a_history.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while a_history.worker_holds_pass() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the cancelled supervisor finishes before the rekey is dropped");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), rekey.as_mut())
+                .await
+                .is_err(),
+            "the rekey must wait on the held map lock once its join finished"
+        );
+        drop(hold);
+    }
+    assert!(
+        !a_wake.wake(),
+        "the parked handoff's route must report no live target"
+    );
+
+    let c_history = Arc::new(HeldHistory::default());
+    let c_wake = registry
+        .ensure_project_with_history(
+            c_owner.clone(),
+            harness.registered.clone(),
+            Arc::clone(&c_history) as SharedSessionHistoricalIngestor,
+        )
+        .await;
+    c_history.entered.notified().await;
+    c_history.release.notify_one();
+    registry
+        .rekey_project(&c_owner, a_owner.clone(), harness.registered.clone())
+        .await;
+    assert!(
+        c_wake.wake(),
+        "the readmission rekey installs its route as the owner's live wake"
+    );
+    assert!(
+        !a_wake.wake(),
+        "the parked handoff stays owed to its own destination"
+    );
+    let readmitted = registry
+        .project_state(&a_owner)
+        .await
+        .expect("readmitted project entry");
+    readmitted.requeue_request(tracedecay_store::SessionRefreshBeginOrJoinRequestV1::new(
+        tracedecay_domain::SessionId::new("session.readmitted-live").unwrap(),
+        tracedecay_store::SessionRefreshFrontierV1::new(0, 0).unwrap(),
+    ));
+
+    registry
+        .rekey_project(&a_owner, d_owner.clone(), harness.registered.clone())
+        .await;
+
+    assert!(registry.project_state(&a_owner).await.is_none());
+    let landed = registry
+        .project_state(&d_owner)
+        .await
+        .expect("final owner entry");
+    assert_eq!(
+        landed.queued_request_count(),
+        2,
+        "the parked request and the readmitted entry's request must both reach the final owner"
+    );
+    assert!(
+        a_wake.wake(),
+        "the parked route must reach the new owner once the rekey completes"
+    );
+    assert!(
+        c_wake.wake(),
+        "the live route the readmission installed must reach the new owner too"
+    );
+
+    // The destination retains the complete route set it absorbed: a later
+    // D-to-E rekey must still land both handles, or older callers die at
+    // the next move.
+    registry
+        .rekey_project(&d_owner, e_owner.clone(), harness.registered.clone())
+        .await;
+    assert!(registry.project_state(&d_owner).await.is_none());
+    registry
+        .project_state(&e_owner)
+        .await
+        .expect("final destination entry");
+    assert!(
+        a_wake.wake(),
+        "the parked route must survive every successive rekey"
+    );
+    assert!(
+        c_wake.wake(),
+        "the readmission route must survive every successive rekey"
+    );
 
     registry.shutdown().await;
 }

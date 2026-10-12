@@ -15,7 +15,6 @@ mod graph_publication;
 mod identity;
 mod lifecycle;
 mod operation;
-mod outbox;
 mod ports;
 mod repository_read;
 mod scope_set;
@@ -55,10 +54,9 @@ pub use identity::{
     RetainedGraphStoreOwnerAttachmentV1, RetainedGraphStoreOwnerOperationLeaseErrorV1,
     RuntimeLeaseIdV1, RuntimeMaintenanceTransitionIdV1, RuntimeOperationPermitIdV1,
     RuntimePublicationIdV1, RuntimeTransactionIdV1, SnapshotLeaseIdV1, StoreAuthorityEpochV1,
-    StoreClientIdV1, StoreEffectIdV1, StoreEffectOrderingKeyV1, StoreIdempotencyKeyV1,
-    StoreIncarnationV1, StoreOperationIdV1, StoreRuntimeBindingV1, StoreShardIdV1,
-    StoreShardScopeV1, StoreSnapshotIdV1, UserProfileId, VerifiedStoreLocatorV1, WorktreeId,
-    canonical_store_locator_digest, graph_store_locator_path,
+    StoreClientIdV1, StoreIdempotencyKeyV1, StoreIncarnationV1, StoreOperationIdV1,
+    StoreRuntimeBindingV1, StoreShardIdV1, StoreShardScopeV1, StoreSnapshotIdV1, UserProfileId,
+    VerifiedStoreLocatorV1, WorktreeId, canonical_store_locator_digest, graph_store_locator_path,
 };
 pub use lifecycle::{
     ReaderHealthLeaseV1, RuntimeBatchCompatibilityV1, RuntimeLeaseV1,
@@ -80,11 +78,6 @@ pub use operation::{
     StoreOperationMetadataV1, WAL_HARD_LIMIT_BYTES, WAL_SOFT_LIMIT_BYTES,
     WORKSTATION_GLOBAL_QUEUE_BYTES, WalBudgetV1,
 };
-pub use outbox::{
-    EffectIdentityV1, InboxEffectDispositionV1, OutboxAcknowledgementReceiptV1,
-    OutboxEffectStateV1, RepositoryEffectV1, TransactionalInboxReceiptV1,
-    TransactionalOutboxEntryV1,
-};
 pub use ports::{
     RuntimeInterruptionV1, RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadOutcomeV1,
     RuntimeReadRequestV1, RuntimeReadResultV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1,
@@ -93,14 +86,12 @@ pub use ports::{
 pub use repository_read::{
     CodeReadOperationV1, CodeReadResultV1, CodeRecoveryCandidatesPageV1,
     CodeRecoveryCandidatesQueryV1, CodeRecoveryRepositoriesPageV1, CodeRecoveryRepositoriesQueryV1,
-    DiagnosticReadOperationV1, DiagnosticReadResultV1, EffectsInboxCursorV1,
-    EffectsInboxPageQueryV1, EffectsInboxPageV1, EffectsOutboxCursorV1, EffectsOutboxPageQueryV1,
-    EffectsOutboxPageV1, EffectsReadOperationV1, EffectsReadResultV1,
-    ExternalSourceReadOperationV1, ExternalSourceReadResultV1, FactReadOperationV1,
-    FactReadResultV1, ObservationReadOperationV1, ObservationReadResultV1, ProfileReadOperationV1,
-    ProfileReadResultV1, ProjectReadOperationV1, ProjectReadResultV1, ProjectionRebuildProgressV1,
-    ProjectionRebuildStateV1, RepositoryReadOperationV1, RepositoryReadResultV1,
-    RetrievalAnchorReadOperationV1, RetrievalAnchorReadResultV1, StoredObservationRowV1,
+    DiagnosticReadOperationV1, DiagnosticReadResultV1, ExternalSourceReadOperationV1,
+    ExternalSourceReadResultV1, FactReadOperationV1, FactReadResultV1, ObservationReadOperationV1,
+    ObservationReadResultV1, ProfileReadOperationV1, ProfileReadResultV1, ProjectReadOperationV1,
+    ProjectReadResultV1, ProjectionRebuildProgressV1, ProjectionRebuildStateV1,
+    RepositoryReadOperationV1, RepositoryReadResultV1, RetrievalAnchorReadOperationV1,
+    RetrievalAnchorReadResultV1, StoredObservationRowV1,
 };
 pub use scope_set::{
     AuthorizedScopeSetRecordV1, MAX_AUTHORIZED_SCOPE_SET_BYTES_V1, ScopeSetCasOutcomeV1,

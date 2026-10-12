@@ -71,9 +71,6 @@ use crate::{
         },
         graph::{GraphLane, production_code_index_freshness},
         lexical::{
-            CLONE_FINGERPRINT_CANDIDATE_BODY_BUDGET_V1, CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1,
-            CLONE_FINGERPRINT_POSTING_ROW_BUDGET_V1, CLONE_NEAR_MATCH_BODY_COMPARISON_BUDGET_V1,
-            CLONE_NEAR_MATCH_MINIMUM_COVERAGE_MILLIONTHS_V1, CLONE_NEAR_MATCH_TOKEN_WORK_BUDGET_V1,
             CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_BUDGET_BYTES_V1,
             CODE_LEXICAL_ARTIFACT_QUERY_CACHE_BUDGET_BYTES_V1, CodeExactLexicalArtifactReaderV1,
             CodeLexicalArtifactBuilderV1, CodeLexicalArtifactErrorV1,
@@ -1970,10 +1967,6 @@ fn clone_index_observation(
             unique_payloads: Some(census.unique_payloads),
             payloads_reused: update.and_then(|update| update.payloads_reused),
             exact_postings: Some(census.exact_postings),
-            near_fingerprint_bodies: Some(census.near_fingerprint_bodies),
-            near_fingerprint_postings: Some(census.near_fingerprint_postings),
-            hot_postings_skipped: Some(census.hot_postings),
-            hot_posting_rows_skipped: Some(census.hot_posting_rows),
             excluded_too_small_bodies: Some(census.excluded_too_small_bodies),
             excluded_too_large_bodies: Some(census.excluded_too_large_bodies),
             excluded_incomplete_tokenization_bodies: Some(
@@ -1983,16 +1976,7 @@ fn clone_index_observation(
             rename_unsupported_bodies: Some(census.rename_unsupported_bodies),
         },
         budgets: CodeCloneIndexBudgetsV1 {
-            posting_rows: CLONE_FINGERPRINT_POSTING_ROW_BUDGET_V1,
-            candidate_bodies: u64::try_from(CLONE_FINGERPRINT_CANDIDATE_BODY_BUDGET_V1)
-                .unwrap_or(u64::MAX),
-            verification_bodies: CLONE_NEAR_MATCH_BODY_COMPARISON_BUDGET_V1,
-            verification_token_work: CLONE_NEAR_MATCH_TOKEN_WORK_BUDGET_V1,
-            hot_posting_rows: CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1,
             minimum_body_tokens: u64::from(MIN_AUTOMATIC_CLONE_BODY_TOKENS_V1),
-            minimum_directional_coverage_millionths: u64::from(
-                CLONE_NEAR_MATCH_MINIMUM_COVERAGE_MILLIONTHS_V1,
-            ),
         },
         resources: CodeCloneIndexResourcesV1 {
             bytes_on_disk: Some(artifact.bytes_on_disk),
@@ -2010,9 +1994,6 @@ fn clone_index_omission_reasons(census: &CodeLexicalCloneIndexCensusV1) -> Vec<S
         reasons.push(
             "conservative normalization postings do not cover every eligible body".to_owned(),
         );
-    }
-    if census.near_fingerprint_bodies != census.eligible_source_bodies {
-        reasons.push("positional fingerprints do not cover every eligible body".to_owned());
     }
     reasons
 }

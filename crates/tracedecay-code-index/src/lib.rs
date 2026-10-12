@@ -40,6 +40,8 @@ pub mod unmounted_files;
 
 pub use self::intake::CodeIndexIntake;
 
+use self::languages::LanguageRegistry;
+
 /// Whether an extracted symbol is a parser-attested test annotation.
 ///
 /// Callers combine this marker with the canonical `Annotates` edge instead of
@@ -108,6 +110,71 @@ fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
         .as_bytes()
         .windows(needle.len())
         .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
+/// Whether `simple_name` is a test the runner discovers by name alone in
+/// `path`, given the name of the type that owns it when the parser attested
+/// one (`None` for top-level items and owners outside the census).
+///
+/// Each runner's discovery rules decide: `go test` runs `Test*` functions,
+/// and testify `Test*` suite methods, only in `_test.go` files (the parser
+/// never attests a Go method's receiver as its owner); pytest and unittest
+/// run `test*` functions and test-case methods in `test*.py`/`*_test.py`
+/// files; JUnit 3, PHPUnit, and XCTest run `test*` methods and minitest
+/// `test_*` methods only on test-case classes. The superclass that proves
+/// class eligibility usually sits outside the census, so it falls back to
+/// the conventional `Test*`/`*Test`/`*Tests`/`*TestCase` names, and an
+/// unattested owner declines rather than hide a helper on an ordinary class.
+/// Languages whose runners need annotations or explicit calls return `false`.
+pub fn name_discovered_test(path: &str, simple_name: &str, owner_name: Option<&str>) -> bool {
+    let language = std::path::Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_lowercase())
+        .and_then(|extension| {
+            language_descriptors()
+                .descriptor_for_extension(&extension)
+                .map(|descriptor| descriptor.language.as_str())
+        });
+    let basename = std::path::Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    match language {
+        Some("go") => basename.ends_with("_test.go") && simple_name.starts_with("Test"),
+        Some("python") => {
+            (basename.starts_with("test") || basename.ends_with("_test.py"))
+                && owner_name.is_none_or(is_test_case_name)
+                && simple_name.starts_with("test")
+        }
+        Some("java" | "php" | "swift" | "objc") => {
+            is_test_file(path)
+                && owner_name.is_some_and(is_test_case_name)
+                && simple_name.starts_with("test")
+        }
+        Some("ruby") => {
+            is_test_file(path)
+                && owner_name.is_some_and(is_test_case_name)
+                && simple_name.starts_with("test_")
+        }
+        _ => false,
+    }
+}
+
+/// A class name that conventionally holds runner-discovered tests: the
+/// `Test*` and `*Test`/`*Tests`/`*TestCase` names JUnit, PHPUnit, XCTest,
+/// minitest, pytest, and unittest derive test cases from.
+fn is_test_case_name(name: &str) -> bool {
+    name.starts_with("Test")
+        || name.ends_with("Test")
+        || name.ends_with("Tests")
+        || name.ends_with("TestCase")
+}
+
+fn language_descriptors() -> &'static languages::StaticLanguageRegistry {
+    static REGISTRY: std::sync::OnceLock<languages::StaticLanguageRegistry> =
+        std::sync::OnceLock::new();
+    REGISTRY.get_or_init(languages::StaticLanguageRegistry::new)
 }
 
 #[cfg(test)]
