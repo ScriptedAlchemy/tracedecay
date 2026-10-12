@@ -819,23 +819,12 @@ pub fn with_background_cpu_permit_cancellable<R>(
 /// pool. Building one all-core pool per request oversubscribes concurrent
 /// tests and profiling harnesses, which can turn bounded parser work into
 /// false timeout/unsupported-document results.
-#[tracing::instrument(name = "code_index.workers.install", level = "trace", skip_all)]
 pub fn install<R, F>(operation: F) -> Result<R, CodeIndexParallelismErrorV1>
 where
     F: FnOnce() -> R + Send,
     R: Send,
 {
-    #[cfg(test)]
-    if FORCE_INSTALL_FAILURE.with(std::cell::Cell::get) {
-        return Err(CodeIndexParallelismErrorV1::PoolBuild {
-            message: "forced code-index worker pool failure for test".to_owned(),
-        });
-    }
-    if let Some(runtime) = current_runtime() {
-        return Ok(runtime.install(operation));
-    }
-    let pool = standalone_pool()?;
-    Ok(pool.install(operation))
+    install_on(WorkerPoolV1::Indexing, operation)
 }
 
 /// Run request-bound source-scan work on the owner's interactive pool.
@@ -845,27 +834,41 @@ where
 /// and the background CPU FIFO, so its leaves take no background CPU units.
 /// Standalone callers without an installed owner get their own process-wide
 /// pool rather than queueing behind the standalone indexing pool.
-#[tracing::instrument(
-    name = "code_index.workers.install_interactive",
-    level = "trace",
-    skip_all
-)]
 pub fn install_interactive<R, F>(operation: F) -> Result<R, CodeIndexParallelismErrorV1>
 where
     F: FnOnce() -> R + Send,
     R: Send,
 {
+    install_on(WorkerPoolV1::Interactive, operation)
+}
+
+enum WorkerPoolV1 {
+    Indexing,
+    Interactive,
+}
+
+fn install_on<R, F>(pool: WorkerPoolV1, operation: F) -> Result<R, CodeIndexParallelismErrorV1>
+where
+    F: FnOnce() -> R + Send,
+    R: Send,
+{
+    let _span = match pool {
+        WorkerPoolV1::Indexing => tracing::trace_span!("code_index.workers.install"),
+        WorkerPoolV1::Interactive => tracing::trace_span!("code_index.workers.install_interactive"),
+    }
+    .entered();
     #[cfg(test)]
     if FORCE_INSTALL_FAILURE.with(std::cell::Cell::get) {
         return Err(CodeIndexParallelismErrorV1::PoolBuild {
             message: "forced code-index worker pool failure for test".to_owned(),
         });
     }
-    if let Some(runtime) = current_runtime() {
-        return Ok(runtime.install_interactive(operation));
+    match (current_runtime(), pool) {
+        (Some(runtime), WorkerPoolV1::Indexing) => Ok(runtime.install(operation)),
+        (Some(runtime), WorkerPoolV1::Interactive) => Ok(runtime.install_interactive(operation)),
+        (None, WorkerPoolV1::Indexing) => Ok(standalone_pool()?.install(operation)),
+        (None, WorkerPoolV1::Interactive) => Ok(standalone_interactive_pool()?.install(operation)),
     }
-    let pool = standalone_interactive_pool()?;
-    Ok(pool.install(operation))
 }
 
 #[tracing::instrument(name = "code_index.workers.standalone_pool", level = "trace", skip_all)]
