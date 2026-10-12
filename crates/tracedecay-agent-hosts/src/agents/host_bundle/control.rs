@@ -430,7 +430,7 @@ const LEGACY_COMPONENT_IDENTITIES: [(HostComponentV1, HostComponentV1); 1] =
     [(HostComponentV1::OperatorMcp, HostComponentV1::ContextMcp)];
 
 /// The identity a component's receipts converge to.
-pub(super) fn canonical_component(component: HostComponentV1) -> HostComponentV1 {
+pub fn canonical_component(component: HostComponentV1) -> HostComponentV1 {
     LEGACY_COMPONENT_IDENTITIES
         .into_iter()
         .find(|(legacy, _)| *legacy == component)
