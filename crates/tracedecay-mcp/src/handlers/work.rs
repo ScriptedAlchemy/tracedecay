@@ -10,15 +10,14 @@ use std::future::Future;
 
 use serde_json::Value;
 use tracedecay_api::{HttpApplicationControls, WorkHttpRequest, WorkOperation};
-use tracedecay_contracts::now_micros;
-use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_contracts::{CancellationSignal, Deadline, RequestId};
-use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_tool_catalog::OperationId;
 
 use crate::ToolResult;
-use crate::handlers::support::{owner_envelope_result, unknown_tool_error};
+use crate::handlers::support::{
+    mint_owner_request_id, owner_envelope_result, owner_request_controls, unknown_tool_error,
+};
 
 #[tracing::instrument(name = "mcp.work.total", level = "trace", skip_all)]
 pub async fn handle_work<Invoke, InvokeFuture>(
@@ -38,7 +37,8 @@ where
         {
             let operation =
                 work_operation_for_tool(tool_name).ok_or_else(|| unknown_tool_error(tool_name))?;
-            let request_id = protocol_request_id.map_or_else(mint_request_id, Ok)?;
+            let request_id =
+                protocol_request_id.map_or_else(|| mint_owner_request_id("Work"), Ok)?;
             let controls = work_controls(
                 operation,
                 &request_id,
@@ -84,12 +84,6 @@ pub fn work_operation_for_tool(tool_name: &str) -> Option<WorkOperation> {
         .find(|operation| operation.operation_key() == key)
 }
 
-fn mint_request_id() -> Result<RequestId> {
-    mint_global_request_id(GlobalRequestSurface::McpFallback).map_err(|_| TraceDecayError::Config {
-        message: "could not allocate a Work request id".to_owned(),
-    })
-}
-
 fn work_controls(
     operation: WorkOperation,
     request_id: &RequestId,
@@ -118,35 +112,13 @@ fn work_controls(
                 "The canonical Work operation is not advertised by this build",
             )
         })?;
-    let maximum_micros = i64::try_from(
-        std::time::Duration::from_millis(binding.deadline().maximum_millis()).as_micros(),
+    owner_request_controls(
+        "Work",
+        binding.deadline().maximum_millis(),
+        request_id,
+        protocol_deadline,
+        protocol_cancellation,
     )
-    .map_err(|_| {
-        TraceDecayError::project_route(
-            "work.deadline_unavailable",
-            false,
-            "The canonical Work deadline exceeds the domain clock",
-        )
-    })?;
-    let maximum_deadline = UtcMicros(now_micros().0.saturating_add(maximum_micros));
-    let deadline = protocol_deadline
-        .filter(|deadline| deadline.expires_at <= maximum_deadline)
-        .map_or_else(|| Deadline::new(maximum_deadline), Ok)
-        .map_err(|error| TraceDecayError::Config {
-            message: error.to_string(),
-        })?;
-    let cancellation = protocol_cancellation
-        .map_or_else(
-            || CancellationSignal::active(format!("cancellation.{}", request_id.as_str())),
-            Ok,
-        )
-        .map_err(|error| TraceDecayError::Config {
-            message: error.to_string(),
-        })?;
-    Ok(HttpApplicationControls {
-        deadline,
-        cancellation,
-    })
 }
 
 #[cfg(test)]

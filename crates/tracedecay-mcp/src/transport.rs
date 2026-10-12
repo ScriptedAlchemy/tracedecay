@@ -5,6 +5,7 @@
 //! replay transports plus the split read/write halves stay with this crate
 //! because they apply host-admission frame bounds and target tokio I/O types.
 
+use crate::analysis::skip_ascii_whitespace;
 pub use crate::jsonrpc::{
     ErrorCode, JsonRpcDecodeError, JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpTransport,
 };
@@ -71,18 +72,24 @@ impl<T: McpTransport + Send> ReplayTransport<T> {
     /// Rejects oversized lines before enqueue so the replay deque never retains
     /// attacker payload bytes.
     pub fn push_replay(&mut self, line: String) -> std::io::Result<()> {
-        if line.len() > tracedecay_framing::MAX_MCP_JSONRPC_FRAME_BYTES {
-            let prefix = line.as_bytes()[..line
-                .len()
-                .min(tracedecay_framing::MCP_OVERSIZE_ID_INSPECT_BYTES)]
-                .to_vec();
-            return Err(tracedecay_framing::wire_oversized_io_error_with_prefix(
-                prefix,
-            ));
-        }
+        reject_oversized_line(&line)?;
         self.replay.push_back(line);
         Ok(())
     }
+}
+
+/// Refuses a frame over the wire bound, retaining only the bounded prefix
+/// used to recover its request id.
+pub(crate) fn reject_oversized_line(line: &str) -> std::io::Result<()> {
+    if line.len() > tracedecay_framing::MAX_MCP_JSONRPC_FRAME_BYTES {
+        let inspect = line
+            .len()
+            .min(tracedecay_framing::MCP_OVERSIZE_ID_INSPECT_BYTES);
+        return Err(tracedecay_framing::wire_oversized_io_error_with_prefix(
+            line.as_bytes()[..inspect].to_vec(),
+        ));
+    }
+    Ok(())
 }
 
 impl<T: McpTransport + Send> McpTransport for ReplayTransport<T> {
@@ -221,18 +228,11 @@ impl ChannelTransport {
 #[cfg(any(test, feature = "test-transport"))]
 impl McpTransport for ChannelTransport {
     async fn read_line(&mut self) -> std::io::Result<Option<String>> {
-        match self.rx.recv().await {
-            Some(line) if line.len() > tracedecay_framing::MAX_MCP_JSONRPC_FRAME_BYTES => {
-                let prefix = line.as_bytes()[..line
-                    .len()
-                    .min(tracedecay_framing::MCP_OVERSIZE_ID_INSPECT_BYTES)]
-                    .to_vec();
-                Err(tracedecay_framing::wire_oversized_io_error_with_prefix(
-                    prefix,
-                ))
-            }
-            other => Ok(other),
+        let line = self.rx.recv().await;
+        if let Some(line) = &line {
+            reject_oversized_line(line)?;
         }
+        Ok(line)
     }
 
     fn write_line(&mut self, line: &str) -> impl std::future::Future<Output = std::io::Result<()>> {
@@ -253,18 +253,11 @@ impl McpTransport for ChannelTransport {
 #[cfg(any(test, feature = "test-transport"))]
 impl McpTransportReader for &mut tokio::sync::mpsc::UnboundedReceiver<String> {
     async fn read_line(&mut self) -> std::io::Result<Option<String>> {
-        match self.recv().await {
-            Some(line) if line.len() > tracedecay_framing::MAX_MCP_JSONRPC_FRAME_BYTES => {
-                let prefix = line.as_bytes()[..line
-                    .len()
-                    .min(tracedecay_framing::MCP_OVERSIZE_ID_INSPECT_BYTES)]
-                    .to_vec();
-                Err(tracedecay_framing::wire_oversized_io_error_with_prefix(
-                    prefix,
-                ))
-            }
-            other => Ok(other),
+        let line = self.recv().await;
+        if let Some(line) = &line {
+            reject_oversized_line(line)?;
         }
+        Ok(line)
     }
 }
 
@@ -332,24 +325,19 @@ pub async fn write_wire_oversized_rejection(
 pub fn peek_jsonrpc_request_id(prefix: &[u8]) -> Option<serde_json::Value> {
     use tracedecay_framing::MCP_OVERSIZE_ID_INSPECT_BYTES;
 
-    let prefix = if prefix.len() > MCP_OVERSIZE_ID_INSPECT_BYTES {
+    let bytes = if prefix.len() > MCP_OVERSIZE_ID_INSPECT_BYTES {
         &prefix[..MCP_OVERSIZE_ID_INSPECT_BYTES]
     } else {
         prefix
     };
-    let bytes = prefix;
     let mut i = 0;
-    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-        i += 1;
-    }
+    i = skip_ascii_whitespace(bytes, i);
     if i >= bytes.len() || bytes[i] != b'{' {
         return None;
     }
     i += 1;
     loop {
-        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-            i += 1;
-        }
+        i = skip_ascii_whitespace(bytes, i);
         if i >= bytes.len() || bytes[i] == b'}' {
             return None;
         }
@@ -359,22 +347,16 @@ pub fn peek_jsonrpc_request_id(prefix: &[u8]) -> Option<serde_json::Value> {
             return None;
         };
         i = i.checked_add(key_bytes)?;
-        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-            i += 1;
-        }
+        i = skip_ascii_whitespace(bytes, i);
         if i >= bytes.len() || bytes[i] != b':' {
             return None;
         }
         i += 1;
-        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-            i += 1;
-        }
+        i = skip_ascii_whitespace(bytes, i);
 
         let (value, value_bytes) = parse_prefix_value(&bytes[i..])?;
         i = i.checked_add(value_bytes)?;
-        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
-            i += 1;
-        }
+        i = skip_ascii_whitespace(bytes, i);
         if i >= bytes.len() || !matches!(bytes[i], b',' | b'}') {
             return None;
         }
