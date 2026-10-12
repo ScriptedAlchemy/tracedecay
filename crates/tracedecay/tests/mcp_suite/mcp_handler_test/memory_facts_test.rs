@@ -178,7 +178,7 @@ pub(super) async fn fact_store_cross_project_fixture() -> FactStoreCrossProjectF
     let target_root = isolation.path().join("target");
     initialize_production_fact_project(&active_root);
     initialize_production_fact_project(&target_root);
-    let harness = tracedecay::daemon::ProductionProjectCompositionHarnessV1::open(
+    let harness = crate::support::seeded_composition::open(
         isolation.path(),
         vec![active_root.clone(), target_root.clone()],
     )

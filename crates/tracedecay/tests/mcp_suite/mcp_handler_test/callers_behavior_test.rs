@@ -33,7 +33,6 @@
 use std::fs;
 
 use serde_json::{Value, json};
-use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay::mcp::McpServer;
 
 use crate::support::{
@@ -294,7 +293,7 @@ async fn tracedecay_callers_reads_the_selected_registered_project() {
     fs::write(target.join("src/worker.rs"), WORKER_RS).unwrap();
     commit_worktree(&active, "active project");
     commit_worktree(&target, "target project");
-    let harness = Box::pin(ProductionProjectCompositionHarnessV1::open(
+    let harness = Box::pin(crate::support::seeded_composition::open(
         isolation.path(),
         vec![active.clone(), target.clone()],
     ))
