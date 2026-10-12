@@ -1684,6 +1684,155 @@ async fn a_refused_refresh_waits_for_a_release_without_passive_reads_holding_its
     registry.shutdown().await;
 }
 
+/// A mounted worktree whose native graph activation is refused for resident
+/// memory until the returned guard drops, read once the refusal is parked and
+/// the worker has gone idle on it.
+struct RefusedGraphV1 {
+    fixture: GitFixture,
+    _store: TempDir,
+    registry: CodeIndexSchedulerRegistryV1,
+    worktree_id: WorktreeId,
+}
+
+impl RefusedGraphV1 {
+    async fn mount(owners: &Arc<ResidentOwnersV1>) -> Self {
+        let fixture = GitFixture::new(ALPHA_LIB_V1);
+        let store = TempDir::new().expect("store root");
+        let mut scheduler = super::scheduler(
+            &fixture,
+            super::super::scoped_code_index_store_root(
+                store.path(),
+                &canonical_existing_identity(fixture.path()).expect("canonical fixture"),
+            ),
+            Arc::new(super::SharedCodeIndexBytePoolV1::default()),
+        );
+        super::published(scheduler.reconcile_now().expect("seed generation"));
+        let worktree_id = scheduler
+            .latest_complete()
+            .expect("seeded generation")
+            .generation
+            .snapshot()
+            .worktree
+            .clone()
+            .expect("worktree id");
+        drop(scheduler);
+        super::super::graph_activation::set_injected_resident_memory_refusal(&worktree_id, true);
+        let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1)
+            .with_resident_owners(Arc::clone(owners));
+        registry
+            .mount_worktree(
+                test_project_id(),
+                fixture.path(),
+                store.path().to_path_buf(),
+            )
+            .await
+            .expect("mount retained generation");
+        let refused = Self {
+            fixture,
+            _store: store,
+            registry,
+            worktree_id,
+        };
+        refused.wait_until_parked().await;
+        refused
+    }
+
+    async fn wait_until_parked(&self) {
+        super::wait_for_owner(
+            &self.registry,
+            self.fixture.path(),
+            SERVING_SEAT_FAILURE_CEILING,
+            "a parked resident-memory graph refusal",
+            || async {
+                let freshness = self
+                    .registry
+                    .dashboard_freshness(self.fixture.path())
+                    .await?;
+                let parked = matches!(
+                    freshness.code_graph_serving,
+                    Some(CodeGraphServingReadinessV1::Refused { .. })
+                ) && freshness.staleness_state
+                    == Some(CodeIndexStalenessStateV1::Parked);
+                parked.then_some(())
+            },
+        )
+        .await;
+        wait_for_worker_phase(
+            &self.registry,
+            self.fixture.path(),
+            CodeIndexWorkerPhaseV1::Parked,
+        )
+        .await;
+    }
+
+    fn activation_attempts(&self) -> usize {
+        super::super::graph_activation::injected_activation_attempt_count(&self.worktree_id)
+    }
+
+    async fn shutdown(self) {
+        super::super::graph_activation::set_injected_resident_memory_refusal(
+            &self.worktree_id,
+            false,
+        );
+        self.registry.shutdown().await;
+    }
+}
+
+/// Issue #3588: the decode a refused graph's worktree gives back when it
+/// parks is exactly what a retry decodes again, so that release must not
+/// retry the graph. Before the fix each park release woke the next refused
+/// activation, 10 to 25 a second.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_graph_refused_for_memory_is_not_retried_by_its_own_park_release() {
+    let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
+    let refused = RefusedGraphV1::mount(&owners).await;
+    let attempts = refused.activation_attempts();
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        refused.activation_attempts(),
+        attempts,
+        "no other owner gave memory back, yet the refused graph activated again"
+    );
+    let freshness = refused
+        .registry
+        .dashboard_freshness(refused.fixture.path())
+        .await
+        .expect("mounted worktree freshness");
+    assert!(
+        matches!(
+            freshness.code_graph_serving,
+            Some(CodeGraphServingReadinessV1::Refused { .. })
+        ),
+        "the refusal stays refused while memory stays short: {:?}",
+        freshness.code_graph_serving
+    );
+
+    refused.shutdown().await;
+}
+
+/// Issue #3588: memory another owner gives back still retries the refused
+/// graph, even though the worktree's own park releases no longer do.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn another_owners_release_retries_a_graph_refused_for_memory() {
+    let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
+    let refused = RefusedGraphV1::mount(&owners).await;
+    let attempts = refused.activation_attempts();
+
+    owners.note_headroom();
+    super::wait_for_owner(
+        &refused.registry,
+        refused.fixture.path(),
+        SERVING_SEAT_FAILURE_CEILING,
+        "the refused graph's retry after another owner's release",
+        || async { (refused.activation_attempts() > attempts).then_some(()) },
+    )
+    .await;
+    refused.wait_until_parked().await;
+
+    refused.shutdown().await;
+}
+
 /// Retained state another worktree holds, modelled as a ledger reservation so
 /// releasing it gives the build real headroom. A `serving` holding is
 /// protected from pressure inside its idle window.
