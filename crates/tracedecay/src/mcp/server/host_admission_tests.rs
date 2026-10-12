@@ -8,7 +8,8 @@ use tempfile::TempDir;
 use tokio::sync::{Barrier, Notify};
 
 use super::writer_test_support::{
-    WriterTestFixtureAuthority, init_indexed_repo, registered_context, registered_runtime,
+    WriterTestFixtureAuthority, counting_reconcile_sink, default_spool_broker, init_indexed_repo,
+    registered_context, registered_runtime, server_with_broker, session_start,
 };
 use super::{CodeIndexReconcileSink, McpServer, McpServerConstructionContext};
 use crate::mcp::project_route::HookProjectRouteCache;
@@ -26,14 +27,6 @@ use tracedecay_sessions::runtime::git_correlation::{
     CommitRelationFilter, GitRefFilter, SessionsForQuery,
 };
 use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
-
-fn session_start(root: PathBuf) -> Value {
-    serde_json::to_value(DaemonHookEvent::session_start(
-        HostIntegrationIdV1::Codex,
-        root,
-    ))
-    .unwrap()
-}
 
 /// Builds the terminal-receipt wire event the Hermes plugin sends. Production
 /// only deserializes these, so the tests own the sender-side construction.
@@ -72,18 +65,6 @@ fn terminal_receipt(root: PathBuf) -> Value {
         },
     ))
     .unwrap()
-}
-
-async fn server_with_broker(
-    cg: tracedecay_project::project::TraceDecay,
-    authority: &WriterTestFixtureAuthority,
-    broker: SharedHostAdmissionBroker,
-    reconcile_sink: CodeIndexReconcileSink,
-) -> Arc<McpServer> {
-    let context = with_broker(registered_context(cg, authority), broker, reconcile_sink);
-    McpServer::new_with_registered_test_context(context, Vec::new())
-        .await
-        .expect("registered test server")
 }
 
 async fn server_with_owned_project_replay_worker(
@@ -172,10 +153,7 @@ async fn concurrent_saves_share_spool_durability_barriers_on_a_slow_fsync_disk()
     const SAVES: usize = 8;
     let (cg, project, authority) = init_indexed_repo().await;
     let spool = TempDir::new().unwrap();
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
+    let broker = default_spool_broker(spool.path());
     let context = with_broker(
         registered_context(cg, &authority),
         Arc::clone(&broker),
@@ -257,10 +235,7 @@ async fn concurrent_saves_share_spool_durability_barriers_on_a_slow_fsync_disk()
 async fn hook_event_is_durable_before_attempt_and_retained_on_failure() {
     let (cg, project, authority) = init_indexed_repo().await;
     let spool = TempDir::new().unwrap();
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
+    let broker = default_spool_broker(spool.path());
     let attempted_after_append = Arc::new(Mutex::new(false));
     let reconcile_sink: CodeIndexReconcileSink = {
         let broker = Arc::clone(&broker);
@@ -300,10 +275,7 @@ async fn hook_event_is_durable_before_attempt_and_retained_on_failure() {
 async fn commit_before_ack_replays_once_and_acknowledges_exact_duplicate() {
     let (cg, project, authority) = init_indexed_repo().await;
     let spool = TempDir::new().unwrap();
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
+    let broker = default_spool_broker(spool.path());
     let authoritative_commit = Arc::new(Mutex::new(false));
     let failing_reconcile_sink: CodeIndexReconcileSink = {
         let authoritative_commit = Arc::clone(&authoritative_commit);
@@ -331,10 +303,7 @@ async fn commit_before_ack_replays_once_and_acknowledges_exact_duplicate() {
     drop(server);
     drop(broker);
 
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
+    let broker = default_spool_broker(spool.path());
     let attempts = Arc::new(Mutex::new(0usize));
     let duplicate_reconcile_sink: CodeIndexReconcileSink = {
         let attempts = Arc::clone(&attempts);
@@ -375,17 +344,8 @@ async fn oversized_event_is_rejected_before_canonical_attempt() {
         .unwrap()
         .0;
     let broker = Arc::new(HostAdmissionBroker::new(runtime));
-    let attempted = Arc::new(Mutex::new(false));
-    let reconcile_sink: CodeIndexReconcileSink = {
-        let attempted = Arc::clone(&attempted);
-        Arc::new(move |_request, _demand| {
-            let attempted = Arc::clone(&attempted);
-            Box::pin(async move {
-                *attempted.lock().unwrap() = true;
-                super::CodeIndexDemandAdmissionV1::Queued
-            })
-        })
-    };
+    let attempted = Arc::new(AtomicUsize::new(0));
+    let reconcile_sink = counting_reconcile_sink(Arc::clone(&attempted));
     let server = server_with_broker(cg, &authority, Arc::clone(&broker), reconcile_sink).await;
     let mut routes = HookProjectRouteCache::default();
 
@@ -397,7 +357,7 @@ async fn oversized_event_is_rejected_before_canonical_attempt() {
 
     assert_eq!(outcome.status, HostAdmissionStatus::Degraded);
     assert_eq!(outcome.reason_code, Some("spool_record_too_large"));
-    assert!(!*attempted.lock().unwrap());
+    assert_eq!(attempted.load(Ordering::SeqCst), 0);
     assert_eq!(broker.pending_count().await, 0);
     server.shutdown().await;
 }
@@ -406,21 +366,9 @@ async fn oversized_event_is_rejected_before_canonical_attempt() {
 async fn malformed_semantic_payload_is_explicit_and_quarantined_across_reopen() {
     let (cg, project, authority) = init_indexed_repo().await;
     let spool = TempDir::new().unwrap();
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
-    let attempted = Arc::new(Mutex::new(false));
-    let reconcile_sink: CodeIndexReconcileSink = {
-        let attempted = Arc::clone(&attempted);
-        Arc::new(move |_request, _demand| {
-            let attempted = Arc::clone(&attempted);
-            Box::pin(async move {
-                *attempted.lock().unwrap() = true;
-                super::CodeIndexDemandAdmissionV1::Queued
-            })
-        })
-    };
+    let broker = default_spool_broker(spool.path());
+    let attempted = Arc::new(AtomicUsize::new(0));
+    let reconcile_sink = counting_reconcile_sink(Arc::clone(&attempted));
     let server = server_with_broker(
         cg,
         &authority,
@@ -446,15 +394,12 @@ async fn malformed_semantic_payload_is_explicit_and_quarantined_across_reopen() 
     let rendered = serde_json::to_string(&outcome).unwrap();
     assert!(!rendered.contains("invalid-plan-fixture"));
     assert!(!rendered.contains("\"branch\":\"\""));
-    assert!(!*attempted.lock().unwrap());
+    assert_eq!(attempted.load(Ordering::SeqCst), 0);
     server.shutdown().await;
     drop(server);
     drop(broker);
 
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
+    let broker = default_spool_broker(spool.path());
     assert_eq!(broker.pending_count().await, 0);
     assert_eq!(broker.quarantine_count().await, 1);
     let reopened = authority.reopen_project_graph(project.path()).await;
@@ -466,7 +411,7 @@ async fn malformed_semantic_payload_is_explicit_and_quarantined_across_reopen() 
     assert_eq!(outcome.status, HostAdmissionStatus::AcceptedForReplay);
     assert_eq!(broker.pending_count().await, 0);
     assert_eq!(broker.quarantine_count().await, 1);
-    assert!(!*attempted.lock().unwrap());
+    assert_eq!(attempted.load(Ordering::SeqCst), 0);
     server.shutdown().await;
 }
 
@@ -474,21 +419,9 @@ async fn malformed_semantic_payload_is_explicit_and_quarantined_across_reopen() 
 async fn unsupported_payload_version_is_retryable_and_retained_across_reopen() {
     let (cg, _project, authority) = init_indexed_repo().await;
     let spool = TempDir::new().unwrap();
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
-    let attempted = Arc::new(Mutex::new(false));
-    let reconcile_sink: CodeIndexReconcileSink = {
-        let attempted = Arc::clone(&attempted);
-        Arc::new(move |_request, _demand| {
-            let attempted = Arc::clone(&attempted);
-            Box::pin(async move {
-                *attempted.lock().unwrap() = true;
-                super::CodeIndexDemandAdmissionV1::Queued
-            })
-        })
-    };
+    let broker = default_spool_broker(spool.path());
+    let attempted = Arc::new(AtomicUsize::new(0));
+    let reconcile_sink = counting_reconcile_sink(Arc::clone(&attempted));
     let server = server_with_broker(cg, &authority, Arc::clone(&broker), reconcile_sink).await;
     let payload = br#"{"version":2,"plan":{"kind":"future_host_event","opaque":"private"}}"#;
     let admitted = broker
@@ -504,18 +437,14 @@ async fn unsupported_payload_version_is_retryable_and_retained_across_reopen() {
         Some("host_event_payload_unsupported_version")
     );
     assert!(outcome.retryable);
-    assert!(!*attempted.lock().unwrap());
+    assert_eq!(attempted.load(Ordering::SeqCst), 0);
     assert_eq!(broker.pending_count().await, 1);
     assert_eq!(broker.quarantine_count().await, 0);
     server.shutdown().await;
     drop(server);
     drop(broker);
 
-    let recovered = Arc::new(HostAdmissionBroker::new(
-        HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-            .unwrap()
-            .0,
-    ));
+    let recovered = default_spool_broker(spool.path());
     assert_eq!(recovered.pending_count().await, 1);
     assert_eq!(recovered.quarantine_count().await, 0);
     let replay = recovered.begin_replay().await.unwrap();
@@ -533,16 +462,7 @@ async fn quarantine_releases_active_capacity_then_full_fails_closed() {
     let runtime = HostAdmissionRuntime::open(spool.path(), bounds).unwrap().0;
     let broker = Arc::new(HostAdmissionBroker::new(runtime));
     let attempted = Arc::new(AtomicUsize::new(0));
-    let reconcile_sink: CodeIndexReconcileSink = {
-        let attempted = Arc::clone(&attempted);
-        Arc::new(move |_request, _demand| {
-            let attempted = Arc::clone(&attempted);
-            Box::pin(async move {
-                attempted.fetch_add(1, Ordering::SeqCst);
-                super::CodeIndexDemandAdmissionV1::Queued
-            })
-        })
-    };
+    let reconcile_sink = counting_reconcile_sink(Arc::clone(&attempted));
     let server = server_with_broker(cg, &authority, Arc::clone(&broker), reconcile_sink).await;
 
     let first = broker
@@ -588,10 +508,7 @@ async fn quarantine_releases_active_capacity_then_full_fails_closed() {
 async fn malformed_source_does_not_starve_valid_sibling_source() {
     let (cg, _project, authority) = init_indexed_repo().await;
     let spool = TempDir::new().unwrap();
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
+    let broker = default_spool_broker(spool.path());
     let valid_payload = tracedecay_mcp::hook_events::encode_durable_hook_event_plan(
         &tracedecay_mcp::hook_events::HookEventPlan::AddBranch("main".to_string()),
     )
@@ -650,10 +567,7 @@ async fn malformed_source_does_not_starve_valid_sibling_source() {
 async fn cancelled_canonical_attempt_is_recovered_and_replayed() {
     let (cg, project, authority) = init_indexed_repo().await;
     let spool = TempDir::new().unwrap();
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
+    let broker = default_spool_broker(spool.path());
     let attempts = Arc::new(AtomicUsize::new(0));
     let started = Arc::new(Notify::new());
     let reconcile_sink: CodeIndexReconcileSink = {
@@ -748,21 +662,9 @@ async fn add_branch_at_replay_rejects_stale_root_after_adversarial_replace() {
     let payload = add_branch_at_payload(worktree.clone(), "feature/admission");
 
     let spool = TempDir::new().unwrap();
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
-    let attempted = Arc::new(Mutex::new(false));
-    let reconcile_sink: CodeIndexReconcileSink = {
-        let attempted = Arc::clone(&attempted);
-        Arc::new(move |_request, _demand| {
-            let attempted = Arc::clone(&attempted);
-            Box::pin(async move {
-                *attempted.lock().unwrap() = true;
-                super::CodeIndexDemandAdmissionV1::Queued
-            })
-        })
-    };
+    let broker = default_spool_broker(spool.path());
+    let attempted = Arc::new(AtomicUsize::new(0));
+    let reconcile_sink = counting_reconcile_sink(Arc::clone(&attempted));
     let server = server_with_broker(cg, &authority, Arc::clone(&broker), reconcile_sink).await;
     let admitted = broker
         .admit("codex:add-branch-at-stale", &payload)
@@ -782,14 +684,18 @@ async fn add_branch_at_replay_rejects_stale_root_after_adversarial_replace() {
     let outcome = Box::pin(server.replay_host_admission(Some(admitted.seq))).await;
     assert_eq!(outcome.status, HostAdmissionStatus::Degraded);
     assert_eq!(outcome.reason_code, Some("stale_branch_authorization"));
-    assert!(!*attempted.lock().unwrap(), "stale root must not write");
+    assert_eq!(
+        attempted.load(Ordering::SeqCst),
+        0,
+        "stale root must not write"
+    );
     assert_eq!(broker.pending_count().await, 0);
     assert_eq!(broker.quarantine_count().await, 1);
 
     // A second pass cannot reauthorize or write the terminal admission.
     let outcome = Box::pin(server.replay_host_admission(Some(admitted.seq))).await;
     assert_eq!(outcome.status, HostAdmissionStatus::AcceptedForReplay);
-    assert!(!*attempted.lock().unwrap());
+    assert_eq!(attempted.load(Ordering::SeqCst), 0);
     server.shutdown().await;
 }
 
@@ -801,21 +707,9 @@ async fn add_branch_at_replay_rejects_stale_branch_after_switch() {
     super::writer_test_support::git(&worktree, &["switch", "-c", "feature/other"]);
 
     let spool = TempDir::new().unwrap();
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
+    let broker = default_spool_broker(spool.path());
     let attempted = Arc::new(AtomicUsize::new(0));
-    let reconcile_sink: CodeIndexReconcileSink = {
-        let attempted = Arc::clone(&attempted);
-        Arc::new(move |_request, _demand| {
-            let attempted = Arc::clone(&attempted);
-            Box::pin(async move {
-                attempted.fetch_add(1, Ordering::SeqCst);
-                super::CodeIndexDemandAdmissionV1::Queued
-            })
-        })
-    };
+    let reconcile_sink = counting_reconcile_sink(Arc::clone(&attempted));
     let server = server_with_broker(cg, &authority, Arc::clone(&broker), reconcile_sink).await;
     let admitted = broker
         .admit("codex:add-branch-at-stale-branch", &payload)
@@ -837,21 +731,9 @@ async fn add_branch_replay_rejects_stale_branch_after_delayed_switch() {
     let payload = add_branch_payload_for("main");
 
     let spool = TempDir::new().unwrap();
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
+    let broker = default_spool_broker(spool.path());
     let attempted = Arc::new(AtomicUsize::new(0));
-    let reconcile_sink: CodeIndexReconcileSink = {
-        let attempted = Arc::clone(&attempted);
-        Arc::new(move |_request, _demand| {
-            let attempted = Arc::clone(&attempted);
-            Box::pin(async move {
-                attempted.fetch_add(1, Ordering::SeqCst);
-                super::CodeIndexDemandAdmissionV1::Queued
-            })
-        })
-    };
+    let reconcile_sink = counting_reconcile_sink(Arc::clone(&attempted));
     let server = server_with_broker(cg, &authority, Arc::clone(&broker), reconcile_sink).await;
     let admitted = broker
         .admit("codex:add-branch-stale-delayed", &payload)
@@ -881,10 +763,7 @@ async fn add_branch_restart_replay_rejects_stale_branch_after_switch() {
     let payload = add_branch_payload_for("main");
 
     let spool = TempDir::new().unwrap();
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
+    let broker = default_spool_broker(spool.path());
     broker
         .admit("codex:add-branch-stale-restart", &payload)
         .await
@@ -894,21 +773,9 @@ async fn add_branch_restart_replay_rejects_stale_branch_after_switch() {
 
     super::writer_test_support::git(project.path(), &["switch", "-c", "feature/restart"]);
 
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
+    let broker = default_spool_broker(spool.path());
     let attempted = Arc::new(AtomicUsize::new(0));
-    let reconcile_sink: CodeIndexReconcileSink = {
-        let attempted = Arc::clone(&attempted);
-        Arc::new(move |_request, _demand| {
-            let attempted = Arc::clone(&attempted);
-            Box::pin(async move {
-                attempted.fetch_add(1, Ordering::SeqCst);
-                super::CodeIndexDemandAdmissionV1::Queued
-            })
-        })
-    };
+    let reconcile_sink = counting_reconcile_sink(Arc::clone(&attempted));
     let reopened = authority.reopen_project_graph(project.path()).await;
     let server =
         server_with_broker(reopened, &authority, Arc::clone(&broker), reconcile_sink).await;
@@ -934,21 +801,9 @@ async fn sync_current_branch_replay_rejects_stale_branch_after_delayed_switch() 
     let payload = sync_current_branch_payload("main");
 
     let spool = TempDir::new().unwrap();
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
+    let broker = default_spool_broker(spool.path());
     let attempted = Arc::new(AtomicUsize::new(0));
-    let reconcile_sink: CodeIndexReconcileSink = {
-        let attempted = Arc::clone(&attempted);
-        Arc::new(move |_request, _demand| {
-            let attempted = Arc::clone(&attempted);
-            Box::pin(async move {
-                attempted.fetch_add(1, Ordering::SeqCst);
-                super::CodeIndexDemandAdmissionV1::Queued
-            })
-        })
-    };
+    let reconcile_sink = counting_reconcile_sink(Arc::clone(&attempted));
     let server = server_with_broker(cg, &authority, Arc::clone(&broker), reconcile_sink).await;
     let admitted = broker
         .admit("codex:sync-current-branch-stale-delayed", &payload)
@@ -977,10 +832,7 @@ async fn sync_current_branch_restart_replay_rejects_stale_branch_after_switch() 
     let payload = sync_current_branch_payload("main");
 
     let spool = TempDir::new().unwrap();
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
+    let broker = default_spool_broker(spool.path());
     broker
         .admit("codex:sync-current-branch-stale-restart", &payload)
         .await
@@ -990,21 +842,9 @@ async fn sync_current_branch_restart_replay_rejects_stale_branch_after_switch() 
 
     super::writer_test_support::git(project.path(), &["switch", "-c", "feature/sync-restart"]);
 
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
+    let broker = default_spool_broker(spool.path());
     let attempted = Arc::new(AtomicUsize::new(0));
-    let reconcile_sink: CodeIndexReconcileSink = {
-        let attempted = Arc::clone(&attempted);
-        Arc::new(move |_request, _demand| {
-            let attempted = Arc::clone(&attempted);
-            Box::pin(async move {
-                attempted.fetch_add(1, Ordering::SeqCst);
-                super::CodeIndexDemandAdmissionV1::Queued
-            })
-        })
-    };
+    let reconcile_sink = counting_reconcile_sink(Arc::clone(&attempted));
     let reopened = authority.reopen_project_graph(project.path()).await;
     let server =
         server_with_broker(reopened, &authority, Arc::clone(&broker), reconcile_sink).await;
@@ -1031,10 +871,7 @@ async fn add_branch_at_restart_replay_rejects_common_dir_drift() {
     let payload = add_branch_at_payload(worktree.clone(), "feature/admission");
 
     let spool = TempDir::new().unwrap();
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
+    let broker = default_spool_broker(spool.path());
     broker
         .admit("codex:add-branch-at-common-dir", &payload)
         .await
@@ -1059,21 +896,9 @@ async fn add_branch_at_restart_replay_rejects_common_dir_drift() {
     )
     .expect("rewrite common-dir pointer");
 
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
+    let broker = default_spool_broker(spool.path());
     let attempted = Arc::new(AtomicUsize::new(0));
-    let reconcile_sink: CodeIndexReconcileSink = {
-        let attempted = Arc::clone(&attempted);
-        Arc::new(move |_request, _demand| {
-            let attempted = Arc::clone(&attempted);
-            Box::pin(async move {
-                attempted.fetch_add(1, Ordering::SeqCst);
-                super::CodeIndexDemandAdmissionV1::Queued
-            })
-        })
-    };
+    let reconcile_sink = counting_reconcile_sink(Arc::clone(&attempted));
     let reopened = authority.reopen_project_graph(project.path()).await;
     let server =
         server_with_broker(reopened, &authority, Arc::clone(&broker), reconcile_sink).await;
@@ -1102,10 +927,7 @@ async fn add_branch_at_restart_replay_rejects_symlink_swap() {
     let payload = add_branch_at_payload(alias.clone(), "feature/admission");
 
     let spool = TempDir::new().unwrap();
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
+    let broker = default_spool_broker(spool.path());
     broker
         .admit("codex:add-branch-at-symlink", &payload)
         .await
@@ -1123,21 +945,9 @@ async fn add_branch_at_restart_replay_rejects_symlink_swap() {
     std::fs::remove_file(&alias).expect("remove alias");
     std::os::unix::fs::symlink(&stranger, &alias).expect("swap");
 
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
+    let broker = default_spool_broker(spool.path());
     let attempted = Arc::new(AtomicUsize::new(0));
-    let reconcile_sink: CodeIndexReconcileSink = {
-        let attempted = Arc::clone(&attempted);
-        Arc::new(move |_request, _demand| {
-            let attempted = Arc::clone(&attempted);
-            Box::pin(async move {
-                attempted.fetch_add(1, Ordering::SeqCst);
-                super::CodeIndexDemandAdmissionV1::Queued
-            })
-        })
-    };
+    let reconcile_sink = counting_reconcile_sink(Arc::clone(&attempted));
     let reopened = authority.reopen_project_graph(project.path()).await;
     let server =
         server_with_broker(reopened, &authority, Arc::clone(&broker), reconcile_sink).await;
@@ -1197,10 +1007,7 @@ async fn failed_admission_does_not_emit_hook_route_analytics() {
     let (cg, project, authority) = init_indexed_repo().await;
     let test_runtime = registered_runtime(&authority);
     let spool = TempDir::new().unwrap();
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
+    let broker = default_spool_broker(spool.path());
     let reconcile_sink: CodeIndexReconcileSink = Arc::new(|_request, _demand| {
         Box::pin(async {
             super::CodeIndexDemandAdmissionV1::Unavailable(
@@ -1263,10 +1070,7 @@ async fn durable_route_survives_unavailable_effect_for_same_connection_retry() {
         .expect("register route alias");
 
     let spool = TempDir::new().unwrap();
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
+    let broker = default_spool_broker(spool.path());
     let first_attempt = Arc::new(AtomicBool::new(true));
     let reconcile_sink: CodeIndexReconcileSink = {
         let first_attempt = Arc::clone(&first_attempt);
@@ -1383,10 +1187,7 @@ async fn committed_admissions_emit_post_commit_private_route_analytics() {
     let (cg, project, authority) = init_indexed_repo().await;
     let test_runtime = registered_runtime(&authority);
     let spool = TempDir::new().unwrap();
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
+    let broker = default_spool_broker(spool.path());
     let reconcile_sink: CodeIndexReconcileSink =
         Arc::new(|_request, _demand| Box::pin(async { super::CodeIndexDemandAdmissionV1::Queued }));
     let server =
@@ -1473,10 +1274,7 @@ async fn credential_canary_receipt_analytics_and_git_span_survive_database_reope
         .expect("register identity alias");
 
     let spool = TempDir::new().unwrap();
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
+    let broker = default_spool_broker(spool.path());
     let server = server_with_broker_and_runtime(
         cg,
         Arc::clone(&broker),
@@ -1644,10 +1442,7 @@ async fn credential_canary_receipt_analytics_and_git_span_survive_database_reope
 async fn owned_project_replay_worker_continues_past_one_bounded_batch() {
     let (cg, _project, authority) = init_indexed_repo().await;
     let spool = TempDir::new().unwrap();
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
+    let broker = default_spool_broker(spool.path());
     let payload = add_branch_payload();
     for index in 0..65 {
         broker
@@ -1678,10 +1473,7 @@ async fn owned_project_replay_worker_continues_past_one_bounded_batch() {
 async fn owned_project_replay_worker_backoffs_on_retryable_failure() {
     let (cg, _project, authority) = init_indexed_repo().await;
     let spool = TempDir::new().unwrap();
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
+    let broker = default_spool_broker(spool.path());
     broker
         .admit("codex:retryable", &add_branch_payload())
         .await
@@ -1727,10 +1519,7 @@ async fn owned_project_replay_worker_backoffs_on_retryable_failure() {
 async fn owned_project_replay_worker_is_cancelled_and_joined_on_shutdown() {
     let (cg, _project, authority) = init_indexed_repo().await;
     let spool = TempDir::new().unwrap();
-    let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
-        .unwrap()
-        .0;
-    let broker = Arc::new(HostAdmissionBroker::new(runtime));
+    let broker = default_spool_broker(spool.path());
     broker
         .admit("codex:hang", &add_branch_payload())
         .await
