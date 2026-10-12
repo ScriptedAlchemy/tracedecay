@@ -25,6 +25,12 @@
       "start": 7
     },
     {
+      "case": "row without utility",
+      "query": "exact class",
+      "rows": [{"utility": 2000000}, {"utility": 2000000}, {"utility": 2000000}, {"utility": 1000000}, {"utility": 1000000}, {"utility": null}, {"utility": 1000000}, {"utility": 1000000}, {"utility": 1000000}, {"utility": 1000000}],
+      "start": 6
+    },
+    {
       "case": "weak row naming every query word",
       "query": "exact class",
       "rows": [{"utility": 2000000}, {"utility": 2000000}, {"utility": 2000000}, {"utility": 1000000}, {"utility": 1000000}, {"utility": 1000000, "name": "Exact_Class_rank"}, {"utility": 1000000}, {"utility": 1000000}, {"utility": 1000000}, {"utility": 1000000}],
