@@ -3191,12 +3191,16 @@ impl LatestCodeTextGenerationV1 {
                 control,
             )? {
                 Some(carried) => carried,
-                None => CodeLexicalArtifactBuilderV1::create_with_memory_budget(
-                    &staging_path,
-                    metadata.clone(),
-                    builder_budget,
-                )
-                .map_err(map_text_artifact_error)?,
+                None => {
+                    #[cfg(any(test, feature = "test-helpers"))]
+                    stall_text_artifact_create_for_test();
+                    CodeLexicalArtifactBuilderV1::create_with_memory_budget(
+                        &staging_path,
+                        metadata.clone(),
+                        builder_budget,
+                    )
+                    .map_err(map_text_artifact_error)?
+                }
             },
         };
         // A staging file sealed before its publication was interrupted keeps
@@ -3865,6 +3869,22 @@ fn checkpoint_text_artifact_control(
 /// DELETE-mode recovery applies `path-journal` into whatever file is later
 /// opened at `path`. A crash that unlinked the database and left the journal
 /// would otherwise roll that journal into the next staging database.
+/// Stands in for a staging create stalled in the kernel (a fault under memory
+/// pressure, a slow fsync): when `TRACEDECAY_TEST_STALL_TEXT_ARTIFACT_CREATE`
+/// names a file, records `<file>.entered` and blocks, deaf to cancellation,
+/// until the file is removed.
+#[cfg(any(test, feature = "test-helpers"))]
+fn stall_text_artifact_create_for_test() {
+    let Some(stall) = std::env::var_os("TRACEDECAY_TEST_STALL_TEXT_ARTIFACT_CREATE") else {
+        return;
+    };
+    let stall = PathBuf::from(stall);
+    let _ = std::fs::write(format!("{}.entered", stall.display()), b"create");
+    while stall.exists() {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 fn prepare_absent_text_artifact_staging(staging_path: &Path) -> std::io::Result<()> {
     match staging_path.symlink_metadata() {
         Ok(metadata) if metadata.file_type().is_file() => Ok(()),

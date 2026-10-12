@@ -251,41 +251,83 @@ async fn stop_after_owner_registration_releases_every_store_lease() {
     );
 }
 
-/// A stop right after `init` lands mid-reconcile: the code-index worker is
-/// still projecting or seating the first generation. Its join must finish
-/// inside the shutdown abort deadline, or the worker keeps its project store
-/// leases and both project WALs survive the stop. One round rarely lands in
-/// the narrow window, so the test repeats it.
+/// A stop while the first text projection is stalled inside a blocking step
+/// the shutdown cannot interrupt (a fault under memory pressure, a slow
+/// fsync). The code-index worker must still join inside the abort deadline;
+/// a worker that waits out the stall keeps its project store leases and the
+/// store WALs survive the stop. The stall is released only once the stores
+/// have closed, so the daemon can exit.
 #[tokio::test]
-async fn stop_after_init_joins_the_code_index_worker_and_truncates_wals() {
-    for round in 0..12 {
-        let (environment, project) = IsolatedHome::new();
-        let project = project.canonicalize().expect("canonical fixture project");
-        initialize_repository(&project);
-        let log_path = environment.scratch().join("stop-after-init.log");
-        let mut daemon = spawn_tracedecay_daemon_logged(environment.home(), &log_path, |_| {});
-        initialize_tracedecay(environment.home(), &project);
-        stop_daemon_gracefully(&mut daemon);
+async fn stop_during_a_stalled_text_projection_joins_the_worker_and_truncates_wals() {
+    let (environment, project) = IsolatedHome::new();
+    let project = project.canonicalize().expect("canonical fixture project");
+    initialize_repository(&project);
+    let log_path = environment.scratch().join("stalled-projection.log");
+    let stall = environment.scratch().join("stall-text-artifact-create");
+    fs::write(&stall, b"stall").expect("stall file");
+    let entered = environment
+        .scratch()
+        .join("stall-text-artifact-create.entered");
+    let socket = daemon_socket_path(environment.home());
+    let mut daemon = spawn_tracedecay_daemon_logged(environment.home(), &log_path, |command| {
+        command.env("TRACEDECAY_TEST_STALL_TEXT_ARTIFACT_CREATE", &stall);
+    });
 
-        let log = fs::read_to_string(&log_path).expect("daemon log");
-        assert!(
-            !log.contains("outcome=code_index_scheduler_pending"),
-            "round {round}: the code-index worker must join within the abort deadline; log={log}"
-        );
-        assert_clean_shutdown_log(&log);
-        let (graph_db, sessions_db) = project_stores(environment.home(), &project);
-        let profile = environment
-            .home()
-            .join(".tracedecay")
-            .join(tracedecay_store::StoreFile::Profile.file_name());
-        for store in [&profile, &graph_db, &sessions_db] {
-            assert_eq!(
-                wal_bytes(store),
-                0,
-                "round {round}: a stop after init keeps no WAL for {}; log={log}",
-                store.display()
-            );
+    let mut init = tracedecay_command_with_home(environment.home());
+    init.arg("init")
+        .current_dir(&project)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let init = std::thread::spawn(move || init.output());
+    tokio::time::timeout(std::time::Duration::from_secs(120), async {
+        while !entered.exists() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "the text projection never reached its staging create; log={}",
+            fs::read_to_string(&log_path).unwrap_or_default()
+        )
+    });
+    let releaser = {
+        let log_path = log_path.clone();
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while std::time::Instant::now() < deadline
+                && !fs::read_to_string(&log_path)
+                    .unwrap_or_default()
+                    .contains("outcome=store_close_complete")
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            fs::remove_file(&stall).expect("release the stall");
+        })
+    };
+    stop_daemon_gracefully(&mut daemon);
+    releaser.join().expect("stall releaser");
+    settle_interrupted_init(init, &socket);
+
+    let log = fs::read_to_string(&log_path).expect("daemon log");
+    assert!(
+        !log.contains("outcome=code_index_scheduler_pending"),
+        "the code-index worker must join within the abort deadline; log={log}"
+    );
+    assert_clean_shutdown_log(&log);
+    let (graph_db, sessions_db) = project_stores(environment.home(), &project);
+    let profile = environment
+        .home()
+        .join(".tracedecay")
+        .join(tracedecay_store::StoreFile::Profile.file_name());
+    for store in [&profile, &graph_db, &sessions_db] {
+        assert_eq!(
+            wal_bytes(store),
+            0,
+            "a stop during a stalled projection keeps no WAL for {}; log={log}",
+            store.display()
+        );
     }
 }
 
