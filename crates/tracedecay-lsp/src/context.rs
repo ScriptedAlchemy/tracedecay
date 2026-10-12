@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracedecay_domain::ContentDigest;
+use tracedecay_domain::{CodeGenerationId, CommitId, ContentDigest, ManifestDigest};
 
 use crate::gateway::operation_table::{
     BoundedOperationCapacity, BoundedOperationTable, OperationAdmission, OperationPoll,
@@ -147,6 +147,21 @@ pub struct ContextProjectionIdentity {
     pub snapshot_content_digest: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub document_content_digest: Option<String>,
+}
+
+impl ContextProjectionIdentity {
+    /// Whether every component parses as its canonical domain identity.
+    pub fn is_valid(&self) -> bool {
+        CommitId::new(self.head_commit_id.clone()).is_ok()
+            && CodeGenerationId::new(self.code_generation_id.clone()).is_ok()
+            && ManifestDigest::new(self.snapshot_digest.clone()).is_ok()
+            && ManifestDigest::new(self.invalidation_digest.clone()).is_ok()
+            && ContentDigest::new(self.snapshot_content_digest.clone()).is_ok()
+            && self
+                .document_content_digest
+                .as_ref()
+                .is_none_or(|digest| ContentDigest::new(digest.clone()).is_ok())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]

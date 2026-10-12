@@ -304,7 +304,7 @@ pub const EXECUTION_TOPOLOGY_METRIC_DESCRIPTORS_V1: [(&str, &str, &str); 19] = [
 
 /// Coverage ladder: the least trustworthy observation in a population decides
 /// the population's state.
-pub(super) const fn worse_state(left: CoverageStateV1, right: CoverageStateV1) -> CoverageStateV1 {
+pub const fn worse_state(left: CoverageStateV1, right: CoverageStateV1) -> CoverageStateV1 {
     if state_rank(right) > state_rank(left) {
         right
     } else {

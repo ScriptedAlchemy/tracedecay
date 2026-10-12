@@ -2,8 +2,8 @@
 
 use super::super::primitives::{
     OwnerKey, PROJECT_MEMORY_READ_OPERATION, PROJECT_MEMORY_WRITE_OPERATION, QUERY_OPERATION,
-    ensure_project_memory_read_active, nonnegative_u64, project_memory_category_label,
-    project_memory_event_time, row_i64, row_string, storage_error, storage_message,
+    ensure_project_memory_read_active, nonnegative_u64, project_memory_event_time, row_i64,
+    row_string, storage_error, storage_message,
 };
 use super::super::projection::{
     load_project_memory_projection_controlled_tx, load_project_memory_projection_tx,
@@ -59,7 +59,7 @@ async fn list_project_memory_facts_inner_tx(
 ) -> FactStoreResult<ProjectMemoryFactPageV1> {
     ensure_optional_project_memory_read_active(read_control)?;
     let key = OwnerKey::new(query.owner())?;
-    let category = query.category().map(project_memory_category_label);
+    let category = query.category().map(FactCategoryV1::as_str);
     let min_trust = query.min_trust().map(Confidence::as_f64);
     let has_min_trust = i64::from(min_trust.is_some());
     let fetch_limit = i64::try_from(query.limit().saturating_add(1)).map_err(|_| {
@@ -446,7 +446,7 @@ pub(in crate::fact_store) fn payload_material(
     material.insert("content".to_owned(), Value::String(content.to_owned()));
     material.insert(
         "category".to_owned(),
-        Value::String(project_memory_category_label(category).to_owned()),
+        Value::String(category.as_str().to_owned()),
     );
     material.insert("tags".to_owned(), json!(tags));
     material.insert("entities".to_owned(), json!(entities));

@@ -3,19 +3,18 @@ use serde::Serialize;
 use super::diagnostics_controller::refresh_pending_failure;
 use super::semantic_controller::admission_refusal;
 use super::{
-    Arc, BTreeMap, BTreeSet, CodeGenerationId, CommitId, ContentDigest, ContextCoverage,
-    ContextExpansionEnvelope, ContextExpansionOutcome, ContextExpansionRequest, ContextFreshness,
-    ContextProducerState, ContextProjectionChange, ContextProjectionEnvelope,
-    ContextProjectionIdentity, ContextProjectionKind, ContextProjectionOutcome,
-    ContextProjectionPort, ContextProjectionRegistration, ContextProjectionRequest,
-    ContextSubscribeRequest, DaemonLspProtocolSession, DiagnosticSnapshotPort, FeedbackCyclePort,
-    LspRequestFailure, LspRequestId, MAX_CONTEXT_CHANGES_PER_POLL, MAX_CONTEXT_PROJECTION_BYTES,
-    MAX_CONTEXT_PROJECTION_ITEMS, MAX_CONTEXT_PROJECTION_KINDS, MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES,
-    MAX_CONTEXT_SUMMARY_BYTES, ManifestDigest, MethodUnavailableReason, OverlayStore,
-    ProcessLocalRequestSequence, RpcFailure, SemanticProviderPort,
-    TRACEDECAY_CONTEXT_CHANGED_METHOD, TRACEDECAY_CONTEXT_EXPAND_METHOD, TRACEDECAY_CONTEXT_METHOD,
-    TRACEDECAY_SUBSCRIBE_METHOD, Value, error_response, is_supported_context_projection, json,
-    request_id,
+    Arc, BTreeMap, BTreeSet, ContextCoverage, ContextExpansionEnvelope, ContextExpansionOutcome,
+    ContextExpansionRequest, ContextFreshness, ContextProducerState, ContextProjectionChange,
+    ContextProjectionEnvelope, ContextProjectionIdentity, ContextProjectionKind,
+    ContextProjectionOutcome, ContextProjectionPort, ContextProjectionRegistration,
+    ContextProjectionRequest, ContextSubscribeRequest, DaemonLspProtocolSession,
+    DiagnosticSnapshotPort, FeedbackCyclePort, LspRequestFailure, LspRequestId,
+    MAX_CONTEXT_CHANGES_PER_POLL, MAX_CONTEXT_PROJECTION_BYTES, MAX_CONTEXT_PROJECTION_ITEMS,
+    MAX_CONTEXT_PROJECTION_KINDS, MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES, MAX_CONTEXT_SUMMARY_BYTES,
+    MethodUnavailableReason, OverlayStore, ProcessLocalRequestSequence, RpcFailure,
+    SemanticProviderPort, TRACEDECAY_CONTEXT_CHANGED_METHOD, TRACEDECAY_CONTEXT_EXPAND_METHOD,
+    TRACEDECAY_CONTEXT_METHOD, TRACEDECAY_SUBSCRIBE_METHOD, Value, error_response,
+    is_supported_context_projection, json, request_id,
 };
 
 struct CountingSink {
@@ -60,18 +59,6 @@ fn context_envelope_value<T: Serialize>(
         message: "Internal error",
         data: Value::Null,
     })
-}
-
-fn valid_context_projection_identity(identity: &ContextProjectionIdentity) -> bool {
-    CommitId::new(identity.head_commit_id.clone()).is_ok()
-        && CodeGenerationId::new(identity.code_generation_id.clone()).is_ok()
-        && ManifestDigest::new(identity.snapshot_digest.clone()).is_ok()
-        && ManifestDigest::new(identity.invalidation_digest.clone()).is_ok()
-        && ContentDigest::new(identity.snapshot_content_digest.clone()).is_ok()
-        && identity
-            .document_content_digest
-            .as_ref()
-            .is_none_or(|digest| ContentDigest::new(digest.clone()).is_ok())
 }
 static NEXT_CONTEXT_OPERATION_ID: ProcessLocalRequestSequence =
     ProcessLocalRequestSequence::starting_at(1);
@@ -577,7 +564,7 @@ where
                     .is_some_and(|root| root.contains_document(uri))
             })
             && !envelope.scope.scope_digest.is_empty()
-            && valid_context_projection_identity(&envelope.scope.identity)
+            && envelope.scope.identity.is_valid()
             && match (
                 envelope.document_uri.is_some(),
                 envelope.scope.identity.document_content_digest.as_deref(),
@@ -682,7 +669,7 @@ where
                     .as_ref()
                     .is_some_and(|root| root.contains_document(uri))
             })
-            && valid_context_projection_identity(&envelope.identity)
+            && envelope.identity.is_valid()
             && match (
                 envelope.document_uri.is_some(),
                 envelope.identity.document_content_digest.as_deref(),
@@ -842,7 +829,7 @@ where
                     .as_ref()
                     .is_some_and(|root| root.contains_document(uri))
             })
-            && valid_context_projection_identity(&change.identity)
+            && change.identity.is_valid()
             && match (
                 change.document_uri.is_some(),
                 change.identity.document_content_digest.as_deref(),

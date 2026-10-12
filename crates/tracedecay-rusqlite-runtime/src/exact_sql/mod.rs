@@ -739,10 +739,7 @@ enum RollbackDispatch {
 }
 
 impl ExactSqlTransaction {
-    fn enqueue_attach_database(
-        &self,
-        attachment: ExactSqlAttachment,
-    ) -> Result<async_channel::Receiver<Result<(), ExactSqlError>>, ExactSqlError> {
+    pub fn attach_database(&self, attachment: ExactSqlAttachment) -> Result<(), ExactSqlError> {
         let sender = self
             .commands
             .as_ref()
@@ -751,23 +748,7 @@ impl ExactSqlTransaction {
         sender
             .try_send(TransactionCommand::Attach { attachment, reply })
             .map_err(|error| map_transaction_send_error(error, &self.lease))?;
-        Ok(response)
-    }
-    pub fn attach_database(&self, attachment: ExactSqlAttachment) -> Result<(), ExactSqlError> {
-        let lease = Arc::clone(&self.lease);
-        recv_writer_reply(self.enqueue_attach_database(attachment)?)
-            .map_err(|_| transaction_terminal_error(&lease))?
-    }
-
-    pub async fn attach_database_async(
-        &self,
-        attachment: ExactSqlAttachment,
-    ) -> Result<(), ExactSqlError> {
-        let lease = Arc::clone(&self.lease);
-        self.enqueue_attach_database(attachment)?
-            .recv()
-            .await
-            .map_err(|_| transaction_terminal_error(&lease))?
+        recv_writer_reply(response).map_err(|_| transaction_terminal_error(&self.lease))?
     }
 
     pub fn validate(&self, statement: ExactSqlStatement) -> Result<(), ExactSqlError> {
