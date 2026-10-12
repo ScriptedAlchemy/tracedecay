@@ -2981,7 +2981,6 @@ async fn project_open_shutdown_retains_synchronous_work_after_deadline() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
-    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
     const PHASE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(20);
 
     let temp = TempDir::new().expect("temp dir");
@@ -3068,7 +3067,7 @@ async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
             clients.spawn(async move {
                 Box::pin(super::super::serve_windows_broker_client(
                     stream,
-                    TOKEN,
+                    TEST_AUTH_TOKEN,
                     &lifecycle,
                     administration,
                     gates,
@@ -3090,11 +3089,7 @@ async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
                 .await
                 .expect("connect client");
             let (reader, mut writer) = stream.into_split();
-            let preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(TOKEN)
-                .to_line()
-                .expect("auth preface");
-            writer.write_all(preface.as_bytes()).await.expect("preface");
-            writer.write_all(b"\n").await.expect("preface newline");
+            write_test_auth_preface(&mut writer).await;
             writer
                 .write_all(handshake.to_line().expect("handshake").as_bytes())
                 .await

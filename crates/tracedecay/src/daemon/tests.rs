@@ -372,7 +372,6 @@ fn test_handshake_defaults() -> DaemonHandshake {
 }
 
 /// Daemon credential the in-process socket fixtures serve and present.
-#[cfg(unix)]
 const TEST_AUTH_TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
 /// Serves one socket client through the production authenticated entry.
@@ -391,7 +390,6 @@ async fn serve_authenticated_test_client(
 }
 
 /// Writes the auth preface an authenticated client sends before its handshake.
-#[cfg(unix)]
 async fn write_test_auth_preface(writer: &mut (impl tokio::io::AsyncWrite + Unpin)) {
     let preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(TEST_AUTH_TOKEN)
         .to_line()
@@ -401,6 +399,39 @@ async fn write_test_auth_preface(writer: &mut (impl tokio::io::AsyncWrite + Unpi
         .await
         .expect("write auth preface");
     writer.write_all(b"\n").await.expect("auth preface newline");
+}
+
+/// One in-process client served by `engine`, past the auth preface.
+#[cfg(unix)]
+type AuthenticatedTestClient = (
+    tokio::net::unix::OwnedReadHalf,
+    tokio::net::unix::OwnedWriteHalf,
+    JoinHandle<tracedecay_domain::errors::Result<()>>,
+);
+
+/// Connects a socket client to `engine` and writes its auth preface.
+#[cfg(unix)]
+async fn connect_authenticated_test_client(engine: DaemonEngine) -> AuthenticatedTestClient {
+    let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
+    let server_task = tokio::spawn(Box::pin(serve_authenticated_test_client(server, engine)));
+    let (reader, mut writer) = client.into_split();
+    write_test_auth_preface(&mut writer).await;
+    (reader, writer, server_task)
+}
+
+/// Connects an authenticated socket client to `engine` and writes `handshake`.
+#[cfg(unix)]
+async fn handshake_authenticated_test_client(
+    engine: DaemonEngine,
+    handshake: &DaemonHandshake,
+) -> AuthenticatedTestClient {
+    let (reader, mut writer, server_task) = connect_authenticated_test_client(engine).await;
+    writer
+        .write_all(handshake.to_line().expect("handshake").as_bytes())
+        .await
+        .expect("write handshake");
+    writer.write_all(b"\n").await.expect("handshake newline");
+    (reader, writer, server_task)
 }
 
 /// Publishes the authority record beside `socket` that clients resolve it

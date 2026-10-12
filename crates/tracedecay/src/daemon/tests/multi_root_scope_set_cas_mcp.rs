@@ -83,24 +83,9 @@ async fn run_scope_set_compare_and_swap() {
         .await
         .expect("register beta project");
 
-    let (server_stream, client_stream) =
-        tokio::net::UnixStream::pair().expect("scope-set socket pair");
-    let server_engine = engine.clone();
-    let server_task = tokio::spawn(async move {
-        Box::pin(super::serve_authenticated_test_client(
-            server_stream,
-            server_engine,
-        ))
-        .await
-    });
-    let (reader, mut writer) = client_stream.into_split();
-    super::write_test_auth_preface(&mut writer).await;
+    let (reader, mut writer, server_task) =
+        super::handshake_authenticated_test_client(engine.clone(), &handshake).await;
     let mut reader = tokio::io::BufReader::new(reader);
-    writer
-        .write_all(handshake.to_line().expect("handshake").as_bytes())
-        .await
-        .expect("write handshake");
-    writer.write_all(b"\n").await.expect("handshake newline");
     write_line(
         &mut writer,
         &json!({
