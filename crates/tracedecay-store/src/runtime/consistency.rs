@@ -1,11 +1,9 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use tracedecay_domain::UtcMicros;
 
 use super::{
-    SnapshotLeaseIdV1, StorageRuntimeContractErrorV1, StoreAuthorityEpochV1, StoreIncarnationV1,
-    StoreShardIdV1, StoreSnapshotIdV1,
+    StorageRuntimeContractErrorV1, StoreAuthorityEpochV1, StoreIncarnationV1, StoreShardIdV1,
 };
 
 /// Per-incarnation sequence assigned only after a successful commit.
@@ -110,68 +108,12 @@ impl From<FrozenWatermarkVectorV1> for Vec<ShardWatermarkV1> {
     }
 }
 
-/// Retained exact snapshot and its bounded lease.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SnapshotLeaseV1 {
-    pub lease_id: SnapshotLeaseIdV1,
-    pub snapshot_id: StoreSnapshotIdV1,
-    pub watermark: ShardWatermarkV1,
-    pub acquired_at: UtcMicros,
-    pub expires_at: UtcMicros,
-}
-
-impl SnapshotLeaseV1 {
-    pub fn validate(&self) -> Result<(), StorageRuntimeContractErrorV1> {
-        if self.expires_at <= self.acquired_at {
-            return Err(StorageRuntimeContractErrorV1::InvalidLeaseInterval {
-                field: "snapshot lease",
-            });
-        }
-        Ok(())
-    }
-
-    pub fn is_expired_at(&self, now: UtcMicros) -> bool {
-        now >= self.expires_at
-    }
-}
-
-impl<'de> Deserialize<'de> for SnapshotLeaseV1 {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            lease_id: SnapshotLeaseIdV1,
-            snapshot_id: StoreSnapshotIdV1,
-            watermark: ShardWatermarkV1,
-            acquired_at: UtcMicros,
-            expires_at: UtcMicros,
-        }
-
-        let wire = Wire::deserialize(deserializer)?;
-        let lease = Self {
-            lease_id: wire.lease_id,
-            snapshot_id: wire.snapshot_id,
-            watermark: wire.watermark,
-            acquired_at: wire.acquired_at,
-            expires_at: wire.expires_at,
-        };
-        lease.validate().map_err(serde::de::Error::custom)?;
-        Ok(lease)
-    }
-}
-
 /// Read guarantee requested from a runtime. All waiting remains bounded by the caller.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ConsistencyModeV1 {
     LatestAvailable,
     AtLeast { commit_sequence: CommitSequenceV1 },
-    ExactSnapshot { lease: Box<SnapshotLeaseV1> },
-    FrozenWatermarkVector { vector: FrozenWatermarkVectorV1 },
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -247,13 +189,6 @@ impl FrozenWatermarkCoverageV1 {
         self.required
             .iter()
             .all(|(shard_id, _)| self.status_for(shard_id) == WatermarkCoverageStatusV1::Satisfied)
-    }
-
-    pub fn is_partial(&self) -> bool {
-        !self.is_complete()
-            && self.required.iter().any(|(shard_id, _)| {
-                self.status_for(shard_id) == WatermarkCoverageStatusV1::Satisfied
-            })
     }
 }
 
