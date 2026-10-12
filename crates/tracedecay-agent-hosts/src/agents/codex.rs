@@ -444,6 +444,7 @@ impl AgentIntegration for CodexIntegration {
             return mcp_registry::codex_mcp_add_with(&codex_cli, &ctx.home, &ctx.tracedecay_bin);
         }
         if components.contains(&super::host_bundle::HostComponentV1::Core) {
+            mcp_registry::retire_standalone_server(components, &ctx.home)?;
             return self.activate_deployed_host_registration(ctx);
         }
         Ok(())
@@ -462,6 +463,7 @@ impl AgentIntegration for CodexIntegration {
             return mcp_registry::codex_mcp_remove_with(&codex_cli, &ctx.home);
         }
         if components.contains(&super::host_bundle::HostComponentV1::Core) {
+            mcp_registry::retire_standalone_server(components, &ctx.home)?;
             return self.deactivate_deployed_host_registration(ctx);
         }
         Ok(())

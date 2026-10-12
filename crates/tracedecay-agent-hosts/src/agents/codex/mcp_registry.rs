@@ -120,15 +120,32 @@ pub(super) fn standalone_mcp_route(
     ) {
         return Ok(false);
     }
-    let (_, config) = read_config_table(&codex_config_path(home)).map_err(drop)?;
-    let Some(server) = config
-        .get(CODEX_MCP_SERVERS_KEY)
-        .and_then(|servers| servers.get(CODEX_MCP_SERVER_NAME))
-    else {
+    let Some(server) = standalone_server(home).map_err(drop)? else {
         return Ok(false);
     };
     Ok(tracedecay_bin
         .is_none_or(|bin| server.get("command").and_then(toml::Value::as_str) == Some(bin)))
+}
+
+fn standalone_server(home: &Path) -> Result<Option<toml::Value>> {
+    let (_, mut config) = read_config_table(&codex_config_path(home))?;
+    Ok(config
+        .remove(CODEX_MCP_SERVERS_KEY)
+        .and_then(|mut servers| servers.as_table_mut()?.remove(CODEX_MCP_SERVER_NAME)))
+}
+
+/// Drop the standalone server an MCP-only install registered, through Codex's
+/// own registry, when `components` is the plugin-bearing set. That plugin
+/// carries the MCP route, so a standalone server beside it would be a second
+/// one, and after its uninstall the server would be registration residue.
+pub(super) fn retire_standalone_server(components: &[HostComponentV1], home: &Path) -> Result<()> {
+    let plugin_carries_mcp = components.contains(&HostComponentV1::Core)
+        && (components.contains(&HostComponentV1::ContextMcp)
+            || components.contains(&HostComponentV1::OperatorMcp));
+    if !plugin_carries_mcp || standalone_server(home)?.is_none() {
+        return Ok(());
+    }
+    codex_mcp_remove_with(&require_codex_cli()?, home)
 }
 
 /// Resolve Codex's own CLI, or fail with the typed requirement.
