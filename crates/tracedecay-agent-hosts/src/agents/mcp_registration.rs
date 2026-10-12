@@ -195,6 +195,30 @@ pub fn mcp_servers_registration_state(
     }
 }
 
+/// Registration state of one tracedecay MCP server entry that must launch
+/// `<command> serve`: `expected_binary` pins the command, `None` accepts any
+/// non-empty one.
+pub(crate) fn serve_entry_registration_state(
+    server: &serde_json::Value,
+    expected_binary: Option<&str>,
+) -> host_bundle::HostBundleRegistrationStateV1 {
+    let command_matches = server
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|command| {
+            expected_binary.map_or_else(|| !command.is_empty(), |expected| command == expected)
+        });
+    let serves_tracedecay = server
+        .get("args")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|args| args.len() == 1 && args[0].as_str() == Some("serve"));
+    if server.is_object() && command_matches && serves_tracedecay {
+        host_bundle::HostBundleRegistrationStateV1::Current
+    } else {
+        host_bundle::HostBundleRegistrationStateV1::Repairable
+    }
+}
+
 /// Host-specific wording for [`doctor_check_mcp_registration`].
 pub struct McpDoctorLabels<'a> {
     /// Agent id used in the ``run `tracedecay install --agent <id>` `` hint.
