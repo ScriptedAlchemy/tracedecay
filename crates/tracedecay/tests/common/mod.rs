@@ -1550,11 +1550,14 @@ impl LcmTestRuntime {
         self.runtime.lcm_load_session_for_test(request).await
     }
 
-    pub async fn lcm_grep(
+    pub async fn lcm_raw_message_search_fields(
         &self,
-        request: tracedecay_lcm::LcmGrepRequest,
-    ) -> Result<tracedecay_lcm::LcmGrepOutcome, tracedecay_lcm::LcmError> {
-        self.runtime.lcm_grep_for_test(request).await
+        provider: &str,
+        message_id: &str,
+    ) -> Result<Option<(String, String)>, tracedecay_lcm::LcmError> {
+        self.runtime
+            .lcm_raw_message_search_fields_for_test(provider, message_id)
+            .await
     }
 
     pub async fn lcm_expand(

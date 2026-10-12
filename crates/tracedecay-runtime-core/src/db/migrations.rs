@@ -51,6 +51,79 @@ const ROOT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS metadata (
 /// v39 drops the handoff grant table, which lives in the project session store.
 pub const SCHEMA_VERSION: u32 = 39;
 
+/// The runtime ledger's retired outbox and inbox tables, exactly as v39 stores
+/// carry them. Nothing reads or writes them, but a store cannot change shape
+/// in place, so the v39 shape keeps them until the next [`SCHEMA_VERSION`].
+const RETIRED_RUNTIME_EFFECTS_SCHEMA_V39: &str = "
+CREATE TABLE IF NOT EXISTS td_runtime_writer_outbox_v1 (
+    source_shard_json TEXT NOT NULL,
+    source_incarnation INTEGER NOT NULL CHECK (source_incarnation > 0),
+    source_authority_epoch INTEGER NOT NULL CHECK (source_authority_epoch > 0),
+    effect_id TEXT NOT NULL,
+    ordering_key TEXT NOT NULL,
+    source_sequence INTEGER NOT NULL CHECK (source_sequence >= 0),
+    state TEXT NOT NULL CHECK (
+        state IN ('pending', 'dispatched', 'effect_unknown', 'acknowledged')
+    ),
+    entry_json TEXT NOT NULL,
+    source_receipt_json TEXT NOT NULL,
+    transaction_scope_json TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    durability_json TEXT NOT NULL,
+    updated_at_micros INTEGER NOT NULL,
+    PRIMARY KEY (source_shard_json, source_incarnation, source_authority_epoch, effect_id)
+) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS td_runtime_writer_outbox_ordering_v1
+ON td_runtime_writer_outbox_v1 (
+    source_shard_json,
+    source_incarnation,
+    source_authority_epoch,
+    ordering_key,
+    source_sequence,
+    effect_id
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS td_runtime_writer_outbox_effect_v1
+ON td_runtime_writer_outbox_v1 (source_shard_json, effect_id);
+
+CREATE INDEX IF NOT EXISTS td_runtime_writer_outbox_state_v1
+ON td_runtime_writer_outbox_v1 (
+    source_shard_json,
+    source_incarnation,
+    source_authority_epoch,
+    state,
+    updated_at_micros
+);
+
+CREATE TABLE IF NOT EXISTS td_runtime_writer_inbox_v1 (
+    target_shard_json TEXT NOT NULL,
+    target_incarnation INTEGER NOT NULL CHECK (target_incarnation > 0),
+    target_authority_epoch INTEGER NOT NULL CHECK (target_authority_epoch > 0),
+    effect_id TEXT NOT NULL,
+    ordering_key TEXT NOT NULL,
+    source_sequence INTEGER NOT NULL CHECK (source_sequence >= 0),
+    target_sequence INTEGER NOT NULL CHECK (target_sequence > 0),
+    identity_json TEXT NOT NULL,
+    receipt_json TEXT NOT NULL,
+    committed_at_micros INTEGER NOT NULL,
+    PRIMARY KEY (target_shard_json, target_incarnation, target_authority_epoch, effect_id)
+) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS td_runtime_writer_inbox_ordering_v1
+ON td_runtime_writer_inbox_v1 (
+    target_shard_json,
+    target_incarnation,
+    target_authority_epoch,
+    ordering_key,
+    source_sequence,
+    effect_id
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS td_runtime_writer_inbox_effect_v1
+ON td_runtime_writer_inbox_v1 (target_shard_json, effect_id);
+";
+
 /// Verifies that a rusqlite connection sees the exact final relational shape
 /// this binary creates. This is query-only and shares the daemon's schema
 /// authority.
@@ -202,6 +275,12 @@ async fn create_schema_transaction(conn: &(impl Executor + Sync)) -> Result<()> 
         .await
         .map_err(|e| TraceDecayError::Database {
             message: format!("failed to create runtime writer ledger: {e}"),
+            operation: "create_schema".to_string(),
+        })?;
+    conn.execute_batch(RETIRED_RUNTIME_EFFECTS_SCHEMA_V39)
+        .await
+        .map_err(|e| TraceDecayError::Database {
+            message: format!("failed to create retired runtime effects tables: {e}"),
             operation: "create_schema".to_string(),
         })?;
     final_shape::require_exact_final_shape(conn).await?;

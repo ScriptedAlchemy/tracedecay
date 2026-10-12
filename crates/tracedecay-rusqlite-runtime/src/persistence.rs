@@ -200,10 +200,6 @@ mod tests {
         let mut connection = Connection::open_in_memory().unwrap();
         let request = request(metadata("operation.atomic", "key.atomic", 'a'));
         let binding = request.binding().clone();
-        let effect_id = match &request.envelope().payload {
-            RepositoryWritePayloadV1::EnqueueOutbox(entry) => entry.identity.effect_id.clone(),
-            _ => unreachable!(),
-        };
         let mut first = RuntimeWriterPersistence::new(MarkerExecutor);
         let mut transaction = connection.transaction().unwrap();
         assert!(
@@ -232,14 +228,6 @@ mod tests {
             )
             .unwrap(),
             Some(receipt.clone())
-        );
-        assert_eq!(
-            ledger::outbox_entry(&savepoint, &binding, &effect_id)
-                .unwrap()
-                .unwrap()
-                .identity
-                .effect_id,
-            effect_id
         );
         savepoint.rollback().unwrap();
         drop(savepoint);

@@ -121,15 +121,14 @@ fn transaction_scope(metadata: &StoreOperationMetadataV1) -> RuntimeTransactionS
     }
 }
 
-fn outbox_payload() -> RepositoryWritePayloadV1 {
-    RepositoryWritePayloadV1::EnqueueOutbox(Box::new(TransactionalOutboxEntryV1 {
-        identity: effect_identity(),
-        effect: RepositoryEffectV1::PublishObservation,
-        state: OutboxEffectStateV1::Pending,
-        acknowledgement: None,
-        enqueued_at: UtcMicros(1),
-        updated_at: UtcMicros(1),
-    }))
+fn diagnostics_payload() -> RepositoryWritePayloadV1 {
+    RepositoryWritePayloadV1::Diagnostics(Box::new(
+        SanitizedCleanDiagnosticSnapshotV1::new(
+            id::<CodeGenerationId>("generation.fixture"),
+            vec![],
+        )
+        .unwrap(),
+    ))
 }
 
 fn submit_request(metadata: StoreOperationMetadataV1) -> RuntimeSubmitRequestV1 {
@@ -137,7 +136,7 @@ fn submit_request(metadata: StoreOperationMetadataV1) -> RuntimeSubmitRequestV1 
     RuntimeSubmitRequestV1::new(
         RepositoryOperationEnvelopeV1 {
             metadata,
-            payload: outbox_payload(),
+            payload: diagnostics_payload(),
         },
         scope,
         control(),
@@ -331,13 +330,7 @@ fn frozen_coverage_rejects_a_shard_observed_twice() {
 fn operation_envelopes_enforce_scope_and_per_operation_durability() {
     let valid = RepositoryOperationEnvelopeV1 {
         metadata: metadata(project_shard("project.one"), DurabilityClassV1::Full),
-        payload: RepositoryWritePayloadV1::Diagnostics(Box::new(
-            SanitizedCleanDiagnosticSnapshotV1::new(
-                id::<CodeGenerationId>("generation.fixture"),
-                vec![],
-            )
-            .unwrap(),
-        )),
+        payload: diagnostics_payload(),
     };
     valid.validate().unwrap();
 
@@ -364,152 +357,12 @@ fn operation_envelopes_enforce_scope_and_per_operation_durability() {
 
     let immutable_snapshot = RepositoryOperationEnvelopeV1 {
         metadata: metadata(code_snapshot_shard("project.one"), DurabilityClassV1::Full),
-        payload: outbox_payload(),
+        payload: diagnostics_payload(),
     };
     assert!(matches!(
         immutable_snapshot.validate(),
         Err(StorageRuntimeContractErrorV1::ImmutableShard { .. })
     ));
-
-    let invalid_payload = RepositoryOperationEnvelopeV1 {
-        metadata: metadata(project_shard("project.one"), DurabilityClassV1::Full),
-        payload: RepositoryWritePayloadV1::EnqueueOutbox(Box::new(TransactionalOutboxEntryV1 {
-            identity: effect_identity(),
-            effect: RepositoryEffectV1::PublishObservation,
-            state: OutboxEffectStateV1::Acknowledged,
-            acknowledgement: None,
-            enqueued_at: UtcMicros(1),
-            updated_at: UtcMicros(2),
-        })),
-    };
-    assert!(matches!(
-        invalid_payload.validate(),
-        Err(StorageRuntimeContractErrorV1::AcknowledgementReceiptRequired)
-    ));
-    let invalid_scope = transaction_scope(&invalid_payload.metadata);
-    assert!(matches!(
-        RuntimeSubmitRequestV1::new(invalid_payload, invalid_scope, control()),
-        Err(StorageRuntimeContractErrorV1::AcknowledgementReceiptRequired)
-    ));
-}
-
-fn effect_identity() -> EffectIdentityV1 {
-    let source = project_shard("project.one");
-    let target = session_shard("project.one");
-    EffectIdentityV1 {
-        effect_id: StoreEffectIdV1::new("effect.fixture").unwrap(),
-        command_digest: digest('d'),
-        ordering_key: StoreEffectOrderingKeyV1::new("project.one.observations").unwrap(),
-        source_watermark: watermark(source, 30),
-        target_watermark: watermark(target, 40),
-    }
-}
-
-#[test]
-fn outbox_identity_and_acknowledgements_bind_target_history() {
-    let identity = effect_identity();
-    identity.validate().unwrap();
-    identity.enforce_epochs(epoch(7), epoch(7)).unwrap();
-    identity
-        .enforce_histories(
-            &ShardWatermarkV1 {
-                commit_sequence: CommitSequenceV1(31),
-                ..identity.source_watermark.clone()
-            },
-            &ShardWatermarkV1 {
-                commit_sequence: CommitSequenceV1(40),
-                ..identity.target_watermark.clone()
-            },
-        )
-        .unwrap();
-    assert_eq!(
-        identity.enforce_epochs(epoch(8), epoch(7)),
-        Err(StorageRuntimeContractErrorV1::EffectEpochMismatch { side: "source" })
-    );
-
-    let mut outbox = TransactionalOutboxEntryV1 {
-        identity: identity.clone(),
-        effect: RepositoryEffectV1::PublishObservation,
-        state: OutboxEffectStateV1::Pending,
-        acknowledgement: None,
-        enqueued_at: UtcMicros(1),
-        updated_at: UtcMicros(1),
-    };
-    outbox
-        .transition(OutboxEffectStateV1::Dispatched, UtcMicros(2))
-        .unwrap();
-    outbox
-        .transition(OutboxEffectStateV1::EffectUnknown, UtcMicros(3))
-        .unwrap();
-    assert_eq!(outbox.state, OutboxEffectStateV1::EffectUnknown);
-    assert!(
-        outbox
-            .transition(OutboxEffectStateV1::Dispatched, UtcMicros(2))
-            .is_err()
-    );
-    assert_eq!(outbox.state, OutboxEffectStateV1::EffectUnknown);
-    assert!(
-        outbox
-            .transition(OutboxEffectStateV1::Pending, UtcMicros(4))
-            .is_err()
-    );
-
-    let receipt = TransactionalInboxReceiptV1 {
-        target_commit_watermark: ShardWatermarkV1 {
-            commit_sequence: CommitSequenceV1(41),
-            ..identity.target_watermark.clone()
-        },
-        identity: identity.clone(),
-        disposition: InboxEffectDispositionV1::Applied,
-        committed_at: UtcMicros(5),
-    };
-    receipt.validate().unwrap();
-    assert!(
-        TransactionalInboxReceiptV1 {
-            target_commit_watermark: identity.target_watermark.clone(),
-            ..receipt.clone()
-        }
-        .validate()
-        .is_err()
-    );
-    let acknowledgement = OutboxAcknowledgementReceiptV1 {
-        identity: identity.clone(),
-        inbox_receipt: receipt.clone(),
-        source_commit_watermark: ShardWatermarkV1 {
-            commit_sequence: CommitSequenceV1(31),
-            ..identity.source_watermark.clone()
-        },
-        acknowledged_at: UtcMicros(6),
-    };
-    acknowledgement.validate().unwrap();
-    assert!(
-        OutboxAcknowledgementReceiptV1 {
-            source_commit_watermark: identity.source_watermark.clone(),
-            ..acknowledgement.clone()
-        }
-        .validate()
-        .is_err()
-    );
-    outbox.acknowledge(acknowledgement).unwrap();
-    assert_eq!(outbox.state, OutboxEffectStateV1::Acknowledged);
-    assert!(outbox.acknowledgement.is_some());
-
-    let wrong_target_history = TransactionalInboxReceiptV1 {
-        target_commit_watermark: ShardWatermarkV1 {
-            incarnation: incarnation(2),
-            commit_sequence: CommitSequenceV1(41),
-            ..identity.target_watermark.clone()
-        },
-        identity,
-        disposition: InboxEffectDispositionV1::Applied,
-        committed_at: UtcMicros(5),
-    };
-    assert!(matches!(
-        wrong_target_history.validate(),
-        Err(StorageRuntimeContractErrorV1::EffectIncarnationMismatch { side: "target" })
-    ));
-    round_trip(&outbox);
-    round_trip(&receipt);
 }
 
 struct Probe {
@@ -969,7 +822,7 @@ fn transaction_scope_deserialization_preserves_nested_and_structural_validation(
 }
 
 #[test]
-fn semantic_serde_boundaries_reject_scope_durability_history_and_receipt_mismatches() {
+fn semantic_serde_boundaries_reject_scope_durability_and_history_mismatches() {
     let mut invalid_control = serde_json::to_value(control()).unwrap();
     invalid_control["cancellation"]["generation"] = json!(0);
     assert_eq!(
@@ -986,25 +839,6 @@ fn semantic_serde_boundaries_reject_scope_durability_history_and_receipt_mismatc
             .unwrap_err()
             .to_string(),
         "unknown field `expires_at`, expected `deadline_id`"
-    );
-
-    let identity = effect_identity();
-    let receipt = TransactionalInboxReceiptV1 {
-        identity: identity.clone(),
-        disposition: InboxEffectDispositionV1::Applied,
-        target_commit_watermark: ShardWatermarkV1 {
-            commit_sequence: CommitSequenceV1(41),
-            ..identity.target_watermark.clone()
-        },
-        committed_at: UtcMicros(2),
-    };
-    let mut wrong_receipt = serde_json::to_value(&receipt).unwrap();
-    wrong_receipt["target_commit_watermark"]["authority_epoch"] = json!(8);
-    assert_eq!(
-        serde_json::from_value::<TransactionalInboxReceiptV1>(wrong_receipt)
-            .unwrap_err()
-            .to_string(),
-        "authority epoch mismatch for target effect sink"
     );
 
     let health_lease = ReaderHealthLeaseV1 {

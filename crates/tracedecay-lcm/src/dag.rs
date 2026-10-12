@@ -144,26 +144,8 @@ pub async fn expand_summary_node(
     expansions.pop().ok_or(LcmError::SummaryNodeNotFound)
 }
 
-/// Expands every requested node against **one** hydration pass.
-///
-/// The node rows, their lineage rows, the raw sources of the whole set, and the
-/// child summary nodes of the whole set are each loaded once, so a page of `N`
-/// explicitly requested nodes costs a fixed number of round trips instead of
-/// `N` independent expansions. Per-node semantics are unchanged: nodes are
-/// assembled in request order and the first ownership or integrity failure
-/// still aborts the whole call with the same error it raised before.
-pub async fn expand_summary_nodes(
-    conn: &(impl QueryExecutor + ?Sized),
-    provider: &str,
-    session_id: &str,
-    node_ids: &[String],
-) -> Result<Vec<LcmSummaryExpansion>, LcmError> {
-    expand_summary_nodes_with_content(conn, provider, session_id, node_ids, true).await
-}
-
 // The one hydration pass behind every summary expansion (node rows, lineage,
-// raw + child source closure). Measured here rather than on the two public
-// wrappers so single-node and batched expansions share one label.
+// raw + child source closure).
 #[tracing::instrument(name = "sessions.lcm.dag.hydrate", level = "trace", skip_all)]
 async fn expand_summary_nodes_with_content(
     conn: &(impl QueryExecutor + ?Sized),

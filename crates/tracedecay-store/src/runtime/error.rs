@@ -59,7 +59,7 @@ pub enum StorageRuntimeContractErrorV1 {
     IdempotencyConflict,
     #[error("repository payload for {payload} failed its owning store contract")]
     InvalidRepositoryPayload { payload: &'static str },
-    #[error("{field} does not bind to the request or effect identity")]
+    #[error("{field} does not bind to the request identity")]
     ReceiptBindingMismatch { field: &'static str },
     #[error("{field} is not a valid lease interval")]
     InvalidLeaseInterval { field: &'static str },
@@ -72,17 +72,6 @@ pub enum StorageRuntimeContractErrorV1 {
     ReaderHealthLaneRequired,
     #[error("runtime batch is incompatible at {field}")]
     BatchIncompatible { field: &'static str },
-    #[error("invalid effect state transition from {from} to {to}")]
-    InvalidEffectTransition {
-        from: &'static str,
-        to: &'static str,
-    },
-    #[error("an acknowledged outbox entry requires a typed acknowledgment receipt")]
-    AcknowledgementReceiptRequired,
-    #[error("authority epoch mismatch for {side} effect sink")]
-    EffectEpochMismatch { side: &'static str },
-    #[error("store incarnation mismatch for {side} effect sink")]
-    EffectIncarnationMismatch { side: &'static str },
     #[error("{field} has an unexpected store incarnation")]
     IncarnationMismatch {
         field: &'static str,

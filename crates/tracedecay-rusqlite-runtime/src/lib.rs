@@ -17,7 +17,7 @@ mod ledger;
 /// Canonical schema for the runtime writer ledger installed in registered
 /// SQLite stores.
 pub mod runtime_ledger {
-    pub use crate::ledger::RUNTIME_LEDGER_SCHEMA;
+    pub use crate::ledger::{RETIRE_RUNTIME_EFFECTS_V1, RUNTIME_LEDGER_SCHEMA};
 }
 pub mod maintenance;
 mod operation;

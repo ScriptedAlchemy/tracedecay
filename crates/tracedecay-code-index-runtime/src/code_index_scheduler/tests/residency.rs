@@ -1302,18 +1302,27 @@ async fn a_settled_index_keeps_no_captured_source_allocated() {
     registry.shutdown().await;
 }
 
+/// The receipts retained now, the mark [`next_receipt_trigger`] reads past.
+fn receipt_mark(receipts: &mut tokio::sync::watch::Receiver<CodeIndexCadenceTelemetryV1>) -> usize {
+    receipts.borrow_and_update().receipts().len()
+}
+
+/// The trigger of the first receipt recorded after `mark`. The pass that
+/// answers an action can owe a follow-up whose receipt lands before this
+/// reader runs, so the latest receipt need not be the action's.
 async fn next_receipt_trigger(
     receipts: &mut tokio::sync::watch::Receiver<CodeIndexCadenceTelemetryV1>,
+    mark: usize,
 ) -> CodeIndexCadenceTriggerV1 {
     tokio::time::timeout(Duration::from_mins(1), async {
         loop {
+            if let Some(receipt) = receipts.borrow_and_update().receipts().nth(mark) {
+                return receipt.trigger;
+            }
             receipts
                 .changed()
                 .await
                 .expect("the cadence channel stays open while the registry lives");
-            if let Some(receipt) = receipts.borrow_and_update().latest().cloned() {
-                return receipt.trigger;
-            }
         }
     })
     .await
@@ -1380,11 +1389,12 @@ async fn a_text_build_refused_for_memory_retries_when_memory_is_given_back() {
     let (registry, blocker, mut receipts) =
         mount_with_refused_text_build(&fixture, &store, &owners).await;
 
+    let mark = receipt_mark(&mut receipts);
     drop(blocker);
     owners.note_headroom();
 
     assert_eq!(
-        next_receipt_trigger(&mut receipts).await,
+        next_receipt_trigger(&mut receipts, mark).await,
         CodeIndexCadenceTriggerV1::MemoryHeadroom
     );
     let text = wait_for_queryable_text_generation(&registry, fixture.path()).await;
@@ -1401,10 +1411,11 @@ async fn a_refused_text_build_retries_when_a_reservation_it_waited_on_drops() {
     let (registry, blocker, mut receipts) =
         mount_with_refused_text_build(&fixture, &store, &owners).await;
 
+    let mark = receipt_mark(&mut receipts);
     drop(blocker);
 
     assert_eq!(
-        next_receipt_trigger(&mut receipts).await,
+        next_receipt_trigger(&mut receipts, mark).await,
         CodeIndexCadenceTriggerV1::MemoryHeadroom
     );
     let text = wait_for_queryable_text_generation(&registry, fixture.path()).await;
@@ -2053,6 +2064,7 @@ async fn readers_of_a_build_waiting_for_memory_do_not_spin_the_worker() {
     let (registry, blocker, mut receipts) =
         mount_with_refused_text_build(&fixture, &store, &owners).await;
 
+    let mark = receipt_mark(&mut receipts);
     // The first complete-generation demand is new work and wakes one pass,
     // which finds the build still waiting for memory.
     assert!(
@@ -2062,7 +2074,7 @@ async fn readers_of_a_build_waiting_for_memory_do_not_spin_the_worker() {
             .is_none()
     );
     assert_eq!(
-        next_receipt_trigger(&mut receipts).await,
+        next_receipt_trigger(&mut receipts, mark).await,
         CodeIndexCadenceTriggerV1::QueryAdmission
     );
     wait_for_worker_phase(&registry, fixture.path(), CodeIndexWorkerPhaseV1::Parked).await;
@@ -2082,10 +2094,11 @@ async fn readers_of_a_build_waiting_for_memory_do_not_spin_the_worker() {
         "a reader's wake cannot help a build parked on memory, so no pass runs"
     );
 
+    let mark = receipt_mark(&mut receipts);
     drop(blocker);
     owners.note_headroom();
     assert_eq!(
-        next_receipt_trigger(&mut receipts).await,
+        next_receipt_trigger(&mut receipts, mark).await,
         CodeIndexCadenceTriggerV1::MemoryHeadroom
     );
     let text = wait_for_queryable_text_generation(&registry, fixture.path()).await;

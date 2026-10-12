@@ -38,6 +38,13 @@ pub async fn hold_after_independent_owners_for_test() -> Result<()> {
     hold_for_test("TRACEDECAY_TEST_HOLD_AFTER_INDEPENDENT_OWNERS", b"owners").await
 }
 
+/// Park a project open after capacity admission and before it binds its route
+/// into the bounded project-server cache, when
+/// `TRACEDECAY_TEST_HOLD_BEFORE_ROUTE_BIND` names a file.
+pub async fn hold_before_route_bind_for_test() -> Result<()> {
+    hold_for_test("TRACEDECAY_TEST_HOLD_BEFORE_ROUTE_BIND", b"bind").await
+}
+
 /// Releases `store`'s interactive catalog once nothing holds it. `Busy` means
 /// ask again later: after a test drops its own readers, a background catalog
 /// warm or residency pass can still hold the catalog for a moment.

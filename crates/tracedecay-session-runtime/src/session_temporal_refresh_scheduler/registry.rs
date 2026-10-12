@@ -94,6 +94,10 @@ fn bounded_historical_ingest_permits() -> usize {
 struct SessionTemporalRefreshSchedulerEntry {
     state: Arc<SessionTemporalRefreshWakeState>,
     wake: SessionTemporalRefreshWake,
+    /// Every other route callers hold for this owner, rebound to `state`
+    /// so their `wake()` lands here. A rekey collects the complete set —
+    /// `wake` plus these — into the handoff it owes the new owner.
+    extra_routes: Vec<SessionTemporalRefreshWake>,
     history: Arc<std::sync::RwLock<Option<SharedSessionHistoricalIngestor>>>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -115,6 +119,12 @@ fn cancel_supervisor(
 impl SessionTemporalRefreshSchedulerEntry {
     fn cancel(&self) {
         cancel_supervisor(&self.state, &self.history);
+    }
+
+    /// Every route callers hold for this entry, oldest first and ending
+    /// with its primary wake.
+    fn routes(&self) -> impl Iterator<Item = &SessionTemporalRefreshWake> {
+        self.extra_routes.iter().chain(std::iter::once(&self.wake))
     }
 }
 
@@ -179,6 +189,36 @@ impl Drop for SessionTemporalRefreshRetirement<'_> {
     }
 }
 
+/// The obligation a `rekey_project` owes the new owner, retained across a
+/// dropped join: every route that reached the retired owner plus the
+/// requests every retired worker's state still held when this attempt
+/// took it, and whatever `staging` already collected. A later rekey
+/// lands all of it on the new owner's state. `staging` is cancelled
+/// whenever no attempt owns it, so a parked handoff's routes report no
+/// live target until a retry binds a worker.
+#[derive(Clone)]
+struct SessionTemporalRefreshRekeyHandoff {
+    /// Every route owed to the new owner, oldest first: the parked
+    /// routes plus any distinct live route a re-admitted owner's entry
+    /// carried when a retry retired it again.
+    routes: Vec<SessionTemporalRefreshWake>,
+    staging: Arc<SessionTemporalRefreshWakeState>,
+    pending_states: Vec<Arc<SessionTemporalRefreshWakeState>>,
+}
+
+/// Cancels a rekey attempt's live staging when the attempt's future is
+/// dropped: the handoff it leaves parked keeps the route and queued
+/// requests while reporting no live target until a retry binds a worker.
+struct SessionTemporalRefreshStagingPark {
+    staging: Arc<SessionTemporalRefreshWakeState>,
+}
+
+impl Drop for SessionTemporalRefreshStagingPark {
+    fn drop(&mut self) {
+        self.staging.cancel();
+    }
+}
+
 pub struct SessionTemporalRefreshSchedulerRegistry {
     project: tokio::sync::Mutex<HashMap<StoreOwnerKey, SessionTemporalRefreshSchedulerEntry>>,
     profile: tokio::sync::Mutex<HashMap<std::path::PathBuf, SessionTemporalRefreshSchedulerEntry>>,
@@ -187,6 +227,9 @@ pub struct SessionTemporalRefreshSchedulerRegistry {
     /// so `cancel_supervisors` reaches workers without waiting on the
     /// lifecycle or map locks a stuck retired-owner join may hold.
     live: std::sync::Mutex<Vec<SessionTemporalRefreshLiveCancel>>,
+    /// Rekey obligations a dropped `rekey_project` left behind, keyed by
+    /// the retired owner, until a retry lands them on the new owner.
+    rekey_handoffs: std::sync::Mutex<HashMap<StoreOwnerKey, SessionTemporalRefreshRekeyHandoff>>,
     projector: Arc<dyn SessionTemporalRefreshProjector>,
     policy: SessionTemporalRefreshPolicy,
     shutting_down: AtomicBool,
@@ -210,6 +253,7 @@ impl Default for SessionTemporalRefreshSchedulerRegistry {
             profile: tokio::sync::Mutex::new(HashMap::new()),
             retired: std::sync::Mutex::new(Vec::new()),
             live: std::sync::Mutex::new(Vec::new()),
+            rekey_handoffs: std::sync::Mutex::new(HashMap::new()),
             projector: Arc::new(CanonicalSessionTemporalProjector),
             policy: SessionTemporalRefreshPolicy::default(),
             shutting_down: AtomicBool::new(false),
@@ -383,6 +427,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
         SessionTemporalRefreshSchedulerEntry {
             state,
             wake,
+            extra_routes: Vec::new(),
             history,
             task,
         }
@@ -433,6 +478,79 @@ impl SessionTemporalRefreshSchedulerRegistry {
         self.retire(self.take_retired(owner)).join().await;
     }
 
+    /// Resumes the handoff a dropped rekey parked for `old_owner`, or
+    /// stages a fresh one from `entries` before this attempt's first join
+    /// await, so a dropped rekey cannot strand the old route or the
+    /// requests still queued on the retired worker's state.
+    ///
+    /// A parked handoff's staging was cancelled when its attempt dropped;
+    /// the retry rebinds the route to a live staging that takes over the
+    /// parked requests until this attempt's drop or completion.
+    fn rekey_handoff(
+        &self,
+        old_owner: &StoreOwnerKey,
+        entries: &[RetiredSessionTemporalRefreshEntry],
+    ) -> Option<SessionTemporalRefreshRekeyHandoff> {
+        let mut handoffs = self
+            .rekey_handoffs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(stored) = handoffs.get_mut(old_owner) {
+            for (_, entry) in entries {
+                if !stored
+                    .pending_states
+                    .iter()
+                    .any(|state| Arc::ptr_eq(state, &entry.state))
+                {
+                    stored.pending_states.push(Arc::clone(&entry.state));
+                }
+            }
+            if let Some((_, entry)) = entries.last() {
+                // A re-admitted owner can run under routes its parked
+                // handoff does not hold (a dropped A-to-B, then a C-to-A
+                // readmission installs C's route as A's live wake): keep
+                // every route the live entry carries so none of its
+                // callers is stranded on a cancelled state.
+                for route in entry.routes() {
+                    if !stored.routes.iter().any(|held| held.same_route(route)) {
+                        stored.routes.push(route.clone());
+                    }
+                }
+            }
+            let staging = Arc::new(SessionTemporalRefreshWakeState::default());
+            for route in &stored.routes {
+                route.bind(&staging);
+            }
+            stored.staging.transfer_requests_to(&staging);
+            stored.staging = Arc::clone(&staging);
+            return Some(stored.clone());
+        }
+        let (_, entry) = entries.last()?;
+        let staging = Arc::new(SessionTemporalRefreshWakeState::default());
+        let handoff = SessionTemporalRefreshRekeyHandoff {
+            routes: entry.routes().cloned().collect(),
+            staging: Arc::clone(&staging),
+            pending_states: entries
+                .iter()
+                .map(|(_, entry)| Arc::clone(&entry.state))
+                .collect(),
+        };
+        for route in &handoff.routes {
+            route.bind(&staging);
+        }
+        handoffs.insert(old_owner.clone(), handoff.clone());
+        Some(handoff)
+    }
+
+    /// The retained handoff's route and requests reached the new owner, so
+    /// its record is released.
+    fn complete_rekey_handoff(&self, old_owner: &StoreOwnerKey) {
+        self.rekey_handoffs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(old_owner);
+    }
+
     pub async fn ensure_project(
         &self,
         owner: StoreOwnerKey,
@@ -463,6 +581,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
             #[allow(clippy::expect_used)]
             let finished = project.remove(&owner).expect("finished entry disappeared");
             let route = finished.wake.clone();
+            let extra_routes = finished.extra_routes.clone();
             let history = finished
                 .history
                 .read()
@@ -475,7 +594,11 @@ impl SessionTemporalRefreshSchedulerRegistry {
                 return inert_session_temporal_refresh_wake();
             }
             self.settle_retired(&retired_owner).await;
-            let entry = self.spawn_entry(database, Some(route), history);
+            let mut entry = self.spawn_entry(database, Some(route), history);
+            entry.extra_routes = extra_routes;
+            for extra in &entry.extra_routes {
+                extra.bind(&entry.state);
+            }
             let wake = entry.wake.clone();
             project.insert(owner, entry);
             return wake;
@@ -632,48 +755,68 @@ impl SessionTemporalRefreshSchedulerRegistry {
         let mut entries = self.take_retired(&old_key);
         entries.extend(project.remove(old_owner).map(|entry| (old_key, entry)));
         drop(project);
-        let route = entries.last().map(|(_, entry)| entry.wake.clone());
-        let staging = route.as_ref().map(|route| {
-            let staging = Arc::new(SessionTemporalRefreshWakeState::default());
-            route.bind(&staging);
-            staging
-        });
-        let retired_states: Vec<_> = entries
-            .iter()
-            .map(|(_, entry)| Arc::clone(&entry.state))
-            .collect();
+        // A dropped attempt can leave its entries already joined — a retry
+        // then finds nothing in `retired` or the map. The handoff owns the
+        // route and the retired states' queued requests until one lands
+        // them on the new owner.
+        let handoff = self.rekey_handoff(old_owner, &entries);
+        // Dropping this attempt cancels the staging it bound, so the parked
+        // handoff reports no live target while keeping the route and every
+        // request staged for the new owner.
+        let _staging_park = handoff
+            .as_ref()
+            .map(|handoff| SessionTemporalRefreshStagingPark {
+                staging: Arc::clone(&handoff.staging),
+            });
         self.retire(entries).join().await;
-        if let Some(staging) = &staging {
-            for state in retired_states {
-                state.transfer_requests_to(staging);
+        if let Some(handoff) = &handoff {
+            for state in &handoff.pending_states {
+                state.transfer_requests_to(&handoff.staging);
             }
         }
         if self.shutting_down.load(Ordering::Acquire) {
-            if let Some(staging) = staging {
-                staging.cancel();
-            }
             return;
         }
         let mut project = self.project.lock().await;
-        if let Some(existing) = project.get(&new_owner) {
-            if let Some(route) = route {
-                route.bind(&existing.state);
+        if let Some(existing) = project.get_mut(&new_owner) {
+            if let Some(handoff) = &handoff {
+                for route in &handoff.routes {
+                    route.bind(&existing.state);
+                    // A route merged into an existing destination stays
+                    // associated with that owner so its later rekey
+                    // transfers the complete set too.
+                    if !existing.routes().any(|held| held.same_route(route)) {
+                        existing.extra_routes.push(route.clone());
+                    }
+                }
+                handoff.staging.cancel();
+                handoff.staging.transfer_requests_to(&existing.state);
             }
-            if let Some(staging) = staging {
-                staging.cancel();
-                staging.transfer_requests_to(&existing.state);
-            }
+            self.complete_rekey_handoff(old_owner);
             existing.wake.wake();
             return;
         }
         self.settle_retired(&SessionTemporalRefreshOwner::Project(new_owner.clone()))
             .await;
-        let entry = self.spawn_entry(database, route, None);
-        if let Some(staging) = staging {
-            staging.cancel();
-            staging.transfer_requests_to(&entry.state);
+        let mut entry = self.spawn_entry(
+            database,
+            handoff
+                .as_ref()
+                .and_then(|handoff| handoff.routes.last().cloned()),
+            None,
+        );
+        if let Some(handoff) = &handoff {
+            for route in &handoff.routes {
+                route.bind(&entry.state);
+                if !route.same_route(&entry.wake) {
+                    entry.extra_routes.push(route.clone());
+                }
+            }
+            handoff.staging.cancel();
+            handoff.staging.transfer_requests_to(&entry.state);
         }
         project.insert(new_owner, entry);
+        self.complete_rekey_handoff(old_owner);
     }
 
     pub async fn retire_project(&self, owner: &StoreOwnerKey) {
@@ -687,6 +830,16 @@ impl SessionTemporalRefreshSchedulerRegistry {
         let mut entries = self.take_retired(&retired_owner);
         entries.extend(project.remove(owner).map(|entry| (retired_owner, entry)));
         drop(project);
+        // Retiring the owner abandons a rekey handoff it still owes: its
+        // route reports no live target and the staged requests die with it.
+        if let Some(handoff) = self
+            .rekey_handoffs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(owner)
+        {
+            handoff.staging.cancel();
+        }
         self.retire(entries).join().await;
     }
 
@@ -721,6 +874,16 @@ impl SessionTemporalRefreshSchedulerRegistry {
         // leaving its map from the retirement that cancels and owns it.
         let mut entries =
             std::mem::take(&mut *self.retired.lock().unwrap_or_else(PoisonError::into_inner));
+        for handoff in std::mem::take(
+            &mut *self
+                .rekey_handoffs
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        )
+        .into_values()
+        {
+            handoff.staging.cancel();
+        }
         entries.extend(
             project
                 .drain()
