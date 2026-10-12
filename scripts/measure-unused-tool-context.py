@@ -70,9 +70,12 @@ import json
 import re
 import subprocess
 import sys
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
+from collections.abc import Callable, Iterable, Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TypeVar
 
 TRACEDECAY_TOOL = re.compile(r"(?:^|__)(tracedecay(?:_[a-z0-9]+)+)$")
 PATH = re.compile(r"(?<![\w.@+-])/?(?:[\w.@+-]+/)+[\w@+-][\w.@+-]*\.[A-Za-z][A-Za-z0-9]{0,7}(?![\w/])")
@@ -654,6 +657,28 @@ def sum_rows(rows: list[dict], sessions: int) -> dict:
     return dict(total, **optional, tool="**all**", sessions=sessions)
 
 
+T = TypeVar("T")
+R = TypeVar("R")
+
+
+def in_order(load: Callable[[T], R], keys: Iterable[T], jobs: int) -> Iterator[tuple[T, R]]:
+    """(key, load(key)) in key order, at most `jobs` loads running or awaiting the consumer.
+
+    Executor.map would submit every key up front and hold each finished session
+    until a slow earlier one is consumed, so memory would grow with the run.
+    """
+    window: deque[tuple[T, Future[R]]] = deque()
+    with ThreadPoolExecutor(jobs) as pool:
+        for key in keys:
+            window.append((key, pool.submit(load, key)))
+            if len(window) >= jobs:
+                head, future = window.popleft()
+                yield head, future.result()
+        while window:
+            head, future = window.popleft()
+            yield head, future.result()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0], formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--binary", default="tracedecay")
@@ -666,6 +691,7 @@ def main() -> int:
     parser.add_argument("--providers", help="comma-separated provider filter, e.g. claude,codex,kimi")
     parser.add_argument("--storage-scope", default="project", choices=("project", "user"))
     parser.add_argument("--max-sessions", type=int, default=0, help="0 = no limit")
+    parser.add_argument("--jobs", type=int, default=4, help="sessions loaded concurrently (each load is a chain of CLI calls)")
     parser.add_argument("--json", type=Path, help="write aggregate rows and coverage as JSON")
     parser.add_argument("--examples", type=int, default=0, help="print N sanitized scored calls per tool (path/symbol keys only; no source quotes)")
     args = parser.parse_args()
@@ -687,16 +713,20 @@ def main() -> int:
     if args.max_sessions:
         ordered = ordered[: args.max_sessions]
 
+    def load(key: tuple[str, str]) -> list[dict] | ToolProblem:
+        try:
+            return load_messages(client, key[0], key[1], args.storage_scope)
+        except ToolProblem as problem:
+            return problem
+
     coverage: Counter = Counter()
     by_provider: dict[str, Counter] = defaultdict(Counter)
     reports: list[CallReport] = []
-    for number, (provider, session) in enumerate(ordered, 1):
+    for number, ((provider, session), messages) in enumerate(in_order(load, ordered, max(1, args.jobs)), 1):
         stats = by_provider[provider]
         stats["discovered"] += 1
-        try:
-            messages = load_messages(client, provider, session, args.storage_scope)
-        except ToolProblem as problem:
-            stats["unreadable:" + problem.code.rsplit(".", 1)[-1]] += 1
+        if isinstance(messages, ToolProblem):
+            stats["unreadable:" + messages.code.rsplit(".", 1)[-1]] += 1
             continue
         if not messages:
             stats["empty"] += 1
