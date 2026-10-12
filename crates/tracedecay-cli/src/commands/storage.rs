@@ -447,6 +447,47 @@ mod wipe_safety_tests {
         }
     }
 
+    #[test]
+    fn restore_failures_keep_each_wording() {
+        let failed = |message: &str| -> tracedecay_domain::errors::Result<()> {
+            Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: message.to_owned(),
+            })
+        };
+        let joined = |wording, outcome| {
+            join_outcome_and_restore(wording, "op", outcome, failed("restore"))
+                .unwrap_err()
+                .to_string()
+        };
+        for (wording, outcome, expected) in [
+            (
+                RestoreWording::ManagedService,
+                Ok(()),
+                "config error: op completed, but the managed daemon service state could not be \
+                 restored: config error: restore",
+            ),
+            (
+                RestoreWording::ManagedService,
+                failed("boom"),
+                "config error: config error: boom; additionally the managed daemon service state \
+                 could not be restored: config error: restore",
+            ),
+            (RestoreWording::DaemonState, Ok(()), "config error: restore"),
+            (
+                RestoreWording::DaemonState,
+                failed("boom"),
+                "config error: op failed: config error: boom; daemon state restoration also \
+                 failed: config error: restore",
+            ),
+        ] {
+            assert_eq!(joined(wording, outcome), expected);
+        }
+        assert_eq!(
+            join_outcome_and_restore(RestoreWording::DaemonState, "op", Ok(7), Ok(())).unwrap(),
+            7
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn complete_wipe_rejects_a_leaf_symlink() {
