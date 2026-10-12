@@ -205,7 +205,6 @@ pub enum RankEdgeKindV1 {
     Uses,
     Contains,
     Annotates,
-    DerivesMacro,
     TypeOf,
     Returns,
     Receives,
