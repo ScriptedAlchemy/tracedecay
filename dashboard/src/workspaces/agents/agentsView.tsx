@@ -51,24 +51,17 @@ export function useAgentsView(): [AgentsView, (next: AgentsView) => void] {
   return [active, select];
 }
 
-/**
- * The selected session, linked as Sessions links it: `?sessionId=` and
- * `?sessionProvider=`, read and written by the same functions. Selecting
- * pushes history; hover and focus inspection stay out of the URL.
- */
 export type AgentsSelection =
   | { readonly kind: 'none' }
   | { readonly kind: 'node'; readonly node: AnalyticsSubagentNodeV1 }
-  /** The link names a session the tree does not answer for. `pending` while
-   * the tree is unread or unavailable, so a slow read never claims absence. */
   | {
       readonly kind: 'unresolved';
       readonly selection: SessionSelection;
-      readonly reason: 'pending' | 'absent' | 'ambiguous';
+      readonly reason: 'pending' | 'unavailable' | 'absent' | 'ambiguous';
     };
 
 export function useAgentsSelection(
-  tree: AnalyticsSubagentTreePayloadV1 | null,
+  tree: AnalyticsSubagentTreePayloadV1 | 'pending' | 'unavailable',
 ): [AgentsSelection, (node: AnalyticsSubagentNodeV1 | null) => void] {
   const [params, setParams] = useSearchParams();
   const select = useCallback(
@@ -86,10 +79,10 @@ export function useAgentsSelection(
 
 function resolveAgentsSelection(
   linked: SessionSelection | null,
-  tree: AnalyticsSubagentTreePayloadV1 | null,
+  tree: AnalyticsSubagentTreePayloadV1 | 'pending' | 'unavailable',
 ): AgentsSelection {
   if (linked === null) return { kind: 'none' };
-  if (tree === null) return { kind: 'unresolved', selection: linked, reason: 'pending' };
+  if (typeof tree === 'string') return { kind: 'unresolved', selection: linked, reason: tree };
   const join = joinIndexRow(tree.nodes, linked);
   switch (join.kind) {
     case 'exact':

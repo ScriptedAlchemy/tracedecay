@@ -2,7 +2,7 @@ import { useCallback, useMemo, useState } from 'react';
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
 import { ReadFailure } from '../../ui/ReadFailure.tsx';
 import { ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
-import { StateChip } from '../../ui/StateChip.tsx';
+import { StateChip, type DomainStateKind } from '../../ui/StateChip.tsx';
 import { MeterRow, Panel, WorkspaceHeader } from '../../ui/instrument.tsx';
 import {
   AnalyticsAgentsPayloadV1Schema,
@@ -129,7 +129,9 @@ export function AgentsPage() {
   );
   // The selected session by identity, looked up in the reading rather than in
   // the drawing: a bundle closing over it or a depth fold must not unselect it.
-  const [selection, setSelection] = useAgentsSelection(treeAvailable);
+  const [selection, setSelection] = useAgentsSelection(
+    treeAvailable ?? (subagentTree.isPending ? 'pending' : 'unavailable'),
+  );
   const selectedNode = selection.kind === 'node' ? selection.node : null;
   const selectedId = selectedNode === null ? null : markId(selectedNode);
   const select = (id: string) => {
@@ -430,28 +432,43 @@ function TopologyRenderer({
   }
 }
 
-/** A linked session the tree does not answer for. The inspector keeps its
- * default subject, and this says that it is not the linked one. */
 function UnresolvedLink({
   selection,
   reason,
   truncated,
 }: {
   selection: SessionSelection;
-  reason: 'absent' | 'ambiguous';
+  reason: UnresolvedReason;
   truncated: boolean;
 }) {
-  const detail =
-    reason === 'absent'
-      ? `Linked session ${selection.sessionId} is not in the delegation tree${truncated ? ' · tree truncated' : ''}; the inspector shows the newest root.`
-      : `Linked session ${selection.sessionId} names more than one session in the delegation tree; choose one in the exact tree.`;
+  const { kind, detail } = UNRESOLVED[reason](selection.sessionId, truncated);
   return (
     <div className="flex flex-wrap items-center gap-2" data-agents-unresolved={reason}>
-      <StateChip kind={reason === 'absent' ? 'unavailable' : 'conflicting'} detail={detail} />
+      <StateChip kind={kind} detail={detail} />
       <SessionPivots session={selection} from="agents" />
     </div>
   );
 }
+
+type UnresolvedReason = 'unavailable' | 'absent' | 'ambiguous';
+
+const UNRESOLVED: Record<
+  UnresolvedReason,
+  (sessionId: string, truncated: boolean) => { kind: DomainStateKind; detail: string }
+> = {
+  unavailable: (sessionId) => ({
+    kind: 'unavailable',
+    detail: `Linked session ${sessionId} cannot be placed: the delegation tree is unavailable.`,
+  }),
+  absent: (sessionId, truncated) => ({
+    kind: 'unavailable',
+    detail: `Linked session ${sessionId} is not in the delegation tree${truncated ? ' · tree truncated' : ''}; the inspector shows the newest root.`,
+  }),
+  ambiguous: (sessionId) => ({
+    kind: 'conflicting',
+    detail: `Linked session ${sessionId} names more than one session in the delegation tree; choose one in the exact tree.`,
+  }),
+};
 
 /** The model the inspector is handed before the tree has been read. */
 const EMPTY_MODEL = fitDelegationTopology({

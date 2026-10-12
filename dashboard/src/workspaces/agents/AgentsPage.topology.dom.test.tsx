@@ -4,7 +4,7 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { http, HttpResponse, type JsonBodyType } from 'msw';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { resolveFixture } from '../../../stories/fixtures/data.ts';
-import { fixtureServer } from '../../../stories/fixtures/handlers.ts';
+import { faultHandler, fixtureServer } from '../../../stories/fixtures/handlers.ts';
 import { AgentsPage } from './AgentsPage.tsx';
 
 /**
@@ -307,6 +307,16 @@ describe('AgentsPage delegation topology', () => {
     expect(document.querySelector('[data-topology-selected]')).toBeNull();
     expect(inspector().getAttribute('data-agent-inspector-id')).toBe('cursor:session.cursor.solo');
     await waitFor(() => expect(asked).toEqual(['session.cursor.solo']));
+  });
+
+  it('says a linked session cannot be placed while the tree is unavailable', async () => {
+    server.use(faultHandler('*/api/plugins/analytics/subagent-tree', 'server_error'));
+    renderAgents('/agents?sessionId=session.codex.child&sessionProvider=codex');
+    expect(
+      await screen.findByText(/Linked session session\.codex\.child cannot be placed: the delegation tree is unavailable/),
+    ).toBeTruthy();
+    const unresolved = document.querySelector<HTMLElement>('[data-agents-unresolved="unavailable"]')!;
+    expect(within(unresolved).getByRole('link', { name: /Open in Sessions/ })).toBeTruthy();
   });
 
   it('names every mark for a screen reader with its generation and link state', async () => {
