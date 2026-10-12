@@ -400,8 +400,15 @@ fn pending_local_unavailable_label(reason: PendingLocalUnavailableReasonV1) -> &
 }
 
 fn map_remote_client_error(error: RemoteClientError) -> TraceDecayError {
-    TraceDecayError::Config {
-        message: error.to_string(),
+    match error {
+        RemoteClientError::Problem(problem) => TraceDecayError::tool_refused(
+            "remote request",
+            Some(problem.code),
+            Some(problem.message),
+        ),
+        error => TraceDecayError::Config {
+            message: error.to_string(),
+        },
     }
 }
 
