@@ -230,7 +230,9 @@ copy_claude_endpoint_profile() {
 }
 
 scrub_auth_copies() {
-  rm -f "$CODEX_EVAL_CONFIG/auth.json"
+  # $CODEX_HOME is the isolated daemon's (pinned by the re-entry check), where
+  # learned-skill generation puts the writer's auth.
+  rm -f "$CODEX_EVAL_CONFIG/auth.json" "$CODEX_HOME/auth.json"
   local d
   for d in "$work"/host-homes/claude*/.claude; do
     rm -f "$d/.credentials.json" "$d/credentials.json" "$d/settings.json"
@@ -292,7 +294,7 @@ prepare_host_profiles() {
   fi
 }
 
-if [[ "$live" == "1" ]]; then
+if [[ "$live" == "1" && -z "${LEARNED_SKILL_GENERATE:-}" ]]; then
   prepare_host_profiles
 fi
 echo "work dir:     $work"
@@ -346,6 +348,10 @@ fixture_main="$work/fixture-main"
 fixture_broken="$work/fixture-broken"
 echo "indexing fixture-main (with seeded git history)..."
 build_fixture "$fixture_main" clean history
+if [[ -n "${LEARNED_SKILL_GENERATE:-}" ]]; then
+  source "$here/generate_learned_skill.sh"
+  exit 0
+fi
 echo "indexing fixture-broken..."
 build_fixture "$fixture_broken" broken
 
