@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.86](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.85...v1.0.0-beta.86) (2026-10-12)
+
+
+### Bug Fixes
+
+* **configuration:** share receipt SQL and outbox lifecycle ([9c9b339](https://github.com/ScriptedAlchemy/tracedecay/commit/9c9b3397dd52928108fff6f334ed7290fb81511d))
+* **configuration:** share receipt SQL and outbox lifecycle ([7ee6faa](https://github.com/ScriptedAlchemy/tracedecay/commit/7ee6faa7bce0aa0dd23624e58f738e750b85758a))
+* **configuration:** validate receipt bindings across writers ([9bce658](https://github.com/ScriptedAlchemy/tracedecay/commit/9bce6587db3e435660ed1ae877931978ff9a9b50))
+* **edits:** retain move inverse during prepared recovery ([05a2a59](https://github.com/ScriptedAlchemy/tracedecay/commit/05a2a59a19df00d884cf1e247f1c08c927519383))
+* **graph:** reuse rename preview sources and stop cancelled walks ([6da1ed9](https://github.com/ScriptedAlchemy/tracedecay/commit/6da1ed97abb58edc752e1e3c894696dae0588f51))
+* **graph:** reuse rename preview sources and stop cancelled walks ([41298cb](https://github.com/ScriptedAlchemy/tracedecay/commit/41298cbabe4af588a93444a9d12bd25596c724f8))
+* **graph:** share one test classification across health reports ([dec2281](https://github.com/ScriptedAlchemy/tracedecay/commit/dec2281bad4473cf3bc716a5fca006402ffc25ca))
+* **graph:** share one test classification across health reports ([b9a826d](https://github.com/ScriptedAlchemy/tracedecay/commit/b9a826dfecc12932ad71eb88ec4ef0008efb56c4))
+* **hooks:** release settled Hook V2 ledgers at the open bound ([e8977ee](https://github.com/ScriptedAlchemy/tracedecay/commit/e8977eef1011d34c4f045d4a6b245923a7ef889c))
+* **hooks:** release settled Hook V2 ledgers at the open bound ([32f91dc](https://github.com/ScriptedAlchemy/tracedecay/commit/32f91dc3c1c3748b2e45dc12a8074fe3d6d5c8de)), closes [#3534](https://github.com/ScriptedAlchemy/tracedecay/issues/3534)
+* **session-runtime:** keep refresh supervisors owned past dropped drains ([f38a487](https://github.com/ScriptedAlchemy/tracedecay/commit/f38a487da00cf08301d69000a728b2b7dc50be13))
+* **session-runtime:** keep refresh supervisors owned past dropped drains ([6ea2fe3](https://github.com/ScriptedAlchemy/tracedecay/commit/6ea2fe31500b5afc250e35fab7a8ccc5fdd15b04))
+* **source-edit:** retain MoveSymbol rollback material on roll-forward ([57ff4c4](https://github.com/ScriptedAlchemy/tracedecay/commit/57ff4c4eddc81500d0b48bbe690cba04a923eb9f))
+* **source-edit:** retain MoveSymbol rollback material on roll-forward ([cef18bc](https://github.com/ScriptedAlchemy/tracedecay/commit/cef18bcacd1da19a462c7f79c895a823c3dd027d))
+
+
+### Performance Improvements
+
+* **session-temporal:** batch record copy hydration per session group ([bf90d5c](https://github.com/ScriptedAlchemy/tracedecay/commit/bf90d5c306483717478d28fda5627fcf9fdde1c7))
+* **session-temporal:** batch record copy hydration per session group ([4c82edc](https://github.com/ScriptedAlchemy/tracedecay/commit/4c82edc89503984e54797fe10f321a5a3384a423)), closes [#3532](https://github.com/ScriptedAlchemy/tracedecay/issues/3532)
+
 ## [1.0.0-beta.85](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.84...v1.0.0-beta.85) (2026-10-11)
 
 
