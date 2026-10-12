@@ -16,9 +16,14 @@ pub(crate) async fn run(
     let project_root =
         tracedecay_configuration::resolve_path_with_discovery(profile, invocation.project);
     let operation = invocation.operation;
-    let outcome =
-        crate::workflow_cli::invoke_workflow_cli(profile, project_root.clone(), operation, body)
-            .await?;
+    let outcome = crate::application_cli::invoke(
+        profile,
+        &project_root,
+        crate::application_cli::ApplicationOperation::Workflow(operation),
+        body,
+    )
+    .await?
+    .outcome;
     print!(
         "{}",
         crate::application_cli::render(
