@@ -5,6 +5,7 @@ use super::*;
 mod attempt_operations;
 mod evidence_retrieval;
 mod intelligence;
+mod job;
 mod leak_adjudication;
 mod outcome;
 mod preparation;

@@ -17,12 +17,12 @@ use tracedecay_contracts::{
     AdvanceWorkJobResultV1, ApplicationOutcome, ApplicationProblem, ApplicationProblemRecord,
     CancellationContext, Deadline, EffectReceipt, GenerateProposalRequest,
     PrepareWorkProductMutationRequestV1, ReleaseWorkPlacementCommand, RequestContext, RequestId,
-    SafeDiagnostic, StartWorkAttemptCommand, WorkAttemptStatusRequestV1, WorkGraphReadRequestV1,
-    WorkGraphReadV1, WorkJobKeyV1, WorkJobNextV1, WorkJobObservationV1, WorkJobStateV1,
-    WorkJobStepRecordV1, WorkJobStepResultV1, WorkJobStepV1, WorkJobTaskPlanV1, WorkJobV1,
-    WorkJobWaitV1, WorkPlacementReadingV1, WorkPlacementStatusRequestV1, WorkProductChangeDraftV1,
-    WorkProductMutationRequestV1, WorkSynthesisAttemptV1, next_work_job_step, now_micros,
-    work_job_proposal_withheld, work_job_synthesis_unsynthesized,
+    SafeDiagnostic, StartWorkAttemptCommand, WorkAttemptStatusRequestV1, WorkGraphReadV1,
+    WorkJobKeyV1, WorkJobNextV1, WorkJobObservationV1, WorkJobStateV1, WorkJobStepRecordV1,
+    WorkJobStepResultV1, WorkJobStepV1, WorkJobTaskPlanV1, WorkJobV1, WorkJobWaitV1,
+    WorkPlacementReadingV1, WorkPlacementStatusRequestV1, WorkProductChangeDraftV1,
+    WorkProductMutationRequestV1, WorkProductSelectionScopeV1, WorkSynthesisAttemptV1,
+    next_work_job_step, now_micros, work_job_proposal_withheld, work_job_synthesis_unsynthesized,
 };
 use tracedecay_daemon_protocol::{
     DaemonInvocationOutcome, DaemonInvocationResponse, WorkApplicationInvocationV1,
@@ -57,6 +57,8 @@ pub(super) struct WorkJobHost {
     pub(super) observability_producer:
         Option<Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>>,
     pub(super) project_root: Option<PathBuf>,
+    /// The request's own repository, which every graph step selects.
+    pub(super) selection: WorkProductSelectionScopeV1,
     pub(super) deadline: Deadline,
     pub(super) cancellation: CancellationContext,
 }
@@ -248,7 +250,7 @@ async fn act(
                 host,
                 &request_id,
                 WorkApplicationInvocationV1::GenerateProposal(GenerateProposalRequest {
-                    selection: preparation::repository_selection(&host.registered)?,
+                    selection: host.selection.clone(),
                     task_id: task.task_id.clone(),
                     proposal_id: task.proposal_id.clone(),
                     live_git_evidence: None,
@@ -552,7 +554,7 @@ async fn prepare(
         host,
         request_id,
         WorkApplicationInvocationV1::PrepareGraphMutation(PrepareWorkProductMutationRequestV1 {
-            selection: preparation::repository_selection(&host.registered)?,
+            selection: host.selection.clone(),
             change,
             causation_event_id: None,
             evidence: Vec::new(),
