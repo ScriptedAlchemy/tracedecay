@@ -26,6 +26,7 @@ import {
   planCodeIndexWorkerChangeAgainst,
   planProjectChangeAgainst,
   planUserChangeAgainst,
+  sameCodeIndexWorkerSelection,
   type CodeIndexWorkerSettingsChangeSet,
   type CodeIndexWorkerSettingsValues,
   settingsRevisionId,
@@ -739,16 +740,6 @@ function sameCodeIndexWorkerValues(
   return (
     sameCodeIndexWorkerSelection(left.code_index_workers, right.code_index_workers) &&
     sameCodeIndexWorkerStatus(left.code_index_worker_status, right.code_index_worker_status)
-  );
-}
-
-function sameCodeIndexWorkerSelection(
-  left: CodeIndexWorkerSettingsValues['code_index_workers'],
-  right: CodeIndexWorkerSettingsValues['code_index_workers'],
-): boolean {
-  return (
-    left.mode === right.mode &&
-    (left.mode !== 'exact' || (right.mode === 'exact' && left.workers === right.workers))
   );
 }
 
