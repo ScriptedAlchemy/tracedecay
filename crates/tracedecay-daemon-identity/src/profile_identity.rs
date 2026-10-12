@@ -354,7 +354,6 @@ mod tests {
         let authority = load_or_create(&profile_root).unwrap();
 
         assert_eq!(load_existing(&profile_root).unwrap(), authority);
-        let path = profile_root.join(PROFILE_IDENTITY_FILENAME);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -370,6 +369,7 @@ mod tests {
         }
         #[cfg(windows)]
         {
+            let path = profile_root.join(PROFILE_IDENTITY_FILENAME);
             tracedecay_runtime_core::windows_security::validate_private_file(&path).unwrap();
             assert!(
                 tracedecay_runtime_core::windows_security::validate_private_directory(
