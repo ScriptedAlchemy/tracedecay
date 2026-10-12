@@ -102,7 +102,7 @@ pub async fn compute_admin_project(
     request: AdminProjectSurfaceRequestV1,
     global_db: Option<&RegisteredGlobalDb>,
     automation_scheduler_reconciler: Option<
-        tracedecay_dashboard_api::AutomationSchedulerReconciler,
+        tracedecay_dashboard_api::state::AutomationSchedulerReconciler,
     >,
     application_deadline: Deadline,
     application_cancellation: CancellationSignal,

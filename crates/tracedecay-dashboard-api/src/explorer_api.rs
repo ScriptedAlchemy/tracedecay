@@ -22,6 +22,7 @@ mod lifecycle;
 
 use lifecycle::{admitted_deadline_elapsed, mark_cancelled, mark_timed_out};
 
+use super::graph_service;
 use super::lcm_api::{
     DashboardLcmCanonicalMessageV1, DashboardLcmCanonicalPageV1, DashboardLcmCanonicalStatsV1,
     DashboardLcmCanonicalSummaryV1, DashboardLcmReadOutcomeV1, DashboardLcmReadRequestV1,
@@ -33,8 +34,9 @@ use super::read_model::{
     DashboardLegalActionKindV1, DashboardLegalActionRefV1, now_micros, scope_from_state,
 };
 use super::util::json_error;
-use super::{DashboardHttpRequestControlV1, DashboardState, RequestControl, graph_service};
+use crate::http::{DashboardHttpRequestControlV1, RequestControl};
 use crate::request_identity::{GlobalOpaqueIdentityKind, mint_global_opaque_id};
+use crate::state::DashboardState;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
 const SOURCE_IDS: [ExplorerSourceIdV1; 3] = [

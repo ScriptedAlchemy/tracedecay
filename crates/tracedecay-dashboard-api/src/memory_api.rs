@@ -18,7 +18,8 @@ use super::read_model::{
     DashboardEnvelopeV1, DashboardFreshnessV1, scope_from_state,
 };
 use super::util::{JsonPath, JsonQuery, coerce_limit, http_detail};
-use super::{DashboardHttpRequestControlV1, DashboardState, RequestControl};
+use crate::http::{DashboardHttpRequestControlV1, RequestControl};
+use crate::state::DashboardState;
 use crate::tracedecay::facts::memory_application_for_db;
 use tracedecay_domain::FactId;
 use tracedecay_store::FactReadControl;

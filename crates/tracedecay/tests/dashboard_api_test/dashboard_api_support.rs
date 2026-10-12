@@ -81,7 +81,7 @@ pub(crate) struct DashboardFixture {
     pub(crate) base_url: String,
     pub(crate) project_root: std::path::PathBuf,
     pub(crate) host_runtime: Arc<DashboardTestRuntimeV1>,
-    pub(crate) project_graphs: tracedecay_dashboard_api::DashboardTestProjectGraphsV1,
+    pub(crate) project_graphs: tracedecay_dashboard_api::test_serve::DashboardTestProjectGraphsV1,
     pub(crate) server: DashboardServer,
 }
 
@@ -129,8 +129,8 @@ pub(crate) fn dashboard_access_for(
 fn fixture_endpoint(
     port: u16,
     access: tracedecay_dashboard_api::DashboardAccessToken,
-) -> tracedecay_dashboard_api::DashboardTestEndpointV1<'static> {
-    tracedecay_dashboard_api::DashboardTestEndpointV1 {
+) -> tracedecay_dashboard_api::test_serve::DashboardTestEndpointV1<'static> {
+    tracedecay_dashboard_api::test_serve::DashboardTestEndpointV1 {
         host: "127.0.0.1",
         port,
         access,
@@ -140,7 +140,7 @@ fn fixture_endpoint(
 pub(crate) fn spawn_dashboard_server_with_host_runtime(
     cg: TraceDecay,
     host_runtime: Arc<DashboardTestRuntimeV1>,
-    project_graphs: tracedecay_dashboard_api::DashboardTestProjectGraphsV1,
+    project_graphs: tracedecay_dashboard_api::test_serve::DashboardTestProjectGraphsV1,
     port: u16,
     access: tracedecay_dashboard_api::DashboardAccessToken,
 ) -> DashboardServer {
@@ -158,7 +158,7 @@ pub(crate) fn spawn_dashboard_server_with_host_runtime(
 pub(crate) fn spawn_dashboard_server_with_configuration_runtime(
     cg: TraceDecay,
     host_runtime: Arc<DashboardTestRuntimeV1>,
-    project_graphs: tracedecay_dashboard_api::DashboardTestProjectGraphsV1,
+    project_graphs: tracedecay_dashboard_api::test_serve::DashboardTestProjectGraphsV1,
     port: u16,
     access: tracedecay_dashboard_api::DashboardAccessToken,
 ) -> DashboardServer {
@@ -227,7 +227,7 @@ fn spawn_dashboard_server_with_runner(
     cg: TraceDecay,
     host_authority: Option<(
         Arc<DashboardTestRuntimeV1>,
-        tracedecay_dashboard_api::DashboardTestProjectGraphsV1,
+        tracedecay_dashboard_api::test_serve::DashboardTestProjectGraphsV1,
     )>,
     mount_configuration_runtime: bool,
     delivery_authority: Option<FakeDeliveryAuthority>,
@@ -235,7 +235,7 @@ fn spawn_dashboard_server_with_runner(
         Arc<dyn tracedecay_dashboard_api::DashboardGitCorrelationReadPortV1>,
     >,
     project_open: Option<ProjectOpenPublication>,
-    endpoint: tracedecay_dashboard_api::DashboardTestEndpointV1<'static>,
+    endpoint: tracedecay_dashboard_api::test_serve::DashboardTestEndpointV1<'static>,
 ) -> DashboardServer {
     let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let thread = thread::spawn(move || {
@@ -246,7 +246,7 @@ fn spawn_dashboard_server_with_runner(
                 Some(authority) => authority,
                 None => (
                     open_dashboard_host_runtime(&cg).await,
-                    tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
+                    tracedecay_dashboard_api::test_serve::DashboardTestProjectGraphsV1::default(),
                 ),
             };
             let authority = if mount_configuration_runtime {
@@ -1224,7 +1224,8 @@ async fn start_dashboard_fixture_with_options_and_delivery(
         seed_memory_fixture(&cg).await;
     }
 
-    let project_graphs = tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default();
+    let project_graphs =
+        tracedecay_dashboard_api::test_serve::DashboardTestProjectGraphsV1::default();
     if seed_lcm {
         seed_lcm_fixture(&host_runtime, &project_root).await;
     }

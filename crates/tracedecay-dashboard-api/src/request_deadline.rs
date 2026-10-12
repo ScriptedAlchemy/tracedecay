@@ -1,4 +1,7 @@
-pub(super) fn dashboard_http_request_deadline_micros(path: &str) -> i64 {
+pub(crate) const DASHBOARD_CODE_GRAPH_REQUEST_DEADLINE_MICROS: i64 = 30_000_000;
+pub(crate) const DASHBOARD_AUTOMATION_RUN_REQUEST_DEADLINE_MICROS: i64 = 300_000_000;
+
+pub(crate) fn dashboard_http_request_deadline_micros(path: &str) -> i64 {
     let automation_run = path == "/api/application/retained/fact_store_curate"
         || one_segment_then(
             path,
@@ -7,9 +10,9 @@ pub(super) fn dashboard_http_request_deadline_micros(path: &str) -> i64 {
         )
         || one_segment_then(path, "/api/automation/jobs/", "run");
     if automation_run {
-        super::DASHBOARD_AUTOMATION_RUN_REQUEST_DEADLINE_MICROS
+        DASHBOARD_AUTOMATION_RUN_REQUEST_DEADLINE_MICROS
     } else {
-        super::DASHBOARD_CODE_GRAPH_REQUEST_DEADLINE_MICROS
+        DASHBOARD_CODE_GRAPH_REQUEST_DEADLINE_MICROS
     }
 }
 

@@ -32,9 +32,9 @@ use tracedecay_session_memory::provider_usage::{
     provider_usage_aggregate, provider_usage_by_session,
 };
 
-use super::DashboardState;
 use super::read_model::{DashboardCoverageV1, DashboardEnvelopeV1, scope_from_state};
 use super::util::{i64_field, query_i64_result, query_rows, str_field};
+use crate::state::DashboardState;
 
 pub use tracedecay_application::analytics_bridge::{
     AnalyticsDiagnosticsPayloadV1, AnalyticsDiagnosticsRatiosV1, AnalyticsEventKindCountV1,

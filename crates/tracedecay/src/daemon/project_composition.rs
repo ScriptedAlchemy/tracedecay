@@ -546,7 +546,7 @@ struct ProjectRoutePorts {
     application_invocation_executor: Arc<dyn tracedecay_daemon_protocol::DaemonInvocationExecutor>,
     retained_server_resolver: crate::mcp::server::RetainedProjectServerResolver,
     automation_scheduler_reconciler:
-        Option<tracedecay_dashboard_api::AutomationSchedulerReconciler>,
+        Option<tracedecay_dashboard_api::state::AutomationSchedulerReconciler>,
 }
 
 /// Route-owned state shared by the core server, the full server that replaces
@@ -663,7 +663,7 @@ struct PublishedFullServer {
 /// What the published full server still has to mount before it serves: the
 /// Doctor report reader published once its dependent owners have.
 struct PendingFullServerOwners {
-    doctor_report_reader: tracedecay_dashboard_api::DoctorReportReader,
+    doctor_report_reader: tracedecay_dashboard_api::state::DoctorReportReader,
 }
 
 impl ProjectOpenInputs<'_> {
@@ -1678,7 +1678,7 @@ impl ProjectOpenInputs<'_> {
         core: &ComposedCoreServer,
         user_session_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
         session_db: Option<tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
-    ) -> Result<tracedecay_dashboard_api::DoctorReportReader> {
+    ) -> Result<tracedecay_dashboard_api::state::DoctorReportReader> {
         let remote_credentials = core.graph_runtime.remote_credential_authority();
         let remote_operational_read =
             Arc::new(move || remote_credentials.operational_status().doctor_read());

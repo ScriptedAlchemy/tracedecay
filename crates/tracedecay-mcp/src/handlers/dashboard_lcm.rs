@@ -15,11 +15,12 @@ use tracedecay_temporal_query::context::{ContextBudget, MAX_CONTEXT_RECORDS};
 use tracedecay_temporal_query::ranking::DiversityLimits;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
+use tracedecay_dashboard_api::http::DashboardHttpRequestControlV1;
 use tracedecay_dashboard_api::{
-    DashboardHttpRequestControlV1, DashboardLcmCanonicalMatchesV1, DashboardLcmCanonicalMessageV1,
-    DashboardLcmCanonicalPageV1, DashboardLcmCanonicalStatsV1, DashboardLcmCanonicalSummaryV1,
-    DashboardLcmReadFutureV1, DashboardLcmReadOutcomeV1, DashboardLcmReadPortV1,
-    DashboardLcmReadRequestV1, DashboardLcmReadStateV1,
+    DashboardLcmCanonicalMatchesV1, DashboardLcmCanonicalMessageV1, DashboardLcmCanonicalPageV1,
+    DashboardLcmCanonicalStatsV1, DashboardLcmCanonicalSummaryV1, DashboardLcmReadFutureV1,
+    DashboardLcmReadOutcomeV1, DashboardLcmReadPortV1, DashboardLcmReadRequestV1,
+    DashboardLcmReadStateV1,
 };
 use tracedecay_lcm::contracts::{LcmDataFreshness, LcmRetrievalOutcome};
 use tracedecay_lcm::{LcmDescribeResponse, LcmDescribeTarget};

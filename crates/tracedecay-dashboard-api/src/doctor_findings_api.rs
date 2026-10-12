@@ -1,7 +1,7 @@
 //! `GET /api/doctor/findings`, root composition for the Doctor finding family.
 //!
 //! An admitted daemon owner injects the canonical composed report reader into
-//! [`DashboardState`]. This module only resolves scope and invokes that reader.
+//! [`crate::state::DashboardState`]. This module only resolves scope and invokes that reader.
 //! Every presentation decision, family vocabulary, coverage, freshness,
 //! domain state, notes, and refresh action, belongs to
 //! [`tracedecay_api::doctor`]. A dashboard opened without an admitted reader
@@ -23,10 +23,10 @@ use tracedecay_contracts::doctor::{
 };
 use tracedecay_contracts::storage::SchemaConvergenceFindingV1;
 
-use super::DashboardState;
 use super::read_model::{
     DashboardDomainStateV1, DashboardEnvelopeV1, DashboardScopeV1, scope_from_state,
 };
+use crate::state::DashboardState;
 
 const STORAGE_KINDS: [DoctorStorageFindingKindV1; 6] = [
     DoctorStorageFindingKindV1::OverBudgetStore,
@@ -84,7 +84,7 @@ pub async fn findings(
 async fn findings_with_authorities(
     scope: DashboardScopeV1,
     params: DoctorFindingsQueryV1,
-    doctor_report_reader: Option<crate::DoctorReportReader>,
+    doctor_report_reader: Option<crate::state::DoctorReportReader>,
 ) -> DashboardEnvelopeV1<DoctorFindingsPayloadV1> {
     // Validate the optional per-family filter against the closed vocabulary. An
     // unknown family is a typed `error` envelope, not a silent all-families read.
@@ -542,10 +542,10 @@ mod tests {
             .expect("canonical Doctor report")
     }
 
-    fn reader_for(report: DoctorReportV1) -> crate::DoctorReportReader {
+    fn reader_for(report: DoctorReportV1) -> crate::state::DoctorReportReader {
         Arc::new(move || {
             let report = report.clone();
-            Box::pin(async move { Ok(crate::AdmittedDoctorReportV1::new(report)) })
+            Box::pin(async move { Ok(crate::state::AdmittedDoctorReportV1::new(report)) })
         })
     }
 
@@ -688,20 +688,21 @@ mod tests {
     #[tokio::test]
     async fn findings_route_preserves_typed_schema_convergence() {
         let report = compose_report(&DoctorTestSourcesV1::all_unknown()).await;
-        let admitted = crate::AdmittedDoctorReportV1::new(report).with_schema_convergences(vec![
-            SchemaConvergenceFindingV1 {
-                store: "profile-sessions".to_owned(),
-                stage: SchemaConvergenceStageV1::RegisteredSchema,
-                state: SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress,
-                progress: Some(SchemaConvergenceProgressV1::Pages {
-                    done: 4,
-                    remaining: 7,
-                }),
-                started_at_micros: 42,
-                degraded_row: None,
-            },
-        ]);
-        let reader: crate::DoctorReportReader = Arc::new(move || {
+        let admitted =
+            crate::state::AdmittedDoctorReportV1::new(report).with_schema_convergences(vec![
+                SchemaConvergenceFindingV1 {
+                    store: "profile-sessions".to_owned(),
+                    stage: SchemaConvergenceStageV1::RegisteredSchema,
+                    state: SchemaConvergenceStateV1::ReleasedShapeConvergenceInProgress,
+                    progress: Some(SchemaConvergenceProgressV1::Pages {
+                        done: 4,
+                        remaining: 7,
+                    }),
+                    started_at_micros: 42,
+                    degraded_row: None,
+                },
+            ]);
+        let reader: crate::state::DoctorReportReader = Arc::new(move || {
             let admitted = admitted.clone();
             Box::pin(async move { Ok(admitted) })
         });

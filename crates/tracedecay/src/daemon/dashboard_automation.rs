@@ -25,11 +25,12 @@ use tracedecay_daemon_service::DaemonInvocationService;
 use tracedecay_daemon_service::automation_observation::{
     project_run_observation_producer, record_project_run,
 };
+use tracedecay_dashboard_api::http::DashboardHttpRequestControlV1;
+use tracedecay_dashboard_api::state::DashboardAutomationObservationRecorderV1;
 use tracedecay_dashboard_api::{
     DashboardAutomationAuthorityErrorV1, DashboardAutomationAuthorityV1,
-    DashboardAutomationObservationRecorderV1, DashboardAutomationRunOutcomeV1,
-    DashboardAutomationRunPortV1, DashboardAutomationRunRequestV1, DashboardAutomationWriter,
-    DashboardHttpRequestControlV1, DashboardManagedSkillCommandOutcomeV1,
+    DashboardAutomationRunOutcomeV1, DashboardAutomationRunPortV1, DashboardAutomationRunRequestV1,
+    DashboardAutomationWriter, DashboardManagedSkillCommandOutcomeV1,
     DashboardManagedSkillCommandPortV1, DashboardManagedSkillCommandV1,
 };
 use tracedecay_domain::configuration::UserProfileId;
@@ -72,7 +73,7 @@ impl DashboardAutomationRequestRuntime {
 pub(crate) fn dashboard_automation_observation_port(
     invocation_service: DaemonInvocationService,
 ) -> Arc<
-    dyn Fn(PathBuf) -> tracedecay_dashboard_api::DashboardAutomationObservationFuture
+    dyn Fn(PathBuf) -> tracedecay_dashboard_api::state::DashboardAutomationObservationFuture
         + Send
         + Sync
         + 'static,

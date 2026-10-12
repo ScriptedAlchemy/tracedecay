@@ -27,9 +27,10 @@ use tracedecay_daemon_service::{
     DaemonFeedbackProximityInvocationFuture, DaemonFeedbackProximityInvocationRequest,
     DaemonInvocationService, feedback_proximity_invocation_result,
 };
+use tracedecay_dashboard_api::http::DashboardHttpRequestControlV1;
 use tracedecay_dashboard_api::{
     DashboardDeliveryProjectV1, DashboardDeliveryReadFutureV1, DashboardDeliveryReadPortV1,
-    DashboardHttpRequestControlV1, DashboardProximityAttentionReadFutureV1,
+    DashboardProximityAttentionReadFutureV1,
 };
 use tracedecay_domain::feedback::{
     FeedbackScopeV1, GitHubPullRequestIdV1, GitHubReviewCoverageV1,

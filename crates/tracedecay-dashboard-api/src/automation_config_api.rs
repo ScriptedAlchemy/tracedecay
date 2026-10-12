@@ -21,8 +21,8 @@ use tracedecay_domain::configuration::{
     ConfigurationRevisionId, ConfigurationValueV1, LcmSummarizerExecutableV1, SettingKey,
 };
 
-use super::DashboardState;
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use crate::state::DashboardState;
 use tracedecay_automation_runtime::automation::backend;
 use tracedecay_automation_runtime::automation::config::{
     AutomationConfig, AutomationConfigPatch, effective_config, from_configuration_snapshot,

@@ -247,7 +247,7 @@ fn managed_skills_are_dashboard_controllable_with_direct_activation() {
         let mut server = spawn_dashboard_server_with_host_runtime(
             cg,
             host_runtime,
-            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
+            tracedecay_dashboard_api::test_serve::DashboardTestProjectGraphsV1::default(),
             port,
             access,
         );
@@ -408,7 +408,7 @@ fn managed_skill_dashboard_api_applies_updates_immediately() {
         let mut server = spawn_dashboard_server_with_host_runtime(
             cg,
             host_runtime,
-            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
+            tracedecay_dashboard_api::test_serve::DashboardTestProjectGraphsV1::default(),
             port,
             access,
         );

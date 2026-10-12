@@ -3,8 +3,8 @@
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use super::super::DashboardState;
 use crate::read_model::DashboardDomainStateV1;
+use crate::state::DashboardState;
 use crate::tracedecay::facts::memory_application_for_db;
 use tracedecay_store::FactReadControl;
 

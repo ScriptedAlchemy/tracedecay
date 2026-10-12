@@ -5,7 +5,7 @@
 //! `crate::daemon::code_index_scheduler` registry, which holds the map of live
 //! per-worktree schedulers, their latest sealed generation identity, last
 //! reconcile, staleness-ladder state, and hook-hint queues. Daemon-owned
-//! dashboard construction threads an exact read port into [`DashboardState`].
+//! dashboard construction threads an exact read port into [`crate::state::DashboardState`].
 //! Direct dashboard construction remains typed `unsupported` rather than
 //! fabricating a generation identity or a "fresh" claim. The wire types are
 //! owned by `tracedecay_contracts::code_index_freshness`.
@@ -16,11 +16,11 @@ use tracedecay_contracts::code_index_freshness::{
     CodeIndexFreshnessPayloadV1, CodeIndexFreshnessReadFailureV1, CodeIndexStalenessStateV1,
 };
 
-use super::DashboardState;
 use super::read_model::{
     DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessStateV1,
     DashboardFreshnessV1, DashboardLegalActionKindV1, DashboardLegalActionRefV1, scope_from_state,
 };
+use crate::state::DashboardState;
 
 /// `GET /api/code-index/freshness`
 pub async fn freshness(

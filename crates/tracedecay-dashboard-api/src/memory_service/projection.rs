@@ -8,11 +8,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracedecay_domain::{FactId, PayloadAccessState};
 
-use super::super::DashboardState;
 use super::super::memory_analysis::pca_scores;
 use super::facts::fact_summary_json;
 use crate::read_model::DashboardDomainStateV1;
 use crate::snapshot_cache::DerivedSnapshotCacheState;
+use crate::state::DashboardState;
 use crate::tracedecay::facts::memory_application_for_db;
 use tracedecay_store::{
     FactReadControl, ProjectMemoryDashboardVectorPointV1, ProjectMemoryFactProjectionV1,

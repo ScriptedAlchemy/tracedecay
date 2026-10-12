@@ -23,9 +23,10 @@ use super::read_model::{
     DashboardVersionV1, scope_from_state,
 };
 use super::util::{JsonPath, JsonQuery, query_rows};
-use super::{DashboardHttpRequestControlV1, DashboardState, RequestControl};
 use crate::graph::health::{dependency_depth, dsm_clusters};
 use crate::graph::queries::GraphQueryManager;
+use crate::http::{DashboardHttpRequestControlV1, RequestControl};
+use crate::state::DashboardState;
 use tracedecay_code_index::graph_projection::{
     CodeGraphInteractiveReader, CodeGraphSemanticEdgeV1, CodeGraphSymbolSummaryV1,
 };

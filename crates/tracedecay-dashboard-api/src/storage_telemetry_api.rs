@@ -50,12 +50,12 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use self::table_growth::{
     TABLE_GROWTH_THRESHOLD, table_growth_dimension, table_growth_payload_coverage,
 };
-use super::DashboardState;
 use super::read_model::{
     DashboardCoverageV1, DashboardEnvelopeV1, DashboardLegalActionKindV1,
     DashboardLegalActionRefV1, now_micros, scope_from_state,
 };
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use crate::state::DashboardState;
 
 pub use self::table_growth::{TableGrowthDimensionV1, TableGrowthThresholdV1};
 

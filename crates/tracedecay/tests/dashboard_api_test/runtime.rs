@@ -234,9 +234,9 @@ impl DashboardTestRuntimeV1 {
 
     pub(crate) fn dashboard_test_authority(
         self: &Arc<Self>,
-    ) -> Result<tracedecay_dashboard_api::DashboardHostAdmissionTestAuthorityV1> {
+    ) -> Result<tracedecay_dashboard_api::test_serve::DashboardHostAdmissionTestAuthorityV1> {
         Ok(
-            tracedecay_dashboard_api::DashboardHostAdmissionTestAuthorityV1::new(
+            tracedecay_dashboard_api::test_serve::DashboardHostAdmissionTestAuthorityV1::new(
                 Arc::clone(self),
                 self.profile_database.clone(),
                 self.project_database.clone(),
@@ -264,7 +264,7 @@ impl DashboardTestRuntimeV1 {
     pub(crate) async fn dashboard_test_authority_with_session_reads(
         self: &Arc<Self>,
         cg: &Arc<TraceDecay>,
-    ) -> Result<tracedecay_dashboard_api::DashboardHostAdmissionTestAuthorityV1> {
+    ) -> Result<tracedecay_dashboard_api::test_serve::DashboardHostAdmissionTestAuthorityV1> {
         let authority = self
             .dashboard_test_authority_with_session_reads_base(cg)
             .await?;
@@ -280,7 +280,7 @@ impl DashboardTestRuntimeV1 {
     async fn dashboard_test_authority_with_session_reads_base(
         self: &Arc<Self>,
         cg: &Arc<TraceDecay>,
-    ) -> Result<tracedecay_dashboard_api::DashboardHostAdmissionTestAuthorityV1> {
+    ) -> Result<tracedecay_dashboard_api::test_serve::DashboardHostAdmissionTestAuthorityV1> {
         let authority = self.dashboard_test_authority()?;
         let (automation_authority, automation_writer) =
             dashboard::dashboard_automation_authority_for_test(Arc::clone(cg), &self.profile)
@@ -313,7 +313,7 @@ impl DashboardTestRuntimeV1 {
     pub(crate) async fn dashboard_test_authority_with_configuration(
         self: &Arc<Self>,
         cg: &Arc<TraceDecay>,
-    ) -> Result<tracedecay_dashboard_api::DashboardHostAdmissionTestAuthorityV1> {
+    ) -> Result<tracedecay_dashboard_api::test_serve::DashboardHostAdmissionTestAuthorityV1> {
         let authority = self
             .dashboard_test_authority_with_session_reads_base(cg)
             .await?;

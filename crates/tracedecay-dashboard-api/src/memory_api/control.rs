@@ -7,7 +7,7 @@ use axum::http::StatusCode;
 use serde_json::{Value, json};
 use tracedecay_store::FactReadControl;
 
-use crate::DashboardHttpRequestControlV1;
+use crate::http::DashboardHttpRequestControlV1;
 use crate::read_model::{
     DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessV1,
     DashboardScopeV1,
@@ -123,9 +123,12 @@ mod tests {
             "cancel.dashboard-memory-read-deadline-test",
         )
         .expect("cancellation signal");
-        let mut control = request_control(cancellation);
-        control.deadline = tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(0))
-            .expect("elapsed deadline");
+        let control = DashboardHttpRequestControlV1::test_fixture_with(
+            "dashboard-memory-read-control-test",
+            cancellation,
+            tracedecay_domain::UtcMicros(1),
+            tracedecay_domain::UtcMicros(0),
+        );
 
         assert!(request_deadline_elapsed(&control));
         assert!(fact_read_control(&control).interrupted());
@@ -155,9 +158,12 @@ mod tests {
             "cancel.dashboard-memory-timeout-envelope-test",
         )
         .expect("cancellation signal");
-        let mut control = request_control(cancellation);
-        control.deadline = tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(0))
-            .expect("elapsed deadline");
+        let control = DashboardHttpRequestControlV1::test_fixture_with(
+            "dashboard-memory-read-control-test",
+            cancellation,
+            tracedecay_domain::UtcMicros(1),
+            tracedecay_domain::UtcMicros(0),
+        );
         let timed_out = read_error_envelope(
             DashboardScopeV1 {
                 project_id: None,

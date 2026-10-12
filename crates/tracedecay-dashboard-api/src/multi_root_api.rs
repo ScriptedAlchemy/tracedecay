@@ -20,7 +20,8 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::ScopeSetId;
 
-use super::{DashboardHttpRequestControlV1, DashboardState, RequestControl};
+use crate::http::{DashboardHttpRequestControlV1, RequestControl};
+use crate::state::DashboardState;
 
 #[derive(Deserialize)]
 pub struct CollectionQueryV1 {

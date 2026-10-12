@@ -16,7 +16,8 @@ use super::read_model::{
     scope_from_state,
 };
 use super::util::{JsonPath, JsonQuery};
-use super::{DashboardHttpRequestControlV1, DashboardState, RequestControl};
+use crate::http::{DashboardHttpRequestControlV1, RequestControl};
+use crate::state::DashboardState;
 use tracedecay_store::TOOL_USE_ID_KEY;
 
 mod aggregates;

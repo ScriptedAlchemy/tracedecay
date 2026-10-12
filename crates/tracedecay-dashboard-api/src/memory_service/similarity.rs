@@ -8,7 +8,6 @@ use serde::Serialize;
 use serde_json::Value;
 use tracedecay_store::FactReadControl;
 
-use super::super::DashboardState;
 use super::super::memory_analysis::{
     MemoryAnalysisError, MemoryScoreDistributionV1, SIMILARITY_FACT_CAP, SIMILARITY_PAIR_FLOOR,
     SIMILARITY_SCORE_MAX, SIMILARITY_SCORE_MIN, SimilarityComputation,
@@ -17,6 +16,7 @@ use super::super::memory_analysis::{
 use super::projection::{MemoryDerivedScanV1, vector_rows};
 use crate::read_model::DashboardDomainStateV1;
 use crate::snapshot_cache::DerivedSnapshotCacheState;
+use crate::state::DashboardState;
 use crate::tracedecay::facts::memory_application_for_db;
 
 /// One scored fact pair above the requested similarity floor.

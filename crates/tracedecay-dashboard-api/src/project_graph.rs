@@ -2,7 +2,7 @@
 //!
 //! These definitions used to live in `crate::mcp::server`, which made the
 //! dashboard depend on the MCP layer for a seam it only ever consumed as an
-//! injected `Option<…>` field on [`crate::DashboardState`]. The dependency is
+//! injected `Option<…>` field on [`crate::state::DashboardState`]. The dependency is
 //! inverted here: this crate owns the contract, and the root crate (MCP server
 //! construction, daemon dashboard admission) supplies the implementation when
 //! it builds dashboard state. Project selectors must not reconstruct graph

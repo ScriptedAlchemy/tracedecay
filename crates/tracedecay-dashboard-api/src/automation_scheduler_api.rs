@@ -5,9 +5,9 @@ use axum::extract::State;
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use super::DashboardState;
 use super::automation_config_api::effective_automation_config;
 use super::util::{JsonError, internal_error};
+use crate::state::DashboardState;
 use tracedecay_automation_runtime::automation::backend::{AgentTaskKind, task_key};
 use tracedecay_automation_runtime::automation::config::AutomationConfig;
 use tracedecay_automation_runtime::automation::run_ledger::{

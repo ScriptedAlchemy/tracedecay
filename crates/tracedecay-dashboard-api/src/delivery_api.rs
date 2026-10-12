@@ -59,7 +59,8 @@ use super::read_model::{
     DashboardLegalActionKindV1, DashboardLegalActionRefV1, DashboardVersionV1,
     DashboardWatermarkV1, scope_from_state,
 };
-use super::{DashboardHttpRequestControlV1, DashboardState, RequestControl};
+use crate::http::{DashboardHttpRequestControlV1, RequestControl};
+use crate::state::DashboardState;
 
 const DELIVERY_SOURCE_COUNT: u64 = 9;
 const MAX_DELIVERY_INBOX_PROJECTS_V1: usize = 64;

@@ -26,10 +26,11 @@ use tracedecay_daemon_service::{
     DaemonConfigurationRuntimeRegistrar, DaemonInvocationService, DaemonRetainedRuntimeRegistrar,
     daemon_owned_project_source_access_at,
 };
+use tracedecay_dashboard_api::http::DashboardHttpRequestControlV1;
 use tracedecay_dashboard_api::{
     DashboardApplicationRouters, DashboardApplicationRuntime, DashboardConfigurationApplyError,
     DashboardConfigurationApplyFuture, DashboardDaemonReadUnavailableV1,
-    DashboardHttpRequestControlV1, DashboardScopeSetReadFuture,
+    DashboardScopeSetReadFuture,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_project::project::TraceDecay;

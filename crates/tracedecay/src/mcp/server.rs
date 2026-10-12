@@ -354,7 +354,7 @@ pub struct McpServer {
     /// to the daemon process profile for selector resolution.
     registry_db: Option<RegisteredGlobalDbLeaseV1>,
     automation_scheduler_reconciler:
-        Option<tracedecay_dashboard_api::AutomationSchedulerReconciler>,
+        Option<tracedecay_dashboard_api::state::AutomationSchedulerReconciler>,
     database_owner_reconciler: Option<DatabaseOwnerReconciler>,
     dashboard_automation_writer: tracedecay_dashboard_api::DashboardAutomationWriter,
     remote_operational_status: Option<tracedecay_contracts::RemoteOperationalStatusReaderV1>,
@@ -362,7 +362,7 @@ pub struct McpServer {
     /// report: when the full server publishes, or when a reset-required
     /// session store leaves the core serving the route.
     dashboard_doctor_report_reader:
-        std::sync::OnceLock<tracedecay_dashboard_api::DoctorReportReader>,
+        std::sync::OnceLock<tracedecay_dashboard_api::state::DoctorReportReader>,
     dashboard_code_index_freshness_reader:
         Option<tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader>,
     code_index_readiness_waiter:
@@ -583,7 +583,7 @@ impl McpServer {
     /// reader it was given.
     pub(crate) fn publish_doctor_report(
         &self,
-        reader: tracedecay_dashboard_api::DoctorReportReader,
+        reader: tracedecay_dashboard_api::state::DoctorReportReader,
     ) {
         let _ = self.dashboard_doctor_report_reader.set(reader);
     }

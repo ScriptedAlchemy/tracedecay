@@ -15,9 +15,9 @@ use tracedecay_domain::{
     DeliverySurfaceFamilyV1, UtcMicros, canonical_sha256,
 };
 
-use super::DashboardState;
 use super::events_api::DashboardEventV1;
 use super::read_model::{DashboardScopeV1, now_micros};
+use crate::state::DashboardState;
 
 const MAX_PENDING_DELIVERIES: usize = 256;
 const MAX_TERMINAL_RECEIPTS: usize = 512;

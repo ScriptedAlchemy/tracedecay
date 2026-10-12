@@ -27,10 +27,10 @@ use tracedecay_sessions::runtime::git_correlation::{
 };
 use tracedecay_sessions::runtime::shared::durable_project_path_key;
 
-use super::DashboardState;
 use super::analytics_api::managed_agent_label_for_session;
 use super::delivery_api::{DeliveryGitHeadV1, DeliveryGitStatusV1, DeliveryProjectionV1};
 use super::util::{i64_field, query_rows, str_field};
+use crate::state::DashboardState;
 
 const CORRELATION_AUTHORITY: &str = "session-Git correlation index";
 const SESSION_STORE_AUTHORITY: &str = "registered project session store";

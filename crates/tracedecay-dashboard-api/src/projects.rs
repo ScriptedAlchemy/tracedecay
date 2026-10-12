@@ -12,14 +12,12 @@ use super::read_model::{
     DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessV1,
     scope_from_state,
 };
-use super::{
-    DashboardSessionAuthorityStateV1, DashboardSessionResolutionV1, DashboardState,
-    build_selected_project_state, config_error,
-};
+use super::{DashboardSessionAuthorityStateV1, DashboardSessionResolutionV1};
 use crate::project_registry::{
     PublicCodeProject, align_public_checkout_branches, build_project_registry_view,
     public_code_project_for_checkout, public_code_project_from_record,
 };
+use crate::state::{DashboardState, build_selected_project_state, config_error};
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_global_db::ProjectRegistryContext;
 

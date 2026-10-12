@@ -7,12 +7,14 @@ use axum::response::{IntoResponse, Json, Response};
 use schemars::JsonSchema;
 use serde::Serialize;
 
+use super::DashboardAutomationAuthorityErrorV1;
 use super::automation_authority_error_response;
 use super::exact_automation_authority;
-use super::{DashboardAutomationAuthorityErrorV1, DashboardState, RequestControl};
+use crate::http::RequestControl;
 use crate::memory_api::control::{
     fact_read_control, request_terminal_state, terminal_read_response,
 };
+use crate::state::DashboardState;
 use tracedecay_automation_runtime::automation::managed_skills::list_managed_skills;
 use tracedecay_automation_runtime::automation::outcomes::{
     AutomationOutcomesSnapshot, FactOutcomeRecord, SkillOutcomeRecord, compute_fact_outcomes,

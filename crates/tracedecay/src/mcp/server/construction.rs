@@ -150,7 +150,7 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) own_project_host_admission_replay: bool,
     pub(crate) startup_catch_up_enabled: bool,
     pub(crate) automation_scheduler_reconciler:
-        Option<tracedecay_dashboard_api::AutomationSchedulerReconciler>,
+        Option<tracedecay_dashboard_api::state::AutomationSchedulerReconciler>,
     pub(crate) database_owner_reconciler: Option<DatabaseOwnerReconciler>,
     pub(crate) dashboard_automation_writer: tracedecay_dashboard_api::DashboardAutomationWriter,
     /// Live Remote Brain operational read composed from the mounted remote
@@ -645,7 +645,7 @@ impl McpServerConstructionContext {
 
     pub(crate) fn with_automation_scheduler_reconciler(
         mut self,
-        reconciler: tracedecay_dashboard_api::AutomationSchedulerReconciler,
+        reconciler: tracedecay_dashboard_api::state::AutomationSchedulerReconciler,
     ) -> Self {
         self.automation_scheduler_reconciler = Some(reconciler);
         self

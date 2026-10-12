@@ -1001,7 +1001,7 @@ pub fn production_doctor_report_reader(
     diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
     feedback_runtimes: DaemonFeedbackRuntimeRegistrar,
     store_telemetry_sampling: tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry,
-) -> tracedecay_dashboard_api::DoctorReportReader {
+) -> tracedecay_dashboard_api::state::DoctorReportReader {
     Arc::new(move || {
         let project_root = project_root.clone();
         let project_id = project_id.clone();
@@ -1254,7 +1254,7 @@ pub fn production_doctor_report_reader(
             };
             let report = compose_doctor_report(&context, &inputs).await?;
             Ok(
-                tracedecay_dashboard_api::AdmittedDoctorReportV1::new(report)
+                tracedecay_dashboard_api::state::AdmittedDoctorReportV1::new(report)
                     .with_table_growth_evidence(store_telemetry.table_growth_evidence)
                     .with_schema_convergences(schema_convergence.findings)
                     .with_language_servers(inputs.language_server),

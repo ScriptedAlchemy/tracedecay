@@ -6,10 +6,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::util::{JsonQuery, coerce_limit, json_error};
-use super::{DashboardState, RequestControl};
+use crate::http::RequestControl;
 use crate::memory_api::control::{
     fact_read_control, request_terminal_state, terminal_read_response,
 };
+use crate::state::DashboardState;
 use crate::tracedecay::facts::memory_application_for_db;
 use tracedecay_automation_runtime::automation::automatic_facts::{
     AutomaticFactReceipt, AutomaticFactState, list_automatic_fact_receipts,

@@ -20,7 +20,7 @@ use tracedecay_domain::configuration::{
 use tracedecay_domain::{NativeIntegrationTransactionId, ProjectId, ScopeSetId};
 use tracedecay_global_db::configuration::contracts::types::DirectConfigurationMutation;
 
-use crate::DashboardHttpRequestControlV1;
+use crate::http::DashboardHttpRequestControlV1;
 
 pub struct DashboardApplicationRouters {
     pub http: Router,
@@ -161,20 +161,19 @@ pub trait DashboardApplicationRuntime: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use tracedecay_contracts::{Deadline, RequestId};
     use tracedecay_domain::UtcMicros;
 
     #[test]
     fn admitted_dashboard_control_clones_share_the_live_cancellation_signal() {
-        let control = crate::DashboardHttpRequestControlV1 {
-            request_id: RequestId::new("request.dashboard-memory-control").expect("request id"),
-            deadline: Deadline::new(UtcMicros(500)).expect("deadline"),
-            cancellation: tracedecay_contracts::CancellationSignal::active(
+        let control = crate::http::DashboardHttpRequestControlV1::test_fixture_with(
+            "dashboard-memory-control",
+            tracedecay_contracts::CancellationSignal::active(
                 "cancellation.dashboard-memory-control",
             )
             .expect("cancellation"),
-            observed_at: UtcMicros(100),
-        };
+            UtcMicros(100),
+            UtcMicros(500),
+        );
 
         let owned_control = control.clone();
         assert_eq!(owned_control.request_id(), control.request_id());

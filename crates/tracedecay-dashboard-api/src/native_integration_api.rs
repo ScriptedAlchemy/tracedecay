@@ -17,7 +17,8 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::NativeIntegrationTransactionId;
 
-use super::{DashboardState, RequestControl};
+use crate::http::RequestControl;
+use crate::state::DashboardState;
 
 #[derive(Deserialize)]
 pub struct NativeIntegrationStatusQueryV1 {

@@ -16,8 +16,8 @@ use tracedecay_contracts::ApplicationContractError;
 use crate::application::feedback::observations::FeedbackObservationReadModelV1;
 use tracedecay_contracts::feedback::observations::FeedbackCoverageV1;
 
-use super::DashboardState;
 use super::read_model::{DashboardEnvelopeV1, scope_from_state};
+use crate::state::DashboardState;
 
 pub type FeedbackStatusReadFuture = Pin<
     Box<

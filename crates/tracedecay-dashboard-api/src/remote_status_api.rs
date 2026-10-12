@@ -1,7 +1,7 @@
 //! `GET /api/remote/status`. Remote Brain operational plane for Settings.
 //!
 //! An admitted daemon owner injects the canonical operational read into
-//! [`DashboardState`]. This module maps that one application shape onto a
+//! [`crate::state::DashboardState`]. This module maps that one application shape onto a
 //! schemars-typed dashboard DTO. A dashboard opened without an admitted
 //! reader remains explicitly unavailable, never an empty success.
 
@@ -19,11 +19,11 @@ use tracedecay_domain::{
     UtcMicros,
 };
 
-use super::DashboardState;
 use super::read_model::{
     DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessV1,
     DashboardLegalActionKindV1, DashboardLegalActionRefV1, DashboardScopeV1, scope_from_state,
 };
+use crate::state::DashboardState;
 
 const REMOTE_STATUS_REFRESH_OPERATION: &str = "use-case.dashboard.remote.status.refresh";
 const READER_UNSUPPORTED_NOTE: &str =
@@ -41,7 +41,7 @@ pub async fn status(
 
 pub(crate) fn status_from_reader(
     scope: DashboardScopeV1,
-    reader: Option<crate::RemoteOperationalStatusReader>,
+    reader: Option<crate::state::RemoteOperationalStatusReader>,
 ) -> DashboardEnvelopeV1<RemoteOperationalStatusPayloadV1> {
     let envelope = {
         let _span = tracing::trace_span!("dashboard_api.status.projection").entered();
@@ -53,7 +53,7 @@ pub(crate) fn status_from_reader(
 
 fn project_remote_status(
     scope: DashboardScopeV1,
-    reader: Option<crate::RemoteOperationalStatusReader>,
+    reader: Option<crate::state::RemoteOperationalStatusReader>,
 ) -> DashboardEnvelopeV1<RemoteOperationalStatusPayloadV1> {
     match reader {
         None => envelope(
@@ -412,7 +412,7 @@ mod tests {
 
     #[test]
     fn present_reader_preserves_unconfigured_and_unavailable_kinds() {
-        let unconfigured: crate::RemoteOperationalStatusReader =
+        let unconfigured: crate::state::RemoteOperationalStatusReader =
             Arc::new(|| RemoteOperationalStatusReadV1::Unconfigured);
         let envelope = status_from_reader(scope(), Some(unconfigured));
         assert_eq!(
@@ -421,7 +421,7 @@ mod tests {
         );
         assert_eq!(envelope.domain_state, DashboardDomainStateV1::Unknown);
 
-        let unavailable: crate::RemoteOperationalStatusReader =
+        let unavailable: crate::state::RemoteOperationalStatusReader =
             Arc::new(|| RemoteOperationalStatusReadV1::Unavailable);
         let envelope = status_from_reader(scope(), Some(unavailable));
         assert_eq!(

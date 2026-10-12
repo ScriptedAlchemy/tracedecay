@@ -412,8 +412,8 @@ async fn start_fixture(seed: FixtureSeed) -> Fixture {
             &server_profile,
             None,
             authority,
-            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
-            tracedecay_dashboard_api::DashboardTestEndpointV1 {
+            tracedecay_dashboard_api::test_serve::DashboardTestProjectGraphsV1::default(),
+            tracedecay_dashboard_api::test_serve::DashboardTestEndpointV1 {
                 host: "127.0.0.1",
                 port,
                 access,

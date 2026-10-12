@@ -13,8 +13,9 @@ use super::read_model::{
     DashboardVersionV1, scope_from_state,
 };
 use super::util::{JsonPath, JsonQuery, coerce_limit};
-use super::{DashboardState, RequestControl};
 use crate::graph::CodeGraphReadError;
+use crate::http::RequestControl;
+use crate::state::DashboardState;
 
 #[derive(Deserialize)]
 pub struct SearchParams {

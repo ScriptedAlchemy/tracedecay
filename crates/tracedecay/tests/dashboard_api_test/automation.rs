@@ -173,7 +173,7 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_deployment(
         let mut server = spawn_dashboard_server_with_configuration_runtime(
             cg,
             host_runtime,
-            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
+            tracedecay_dashboard_api::test_serve::DashboardTestProjectGraphsV1::default(),
             port,
             access,
         );
@@ -445,7 +445,7 @@ fn fact_store_curate_answers_with_its_receipt_while_a_slow_curator_runs() {
         let mut server = spawn_dashboard_server_with_configuration_runtime(
             cg,
             host_runtime,
-            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
+            tracedecay_dashboard_api::test_serve::DashboardTestProjectGraphsV1::default(),
             port,
             access,
         );
@@ -600,7 +600,7 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
         let mut server = spawn_dashboard_server_with_host_runtime(
             cg,
             host_runtime,
-            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
+            tracedecay_dashboard_api::test_serve::DashboardTestProjectGraphsV1::default(),
             port,
             access,
         );
@@ -722,7 +722,7 @@ fn automation_outcomes_endpoint_reports_activated_skills_and_automatic_fact_rece
         let mut server = spawn_dashboard_server_with_host_runtime(
             cg,
             host_runtime,
-            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
+            tracedecay_dashboard_api::test_serve::DashboardTestProjectGraphsV1::default(),
             port,
             access,
         );

@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use super::DashboardState;
+use crate::state::DashboardState;
 
 pub type DashboardAutomationWriteFuture =
     Pin<Box<dyn Future<Output = Result<Value, String>> + Send + 'static>>;

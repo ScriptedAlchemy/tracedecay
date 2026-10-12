@@ -19,7 +19,7 @@ use tracedecay_automation_runtime::automation::skill_writer::ManagedSkillDeploym
 use tracedecay_contracts::ApplicationProblemEnvelope;
 use tracedecay_contracts::retained_surfaces::{AutomationRunProblemV1, AutomationRunResultV1};
 
-use super::DashboardHttpRequestControlV1;
+use crate::http::DashboardHttpRequestControlV1;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum DashboardAutomationAuthorityErrorV1 {
@@ -88,7 +88,7 @@ pub(crate) fn automation_authority_error_response(
 }
 
 pub(crate) fn exact_automation_authority(
-    state: &super::DashboardState,
+    state: &crate::state::DashboardState,
 ) -> Result<&DashboardAutomationAuthorityV1, DashboardAutomationAuthorityErrorV1> {
     let authority = state.automation_authority.as_ref().ok_or_else(|| {
         DashboardAutomationAuthorityErrorV1::unavailable(

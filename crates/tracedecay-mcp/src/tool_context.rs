@@ -35,7 +35,7 @@ use tracedecay_contracts::code_index_freshness::{
     CodeIndexFreshnessPayloadV1, CodeIndexFreshnessReader,
 };
 use tracedecay_contracts::{CancellationSignal, Deadline, ResolvedScope};
-use tracedecay_dashboard_api::AdmittedDoctorReportV1;
+use tracedecay_dashboard_api::state::AdmittedDoctorReportV1;
 use tracedecay_domain::IndexPathPolicyV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;

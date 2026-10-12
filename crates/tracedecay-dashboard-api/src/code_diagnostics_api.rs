@@ -7,10 +7,11 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
 use super::util::{JsonError, http_detail, internal_error, json_error};
-use super::{DashboardHttpRequestControlV1, DashboardState, RequestControl};
 use crate::application::dashboard_diagnostics::{
     DashboardDiagnosticsAuthorityV1, DashboardDiagnosticsErrorV1, settings_revision,
 };
+use crate::http::{DashboardHttpRequestControlV1, RequestControl};
+use crate::state::DashboardState;
 use tracedecay_contracts::{CallableCodeOperationKind, callable_code_operation};
 use tracedecay_domain::ManifestDigest;
 use tracedecay_lsp::analyzer::adapters::LspAdapterDefinition;

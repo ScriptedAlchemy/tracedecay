@@ -9,7 +9,7 @@ pub use tracedecay_api::read_model::*;
 
 /// Resolve the exact scope from the live dashboard state.
 #[must_use]
-pub fn scope_from_state(state: &super::DashboardState) -> DashboardScopeV1 {
+pub fn scope_from_state(state: &crate::state::DashboardState) -> DashboardScopeV1 {
     DashboardScopeV1 {
         project_id: state.project_id.clone(),
         storage_mode: state.storage_mode.clone(),

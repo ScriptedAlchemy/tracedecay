@@ -62,10 +62,10 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use tracedecay_runtime_core::db::engine::QueryExecutor;
 
-use super::DashboardState;
 use super::read_model::{
     DashboardCoverageV1, DashboardScopeV1, DashboardWatermarkV1, now_micros, scope_from_state,
 };
+use crate::state::DashboardState;
 use tracedecay_session_memory::event_lane::{
     ActivityFamilyV1, ActivityFrontierV1, ActivityPulseV1, ActivityRecordV1,
 };

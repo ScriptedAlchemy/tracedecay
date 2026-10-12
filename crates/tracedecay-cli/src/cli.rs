@@ -459,7 +459,7 @@ pub enum Commands {
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
         /// Port to listen on (0 = pick a free port)
-        #[arg(long, default_value_t = tracedecay_dashboard_api::DEFAULT_PORT)]
+        #[arg(long, default_value_t = tracedecay_dashboard_api::http::DEFAULT_PORT)]
         port: u16,
         /// Open the dashboard URL in the default browser after the server starts
         #[arg(long)]

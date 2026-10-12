@@ -20,7 +20,8 @@ use tracedecay_graph_query::{
 };
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
-use super::{DashboardHttpRequestControlV1, DashboardState};
+use crate::http::DashboardHttpRequestControlV1;
+use crate::state::DashboardState;
 
 const TOP_CONNECTED_SYMBOLS: usize = 12;
 const LARGEST_FILES: usize = 20;

@@ -16,11 +16,14 @@ use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 #[cfg(feature = "test-transport")]
 use tracedecay_daemon_service::DaemonInvocationService;
 #[cfg(feature = "test-transport")]
+use tracedecay_dashboard_api::test_serve::{
+    DashboardHostAdmissionTestAuthorityV1, DashboardTestEndpointV1, DashboardTestProjectGraphsV1,
+};
+#[cfg(feature = "test-transport")]
 use tracedecay_dashboard_api::{
     DashboardApplicationRuntime, DashboardAutomationAuthorityV1, DashboardAutomationWriter,
-    DashboardGitCorrelationReadPortV1, DashboardHostAdmissionTestAuthorityV1,
-    DashboardLcmReadPortV1, DashboardProfileCodeIndexWorkerSettingsPort, DashboardTestEndpointV1,
-    DashboardTestProjectGraphsV1, standalone_dashboard_automation_writer,
+    DashboardGitCorrelationReadPortV1, DashboardLcmReadPortV1,
+    DashboardProfileCodeIndexWorkerSettingsPort, standalone_dashboard_automation_writer,
 };
 #[cfg(feature = "test-transport")]
 use tracedecay_session_runtime::session_retrieval::{
@@ -97,7 +100,7 @@ pub async fn run_until_shutdown_for_tests_with_host_admission<F>(
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
-    tracedecay_dashboard_api::run_until_shutdown_for_tests_with_host_admission(
+    tracedecay_dashboard_api::test_serve::run_until_shutdown_for_tests_with_host_admission(
         std::sync::Arc::new(dashboard_project_context(
             &graph,
             Some(profile),

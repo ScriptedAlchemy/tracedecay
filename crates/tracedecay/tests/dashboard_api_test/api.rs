@@ -793,7 +793,7 @@ fn lcm_serves_project_session_store_without_global_override() {
         let mut server = spawn_dashboard_server_with_host_runtime(
             cg,
             session_store,
-            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
+            tracedecay_dashboard_api::test_serve::DashboardTestProjectGraphsV1::default(),
             port,
             access,
         );
@@ -870,7 +870,7 @@ fn lcm_project_store_wins_over_global_accounting_override() {
         let mut server = spawn_dashboard_server_with_host_runtime(
             cg,
             session_store,
-            tracedecay_dashboard_api::DashboardTestProjectGraphsV1::default(),
+            tracedecay_dashboard_api::test_serve::DashboardTestProjectGraphsV1::default(),
             port,
             access,
         );

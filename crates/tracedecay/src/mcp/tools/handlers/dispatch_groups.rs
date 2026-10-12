@@ -19,7 +19,7 @@ use tracedecay_contracts::retrieval::{
     AdminSyncSurfaceRequestV1, RemoteStatusSurfaceRequestV1, RuntimeSurfaceRequestV1,
     StatusSurfaceRequestV1,
 };
-use tracedecay_dashboard_api::AdmittedDoctorReportV1;
+use tracedecay_dashboard_api::state::AdmittedDoctorReportV1;
 use tracedecay_mcp::handlers::health as portable_health;
 use tracedecay_mcp::handlers::info as portable_info;
 use tracedecay_mcp::handlers::{

@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracedecay_automation::backend::{AgentTaskFailureClass, AgentTaskKind};
 
-use super::DashboardState;
 use super::util::{internal_error, json_error};
+use crate::state::DashboardState;
 use tracedecay_automation_runtime::automation::run_ledger::{
     AutomationRunArtifact, AutomationRunArtifactKind, AutomationRunLedgerRecord,
     AutomationRunStatus, AutomationTrigger, find_run_record, read_published_artifact_chain,

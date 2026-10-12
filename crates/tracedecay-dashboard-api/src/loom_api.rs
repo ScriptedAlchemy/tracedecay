@@ -23,12 +23,14 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::DashboardSessionAuthorityStateV1;
 use super::read_model::{
     DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessV1,
     DashboardLegalActionKindV1, DashboardLegalActionRefV1, DashboardWatermarkV1, scope_from_state,
 };
 use super::util::{JsonQuery, collect_rows};
-use super::{DashboardSessionAuthorityStateV1, DashboardState, RequestControl};
+use crate::http::RequestControl;
+use crate::state::DashboardState;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::db::engine::{
     Error as EngineError, IntoParams, QueryExecutor, params,

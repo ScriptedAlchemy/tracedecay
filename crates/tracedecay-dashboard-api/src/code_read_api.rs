@@ -20,7 +20,8 @@ use super::read_model::{
     DashboardEnvelopeV1, DashboardFreshnessV1, DashboardVersionV1, scope_from_state,
 };
 use super::util::{JsonQuery, coerce_limit};
-use super::{DashboardHttpRequestControlV1, DashboardState, RequestControl};
+use crate::http::{DashboardHttpRequestControlV1, RequestControl};
+use crate::state::DashboardState;
 
 const DEFAULT_FAMILY_LIMIT: i64 = 100;
 const MAX_FAMILY_LIMIT: i64 = 1_000;

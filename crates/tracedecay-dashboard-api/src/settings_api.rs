@@ -22,7 +22,6 @@ use tracedecay_contracts::{
     ApplicationOutcome, ApplicationProblemEnvelope, ApplicationProblemKind,
 };
 
-use super::DashboardState;
 use super::read_model::{
     DashboardCoverageV1, DashboardEnvelopeV1, DashboardLegalActionKindV1,
     DashboardLegalActionRefV1, scope_from_state,
@@ -33,6 +32,7 @@ use crate::application::settings_control::{
     preview_project_settings,
 };
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use crate::state::DashboardState;
 use tracedecay_automation_runtime::automation::config::from_configuration_snapshot;
 use tracedecay_configuration::{
     UserSettingsMutationV1, UserSettingsSnapshotV1, parse_duration_millis,

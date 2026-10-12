@@ -20,8 +20,9 @@ use tracedecay_store::{
 };
 
 use super::super::read_model::{DashboardCoverageV1, DashboardDomainStateV1};
-use super::super::{DashboardHttpRequestControlV1, DashboardState};
 use super::facts::dashboard_overview;
+use crate::http::DashboardHttpRequestControlV1;
+use crate::state::DashboardState;
 use crate::tracedecay::facts::memory_application_for_db;
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]

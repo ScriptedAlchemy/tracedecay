@@ -298,9 +298,9 @@ pub struct ToolCallRegistryOptions<'a> {
     pub profile: Option<&'a tracedecay_runtime_core::config::ProfileRoot>,
     pub(crate) resolved_project_route: Option<&'a crate::mcp::project_route::ResolvedProjectRoute>,
     pub automation_scheduler_reconciler:
-        Option<tracedecay_dashboard_api::AutomationSchedulerReconciler>,
+        Option<tracedecay_dashboard_api::state::AutomationSchedulerReconciler>,
     pub automation_writer: tracedecay_dashboard_api::DashboardAutomationWriter,
-    pub(crate) doctor_report_reader: Option<tracedecay_dashboard_api::DoctorReportReader>,
+    pub(crate) doctor_report_reader: Option<tracedecay_dashboard_api::state::DoctorReportReader>,
     pub(crate) remote_operational_status:
         Option<tracedecay_contracts::RemoteOperationalStatusReaderV1>,
     pub(crate) code_index_freshness_reader:

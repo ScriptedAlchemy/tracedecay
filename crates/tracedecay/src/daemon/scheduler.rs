@@ -654,7 +654,7 @@ impl DaemonEngine {
         current_key: Arc<tokio::sync::Mutex<ProjectServerKey>>,
         current_project_path: Arc<tokio::sync::Mutex<PathBuf>>,
         handshake: DaemonHandshake,
-    ) -> tracedecay_dashboard_api::AutomationSchedulerReconciler {
+    ) -> tracedecay_dashboard_api::state::AutomationSchedulerReconciler {
         let engine = self.clone();
         std::sync::Arc::new(move || {
             let engine = engine.clone();

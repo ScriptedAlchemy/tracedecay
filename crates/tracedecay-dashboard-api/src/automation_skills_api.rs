@@ -9,9 +9,10 @@ use serde_json::{Value, json};
 
 use super::util::{JsonError, internal_error, json_error};
 use super::{
-    DashboardManagedSkillCommandOutcomeV1, DashboardManagedSkillCommandV1, DashboardState,
+    DashboardManagedSkillCommandOutcomeV1, DashboardManagedSkillCommandV1,
     automation_authority_error_response, exact_automation_authority,
 };
+use crate::state::DashboardState;
 use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSkill, ManagedSkillDraft, ManagedSkillProvenance, ManagedSkillReadError,
     ManagedSkillSource, ManagedSkillUpdate, ManagedSupportFile, SkillInstallTarget,

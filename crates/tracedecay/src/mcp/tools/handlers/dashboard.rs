@@ -37,17 +37,22 @@ use tracedecay_project::project::TraceDecay;
 use tracedecay_mcp::handlers::dashboard_lcm::DashboardLcmReadAdapter;
 
 use code_reads::DashboardCodeReadAdapter;
+use tracedecay_dashboard_api::http::{
+    DEFAULT_PORT, DashboardHttpRequestControlV1, bind_dashboard, validate_dashboard_host,
+};
+use tracedecay_dashboard_api::routes::router;
+use tracedecay_dashboard_api::state::{
+    AutomationSchedulerReconciler, DashboardStateCompositionV1,
+    build_state_with_automation_reconciler,
+};
 use tracedecay_dashboard_api::{
-    AutomationSchedulerReconciler, DEFAULT_PORT, DashboardApplicationRouters,
-    DashboardApplicationRuntime, DashboardAutomationWriter,
+    DashboardApplicationRouters, DashboardApplicationRuntime, DashboardAutomationWriter,
     DashboardCodeIndexWorkerConfigurationV1, DashboardCodeIndexWorkerSettingsCommitFuture,
     DashboardCodeIndexWorkerSettingsCommitV1, DashboardCodeIndexWorkerSettingsErrorV1,
     DashboardCodeIndexWorkerSettingsFuture, DashboardConfigurationApplyError,
     DashboardConfigurationApplyFuture, DashboardDaemonReadUnavailableV1,
-    DashboardHttpRequestControlV1, DashboardProfileCodeIndexWorkerSettingsPort,
-    DashboardScopeSetReadFuture, DashboardSessionAuthoritiesV1, DashboardSessionMountV1,
-    DashboardSessionResolutionV1, DashboardStateCompositionV1, bind_dashboard,
-    build_state_with_automation_reconciler, router, validate_dashboard_host,
+    DashboardProfileCodeIndexWorkerSettingsPort, DashboardScopeSetReadFuture,
+    DashboardSessionAuthoritiesV1, DashboardSessionMountV1, DashboardSessionResolutionV1,
 };
 
 #[derive(Clone)]
@@ -400,7 +405,7 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
 )]
 pub(crate) async fn dashboard_native_integration_status(
     executor: &dyn tracedecay_daemon_protocol::DaemonInvocationExecutor,
-    control: &tracedecay_dashboard_api::DashboardHttpRequestControlV1,
+    control: &tracedecay_dashboard_api::http::DashboardHttpRequestControlV1,
     transaction_id: tracedecay_domain::NativeIntegrationTransactionId,
 ) -> std::result::Result<
     tracedecay_contracts::NativeIntegrationSurfaceResultV1,
@@ -783,7 +788,7 @@ pub(super) async fn compute_dashboard(
     registered_savings_db: Option<RegisteredGlobalDbLeaseV1>,
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     automation_writer: DashboardAutomationWriter,
-    doctor_report_reader: Option<tracedecay_dashboard_api::DoctorReportReader>,
+    doctor_report_reader: Option<tracedecay_dashboard_api::state::DoctorReportReader>,
     remote_operational_status: Option<tracedecay_contracts::RemoteOperationalStatusReaderV1>,
     code_index_freshness_reader: Option<
         tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReader,
@@ -1081,7 +1086,8 @@ pub(super) async fn compute_dashboard(
             let (listener, addr) = bind_dashboard(&host, port).await?;
             let access = tracedecay_dashboard_api::DashboardAccessToken::mint()?;
             let url = access.launch_url(addr);
-            let app = tracedecay_dashboard_api::with_dashboard_http_admission(app, addr, access);
+            let app =
+                tracedecay_dashboard_api::http::with_dashboard_http_admission(app, addr, access);
 
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
             let completed = Arc::new(tokio::sync::Semaphore::new(0));
