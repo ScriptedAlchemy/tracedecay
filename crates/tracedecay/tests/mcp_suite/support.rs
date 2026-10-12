@@ -437,6 +437,9 @@ pub(crate) async fn production_composition_fixture_with_sources(
     common::register_process_runtime_ports();
     let isolation = test_temp_dir();
     let project_root = seed_production_composition_project(isolation.path(), write_sources);
+    fixture::seed_composition_store(isolation.path(), &project_root)
+        .await
+        .expect("seed schema-complete store for production composition");
     let harness = Box::pin(ProductionProjectCompositionHarnessV1::open(
         isolation.path(),
         vec![project_root.clone()],
@@ -461,6 +464,9 @@ pub(crate) async fn peer_production_composition(
         isolation.path(),
         fixture::write_indexed_fixture_sources,
     );
+    fixture::seed_composition_store(isolation.path(), &project_root)
+        .await
+        .expect("seed schema-complete store for peer composition");
     let harness = Box::pin(ProductionProjectCompositionHarnessV1::open(
         isolation.path(),
         vec![project_root],
@@ -498,6 +504,9 @@ pub(crate) async fn init_production_source_edit_project(
         .parent()
         .expect("source-edit project has an isolation parent");
     commit_worktree(project_root, "source edit fixture");
+    fixture::seed_composition_store(isolation_root, project_root)
+        .await
+        .expect("seed schema-complete store for source-edit composition");
     let harness = Box::pin(ProductionProjectCompositionHarnessV1::open(
         isolation_root,
         [project_root.to_path_buf()],

@@ -166,6 +166,27 @@ async fn init_project_from_template_root(
     Box::pin(TraceDecay::open_with_options(project_root, options)).await
 }
 
+/// Seeds a schema-complete store into a production composition's profile
+/// before the harness mounts the project: the composed profile root is
+/// `<isolation>/profile` and its global database sits beside it.
+#[cfg(feature = "test-transport")]
+pub(crate) async fn seed_composition_store(
+    isolation_root: &Path,
+    project_root: &Path,
+) -> TdResult<()> {
+    let template = template_root().await.map_err(|error| {
+        config_error(format!("mcp suite store template is unavailable: {error}"))
+    })?;
+    let profile_root = isolation_root.join("profile");
+    let targets = SeedTargets {
+        profile_root: profile_root.clone(),
+        global_db_path: profile_root.join("global.db"),
+    };
+    let project_root = canonical_root_identity(project_root);
+    seed_store(&template.join(EMPTY_FLAVOR), &project_root, &targets)
+        .map_err(|error| config_error(format!("mcp suite store template seed failed: {error}")))
+}
+
 fn config_error(message: impl Into<String>) -> tracedecay_domain::errors::TraceDecayError {
     tracedecay_domain::errors::TraceDecayError::Config {
         message: message.into(),
