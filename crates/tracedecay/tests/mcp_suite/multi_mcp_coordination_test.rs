@@ -6,8 +6,6 @@ use serde_json::{Value, json};
 #[cfg(feature = "test-transport")]
 use tempfile::tempdir;
 #[cfg(feature = "test-transport")]
-use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
-#[cfg(feature = "test-transport")]
 use tracedecay::mcp::McpServer;
 
 #[cfg(feature = "test-transport")]
@@ -85,7 +83,7 @@ async fn concurrent_mcp_clients_converge_through_one_project_scheduler() {
     let project = isolation.path().join("project");
     initialize_project(&project);
 
-    let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
+    let harness = crate::support::seeded_composition::open(isolation.path(), [project.clone()])
         .await
         .unwrap();
     let server1 = harness.server(&project).unwrap();

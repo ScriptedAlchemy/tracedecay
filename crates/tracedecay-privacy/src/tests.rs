@@ -10,18 +10,17 @@ use tracedecay_domain::{
 };
 
 use super::detect::{
-    DetectionError, SanitizationDetectorOriginV1, SanitizationDetectorRevisionV1,
-    SanitizationRemediationClassV1, SanitizationScanBoundaryV1, SanitizationScannedCoverageV1,
+    SanitizationDetectorOriginV1, SanitizationDetectorRevisionV1, SanitizationRemediationClassV1,
+    SanitizationScanBoundaryV1, SanitizationScannedCoverageV1,
 };
 use super::sanitize::OBSERVATION_SANITIZER_VERSION_V1;
 use super::{
     CODE_SOURCE_SANITIZER_VERSION_V1, ClaudeSanitizerPolicyV1, CodeSourceShapeV1,
-    DetectionConfidenceV1, LcmSensitiveRedactionPolicyV1, MEMORY_FACT_SANITIZER_VERSION_V1,
-    MemoryFactSanitizationV1, ObservationRecordParseErrorV1, ObservationSanitizationOutcomeV1,
-    PrivacyDetectorV1, PrivacySanitizerError, RecordSanitizerV1, SanitizationActionV1,
-    SanitizationFindingV1, SanitizedPayloadVerificationError,
-    parse_normalized_observation_record_v1, parse_observation_record_v1,
-    redact_lcm_sensitive_payload, sanitize_code_source_bytes, sanitize_memory_fact_payload,
+    DetectionConfidenceV1, MEMORY_FACT_SANITIZER_VERSION_V1, MemoryFactSanitizationV1,
+    ObservationRecordParseErrorV1, ObservationSanitizationOutcomeV1, PrivacyDetectorV1,
+    PrivacySanitizerError, RecordSanitizerV1, SanitizationActionV1, SanitizationFindingV1,
+    SanitizedPayloadVerificationError, parse_normalized_observation_record_v1,
+    parse_observation_record_v1, sanitize_code_source_bytes, sanitize_memory_fact_payload,
     sanitize_provider_metadata_json, verify_memory_fact_sanitization,
     verify_sanitized_json_payload,
 };
@@ -1482,63 +1481,6 @@ fn custom_policy_behavior_has_a_deterministic_version_fingerprint() {
     assert_eq!(
         outcome.receipt().receipt().sanitizer_version(),
         first.version()
-    );
-}
-
-#[test]
-fn lcm_sensitive_redaction_parses_structured_payload_before_scanning_values() {
-    let policy = LcmSensitiveRedactionPolicyV1::enabled(["api_key"]);
-    let raw = r#"{"nested":{"api_key":"short","password":"owner-kept-value"},"safe":"keep"}"#;
-
-    let outcome =
-        redact_lcm_sensitive_payload(raw, &policy).expect("structured LCM privacy scan succeeds");
-    let sanitized: Value =
-        serde_json::from_str(outcome.text()).expect("structured output remains JSON");
-
-    assert_eq!(
-        sanitized["nested"]["api_key"],
-        "[TraceDecay redacted: sensitive field]"
-    );
-    assert_eq!(sanitized["nested"]["password"], "owner-kept-value");
-    assert_eq!(sanitized["safe"], "keep");
-    assert_eq!(outcome.patterns(), &["api_key".to_string()]);
-}
-
-#[test]
-fn lcm_sensitive_redaction_fails_closed_for_unknown_configured_patterns() {
-    let policy = LcmSensitiveRedactionPolicyV1::enabled(["api_keey"]);
-    let secret = "sk-unknown-policy-1234567890";
-
-    let outcome = redact_lcm_sensitive_payload(&format!("api_key={secret}"), &policy)
-        .expect("fail-closed LCM privacy scan succeeds");
-
-    assert!(!outcome.text().contains(secret));
-    assert_eq!(outcome.patterns(), &["api_key".to_string()]);
-}
-
-#[test]
-fn lcm_sensitive_redaction_rejects_duplicate_json_keys_before_materialization() {
-    let policy = LcmSensitiveRedactionPolicyV1::enabled(["api_key"]);
-    let raw = r#"{"api_key":"unit-test-placeholder-value","api_key":"safe-replacement"}"#;
-
-    assert!(matches!(
-        redact_lcm_sensitive_payload(raw, &policy),
-        Err(DetectionError::StructuredQuarantine)
-    ));
-}
-
-#[test]
-fn lcm_sensitive_redaction_rejects_payloads_above_the_canonical_raw_byte_limit() {
-    let policy = LcmSensitiveRedactionPolicyV1::enabled(["api_key"]);
-    let admitted = redact_lcm_sensitive_payload(r#"{"safe":"kept"}"#, &policy)
-        .expect("a record inside the byte limit is redacted");
-    assert_eq!(admitted.text(), r#"{"safe":"kept"}"#);
-    assert_eq!(admitted.patterns(), &[] as &[String]);
-
-    let raw = format!("{{{}", " ".repeat(1_048_576));
-    assert_eq!(
-        redact_lcm_sensitive_payload(&raw, &policy),
-        Err(DetectionError::ScanLimitExceeded)
     );
 }
 

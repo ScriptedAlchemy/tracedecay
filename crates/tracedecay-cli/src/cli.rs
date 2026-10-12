@@ -6,7 +6,6 @@ use tracedecay_contracts::retained_surfaces::{MessageRelationshipScopeV1, Messag
 mod automation;
 pub mod dispatch;
 mod help;
-pub(crate) mod output;
 mod package_hook;
 mod work;
 mod workflow;

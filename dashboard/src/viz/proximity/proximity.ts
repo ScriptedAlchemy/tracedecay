@@ -5,7 +5,7 @@ import type {
   FeedbackProximityRelationV1,
 } from '../../contracts/generated.ts';
 
-export type ProximityTone = 'candidate' | 'overlap' | 'conflict';
+type ProximityTone = 'candidate' | 'overlap' | 'conflict';
 
 export function proximityTone(relation: FeedbackProximityRelationV1): ProximityTone {
   switch (relation.relation_kind) {

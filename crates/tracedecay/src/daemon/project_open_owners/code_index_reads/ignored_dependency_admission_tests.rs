@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,6 +23,8 @@ use tracedecay_code_index_runtime::code_index_scheduler::{
 };
 use tracedecay_code_index_runtime::project_reads::project_code_index_ignored_dependency_admission_port;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
+
+use crate::test_support::git::git;
 
 const PROJECT_ID: &str = "project.project-open-ignored-dependency";
 
@@ -422,21 +423,6 @@ async fn latest(
     })
     .await
     .expect("fresh serving generation")
-}
-
-fn git(root: &Path, arguments: &[&str]) {
-    let status = Command::new(
-        tracedecay_runtime_core::git::try_git_program()
-            .expect("absolute git executable should resolve"),
-    )
-    .current_dir(root)
-    .args(arguments)
-    .status()
-    .expect("run git fixture command");
-    assert!(
-        status.success(),
-        "git fixture command failed: {arguments:?}"
-    );
 }
 
 fn write(root: &Path, logical_path: &str, contents: &[u8]) {

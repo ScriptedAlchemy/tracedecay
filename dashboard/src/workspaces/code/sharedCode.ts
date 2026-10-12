@@ -47,10 +47,10 @@ export const SHARED_CODE_MATCH_CLASSES: ReadonlyArray<{
   },
 ];
 
-export const SHARED_CODE_FAMILY_ROUTE = '/api/plugins/graph/shared-code/family';
+const SHARED_CODE_FAMILY_ROUTE = '/api/plugins/graph/shared-code/family';
 
 /** Default page size: the route's own `DEFAULT_FAMILY_LIMIT`. */
-export const SHARED_CODE_PAGE_LIMIT = 100;
+const SHARED_CODE_PAGE_LIMIT = 100;
 
 export function sharedFamilyUrl(
   symbolOccurrenceId: string,
@@ -68,7 +68,7 @@ export function sharedFamilyUrl(
 
 /** How the result's own coverage reads to a person. The four statuses are the
  * daemon's (`SimilarCoverageV1`); nothing here infers coverage from counts. */
-export type SharedCodeCoverageReading =
+type SharedCodeCoverageReading =
   | { readonly kind: 'complete' }
   | {
       readonly kind: 'partial';

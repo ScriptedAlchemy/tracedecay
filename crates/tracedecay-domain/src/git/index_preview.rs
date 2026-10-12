@@ -128,7 +128,6 @@ impl GitIndexPreviewInputV1 {
             expires_at,
             input_digest: ManifestDigest::zero()?,
         };
-        input.validate_fields()?;
         input.input_digest = input.compute_input_digest()?;
         Ok(input)
     }
@@ -155,7 +154,6 @@ impl GitIndexPreviewInputV1 {
 
     pub fn validate(&self) -> Result<(), DomainError> {
         self.input_digest.validate()?;
-        self.validate_fields()?;
         if self.input_digest != self.compute_input_digest()? {
             return Err(DomainError::DigestMismatch);
         }
@@ -361,7 +359,6 @@ impl GitIndexPreviewV1 {
 
     pub fn validate(&self) -> Result<(), DomainError> {
         self.preview_digest.validate()?;
-        self.validate_fields()?;
         if self.preview_digest != self.compute_preview_digest()? {
             return Err(DomainError::DigestMismatch);
         }

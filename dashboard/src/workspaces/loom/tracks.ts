@@ -5,7 +5,7 @@
  * derived from the recorded extent it is clamped against.
  */
 
-export interface LoomWindow {
+interface LoomWindow {
   start: number;
   end: number;
 }
@@ -40,21 +40,6 @@ export function clampWindow(view: LoomWindow, extent: LoomWindow): LoomWindow {
   return { start, end: start + span };
 }
 
-export function zoomWindow(
-  view: LoomWindow,
-  extent: LoomWindow,
-  factor: number,
-  focusTime: number,
-): LoomWindow {
-  const span = view.end - view.start;
-  const nextSpan = span * factor;
-  const ratio = span === 0 ? 0.5 : (focusTime - view.start) / span;
-  return clampWindow(
-    { start: focusTime - ratio * nextSpan, end: focusTime + (1 - ratio) * nextSpan },
-    extent,
-  );
-}
-
 /** True when the viewport is (near enough) the whole fitted extent. */
 export function isFitted(view: LoomWindow, extent: LoomWindow): boolean {
   const full = fittedWindow(extent);
@@ -73,7 +58,7 @@ function xFor(time: number, window: LoomWindow, width: number): number {
  * Axis
  * ---------------------------------------------------------------------- */
 
-export interface AxisTick {
+interface AxisTick {
   x: number;
   time: number;
   label: string;

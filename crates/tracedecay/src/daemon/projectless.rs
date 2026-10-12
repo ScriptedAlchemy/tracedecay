@@ -124,7 +124,7 @@ pub(super) async fn serve_projectless_client(
             Err(error) => Some(error.into_response()),
         };
         if let Some(response) = response {
-            write_json_rpc_response(transport, &response).await?;
+            write_daemon_response(transport, &response).await?;
         }
         if !lifecycle.accepting() {
             break;

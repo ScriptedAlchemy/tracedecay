@@ -17,7 +17,7 @@ use tracedecay_store::{ParseOffset, observation::ObservationCoverageReason};
 
 use crate::admission::{HostAdmission, HostDiscoveryQueueEntry};
 use crate::observation::ObservationCancellation;
-use crate::runtime::host_scan::{HOST_SCAN_WINDOW, HostScanBudget};
+use crate::runtime::host_scan::{HOST_SCAN_WINDOW, HostScanBudget, isolatable_source_error};
 use crate::runtime::hosts::codex::{CodexDiscoveryHub, PendingTranscript};
 use crate::runtime::jsonl_observation_admission::{
     JsonlFrameAdmission, JsonlObservationAdmissionRequest, admit_jsonl_observations,
@@ -33,10 +33,7 @@ use crate::runtime::source::{
 };
 
 mod discovery;
-use discovery::{
-    KimiDiscoveryFailureKind, KimiDiscoveryReport, KimiSessionState, KimiStateGate,
-    charge_discovered_path,
-};
+use discovery::{KimiDiscoveryFailureKind, KimiDiscoveryReport, KimiSessionState, KimiStateGate};
 
 const PROVIDER: &str = "kimi";
 const MAX_SESSION_FILES: usize = 512;
@@ -283,7 +280,7 @@ impl KimiSource {
                                 CandidateConvergence::Unreadable => continue,
                             }
                             queued_wires.push(candidate.clone());
-                            if !charge_discovered_path(&mut budget, &candidate)? {
+                            if !budget.try_charge_path(&candidate, PROVIDER)? {
                                 discovery.scan_complete = false;
                                 discovery.reached_end = false;
                                 break 'session_dirs;
@@ -429,7 +426,7 @@ fn read_real_directories(
             break;
         }
         let path = entry.path();
-        if !charge_discovered_path(budget, &path)? {
+        if !budget.try_charge_path(&path, PROVIDER)? {
             discovery.scan_complete = false;
             discovery.reached_end = false;
             break;
@@ -897,16 +894,6 @@ pub async fn capture_kimi_observations(
         tracing::trace_span!("sessions.hosts.kimi.capture"),
     )
     .await
-}
-
-fn isolatable_source_error(error: &TranscriptIngestError) -> bool {
-    matches!(
-        error,
-        TranscriptIngestError::ScanIo { .. }
-            | TranscriptIngestError::ScanGenerationChanged { .. }
-            | TranscriptIngestError::NonDurableRecord { .. }
-            | TranscriptIngestError::InvalidSourceIdentity { .. }
-    )
 }
 
 fn warn_isolated_source(path: &Path, failure_kind: &'static str) {

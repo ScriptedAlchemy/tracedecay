@@ -142,9 +142,6 @@ const CREATE_PROVENANCE_UPDATE_TRIGGER: &str = "CREATE TRIGGER IF NOT EXISTS \
      observation_repository_provenance BEGIN SELECT RAISE(ABORT, \
      'observation repository provenance is immutable'); END";
 
-mod restore;
-pub use restore::replay_current_release_state_for_restore;
-
 fn db_error(source: impl std::error::Error + Send + Sync + 'static) -> TraceDecayError {
     TraceDecayError::database_operation(OPERATION, source)
 }

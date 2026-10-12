@@ -5,6 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 use tracedecay_domain::ManifestDigest;
+use tracedecay_domain::canonical_text::is_tagged_lowercase_hex;
 
 /// Maximum UTF-8 byte length for a catalog-owned stable identifier.
 pub const MAX_CATALOG_IDENTIFIER_BYTES: usize = 192;
@@ -134,14 +135,7 @@ impl CatalogDigest {
     }
 
     pub fn parse(value: &str) -> Result<Self, CatalogDigestError> {
-        let Some(encoded) = value.strip_prefix("sha256:") else {
-            return Err(CatalogDigestError::Malformed);
-        };
-        if encoded.len() != 64
-            || !encoded
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
+        if !is_tagged_lowercase_hex(value, "sha256:", 64) {
             return Err(CatalogDigestError::Malformed);
         }
         ManifestDigest::new(value)

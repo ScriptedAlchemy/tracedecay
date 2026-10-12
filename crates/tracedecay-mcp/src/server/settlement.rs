@@ -288,17 +288,27 @@ impl RetainedDispatchRegistry {
 
     fn reap_finished(state: &mut RetainedDispatchState) {
         while let Some(joined) = state.tasks.try_join_next_with_id() {
-            match joined {
-                Ok((id, settlement)) => {
-                    settlement.mark_joined();
-                    state.active.remove(&id);
+            Self::settle_joined(state, joined);
+        }
+    }
+
+    fn settle_joined(
+        state: &mut RetainedDispatchState,
+        joined: std::result::Result<
+            (tokio::task::Id, Arc<DispatchExecutionSettlement>),
+            tokio::task::JoinError,
+        >,
+    ) {
+        match joined {
+            Ok((id, settlement)) => {
+                settlement.mark_joined();
+                state.active.remove(&id);
+            }
+            Err(error) => {
+                if let Some(active) = state.active.remove(&error.id()) {
+                    active.settlement.mark_joined();
                 }
-                Err(error) => {
-                    if let Some(active) = state.active.remove(&error.id()) {
-                        active.settlement.mark_joined();
-                    }
-                    tracing::error!(error = %error, "retained MCP dispatch task failed");
-                }
+                tracing::error!(error = %error, "retained MCP dispatch task failed");
             }
         }
     }
@@ -313,18 +323,7 @@ impl RetainedDispatchRegistry {
             }
         }
         while let Some(joined) = state.tasks.join_next_with_id().await {
-            match joined {
-                Ok((id, settlement)) => {
-                    settlement.mark_joined();
-                    state.active.remove(&id);
-                }
-                Err(error) => {
-                    if let Some(active) = state.active.remove(&error.id()) {
-                        active.settlement.mark_joined();
-                    }
-                    tracing::error!(error = %error, "retained MCP dispatch task failed");
-                }
-            }
+            Self::settle_joined(&mut state, joined);
         }
     }
 }

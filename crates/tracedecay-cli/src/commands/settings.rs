@@ -22,11 +22,7 @@ use tracedecay_domain::configuration::{
 use tracedecay_domain::{ProjectId, UtcMicros, canonical_sha256};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
-fn configuration_error(message: impl Into<String>) -> tracedecay_domain::errors::TraceDecayError {
-    tracedecay_domain::errors::TraceDecayError::Config {
-        message: message.into(),
-    }
-}
+use crate::application_cli::config_error;
 
 fn cli_configuration_idempotency_key(
     project_id: &ProjectId,
@@ -39,12 +35,12 @@ fn cli_configuration_idempotency_key(
         expected_revision,
         mutations,
     ))
-    .map_err(|error| configuration_error(format!("invalid configuration mutation: {error}")))?;
+    .map_err(|error| config_error(format!("invalid configuration mutation: {error}")))?;
     let suffix = digest
         .hex_suffix()
-        .ok_or_else(|| configuration_error("configuration mutation digest is malformed"))?;
+        .ok_or_else(|| config_error("configuration mutation digest is malformed"))?;
     ConfigurationIdempotencyKey::new(format!("configuration.idempotency.cli.{suffix}"))
-        .map_err(|error| configuration_error(format!("invalid configuration request key: {error}")))
+        .map_err(|error| config_error(format!("invalid configuration request key: {error}")))
 }
 
 fn cli_user_configuration_idempotency_key(
@@ -58,16 +54,12 @@ fn cli_user_configuration_idempotency_key(
         expected_revision,
         mutations,
     ))
-    .map_err(|error| {
-        configuration_error(format!("invalid user configuration mutation: {error}"))
-    })?;
+    .map_err(|error| config_error(format!("invalid user configuration mutation: {error}")))?;
     let suffix = digest
         .hex_suffix()
-        .ok_or_else(|| configuration_error("user configuration mutation digest is malformed"))?;
+        .ok_or_else(|| config_error("user configuration mutation digest is malformed"))?;
     ConfigurationIdempotencyKey::new(format!("configuration.idempotency.cli.user.{suffix}"))
-        .map_err(|error| {
-            configuration_error(format!("invalid user configuration request key: {error}"))
-        })
+        .map_err(|error| config_error(format!("invalid user configuration request key: {error}")))
 }
 
 fn configuration_deadline(
@@ -76,21 +68,21 @@ fn configuration_deadline(
 ) -> tracedecay_domain::errors::Result<Deadline> {
     let application_operation =
         tracedecay_contracts::configuration::configuration_surface_operation(operation.as_str())
-            .map_err(|error| configuration_error(error.to_string()))?
-            .ok_or_else(|| configuration_error("configuration operation is not cataloged"))?;
+            .map_err(|error| config_error(error.to_string()))?
+            .ok_or_else(|| config_error("configuration operation is not cataloged"))?;
     let catalog = tracedecay_daemon_service::application_surface::application_surface_catalog()
-        .map_err(|error| configuration_error(error.to_string()))?;
+        .map_err(|error| config_error(error.to_string()))?;
     let maximum_millis = catalog
         .capability(application_operation.capability_id())
-        .ok_or_else(|| configuration_error("configuration capability is not cataloged"))?
+        .ok_or_else(|| config_error("configuration capability is not cataloged"))?
         .deadline()
         .maximum_millis();
     let maximum_micros = i64::try_from(maximum_millis)
         .ok()
         .and_then(|millis| millis.checked_mul(1_000))
-        .ok_or_else(|| configuration_error("configuration deadline exceeds the domain clock"))?;
+        .ok_or_else(|| config_error("configuration deadline exceeds the domain clock"))?;
     Deadline::new(UtcMicros(observed_at.0.saturating_add(maximum_micros)))
-        .map_err(|error| configuration_error(error.to_string()))
+        .map_err(|error| config_error(error.to_string()))
 }
 
 /// Invoke one configuration request. A request of profile settings only is
@@ -102,12 +94,12 @@ async fn invoke_configuration_surface(
     request: ConfigurationWireRequestV1,
 ) -> tracedecay_domain::errors::Result<ApplicationEnvelope<serde_json::Value>> {
     let request_id = mint_global_request_id(GlobalRequestSurface::Cli)
-        .map_err(|error| configuration_error(error.to_string()))?;
+        .map_err(|error| config_error(error.to_string()))?;
     let observed_at = now_micros();
     let deadline = configuration_deadline(operation, observed_at)?;
     let cancellation =
         CancellationSignal::active(format!("cancellation.cli.{}", request_id.as_str()))
-            .map_err(|error| configuration_error(error.to_string()))?;
+            .map_err(|error| config_error(error.to_string()))?;
     let handshake = super::daemon::client_handshake(profile, project_path)?;
     let client = tracedecay::daemon::invocation_client_for_current(profile, handshake)?;
     loop {
@@ -121,19 +113,19 @@ async fn invoke_configuration_surface(
             Some(&client),
         )
         .await
-        .map_err(|error| configuration_error(error.to_string()))?;
+        .map_err(|error| config_error(error.to_string()))?;
         if let Some(delay) = crate::cli::dispatch::surface_retry_delay(&result) {
             let now = now_micros();
             let remaining_micros = deadline.expires_at.0.saturating_sub(now.0);
             let remaining_micros = u64::try_from(remaining_micros)
-                .map_err(|_| configuration_error("configuration deadline elapsed"))?;
+                .map_err(|_| config_error("configuration deadline elapsed"))?;
             if delay <= std::time::Duration::from_micros(remaining_micros) {
                 tokio::time::sleep(delay).await;
                 continue;
             }
         }
         return result.result.map_err(|problem| {
-            configuration_error(format!(
+            config_error(format!(
                 "{}: {}",
                 problem.problem.code, problem.problem.message
             ))
@@ -153,25 +145,25 @@ pub(crate) async fn current_configuration_revision(
     )
     .await?;
     let ApplicationOutcome::Evidence(evidence) = envelope.outcome else {
-        return Err(configuration_error(
+        return Err(config_error(
             "configuration state returned a non-evidence outcome",
         ));
     };
     let states: Vec<ComponentConfigurationState> = serde_json::from_value(
         evidence
             .payload
-            .ok_or_else(|| configuration_error("configuration state omitted its payload"))?,
+            .ok_or_else(|| config_error("configuration state omitted its payload"))?,
     )
-    .map_err(|error| configuration_error(format!("invalid configuration state: {error}")))?;
+    .map_err(|error| config_error(format!("invalid configuration state: {error}")))?;
     let revision = states
         .first()
         .map(|state| state.desired_revision_id.clone())
-        .ok_or_else(|| configuration_error("configuration state has no runtime component"))?;
+        .ok_or_else(|| config_error("configuration state has no runtime component"))?;
     if states
         .iter()
         .any(|state| state.desired_revision_id != revision)
     {
-        return Err(configuration_error(
+        return Err(config_error(
             "configuration components disagree on the desired revision",
         ));
     }
@@ -193,7 +185,7 @@ async fn resolved_setting(
     project_path: Option<&Path>,
     key: &str,
 ) -> tracedecay_domain::errors::Result<ResolvedSetting> {
-    let key = SettingKey::new(key).map_err(|error| configuration_error(error.to_string()))?;
+    let key = SettingKey::new(key).map_err(|error| config_error(error.to_string()))?;
     let envelope = invoke_configuration_surface(
         profile,
         project_path,
@@ -202,16 +194,16 @@ async fn resolved_setting(
     )
     .await?;
     let ApplicationOutcome::Evidence(evidence) = envelope.outcome else {
-        return Err(configuration_error(
+        return Err(config_error(
             "configuration read returned a non-evidence outcome",
         ));
     };
     serde_json::from_value(
         evidence
             .payload
-            .ok_or_else(|| configuration_error("configuration read omitted its payload"))?,
+            .ok_or_else(|| config_error("configuration read omitted its payload"))?,
     )
-    .map_err(|error| configuration_error(format!("invalid configuration setting: {error}")))
+    .map_err(|error| config_error(format!("invalid configuration setting: {error}")))
 }
 
 /// The profile's worldwide-counter upload setting, wherever the command runs.
@@ -231,7 +223,7 @@ pub(crate) async fn repeated_query_hints_enabled(
 fn boolean_setting(setting: &ResolvedSetting) -> tracedecay_domain::errors::Result<bool> {
     match setting.effective_value {
         ConfigurationValueV1::Boolean(enabled) => Ok(enabled),
-        _ => Err(configuration_error(format!(
+        _ => Err(config_error(format!(
             "setting {} is not boolean",
             setting.key.as_str()
         ))),
@@ -314,21 +306,21 @@ fn configuration_effect_receipt(
     idempotency_key: &ConfigurationIdempotencyKey,
 ) -> tracedecay_domain::errors::Result<EffectReceipt> {
     let ApplicationOutcome::Effect(effect) = envelope.outcome else {
-        return Err(configuration_error(
+        return Err(config_error(
             "configuration mutation returned a non-effect outcome",
         ));
     };
     if effect.idempotency_key.as_str() != idempotency_key.as_str()
         || effect.receipt.idempotency_key.as_str() != idempotency_key.as_str()
     {
-        return Err(configuration_error(
+        return Err(config_error(
             "configuration mutation returned a receipt for another request",
         ));
     }
     effect
         .receipt
         .validate()
-        .map_err(|error| configuration_error(error.to_string()))?;
+        .map_err(|error| config_error(error.to_string()))?;
     Ok(effect.receipt)
 }
 
@@ -341,7 +333,7 @@ pub(crate) fn project_configuration_set(
         layer: ConfigurationLayerIdV1::Project {
             project_id: project_id.clone(),
         },
-        key: SettingKey::new(key).map_err(|error| configuration_error(error.to_string()))?,
+        key: SettingKey::new(key).map_err(|error| config_error(error.to_string()))?,
         value: Box::new(value),
     })
 }

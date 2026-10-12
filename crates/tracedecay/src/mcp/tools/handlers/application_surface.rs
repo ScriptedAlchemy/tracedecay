@@ -16,10 +16,7 @@ use tracedecay_domain::errors::{ProjectOpenFailureKind, Result, TraceDecayError}
 use tracedecay_mcp::application_output::tool_result::{
     ApplicationRefusal, render_application_result,
 };
-use tracedecay_mcp::tools::dispatch::{
-    resolve_mcp_application_surface_for_target,
-    resolve_mcp_application_surface_with_controls_for_target,
-};
+use tracedecay_mcp::tools::dispatch::resolve_mcp_application_surface_with_controls_for_target;
 
 pub(super) fn request_id() -> Result<RequestId> {
     mint_global_request_id(GlobalRequestSurface::McpFallback).map_err(|_| TraceDecayError::Config {
@@ -32,7 +29,7 @@ pub(super) fn complete_protocol_controls(
     request_id: &RequestId,
     deadline: Option<Deadline>,
     cancellation: Option<CancellationSignal>,
-) -> Result<Option<(Deadline, CancellationSignal)>> {
+) -> Result<(Deadline, CancellationSignal)> {
     let ceiling =
         tracedecay_daemon_service::application_surface::application_operation_deadline_ceiling(
             operation,
@@ -48,7 +45,7 @@ pub(super) fn complete_retained_protocol_controls(
     request_id: &RequestId,
     deadline: Option<Deadline>,
     cancellation: Option<CancellationSignal>,
-) -> Result<Option<(Deadline, CancellationSignal)>> {
+) -> Result<(Deadline, CancellationSignal)> {
     let binding = super::retained_catalog::retained_mcp_binding(operation)?;
     let ceiling = std::time::Duration::from_millis(binding.maximum_millis());
     complete_protocol_controls_with_ceiling(ceiling, request_id, deadline, cancellation)
@@ -59,7 +56,7 @@ fn complete_protocol_controls_with_ceiling(
     request_id: &RequestId,
     deadline: Option<Deadline>,
     cancellation: Option<CancellationSignal>,
-) -> Result<Option<(Deadline, CancellationSignal)>> {
+) -> Result<(Deadline, CancellationSignal)> {
     let ceiling_micros =
         i64::try_from(ceiling.as_micros()).map_err(|_| TraceDecayError::Config {
             message: "application surface deadline exceeds the domain clock".to_owned(),
@@ -85,7 +82,7 @@ fn complete_protocol_controls_with_ceiling(
                 message: error.to_string(),
             })?,
     };
-    Ok(Some((deadline, cancellation)))
+    Ok((deadline, cancellation))
 }
 
 /// Run one application-surface tool through `executor` and render its result,
@@ -119,44 +116,26 @@ pub async fn handle_application_surface(
             return Err(error.into_trace_decay_error());
         }
     };
-    let controls = complete_protocol_controls(
+    let (deadline, cancellation) = complete_protocol_controls(
         operation,
         &request_id,
         request_controls.deadline.cloned(),
         request_controls.cancellation.cloned(),
     )?;
-    let result = match controls {
-        Some((deadline, cancellation)) => {
-            tracing::Instrument::instrument(
-                resolve_mcp_application_surface_with_controls_for_target(
-                    operation,
-                    request_id,
-                    request,
-                    requested_format,
-                    deadline,
-                    cancellation,
-                    target,
-                    executor,
-                ),
-                tracing::trace_span!("mcp.application.surface.resolve"),
-            )
-            .await
-        }
-        None => {
-            tracing::Instrument::instrument(
-                resolve_mcp_application_surface_for_target(
-                    operation,
-                    request_id,
-                    request,
-                    requested_format,
-                    target,
-                    executor,
-                ),
-                tracing::trace_span!("mcp.application.surface.resolve"),
-            )
-            .await
-        }
-    }
+    let result = tracing::Instrument::instrument(
+        resolve_mcp_application_surface_with_controls_for_target(
+            operation,
+            request_id,
+            request,
+            requested_format,
+            deadline,
+            cancellation,
+            target,
+            executor,
+        ),
+        tracing::trace_span!("mcp.application.surface.resolve"),
+    )
+    .await
     .map_err(ApplicationSurfaceAdapterError::into_trace_decay_error)?;
     render_application_surface_result(response_handle_root, &result)
 }
@@ -335,14 +314,7 @@ pub async fn execute_retained_surface_tool(
         None => self::request_id()?,
     };
     let (deadline, cancellation) =
-        complete_retained_protocol_controls(retained, &request_id, deadline, cancellation)?
-            .ok_or_else(|| {
-                TraceDecayError::project_route(
-                    "retained_application_controls_unavailable",
-                    true,
-                    "retained application protocol controls are unavailable",
-                )
-            })?;
+        complete_retained_protocol_controls(retained, &request_id, deadline, cancellation)?;
     // The executor belongs to the selected project's server, and the retained
     // daemon payload carries no resolved scope: the target is that project or
     // the authenticated profile.
@@ -437,15 +409,7 @@ pub async fn execute_graph_tool_surface(
         None => self::request_id()?,
     };
     let (deadline, cancellation) =
-        complete_protocol_controls(operation, &request_id, deadline, cancellation)?.ok_or_else(
-            || {
-                TraceDecayError::project_route(
-                    "application_surface_controls_unavailable",
-                    true,
-                    "graph-tool protocol controls are unavailable",
-                )
-            },
-        )?;
+        complete_protocol_controls(operation, &request_id, deadline, cancellation)?;
     let mut dispatched = tracedecay_daemon_service::application_surface::resolve_application_surface_dispatch_with_controls(
         surface,
         operation,
@@ -869,7 +833,6 @@ mod tests {
             Some(deadline.clone()),
             None,
         )
-        .unwrap()
         .unwrap();
 
         assert_eq!(actual_deadline, deadline);
@@ -891,7 +854,6 @@ mod tests {
             None,
             Some(cancellation),
         )
-        .unwrap()
         .unwrap();
         actual_cancellation.cancel(UtcMicros(41));
 
@@ -912,7 +874,6 @@ mod tests {
             None,
             None,
         )
-        .unwrap()
         .unwrap();
         let after = tracedecay_contracts::clock::now_micros();
         assert!(

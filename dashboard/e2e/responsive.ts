@@ -1,152 +1,20 @@
 /**
- * The Plan 11 responsive/zoom/media matrix, and the two measurements the plan
- * names that no axe rule performs.
+ * The two Plan 11 measurements no axe rule performs: page-level reflow and
+ * touch-target size.
  *
- * Split out of `axe-harness.ts` for the same reason `visibility.ts` was: the
- * probes are pure DOM measurement and the pass/fail rules are pure functions
- * over their reports, so neither needs a Playwright import and both can be
- * driven against a real DOM outside the browser harness.
- *
- * What the plan mandates (11-dashboard-frontend.md, "Responsive,
- * accessibility, performance, and usability gates"):
- *
- *   "Automated tests cover 320x568, 390x844, 768x1024, 1024x768, 1280x720,
- *    and 1440x900 CSS pixels, 200% and 400% zoom, prefers-reduced-motion,
- *    prefers-contrast: more, and forced colors. At 320 pixels and 400% zoom
- *    there is no page-level horizontal scroll, clipped truth state, lost
- *    scope/provenance, or inaccessible action; labeled code/table/graph
- *    regions may scroll internally. Touch targets are at least 44x44 CSS
- *    pixels."
- *
- * ZOOM IS A CSS VIEWPORT, NOT `deviceScaleFactor`. Playwright's
- * `deviceScaleFactor` raises rasterization density and leaves layout at the
- * unzoomed CSS size, so a page captured at `deviceScaleFactor: 4` reflows
- * exactly as it did at 1x, which is the one thing WCAG 1.4.10 is about. Real
- * browser zoom shrinks the CSS viewport: 400% zoom of a 1280x720 window is a
- * 320x180 CSS viewport, and that is what is emulated here. It is also why the
- * 400% row and the 320px row test the same reflow width from opposite
- * directions.
+ * The probes are pure DOM measurement and the pass/fail rules are pure
+ * functions over their reports, so neither needs a Playwright import and both
+ * can be driven against a real DOM outside the browser harness.
  */
 
 /** WCAG 2.5.5 / Plan 11 minimum, in CSS pixels. */
 export const MIN_TOUCH_TARGET_PX = 44;
 
-/** The window this harness models browser zoom against. */
-const ZOOM_BASE = { width: 1280, height: 720 } as const;
-
-export interface Viewport {
-  /** Stable id: file names, findings keys, console tags. */
-  readonly id: string;
-  readonly width: number;
-  readonly height: number;
-  /** Browser zoom this CSS viewport models, as a percentage. */
-  readonly zoom: number;
-  /**
-   * Where the plan forbids page-level horizontal scroll outright. "at 320
-   * pixels and 400% zoom". Elsewhere the measurement is still taken and
-   * reported; only these two gate the run.
-   */
-  readonly reflowGated: boolean;
-}
-
-function zoomed(zoom: number): Viewport {
-  const scale = zoom / 100;
-  return {
-    id: `zoom${zoom}`,
-    width: Math.round(ZOOM_BASE.width / scale),
-    height: Math.round(ZOOM_BASE.height / scale),
-    zoom,
-    reflowGated: zoom >= 400,
-  };
-}
-
-function device(width: number, height: number, reflowGated = false): Viewport {
-  return { id: `${width}x${height}`, width, height, zoom: 100, reflowGated };
-}
-
-/**
- * The three the full scenario sweep runs, in both themes.
- *
- * These are the plan's own sizes, not the harness's previous 320/768/1440 at a
- * uniform height of 900. A 320-wide viewport 900 tall is a phone width with a
- * tablet's vertical room, which hides exactly the "does the truth state fit"
- * question the narrow row exists to ask.
- */
-export const SHOWCASE_VIEWPORTS: readonly Viewport[] = [
-  device(320, 568, true),
-  device(768, 1024),
-  device(1440, 900),
-];
-
-/** The rest of the plan's matrix, swept over a representative subset. */
-export const MATRIX_VIEWPORTS: readonly Viewport[] = [
-  device(390, 844),
-  device(1024, 768),
-  device(1280, 720),
-  zoomed(200),
-  zoomed(400),
-];
-
-export const PLAN_VIEWPORTS: readonly Viewport[] = [...SHOWCASE_VIEWPORTS, ...MATRIX_VIEWPORTS];
-
-/**
- * `reduced-motion` is the harness default and the only mode the full sweep
- * runs; the other two are emulated live, without reloading, because both
- * resolve through CSS media queries.
- */
-export type MediaMode = 'reduced-motion' | 'contrast-more' | 'forced-colors';
-
-export const MEDIA_MODES: readonly MediaMode[] = ['reduced-motion', 'contrast-more', 'forced-colors'];
-
-export type Theme = 'light' | 'dark';
-
-export interface Combination {
-  readonly viewport: Viewport;
-  readonly theme: Theme;
-  readonly media: MediaMode;
-}
-
-/**
- * Everything the matrix subset is scanned at, beyond what the full sweep
- * already covers. Thirty combinations per subset scenario:
- *
- *   - 10: the five viewports the full sweep does not reach (390x844, 1024x768,
- *     1280x720, and the two zoom levels), in both themes, under reduced motion;
- *   - 16: all eight plan viewports under `prefers-contrast: more`, and all
- *     eight under forced colors, in light;
- *   -  4: a dark spot check of both media modes at 1440x900 and 390x844, the
- *     widest and the narrowest, where a raised-contrast or forced palette is
- *     likeliest to collide with the dark token set.
- *
- * Forced colors replaces the palette wholesale, so sweeping it through both
- * themes at every size would buy near-identical renders; the dark rows are the
- * spot check rather than a full second pass. That is a deliberate cost
- * decision, recorded here rather than left implicit in a nested loop.
- */
-export const RESPONSIVE_MATRIX: readonly Combination[] = [
-  ...MATRIX_VIEWPORTS.flatMap((viewport): Combination[] => [
-    { viewport, theme: 'light', media: 'reduced-motion' },
-    { viewport, theme: 'dark', media: 'reduced-motion' },
-  ]),
-  ...PLAN_VIEWPORTS.flatMap((viewport): Combination[] => [
-    { viewport, theme: 'light', media: 'contrast-more' },
-    { viewport, theme: 'light', media: 'forced-colors' },
-  ]),
-  ...[device(1440, 900), device(390, 844)].flatMap((viewport): Combination[] => [
-    { viewport, theme: 'dark', media: 'contrast-more' },
-    { viewport, theme: 'dark', media: 'forced-colors' },
-  ]),
-];
-
-export function combinationTag(c: Combination): string {
-  return `${c.theme}/${c.viewport.id}/${c.media}`;
-}
-
 /* ==========================================================================
  * Reflow: page-level horizontal scroll, and what is running past the edge.
  * ========================================================================== */
 
-export interface OverflowOffender {
+interface OverflowOffender {
   /**
    * `page-overflow` widens the document itself. `clipped` is content that runs
    * past the viewport inside an ancestor that hides its horizontal overflow.
@@ -162,7 +30,7 @@ export interface OverflowOffender {
 
 /** A region that scrolls horizontally on its own, and whether it announces a
  * name. The plan permits "labeled code/table/graph regions" to do this. */
-export interface InternalScroller {
+interface InternalScroller {
   readonly selector: string;
   /** Lower-case tag name; `aside` is a side rail. */
   readonly tag: string;
@@ -182,7 +50,7 @@ export interface InternalScroller {
  * the overflow heuristics it needs no judgement. A scroller holding text with
  * a zero-height viewport is never intentional.
  */
-export interface CollapsedScroller {
+interface CollapsedScroller {
   readonly selector: string;
   readonly scrollHeight: number;
   readonly clientHeight: number;
@@ -380,69 +248,10 @@ export function sidewaysRailFailures(report: ReflowReport, tag: string): string[
 }
 
 /* ==========================================================================
- * Forced colors: who opts out.
- * ========================================================================== */
-
-export interface ForcedColorsOptOut {
-  readonly selector: string;
-  readonly color: string;
-  readonly background: string;
-  readonly text: string;
-}
-
-/**
- * Elements that decline the forced palette.
- *
- * This exists because axe's `color-contrast` rule cannot be trusted here, and
- * saying so without replacing it would be exactly the kind of quietly narrowed
- * check this harness was rebuilt to prevent. Measured against axe-core 4.12.1
- * under Playwright's `forcedColors: 'active'`:
- *
- *   - Chromium forces the palette correctly. Live `getComputedStyle` on the
- *     reported nodes returns `rgb(0, 0, 0)` text and `rgb(255, 255, 255)`
- *     backgrounds, and the captures are legible.
- *   - Axe nonetheless reports the AUTHORED foreground (`#ecedee`, the dark
- *     theme's text token) against the FORCED white background, so it scores
- *     143 serious contrast failures in dark and none in light. A verdict that
- *     tracks which theme is selected rather than anything a user sees.
- *   - axe-core 4.12.1 contains no `forced-colors` or high-contrast handling of
- *     any kind, so this is not a detection it is opting out of; it simply does
- *     not know the mode exists.
- *
- * So `color-contrast` is disabled in that one mode, and the real risk it was
- * standing in for is measured directly instead: forced colors can only fail a
- * reader where an element opts out with `forced-color-adjust: none`. Opting out
- * is legitimate where colour IS the information, a swatch, a chart series, so
- * this reports rather than gates, and the report is what makes an illegitimate
- * opt-out visible.
- */
-export const FORCED_COLORS_PROBE = `(function () {${PROBE_PRELUDE}
-  var out = [];
-  var seen = {};
-  var all = document.body ? document.body.querySelectorAll('*') : [];
-  for (var i = 0; i < all.length; i += 1) {
-    var el = all[i];
-    var style = getComputedStyle(el);
-    if (style.forcedColorAdjust !== 'none') continue;
-    if (style.display === 'none' || style.visibility === 'hidden') continue;
-    var selector = describe(el);
-    if (seen[selector]) continue;
-    seen[selector] = 1;
-    out.push({
-      selector: selector,
-      color: style.color,
-      background: style.backgroundColor,
-      text: ownText(el).slice(0, 60),
-    });
-  }
-  return out.slice(0, 20);
-})()`;
-
-/* ==========================================================================
  * Touch targets.
  * ========================================================================== */
 
-export interface UndersizedTarget {
+interface UndersizedTarget {
   readonly selector: string;
   readonly name: string;
   readonly width: number;
@@ -549,152 +358,4 @@ export function touchTargetFailures(report: TouchTargetReport, tag: string): str
     `${tag}: ${report.undersized.length}/${report.examined} operable targets are smaller than ` +
       `${MIN_TOUCH_TARGET_PX}x${MIN_TOUCH_TARGET_PX} CSS pixels: ${listed.join('; ')}`,
   ];
-}
-
-/* ==========================================================================
- * The workspace header's one line: does anything on it render outside the box.
- * ========================================================================== */
-
-export interface HeaderOverflowChild {
-  readonly header: string;
-  readonly selector: string;
-  readonly text: string;
-  /** CSS pixels past each edge of the header's padding box. 0 means inside. */
-  readonly pastRight: number;
-  readonly pastLeft: number;
-  readonly pastTop: number;
-  readonly pastBottom: number;
-  readonly width: number;
-  readonly height: number;
-  readonly headerWidth: number;
-  readonly contentWidth: number;
-  /** Distance from the child's right edge to the viewport's. Negative means the
-   * child is painted off-screen entirely. */
-  readonly viewportSlack: number;
-}
-
-export interface HeaderBoxReport {
-  /** Workspace headers on the page. Zero is legitimate, not every route
-   * renders one, which is why this is reported rather than asserted. */
-  readonly headers: number;
-  readonly examined: number;
-  readonly offenders: readonly HeaderOverflowChild[];
-}
-
-/**
- * Every rendered child of a workspace header, measured against that header's
- * padding box.
- *
- * This exists because `document.scrollWidth` cannot see the defect it is named
- * for. The state chip on `/work` rendered 19 CSS pixels outside its header at
- * 320px and at 400% zoom, bezel sheared, label flush against the screen edge,
- * through 78 clean scans, because the shell clips instead of scrolling, so the
- * document never widened and the reflow gate never fired. The two heuristics
- * either side of it missed it for reasons worth recording, since both are still
- * in place:
- *
- *   - `REFLOW_PROBE` skips anything whose `rect.right <= clientWidth + 1`, and
- *     the chip's LABEL ended at exactly 320 of 320. One pixel of luck.
- *   - It also skips elements carrying no text of their own, and the chip's text
- *     lives in child spans, so the chip's own box was never a candidate.
- *
- * Measuring against the container instead of the viewport closes both gaps: a
- * child that overruns its header is a defect at any width, whether or not the
- * viewport happens to be wider, and it needs no judgement about what the
- * element carries.
- *
- * Out-of-flow children are excluded. An absolutely positioned overlay does not
- * spend the line's width budget and is routinely meant to escape it; only
- * elements laid out IN the header are held to the header's box.
- */
-export const HEADER_BOX_PROBE = `(function () {${PROBE_PRELUDE}
-  var headers = document.querySelectorAll('[data-workspace-header]');
-  var examined = 0;
-  var offenders = [];
-  var seen = {};
-  var round = function (n) { return Math.round(n * 10) / 10; };
-  for (var h = 0; h < headers.length; h += 1) {
-    var header = headers[h];
-    var hs = getComputedStyle(header);
-    if (hs.display === 'none' || hs.visibility === 'hidden') continue;
-    var hb = header.getBoundingClientRect();
-    var innerLeft = hb.left + (parseFloat(hs.paddingLeft) || 0);
-    var innerRight = hb.right - (parseFloat(hs.paddingRight) || 0);
-    for (var i = 0; i < header.children.length; i += 1) {
-      var el = header.children[i];
-      var style = getComputedStyle(el);
-      if (style.display === 'none' || style.visibility === 'hidden') continue;
-      if (style.position === 'absolute' || style.position === 'fixed') continue;
-      var r = el.getBoundingClientRect();
-      if (r.width < 1 && r.height < 1) continue;
-      examined += 1;
-      var pastRight = r.right - innerRight;
-      var pastLeft = innerLeft - r.left;
-      var pastTop = hb.top - r.top;
-      var pastBottom = r.bottom - hb.bottom;
-      if (pastRight <= 0.5 && pastLeft <= 0.5 && pastTop <= 0.5 && pastBottom <= 0.5) continue;
-      var key = describe(el);
-      if (seen[key]) continue;
-      seen[key] = 1;
-      offenders.push({
-        header: describe(header),
-        selector: key,
-        text: (el.textContent || '').trim().replace(/\\s+/g, ' ').slice(0, 60),
-        pastRight: round(Math.max(0, pastRight)),
-        pastLeft: round(Math.max(0, pastLeft)),
-        pastTop: round(Math.max(0, pastTop)),
-        pastBottom: round(Math.max(0, pastBottom)),
-        width: round(r.width),
-        height: round(r.height),
-        headerWidth: Math.round(hb.width),
-        contentWidth: Math.round(innerRight - innerLeft),
-        viewportSlack: round(window.innerWidth - r.right),
-      });
-    }
-  }
-  return { headers: headers.length, examined: examined, offenders: offenders.slice(0, 12) };
-})()`;
-
-/**
- * Gated at every width, unlike reflow, and for every child rather than only
- * state chips.
- *
- * Reflow is gated only at 320 and 400% zoom because the plan's sentence is
- * about those two sizes. This is a different claim with no width in it: content
- * placed inside a container must render inside that container. A wide layout
- * that pushes its own header content out of the box is the same defect with a
- * bigger budget, so narrowing this to the reflow-gated viewports would only
- * hide the easier half.
- *
- * The chip-only exemption is gone with the bug that motivated it. It existed
- * because the 564-scan sweep found one pre-existing offender, a 494.8px
- * snapshot/revision strip in the `/settings` header rendering 356.9px outside
- * it, 276px of that off-screen, on a surface that change did not own, and
- * gating it would have turned a hand-off into someone else's red build. That
- * strip now shrinks and wraps, the same sweep records no offender on any
- * surface, so the check can finally hold every header child to the invariant
- * it always claimed to measure. Anything that overruns its header from here is
- * a new defect, and it fails.
- */
-export function headerBoxFailures(report: HeaderBoxReport, tag: string): string[] {
-  return report.offenders
-    .map((o) => {
-      const past = [
-        o.pastRight > 0 ? `${o.pastRight}px past its right edge` : '',
-        o.pastLeft > 0 ? `${o.pastLeft}px past its left edge` : '',
-        o.pastTop > 0 ? `${o.pastTop}px above it` : '',
-        o.pastBottom > 0 ? `${o.pastBottom}px below it` : '',
-      ].filter((part) => part !== '');
-      return (
-        `${tag}: ${o.selector} renders outside ${o.header}. ${past.join(', ')}. ` +
-        `The child is ${o.width}x${o.height} CSS px and the header offers ` +
-        `${o.contentWidth}px of content box within ${o.headerWidth}px` +
-        (o.viewportSlack < 0 ? `; ${round1(-o.viewportSlack)}px of it is off-screen` : '') +
-        (o.text === '' ? '' : `. Carrying: "${o.text}"`)
-      );
-    });
-}
-
-function round1(n: number): number {
-  return Math.round(n * 10) / 10;
 }

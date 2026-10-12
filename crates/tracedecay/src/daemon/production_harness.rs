@@ -118,6 +118,12 @@ type ProductionHarnessOpenFuture =
 /// available or installed worker width by 24 therefore admits only the
 /// measured four-wide load before worker-plan installation and preserves more
 /// than 2x headroom under the unchanged 20 s per-composition wait.
+///
+/// Narrower hosts still admit four. One admitted composition keeps only about
+/// one core busy: pinned to 8 CPUs, the `mcp_suite` `graph_analysis_test` used
+/// 1.1 to 1.3 cores on average and took 80 to 106 s when admitted one at a
+/// time, and 29 to 34 s when admitted four at a time, with the same
+/// instruction count.
 const PRODUCTION_COMPOSITION_CPU_DIVISOR: usize = 24;
 
 struct ProductionCompositionAdmissionGateV1 {
@@ -238,7 +244,7 @@ fn production_composition_admission_capacity() -> usize {
         || std::thread::available_parallelism().map_or(1, usize::from),
         |status| usize::from(status.effective_workers),
     );
-    (worker_width / PRODUCTION_COMPOSITION_CPU_DIVISOR).max(1)
+    (worker_width / PRODUCTION_COMPOSITION_CPU_DIVISOR).max(4)
 }
 
 fn production_composition_admission_gate() -> &'static ProductionCompositionAdmissionGateV1 {

@@ -211,7 +211,7 @@ function readSelection(value: unknown): CodeIndexWorkerSelectionV1 {
   return isWorkerSelection(value) ? value : { mode: 'automatic' };
 }
 
-export function FieldError({ id, error }: { id?: string; error?: string | undefined }) {
+function FieldError({ id, error }: { id?: string; error?: string | undefined }) {
   if (!error) return null;
   return (
     <p id={id} role="alert" className="text-body text-state-error">

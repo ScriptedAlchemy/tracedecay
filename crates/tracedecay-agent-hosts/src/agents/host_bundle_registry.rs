@@ -1222,8 +1222,8 @@ mod tests {
             vec![HostComponentV1::ContextMcp]
         );
         assert_eq!(
-            tracedecay_domain::integration::host_descriptor_v1(HostKindV1::Kiro).components(),
-            &[tracedecay_domain::integration::HostComponentV1::ContextMcp]
+            supported_components(HostKindV1::Kiro),
+            vec![HostComponentV1::ContextMcp]
         );
         let bundle = verified_embedded_host_bundle_with_tracedecay_bin(
             HostKindV1::Kiro,
@@ -1278,8 +1278,8 @@ mod tests {
             vec![HostComponentV1::ContextMcp]
         );
         assert_eq!(
-            tracedecay_domain::integration::host_descriptor_v1(HostKindV1::Copilot).components(),
-            &[tracedecay_domain::integration::HostComponentV1::ContextMcp]
+            supported_components(HostKindV1::Copilot),
+            vec![HostComponentV1::ContextMcp]
         );
 
         let installed = "/opt/tracedecay-distinct/bin/tracedecay";
@@ -1340,8 +1340,8 @@ mod tests {
             vec![HostComponentV1::ContextMcp]
         );
         assert_eq!(
-            tracedecay_domain::integration::host_descriptor_v1(HostKindV1::Gemini).components(),
-            &[tracedecay_domain::integration::HostComponentV1::ContextMcp]
+            supported_components(HostKindV1::Gemini),
+            vec![HostComponentV1::ContextMcp]
         );
 
         let installed = "/opt/tracedecay-distinct/bin/tracedecay";

@@ -23,16 +23,17 @@ use tracedecay_domain::{
 };
 use tracedecay_policy::work_loop::{
     WorkEvidenceFrontierV1, WorkPriorOutcomeV1, WorkProposalCancellationV1, WorkProposalDecisionV1,
-    WorkProposalEvaluator, WorkProposalEvaluatorV1, WorkProposalPolicyInputV1,
-    WorkProposalReasonV1, WorkProposalRuntimeCoverageV1, WorkRouteCandidateV1,
+    WorkProposalEvaluatorV1, WorkProposalPolicyInputV1, WorkProposalReasonV1,
+    WorkProposalRuntimeCoverageV1, WorkRouteCandidateV1,
 };
 
 use crate::work::work_authority;
+use crate::work_evidence::root_error;
 use crate::{
     CancellationState, RequestAdmission, RequestContext, VerifiedWorkEvidenceRootV1,
     VerifiedWorkGraphVersionV1, WorkAttemptProviderOutcomeV1, WorkAttemptReceiptReadPortV1,
-    WorkAttemptReceiptV1, WorkEvidenceRootReadErrorV1, WorkEvidenceRootReadPortV1,
-    WorkGraphReadModeV1, WorkGraphReadPortErrorV1, WorkGraphReadPortV1, WorkGraphReadRequestV1,
+    WorkAttemptReceiptV1, WorkEvidenceRootReadPortV1, WorkGraphReadModeV1,
+    WorkGraphReadPortErrorV1, WorkGraphReadPortV1, WorkGraphReadRequestV1,
     WorkProductApplicationErrorV1, WorkProductBindingV1, WorkProductOwnerAuthorizationErrorV1,
     WorkProductOwnerAuthorizationPortV1, WorkProductPortContextV1, WorkProductSelectionScopeV1,
     WorkRoutingSnapshotErrorV1, WorkRoutingSnapshotPortV1,
@@ -1042,20 +1043,6 @@ fn routing_error(error: WorkRoutingSnapshotErrorV1) -> WorkProductApplicationErr
         WorkRoutingSnapshotErrorV1::Unavailable => {
             WorkProductApplicationErrorV1::ProposalAuthorityUnavailable
         }
-    }
-}
-
-fn root_error(error: WorkEvidenceRootReadErrorV1) -> WorkProductApplicationErrorV1 {
-    match error {
-        WorkEvidenceRootReadErrorV1::NotFoundOrNotAuthorized => {
-            WorkProductApplicationErrorV1::NotFoundOrNotAuthorized
-        }
-        WorkEvidenceRootReadErrorV1::Stale => WorkProductApplicationErrorV1::VersionConflict,
-        WorkEvidenceRootReadErrorV1::Unavailable => {
-            WorkProductApplicationErrorV1::EvidenceAuthorityUnavailable
-        }
-        WorkEvidenceRootReadErrorV1::Cancelled => WorkProductApplicationErrorV1::Cancelled,
-        WorkEvidenceRootReadErrorV1::TimedOut => WorkProductApplicationErrorV1::TimedOut,
     }
 }
 

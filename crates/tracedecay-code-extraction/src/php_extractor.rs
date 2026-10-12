@@ -142,8 +142,8 @@ impl PhpExtractor {
             "function_definition" => Self::visit_function(state, node),
             "method_declaration" => Self::visit_method(state, node),
             "class_declaration" => Self::visit_class(state, node),
-            "interface_declaration" => Self::visit_interface(state, node),
-            "trait_declaration" => Self::visit_trait(state, node),
+            "interface_declaration" => Self::visit_interface_or_trait(state, node, "interface"),
+            "trait_declaration" => Self::visit_interface_or_trait(state, node, "trait"),
             "enum_declaration" => Self::visit_enum(state, node),
             "namespace_definition" => Self::visit_namespace(state, node),
             "use_declaration" => Self::visit_use_declaration(state, node),
@@ -362,8 +362,9 @@ impl PhpExtractor {
         state.node_stack.pop();
     }
 
-    /// Extract an interface declaration.
-    fn visit_interface(state: &mut ExtractionState, node: TsNode<'_>) {
+    /// Extract an interface or trait declaration (both become Trait nodes);
+    /// `keyword` heads the signature.
+    fn visit_interface_or_trait(state: &mut ExtractionState, node: TsNode<'_>, keyword: &str) {
         let name = find_direct_child_by_kind(node, "name").map_or_else(
             || "<anonymous>".to_string(),
             |n| state.node_text(n).to_string(),
@@ -395,75 +396,7 @@ impl PhpExtractor {
             end_line,
             start_column,
             end_column,
-            signature: Some(format!("interface {name}")),
-            docstring,
-            visibility,
-            is_async: false,
-            branches: 0,
-            loops: 0,
-            returns: 0,
-            max_nesting: 0,
-            unsafe_blocks: 0,
-            unchecked_calls: 0,
-            assertions: 0,
-            complexity_analysis: ComplexityAnalysisV1::Complete,
-            updated_at: state.timestamp,
-            parent_id: None,
-        };
-        state.nodes.push(graph_node);
-
-        if let Some(parent_id) = state.parent_node_id() {
-            state.edges.push(Edge {
-                source: parent_id.to_string(),
-                target: id.clone(),
-                kind: EdgeKind::Contains,
-                line: Some(start_line),
-            });
-        }
-
-        state.node_stack.push((name.clone(), id));
-        state.class_depth += 1;
-        if let Some(body) = find_direct_child_by_kind(node, "declaration_list") {
-            Self::visit_class_body(state, body);
-        }
-        state.class_depth -= 1;
-        state.node_stack.pop();
-    }
-
-    /// Extract a trait declaration.
-    fn visit_trait(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "name").map_or_else(
-            || "<anonymous>".to_string(),
-            |n| state.node_text(n).to_string(),
-        );
-
-        let visibility = Visibility::Pub;
-        let docstring = Self::extract_docstring(state, node);
-        let start_line = node.start_position().row as u32;
-        let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
-        let end_column = node.end_position().column as u32;
-        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = local_node_id(
-            &state.file_path,
-            state.source,
-            &NodeKind::Trait,
-            &name,
-            node,
-        );
-
-        let graph_node = Node {
-            id: id.clone(),
-            kind: NodeKind::Trait,
-            name: name.to_string(),
-            qualified_name,
-            file_path: state.file_path.clone(),
-            start_line,
-            attrs_start_line: start_line,
-            end_line,
-            start_column,
-            end_column,
-            signature: Some(format!("trait {name}")),
+            signature: Some(format!("{keyword} {name}")),
             docstring,
             visibility,
             is_async: false,
@@ -567,7 +500,7 @@ impl PhpExtractor {
             loop {
                 let child = cursor.node();
                 match child.kind() {
-                    "enum_case" => Self::visit_enum_case(state, child),
+                    "enum_case" => Self::visit_named_leaf(state, child, NodeKind::EnumVariant),
                     "method_declaration" => Self::visit_method(state, child),
                     "const_declaration" => Self::visit_const_declaration(state, child),
                     _ => {}
@@ -579,8 +512,9 @@ impl PhpExtractor {
         }
     }
 
-    /// Extract an enum case as an `EnumVariant`.
-    fn visit_enum_case(state: &mut ExtractionState, node: TsNode<'_>) {
+    /// Extract an enum case (`EnumVariant`) or a const element (`Const`): a
+    /// named leaf whose signature is its trimmed source text.
+    fn visit_named_leaf(state: &mut ExtractionState, node: TsNode<'_>, kind: NodeKind) {
         let name = find_direct_child_by_kind(node, "name").map_or_else(
             || "<anonymous>".to_string(),
             |n| state.node_text(n).to_string(),
@@ -591,17 +525,11 @@ impl PhpExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = local_node_id(
-            &state.file_path,
-            state.source,
-            &NodeKind::EnumVariant,
-            &name,
-            node,
-        );
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
-            kind: NodeKind::EnumVariant,
+            kind,
             name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
@@ -838,70 +766,12 @@ impl PhpExtractor {
             loop {
                 let child = cursor.node();
                 if child.kind() == "const_element" {
-                    Self::visit_const_element(state, child);
+                    Self::visit_named_leaf(state, child, NodeKind::Const);
                 }
                 if !cursor.goto_next_sibling() {
                     break;
                 }
             }
-        }
-    }
-
-    /// Extract a single const element.
-    fn visit_const_element(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "name").map_or_else(
-            || "<anonymous>".to_string(),
-            |n| state.node_text(n).to_string(),
-        );
-
-        let start_line = node.start_position().row as u32;
-        let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
-        let end_column = node.end_position().column as u32;
-        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = local_node_id(
-            &state.file_path,
-            state.source,
-            &NodeKind::Const,
-            &name,
-            node,
-        );
-
-        let graph_node = Node {
-            id: id.clone(),
-            kind: NodeKind::Const,
-            name: name.to_string(),
-            qualified_name,
-            file_path: state.file_path.clone(),
-            start_line,
-            attrs_start_line: start_line,
-            end_line,
-            start_column,
-            end_column,
-            signature: Some(state.node_text(node).trim().to_string()),
-            docstring: None,
-            visibility: Visibility::Pub,
-            is_async: false,
-            branches: 0,
-            loops: 0,
-            returns: 0,
-            max_nesting: 0,
-            unsafe_blocks: 0,
-            unchecked_calls: 0,
-            assertions: 0,
-            complexity_analysis: ComplexityAnalysisV1::Complete,
-            updated_at: state.timestamp,
-            parent_id: None,
-        };
-        state.nodes.push(graph_node);
-
-        if let Some(parent_id) = state.parent_node_id() {
-            state.edges.push(Edge {
-                source: parent_id.to_string(),
-                target: id,
-                kind: EdgeKind::Contains,
-                line: Some(start_line),
-            });
         }
     }
 

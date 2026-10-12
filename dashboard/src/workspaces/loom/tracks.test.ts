@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { axisTicks, bandScale, clampWindow, fittedWindow, isFitted, tickStepFor, zoomWindow } from './tracks.ts';
+import { axisTicks, bandScale, clampWindow, fittedWindow, isFitted, tickStepFor } from './tracks.ts';
 
 const HOUR = 3600;
 const DAY = 86_400;
@@ -59,13 +59,9 @@ describe('viewport', () => {
     expect(isFitted(fitted, extent)).toBe(true);
   });
 
-  it('zooms around the focus point and never past the floor', () => {
-    const view = fittedWindow(extent);
-    const zoomed = zoomWindow(view, extent, 0.5, 5 * DAY);
-    expect(zoomed.end - zoomed.start).toBeCloseTo((view.end - view.start) / 2, 3);
-    let deep = view;
-    for (let i = 0; i < 40; i += 1) deep = zoomWindow(deep, extent, 0.5, 5 * DAY);
-    expect(deep.end - deep.start).toBeGreaterThanOrEqual(60);
+  it('never narrows past the one-minute floor', () => {
+    const view = clampWindow({ start: 5 * DAY, end: 5 * DAY + 1 }, extent);
+    expect(view.end - view.start).toBe(60);
   });
 
   it('refuses to strand the viewport in empty time', () => {

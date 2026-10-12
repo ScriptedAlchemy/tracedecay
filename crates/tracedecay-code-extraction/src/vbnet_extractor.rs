@@ -187,10 +187,28 @@ impl VbNetExtractor {
                 let child = cursor.node();
                 match child.kind() {
                     "class_block" => Self::visit_class(state, child, docstring.clone()),
-                    "structure_block" => Self::visit_struct(state, child, docstring.clone()),
-                    "interface_block" => Self::visit_interface(state, child, docstring.clone()),
+                    "structure_block" => Self::visit_member_block(
+                        state,
+                        child,
+                        docstring.clone(),
+                        NodeKind::Struct,
+                        "Structure",
+                    ),
+                    "interface_block" => Self::visit_member_block(
+                        state,
+                        child,
+                        docstring.clone(),
+                        NodeKind::Interface,
+                        "Interface",
+                    ),
                     "enum_block" => Self::visit_enum(state, child, docstring.clone()),
-                    "module_block" => Self::visit_module(state, child, docstring.clone()),
+                    "module_block" => Self::visit_member_block(
+                        state,
+                        child,
+                        docstring.clone(),
+                        NodeKind::Module,
+                        "Module",
+                    ),
                     _ => {}
                 }
                 if !cursor.goto_next_sibling() {
@@ -424,8 +442,15 @@ impl VbNetExtractor {
         state.node_stack.pop();
     }
 
-    /// Extract a `structure_block` declaration.
-    fn visit_struct(state: &mut ExtractionState, node: TsNode<'_>, docstring: Option<String>) {
+    /// Extract a `structure_block`, `interface_block`, or `module_block`
+    /// declaration as a node of `kind`; `keyword` heads the signature.
+    fn visit_member_block(
+        state: &mut ExtractionState,
+        node: TsNode<'_>,
+        docstring: Option<String>,
+        kind: NodeKind,
+        keyword: &str,
+    ) {
         let name =
             Self::extract_block_name(state, node).unwrap_or_else(|| "<anonymous>".to_string());
         let start_line = node.start_position().row as u32;
@@ -433,80 +458,12 @@ impl VbNetExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = local_node_id(
-            &state.file_path,
-            state.source,
-            &NodeKind::Struct,
-            &name,
-            node,
-        );
-        let signature = Some(Self::extract_block_signature(state, node, "Structure"));
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
+        let signature = Some(Self::extract_block_signature(state, node, keyword));
 
         let graph_node = Node {
             id: id.clone(),
-            kind: NodeKind::Struct,
-            name: name.clone(),
-            qualified_name,
-            file_path: state.file_path.clone(),
-            start_line,
-            attrs_start_line: start_line,
-            end_line,
-            start_column,
-            end_column,
-            signature,
-            docstring,
-            visibility: Visibility::Pub,
-            is_async: false,
-            branches: 0,
-            loops: 0,
-            returns: 0,
-            max_nesting: 0,
-            unsafe_blocks: 0,
-            unchecked_calls: 0,
-            assertions: 0,
-            complexity_analysis: ComplexityAnalysisV1::Complete,
-            updated_at: state.timestamp,
-            parent_id: None,
-        };
-        state.nodes.push(graph_node);
-
-        if let Some(parent_id) = state.parent_node_id() {
-            state.edges.push(Edge {
-                source: parent_id.to_string(),
-                target: id.clone(),
-                kind: EdgeKind::Contains,
-                line: Some(start_line),
-            });
-        }
-
-        state.node_stack.push((name, id));
-        state.class_depth += 1;
-        Self::visit_block_children(state, node);
-        state.class_depth -= 1;
-        state.node_stack.pop();
-    }
-
-    /// Extract an `interface_block` declaration.
-    fn visit_interface(state: &mut ExtractionState, node: TsNode<'_>, docstring: Option<String>) {
-        let name =
-            Self::extract_block_name(state, node).unwrap_or_else(|| "<anonymous>".to_string());
-        let start_line = node.start_position().row as u32;
-        let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
-        let end_column = node.end_position().column as u32;
-        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = local_node_id(
-            &state.file_path,
-            state.source,
-            &NodeKind::Interface,
-            &name,
-            node,
-        );
-        let signature = Some(Self::extract_block_signature(state, node, "Interface"));
-
-        let graph_node = Node {
-            id: id.clone(),
-            kind: NodeKind::Interface,
+            kind,
             name: name.clone(),
             qualified_name,
             file_path: state.file_path.clone(),
@@ -598,68 +555,6 @@ impl VbNetExtractor {
 
         state.node_stack.push((name, id));
         Self::extract_enum_members(state, node);
-        state.node_stack.pop();
-    }
-
-    /// Extract a `module_block` declaration.
-    fn visit_module(state: &mut ExtractionState, node: TsNode<'_>, docstring: Option<String>) {
-        let name =
-            Self::extract_block_name(state, node).unwrap_or_else(|| "<anonymous>".to_string());
-        let start_line = node.start_position().row as u32;
-        let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
-        let end_column = node.end_position().column as u32;
-        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = local_node_id(
-            &state.file_path,
-            state.source,
-            &NodeKind::Module,
-            &name,
-            node,
-        );
-        let signature = Some(Self::extract_block_signature(state, node, "Module"));
-
-        let graph_node = Node {
-            id: id.clone(),
-            kind: NodeKind::Module,
-            name: name.clone(),
-            qualified_name,
-            file_path: state.file_path.clone(),
-            start_line,
-            attrs_start_line: start_line,
-            end_line,
-            start_column,
-            end_column,
-            signature,
-            docstring,
-            visibility: Visibility::Pub,
-            is_async: false,
-            branches: 0,
-            loops: 0,
-            returns: 0,
-            max_nesting: 0,
-            unsafe_blocks: 0,
-            unchecked_calls: 0,
-            assertions: 0,
-            complexity_analysis: ComplexityAnalysisV1::Complete,
-            updated_at: state.timestamp,
-            parent_id: None,
-        };
-        state.nodes.push(graph_node);
-
-        if let Some(parent_id) = state.parent_node_id() {
-            state.edges.push(Edge {
-                source: parent_id.to_string(),
-                target: id.clone(),
-                kind: EdgeKind::Contains,
-                line: Some(start_line),
-            });
-        }
-
-        state.node_stack.push((name, id));
-        state.class_depth += 1;
-        Self::visit_block_children(state, node);
-        state.class_depth -= 1;
         state.node_stack.pop();
     }
 

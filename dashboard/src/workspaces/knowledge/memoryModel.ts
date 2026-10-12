@@ -30,7 +30,7 @@ import type {
 
 /* ---- trust history ------------------------------------------------------- */
 
-export interface TrustHistoryReading {
+interface TrustHistoryReading {
   /** Events this bounded audit response returned. */
   readonly count: number;
   readonly helpful: number;
@@ -96,7 +96,7 @@ export function trustDetailState(
 
 /* ---- projection ---------------------------------------------------------- */
 
-export interface ProjectionReading {
+interface ProjectionReading {
   /** `true` only when the daemon decomposed query-time-derived phase encodings. */
   readonly projected: boolean;
   /** What the panel says the axes mean, or that they mean nothing. */
@@ -152,7 +152,7 @@ export function projectionReading(payload: MemoryProjectionPayloadV1): Projectio
 
 /* ---- similarity ---------------------------------------------------------- */
 
-export interface SimilarityReading {
+interface SimilarityReading {
   /** Facts successfully encoded on read, never the store's fact total. */
   readonly encoded: number;
   /** Pairs scored above the computation's own floor, before this request's. */
@@ -193,7 +193,7 @@ export function similarityReading(payload: MemorySimilarityPayloadV1): Similarit
 
 /* ---- oplog --------------------------------------------------------------- */
 
-export interface OplogReading {
+interface OplogReading {
   readonly events: MemoryOplogPayloadV1['events'];
   /** Operations by name, ranked, for the summary rail. */
   readonly operations: readonly { op: string; count: number }[];

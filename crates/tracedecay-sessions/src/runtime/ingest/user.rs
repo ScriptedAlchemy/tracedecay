@@ -418,26 +418,6 @@ pub(super) fn provider_selected(
     scope.is_none() || scope == Some(candidate)
 }
 
-pub async fn ingest_user_global_sources_for_provider_with_authorities<A: SessionIngestAuthority>(
-    brain_id: &BrainId,
-    profile_id: &UserProfileId,
-    registered: &A,
-    registry_db: &A,
-    profile_root: &Path,
-    provider: Option<SessionProvider>,
-) -> TranscriptIngestOutcome {
-    ingest_user_global_sources_for_provider_with_authorities_and_cancellation(
-        brain_id,
-        profile_id,
-        registered,
-        registry_db,
-        profile_root,
-        provider,
-        &ObservationCancellation::default(),
-    )
-    .await
-}
-
 pub async fn ingest_user_global_sources_for_provider_with_authorities_and_cancellation<
     A: SessionIngestAuthority,
 >(
@@ -508,23 +488,6 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots_and_cance
     )
     .await
     .into_transcript_outcome()
-}
-
-#[cfg(any(test, feature = "test-helpers"))]
-pub async fn ingest_user_global_sources_for_provider_with_roots_without_registered_authority<
-    A: SessionIngestAuthority,
->(
-    _db: &A,
-    _profile_root: &Path,
-    provider: Option<SessionProvider>,
-    _roots: Vec<PathBuf>,
-) -> TranscriptIngestOutcome {
-    TranscriptIngestOutcome::new(
-        TranscriptIngestStats::default(),
-        vec![TranscriptCatchUpFailure::registered_authority_unavailable(
-            provider.map_or("all", SessionProvider::id),
-        )],
-    )
 }
 
 /// Bounded fair multi-provider user catch-up with typed coverage outcomes.

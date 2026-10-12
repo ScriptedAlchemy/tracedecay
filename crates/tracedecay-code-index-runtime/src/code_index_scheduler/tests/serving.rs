@@ -70,17 +70,14 @@ use super::{
     wait_for_queryable_text_generation, wait_for_queryable_text_generation_change,
     wait_for_settled_owner, with_untouched_fillers, write,
 };
-use crate::{
-    code_index::production::{
-        CodeIndexExecutionControlV1, UninterruptibleCodeIndexControlV1,
-        VerifiedSealedLexicalPageReadV1,
-    },
-    code_index::provider::GenerationTestAttributionJoinReadPort,
-    code_index_scheduler::{
-        CodeIndexBuildProgressStateV1, CodeIndexCommittedProgressSampleV1,
-        CodeIndexReconcileAdmissionV1, CodeIndexSchedulerRegistryV1, SharedCodeIndexBytePoolV1,
-    },
+use crate::code_index_scheduler::{
+    CodeIndexBuildProgressStateV1, CodeIndexCommittedProgressSampleV1,
+    CodeIndexReconcileAdmissionV1, CodeIndexSchedulerRegistryV1, SharedCodeIndexBytePoolV1,
 };
+use tracedecay_code_index::production::{
+    CodeIndexExecutionControlV1, UninterruptibleCodeIndexControlV1, VerifiedSealedLexicalPageReadV1,
+};
+use tracedecay_code_index::provider::GenerationTestAttributionJoinReadPort;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 /// A content key for publications whose adoption the test does not exercise.

@@ -52,8 +52,7 @@ pub use mcp::{
 };
 pub use operation::ApplicationSurfaceOperation;
 pub use owner_side_effect::{
-    INTERACTIVE_CEILING_MILLIS, IdenticalCallPolicyV1, LONG_RUNNING_CEILING_MILLIS,
-    OwnerSideEffectEntryV1,
+    INTERACTIVE_CEILING_MILLIS, LONG_RUNNING_CEILING_MILLIS, OwnerSideEffectEntryV1,
 };
 pub use owner_stores::{OwnerStoreDeclarationV1, OwnerStoresV1};
 pub use profile::{ProfileBudget, ProfileDefinition, ProfileDefinitionInputV1, ProfileKind};

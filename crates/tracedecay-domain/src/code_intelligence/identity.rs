@@ -45,12 +45,10 @@ pub fn repository_path_matches_scope(path: &str, scope_prefix: Option<&str>) -> 
 /// directory separator, not a character that must be followed by another `/`.
 pub fn path_matches_scope(path: &str, scope_prefix: Option<&str>) -> bool {
     scope_prefix.is_none_or(|prefix| {
-        let with_slash = if prefix.ends_with('/') {
-            prefix.to_string()
-        } else {
-            format!("{prefix}/")
-        };
-        path.starts_with(&with_slash) || path == prefix
+        path == prefix
+            || path
+                .strip_prefix(prefix)
+                .is_some_and(|rest| prefix.ends_with('/') || rest.starts_with('/'))
     })
 }
 

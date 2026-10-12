@@ -332,20 +332,25 @@ async fn open_scope_set_cas_projects<'a>(
     Ok(servers)
 }
 
-#[cfg(any(not(unix), test))]
-#[allow(
-    clippy::too_many_arguments,
-    reason = "Portable transport composes separately owned lifecycle, route admission and HTTP owners; the extra argument is a test probe."
+/// Run one invocation through a transport's project-open owner.
+///
+/// `open_project` opens the handshake's project, `resolve_project_route` resolves its
+/// canonical route, and `open_selected_root` opens one root a scope-set
+/// compare-and-swap names.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Daemon invocation dispatch is one payload match onto the owning executor."
 )]
-pub(super) async fn execute_portable_daemon_invocation(
-    lifecycle: DaemonLifecycle,
-    store_administration: StoreAdministration,
-    project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
+#[allow(clippy::too_many_arguments)]
+async fn execute_invocation_with_project_owner<'a>(
     handshake: &DaemonHandshake,
-    invocation: &DaemonInvocationState,
-    http_application_registry: http_application::DaemonHttpApplicationRegistry,
     request: DaemonInvocationRequest,
-    #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
+    invocation: &DaemonInvocationState,
+    store_administration: &StoreAdministration,
+    project_open_gates: &Arc<tokio::sync::Mutex<ProjectOpenGates>>,
+    open_project: impl Fn() -> ProjectOpenFuture<'a>,
+    resolve_project_route: impl Fn() -> Result<(PathBuf, ProjectRouteKey)>,
+    open_selected_root: impl FnMut(DaemonHandshake) -> ProjectOpenFuture<'a>,
 ) -> DaemonInvocationResponse {
     if let Some(response) = invalid_multi_root_invocation_response(&request) {
         return response;
@@ -365,9 +370,6 @@ pub(super) async fn execute_portable_daemon_invocation(
             );
         }
     };
-    let lsp_project_open_gates = Arc::clone(&project_open_gates);
-    #[cfg(test)]
-    let lsp_project_open_attempts = project_open_attempts.clone();
     let git_operation = invocation_is_git_operation(request.operation());
     let workflow_application = request.is_workflow_application();
     // A profile registry read marks the handshake's project active without
@@ -376,30 +378,12 @@ pub(super) async fn execute_portable_daemon_invocation(
         DaemonInvocationPayload::ProfileGraphTool { .. } => handshake.project_path.clone(),
         _ => None,
     };
-    let requirement = match &request.payload {
-        DaemonInvocationPayload::GraphTool {
-            surface_operation,
-            arguments,
-            ..
-        } => super::project_open_admission::graph_tool_requirement(*surface_operation, arguments),
-        _ => ProjectServerRequirement::Core,
-    };
     if request.requires_project() {
         let project_server = {
             use tracing::Instrument as _;
-            Box::pin(portable_project_server_for_request(
-                lifecycle.clone(),
-                store_administration.clone(),
-                project_open_gates,
-                invocation.clone(),
-                http_application_registry.clone(),
-                handshake,
-                requirement,
-                #[cfg(test)]
-                project_open_attempts.clone(),
-            ))
-            .instrument(tracing::trace_span!("daemon.invocation.project_open"))
-            .await
+            open_project()
+                .instrument(tracing::trace_span!("daemon.invocation.project_open"))
+                .await
         };
         if let Err(error) = project_server {
             record_project_open_refusal(request.operation().as_str(), &error);
@@ -410,9 +394,7 @@ pub(super) async fn execute_portable_daemon_invocation(
                 git_operation,
             );
         }
-        let project_route = store_administration
-            .owner_home()
-            .and_then(|owner_home| project_route_for_handshake(handshake, owner_home));
+        let project_route = resolve_project_route();
         let (mut resolved_project_path, route) = match project_route {
             Ok(route) => route,
             Err(error) => {
@@ -427,7 +409,7 @@ pub(super) async fn execute_portable_daemon_invocation(
             (request.lsp_open_control(), lsp_cancellation.as_ref())
         {
             let wait = await_lsp_project_open_upgrade(
-                &lsp_project_open_gates,
+                project_open_gates,
                 &route,
                 deadline,
                 request_cancellation,
@@ -445,22 +427,8 @@ pub(super) async fn execute_portable_daemon_invocation(
             // Core publication may have been visible before the dependent LSP
             // owner finished. Re-enter the canonical route lookup after the
             // wait instead of carrying the pre-upgrade root/owner snapshot.
-            let project_server = Box::pin(await_lsp_route_rejoin(
-                deadline,
-                request_cancellation,
-                portable_project_server_for_request(
-                    lifecycle.clone(),
-                    store_administration.clone(),
-                    Arc::clone(&lsp_project_open_gates),
-                    invocation.clone(),
-                    http_application_registry.clone(),
-                    handshake,
-                    requirement,
-                    #[cfg(test)]
-                    lsp_project_open_attempts,
-                ),
-            ))
-            .await;
+            let project_server =
+                await_lsp_route_rejoin(deadline, request_cancellation, open_project()).await;
             let project_server = match project_server {
                 Ok(project_server) => project_server,
                 Err(problem) => {
@@ -475,10 +443,7 @@ pub(super) async fn execute_portable_daemon_invocation(
                     git_operation,
                 );
             }
-            let Ok((canonical_project_path, _)) = store_administration
-                .owner_home()
-                .and_then(|owner_home| project_route_for_handshake(handshake, owner_home))
-            else {
+            let Ok((canonical_project_path, _)) = resolve_project_route() else {
                 return DaemonInvocationResponse::problem(
                     request_id,
                     DaemonInvocationProblem::NotFoundOrNotAuthorized,
@@ -514,30 +479,8 @@ pub(super) async fn execute_portable_daemon_invocation(
                 cancellation,
                 &request_id,
                 request_cancellation,
-                &lsp_project_open_gates,
-                |selected_handshake| {
-                    let lifecycle = lifecycle.clone();
-                    let store_administration = store_administration.clone();
-                    let project_open_gates = Arc::clone(&lsp_project_open_gates);
-                    let invocation = invocation.clone();
-                    let http_application_registry = http_application_registry.clone();
-                    #[cfg(test)]
-                    let project_open_attempts = project_open_attempts.clone();
-                    Box::pin(async move {
-                        portable_project_server_for_request(
-                            lifecycle,
-                            store_administration,
-                            project_open_gates,
-                            invocation,
-                            http_application_registry,
-                            &selected_handshake,
-                            ProjectServerRequirement::Core,
-                            #[cfg(test)]
-                            project_open_attempts,
-                        )
-                        .await
-                    })
-                },
+                project_open_gates,
+                open_selected_root,
             )
             .await
             {
@@ -547,14 +490,87 @@ pub(super) async fn execute_portable_daemon_invocation(
         } else {
             Vec::new()
         };
-    invocation
-        .invoke_for_project(
-            &store_administration,
-            project_path.as_deref(),
-            request,
-            request_cancellation,
-        )
-        .await
+    Box::pin(invocation.invoke_for_project(
+        store_administration,
+        project_path.as_deref(),
+        request,
+        request_cancellation,
+    ))
+    .await
+}
+
+#[cfg(any(not(unix), test))]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Portable transport composes separately owned lifecycle, route admission and HTTP owners; the extra argument is a test probe."
+)]
+pub(super) async fn execute_portable_daemon_invocation(
+    lifecycle: DaemonLifecycle,
+    store_administration: StoreAdministration,
+    project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
+    handshake: &DaemonHandshake,
+    invocation: &DaemonInvocationState,
+    http_application_registry: http_application::DaemonHttpApplicationRegistry,
+    request: DaemonInvocationRequest,
+    #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
+) -> DaemonInvocationResponse {
+    let requirement = match &request.payload {
+        DaemonInvocationPayload::GraphTool {
+            surface_operation,
+            arguments,
+            ..
+        } => super::project_open_admission::graph_tool_requirement(*surface_operation, arguments),
+        _ => ProjectServerRequirement::Core,
+    };
+    execute_invocation_with_project_owner(
+        handshake,
+        request,
+        invocation,
+        &store_administration,
+        &project_open_gates,
+        || {
+            Box::pin(portable_project_server_for_request(
+                lifecycle.clone(),
+                store_administration.clone(),
+                Arc::clone(&project_open_gates),
+                invocation.clone(),
+                http_application_registry.clone(),
+                handshake,
+                requirement,
+                #[cfg(test)]
+                project_open_attempts.clone(),
+            ))
+        },
+        || {
+            store_administration
+                .owner_home()
+                .and_then(|owner_home| project_route_for_handshake(handshake, owner_home))
+        },
+        |selected_handshake| {
+            let lifecycle = lifecycle.clone();
+            let store_administration = store_administration.clone();
+            let project_open_gates = Arc::clone(&project_open_gates);
+            let invocation = invocation.clone();
+            let http_application_registry = http_application_registry.clone();
+            #[cfg(test)]
+            let project_open_attempts = project_open_attempts.clone();
+            Box::pin(async move {
+                portable_project_server_for_request(
+                    lifecycle,
+                    store_administration,
+                    project_open_gates,
+                    invocation,
+                    http_application_registry,
+                    &selected_handshake,
+                    ProjectServerRequirement::Core,
+                    #[cfg(test)]
+                    project_open_attempts,
+                )
+                .await
+            })
+        },
+    )
+    .await
 }
 
 pub(super) async fn git_service_for_project_path(
@@ -720,173 +736,27 @@ pub(super) async fn resolve_multi_root_projects(
 }
 
 #[cfg(unix)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Daemon invocation dispatch is one payload match onto the owning executor."
-)]
 pub(super) async fn execute_daemon_invocation(
     engine: &DaemonEngine,
     handshake: &DaemonHandshake,
     request: DaemonInvocationRequest,
 ) -> DaemonInvocationResponse {
-    if let Some(response) = invalid_multi_root_invocation_response(&request) {
-        return response;
-    }
-    let InvocationCancellation {
-        request_id,
-        scope_set_cas_lease: _scope_set_cas_lease,
-        lsp_lease: _lsp_lease,
-        lsp_cancellation,
-        request_cancellation,
-    } = match invocation_cancellation(&request, &engine.invocation.service) {
-        Some(cancellation) => cancellation,
-        None => {
-            return DaemonInvocationResponse::problem(
-                request.request_id.clone(),
-                DaemonInvocationProblem::InvalidRequest,
-            );
-        }
-    };
-    let git_operation = invocation_is_git_operation(request.operation());
-    let workflow_application = request.is_workflow_application();
-    // A profile registry read marks the handshake's project active without
-    // opening it.
-    let mut project_path = match &request.payload {
-        DaemonInvocationPayload::ProfileGraphTool { .. } => handshake.project_path.clone(),
-        _ => None,
-    };
-    if request.requires_project() {
-        let project_server = {
-            use tracing::Instrument as _;
-            engine
-                .project_server_for_request(handshake, ProjectServerRequirement::Core)
-                .instrument(tracing::trace_span!("daemon.invocation.project_open"))
-                .await
-        };
-        if let Err(error) = project_server {
-            record_project_open_refusal(request.operation().as_str(), &error);
-            return project_open_refusal_response(
-                request_id,
-                &error,
-                workflow_application,
-                git_operation,
-            );
-        }
-        let project_route = engine.project_route(handshake);
-        let (mut resolved_project_path, route) = match project_route {
-            Ok(route) => route,
-            Err(error) => {
-                record_project_route_refusal(request.operation().as_str(), &error);
-                return DaemonInvocationResponse::problem(
-                    request_id,
-                    DaemonInvocationProblem::NotFoundOrNotAuthorized,
-                );
-            }
-        };
-        if let (Some((deadline, _)), Some(request_cancellation)) =
-            (request.lsp_open_control(), lsp_cancellation.as_ref())
-        {
-            let wait = await_lsp_project_open_upgrade(
-                &engine.project_open_gates,
-                &route,
-                deadline,
-                request_cancellation,
-            )
-            .await;
-            if let Some(response) = lsp_project_open_wait_response(
-                &request_id,
-                wait,
-                workflow_application,
-                git_operation,
-            ) {
-                return response;
-            }
-
-            // Core publication may have been visible before the dependent LSP
-            // owner finished. Re-enter the canonical route lookup after the
-            // wait instead of carrying the pre-upgrade root/owner snapshot.
-            let project_server = await_lsp_route_rejoin(
-                deadline,
-                request_cancellation,
-                engine.project_server_for_request(handshake, ProjectServerRequirement::Core),
-            )
-            .await;
-            let project_server = match project_server {
-                Ok(project_server) => project_server,
-                Err(problem) => {
-                    return DaemonInvocationResponse::application_problem(request_id, problem);
-                }
-            };
-            if let Err(error) = project_server {
-                return project_open_refusal_response(
-                    request_id,
-                    &error,
-                    workflow_application,
-                    git_operation,
-                );
-            }
-            let Ok((canonical_project_path, _)) = engine.project_route(handshake) else {
-                return DaemonInvocationResponse::problem(
-                    request_id,
-                    DaemonInvocationProblem::NotFoundOrNotAuthorized,
-                );
-            };
-            resolved_project_path = canonical_project_path;
-        }
-        let admitted_root = admitted_lsp_root_for_project_path(&resolved_project_path);
-        if admitted_root.is_none() {
-            record_admitted_root_refusal(request.operation().as_str());
-            return DaemonInvocationResponse::problem(
-                request_id,
-                DaemonInvocationProblem::Unavailable,
-            );
-        }
-        project_path = Some(resolved_project_path);
-    }
-    let _selected_project_servers =
-        if let Some((scope_set_request, observed_at, deadline, cancellation)) =
-            scope_set_cas_admission(&request)
-        {
-            let Some(request_cancellation) = request_cancellation.as_ref() else {
-                return DaemonInvocationResponse::problem(
-                    request_id,
-                    DaemonInvocationProblem::Unavailable,
-                );
-            };
-            match open_scope_set_cas_projects(
-                handshake,
-                scope_set_request,
-                observed_at,
-                deadline,
-                cancellation,
-                &request_id,
-                request_cancellation,
-                &engine.project_open_gates,
-                |selected_handshake| {
-                    Box::pin(async move {
-                        engine
-                            .project_server_for_request(
-                                &selected_handshake,
-                                ProjectServerRequirement::Core,
-                            )
-                            .await
-                    })
-                },
-            )
-            .await
-            {
-                Ok(servers) => servers,
-                Err(response) => return *response,
-            }
-        } else {
-            Vec::new()
-        };
-    Box::pin(engine.invocation.invoke_for_project(
-        &engine.store_administration,
-        project_path.as_deref(),
+    execute_invocation_with_project_owner(
+        handshake,
         request,
-        request_cancellation,
-    ))
+        &engine.invocation,
+        &engine.store_administration,
+        &engine.project_open_gates,
+        || Box::pin(engine.project_server_for_request(handshake, ProjectServerRequirement::Core)),
+        || engine.project_route(handshake),
+        |selected_handshake| {
+            Box::pin(async move {
+                engine
+                    .project_server_for_request(&selected_handshake, ProjectServerRequirement::Core)
+                    .await
+            })
+        },
+    )
     .await
 }
 

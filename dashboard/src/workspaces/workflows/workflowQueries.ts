@@ -70,7 +70,7 @@ export function useWorkflowRun(runId: string | null) {
   });
 }
 
-export interface WorkflowLifecycleCommand {
+interface WorkflowLifecycleCommand {
   readonly action: WorkflowLifecycleAction;
   readonly definitionId: string;
   readonly definitionVersion: number;

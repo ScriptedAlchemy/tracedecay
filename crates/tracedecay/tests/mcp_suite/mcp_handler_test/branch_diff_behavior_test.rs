@@ -8,7 +8,6 @@ use std::fs;
 use std::path::Path;
 
 use serde_json::{Value, json};
-use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay::mcp::McpServer;
 
 use crate::common::fixture::{git_capture, git_run};
@@ -288,7 +287,7 @@ async fn branch_diff_reports_the_symbols_that_differ_between_master_and_feature(
     let project_root = isolation.path().join("project");
     fs::create_dir_all(&project_root).expect("project root");
     branched_master_repo(&project_root);
-    let harness = Box::pin(ProductionProjectCompositionHarnessV1::open(
+    let harness = Box::pin(crate::support::seeded_composition::open(
         isolation.path(),
         vec![project_root.clone()],
     ))

@@ -1375,37 +1375,20 @@ impl GraphDbRegistry {
     /// removed the store root. The registry entry remains the path/format
     /// authority; this operation never reconstructs or canonicalizes a path
     /// from the missing filesystem tree.
+    ///
+    /// Shutdown uses the same close: the exclusive Grafeo writer is released
+    /// only after every client and exact map-owner attachment has drained, so
+    /// retained client leases stay an identity-bearing close blocker.
+    #[tracing::instrument(name = "graph_db.registry.close_retained", level = "trace", skip_all)]
     pub fn close_retained(
         &self,
         binding: &StoreRuntimeBindingV1,
         verified_locator: &VerifiedStoreLocatorV1,
     ) -> Result<bool, GraphDbError> {
-        self.close_retained_inner(binding, verified_locator, true)
-    }
-
-    /// Releases the exclusive Grafeo writer only after every client and exact
-    /// map-owner attachment has drained. Retained client leases are an
-    /// identity-bearing close blocker even during shutdown.
-    pub fn close_retained_for_shutdown(
-        &self,
-        binding: &StoreRuntimeBindingV1,
-        verified_locator: &VerifiedStoreLocatorV1,
-    ) -> Result<bool, GraphDbError> {
-        self.close_retained_inner(binding, verified_locator, true)
-    }
-
-    #[tracing::instrument(name = "graph_db.registry.close_retained", level = "trace", skip_all)]
-    fn close_retained_inner(
-        &self,
-        binding: &StoreRuntimeBindingV1,
-        verified_locator: &VerifiedStoreLocatorV1,
-        require_unleased: bool,
-    ) -> Result<bool, GraphDbError> {
-        let reservation =
-            match self.reserve_close(binding, verified_locator, None, require_unleased)? {
-                CloseReservation::Absent => return Ok(false),
-                CloseReservation::Closing(reservation) => reservation,
-            };
+        let reservation = match self.reserve_close(binding, verified_locator, None, true)? {
+            CloseReservation::Absent => return Ok(false),
+            CloseReservation::Closing(reservation) => reservation,
+        };
         self.finish_eviction(*reservation)?;
         Ok(true)
     }
@@ -3035,7 +3018,7 @@ mod tests {
 
         assert!(
             registry
-                .close_retained_for_shutdown(
+                .close_retained(
                     registration.authority_lease.binding(),
                     registration.authority_lease.verified_locator(),
                 )

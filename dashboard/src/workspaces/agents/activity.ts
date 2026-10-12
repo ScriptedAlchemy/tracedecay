@@ -29,7 +29,7 @@ function count(row: CountRow): number {
   return Number.isFinite(value) ? value : 0;
 }
 
-export interface LabelledCount {
+interface LabelledCount {
   readonly label: string;
   readonly count: number;
 }
@@ -73,7 +73,7 @@ export function rankedCounts(rows: readonly CountRow[], field: string): Labelled
  * reporting more MCP tool calls than tool calls is disagreeing with itself, and
  * clamping the remainder to zero would hide that behind a plausible figure.
  */
-export interface ToolCallSplit {
+interface ToolCallSplit {
   readonly total: number | null;
   readonly mcp: number | null;
   readonly other: number | null;
@@ -120,7 +120,7 @@ export function toolCallsPerMessage(ratios: unknown): number | null {
  * so, but a suffix of real attributed rows is a stronger reading than a
  * complete count attributed to nobody.
  */
-export interface AgentToolActivityRow {
+interface AgentToolActivityRow {
   readonly agent: string;
   readonly calls: number;
   readonly sessions: number;

@@ -511,63 +511,80 @@ impl DaemonAdvisoryCycleInvocationPort for ProjectOpenAdvisoryFeedbackCycleV1 {
         &self,
         request: DaemonFeedbackProximityInvocationRequest,
     ) -> DaemonFeedbackProximityInvocationFuture<'_> {
-        let owner = self.clone();
-        Box::pin(async move {
-            if request.cancellation.is_cancelled() {
-                return Err(ApplicationProblem::cancelled_before_admission());
-            }
-            if request.deadline.is_elapsed_at(request.request.observed_at)
-                || request.deadline.is_elapsed_at(now_micros())
-            {
-                return Err(ApplicationProblem::timed_out_before_admission());
-            }
-            let configuration = owner
-                .producer
-                .graph
-                .configuration_runtime()
-                .client()
-                .current()
-                .await
-                .map_err(|_| {
-                    ApplicationProblem::unavailable(SafeDiagnostic {
-                        code: "feedback.proximity.configuration".to_owned(),
-                        message: "The feedback proximity configuration is unavailable".to_owned(),
-                    })
-                })?;
-            let access = daemon_owned_project_source_access_at(
-                &owner.producer.scope,
-                &owner.producer.project_root,
-                &configuration,
-                request.request.observed_at,
-            )
-            .map_err(|_| {
-                ApplicationProblem::not_found_or_not_authorized(
-                    tracedecay_contracts::RetryDirective::Never,
-                )
-            })?;
-            let context = proximity_authorization_context(
-                &access,
-                &owner.feedback_scope,
-                request.request.observed_at,
-                request.request_id,
-                request.deadline.clone(),
-                request.cancellation.clone(),
-            )
-            .ok_or_else(|| {
-                ApplicationProblem::not_found_or_not_authorized(
-                    tracedecay_contracts::RetryDirective::Never,
-                )
-            })?;
-            let result = owner.proximity_read.read(&context, &request.request).await;
-            feedback_proximity_invocation_result(
-                &context,
-                request.request.observed_at,
-                request.deadline,
-                request.cancellation,
-                result,
-            )
-        })
+        invoke_feedback_proximity(
+            &self.producer.graph,
+            &self.producer.scope,
+            &self.producer.project_root,
+            &self.feedback_scope,
+            &self.proximity_read,
+            request,
+        )
     }
+}
+
+/// The one proximity read both the advisory cycle owner and the
+/// proximity-only owner answer with.
+fn invoke_feedback_proximity<'a>(
+    graph: &'a tracedecay_project::project::TraceDecay,
+    scope: &'a tracedecay_contracts::ResolvedScope,
+    project_root: &'a Path,
+    feedback_scope: &'a FeedbackScopeV1,
+    proximity_read: &'a FeedbackProximityReadRuntimeV1,
+    request: DaemonFeedbackProximityInvocationRequest,
+) -> DaemonFeedbackProximityInvocationFuture<'a> {
+    Box::pin(async move {
+        if request.cancellation.is_cancelled() {
+            return Err(ApplicationProblem::cancelled_before_admission());
+        }
+        if request.deadline.is_elapsed_at(request.request.observed_at)
+            || request.deadline.is_elapsed_at(now_micros())
+        {
+            return Err(ApplicationProblem::timed_out_before_admission());
+        }
+        let configuration = graph
+            .configuration_runtime()
+            .client()
+            .current()
+            .await
+            .map_err(|_| {
+                ApplicationProblem::unavailable(SafeDiagnostic {
+                    code: "feedback.proximity.configuration".to_owned(),
+                    message: "The feedback proximity configuration is unavailable".to_owned(),
+                })
+            })?;
+        let access = daemon_owned_project_source_access_at(
+            scope,
+            project_root,
+            &configuration,
+            request.request.observed_at,
+        )
+        .map_err(|_| {
+            ApplicationProblem::not_found_or_not_authorized(
+                tracedecay_contracts::RetryDirective::Never,
+            )
+        })?;
+        let context = proximity_authorization_context(
+            &access,
+            feedback_scope,
+            request.request.observed_at,
+            request.request_id,
+            request.deadline.clone(),
+            request.cancellation.clone(),
+        )
+        .ok_or_else(|| {
+            ApplicationProblem::not_found_or_not_authorized(
+                tracedecay_contracts::RetryDirective::Never,
+            )
+        })?;
+        let result = proximity_read.read(&context, &request.request).await;
+        feedback_proximity_invocation_result(
+            &context,
+            request.request.observed_at,
+            request.deadline,
+            request.cancellation,
+            result,
+        )
+    })
 }
 
 fn proximity_authorization_context(
@@ -2178,61 +2195,14 @@ impl DaemonAdvisoryCycleInvocationPort for ProjectOpenProximityReadOwnerV1 {
         &self,
         request: DaemonFeedbackProximityInvocationRequest,
     ) -> DaemonFeedbackProximityInvocationFuture<'_> {
-        let owner = self.clone();
-        Box::pin(async move {
-            if request.cancellation.is_cancelled() {
-                return Err(ApplicationProblem::cancelled_before_admission());
-            }
-            if request.deadline.is_elapsed_at(request.request.observed_at)
-                || request.deadline.is_elapsed_at(now_micros())
-            {
-                return Err(ApplicationProblem::timed_out_before_admission());
-            }
-            let configuration = owner
-                .graph
-                .configuration_runtime()
-                .client()
-                .current()
-                .await
-                .map_err(|_| {
-                    ApplicationProblem::unavailable(SafeDiagnostic {
-                        code: "feedback.proximity.configuration".to_owned(),
-                        message: "The feedback proximity configuration is unavailable".to_owned(),
-                    })
-                })?;
-            let access = daemon_owned_project_source_access_at(
-                &owner.scope,
-                &owner.project_root,
-                &configuration,
-                request.request.observed_at,
-            )
-            .map_err(|_| {
-                ApplicationProblem::not_found_or_not_authorized(
-                    tracedecay_contracts::RetryDirective::Never,
-                )
-            })?;
-            let context = proximity_authorization_context(
-                &access,
-                &owner.feedback_scope,
-                request.request.observed_at,
-                request.request_id,
-                request.deadline.clone(),
-                request.cancellation.clone(),
-            )
-            .ok_or_else(|| {
-                ApplicationProblem::not_found_or_not_authorized(
-                    tracedecay_contracts::RetryDirective::Never,
-                )
-            })?;
-            let result = owner.proximity_read.read(&context, &request.request).await;
-            feedback_proximity_invocation_result(
-                &context,
-                request.request.observed_at,
-                request.deadline,
-                request.cancellation,
-                result,
-            )
-        })
+        invoke_feedback_proximity(
+            &self.graph,
+            &self.scope,
+            &self.project_root,
+            &self.feedback_scope,
+            &self.proximity_read,
+            request,
+        )
     }
 }
 

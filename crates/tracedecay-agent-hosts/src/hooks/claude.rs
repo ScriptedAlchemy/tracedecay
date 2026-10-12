@@ -11,56 +11,12 @@ use tracedecay_contracts::retrieval::HookRuntimeSurfaceRequestV1;
 use crate::ports::hook_runtime::HookRuntimeV1;
 
 use super::post_tool_use::is_post_tool_use_failure_event;
-use super::tool_hints::{ToolHintInput, decide_hint};
 use super::{
-    additional_context_json, event_project_root_with_identity, event_session_id, prompt_like_text,
-    read_hook_event, record_hook_invoked_parsed, research_block_reason,
+    additional_context_json, event_project_root_with_identity, read_hook_event,
+    record_hook_invoked_parsed,
 };
 use tracedecay_domain::HostIntegrationIdV1;
 
-/// Pure decision logic for the `PreToolUse` hook.
-pub fn evaluate_hook_decision(tool_input: &str) -> String {
-    let parsed: serde_json::Value =
-        serde_json::from_str(tool_input).unwrap_or_else(|_| serde_json::json!({}));
-    let hint = decide_hint(&ToolHintInput {
-        agent: HostIntegrationIdV1::Claude,
-        session_id: event_session_id(&parsed),
-        tool_name: Some("Agent".to_string()),
-        command: None,
-        prompt: prompt_like_text(&parsed),
-        subagent_type: parsed
-            .get("subagent_type")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        file_path: None,
-        captured_output: None,
-        trusted_failure: false,
-        edit_text: None,
-        hints_enabled: true,
-    });
-    let block_reason = research_block_reason(hint);
-    let block_msg = || {
-        serde_json::json!({
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": block_reason
-            }
-        })
-    };
-
-    if parsed.get("subagent_type").and_then(|v| v.as_str()) == Some("Explore") {
-        return block_msg().to_string();
-    }
-
-    if let Some(prompt) = parsed.get("prompt").and_then(|v| v.as_str())
-        && is_code_research_prompt(prompt)
-    {
-        return block_msg().to_string();
-    }
-
-    String::new()
-}
 pub(super) fn is_code_research_prompt(prompt: &str) -> bool {
     let lower = prompt.to_ascii_lowercase();
     let exploration_patterns = [

@@ -21,6 +21,7 @@ use tracedecay_global_db::RegisteredGlobalDb;
 
 use super::{MeasurementDescriptor, MeasurementProvenance, MeasurementSpec, coverage, measurement};
 use crate::observability::RegisteredObservabilityPortV1;
+use tracedecay_contracts::execution_topology_metrics::worse_state;
 use tracedecay_contracts::{ObservabilityQueryPort, ObservabilityQueryV1};
 use tracedecay_session_memory::observability_store::EVENT_LIMIT;
 use tracedecay_session_memory::provider_usage::{
@@ -141,12 +142,9 @@ pub async fn provider_latency_read_model(
                         } else {
                             CoverageStateV1::Known
                         };
-                        weaker_coverage(state, receipt_state)
+                        worse_state(state, receipt_state)
                     });
-            (
-                weaker_coverage(page.coverage, receipt_coverage),
-                page.watermark,
-            )
+            (worse_state(page.coverage, receipt_coverage), page.watermark)
         }
         Err(_) => (
             CoverageStateV1::Unknown,
@@ -157,9 +155,9 @@ pub async fn provider_latency_read_model(
         matches!(&event.payload, ObservabilityPayloadV1::OperationResource(_))
             && (event.coverage != CoverageStateV1::Known || event.dropped_count > 0)
     });
-    let mut source_coverage = weaker_coverage(page.coverage, drop_coverage);
+    let mut source_coverage = worse_state(page.coverage, drop_coverage);
     if carried_drop {
-        source_coverage = weaker_coverage(source_coverage, CoverageStateV1::Partial);
+        source_coverage = worse_state(source_coverage, CoverageStateV1::Partial);
     }
     let complete = source_coverage == CoverageStateV1::Known;
     let watermark = format!("{};{}", page.watermark, drop_watermark);
@@ -251,24 +249,6 @@ fn unavailable_provider_latency_with_coverage(
         first_progress: distribution(StageMetric::FirstProgress),
         service: distribution(StageMetric::Service),
         terminal: distribution(StageMetric::Terminal),
-    }
-}
-
-fn weaker_coverage(left: CoverageStateV1, right: CoverageStateV1) -> CoverageStateV1 {
-    fn rank(state: CoverageStateV1) -> u8 {
-        match state {
-            CoverageStateV1::Known => 0,
-            CoverageStateV1::Sampled => 1,
-            CoverageStateV1::Capped => 2,
-            CoverageStateV1::Partial => 3,
-            CoverageStateV1::Stale => 4,
-            CoverageStateV1::Unknown => 5,
-        }
-    }
-    if rank(left) >= rank(right) {
-        left
-    } else {
-        right
     }
 }
 

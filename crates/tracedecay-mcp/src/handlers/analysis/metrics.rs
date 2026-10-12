@@ -38,12 +38,6 @@ pub(super) async fn compute_rank(
         RankEdgeKindV1::Extends => RelationEdgeKindV1::Extends,
         RankEdgeKindV1::Annotates => RelationEdgeKindV1::Annotates,
         RankEdgeKindV1::Receives => RelationEdgeKindV1::Receives,
-        RankEdgeKindV1::DerivesMacro => {
-            return Err(verified_analysis_unavailable(
-                "rank",
-                "the admitted graph generation does not publish derives_macro relations",
-            ));
-        }
     };
     let (mut symbols, edges) = {
         let _span = tracing::trace_span!("mcp.analysis.rank.graph").entered();

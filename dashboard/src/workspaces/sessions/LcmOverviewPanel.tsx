@@ -25,7 +25,7 @@ import { Fact, Legend, MeterRow, Readout } from '../../ui/instrument.tsx';
 import { splitCount } from '../../ui/format.ts';
 import { pageBounds, provenanceTally, type RowsPerPage, type TimelineBucket } from './model.ts';
 
-export interface LcmOverviewPanelProps {
+interface LcmOverviewPanelProps {
   overview: ReadState<DashboardEnvelopeV1<LcmOverviewPayloadV1>>;
   timeline: ReadState<DashboardEnvelopeV1<LcmTimelinePayloadV1>>;
   index: ReadState<DashboardEnvelopeV1<LoomTemporalPayloadV1>>;

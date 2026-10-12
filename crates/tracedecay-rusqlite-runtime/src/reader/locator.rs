@@ -126,7 +126,7 @@ impl fmt::Display for ReaderStartError {
             Self::SchemaProbeFailed(error) => {
                 write!(
                     f,
-                    "SQLite reader could not read the schema during startup: {error}"
+                    "SQLite reader could not read the database header during startup: {error}"
                 )
             }
             Self::OpenedDatabaseIdentity(error) => {

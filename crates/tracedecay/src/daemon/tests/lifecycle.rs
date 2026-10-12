@@ -195,7 +195,6 @@ fn daemon_shutdown_requires_a_response_id() {
 
 #[tokio::test]
 async fn authenticated_daemon_shutdown_acks_and_begins_draining() {
-    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
     let profile = TempDir::new().expect("profile");
     let mut client_identity = test_client_identity_for(profile.path().to_path_buf());
     client_identity.global_db_path = profile.path().join("mismatched.db");
@@ -211,7 +210,7 @@ async fn authenticated_daemon_shutdown_acks_and_begins_draining() {
         let stream = listener.accept().await.expect("accept shutdown client");
         Box::pin(super::super::serve_windows_broker_client(
             stream,
-            TOKEN,
+            TEST_AUTH_TOKEN,
             &server_lifecycle,
             store_administration,
             Arc::new(tokio::sync::Mutex::new(
@@ -227,13 +226,7 @@ async fn authenticated_daemon_shutdown_acks_and_begins_draining() {
         .await
         .expect("connect shutdown client");
     let (reader, mut writer) = stream.into_split();
-    let preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(TOKEN)
-        .to_line()
-        .expect("auth preface");
-    writer
-        .write_all(format!("{preface}\n").as_bytes())
-        .await
-        .expect("write auth preface");
+    write_test_auth_preface(&mut writer).await;
     writer
         .write_all(
             format!(
@@ -415,14 +408,16 @@ fn project_server_capacity_response_is_typed_json_rpc_data() {
     );
 }
 
-#[tokio::test]
-async fn reserved_doctor_request_answers_under_general_saturation() {
-    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+/// Serves `request` on the reserved-control slot of an admission whose general
+/// slot is held, and returns the daemon's first response.
+async fn reserved_response_under_general_saturation(
+    scope: &str,
+    request: serde_json::Value,
+) -> serde_json::Value {
     let profile = TempDir::new().expect("profile");
     let client_identity = test_client_identity_for(profile.path().join("client"));
     let store_administration = test_store_administration_for_profile(&client_identity.profile_root);
-    let _database_scope =
-        enter_test_daemon_database_scope(&client_identity.profile_root, "reserved-doctor-test");
+    let _database_scope = enter_test_daemon_database_scope(&client_identity.profile_root, scope);
     prewarm_test_profile_runtime(&store_administration).await;
 
     let admission = super::super::DaemonClientAdmission::with_reserved_capacity(2, 1);
@@ -435,7 +430,7 @@ async fn reserved_doctor_request_answers_under_general_saturation() {
     let reserved = match admission.try_admit() {
         super::super::DaemonClientAdmissionOutcome::Admitted(permit) => permit,
         super::super::DaemonClientAdmissionOutcome::Saturated(_) => {
-            panic!("reserved Doctor client rejected")
+            panic!("reserved client rejected")
         }
     };
     assert_eq!(
@@ -453,11 +448,11 @@ async fn reserved_doctor_request_answers_under_general_saturation() {
     .await
     .expect("loopback listener");
     let server = tokio::spawn(async move {
-        let stream = listener.accept().await.expect("accept Doctor client");
+        let stream = listener.accept().await.expect("accept reserved client");
         let lifecycle = DaemonLifecycle::default();
         Box::pin(super::super::serve_windows_broker_client_with_class(
             stream,
-            TOKEN,
+            TEST_AUTH_TOKEN,
             &lifecycle,
             store_administration,
             Arc::new(tokio::sync::Mutex::new(
@@ -468,21 +463,14 @@ async fn reserved_doctor_request_answers_under_general_saturation() {
             None,
         ))
         .await
-        .expect("serve Doctor client");
+        .expect("serve reserved client");
     });
 
     let stream = tracedecay_daemon_protocol::BrokerStream::connect(&endpoint)
         .await
-        .expect("connect Doctor client");
+        .expect("connect reserved client");
     let (reader, mut writer) = stream.into_split();
-    let preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(TOKEN)
-        .to_line()
-        .expect("auth preface");
-    writer
-        .write_all(preface.as_bytes())
-        .await
-        .expect("write preface");
-    writer.write_all(b"\n").await.expect("preface newline");
+    write_test_auth_preface(&mut writer).await;
     writer
         .write_all(
             DaemonHandshake {
@@ -496,38 +484,43 @@ async fn reserved_doctor_request_answers_under_general_saturation() {
         .await
         .expect("write handshake");
     writer.write_all(b"\n").await.expect("handshake newline");
-    let request = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 19,
-        "method": "tools/call",
-        "params": {
-            "name": "tracedecay_runtime",
-            "arguments": {
-                "authority_audit": true,
-                "session_ingest_health": true,
-                "format": "json"
-            }
-        }
-    });
     writer
         .write_all(request.to_string().as_bytes())
         .await
-        .expect("write Doctor request");
-    writer
-        .write_all(b"\n")
-        .await
-        .expect("Doctor request newline");
+        .expect("write request");
+    writer.write_all(b"\n").await.expect("request newline");
     let mut reader = tokio::io::BufReader::new(reader);
     let mut response = String::new();
     tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut response)
         .await
-        .expect("read Doctor response");
-    let response: serde_json::Value =
-        serde_json::from_str(&response).expect("Doctor JSON-RPC response");
+        .expect("read response");
+    let response = serde_json::from_str(&response).expect("JSON-RPC response");
+    drop(general);
+    server.await.expect("reserved server task");
+    response
+}
+
+#[tokio::test]
+async fn reserved_doctor_request_answers_under_general_saturation() {
+    let response = reserved_response_under_general_saturation(
+        "reserved-doctor-test",
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 19,
+            "method": "tools/call",
+            "params": {
+                "name": "tracedecay_runtime",
+                "arguments": {
+                    "authority_audit": true,
+                    "session_ingest_health": true,
+                    "format": "json"
+                }
+            }
+        }),
+    )
+    .await;
     assert_eq!(response["id"], 19);
     assert!(response.get("result").is_some());
-    drop(general);
-    server.await.expect("Doctor server task");
 }
 
 /// A saturated daemon must still hand out its tool catalog.
@@ -538,98 +531,15 @@ async fn reserved_doctor_request_answers_under_general_saturation() {
 /// tracedecay tool at all for as long as the load lasted.
 #[tokio::test]
 async fn tools_list_answers_under_general_saturation() {
-    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
-    let profile = TempDir::new().expect("profile");
-    let client_identity = test_client_identity_for(profile.path().join("client"));
-    let store_administration = test_store_administration_for_profile(&client_identity.profile_root);
-    let _database_scope =
-        enter_test_daemon_database_scope(&client_identity.profile_root, "tools-list-saturation");
-    prewarm_test_profile_runtime(&store_administration).await;
-
-    let admission = super::super::DaemonClientAdmission::with_reserved_capacity(2, 1);
-    let general = match admission.try_admit() {
-        super::super::DaemonClientAdmissionOutcome::Admitted(permit) => permit,
-        super::super::DaemonClientAdmissionOutcome::Saturated(_) => {
-            panic!("general client rejected")
-        }
-    };
-    let reserved = match admission.try_admit() {
-        super::super::DaemonClientAdmissionOutcome::Admitted(permit) => permit,
-        super::super::DaemonClientAdmissionOutcome::Saturated(_) => {
-            panic!("discovery client rejected")
-        }
-    };
-    assert_eq!(
-        reserved.class(),
-        super::super::DaemonClientAdmissionClass::ReservedControl
-    );
-
-    let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
-        &tracedecay_daemon_protocol::default_loopback_endpoint(),
+    let response = reserved_response_under_general_saturation(
+        "tools-list-saturation",
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 21,
+            "method": "tools/list",
+        }),
     )
-    .await
-    .expect("loopback listener");
-    let server = tokio::spawn(async move {
-        let stream = listener.accept().await.expect("accept discovery client");
-        let lifecycle = DaemonLifecycle::default();
-        Box::pin(super::super::serve_windows_broker_client_with_class(
-            stream,
-            TOKEN,
-            &lifecycle,
-            store_administration,
-            Arc::new(tokio::sync::Mutex::new(
-                super::super::ProjectOpenGates::default(),
-            )),
-            super::super::DaemonPerClientAdmission::default(),
-            reserved.class(),
-            None,
-        ))
-        .await
-        .expect("serve discovery client");
-    });
-
-    let stream = tracedecay_daemon_protocol::BrokerStream::connect(&endpoint)
-        .await
-        .expect("connect discovery client");
-    let (reader, mut writer) = stream.into_split();
-    let preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(TOKEN)
-        .to_line()
-        .expect("auth preface");
-    writer
-        .write_all(preface.as_bytes())
-        .await
-        .expect("write preface");
-    writer.write_all(b"\n").await.expect("preface newline");
-    writer
-        .write_all(
-            DaemonHandshake {
-                client_identity,
-                ..test_handshake_defaults()
-            }
-            .to_line()
-            .expect("handshake")
-            .as_bytes(),
-        )
-        .await
-        .expect("write handshake");
-    writer.write_all(b"\n").await.expect("handshake newline");
-    let request = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 21,
-        "method": "tools/list",
-    });
-    writer
-        .write_all(request.to_string().as_bytes())
-        .await
-        .expect("write tools/list");
-    writer.write_all(b"\n").await.expect("tools/list newline");
-    let mut reader = tokio::io::BufReader::new(reader);
-    let mut response = String::new();
-    tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut response)
-        .await
-        .expect("read tools/list response");
-    let response: serde_json::Value =
-        serde_json::from_str(&response).expect("tools/list JSON-RPC response");
+    .await;
 
     assert_eq!(response["id"], 21);
     assert!(
@@ -644,8 +554,6 @@ async fn tools_list_answers_under_general_saturation() {
         "saturated daemon served a degraded catalog of {} tools",
         tools.len()
     );
-    drop(general);
-    server.await.expect("discovery server task");
 }
 
 #[cfg(unix)]
@@ -719,8 +627,6 @@ async fn cancelling_daemon_client_releases_admission_capacity() {
 
 #[tokio::test]
 async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
-    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
-
     let temp = TempDir::new().expect("temp dir");
     let project = temp.path().join("project");
     let profile_root = temp.path().join("profile");
@@ -797,7 +703,7 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
                 clients.spawn(async move {
                     Box::pin(super::super::serve_windows_broker_client(
                         stream,
-                        TOKEN,
+                        TEST_AUTH_TOKEN,
                         &lifecycle,
                         store_administration,
                         gates,
@@ -820,11 +726,7 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
                 .await
                 .expect("connect client");
             let (reader, mut writer) = stream.into_split();
-            let preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(TOKEN)
-                .to_line()
-                .expect("auth preface");
-            writer.write_all(preface.as_bytes()).await.expect("preface");
-            writer.write_all(b"\n").await.expect("preface newline");
+            write_test_auth_preface(&mut writer).await;
             writer
                 .write_all(handshake.to_line().expect("handshake").as_bytes())
                 .await

@@ -21,8 +21,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 use tracedecay_mcp::JsonRpcResponse;
 
-use super::journey_test_support::{git, resolved, tool_answer};
+use super::journey_test_support::{resolved, tool_answer};
 use super::*;
+use crate::test_support::git::git;
 
 const PROBE_SYMBOL: &str = "lcm_preserved_profile_probe";
 const NATIVE_BOUNDARY_UUID: &str = "ffffffff-0000-1111-2222-333333333333";

@@ -406,28 +406,17 @@ async fn handle_status_command_within(
                 print!("{}", include_str!("resources/logo.ansi"));
             }
             let branch_info = status_branch_info(&project_path, &daemon_status);
-            let cost_info = None;
             if short {
                 crate::display::print_status_header(
                     &census,
                     freshness.as_ref(),
-                    None,
-                    None,
-                    None,
-                    &[],
                     branch_info.as_ref(),
-                    cost_info.as_ref(),
                 );
             } else {
                 crate::display::print_status_table_with(crate::display::StatusTable {
                     census: &census,
                     freshness: freshness.as_ref(),
-                    tokens_saved: None,
-                    global_tokens_saved: None,
-                    worldwide: None,
-                    country_flags: &[],
                     branch_info: branch_info.as_ref(),
-                    cost_info: cost_info.as_ref(),
                 });
             }
             for finding in &schema_convergences {

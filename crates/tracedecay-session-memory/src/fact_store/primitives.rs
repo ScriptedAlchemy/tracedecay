@@ -8,7 +8,7 @@ use tracedecay_runtime_core::db::{
     DatabaseMemoryTransaction as Transaction, decode_stored_json, encode_stored_json,
 };
 
-use tracedecay_domain::{FactCategoryV1, FactOwnerV1, PayloadAccessState, UtcMicros};
+use tracedecay_domain::{FactOwnerV1, PayloadAccessState, UtcMicros};
 use tracedecay_store::{FactReadControl, FactStoreError, FactStoreResult};
 
 pub(super) const COMMIT_OPERATION: &str = "commit canonical memory fact";
@@ -22,17 +22,6 @@ pub(super) const PROJECT_MEMORY_WRITE_OPERATION: &str = "write project memory fa
 pub(super) fn nonnegative_u64(value: i64, field: &'static str) -> FactStoreResult<u64> {
     u64::try_from(value)
         .map_err(|_| storage_message(QUERY_OPERATION, format!("{field} must be non-negative")))
-}
-
-pub(super) fn project_memory_category_label(category: FactCategoryV1) -> &'static str {
-    match category {
-        FactCategoryV1::General => "general",
-        FactCategoryV1::UserPref => "user_pref",
-        FactCategoryV1::Project => "project",
-        FactCategoryV1::Tool => "tool",
-        FactCategoryV1::Decision => "decision",
-        FactCategoryV1::CodeArea => "code_area",
-    }
 }
 
 pub(super) fn project_memory_now() -> FactStoreResult<UtcMicros> {

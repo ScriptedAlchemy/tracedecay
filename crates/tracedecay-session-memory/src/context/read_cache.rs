@@ -44,12 +44,6 @@ pub fn args_hash(args: &serde_json::Value) -> Result<String> {
     Ok(sha256_hex(canonical.as_bytes()))
 }
 
-/// SHA-256 of arbitrary bytes, hex-encoded. Used as the body digest so callers
-/// can detect content changes even when only the cache layer changed.
-pub fn digest_bytes(bytes: &[u8]) -> String {
-    sha256_hex(bytes)
-}
-
 /// Looks up a cached row. Returns `Some` only when the row exists *and* its
 /// `mtime_ns` matches `current_mtime_ns`. A stale row (file changed since the
 /// cache was written) is reported as a miss; the caller is expected to

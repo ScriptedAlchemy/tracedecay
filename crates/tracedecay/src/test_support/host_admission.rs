@@ -13,6 +13,9 @@ use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_project::project::TraceDecay;
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 
+#[cfg(test)]
+use super::git::git;
+
 /// The owner a test runtime serves: its profile, with the profile's parent as
 /// the home its host transcripts live under.
 fn test_runtime_profile(
@@ -65,19 +68,6 @@ pub(crate) fn mcp_server_context_for_test(
     context.background_cpu = Some(runtime.background_cpu());
     context.host_admission_test_runtime = Some(runtime);
     Ok(context)
-}
-
-#[cfg(test)]
-fn git(root: &std::path::Path, args: &[&str]) {
-    let status = std::process::Command::new(
-        tracedecay_runtime_core::git::try_git_program()
-            .expect("absolute git executable should resolve"),
-    )
-    .current_dir(root)
-    .args(args)
-    .status()
-    .expect("git command should run");
-    assert!(status.success(), "git {args:?} failed");
 }
 
 /// [`mcp_server_context_for_test`] over a one-commit git project registered

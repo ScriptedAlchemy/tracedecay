@@ -86,8 +86,8 @@ impl FortranExtractor {
         match node.kind() {
             "module" => Self::visit_module(state, node),
             "program" => Self::visit_program(state, node),
-            "subroutine" => Self::visit_subroutine(state, node),
-            "function" => Self::visit_function(state, node),
+            "subroutine" => Self::visit_procedure(state, node, "subroutine_statement"),
+            "function" => Self::visit_procedure(state, node, "function_statement"),
             "derived_type_definition" => Self::visit_derived_type(state, node),
             "interface" => Self::visit_interface(state, node),
             "variable_declaration" => Self::visit_variable_declaration(state, node),
@@ -232,69 +232,10 @@ impl FortranExtractor {
         state.node_stack.pop();
     }
 
-    /// Extract a subroutine definition.
-    fn visit_subroutine(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::find_subroutine_name(state, node);
-        let docstring = Self::extract_docstring(state, node);
-        let start_line = node.start_position().row as u32;
-        let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
-        let end_column = node.end_position().column as u32;
-        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = local_node_id(
-            &state.file_path,
-            state.source,
-            &NodeKind::Function,
-            &name,
-            node,
-        );
-
-        let signature = Self::extract_first_line_signature(state, node);
-        let metrics = count_complexity(node, &FORTRAN_COMPLEXITY, state.source);
-
-        let graph_node = Node {
-            id: id.clone(),
-            kind: NodeKind::Function,
-            name: name.clone(),
-            qualified_name,
-            file_path: state.file_path.clone(),
-            start_line,
-            attrs_start_line: start_line,
-            end_line,
-            start_column,
-            end_column,
-            signature,
-            docstring,
-            visibility: Visibility::Pub,
-            is_async: false,
-            branches: metrics.branches,
-            loops: metrics.loops,
-            returns: metrics.returns,
-            max_nesting: metrics.max_nesting,
-            unsafe_blocks: metrics.unsafe_blocks,
-            unchecked_calls: metrics.unchecked_calls,
-            assertions: metrics.assertions,
-            complexity_analysis: metrics.analysis,
-            updated_at: state.timestamp,
-            parent_id: None,
-        };
-        state.nodes.push(graph_node);
-
-        if let Some(parent_id) = state.parent_node_id() {
-            state.edges.push(Edge {
-                source: parent_id.to_string(),
-                target: id.clone(),
-                kind: EdgeKind::Contains,
-                line: Some(start_line),
-            });
-        }
-
-        Self::extract_call_sites(state, node, &id);
-    }
-
-    /// Extract a function definition.
-    fn visit_function(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::find_function_name(state, node);
+    /// Extract a subroutine or function definition whose header is a
+    /// `statement_kind` child.
+    fn visit_procedure(state: &mut ExtractionState, node: TsNode<'_>, statement_kind: &str) {
+        let name = Self::find_procedure_name(state, node, statement_kind);
         let docstring = Self::extract_docstring(state, node);
         let start_line = node.start_position().row as u32;
         let end_line = node.end_position().row as u32;
@@ -717,21 +658,15 @@ impl FortranExtractor {
             )
     }
 
-    /// Find the subroutine name from a subroutine node.
-    /// Structure: subroutine -> `subroutine_statement` (field name="name")
-    fn find_subroutine_name(state: &ExtractionState, node: TsNode<'_>) -> String {
-        find_direct_child_by_kind(node, "subroutine_statement")
-            .and_then(|stmt| stmt.child_by_field_name("name"))
-            .map_or_else(
-                || "<anonymous>".to_string(),
-                |n| state.node_text(n).to_string(),
-            )
-    }
-
-    /// Find the function name from a function node.
-    /// Structure: function -> `function_statement` (field name="name")
-    fn find_function_name(state: &ExtractionState, node: TsNode<'_>) -> String {
-        find_direct_child_by_kind(node, "function_statement")
+    /// Find the procedure name from a subroutine or function node.
+    /// Structure: subroutine -> `subroutine_statement` (field name="name"),
+    /// function -> `function_statement` (field name="name")
+    fn find_procedure_name(
+        state: &ExtractionState,
+        node: TsNode<'_>,
+        statement_kind: &str,
+    ) -> String {
+        find_direct_child_by_kind(node, statement_kind)
             .and_then(|stmt| stmt.child_by_field_name("name"))
             .map_or_else(
                 || "<anonymous>".to_string(),

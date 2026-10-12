@@ -11,7 +11,6 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -19,7 +18,7 @@ use tempfile::TempDir;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
 use super::{
-    DaemonHandshake, enter_test_daemon_database_scope, test_client_identity_for,
+    DaemonHandshake, enter_test_daemon_database_scope, git, test_client_identity_for,
     test_daemon_engine_for_profile, test_handshake_defaults,
 };
 
@@ -83,24 +82,9 @@ async fn run_scope_set_compare_and_swap() {
         .await
         .expect("register beta project");
 
-    let (server_stream, client_stream) =
-        tokio::net::UnixStream::pair().expect("scope-set socket pair");
-    let server_engine = engine.clone();
-    let server_task = tokio::spawn(async move {
-        Box::pin(super::serve_authenticated_test_client(
-            server_stream,
-            server_engine,
-        ))
-        .await
-    });
-    let (reader, mut writer) = client_stream.into_split();
-    super::write_test_auth_preface(&mut writer).await;
+    let (reader, mut writer, server_task) =
+        super::handshake_authenticated_test_client(engine.clone(), &handshake).await;
     let mut reader = tokio::io::BufReader::new(reader);
-    writer
-        .write_all(handshake.to_line().expect("handshake").as_bytes())
-        .await
-        .expect("write handshake");
-    writer.write_all(b"\n").await.expect("handshake newline");
     write_line(
         &mut writer,
         &json!({
@@ -294,16 +278,6 @@ async fn run_scope_set_compare_and_swap() {
         .expect("scope-set connection did not terminate")
         .expect("join scope-set connection")
         .expect("serve scope-set connection");
-}
-
-fn git(root: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .status()
-        .expect("run Git fixture command");
-    assert!(status.success(), "git {args:?} in {}", root.display());
 }
 
 fn prepared_project(root: &Path, name: &str, project_id: &str) -> PathBuf {

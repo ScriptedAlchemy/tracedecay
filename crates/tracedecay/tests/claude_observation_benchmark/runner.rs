@@ -567,14 +567,18 @@ impl ProviderFixture {
                 stats.messages_upserted
             }
             ProviderKind::Hermes => {
-                let stats = hermes::ingest_homes_capped_with_admission(
-                    std::slice::from_ref(&self.source_path),
-                    &self.project,
-                    self.project_id(),
-                    &admission,
-                    None,
+                let stats = tracedecay_sessions::runtime::with_transcript_source_profile(
+                    tracedecay_runtime_core::config::ProfileRoot::under_home(&self.home),
+                    hermes::ingest_for_project_capped_with_admission_and_cancellation(
+                        &self.project,
+                        self.project_id(),
+                        &admission,
+                        None,
+                        &cancellation,
+                    ),
                 )
-                .await;
+                .await
+                .expect("run Hermes production provider path");
                 stats.stats.messages_upserted
             }
             ProviderKind::Kiro => {

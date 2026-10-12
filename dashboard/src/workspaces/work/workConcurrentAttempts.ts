@@ -10,13 +10,13 @@ import type {
 } from '../../contracts/generated.ts';
 import type { WorkResult } from './workApi.ts';
 
-export interface ConcurrentAttemptRow {
+interface ConcurrentAttemptRow {
   readonly encounter: FeedbackProximityEncounterV1;
   readonly left: JoinedAttempt;
   readonly right: JoinedAttempt;
 }
 
-export interface JoinedAttempt {
+interface JoinedAttempt {
   readonly identity: WorkAttemptIdentityV1;
   readonly participant: FeedbackProximityParticipantV1;
   readonly span: WorkExecutionSpanV1;

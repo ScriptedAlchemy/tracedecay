@@ -25,7 +25,6 @@ import re
 # rustc-readonly ``.rmeta``. Bumping the prefix stops those restores without
 # discarding the cargo registry on an exact later hit.
 CACHE_GENERATION = 1
-PREFIX_KEY = f"v{CACHE_GENERATION}-rust"
 
 KEY_RE = re.compile(
     r"^v(?P<generation>\d+)-rust-(?P<lineage>.+)-[0-9a-f]{8}-[0-9a-f]{8}$"

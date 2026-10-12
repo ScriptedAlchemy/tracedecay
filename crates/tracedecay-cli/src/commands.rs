@@ -13,10 +13,12 @@ pub(crate) use admin_project::{
     admin_project, admin_project_until, local_counter, unexpected_admin_project_result,
 };
 pub(crate) use branch::handle_branch_action;
+#[cfg(test)]
+pub(crate) use daemon::tests as daemon_fixtures;
 pub(crate) use daemon::{
     admin_cli_result, admin_cli_result_mismatch, admin_cli_scope, client_handshake,
-    daemon_tool_json, daemon_tool_json_until, reject_problem_envelope, reject_truncation_envelope,
-    retained_effect_payload, retained_tool_payload,
+    daemon_tool_json, daemon_tool_json_until, registry_context, reject_problem_envelope,
+    reject_truncation_envelope, retained_effect_payload, retained_tool_payload,
 };
 pub use gain::handle_gain;
 pub(crate) use index::{handle_init, handle_no_command, handle_sync};
@@ -29,6 +31,6 @@ pub(crate) use settings::{
 };
 pub(crate) use stale_store_reset::handle_wipe_stale;
 pub(crate) use storage::{
-    ProfileOfflineAuthority, annotate_reset_required, handle_list, handle_wipe,
+    ProfileOfflineAuthority, RestoreWording, annotate_reset_required, handle_list, handle_wipe,
     join_outcome_and_restore, process_error_text, take_profile_offline, try_admit_profile_registry,
 };

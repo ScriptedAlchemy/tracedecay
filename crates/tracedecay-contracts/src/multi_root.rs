@@ -20,7 +20,7 @@ mod locator;
 
 pub use catalog::{
     MultiRootApplicationOperation, multi_root_capability_manifest,
-    multi_root_executable_binding_registry, multi_root_operation_authority,
+    multi_root_executable_binding_registry,
 };
 pub use collection::{
     MultiRootCollectionResolutionV1, MultiRootCollectionSelectorV1,

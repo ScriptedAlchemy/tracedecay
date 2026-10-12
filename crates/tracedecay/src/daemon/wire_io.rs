@@ -5,21 +5,10 @@
 
 use super::*;
 
-pub(super) async fn write_json_rpc_response(
+/// Writes one JSON-RPC, invocation, or delivery-ack response frame.
+pub(super) async fn write_daemon_response(
     transport: &mut impl McpTransport,
-    response: &tracedecay_mcp::JsonRpcResponse,
-) -> Result<()> {
-    let payload = {
-        let _span = tracing::trace_span!("daemon.wire.encode_response").entered();
-        serde_json::to_string(response)
-    }?;
-    write_response_payload(transport, &payload).await?;
-    Ok(())
-}
-
-pub(super) async fn write_daemon_invocation_response(
-    transport: &mut impl McpTransport,
-    response: &DaemonInvocationResponse,
+    response: &impl serde::Serialize,
 ) -> Result<()> {
     let payload = {
         let _span = tracing::trace_span!("daemon.wire.encode_response").entered();

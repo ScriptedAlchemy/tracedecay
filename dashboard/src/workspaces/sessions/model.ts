@@ -36,10 +36,6 @@ export interface SessionSelection {
   readonly sessionId: string;
 }
 
-export function selectionKey(selection: SessionSelection): string {
-  return `${selection.provider ?? ''}\u0000${selection.sessionId}`;
-}
-
 export function sameSelection(
   left: SessionSelection | null,
   right: SessionSelection | null,
@@ -69,7 +65,7 @@ export type RowsPerPage = (typeof ROWS_PER_PAGE_OPTIONS)[number];
 export const TIMELINE_WINDOW_OPTIONS = [30, 90, 400, 2000] as const;
 export type TimelineWindow = (typeof TIMELINE_WINDOW_OPTIONS)[number];
 /** The route's own default when no `limit` is sent. */
-export const DEFAULT_TIMELINE_WINDOW: TimelineWindow = 400;
+const DEFAULT_TIMELINE_WINDOW: TimelineWindow = 400;
 
 export interface SessionsViewState {
   readonly selection: SessionSelection | null;
@@ -89,7 +85,7 @@ const PARAM = {
   window: 'sessionsWindow',
 } as const;
 
-export const DEFAULT_VIEW_STATE: SessionsViewState = {
+const DEFAULT_VIEW_STATE: SessionsViewState = {
   selection: null,
   page: 1,
   rows: 25,
@@ -147,7 +143,7 @@ export function writeViewState(
  * Index paging
  * ------------------------------------------------------------------------ */
 
-export interface PageBounds {
+interface PageBounds {
   /** 1-based ordinal of the first loaded row, or null when the page is empty. */
   readonly first: number | null;
   readonly last: number | null;
@@ -207,7 +203,7 @@ export function recordedModels(row: LoomSessionRowV1): { models: string[]; unrec
  * Selection → index row join
  * ------------------------------------------------------------------------ */
 
-export type IndexJoin =
+type IndexJoin =
   | { kind: 'exact'; row: LoomSessionRowV1 }
   /** More than one loaded row answers to the id; a selection without a
    * provider cannot pick between providers and does not. */
@@ -244,7 +240,7 @@ export interface SessionRelations {
 }
 
 /** The daemon's own source ids (`loom_api.rs`). */
-export const SOURCE_STATUS_ID = {
+const SOURCE_STATUS_ID = {
   commit: 'session_commit',
   file: 'session_file',
   branch: 'branch_worktree',
@@ -274,7 +270,7 @@ export function relationsFor(
 
 /** The daemon's closed commit-evidence vocabulary
  * (`tracedecay_sessions::runtime::git_correlation::CommitEvidence`). */
-export type CommitEvidenceClass =
+type CommitEvidenceClass =
   | 'tool_result'
   | 'host_event'
   | 'head_observation'
@@ -364,7 +360,7 @@ export function bucketStart(key: string): number | null {
   return Number.isFinite(millis) ? millis / 1000 : null;
 }
 
-export interface ProvenanceTally {
+interface ProvenanceTally {
   /** Messages the store counted with a named tokenizer. */
   readonly known: number;
   /** Messages whose token count the store disclaims. */

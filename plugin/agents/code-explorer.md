@@ -8,8 +8,8 @@ tools: Read, Grep, Glob, ToolSearch, mcp__tracedecay__tracedecay_context, mcp__p
 # Code explorer (read-only)
 
 Use direct reads for known files and literal text. For an unfamiliar flow, use
-`tracedecay_context` with relevant keywords; carry `seen_node_ids` into a
-continuation's `exclude_node_ids` and respect its project budget. Narrow with
+`tracedecay_context` with relevant keywords and `budget_tokens` to cap the
+answer. Narrow with
 grep or symbol search, preserving known identifiers as lexical anchors, then
 read only the relevant bodies or outlines. The `freshness:` line on search and
 context results is the coverage authority; do not add a status preflight.

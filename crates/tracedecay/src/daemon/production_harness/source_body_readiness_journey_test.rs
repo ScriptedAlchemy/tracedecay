@@ -7,7 +7,8 @@ use tracedecay_domain::{ProjectId, SymbolOccurrenceId, UtcMicros};
 use tracedecay_graph_db::NeverCancelled;
 
 use super::ProductionProjectCompositionHarnessV1;
-use super::journey_test_support::{git, tool_payload};
+use super::journey_test_support::tool_payload;
+use crate::test_support::git::git;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_body_serves_while_the_released_catalog_cannot_rewarm() {

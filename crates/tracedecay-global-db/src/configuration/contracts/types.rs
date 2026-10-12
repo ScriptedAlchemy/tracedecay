@@ -6,9 +6,9 @@ use std::fmt;
 use serde::Serialize;
 use thiserror::Error;
 use tracedecay_domain::configuration::{
-    ChangePlanId, ConfigurationAuditEventId, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
+    ConfigurationAuditEventId, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
     ConfigurationMutationGrantReceiptV1, ConfigurationRevisionId, ConfigurationValueV1,
-    ProtectedChange, RedactedConfigurationChangeV1, RollbackModeV1, SettingKey,
+    RollbackModeV1, SettingKey,
 };
 use tracedecay_domain::{
     ActorId, CursorBindingMismatchV1, CursorBindingV1, ManifestDigest, canonical_sha256,
@@ -192,14 +192,6 @@ impl ConfigurationAuditQuery {
 pub struct ConfigurationRollbackRequest {
     pub target_revision_id: ConfigurationRevisionId,
     pub mode: RollbackModeV1,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ConfigurationPlanContext {
-    pub plan_id: ChangePlanId,
-    pub change: ProtectedChange,
-    pub redacted_changes: Vec<RedactedConfigurationChangeV1>,
-    pub operation_digest: ManifestDigest,
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]

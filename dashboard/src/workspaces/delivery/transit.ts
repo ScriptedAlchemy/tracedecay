@@ -25,12 +25,12 @@ import { attentionCode, headJoin, isVerificationSource } from './rendererModel.t
  * agent reasoning is reconstructed to fill it. "Next action" prints only the
  * attention the inbox bound to named sources; nothing is recommended here.
  */
-export const TRANSIT_STATIONS = ['session', 'code', 'verification', 'next'] as const;
-export type TransitStationId = (typeof TRANSIT_STATIONS)[number];
+const TRANSIT_STATIONS = ['session', 'code', 'verification', 'next'] as const;
+type TransitStationId = (typeof TRANSIT_STATIONS)[number];
 
-export type StationState = 'evidence' | 'served_empty' | 'no_evidence';
+type StationState = 'evidence' | 'served_empty' | 'no_evidence';
 
-export interface TransitItem {
+interface TransitItem {
   readonly id: string;
   readonly label: string;
   readonly detail: string;
@@ -43,7 +43,7 @@ export interface TransitItem {
   readonly attention: DeliveryAttentionSourceV1 | null;
 }
 
-export interface TransitBranch {
+interface TransitBranch {
   readonly kind: 'objective' | 'session' | 'agent' | 'handoff';
   readonly identities: readonly string[];
 }

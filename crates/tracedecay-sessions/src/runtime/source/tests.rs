@@ -1,7 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
 use super::*;
-use crate::runtime::shared::read_new_rows;
 use std::io::Write;
 
 #[test]
@@ -762,76 +761,6 @@ fn bound_path_list_stops_on_cumulative_discovery_bytes() {
     assert!(report.paths.len() < 20);
     assert_eq!(report.truncated, Some(FileDiscoveryLimit::DiscoveryBytes));
     assert!(report.bytes_charged <= bounds.max_discovery_bytes);
-}
-
-#[tokio::test]
-async fn read_new_rows_tracks_last_rowid() {
-    // A synthetic SQLite-backed source exercises the RowCursor kind. Seed via
-    // a shared in-memory database so the reader handle observes later writes.
-    let seed =
-        rusqlite::Connection::open("file:read_new_rows_tracks?mode=memory&cache=shared").unwrap();
-    seed.execute_batch(
-        "CREATE TABLE turns (role TEXT, text TEXT);\n\
-         INSERT INTO turns (role, text) VALUES ('user', 'hello'), ('assistant', 'hi');",
-    )
-    .unwrap();
-    let conn = crate::runtime::shared::SqliteReadConn::new(
-        rusqlite::Connection::open("file:read_new_rows_tracks?mode=memory&cache=shared").unwrap(),
-    );
-
-    let sql = "SELECT rowid, role, text FROM turns WHERE rowid > ? ORDER BY rowid";
-    let map = |_rowid: i64, row: &rusqlite::Row<'_>| row.get::<_, String>(2).ok();
-    let first = read_new_rows(&conn, sql, StoredCursor::default(), map)
-        .await
-        .unwrap();
-    assert_eq!(first.items, vec!["hello".to_string(), "hi".to_string()]);
-    assert_eq!(first.new_cursor.position, 2);
-
-    // No new rows past the advanced cursor.
-    let again = read_new_rows(&conn, sql, first.new_cursor, map)
-        .await
-        .unwrap();
-    assert_eq!(again.items.len(), 0);
-
-    seed.execute(
-        "INSERT INTO turns (role, text) VALUES ('user', 'again')",
-        (),
-    )
-    .unwrap();
-    let third = read_new_rows(&conn, sql, again.new_cursor, map)
-        .await
-        .unwrap();
-    assert_eq!(third.items, vec!["again".to_string()]);
-    assert_eq!(third.new_cursor.position, 3);
-}
-
-#[tokio::test]
-async fn read_new_rows_returns_none_for_invalid_query() {
-    let connection = rusqlite::Connection::open_in_memory().unwrap();
-    connection
-        .execute_batch("CREATE TABLE turns (text TEXT); INSERT INTO turns (text) VALUES ('hello');")
-        .unwrap();
-    let conn = crate::runtime::shared::SqliteReadConn::new(connection);
-    let map = |_rowid: i64, row: &rusqlite::Row<'_>| row.get::<_, String>(1).ok();
-
-    let rows = read_new_rows(
-        &conn,
-        "SELECT rowid, not_a_column FROM missing_table WHERE rowid > ? ORDER BY rowid",
-        StoredCursor::default(),
-        map,
-    )
-    .await;
-    assert!(rows.is_none());
-
-    let rows = read_new_rows(
-        &conn,
-        "SELECT rowid, text FROM turns WHERE rowid > ? ORDER BY rowid",
-        StoredCursor::default(),
-        map,
-    )
-    .await
-    .unwrap();
-    assert_eq!(rows.items, vec!["hello".to_string()]);
 }
 
 #[test]

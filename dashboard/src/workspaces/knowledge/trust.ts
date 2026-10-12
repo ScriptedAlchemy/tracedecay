@@ -18,7 +18,7 @@ import {
   type MemoryFactRowV1,
 } from '../../contracts/generated.ts';
 
-export interface TrustBand {
+interface TrustBand {
   /** Printed label, e.g. `0.75–1.00`. */
   label: string;
   count: number;
@@ -28,7 +28,7 @@ export interface TrustBand {
   upper: number;
 }
 
-export type TrustSource = 'histogram' | 'status_bands' | 'loaded_facts' | 'none';
+type TrustSource = 'histogram' | 'status_bands' | 'loaded_facts' | 'none';
 
 export interface TrustDistribution {
   source: TrustSource;
@@ -52,7 +52,7 @@ const EMPTY: TrustDistribution = {
 };
 
 /** The four canonical trust bands `memory_api.rs::status` reports. */
-export interface TrustStatusBands {
+interface TrustStatusBands {
   trust_0_025_count: number;
   trust_025_050_count: number;
   trust_050_075_count: number;

@@ -589,15 +589,6 @@ pub fn verify_sanitized_json_payload(
     Ok(())
 }
 
-pub fn serialize_verified_json_payload(
-    payload: &Value,
-    receipt: &SanitizationReceiptV1,
-    expected_revision: &ComponentVersion,
-) -> Result<Vec<u8>, SanitizedPayloadVerificationError> {
-    verify_sanitized_json_payload(payload, receipt, expected_revision)?;
-    serde_json::to_vec(payload).map_err(|_| SanitizedPayloadVerificationError::CanonicalEncoding)
-}
-
 pub fn verify_memory_fact_sanitization(
     payload: &Value,
     receipt: &SanitizationReceiptV1,

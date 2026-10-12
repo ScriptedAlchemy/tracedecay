@@ -1,18 +1,6 @@
 load("@rules_python//python:defs.bzl", "py_binary", "py_test")
 load("//scripts:bazel/rust_test.bzl", "rust_test")
 
-py_test(
-    name = "native_provider_startup_test",
-    size = "small",
-    srcs = [
-        "work_provider_native_smoke.py",
-        "test-work-provider-native-smoke.py",
-    ],
-    main = "test-work-provider-native-smoke.py",
-    imports = ["."],
-    legacy_create_init = 0,
-)
-
 py_binary(
     name = "measure_unused_tool_context",
     srcs = ["measure-unused-tool-context.py"],

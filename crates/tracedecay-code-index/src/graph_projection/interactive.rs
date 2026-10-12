@@ -106,6 +106,9 @@ pub(super) struct InteractiveCatalogCache {
     /// read turns every later catalog lookup into the typed warming answer
     /// the reader could not have waited out.
     readers: std::sync::atomic::AtomicUsize,
+    /// One-shot retry of a park release a live read answered Busy, taken and
+    /// run by the last reader's lease drop.
+    park_release_on_reads_drain: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     clock: Arc<WarmClock>,
 }
 
@@ -132,9 +135,23 @@ impl InteractiveCatalogReaderLeaseV1 {
 
 impl Drop for InteractiveCatalogReaderLeaseV1 {
     fn drop(&mut self) {
-        self.cache
+        if self
+            .cache
             .readers
-            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
+            != 1
+        {
+            return;
+        }
+        let release = self
+            .cache
+            .park_release_on_reads_drain
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(release) = release {
+            release();
+        }
     }
 }
 
@@ -191,8 +208,28 @@ impl InteractiveCatalogCache {
             scan_builds: std::sync::atomic::AtomicUsize::new(0),
             ready_bytes: std::sync::atomic::AtomicU64::new(0),
             readers: std::sync::atomic::AtomicUsize::new(0),
+            park_release_on_reads_drain: Mutex::new(None),
             clock,
         }
+    }
+
+    /// Arm `release` to run when the last live reader drops. `false` when no
+    /// reader is live: the read that answered Busy has already drained.
+    /// Checked under the slot lock, so a drain either sees the arm or the arm
+    /// sees the drain.
+    pub(super) fn park_release_after_reads_drain(
+        &self,
+        release: Arc<dyn Fn() + Send + Sync>,
+    ) -> bool {
+        let mut armed = self
+            .park_release_on_reads_drain
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.readers.load(std::sync::atomic::Ordering::Acquire) == 0 {
+            return false;
+        }
+        *armed = Some(release);
+        true
     }
 
     pub(super) fn residency(&self) -> CatalogResidency {

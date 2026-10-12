@@ -3,7 +3,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
 use tracedecay_contracts::RequestContext;
 use tracedecay_contracts::feedback::{
     FeedbackPortFuture, GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1, GITHUB_REVIEW_INGEST_USE_CASE_ID_V1,
@@ -68,14 +67,6 @@ pub(super) trait GitHubStackReadAuthorityV1: Sync {
     ) -> Option<GitHubStackProviderSnapshotV1>;
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct GitHubStackDurableObservationV1 {
-    pub observation: GitHubStackObservationV1,
-    pub capability_anchor: RetrievalAnchorRecord,
-    pub snapshot_anchor: Option<RetrievalAnchorRecord>,
-}
-
 #[derive(Clone)]
 pub struct ProjectGitHubStackAnchorAuthorityV1 {
     database: RegisteredGlobalDbLeaseV1,
@@ -108,56 +99,6 @@ impl ProjectGitHubStackAnchorAuthorityV1 {
             })
             .flatten()
             .map(|authorization| authorization.privacy_domain_id)
-    }
-
-    pub async fn resolve_published_observation(
-        &self,
-        scope: &tracedecay_contracts::ResolvedScope,
-        observation: GitHubStackObservationV1,
-    ) -> Option<GitHubStackDurableObservationV1> {
-        if observation.scope != *scope {
-            return None;
-        }
-        let owner = ObservationScopeV1::Project {
-            project_id: scope.project_id.clone(),
-        };
-        let capability_anchor = resolve_v2(
-            self.anchors.as_ref(),
-            &owner,
-            &observation.capability_anchor_id,
-        )
-        .await?;
-        if capability_anchor.owner() != &owner
-            || capability_anchor.target()
-                != &RetrievalAnchorTarget::GitTopology(Box::new(
-                    GitTopologyAnchorTargetV1::GitHubStackCapability(
-                        observation.capability.clone(),
-                    ),
-                ))
-        {
-            return None;
-        }
-        let snapshot_anchor = match (&observation.snapshot, &observation.snapshot_anchor_id) {
-            (Some(snapshot), Some(anchor_id)) => {
-                let record = resolve_v2(self.anchors.as_ref(), &owner, anchor_id).await?;
-                if record.owner() != &owner
-                    || record.target()
-                        != &RetrievalAnchorTarget::GitTopology(Box::new(
-                            GitTopologyAnchorTargetV1::GitHubStackSnapshot(snapshot.clone()),
-                        ))
-                {
-                    return None;
-                }
-                Some(record)
-            }
-            (None, None) => None,
-            _ => return None,
-        };
-        Some(GitHubStackDurableObservationV1 {
-            observation,
-            capability_anchor,
-            snapshot_anchor,
-        })
     }
 
     pub fn source_binding(
@@ -447,18 +388,6 @@ impl GitHubStackReadAuthorityV1 for ProjectGitHubStackAnchorAuthorityV1 {
 
 fn canonical_stack_position(provider_position: u32) -> Option<u32> {
     provider_position.checked_sub(1)
-}
-
-async fn resolve_v2(
-    authority: &dyn GitTopologyAnchorAuthority,
-    owner: &ObservationScopeV1,
-    anchor_id: &RetrievalAnchorId,
-) -> Option<RetrievalAnchorRecord> {
-    let resolution = GitTopologyAnchorResolution::new(owner.clone(), anchor_id.clone()).ok()?;
-    match authority.resolve(resolution).await.ok()? {
-        GitTopologyAnchorResolutionOutcome::Resolved(record) => Some(*record),
-        GitTopologyAnchorResolutionOutcome::Unavailable => None,
-    }
 }
 
 fn exact_commit_source_record(

@@ -435,10 +435,11 @@ pub(crate) fn spawn<E: ReaderQueryExecutor>(
             };
             // Opening and policy verification do not enter the database schema.
             // Complete WAL-index recovery before this worker can race admitted writes.
+            // Reading the header cookie opens that read transaction without
+            // parsing the schema, which an idle reader would never use: on a
+            // store with hundreds of schema objects the parse dominates startup.
             if let Err(error) =
-                connection.query_row("SELECT count(*) FROM sqlite_schema", [], |row| {
-                    row.get::<_, i64>(0)
-                })
+                connection.query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))
             {
                 let _ = started.send(Err(ReaderStartError::SchemaProbeFailed(error)));
                 return;

@@ -982,7 +982,7 @@ fn validate_root(
         || root
             .relations
             .iter()
-            .any(|relation| !relation_touches_task(relation, &request.task_id))
+            .any(|relation| !relation.touches_task(&request.task_id))
         || root
             .proposal_decisions
             .iter()
@@ -999,28 +999,6 @@ fn validate_root(
         return Err(WorkProductApplicationErrorV1::EvidenceAuthorityUnavailable);
     }
     Ok(())
-}
-
-fn relation_touches_task(relation: &WorkProductRelationV1, task_id: &TaskId) -> bool {
-    match relation {
-        WorkProductRelationV1::MilestoneContainsTask { task_id: task, .. }
-        | WorkProductRelationV1::Evidence { task_id: task, .. }
-        | WorkProductRelationV1::AcceptedAttempt { task_id: task, .. }
-        | WorkProductRelationV1::Handoff { task_id: task, .. }
-        | WorkProductRelationV1::ProposalDecision { task_id: task, .. } => task == task_id,
-        WorkProductRelationV1::Gates {
-            dependency,
-            dependent,
-        } => dependency == task_id || dependent == task_id,
-        WorkProductRelationV1::Informational { source, target } => {
-            source == task_id || target == task_id
-        }
-        WorkProductRelationV1::CausalCandidate { cause, effect } => {
-            cause == task_id || effect == task_id
-        }
-        WorkProductRelationV1::InitiativeContainsPlan { .. }
-        | WorkProductRelationV1::PlanContainsMilestone { .. } => false,
-    }
 }
 
 fn validate_task_session(
@@ -1175,7 +1153,7 @@ fn hydration_omission(
     })
 }
 
-fn root_error(error: WorkEvidenceRootReadErrorV1) -> WorkProductApplicationErrorV1 {
+pub(crate) fn root_error(error: WorkEvidenceRootReadErrorV1) -> WorkProductApplicationErrorV1 {
     match error {
         WorkEvidenceRootReadErrorV1::NotFoundOrNotAuthorized => {
             WorkProductApplicationErrorV1::NotFoundOrNotAuthorized

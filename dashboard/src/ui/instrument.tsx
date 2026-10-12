@@ -160,7 +160,7 @@ export function Panel({
   );
 }
 
-export type ReadoutSize = 'sm' | 'md' | 'lg' | 'xl' | 'display';
+type ReadoutSize = 'sm' | 'md' | 'lg' | 'xl' | 'display';
 
 /** `sm`–`lg` stay on the text scale for cells that sit inside prose rhythm.
  * `xl` and `display` switch to `.td-display`, which retunes tracking and
@@ -559,44 +559,5 @@ export function WorkspaceHeader({
       ) : null}
       {actions}
     </header>
-  );
-}
-
-/** A proportional bar rendered as a graduated gauge: hairline track, ticked
- * scale, filled to the measured fraction. Renders nothing but the track when
- * the fraction is unknown, an empty gauge is honest, a guessed one is not. */
-export function Gauge({
-  fraction,
-  className,
-  ariaLabel,
-  tone = 'bg-accent',
-}: {
-  fraction: number | null;
-  className?: string;
-  ariaLabel: string;
-  tone?: string;
-}) {
-  const clamped = fraction == null ? null : Math.max(0, Math.min(1, fraction));
-  return (
-    <div
-      className={cn('relative h-2 w-full border border-edge-subtle bg-surface-0', className)}
-      role="img"
-      aria-label={ariaLabel}
-    >
-      {clamped != null ? (
-        <div
-          className={cn('absolute inset-y-0 left-0', tone)}
-          style={{ width: `${clamped * 100}%` }}
-        />
-      ) : null}
-      <span
-        aria-hidden
-        className="absolute inset-0 flex justify-between opacity-70"
-        style={{
-          backgroundImage:
-            'repeating-linear-gradient(to right, var(--raw-edge-strong) 0 1px, transparent 1px 25%)',
-        }}
-      />
-    </div>
   );
 }

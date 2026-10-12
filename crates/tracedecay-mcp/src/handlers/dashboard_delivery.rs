@@ -86,10 +86,11 @@ impl DashboardDeliveryReadAdapter {
         else {
             return ProjectDeliveryReadOutcomeV1::Unavailable;
         };
-        let Some((context, release_control)) = request_context(
-            &control,
-            access,
+        let Some((context, release_control)) = request_context_from_parts_with_deadline(
+            control.request_id(),
+            control.cancellation(),
             authorization_observed_at,
+            access,
             expires_at,
             request_deadline,
         ) else {
@@ -267,23 +268,6 @@ impl DashboardDeliveryReadPortV1 for DashboardDeliveryReadAdapter {
     ) -> DashboardProximityAttentionReadFutureV1<'_> {
         Box::pin(async move { self.read_proximity(control, project).await })
     }
-}
-
-fn request_context(
-    control: &DashboardHttpRequestControlV1,
-    access: tracedecay_application::source_authorization::ProjectSourceAccessSnapshot,
-    issued_at: tracedecay_domain::UtcMicros,
-    expires_at: tracedecay_domain::UtcMicros,
-    release_deadline: Instant,
-) -> Option<(RequestContext, GitHubReleaseReadControlV1)> {
-    request_context_from_parts_with_deadline(
-        control.request_id(),
-        control.cancellation(),
-        issued_at,
-        access,
-        expires_at,
-        release_deadline,
-    )
 }
 
 #[cfg(test)]

@@ -69,8 +69,7 @@ pub use retrieval_anchor_authority::{
     publish_fact_feedback_finding_tx, tombstone_fact_derivatives_tx,
 };
 pub use sql::{
-    CappedRowidScan, FULL_SCAN_PAGE_ROWS, build_qmark_placeholders, collect_rowid_pages,
-    collect_rowid_pages_capped, collect_rowid_pages_capped_with, collect_rowid_pages_with,
+    FULL_SCAN_PAGE_ROWS, build_qmark_placeholders, collect_rowid_pages, collect_rowid_pages_with,
 };
 pub use tracedecay_store::{
     AnchorDerivativeKindV1, AnchorDispositionAppendOutcomeV1, AnchorDispositionReasonClassV1,

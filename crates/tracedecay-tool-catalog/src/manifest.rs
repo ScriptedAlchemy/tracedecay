@@ -59,12 +59,6 @@ pub struct ScopeRequirement {
 }
 
 impl ScopeRequirement {
-    pub fn none() -> Self {
-        Self {
-            dimensions: Vec::new(),
-        }
-    }
-
     pub fn new(mut dimensions: Vec<ScopeDimension>) -> Result<Self, CatalogValidationError> {
         canonicalize_set(&mut dimensions, "scope dimensions")?;
         Ok(Self { dimensions })

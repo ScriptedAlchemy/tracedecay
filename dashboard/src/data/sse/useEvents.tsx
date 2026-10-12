@@ -16,6 +16,7 @@ import {
   type SseConnection,
   type SseConnectionState,
 } from './connect.ts';
+import { isRecord } from '../query/responseBody.ts';
 import type { SseBatch, SseReducerStats } from './types.ts';
 import {
   projectRegistryInvalidationKey,
@@ -385,7 +386,3 @@ export function useLiveActivity(): {
 }
 
 const EMPTY_PULSES: readonly LiveActivityPulse[] = [];
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}

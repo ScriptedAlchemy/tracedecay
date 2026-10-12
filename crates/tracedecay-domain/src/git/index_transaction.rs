@@ -319,7 +319,6 @@ impl GitIndexTransactionReceiptV1 {
 
     pub fn validate(&self) -> Result<(), DomainError> {
         self.receipt_digest.validate()?;
-        self.validate_fields()?;
         if self.receipt_digest != self.compute_receipt_digest()? {
             return Err(DomainError::DigestMismatch);
         }

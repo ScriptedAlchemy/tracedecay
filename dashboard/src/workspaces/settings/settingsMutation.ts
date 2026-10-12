@@ -13,7 +13,7 @@ import {
   type UserSettingsChangeSet,
 } from './settingsModel.ts';
 
-export type SettingsMutationScope = SettingsScope;
+type SettingsMutationScope = SettingsScope;
 
 export type SettingsMutationResult =
   | {

@@ -3,7 +3,7 @@ use std::sync::atomic::AtomicBool;
 
 use tracedecay_application::work::{
     RegisteredWorkApplicationServicesV1, RegisteredWorkProductServicesV1,
-    RegisteredWorkflowApplicationServicesV1, work_intelligence_service,
+    RegisteredWorkflowApplicationServicesV1, authorized_work_intelligence_service,
 };
 use tracedecay_contracts::WorkProductBindingV1;
 use tracedecay_domain::errors::TraceDecayError;
@@ -89,7 +89,16 @@ async fn work_product_and_intelligence_attach_from_storage_without_graph_runtime
     let db = runtime.project_database().expect("project database");
     RegisteredWorkProductServicesV1::attach(db, product_binding())
         .expect("product services attach from work storage alone");
-    work_intelligence_service(db, product_binding())
+    let authority = tracedecay_domain::WorkAuthority::new(
+        project_id(),
+        tracedecay_domain::RepositoryId::new("repository.work-service-attach").expect("repository"),
+        tracedecay_domain::WorktreeId::new("worktree.work-service-attach").expect("worktree"),
+        tracedecay_domain::ActorId::new("actor.work-service-attach").expect("actor"),
+        tracedecay_domain::ManifestDigest::new(format!("sha256:{}", "a".repeat(64)))
+            .expect("policy digest"),
+    )
+    .expect("work authority");
+    authorized_work_intelligence_service(db, product_binding(), authority)
         .expect("intelligence attaches from work storage alone");
 }
 

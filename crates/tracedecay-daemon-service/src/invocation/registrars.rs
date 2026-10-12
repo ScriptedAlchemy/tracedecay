@@ -451,7 +451,8 @@ impl FeedbackCycleRuntimeBuilderV1 {
             TruthSourceStateV1::Unavailable => CapabilityAvailabilityV1::Unavailable,
             TruthSourceStateV1::Unknown => CapabilityAvailabilityV1::Unknown,
         };
-        let correlation_policy = operation.evaluate_local_live_policy(
+        // Fails closed on an inconsistent correlation policy context.
+        operation.evaluate_local_live_policy(
             &policy,
             &policy_context,
             correlation_availability,
@@ -485,7 +486,6 @@ impl FeedbackCycleRuntimeBuilderV1 {
             database,
             Arc::clone(&self.feedback),
             runtime_state,
-            correlation_policy,
             provider_admissions,
             project_root.to_path_buf(),
             code_graph,

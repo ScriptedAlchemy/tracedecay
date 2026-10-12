@@ -23,7 +23,7 @@ import {
  * claims with different grades and a reviewer must be able to tell which one
  * grouped the PRs in front of them.
  */
-export interface UmbrellaEdge {
+interface UmbrellaEdge {
   readonly id: string;
   readonly pullRequestId: string;
   readonly projectId: string;
@@ -52,7 +52,7 @@ export interface Umbrella {
   readonly activeAttention: number;
 }
 
-export type CorrelationAuthority =
+type CorrelationAuthority =
   | { readonly state: 'served'; readonly edges: number }
   | { readonly state: 'unavailable'; readonly reason: string };
 
@@ -81,7 +81,7 @@ function rowKey(row: DeliveryInboxPullRequestV1): string {
   return `${row.project_id}:${row.pull_request.pull_request_id}`;
 }
 
-export function toUmbrellaEdge(edge: DeliveryMembershipEdgeV1): UmbrellaEdge {
+function toUmbrellaEdge(edge: DeliveryMembershipEdgeV1): UmbrellaEdge {
   return {
     id: edge.id,
     pullRequestId: edge.pull_request_id,

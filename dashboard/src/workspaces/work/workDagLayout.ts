@@ -28,7 +28,7 @@ import type { WorkDagReading } from './workViewsModel.ts';
 
 export type WorkDagRelationKind = 'gating' | 'informational' | 'causal';
 
-export interface WorkDagLayoutOptions {
+interface WorkDagLayoutOptions {
   readonly cardWidth: number;
   readonly cardHeight: number;
   readonly columnGap: number;
@@ -71,13 +71,13 @@ export interface WorkDagLayoutEdge {
   readonly path: string;
 }
 
-export interface WorkDagUnresolvedRelation {
+interface WorkDagUnresolvedRelation {
   readonly from: string;
   readonly to: string;
   readonly kind: WorkDagRelationKind;
 }
 
-export interface WorkDagLayoutStratum {
+interface WorkDagLayoutStratum {
   readonly depth: number;
   readonly y: number;
   readonly taskIds: readonly string[];

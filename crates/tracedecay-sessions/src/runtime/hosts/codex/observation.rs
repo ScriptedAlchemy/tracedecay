@@ -25,7 +25,6 @@ use super::PROVIDER;
 use super::context::CodexContextState;
 use super::meta::{CodexMetaWithProvenance, session_meta_with_provenance};
 use crate::admission::HostAdmission;
-use crate::host_ports::unregistered_admission;
 use crate::observation::ObservationCancellation;
 use crate::runtime::jsonl_observation_admission::{
     JsonlFrameAdmission, JsonlObservationAdmissionRequest, PersistedCursorUpdate,
@@ -249,32 +248,6 @@ pub struct CodexJsonlAdmissionProgress {
     pub prior_context_bytes: u64,
 }
 
-/// Admit a Codex rollout for one exact project identity.
-///
-/// The scheduler supplies the already-resolved project id; each complete record
-/// is routed by the rollout's current Codex cwd, including context reconstructed
-/// before a resumed byte cursor.
-pub async fn try_admit_codex_jsonl_observations_for_project(
-    path: &Path,
-    project_root: &Path,
-    project_id: ProjectId,
-    max_new_bytes: Option<u64>,
-) -> TranscriptIngestResult<CodexJsonlAdmissionProgress> {
-    let Some(admission) =
-        unregistered_admission::create(unregistered_admission::Scope::Project(project_id.clone()))
-    else {
-        return Ok(CodexJsonlAdmissionProgress::default());
-    };
-    try_admit_codex_jsonl_observations_for_project_with_admission(
-        path,
-        project_root,
-        project_id,
-        admission.as_ref(),
-        max_new_bytes,
-    )
-    .await
-}
-
 /// Project admission with authority prepared by the caller.
 ///
 /// The project scheduler constructs this facade from its authoritative project
@@ -340,30 +313,6 @@ pub(crate) async fn try_admit_codex_jsonl_observations_for_project_window(
         ),
         Some(crate::runtime::jsonl_observation_admission::MAX_CAPTURE_WINDOW),
         cancellation,
-    )
-    .await
-}
-
-/// Admit Codex records that are not attributable to any registered project.
-///
-/// A scheduler may constrain this pass to one session while it catches up a
-/// profile-owned rollout.
-pub async fn try_admit_codex_jsonl_observations_for_profile(
-    path: &Path,
-    session_id: Option<&str>,
-    registered_roots: &[PathBuf],
-    max_new_bytes: Option<u64>,
-) -> TranscriptIngestResult<CodexJsonlAdmissionProgress> {
-    let Some(admission) = unregistered_admission::create(unregistered_admission::Scope::Profile)
-    else {
-        return Ok(CodexJsonlAdmissionProgress::default());
-    };
-    try_admit_codex_jsonl_observations_for_profile_with_admission(
-        path,
-        session_id,
-        registered_roots,
-        admission.as_ref(),
-        max_new_bytes,
     )
     .await
 }

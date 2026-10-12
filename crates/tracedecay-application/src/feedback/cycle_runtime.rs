@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::diagnostics_publication::{CodeIndexPublicationIdentityPortV1, code_index_logical_path};
 use thiserror::Error;
 use tracedecay_code_index::graph_projection::CodeGraphInteractiveReader;
 use tracedecay_contracts::diagnostics::{
@@ -29,7 +30,7 @@ use tracedecay_contracts::retrieval::{
 };
 use tracedecay_contracts::{
     ApplicationContractError, ApplicationOperation, CoverageCompleteness, FreshnessState,
-    PolicyEvaluationV1, RequestAdmission, RequestContext,
+    RequestAdmission, RequestContext,
 };
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::feedback::{
@@ -40,16 +41,13 @@ use tracedecay_domain::{
     ContentDigest, FileOccurrenceId, RelationEdgeKindV1, RetrievalAnchorId, SymbolOccurrenceId,
     canonical_sha256,
 };
-use tracedecay_lsp::{
-    DiagnosticTrigger, FeedbackCycleRequest, FeedbackCycleRuntimePort, LspRuntimeFailure,
-    LspRuntimeFuture,
-};
-use tracedecay_policy::CapabilityRoutingDecisionV1;
-
-use crate::diagnostics_publication::{CodeIndexPublicationIdentityPortV1, code_index_logical_path};
 use tracedecay_graph_query::{
     CodeGraphProjectionReadPort, CodeGraphReadError, CodeGraphReadRequest, map_projection_error,
     request_graph_cancellation,
+};
+use tracedecay_lsp::{
+    DiagnosticTrigger, FeedbackCycleRequest, FeedbackCycleRuntimePort, LspRuntimeFailure,
+    LspRuntimeFuture,
 };
 use tracedecay_runtime_core::db::Database;
 
@@ -265,7 +263,6 @@ pub struct FeedbackCycleRuntime {
     lsp_input: FeedbackCycleLspInput,
     publication_selector: Arc<DiagnosticStoreFeedbackProvider<DiagnosticsStore<'static>>>,
     provider_admissions: Vec<FeedbackDiagnosticProviderAdmissionV1>,
-    correlation_policy: PolicyEvaluationV1<CapabilityRoutingDecisionV1>,
     source_observations: Arc<dyn FeedbackObservationEmitterV1 + Send + Sync>,
 }
 
@@ -276,7 +273,6 @@ pub fn open_feedback_cycle_runtime(
     database: Database,
     feedback: Arc<FeedbackRuntime>,
     runtime_state: Arc<dyn FeedbackRuntimeStatePort + Send + Sync>,
-    correlation_policy: PolicyEvaluationV1<CapabilityRoutingDecisionV1>,
     provider_admissions: Vec<FeedbackDiagnosticProviderAdmissionV1>,
     project_root: PathBuf,
     code_graph: Arc<dyn CodeGraphProjectionReadPort>,
@@ -351,7 +347,6 @@ pub fn open_feedback_cycle_runtime(
         lsp_input,
         publication_selector,
         provider_admissions,
-        correlation_policy,
         source_observations,
     }))
 }
@@ -364,10 +359,6 @@ impl FeedbackCycleRuntime {
     /// The same durable store used by the publication and completed-dedupe port.
     pub fn publication_store(&self) -> ProjectFeedbackStore {
         self.publications.clone()
-    }
-
-    pub fn correlation_policy(&self) -> &PolicyEvaluationV1<CapabilityRoutingDecisionV1> {
-        &self.correlation_policy
     }
 
     pub fn source_observation_port(&self) -> Arc<dyn FeedbackObservationEmitterV1 + Send + Sync> {

@@ -27,7 +27,7 @@ import type {
  * for a derivation bug to hide behind a number nobody could trace back.
  */
 
-export interface WorkGraphTaskSpec {
+interface WorkGraphTaskSpec {
   readonly taskId: string;
   readonly title?: string;
   readonly acceptedProposal?: string | null;
@@ -54,7 +54,7 @@ export interface WorkGraphTaskSpec {
   readonly handoffs?: readonly WorkHandoffSpec[];
 }
 
-export interface WorkHandoffSpec {
+interface WorkHandoffSpec {
   readonly handoffId: string;
   readonly fromActor: string;
   readonly toActor: string;
@@ -64,7 +64,7 @@ export interface WorkHandoffSpec {
   readonly unknowns?: readonly string[];
 }
 
-export interface WorkRuntimeAttemptSpec {
+interface WorkRuntimeAttemptSpec {
   readonly attemptId: string;
   readonly taskId: string;
   readonly runId: string;
@@ -167,7 +167,7 @@ function runtimeProjection(spec: WorkGraphVersionSpec, version: number, observed
 
 /** One `WorkGraphVersionEntryV1`: an immutable graph version and the whole
  * projection bundle derived from it at one observation instant. */
-export function workGraphVersion(spec: WorkGraphVersionSpec) {
+function workGraphVersion(spec: WorkGraphVersionSpec) {
   const version = spec.version ?? 4;
   const observedAt = spec.observedAt ?? DEFAULT_OBSERVED_AT;
   const totalEffort = spec.tasks.reduce((sum, task) => sum + taskEffort(task), 0);

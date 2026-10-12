@@ -1,4 +1,5 @@
 use serde_json::{Value, json};
+use tracedecay_automation::backend::extract_json_object_prefix;
 use tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1;
 use tracedecay_domain::{ManifestDigest, canonical_sha256};
 use tracedecay_policy::{
@@ -7,8 +8,7 @@ use tracedecay_policy::{
 };
 
 use crate::automation::backend::{
-    AgentTaskKind, AgentTaskResponse, agent_task_contract, extract_json_object_prefix,
-    prompt_version, task_key,
+    AgentTaskKind, AgentTaskResponse, agent_task_contract, prompt_version, task_key,
 };
 use crate::automation::config::AutomationConfig;
 use crate::automation::lifecycle::AgentTaskRunContext;
