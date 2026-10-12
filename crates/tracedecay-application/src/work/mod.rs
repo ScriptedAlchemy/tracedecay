@@ -12,7 +12,7 @@ pub mod workflow_topology;
 pub use registered::{
     RegisteredAuthorizedWorkProductServicesV1, RegisteredWorkApplicationServicesV1,
     RegisteredWorkProductServicesV1, RegisteredWorkflowApplicationServicesV1,
-    RegisteredWorkflowTopologyV1, authorized_work_intelligence_service, work_intelligence_service,
+    RegisteredWorkflowTopologyV1, authorized_work_intelligence_service,
 };
 #[cfg(any(test, feature = "test-helpers"))]
 pub use work_evidence_retrieval::tests::{StaticFederatedAuthority, federated_authority};
