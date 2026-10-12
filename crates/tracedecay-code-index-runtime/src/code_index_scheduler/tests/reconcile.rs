@@ -10634,10 +10634,29 @@ async fn resident_memory_graph_refusal_serves_text_and_retries_when_memory_is_gi
         latest.interactive_graph_store().is_err(),
         "a budget-refused native graph must not gain a substitute store"
     );
-    let freshness = registry
-        .dashboard_freshness(fixture.path())
-        .await
-        .expect("mounted worktree freshness");
+    // Text seats before the graph lane records its refusal, and a headroom
+    // move sends the refused graph back to `Pending` for a retry, so one read
+    // here can land on `Pending`. Wait for the parked refusal; an activated
+    // graph ends the wait so the match below reports it.
+    let freshness = wait_for_owner(
+        &registry,
+        fixture.path(),
+        SERVING_SEAT_FAILURE_CEILING,
+        "a parked resident-memory graph refusal",
+        || async {
+            registry
+                .dashboard_freshness(fixture.path())
+                .await
+                .filter(|freshness| match freshness.code_graph_serving {
+                    Some(CodeGraphServingReadinessV1::Refused { .. }) => {
+                        freshness.staleness_state == Some(CodeIndexStalenessStateV1::Parked)
+                    }
+                    Some(CodeGraphServingReadinessV1::Pending) | None => false,
+                    Some(_) => true,
+                })
+        },
+    )
+    .await;
     match freshness.code_graph_serving {
         Some(
             tracedecay_contracts::code_index_freshness::CodeGraphServingReadinessV1::Refused {
