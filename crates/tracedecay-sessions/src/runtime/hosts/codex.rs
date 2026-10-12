@@ -211,19 +211,24 @@ struct SettledFileWitness {
 }
 
 impl SettledFileWitness {
-    /// `None` while the file's change time is inside the timestamp quantum,
-    /// or where no stat field witnesses a rewrite, or once the file is gone:
-    /// the pass then reads it as before.
+    /// `None` once the file is gone, see [`Self::of`].
     fn settled(path: &Path) -> TranscriptIngestResult<Option<Self>> {
-        let Some(metadata) = stat_if_present(path, "stat transcript for convergence")? else {
-            return Ok(None);
-        };
-        let changed = change_stamp(path, &metadata);
+        match stat_if_present(path, "stat transcript for convergence")? {
+            Some(metadata) => Self::of(path, &metadata),
+            None => Ok(None),
+        }
+    }
+
+    /// `None` while the file's change time is inside the timestamp quantum,
+    /// or where no stat field witnesses a rewrite: the pass then reads it as
+    /// before.
+    fn of(path: &Path, metadata: &std::fs::Metadata) -> TranscriptIngestResult<Option<Self>> {
+        let changed = change_stamp(path, metadata);
         if !metadata.is_file() || !changed.is_settled() {
             return Ok(None);
         }
         Ok(Some(Self {
-            identity: codex_corpus_identity(path, &metadata, changed)?,
+            identity: codex_corpus_identity(path, metadata, changed)?,
             len: metadata.len(),
         }))
     }
@@ -239,8 +244,8 @@ pub(crate) struct PendingTranscript {
 }
 
 impl PendingTranscript {
-    /// `None` when the consumer already finished this exact file, so the
-    /// pass skips it without opening it.
+    /// `None` when the consumer already finished this exact file, or the file
+    /// is gone, so the pass skips it without opening it.
     pub(crate) async fn observe(
         discovery: Option<(&CodexDiscoveryHub, &str)>,
         path: &Path,
@@ -266,7 +271,15 @@ impl PendingTranscript {
         let Some((hub, consumer)) = discovery else {
             return Ok(Some(Self { convergence: None }));
         };
-        let witness = SettledFileWitness::settled(path)?;
+        // A delivered pass is replayed until a catch-up acknowledges it, and a
+        // read failure withholds the acknowledgement. A file moved away since
+        // delivery (Codex archives a session by moving its rollout) has
+        // nothing left to read; failing on it would replay the same path
+        // forever. A later walk delivers the file again if it returns.
+        let Some(metadata) = stat_if_present(path, "stat transcript for convergence")? else {
+            return Ok(None);
+        };
+        let witness = SettledFileWitness::of(path, &metadata)?;
         if let Some(witness) = witness
             && hub.file_converged(consumer, path, witness)
         {
