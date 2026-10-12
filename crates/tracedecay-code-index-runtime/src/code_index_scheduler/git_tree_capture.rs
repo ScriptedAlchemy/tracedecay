@@ -16,6 +16,7 @@ use tracedecay_domain::{
 };
 use tracedecay_privacy::CODE_SOURCE_SANITIZER_VERSION_V1;
 use tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1;
+use tracedecay_runtime_core::git_repository::resolve_tree_link;
 use tracedecay_runtime_core::resident_memory::ResidentMemoryReservationV1;
 
 use super::{
@@ -156,6 +157,17 @@ pub(super) fn representable_logical_path(git_path: &[u8]) -> Option<&str> {
     std::str::from_utf8(git_path)
         .ok()
         .filter(|path| validate_code_logical_path(path).is_ok())
+}
+
+/// Whether capture would parse `git_path` as source. A committed symlink at
+/// such a path is read through to its target, as a checkout reads it, so its
+/// link text never becomes source.
+fn is_source_path(registry: &StaticLanguageRegistry, git_path: &[u8]) -> bool {
+    representable_logical_path(git_path)
+        .and_then(|logical_path| Path::new(logical_path).extension())
+        .and_then(|extension| extension.to_str())
+        .and_then(|extension| registry.descriptor_for_extension(&extension.to_lowercase()))
+        .is_some()
 }
 
 impl CodeIndexExecutionControlV1 for branch_generations::BranchGenerationReadControlV1 {
@@ -432,20 +444,13 @@ impl CodeIndexWorktreeSchedulerV1 {
             .files()
             .map_err(|_| CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?;
         entries.sort_by(|left, right| left.filepath.cmp(&right.filepath));
-        if refuse_source_links {
-            let registry = StaticLanguageRegistry::new();
-            if entries.iter().any(|entry| {
-                entry.mode.is_link()
-                    && representable_logical_path(entry.filepath.as_ref())
-                        .and_then(|logical_path| Path::new(logical_path).extension())
-                        .and_then(|extension| extension.to_str())
-                        .and_then(|extension| {
-                            registry.descriptor_for_extension(&extension.to_lowercase())
-                        })
-                        .is_some()
-            }) {
-                return Err(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable);
-            }
+        let registry = StaticLanguageRegistry::new();
+        if refuse_source_links
+            && entries.iter().any(|entry| {
+                entry.mode.is_link() && is_source_path(&registry, entry.filepath.as_ref())
+            })
+        {
+            return Err(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable);
         }
 
         self.capture_git_tree_blobs_snapshot(
@@ -459,9 +464,21 @@ impl CodeIndexWorktreeSchedulerV1 {
                     if entry.mode.is_tree() || entry.mode.is_commit() {
                         continue;
                     }
-                    let blob = repository
+                    let mut blob = repository
                         .find_blob(entry.oid)
                         .map_err(|_| CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)?;
+                    if entry.mode.is_link() && is_source_path(&registry, entry.filepath.as_ref()) {
+                        let Some(target) =
+                            resolve_tree_link(&tree, entry.filepath.as_ref(), &blob.data).map_err(
+                                |_| CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
+                            )?
+                        else {
+                            continue;
+                        };
+                        blob = repository.find_blob(target).map_err(|_| {
+                            CodeIndexSearchUnavailableReasonV1::GenerationUnavailable
+                        })?;
+                    }
                     visitor(entry.filepath.as_ref(), &blob.data)?;
                 }
                 Ok(())
@@ -487,13 +504,14 @@ impl CodeIndexWorktreeSchedulerV1 {
         if actual_tree.as_str() != expected_tree.as_str() {
             return Err(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable);
         }
+        let registry = StaticLanguageRegistry::new();
         self.capture_git_tree_blobs_snapshot(
             reference,
             None,
             expected_tree.clone(),
             control,
             |visitor| {
-                candidate.visit_blobs(visitor).map_err(|error| match error {
+                candidate.visit_blobs(|path| is_source_path(&registry, path), visitor).map_err(|error| match error {
                     tracedecay_runtime_core::git_repository::GitNativeCandidateTreeVisitError::Repository(_) => {
                         control
                             .termination()
@@ -1244,6 +1262,136 @@ mod tests {
                 git_path: git_path.to_vec(),
                 reason: tracedecay_domain::CodeSourceOmissionReasonV1::UnrepresentablePath,
             })
+        );
+    }
+
+    /// Git stores a symlink as its target path. A branch capture reads
+    /// committed source links through to the blob they name, as a checkout
+    /// does, and drops a source link that names no file in the tree. Link
+    /// text is never captured as source; non-source links keep their row.
+    #[cfg(unix)]
+    #[test]
+    fn exact_capture_reads_committed_source_links_through_to_their_blobs() {
+        use std::os::unix::fs::symlink;
+
+        let project = TempDir::new().expect("project root");
+        let root = project.path();
+        git(root, &["init", "-q", "-b", "main"]);
+        git(root, &["config", "user.name", "TraceDecay Test"]);
+        git(
+            root,
+            &["config", "user.email", "tracedecay@example.invalid"],
+        );
+        std::fs::create_dir_all(root.join("src/nested")).expect("source directories");
+        std::fs::write(
+            root.join("src/real.rs"),
+            "pub fn linked_target() -> u32 { 7 }\n",
+        )
+        .expect("link target");
+        std::fs::write(root.join("AGENTS.md"), "# Agent notes\n").expect("markdown target");
+        for (target, link) in [
+            ("real.rs", "src/alias.rs"),
+            ("../alias.rs", "src/nested/chained.rs"),
+            ("src", "linked"),
+            ("../linked/real.rs", "src/through_directory.rs"),
+            ("missing.rs", "src/dangling.rs"),
+            ("../../outside.rs", "src/escaping.rs"),
+            ("/nonexistent/absolute.rs", "src/absolute.rs"),
+            ("loop_b.rs", "src/loop_a.rs"),
+            ("loop_a.rs", "src/loop_b.rs"),
+            ("nested", "src/directory.rs"),
+            ("AGENTS.md", "CLAUDE.md"),
+            ("AGENTS.md", "notes.txt"),
+        ] {
+            symlink(target, root.join(link)).expect("committed symlink");
+        }
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "symlinks"]);
+        let store = TempDir::new().expect("code-index store");
+        let scheduler = CodeIndexWorktreeSchedulerV1::open(
+            ProjectId::new("project.exact-capture-source-links").expect("project id"),
+            root,
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        )
+        .expect("open code-index scheduler");
+
+        let captured = scheduler
+            .capture_exact_git_tree_snapshot(
+                &ExactGitTreeSourceV1 {
+                    reference: tracedecay_domain::RefId::new("refs/heads/main").expect("reference"),
+                    revision: tracedecay_domain::CommitId::new(git_output(
+                        root,
+                        &["rev-parse", "HEAD"],
+                    ))
+                    .expect("revision"),
+                    tree: tracedecay_domain::TreeId::new(git_output(
+                        root,
+                        &["rev-parse", "HEAD^{tree}"],
+                    ))
+                    .expect("tree"),
+                },
+                &branch_generations::BranchGenerationReadControlV1 {
+                    deadline: None,
+                    cancellation: None,
+                },
+            )
+            .expect("capture a tree with committed symlinks");
+
+        let present = |snapshot: &tracedecay_domain::SanitizedCodeSnapshotV1| {
+            snapshot
+                .files
+                .iter()
+                .filter(|file| {
+                    file.disposition == tracedecay_domain::SnapshotFileDispositionV1::Present
+                })
+                .map(|file| (file.logical_path.clone(), file.content_digest.clone()))
+                .collect::<Vec<_>>()
+        };
+        let branch = present(&captured.snapshot);
+        assert_eq!(
+            branch
+                .iter()
+                .map(|(path, _)| path.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "AGENTS.md",
+                "CLAUDE.md",
+                "src/alias.rs",
+                "src/nested/chained.rs",
+                "src/real.rs",
+                "src/through_directory.rs",
+            ],
+            "only source links that name a file in the tree are captured"
+        );
+        // Disk capture still fails outright on a symlink loop (#3609).
+        for looping in ["src/loop_a.rs", "src/loop_b.rs"] {
+            std::fs::remove_file(root.join(looping)).expect("drop the loop from the checkout");
+        }
+        assert_eq!(
+            branch,
+            present(
+                &scheduler
+                    .capture_authoritative_snapshot_without_active_generation_reuse(None)
+                    .expect("capture the checkout from disk")
+                    .snapshot
+            ),
+            "a branch capture must index the bytes a checkout reads through each link"
+        );
+        let notes = captured
+            .snapshot
+            .files
+            .iter()
+            .find(|file| file.logical_path == "notes.txt")
+            .expect("non-source link keeps its row");
+        assert_eq!(
+            notes.disposition,
+            tracedecay_domain::SnapshotFileDispositionV1::UnsupportedLanguage
+        );
+        assert_eq!(
+            notes.content_digest,
+            crate::code_index::chunks::content_digest(b"AGENTS.md"),
+            "a non-source link is recorded from its committed blob, as before"
         );
     }
 
