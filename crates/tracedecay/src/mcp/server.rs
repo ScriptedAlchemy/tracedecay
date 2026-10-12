@@ -15,6 +15,7 @@ use crate::mcp::project_route::{
 use tracedecay_code_index_runtime::code_index_scheduler::{
     CodeIndexDemandAdmissionV1, CodeIndexDemandUnavailableV1, CodeIndexDemandV1,
 };
+pub(crate) use tracedecay_contracts::code_index_freshness::CODE_INDEX_LINKED_WORKTREE_DISABLED;
 use tracedecay_contracts::code_index_freshness::CODE_INDEX_PUBLICATION_AUTHORITY_CORRUPT;
 use tracedecay_contracts::request_identity::{
     McpConnectionIdentityAuthority, mcp_connection_request_key as application_surface_request_id,
@@ -130,8 +131,6 @@ impl ServerStats {
         }
     }
 }
-
-pub(crate) const CODE_INDEX_LINKED_WORKTREE_DISABLED: &str = "linked_worktree_disabled";
 
 pub(crate) const CODE_INDEX_SCHEDULER_UNAVAILABLE: &str = "code_index_scheduler_unavailable";
 

@@ -16,7 +16,10 @@ use tracedecay_store::{ProjectMemoryAutomaticFactEvidenceV1, ProjectMemoryFactAd
 
 use crate::tracedecay::facts::memory_application_for_db;
 
-use super::*;
+use axum::http::StatusCode;
+use axum::response::Response;
+
+use super::{DashboardStateFixture, admitted_request, admitted_router};
 
 fn admitted_fact(content: &str, metadata: Value) -> Value {
     json!({

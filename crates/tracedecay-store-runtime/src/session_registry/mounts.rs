@@ -738,6 +738,8 @@ impl DaemonSessionRuntimeRegistryV1 {
         ));
         let graph_open_task_key = format!("{shard_id:?}");
         let task_graph = Arc::clone(&graph);
+        let graph_settled = Arc::new(tokio::sync::Notify::new());
+        let task_graph_settled = Arc::clone(&graph_settled);
         let task_database = database.clone();
         let identity = self.identity.clone();
         let registry = self.registry.clone();
@@ -810,6 +812,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 *task_graph
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = state;
+                task_graph_settled.notify_waiters();
                 if let Some(project_id) = task_project_id
                     && let Err(error) =
                         bind_ready_project_memory_graph(&project_owners, &project_id)
@@ -839,6 +842,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             MemoryStoreOwnerV1 {
                 database: database_issuer,
                 graph,
+                graph_settled,
                 graph_open_task_key,
             },
             Arc::new(database),
@@ -1912,6 +1916,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                     error: "test read-only memory owner does not attach a writer graph".to_owned(),
                 },
             )),
+            graph_settled: Arc::new(tokio::sync::Notify::new()),
             graph_open_task_key: format!("{shard_id:?}"),
         })?;
         Ok(database)

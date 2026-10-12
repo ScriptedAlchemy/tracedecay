@@ -6,8 +6,10 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -462,6 +464,23 @@ class HostResultShapes(unittest.TestCase):
         self.assertIsNone(measure.tool_name("Grep"))
 
 
+class ClientResultShapes(unittest.TestCase):
+    def call(self, structured: dict) -> dict:
+        served = subprocess.CompletedProcess([], 0, json.dumps({"structuredContent": structured}), "")
+        with patch.object(measure.subprocess, "run", return_value=served):
+            return measure.TraceDecay("tracedecay", None).call("tracedecay_retrieve", {"handle": "rh_0"})
+
+    def test_enveloped_and_bare_payloads_both_return_the_payload(self) -> None:
+        page = {"content": "- row\n", "next_offset": None}
+        self.assertEqual(self.call({"outcome": {"outcome": "evidence", "value": {"payload": page}}}), page)
+        self.assertEqual(self.call(page), page)
+
+    def test_problem_is_raised_not_returned(self) -> None:
+        with self.assertRaises(measure.ToolProblem) as raised:
+            self.call({"problem": {"code": "application.retained.budget-refused", "message": "too large"}})
+        self.assertEqual(raised.exception.code, "application.retained.budget-refused")
+
+
 class CommandCoverage(unittest.TestCase):
     def test_no_scored_text_reports_null_coverage(self) -> None:
         redacted = [
@@ -489,6 +508,52 @@ class CommandCoverage(unittest.TestCase):
                 self.assertEqual(report["coverage"]["scored_non_error_calls"], 0)
                 self.assertIsNone(report["coverage"]["token_count_coverage"])
                 self.assertIn('"token_count_coverage": null', stdout.getvalue())
+
+    def test_unconsumed_loads_never_exceed_jobs(self) -> None:
+        pulled = []
+
+        def keys():
+            for key in range(10):
+                pulled.append(key)
+                yield key
+
+        loads = measure.in_order(lambda key: key * 10, keys(), 3)
+        self.assertEqual(next(loads), (0, 0))
+        self.assertEqual(pulled, [0, 1, 2])
+        self.assertEqual(list(loads), [(key, key * 10) for key in range(1, 10)])
+
+    def test_sessions_load_concurrently_and_report_in_discovery_order(self) -> None:
+        both_loading = threading.Barrier(2, timeout=30)
+        used = [
+            lcm_row(1, "assistant", "{}", [
+                {"kind": "tool_invocation", "invocation_id": "c1", "name": SEARCH, "arguments": {"query": "config"}}
+            ]),
+            lcm_row(2, "tool", RESULT, [{"kind": "tool_result", "invocation_id": "c1", "content": RESULT, "token_count": 9}]),
+            lcm_row(3, "assistant", "Reading crates/config/src/loader.rs", []),
+        ]
+
+        def load(_client, _provider, session, _scope):
+            both_loading.wait()
+            if session == "unreadable":
+                raise measure.ToolProblem("application.retained.budget-refused", "too large")
+            return used
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "report.json"
+            stderr = io.StringIO()
+            argv = [str(SCRIPT), "--session", "claude:unreadable", "--session", "claude:used", "--jobs", "2", "--json", str(output)]
+            with (
+                patch.object(sys, "argv", argv),
+                patch.object(measure, "discover", return_value={}),
+                patch.object(measure, "load_messages", side_effect=load),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(stderr),
+            ):
+                self.assertEqual(measure.main(), 0)
+            coverage = json.loads(output.read_text())["coverage"]
+        self.assertEqual(coverage["providers"]["claude"], {"discovered": 2, "loaded": 1, "unreadable:budget-refused": 1, "with_tracedecay_calls": 1})
+        self.assertEqual(coverage["scored_calls"], 1)
+        self.assertEqual(stderr.getvalue(), "[2/2] claude 3 messages, 1 tracedecay calls\n")
 
 
 if __name__ == "__main__":

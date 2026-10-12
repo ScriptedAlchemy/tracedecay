@@ -16,12 +16,14 @@ mattered. Two sources:
   agent-authored content; such a row is one the agent would have restored
   with `tracedecay_retrieve`.
 
-A binary that already trims hides the tail behind a retrieval handle, so both
-sources splice each marker's stored rows back through `tracedecay_retrieve`
-before replaying the rule. A marker the store can no longer answer (expired
-handles, sessions recorded under another project) still proves its cut's row
-and byte counts from its own metadata and counts as `markers_unresolved`;
-only its row-use and truth outcomes stay unknown.
+A binary that already trims hides each cut behind a retrieval handle. Both
+sources count every trim marker as the cut it is: its row and byte counts
+from its own metadata, and its rows from `tracedecay_retrieve`. The rule is
+replayed only over the ranked rows the page still shows; context Code rows
+show no utility, so only a trimming binary can cut them. A marker the store
+can no longer answer (expired handles, sessions recorded under another
+project) counts as `markers_unresolved`; only its row-use and truth outcomes
+stay unknown.
 
     scripts/measure-ranked-tail-trim.py --queries scripts/ranked-tail-trim-queries.json
     scripts/measure-ranked-tail-trim.py --branch master --providers claude
@@ -30,8 +32,7 @@ Rule replayed: the longest suffix of unprotected rows after the last row
 scoring above half the block's best utility, starting no earlier than row
 4, cut only when it holds 2+ rows whose marker line would cost fewer bytes
 than the rows it replaces. A row is kept when its name contains every
-query word or a caller `anchor:` route ranked it; a context result with a
-`Lexical Anchors` section keeps every row. Stored sessions keep only the
+query word, an `anchor:` route ranked it, or it has no utility. Stored sessions keep only the
 call's flattened argument values, so they replay with every argument value
 as the query, which can only overstate the cut. `tokens` are bytes/4, the
 repo's footer pricing.
@@ -58,6 +59,7 @@ spec.loader.exec_module(measure)
 
 TOOLS = ("tracedecay_search", "tracedecay_context")
 ROW = re.compile(r"^- \*\*(.+?)\*\* .*?(?:, | · )rank (\d+) · utility (\d+)")
+LISTED = re.compile(r"^- \*\*(.+?)\*\*", re.M)
 MIN_KEPT_ROWS = 3
 MIN_TRIMMED_ROWS = 2
 HANDLE = "rh_" + "0" * 24
@@ -74,12 +76,12 @@ TRIM_MARKER = re.compile(
 class Row:
     name: str
     rank: int
-    utility: int
+    utility: int | None
     protected: bool
     text: str
 
 
-def ranked_blocks(text: str, anchored: bool) -> list[list[Row]]:
+def ranked_blocks(text: str) -> list[list[Row]]:
     """Maximal runs of ranked rows, each row with its indented continuation lines."""
     blocks: list[list[Row]] = []
     current: list[Row] = []
@@ -87,8 +89,7 @@ def ranked_blocks(text: str, anchored: bool) -> list[list[Row]]:
         row = ROW.match(line)
         if row:
             routes = line.split(" · via ", 1)[1] if " · via " in line else ""
-            protected = anchored or "anchor:" in routes
-            current.append(Row(row.group(1), int(row.group(2)), int(row.group(3)), protected, line))
+            current.append(Row(row.group(1), int(row.group(2)), int(row.group(3)), "anchor:" in routes, line))
         elif current and line.startswith("  "):
             current[-1].text += line
         else:
@@ -109,14 +110,21 @@ def names_every_query_word(name: str, query: str) -> bool:
     return bool(words) and all(word in fold(name) for word in words)
 
 
+def best_utility(rows: list[Row]) -> int:
+    return max((row.utility for row in rows if row.utility is not None), default=0)
+
+
 def tail_start(rows: list[Row], query: str) -> int | None:
-    best = max((row.utility for row in rows), default=0)
+    best = best_utility(rows)
     if best == 0:
         return None
     strong = [
         index
         for index, row in enumerate(rows)
-        if row.protected or row.utility * 2 > best or names_every_query_word(row.name, query)
+        if row.protected
+        or row.utility is None
+        or row.utility * 2 > best
+        or names_every_query_word(row.name, query)
     ]
     start = max(strong[-1] + 1 if strong else 0, MIN_KEPT_ROWS)
     return start if len(rows) - start >= MIN_TRIMMED_ROWS else None
@@ -134,13 +142,13 @@ def marker(cut: list[Row], best: int) -> str:
 def trimmed(text: str, query: str) -> list[tuple[list[Row], list[Row], int]]:
     """Per ranked block: (kept rows, cut rows, bytes saved after the marker)."""
     blocks = []
-    for rows in ranked_blocks(text, "\n### Lexical Anchors\n" in text):
+    for rows in ranked_blocks(text):
         start = tail_start(rows, query)
         if start is None:
             blocks.append((rows, [], 0))
             continue
         cut = rows[start:]
-        saved = sum(len(row.text.encode()) for row in cut) - len(marker(cut, max(r.utility for r in rows)).encode())
+        saved = sum(len(row.text.encode()) for row in cut) - len(marker(cut, best_utility(rows)).encode())
         if saved <= 0:
             blocks.append((rows, [], 0))
             continue
@@ -166,37 +174,79 @@ def restored_tail(client: "measure.TraceDecay", handle: str) -> str | None:
         return None
 
 
-def unresolved_tail(match: re.Match) -> tuple[int, int]:
-    """(rows cut, bytes saved) a marker's own metadata proves for a dead handle."""
-    saved = int(match.group("bytes")) - len(match.group(0).encode())
-    return int(match.group("count")), saved
+@dataclass
+class Cut:
+    """One trim marker's cut: rows and bytes saved from its own metadata, and
+    the rows it stands for when its handle still answers."""
+
+    rows: int
+    saved: int
+    tail: str | None
 
 
-def untrimmed(text: str, retrieve: Callable[[str], str | None]) -> tuple[str, list[re.Match]]:
-    """The page with each trim marker's stored tail spliced back verbatim.
+def binary_cuts(text: str, retrieve: Callable[[str], str | None]) -> tuple[str, list[Cut]]:
+    """The page without its trim markers, and the cut each marker stands for.
 
-    Without this splice the replay sees only the kept rows, so it cannot
-    verify the trim's savings or recall on output the binary already trimmed.
-    Returns the spliced page and the markers the store could not answer.
+    A trimming binary already chose these cuts, including cuts of context
+    Code rows, which show no utility and so cannot be replayed from the page.
     """
-    dead: list[re.Match] = []
+    cuts: list[Cut] = []
 
-    def restore(match: re.Match) -> str:
-        tail = retrieve(match.group("handle"))
-        if tail is None:
-            dead.append(match)
-            return match.group(0)
-        return tail
+    def take(match: re.Match) -> str:
+        saved = int(match.group("bytes")) - len(match.group(0).encode())
+        cuts.append(Cut(int(match.group("count")), saved, retrieve(match.group("handle"))))
+        return ""
 
-    return TRIM_MARKER.sub(restore, text), dead
+    return TRIM_MARKER.sub(take, text), cuts
 
 
-def used_later(row: Row, others: str, before: str, later: str) -> bool:
+def listed_rows(text: str) -> list[str]:
+    """Each `- ` row of a stored tail with its indented continuation lines."""
+    rows: list[str] = []
+    for line in text.splitlines(keepends=True):
+        if rows and line.startswith("  "):
+            rows[-1] += line
+        else:
+            rows.append(line)
+    return rows
+
+
+def used_later(row: str, others: str, before: str, later: str) -> bool:
     """An anchor unique to this row (not boilerplate every row shares) occurs later."""
     return any(
         not pattern.search(others) and not pattern.search(before) and pattern.search(later)
-        for line in row.text.splitlines()
+        for line in row.splitlines()
         for _kind, pattern in measure.anchors(line)
+    )
+
+
+@dataclass
+class PageTrim:
+    """One page's cuts: the trimming binary's markers, then the rule replayed
+    over the ranked rows the page still shows."""
+
+    untrimmed_bytes: int
+    saved: int
+    rows: int
+    unresolved: int
+    shown: str
+    cut_rows: list[str]
+
+
+def page_trim(text: str, query: str, retrieve: Callable[[str], str | None]) -> PageTrim:
+    rest, cuts = binary_cuts(text, retrieve)
+    blocks = trimmed(rest, query)
+    replayed = [row.text for _, cut, _ in blocks for row in cut]
+    shown = rest
+    for row in replayed:
+        shown = shown.replace(row, "", 1)
+    return PageTrim(
+        untrimmed_bytes=len(text.encode()) + sum(cut.saved for cut in cuts),
+        saved=sum(saved for _, _, saved in blocks) + sum(cut.saved for cut in cuts),
+        rows=len(replayed) + sum(cut.rows for cut in cuts),
+        unresolved=sum(cut.tail is None for cut in cuts),
+        shown=shown,
+        cut_rows=replayed + [row for cut in cuts if cut.tail is not None for row in listed_rows(cut.tail)],
     )
 
 
@@ -209,24 +259,17 @@ def replay(events: list, stats: Counter, retrieve: Callable[[str], str | None]) 
         tool = measure.tool_name(call.name) if call else None
         if tool not in TOOLS:
             continue
+        page = page_trim(event.text, call.evidence, retrieve)
         stats[f"{tool}:calls"] += 1
-        text, dead = untrimmed(event.text, retrieve)
-        dead_tails = [unresolved_tail(match) for match in dead]
-        stats[f"{tool}:markers_unresolved"] += len(dead)
-        stats[f"{tool}:bytes"] += len(text.encode()) + sum(saved for _, saved in dead_tails)
-        stats[f"{tool}:saved_bytes"] += sum(saved for _, saved in dead_tails)
-        stats[f"{tool}:trimmed_rows"] += sum(rows for rows, _ in dead_tails)
-        stats[f"{tool}:trimmed_calls"] += bool(dead)
+        stats[f"{tool}:bytes"] += page.untrimmed_bytes
+        stats[f"{tool}:saved_bytes"] += page.saved
+        stats[f"{tool}:trimmed_calls"] += bool(page.rows)
+        stats[f"{tool}:trimmed_rows"] += page.rows
+        stats[f"{tool}:markers_unresolved"] += page.unresolved
         before, later, _ = measure.split_evidence(events, index, tool)
-        for kept, cut, saved in trimmed(text, call.evidence):
-            if not cut:
-                continue
-            stats[f"{tool}:trimmed_calls"] += 1
-            stats[f"{tool}:trimmed_rows"] += len(cut)
-            stats[f"{tool}:saved_bytes"] += saved
-            for row in cut:
-                others = "".join(other.text for other in kept + cut if other is not row)
-                stats[f"{tool}:trimmed_rows_used"] += used_later(row, others, before, later)
+        for number, row in enumerate(page.cut_rows):
+            others = page.shown + "".join(other for at, other in enumerate(page.cut_rows) if at != number)
+            stats[f"{tool}:trimmed_rows_used"] += used_later(row, others, before, later)
 
 
 def definitions(repo: str, fragment: str) -> set[str]:
@@ -243,25 +286,22 @@ def run_queries(args: argparse.Namespace, stats: Counter) -> None:
     for item in json.loads(args.queries.read_text()):
         command = [args.binary, "tool", item["tool"], "--args", json.dumps(item["args"])]
         text = subprocess.run(command + ["--project", args.project or args.repo], capture_output=True, text=True, check=False).stdout
-        text, dead = untrimmed(text, lambda handle: restored_tail(client, handle))
-        dead_tails = [unresolved_tail(match) for match in dead]
+        query = item["args"].get("query") or item["args"].get("task", "")
+        page = page_trim(text, query, lambda handle: restored_tail(client, handle))
         truth = definitions(args.repo, item["truth"])
-        blocks = trimmed(text, item["args"].get("query") or item["args"].get("task", ""))
-        kept = {row.name for rows, _, _ in blocks for row in rows}
-        cut = {row.name for _, rows, _ in blocks for row in rows}
-        saved = sum(saved for _, _, saved in blocks)
-        dead_saved = sum(saved for _, saved in dead_tails)
+        kept = set(LISTED.findall(page.shown))
+        cut = {name for row in page.cut_rows for name in LISTED.findall(row)}
         tool = item["tool"]
         stats[f"{tool}:calls"] += 1
-        stats[f"{tool}:bytes"] += len(text.encode()) + dead_saved
-        stats[f"{tool}:markers_unresolved"] += len(dead)
-        stats[f"{tool}:saved_bytes"] += saved + dead_saved
-        stats[f"{tool}:trimmed_calls"] += bool(saved or dead)
-        stats[f"{tool}:trimmed_rows"] += sum(len(rows) for _, rows, _ in blocks) + sum(rows for rows, _ in dead_tails)
+        stats[f"{tool}:bytes"] += page.untrimmed_bytes
+        stats[f"{tool}:markers_unresolved"] += page.unresolved
+        stats[f"{tool}:saved_bytes"] += page.saved
+        stats[f"{tool}:trimmed_calls"] += bool(page.rows)
+        stats[f"{tool}:trimmed_rows"] += page.rows
         stats[f"{tool}:truth_on_page"] += len(truth & (kept | cut))
         stats[f"{tool}:truth_trimmed"] += len(truth & (cut - kept))
         print(
-            f"{json.dumps(item['args'])}: {len(text.encode()) + dead_saved} -> {len(text.encode()) - saved} bytes, "
+            f"{json.dumps(item['args'])}: {page.untrimmed_bytes} -> {page.untrimmed_bytes - page.saved} bytes, "
             f"truth on page {sorted(truth & (kept | cut))}, trimmed {sorted(truth & (cut - kept))}",
             file=sys.stderr,
         )

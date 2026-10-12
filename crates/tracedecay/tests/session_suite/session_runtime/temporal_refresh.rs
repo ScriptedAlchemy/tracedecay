@@ -649,11 +649,7 @@ async fn new_effect_wake_is_bounded_to_its_profile_database() {
 
     let registry = SessionTemporalRefreshSchedulerRegistry::default();
     let first_wake = first_authority.ensure_profile(&registry).await;
-    assert!(
-        registry
-            .wait_profile_idle(first_db.db_path(), Duration::from_secs(2))
-            .await
-    );
+    registry.wait_profile_idle(first_db.db_path()).await;
     assert_eq!(
         scalar(
             first_db,
@@ -674,11 +670,7 @@ async fn new_effect_wake_is_bounded_to_its_profile_database() {
 
     admit_canonical_effect(first_db, &first_session, 4, "second first-profile canary").await;
     first_wake.wake();
-    assert!(
-        registry
-            .wait_profile_idle(first_db.db_path(), Duration::from_secs(2))
-            .await
-    );
+    registry.wait_profile_idle(first_db.db_path()).await;
     assert_eq!(
         scalar(
             first_db,
@@ -1126,11 +1118,7 @@ async fn saturated_recovery_passes_visit_every_operation_before_idling() {
     let wake = authority.ensure_profile(&registry).await;
     assert!(wake.wake());
 
-    assert!(
-        registry
-            .wait_profile_idle(db.db_path(), Duration::from_secs(2))
-            .await
-    );
+    registry.wait_profile_idle(db.db_path()).await;
     assert_eq!(projector.observed_session_count(), 3);
     registry.shutdown().await;
 }
@@ -1233,11 +1221,7 @@ async fn worker_recovery_exposes_blocker_and_drains_backlog() {
         recovering.retry_class,
         Some(SessionTemporalRefreshRetryClass::Projector)
     );
-    assert!(
-        registry
-            .wait_profile_idle(db.db_path(), Duration::from_secs(2))
-            .await
-    );
+    registry.wait_profile_idle(db.db_path()).await;
     let store = tracedecay_session_temporal_store::SessionTemporalStore::new(db);
     assert!(store.running_session_refreshes().await.unwrap().is_empty());
     let recovered = registry.profile_worker_status(db.db_path()).await;
@@ -1471,11 +1455,7 @@ async fn profile_database_has_one_scheduler_and_equivalent_kicks_coalesce() {
 
     assert!(first.same_route(&second));
     assert_eq!(registry.profile_worker_count().await, 1);
-    assert!(
-        registry
-            .wait_profile_idle(db.db_path(), Duration::from_secs(2))
-            .await
-    );
+    registry.wait_profile_idle(db.db_path()).await;
     assert!(registry.profile_pass_count(db.db_path()).await <= 2);
     registry.shutdown().await;
     assert_eq!(registry.profile_worker_count().await, 0);
