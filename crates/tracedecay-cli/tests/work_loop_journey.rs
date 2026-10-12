@@ -820,7 +820,7 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
                                 "max_stdout_bytes": 65536,
                                 "max_stderr_bytes": 65536,
                                 "max_protocol_bytes": 65536,
-                                "max_concurrency": 1
+                                "max_concurrency": 2
                             },
                             "maximum_duration_micros": 600000000,
                             "fallback": { "kind": "disabled" }
