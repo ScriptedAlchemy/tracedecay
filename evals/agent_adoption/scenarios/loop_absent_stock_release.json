@@ -3,7 +3,8 @@
   "category": "code_exploration",
   "pack": "pack_repeated_query",
   "hosts": [
-    "claude"
+    "claude",
+    "codex"
   ],
   "fixture": "main",
   "status": "active",

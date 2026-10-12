@@ -378,6 +378,11 @@ changed course (a different tool or an answer) or repeated the same tool. At
 `REPS=4`, read differences as direction, not significance; check transcripts
 before claiming either way.
 
+Use Claude for this comparison. The hint is added by `tracedecay serve`, and
+Codex in this harness reaches TraceDecay through the `tracedecay-explorer`
+extension and the shell instead: 12 Codex runs of these two scenarios made no
+`serve` call, so no hint could fire in either setting.
+
 ## Adding a scenario
 
 1. Drop a new `scenarios/<id>.json` following the schema above.
