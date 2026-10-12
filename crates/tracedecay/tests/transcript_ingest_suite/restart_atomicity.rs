@@ -19,10 +19,7 @@ use tracedecay_sessions::runtime::hosts::claude::{ClaudeSource, identify_claude_
 use tracedecay_sessions::runtime::hosts::claude_observation::{
     ClaudeObservationIngestError, ingest_source_with_observations_with_admission,
 };
-use tracedecay_sessions::runtime::hosts::cursor::{
-    ingest_cursor_transcript_event as ingest_cursor_transcript_event_registered,
-    try_ingest_cursor_transcript_event as try_ingest_cursor_transcript_event_registered,
-};
+use tracedecay_sessions::runtime::hosts::cursor::try_ingest_cursor_transcript_event_capped_with_admission;
 use tracedecay_sessions::runtime::ingest::test_support::{
     IngestPassOutcome, default_ingest_pass_bounds,
     ingest_user_global_sources_for_provider_with_roots_bounded,
@@ -294,8 +291,9 @@ async fn ingest_cursor_transcript_event(
     runtime: &ProjectSessionTestRuntime,
     project_id: ProjectId,
 ) -> tracedecay_sessions::runtime::hosts::cursor::CursorTranscriptIngestStats {
-    ingest_cursor_transcript_event_registered(event_json, &runtime.runtime.facade(), project_id)
+    try_ingest_cursor_transcript_event(event_json, runtime, project_id)
         .await
+        .expect("cursor transcript ingest")
 }
 
 async fn try_ingest_cursor_transcript_event(
@@ -305,8 +303,13 @@ async fn try_ingest_cursor_transcript_event(
 ) -> tracedecay_sessions::runtime::source::TranscriptIngestResult<
     tracedecay_sessions::runtime::hosts::cursor::CursorTranscriptIngestStats,
 > {
-    try_ingest_cursor_transcript_event_registered(event_json, &runtime.runtime.facade(), project_id)
-        .await
+    try_ingest_cursor_transcript_event_capped_with_admission(
+        event_json,
+        project_id,
+        &runtime.runtime.facade(),
+        None,
+    )
+    .await
 }
 
 /// Runs the production provider sweep with `home` as the transcript source

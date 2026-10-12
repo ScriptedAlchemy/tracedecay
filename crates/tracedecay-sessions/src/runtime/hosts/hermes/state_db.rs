@@ -1,29 +1,20 @@
 //! Bounded `state.db` access: schema probing, byte-capped page reads, and the
 //! per-source ingest drivers.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
-use rayon::prelude::*;
 use tracedecay_domain::{ObservationScopeV1, ObservationSourceGenerationV1, ProjectId};
 
 use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
-use crate::runtime::shared::{
-    ProjectRootMatcher, SqliteReadConn, StoredCursor, TranscriptIngestStats,
-};
+use crate::runtime::shared::{SqliteReadConn, StoredCursor, TranscriptIngestStats};
 use crate::runtime::source::run_blocking_transcript_section;
 
-use super::coverage::{
-    admit_rows_with_admission, admit_rows_with_admission_and_cancellation, sqlite_incarnation,
-};
-use super::ingest::{HermesProfileSource, ProjectIngestDestination};
+use super::coverage::{admit_rows_with_admission_and_cancellation, sqlite_incarnation};
+use super::ingest::HermesProfileSource;
 use super::observation::{HermesProjectionMetadata, project_projection_metadata};
-use super::routing::{
-    turn_project_locations, turn_project_locations_for_destinations, user_turn_locations,
-};
+use super::routing::{turn_project_locations, user_turn_locations};
 use super::rows::{HermesPageRead, HermesRow, hermes_budget_bytes, hermes_page_row_charge};
 use super::{CHUNK_ROWS, MAX_HERMES_IDENTITY_BYTES, MAX_HERMES_PAGE_BYTES, MAX_HERMES_VALUE_BYTES};
 
@@ -541,125 +532,6 @@ pub(super) async fn try_ingest_state_db_bounded_with_admission(
         cancellation,
     )
     .await
-}
-
-/// Shared-source equivalent of [`try_ingest_state_db`]. The `SQLite` page is read
-/// once, then each destination independently admits routed rows against its own
-/// authoritative observation cursor.
-pub(super) async fn try_ingest_state_db_for_projects(
-    source: &HermesProfileSource,
-    destinations: &[ProjectIngestDestination<'_>],
-    budget: &mut IngestByteBudget,
-) -> Result<TranscriptIngestStats, String> {
-    let (conn, generation, file_identity, resume_fingerprint, select_sql) =
-        open_state_source(source).await?;
-    let scopes = destinations
-        .iter()
-        .map(|destination| ObservationScopeV1::Project {
-            project_id: destination.project_id.clone(),
-        })
-        .collect::<Vec<_>>();
-    let destination_matchers = {
-        run_blocking_transcript_section("hermes", {
-            let roots = destinations
-                .iter()
-                .map(|destination| destination.project_root.to_path_buf())
-                .collect::<Vec<_>>();
-            move || {
-                roots
-                    .par_iter()
-                    .map(|root| ProjectRootMatcher::new(root))
-                    .collect::<Vec<_>>()
-            }
-        })
-        .await
-        .map_err(|error| error.to_string())?
-    };
-    let destination_matchers = Arc::new(destination_matchers);
-    let mut read_cursor = StoredCursor::default();
-    let mut stats = TranscriptIngestStats::default();
-    loop {
-        let new = read_new_rows_strict(&conn, &select_sql, read_cursor).await?;
-        let row_count = new.items.len();
-        if row_count == 0 {
-            return Ok(stats);
-        }
-        let bounded_count = new
-            .items
-            .iter()
-            .take_while(|row| budget.try_consume(hermes_budget_bytes(row)))
-            .count();
-        if bounded_count == 0 {
-            return Ok(stats);
-        }
-        let mut items = new.items;
-        let bounded = items.drain(..bounded_count).collect::<Vec<_>>();
-        // Per-page route cache: avoid unbounded growth across many SQLite pages.
-        let (locations, bounded) = {
-            let destination_matchers = Arc::clone(&destination_matchers);
-            run_blocking_transcript_section("hermes", move || {
-                let mut destination_routes = HashMap::<PathBuf, Vec<usize>>::new();
-                turn_project_locations_for_destinations(
-                    &bounded,
-                    &destination_matchers,
-                    &mut destination_routes,
-                )
-                .map(|locations| (locations, bounded))
-            })
-            .await
-            .map_err(|error| error.to_string())?
-        }
-        .map_err(|_| {
-            format!(
-                "could not classify Hermes rows from '{}' because project membership is unknown",
-                source.state_db.display()
-            )
-        })?;
-        for (index, destination) in destinations.iter().enumerate() {
-            let admitted = admit_rows_with_admission(
-                destination.admission,
-                &bounded,
-                scopes[index].clone(),
-                generation,
-                file_identity,
-                resume_fingerprint,
-                |row| {
-                    locations[index]
-                        .by_row_id
-                        .get(&row.id)
-                        .copied()
-                        .map(|provenance| {
-                            project_projection_metadata(
-                                row,
-                                source,
-                                destination.project_root,
-                                provenance,
-                            )
-                        })
-                },
-            )
-            .await?;
-            stats.messages_upserted = stats
-                .messages_upserted
-                .saturating_add(admitted.messages_upserted);
-            stats.sessions_upserted = stats
-                .sessions_upserted
-                .saturating_add(admitted.sessions_upserted);
-        }
-        read_cursor.position = bounded
-            .last()
-            .and_then(|row| u64::try_from(row.id).ok())
-            .unwrap_or(read_cursor.position);
-        if bounded_count < row_count {
-            return Ok(stats);
-        }
-        if new.truncated_by_byte_budget {
-            continue;
-        }
-        if row_count < CHUNK_ROWS {
-            return Ok(stats);
-        }
-    }
 }
 
 pub(super) async fn try_ingest_user_state_db_bounded_with_admission(

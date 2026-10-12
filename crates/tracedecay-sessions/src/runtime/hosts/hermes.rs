@@ -32,12 +32,9 @@ mod state_db;
 mod tests;
 
 pub use callback::{HermesTurnCallbackOutcome, capture_turn_callback};
-pub use ingest::ingest_user_sessions_capped_with_admission;
 pub use ingest::{
-    HermesSweepOutcome, ProjectIngestDestination, ingest_for_project,
-    ingest_for_project_capped_with_admission_and_cancellation, ingest_homes,
-    ingest_homes_capped_with_admission, ingest_homes_for_projects, ingest_user_homes,
-    ingest_user_homes_capped,
+    HermesSweepOutcome, ingest_for_project_capped_with_admission_and_cancellation,
+    ingest_user_sessions_capped_with_admission,
 };
 
 #[cfg(test)]

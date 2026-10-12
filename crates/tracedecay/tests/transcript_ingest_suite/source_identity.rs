@@ -9,7 +9,7 @@ use tracedecay_domain::{
 };
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::runtime::SessionProvider;
-use tracedecay_sessions::runtime::hosts::cursor::ingest_cursor_transcript_event;
+use tracedecay_sessions::runtime::hosts::cursor::try_ingest_cursor_transcript_event_capped_with_admission;
 
 use crate::cline_like::{vscode_storage_root, write_task};
 use crate::codex::write_codex_rollout_with_structured_events;
@@ -123,8 +123,14 @@ async fn cursor_search_uses_path_identity_for_the_selected_project() {
         "transcript_path": transcript,
         "cwd": project,
     });
-    let stats =
-        ingest_cursor_transcript_event(&event.to_string(), &runtime.facade(), project_id).await;
+    let stats = try_ingest_cursor_transcript_event_capped_with_admission(
+        &event.to_string(),
+        project_id,
+        &runtime.facade(),
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(stats.messages_upserted, 2);
 
     let source = ObservationSourceIdentityV1::for_provider(
