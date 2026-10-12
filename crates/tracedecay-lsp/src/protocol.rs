@@ -13,7 +13,7 @@ use serde_json::{Map, Value, json};
 use tracedecay_daemon_protocol::{
     ConnectionLocalRequestSequence, LspFrame, MAX_LSP_FRAME_BYTES, ProcessLocalRequestSequence,
 };
-use tracedecay_domain::{CodeGenerationId, CommitId, ContentDigest, ManifestDigest};
+use tracedecay_domain::ManifestDigest;
 use tracedecay_tool_catalog::BindingId;
 
 use crate::analyzer::broker::DiagnosticSeverity;

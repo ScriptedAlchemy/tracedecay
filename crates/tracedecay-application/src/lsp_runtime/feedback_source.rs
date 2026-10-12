@@ -14,15 +14,15 @@ use tracedecay_domain::feedback::{
     FeedbackContentIdentityV1, FeedbackDiagnosticProducerV1, FeedbackFindingLifecycleV1,
     FeedbackFindingV1,
 };
-use tracedecay_domain::{CodeGenerationId, CommitId, ContentDigest, ManifestDigest, UtcMicros};
+use tracedecay_domain::{ContentDigest, UtcMicros};
 use tracedecay_lsp::{
     AdmittedRoot, CanonicalContextProjectionAuthority, CanonicalDiagnosticRefreshRequest,
     ContextCoverage, ContextExpansionEnvelope, ContextExpansionOutcome, ContextExpansionRequest,
     ContextExpansionScope, ContextFreshness, ContextProducerState, ContextProjectionChange,
-    ContextProjectionEnvelope, ContextProjectionIdentity, ContextProjectionItem,
-    ContextProjectionKind, ContextProjectionOutcome, ContextProjectionRegistration,
-    ContextProjectionRequest, DiagnosticTrigger, FeedbackCycleRequest, FeedbackCycleRuntimePort,
-    LspRequestId, LspRuntimeFailure, LspRuntimeFuture, MAX_CONTEXT_PROJECTION_ITEMS,
+    ContextProjectionEnvelope, ContextProjectionItem, ContextProjectionKind,
+    ContextProjectionOutcome, ContextProjectionRegistration, ContextProjectionRequest,
+    DiagnosticTrigger, FeedbackCycleRequest, FeedbackCycleRuntimePort, LspRequestId,
+    LspRuntimeFailure, LspRuntimeFuture, MAX_CONTEXT_PROJECTION_ITEMS,
     MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES, ManagedDiagnosticSnapshot, ManagedDiagnosticSnapshotPort,
     TRACEDECAY_CONTEXT_REVISION,
 };
@@ -905,7 +905,7 @@ pub(super) fn valid_context_expansion_record(
         && !record.stable_id.is_empty()
         && record.stable_id.len() <= MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES
         && record.scope_digest == scope_digest
-        && valid_projection_identity(&record.identity)
+        && record.identity.is_valid()
         && record.issued_at < record.expires_at
         && record.issued_at <= observed_at
         && observed_at < record.expires_at
@@ -979,18 +979,6 @@ pub(super) fn context_expansion_envelope_for_test_run(
         omission_reason,
         next_retrieval_handle,
     }
-}
-
-pub(super) fn valid_projection_identity(identity: &ContextProjectionIdentity) -> bool {
-    CommitId::new(identity.head_commit_id.clone()).is_ok()
-        && CodeGenerationId::new(identity.code_generation_id.clone()).is_ok()
-        && ManifestDigest::new(identity.snapshot_digest.clone()).is_ok()
-        && ManifestDigest::new(identity.invalidation_digest.clone()).is_ok()
-        && ContentDigest::new(identity.snapshot_content_digest.clone()).is_ok()
-        && identity
-            .document_content_digest
-            .as_ref()
-            .is_none_or(|digest| ContentDigest::new(digest.clone()).is_ok())
 }
 
 pub(super) fn canonical_feedback_value(
