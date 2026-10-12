@@ -6,7 +6,9 @@
 
 use super::*;
 #[cfg(any(test, feature = "test-helpers"))]
-use crate::test_support::hold_after_core_publish_for_test;
+use crate::test_support::{
+    hold_after_core_publish_for_test, hold_after_independent_owners_for_test,
+};
 use tracedecay_agent_hosts::agents::context_scout::owner::unregister_registered_context_scout_owner;
 use tracedecay_agent_hosts::hooks::hook_project_id_for_layout;
 use tracedecay_code_index_runtime::code_index_scheduler;
@@ -1523,6 +1525,10 @@ impl ProjectOpenInputs<'_> {
                 )
                 .await?;
                 self.log_phase("independent_owners_registered", None, full_setup_started);
+                #[cfg(any(test, feature = "test-helpers"))]
+                {
+                    Box::pin(hold_after_independent_owners_for_test()).await?;
+                }
                 project_open_cancellation_checkpoint(self.cancellation)?;
                 project_open_owners::register_project_open_dependent_owners(
                     self.invocation,
