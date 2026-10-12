@@ -65,6 +65,38 @@ pub(super) struct WorktreeResidencyV1 {
     last_used: Mutex<Instant>,
     refresh_waits_for_memory: AtomicBool,
     park_release_after_pass_armed: AtomicBool,
+    pub(super) park_headroom: ParkHeadroomV1,
+}
+
+/// The owner-headroom epochs a worktree's own park releases advanced.
+///
+/// A parked worktree gives back the decode and graph its last pass seated,
+/// and a retry of work it parked on memory decodes that same generation
+/// again, so its own release cannot help it (issue #3588). Waiters subtract
+/// these epochs from the shared epoch and wake only on what other owners gave
+/// back. Coalesced epochs stay countable: another owner's release that lands
+/// beside this worktree's own still leaves the difference ahead.
+#[derive(Default)]
+pub(super) struct ParkHeadroomV1(AtomicU64);
+
+impl ParkHeadroomV1 {
+    fn note(&self, owners: &ResidentOwnersV1) {
+        // Counted before the epoch moves, so a reader never attributes this
+        // release to another owner.
+        self.0.fetch_add(1, Ordering::AcqRel);
+        owners.note_headroom();
+    }
+
+    /// The headroom epochs other owners advanced, up to the epoch `headroom`
+    /// now holds. A park release counted but not yet published reads as a
+    /// lower value; its epoch moving wakes the reader to count again.
+    pub(super) fn released_by_others(
+        &self,
+        headroom: &mut tokio::sync::watch::Receiver<u64>,
+    ) -> u64 {
+        let epoch = *headroom.borrow_and_update();
+        epoch.saturating_sub(self.0.load(Ordering::Acquire))
+    }
 }
 
 pub(super) struct WorktreeResidencyPartsV1 {
@@ -94,12 +126,12 @@ impl WorktreeResidencyV1 {
             last_used: Mutex::new(Instant::now()),
             refresh_waits_for_memory: AtomicBool::new(false),
             park_release_after_pass_armed: AtomicBool::new(false),
+            park_headroom: ParkHeadroomV1::default(),
         }
     }
 
     /// Record whether this worktree's last reconcile was refused for resident
-    /// memory. While it is, memory given back anywhere in the process is its
-    /// retry.
+    /// memory. While it is, memory another owner gives back is its retry.
     pub(super) fn set_refresh_waits_for_memory(&self, waits: bool) {
         self.refresh_waits_for_memory
             .store(waits, Ordering::Release);
@@ -226,7 +258,7 @@ impl WorktreeResidencyV1 {
                 self.arm_park_release_after_first_catalog_warm(owners);
             }
             if !released.is_empty() {
-                owners.note_headroom();
+                self.park_headroom.note(owners);
             }
             return;
         }
@@ -243,7 +275,7 @@ impl WorktreeResidencyV1 {
                 text.code_graph_serving_readiness() == CodeGraphServingReadinessV1::Ready
             }) {
                 if !released.is_empty() {
-                    owners.note_headroom();
+                    self.park_headroom.note(owners);
                 }
                 return;
             }
@@ -275,7 +307,7 @@ impl WorktreeResidencyV1 {
         if released.is_empty() {
             return;
         }
-        owners.note_headroom();
+        self.park_headroom.note(owners);
     }
 
     fn arm_park_release_after_pass_settles(self: &Arc<Self>, owners: &Arc<ResidentOwnersV1>) {
@@ -780,5 +812,39 @@ impl ResidentOwnerV1 for OutgoingGraphOwnerV1 {
                 ResidentOwnerBytesV1::Measured(engine.saturating_add(catalog))
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tracedecay_runtime_core::resident_memory::ResidentOwnersV1;
+
+    use super::ParkHeadroomV1;
+
+    /// Issue #3588: a waiter skips the epochs its own park releases advanced,
+    /// and still sees another owner's release that coalesced with one.
+    #[test]
+    fn only_other_owners_headroom_counts() {
+        let owners = ResidentOwnersV1::new(Duration::from_mins(10));
+        let mut headroom = owners.subscribe_headroom();
+        let park = ParkHeadroomV1::default();
+        let seen = park.released_by_others(&mut headroom);
+
+        park.note(&owners);
+        assert_eq!(
+            park.released_by_others(&mut headroom),
+            seen,
+            "own release only"
+        );
+
+        owners.note_headroom();
+        park.note(&owners);
+        assert_eq!(
+            park.released_by_others(&mut headroom),
+            seen + 1,
+            "another owner's release coalesced with this worktree's own"
+        );
     }
 }

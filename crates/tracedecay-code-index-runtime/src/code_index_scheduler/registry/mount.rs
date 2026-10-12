@@ -730,6 +730,9 @@ impl CodeIndexSchedulerRegistryV1 {
         let worker_resident_owners = Arc::clone(&self.resident_owners);
         let worker_byte_pool = Arc::clone(&self.byte_pool);
         let mut worker_owner_headroom = self.resident_owners.subscribe_headroom();
+        let mut worker_owner_headroom_seen = residency
+            .park_headroom
+            .released_by_others(&mut worker_owner_headroom);
         let mut worker_admission_headroom = self.resident_memory.pressure().subscribe_headroom();
         // Boxed at definition on purpose: this worker's state machine is the
         // largest future in the daemon (reconcile + text advance + decode +
@@ -832,7 +835,10 @@ impl CodeIndexSchedulerRegistryV1 {
             'worker: loop {
                 // Memory given back while the last pass was being refused
                 // reached the watcher before that refusal was visible.
-                let headroom_moved = worker_owner_headroom.has_changed().unwrap_or(false)
+                let headroom_moved = worker_residency
+                    .park_headroom
+                    .released_by_others(&mut worker_owner_headroom)
+                    > worker_owner_headroom_seen
                     || worker_admission_headroom.has_changed().unwrap_or(false);
                 if headroom_moved
                     && worktree_waits_for_memory(
@@ -901,7 +907,11 @@ impl CodeIndexSchedulerRegistryV1 {
                     )
                     .await;
                 }
-                worker_owner_headroom.mark_unchanged();
+                worker_owner_headroom_seen = worker_owner_headroom_seen.max(
+                    worker_residency
+                        .park_headroom
+                        .released_by_others(&mut worker_owner_headroom),
+                );
                 worker_admission_headroom.mark_unchanged();
                 super::CodeIndexWorkerPhaseV1::enter(
                     &worker_phase_signal,
@@ -3802,12 +3812,17 @@ impl CodeIndexSchedulerRegistryV1 {
                 worktree_id: worktree_id.clone(),
             },
         );
-        // Memory given back anywhere in the process is the retry for work
-        // refused for it: an owner released, or the resident-memory authority
-        // finding a refused request would now fit. It wakes the worker even
-        // over an arrival a refused pass restored without a permit. The
-        // watcher holds no strong reference, so it ends with the worktree.
+        // Memory given back is the retry for work refused for it: another
+        // owner released, or the resident-memory authority finding a refused
+        // request would now fit. This worktree's own park releases are not:
+        // the retry would decode that same memory back (issue #3588). It
+        // wakes the worker even over an arrival a refused pass restored
+        // without a permit. The watcher holds no strong reference, so it
+        // ends with the worktree.
         let mut owner_headroom = self.resident_owners.subscribe_headroom();
+        let mut owner_headroom_seen = residency
+            .park_headroom
+            .released_by_others(&mut owner_headroom);
         let mut admission_headroom = self.resident_memory.pressure().subscribe_headroom();
         let headroom_pending_wake = Arc::downgrade(&pending_wake);
         let headroom_wake = Arc::downgrade(&wake);
@@ -3816,9 +3831,9 @@ impl CodeIndexSchedulerRegistryV1 {
         let headroom_residency = Arc::downgrade(&residency);
         tokio::spawn(async move {
             loop {
-                let changed = tokio::select! {
-                    changed = owner_headroom.changed() => changed,
-                    changed = admission_headroom.changed() => changed,
+                let (changed, owner_released) = tokio::select! {
+                    changed = owner_headroom.changed() => (changed, true),
+                    changed = admission_headroom.changed() => (changed, false),
                 };
                 let (
                     Ok(()),
@@ -3838,6 +3853,15 @@ impl CodeIndexSchedulerRegistryV1 {
                 else {
                     return;
                 };
+                if owner_released {
+                    let by_others = residency
+                        .park_headroom
+                        .released_by_others(&mut owner_headroom);
+                    if by_others <= owner_headroom_seen {
+                        continue;
+                    }
+                    owner_headroom_seen = by_others;
+                }
                 if worktree_waits_for_memory(&text, &park, &residency) {
                     Self::note_wake(
                         &pending_wake,
