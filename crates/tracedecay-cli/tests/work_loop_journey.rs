@@ -86,6 +86,7 @@ const PARALLEL_RUN_A: &str = "run.work-loop-journey.parallel-a";
 const PARALLEL_RUN_B: &str = "run.work-loop-journey.parallel-b";
 const ALPHA_ATTEMPT_ID: &str = "attempt.work-loop-journey.alpha";
 const BETA_ATTEMPT_ID: &str = "attempt.work-loop-journey.beta";
+const MISPLACED_ATTEMPT_ID: &str = "attempt.work-loop-journey.misplaced";
 const FENCED_ATTEMPT_ID: &str = "attempt.work-loop-journey.fenced";
 const SYNTHESIS_ATTEMPT_ID: &str = "attempt.work-loop-journey.synthesis";
 /// The stand-in derives each source's tag from the last word, so the two
@@ -824,6 +825,7 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
     let argv_marker = scripts.path().join("argv");
     let stdin_marker = scripts.path().join("stdin");
     let started_marker = scripts.path().join("started");
+    let cwd_marker = scripts.path().join("cwd");
     let synthesis_stdin_marker = scripts.path().join("synthesis-stdin");
     let hold_marker = scripts.path().join("release-parallel-sources");
     // The synthesize arm comes first because a synthesis stdin carries the
@@ -835,17 +837,19 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         "provider",
         &format!(
             r#"#!/bin/sh
+pwd -P > {cwd}
 printf '%s' "$*" > {argv}
 input=$(cat)
 printf '%s' "$input" > {stdin}
 case "$input" in
   *synthesize*) printf '%s' "$input" > {synthesis_stdin};;
   *cancellation*) printf x > {started}; i=0; while [ $i -lt 300 ]; do sleep 1; i=$((i+1)); done;;
-  *parallel*) tag=${{input##* }}; printf x > {scripts}/started-$tag; i=0; while [ ! -e {hold} ] && [ $i -lt 3000 ]; do sleep 0.1; i=$((i+1)); done; printf '{{"type":"assistant","source":"%s"}}\n' "$tag";;
+  *parallel*) tag=${{input##* }}; pwd -P > {scripts}/cwd-$tag; printf x > {scripts}/started-$tag; i=0; while [ ! -e {hold} ] && [ $i -lt 3000 ]; do sleep 0.1; i=$((i+1)); done; printf '{{"type":"assistant","source":"%s"}}\n' "$tag";;
 esac
 printf '%s' '{STREAM_TAIL}'
 exit 0
 "#,
+            cwd = cwd_marker.display(),
             argv = argv_marker.display(),
             stdin = stdin_marker.display(),
             started = started_marker.display(),
@@ -1218,6 +1222,11 @@ exit 0
         INSTRUCTIONS,
         "the attempt instructions must reach the provider's stdin"
     );
+    assert_eq!(
+        fs::read_to_string(&cwd_marker).expect("provider cwd marker"),
+        format!("{}\n", fixture.project.canonicalize().unwrap().display()),
+        "a run without a placement runs in the worktree root its start named"
+    );
 
     // The receipt is truthful about the route: it reports what was requested
     // and what actually ran, as two separate facts.
@@ -1430,14 +1439,14 @@ exit 0
         &prepared_parallel_admission["request"],
     );
 
-    // Each parallel run is placed in its own linked worktree. Placement is
-    // its own authority: start-attempt does not consult it, so it is asserted
-    // as a separate fact rather than as what controls the attempt's cwd.
+    // Each parallel run is placed in its own linked worktree, and an admitted
+    // placement binds where its run's attempts execute.
     let runs = [
         (TASK_ID, PARALLEL_RUN_A, "placement-a"),
         (PARALLEL_TASK_ID, PARALLEL_RUN_B, "placement-b"),
     ];
-    let placement_root = |name: &str| fixture._home.path().join(name);
+    let placement_home = fixture._home.path().to_path_buf();
+    let placement_root = |name: &str| placement_home.join(name);
     for (task_id, run_id, name) in runs {
         run_ok(
             Command::new("git")
@@ -1473,17 +1482,33 @@ exit 0
         assert_eq!(placed["authority_version"], 1, "{placed}");
     }
 
+    let misplaced = fixture.problem(
+        "start a placed run outside its placement",
+        "/application/work/start-attempt",
+        &start_attempt_body(
+            &fixture.project,
+            &attempt_identity(TASK_ID, PARALLEL_RUN_A, MISPLACED_ATTEMPT_ID),
+            admitted["execution_snapshot"].clone(),
+            ALPHA_INSTRUCTIONS,
+            now_micros(),
+        ),
+    );
+    assert_eq!(
+        misplaced["code"], "application.work-attempt.placement-root-conflict",
+        "a start outside the admitted placement root must be refused: {misplaced}"
+    );
+
     let alpha = attempt_identity(TASK_ID, PARALLEL_RUN_A, ALPHA_ATTEMPT_ID);
     let beta = attempt_identity(PARALLEL_TASK_ID, PARALLEL_RUN_B, BETA_ATTEMPT_ID);
-    for (identity, snapshot, instructions) in [
-        (&alpha, &admitted, ALPHA_INSTRUCTIONS),
-        (&beta, &parallel_admitted, BETA_INSTRUCTIONS),
+    for (identity, snapshot, instructions, placement) in [
+        (&alpha, &admitted, ALPHA_INSTRUCTIONS, "placement-a"),
+        (&beta, &parallel_admitted, BETA_INSTRUCTIONS, "placement-b"),
     ] {
         let leased = fixture.payload(
             "start a parallel source",
             "/application/work/start-attempt",
             &start_attempt_body(
-                &fixture.project,
+                &placement_root(placement),
                 identity,
                 snapshot["execution_snapshot"].clone(),
                 instructions,
@@ -1518,6 +1543,17 @@ exit 0
             Err(format!("{listed}"))
         }
     });
+    for (tag, placement) in [("alpha", "placement-a"), ("beta", "placement-b")] {
+        assert_eq!(
+            fs::read_to_string(scripts.path().join(format!("cwd-{tag}")))
+                .expect("source cwd marker"),
+            format!(
+                "{}\n",
+                placement_root(placement).canonicalize().unwrap().display()
+            ),
+            "a placed run's provider must run in its placement root"
+        );
+    }
 
     let run_a = json!({ "task_id": TASK_ID, "run_id": PARALLEL_RUN_A });
     let paused = fixture.payload(
@@ -1540,7 +1576,7 @@ exit 0
         "start an attempt on the paused run",
         "/application/work/start-attempt",
         &start_attempt_body(
-            &fixture.project,
+            &placement_root("placement-a"),
             &attempt_identity(TASK_ID, PARALLEL_RUN_A, FENCED_ATTEMPT_ID),
             admitted["execution_snapshot"].clone(),
             ALPHA_INSTRUCTIONS,
@@ -1604,7 +1640,7 @@ exit 0
     let synthesis_identity = attempt_identity(TASK_ID, PARALLEL_RUN_A, SYNTHESIS_ATTEMPT_ID);
     let synthesis = json!({
         "start": start_attempt_body(
-            &fixture.project,
+            &placement_root("placement-a"),
             &synthesis_identity,
             admitted["execution_snapshot"].clone(),
             SYNTHESIS_INSTRUCTIONS,

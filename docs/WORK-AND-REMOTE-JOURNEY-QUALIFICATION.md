@@ -42,8 +42,8 @@ digest. With the per-repository cap left at one, the second start fails with
 | --- | --- |
 | Concurrency policy | The default topology admits one active attempt. A protected preview and apply raise the global and per-repository caps to two, committing on the previewed revision, and take effect after a restart. |
 | Propose, accept, admit | A second task is added, its generated proposal recommends `proceed_to_acceptance`, it is accepted, and its execution is admitted. |
-| Place | Each run gets a linked worktree whose preflight has no blockers and whose admission is at authority version 1. |
-| Parallel attempts | One `list-attempts` read shows both sources `running` while both stand-in processes have started. Neither can exit before the test releases them. |
+| Place | Each run gets a linked worktree whose preflight has no blockers and whose admission is at authority version 1. A start on run A that names the primary checkout is refused with `application.work-attempt.placement-root-conflict`. |
+| Parallel attempts | One `list-attempts` read shows both sources `running` while both stand-in processes have started, each in its own placement root. Neither can exit before the test releases them. |
 | Pause | Pausing run A records exactly the in-flight attempt it fenced, and a new start on run A is refused with `application.work-run-control.paused`. The fenced attempt still settles. |
 | Restart | After a daemon restart, run A's control record equals the pause response field for field, run B is uncontrolled, and both attempt-status payloads equal their pre-restart values. |
 | Resume and synthesize | Synthesis is refused while paused. After resume it is admitted, cites exactly the two source digests with nothing uncited, succeeds, and its provider receives both digests on stdin. |
@@ -74,9 +74,10 @@ concurrency caps the operator set, a pause that fences new attempts while
 in-flight ones settle, run state and receipts that survive a restart, and a
 synthesis whose cited digests are the exact source artifacts.
 
-**Gaps found.** An admitted placement does not bind where an attempt runs.
+**Gaps found.** An admitted placement did not bind where an attempt runs.
 Both parallel attempts ran in the primary checkout while their runs held
-distinct linked-worktree placements (#3693). A `clean_in_place` preflight on
+distinct linked-worktree placements (#3693). Start now refuses an attempt
+outside its run's admitted placement root. A `clean_in_place` preflight on
 a checkout created with `git init --separate-git-dir` reports
 `target_unreadable` (#3694), which is why the journey places both runs in
 linked worktrees. The route limit `max_concurrency` travels in every execution
