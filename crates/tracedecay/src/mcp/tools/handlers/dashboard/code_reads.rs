@@ -9,9 +9,7 @@ use tracedecay_contracts::ResolvedScope;
 use tracedecay_contracts::branch_snapshots::{
     LocalBranchReadControlV1, LocalBranchRevisionV1, LocalBranchSnapshotErrorV1,
 };
-use tracedecay_contracts::retrieval::{
-    SimilarCoverageV1, SimilarFamilyV1, SimilarMatchClassV1, SimilarResultV1,
-};
+use tracedecay_contracts::retrieval::{SimilarFamilyV1, SimilarResultV1};
 use tracedecay_dashboard_api::code_read_api::{
     DashboardCodeReadErrorV1, DashboardCodeReadPortV1, DashboardRevisionPairReadFuture,
     DashboardRevisionPairRequestV1, DashboardRevisionSelectionV1, DashboardSharedFamilyReadFuture,
@@ -22,6 +20,9 @@ use tracedecay_dashboard_api::code_read_api::{
 use tracedecay_domain::{
     CodeGenerationId, CursorBindingV1, FileIdentityDigest, GitOidV1, SnapshotFileDispositionV1,
     SymbolIdentityDigest, decode_bound_cursor, encode_bound_cursor,
+};
+use tracedecay_mcp::handlers::graph::{
+    clone_normalization_class, similar_coverage, similar_match_class,
 };
 use tracedecay_query::code_search::{
     CodeIndexBranchSymbolV1, CodeIndexSearchAuthorityV1, CodeIndexSearchUnavailableReasonV1,
@@ -74,18 +75,10 @@ impl DashboardCodeReadPortV1 for DashboardCodeReadAdapter {
                 .map(|encoded| decode_bound_cursor(&cursor_binding, encoded))
                 .transpose()
                 .map_err(DashboardCodeReadErrorV1::CursorRefused)?;
-            let match_class = match request.match_class {
-                SimilarMatchClassV1::ConservativeExact => {
-                    tracedecay_code_index::clones::CloneNormalizationClassV1::Conservative
-                }
-                SimilarMatchClassV1::RenameNormalizedExact => {
-                    tracedecay_code_index::clones::CloneNormalizationClassV1::Rename
-                }
-            };
             let outcome = (self.similar_executor)(CodeIndexSimilarRequestV1 {
                 project_root: self.project_root.clone(),
                 target: CodeIndexSimilarTargetV1::SymbolOccurrence(request.symbol_occurrence_id),
-                match_classes: vec![match_class],
+                match_classes: vec![clone_normalization_class(request.match_class)],
                 result_limit: request.limit,
                 work_limit: request.limit.saturating_add(1),
                 cursor,
@@ -238,14 +231,6 @@ fn shared_family_result(
         .exact_groups
         .into_iter()
         .map(|group| {
-            let match_class = match group.key.class {
-                tracedecay_code_index::clones::CloneNormalizationClassV1::Conservative => {
-                    SimilarMatchClassV1::ConservativeExact
-                }
-                tracedecay_code_index::clones::CloneNormalizationClassV1::Rename => {
-                    SimilarMatchClassV1::RenameNormalizedExact
-                }
-            };
             let unfiltered_member_count = group.members.len();
             let members = group
                 .members
@@ -265,7 +250,7 @@ fn shared_family_result(
                 .transpose()
                 .map_err(|_| DashboardCodeReadErrorV1::Internal)?;
             Ok(SimilarFamilyV1 {
-                match_class,
+                match_class: similar_match_class(group.key.class),
                 normalization_revision: group.key.normalization_revision,
                 family_digest: group.key.digest,
                 representative_payload_digest: representative_payload_digest.clone(),
@@ -276,27 +261,7 @@ fn shared_family_result(
             })
         })
         .collect::<Result<Vec<_>, DashboardCodeReadErrorV1>>()?;
-    let coverage = match result.source.occurrence.eligibility {
-        tracedecay_code_index::clones::CloneBodyEligibilityV1::Eligible if complete => {
-            SimilarCoverageV1::Complete
-        }
-        tracedecay_code_index::clones::CloneBodyEligibilityV1::Eligible => {
-            SimilarCoverageV1::Partial
-        }
-        tracedecay_code_index::clones::CloneBodyEligibilityV1::ExcludedTooSmall {
-            minimum_tokens,
-        } => SimilarCoverageV1::ExcludedTooSmall { minimum_tokens },
-        tracedecay_code_index::clones::CloneBodyEligibilityV1::ExcludedTooLarge {
-            maximum_tokens,
-            maximum_bytes,
-        } => SimilarCoverageV1::ExcludedTooLarge {
-            maximum_tokens,
-            maximum_bytes,
-        },
-        tracedecay_code_index::clones::CloneBodyEligibilityV1::ExcludedIncompleteTokenization => {
-            SimilarCoverageV1::ExcludedIncompleteTokenization
-        }
-    };
+    let coverage = similar_coverage(result.source.occurrence.eligibility, complete);
     Ok(SimilarResultV1 {
         source_generation: source.source_generation.clone(),
         source,
