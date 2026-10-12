@@ -13,8 +13,8 @@
 //! all test code out of its census. Dead code and health treat only actual
 //! tests as entrypoints, so an uncalled test helper is still dead code —
 //! including `test_helper`, a `test*` name in a Rust test file, which the
-//! Rust runner never invokes without `#[test]`. The other runners' file and
-//! owner rules are pinned by unit tests in `test_classification`.
+//! Rust runner never invokes without `#[test]`. Runners that discover tests
+//! by name need the runner's file form and, for methods, a test-case owner.
 
 #![cfg(feature = "test-transport")]
 
@@ -285,6 +285,93 @@ async fn reports_share_one_classification_and_keep_production_test_names_visible
         redundancy(&gated_health),
         json!({"dead_count": 1, "total_fns": 1}),
         "{gated_health}"
+    );
+
+    fixture.harness.shutdown().await;
+}
+
+/// One file per name-discovering runner, each holding a runner-discovered
+/// test beside a same-named helper the runner never invokes.
+fn write_runner_sources(project: &Path) {
+    for (path, source) in [
+        (
+            "pkg/client_test.go",
+            "package pkg\n\nimport \"testing\"\n\nfunc TestConnect(t *testing.T) {}\n\nfunc helper() {}\n",
+        ),
+        ("tests/helper.go", "package tests\n\nfunc TestHelper() {}\n"),
+        (
+            "tests/test_client.py",
+            "import unittest\n\n\ndef test_runs():\n    pass\n\n\nclass ClientTest(unittest.TestCase):\n    def testConnect(self):\n        pass\n\n\nclass Client:\n    def test_connects(self):\n        pass\n",
+        ),
+        ("tests/helper.py", "def test_helper():\n    pass\n"),
+        (
+            "app/tests.py",
+            "from django.test import TestCase\n\n\nclass BookTests(TestCase):\n    def test_creates(self):\n        pass\n",
+        ),
+        (
+            "src/test/java/FormatTest.java",
+            "public class FormatTest extends junit.framework.TestCase {\n    public void testFormat() {}\n}\n",
+        ),
+        (
+            "src/test/java/FormatHelper.java",
+            "public class FormatHelper {\n    public void testFormat() {}\n}\n",
+        ),
+        (
+            "tests/SaveTest.php",
+            "<?php\n\nclass SaveTest extends TestCase\n{\n    public function testSaves() {}\n}\n\nclass SaveHelper\n{\n    public function testSaves() {}\n}\n",
+        ),
+        (
+            "test/save_test.rb",
+            "class SaveTest < Minitest::Test\n  def test_saves\n  end\nend\n\nclass Saver\n  def test_saves\n  end\nend\n",
+        ),
+        (
+            "Tests/AppTests/AppTests.swift",
+            "import XCTest\n\nclass AppTests: XCTestCase {\n    func testLaunch() {}\n}\n\nclass Launcher {\n    func testLaunch() {}\n}\n",
+        ),
+        (
+            "Tests/LegacyTests.m",
+            "@implementation LegacyTests\n- (void)testLaunch {}\n@end\n\n@implementation LegacyLauncher\n- (void)testLaunch {}\n@end\n",
+        ),
+    ] {
+        let path = project.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, source).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn runners_discover_tests_by_file_and_owner_not_name_alone() {
+    let fixture = production_composition_fixture_with_sources(write_runner_sources).await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production runner server");
+    wait_for_current_graph(&server).await;
+
+    let dead = call_json(
+        &fixture,
+        "tracedecay_dead_code",
+        json!({
+            "format": "json",
+            "include_public": true,
+            "kinds": ["function", "method", "struct_method"],
+        }),
+    )
+    .await;
+    assert_eq!(
+        dead_code_census(&dead),
+        json!([
+            {"name": "TestHelper", "file": "tests/helper.go"},
+            {"name": "helper", "file": "pkg/client_test.go"},
+            {"name": "testFormat", "file": "src/test/java/FormatHelper.java"},
+            {"name": "testLaunch", "file": "Tests/AppTests/AppTests.swift"},
+            {"name": "testLaunch", "file": "Tests/LegacyTests.m"},
+            {"name": "testSaves", "file": "tests/SaveTest.php"},
+            {"name": "test_connects", "file": "tests/test_client.py"},
+            {"name": "test_helper", "file": "tests/helper.py"},
+            {"name": "test_saves", "file": "test/save_test.rb"},
+        ]),
+        "only the helpers each runner skips are dead: {dead}"
     );
 
     fixture.harness.shutdown().await;

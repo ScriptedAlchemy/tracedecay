@@ -6,8 +6,9 @@
 //! and the `Contains` edges that bind each gate to the items it encloses. A
 //! name alone never makes a symbol test code. Name discovery
 //! ([`name_discovered_test`]) marks only the unannotated items that pytest,
-//! Go's `testing`, JUnit 3, PHPUnit, and minitest invoke by name: the file
-//! and the owning type must satisfy that runner's discovery rules.
+//! unittest, Go's `testing`, JUnit 3, PHPUnit, XCTest, and minitest invoke by
+//! name: the file and the owning type must satisfy that runner's discovery
+//! rules.
 
 use std::collections::{HashMap, HashSet};
 
@@ -34,28 +35,10 @@ pub(crate) struct TestClassification {
     owners: HashMap<String, String>,
 }
 
-/// `Contains` parent kinds that can hold a test-case class's methods.
-const OWNER_KINDS: &[&str] = &[
-    "class",
-    "inner_class",
-    "case_class",
-    "data_class",
-    "sealed_class",
-    "record",
-    "pascal_record",
-    "struct",
-    "union",
-    "enum",
-    "trait",
-    "impl",
-    "interface",
-    "object",
-    "kotlin_object",
-    "companion_object",
-    "mixin",
-    "extension",
-    "proto_message",
-];
+/// `Contains` parent kinds that can hold a name-discovered test-case
+/// class's methods: a class, a Java nested class, an Objective-C
+/// `@implementation`, or a Swift extension of the test class.
+const OWNER_KINDS: &[&str] = &["class", "inner_class", "impl", "extension"];
 
 impl TestClassification {
     /// `symbols` pairs records with their logical paths. `edges` must hold the
@@ -154,10 +137,8 @@ impl TestClassification {
     }
 
     /// A test a runner invokes itself, which is live with no caller: a test
-    /// annotation's target, or a name and owner satisfying the runner's
-    /// discovery rules (`test_*` functions and methods in pytest test files,
-    /// `Test*` functions in Go `_test.go` files, `test*` methods on test-case
-    /// classes).
+    /// annotation's target, or a name, file, and owner satisfying that
+    /// runner's discovery rules ([`name_discovered_test`]).
     pub(crate) fn is_test_entrypoint(&self, file: &str, record: &LineageSymbolRecordV1) -> bool {
         self.is_test_annotated(record.occurrence.as_str())
             || name_discovered_test(
@@ -520,8 +501,8 @@ mod tests {
 
     #[test]
     fn name_discovery_needs_the_runner_file_and_owner() {
-        // Go discovers only top-level `Test*` functions in `_test.go` files
-        // and testify `*Suite` methods.
+        // Go discovers `Test*` functions and testify suite methods only in
+        // `_test.go` files; a method's receiver is never its attested owner.
         let go_helper = record(
             "symbol.go_helper",
             "tests/helper.go::TestHelper",
@@ -529,22 +510,15 @@ mod tests {
             (0, 1),
             None,
         );
-        let go_suite = record(
-            "symbol.go_suite",
-            "pkg/client_test.go::ClientSuite",
-            "struct",
-            (0, 5),
-            None,
-        );
         let go_suite_method = record(
             "symbol.go_suite_method",
-            "pkg/client_test.go::ClientSuite::TestConnect",
+            "pkg/client_test.go::TestConnect",
             "struct_method",
             (0, 1),
             None,
         );
-        // pytest discovers module-level `test_*` functions only in
-        // `test_*.py`/`*_test.py`, and `test_*` methods only on test-case
+        // pytest discovers module-level `test*` functions only in
+        // `test_*.py`/`*_test.py`, and `test*` methods only on test-case
         // classes.
         let pytest_module = record(
             "symbol.py_module",
@@ -634,7 +608,6 @@ mod tests {
         );
         let symbols: Vec<(&str, &LineageSymbolRecordV1)> = vec![
             ("tests/helper.go", &go_helper),
-            ("pkg/client_test.go", &go_suite),
             ("pkg/client_test.go", &go_suite_method),
             ("tests/test_mod.py", &pytest_module),
             ("tests/helper.py", &pytest_helper),
@@ -650,7 +623,6 @@ mod tests {
             ("test/save_test.rb", &minitest_method),
         ];
         let edges = [
-            contains(&go_suite, &go_suite_method),
             contains(&pytest_class, &pytest_method),
             contains(&ordinary_class, &ordinary_method),
             contains(&junit_class, &junit_method),

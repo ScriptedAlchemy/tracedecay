@@ -116,15 +116,16 @@ fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
 /// `path`, given the name of the type that owns it when the parser attested
 /// one (`None` for top-level items and owners outside the census).
 ///
-/// Each runner's discovery rules decide: `go test` runs only top-level
-/// `Test*` functions in `_test.go` files; pytest runs `test_*` functions in
-/// `test_*.py`/`*_test.py` files and `test_*` methods on test-case classes;
-/// JUnit 3, PHPUnit, and minitest run `test*`/`test_*` methods only on
-/// test-case classes. The superclass that proves class eligibility usually
-/// sits outside the census, so it falls back to the conventional
-/// `Test*`/`*Test`/`TestCase`/`Suite` names, and an unattested owner declines
-/// rather than hide a helper on an ordinary class. Languages whose runners
-/// need annotations or explicit calls return `false`.
+/// Each runner's discovery rules decide: `go test` runs `Test*` functions,
+/// and testify `Test*` suite methods, only in `_test.go` files (the parser
+/// never attests a Go method's receiver as its owner); pytest and unittest
+/// run `test*` functions and test-case methods in `test*.py`/`*_test.py`
+/// files; JUnit 3, PHPUnit, and XCTest run `test*` methods and minitest
+/// `test_*` methods only on test-case classes. The superclass that proves
+/// class eligibility usually sits outside the census, so it falls back to
+/// the conventional `Test*`/`*Test`/`*Tests`/`*TestCase` names, and an
+/// unattested owner declines rather than hide a helper on an ordinary class.
+/// Languages whose runners need annotations or explicit calls return `false`.
 pub fn name_discovered_test(path: &str, simple_name: &str, owner_name: Option<&str>) -> bool {
     let language = std::path::Path::new(path)
         .extension()
@@ -140,17 +141,13 @@ pub fn name_discovered_test(path: &str, simple_name: &str, owner_name: Option<&s
         .and_then(|name| name.to_str())
         .unwrap_or_default();
     match language {
-        Some("go") => {
-            basename.ends_with("_test.go")
-                && owner_name.is_none_or(is_test_case_name)
-                && simple_name.starts_with("Test")
-        }
+        Some("go") => basename.ends_with("_test.go") && simple_name.starts_with("Test"),
         Some("python") => {
-            (basename.starts_with("test_") || basename.ends_with("_test.py"))
+            (basename.starts_with("test") || basename.ends_with("_test.py"))
                 && owner_name.is_none_or(is_test_case_name)
-                && simple_name.starts_with("test_")
+                && simple_name.starts_with("test")
         }
-        Some("java") | Some("php") => {
+        Some("java" | "php" | "swift" | "objc") => {
             is_test_file(path)
                 && owner_name.is_some_and(is_test_case_name)
                 && simple_name.starts_with("test")
@@ -165,14 +162,13 @@ pub fn name_discovered_test(path: &str, simple_name: &str, owner_name: Option<&s
 }
 
 /// A class name that conventionally holds runner-discovered tests: the
-/// `Test*` and `*Test`/`*Tests`/`*TestCase` names JUnit, PHPUnit, minitest,
-/// pytest, and unittest derive test cases from, plus testify's `*Suite`.
+/// `Test*` and `*Test`/`*Tests`/`*TestCase` names JUnit, PHPUnit, XCTest,
+/// minitest, pytest, and unittest derive test cases from.
 fn is_test_case_name(name: &str) -> bool {
     name.starts_with("Test")
         || name.ends_with("Test")
         || name.ends_with("Tests")
         || name.ends_with("TestCase")
-        || name.ends_with("Suite")
 }
 
 fn language_descriptors() -> &'static languages::StaticLanguageRegistry {
