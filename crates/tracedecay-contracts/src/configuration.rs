@@ -31,7 +31,9 @@ use crate::capability_manifest::{
 };
 use crate::current_application_bindings;
 use crate::error::ApplicationContractError;
-use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
+use crate::handlers::{
+    ApplicationHandlerDescriptor, ApplicationOperation, capability_executable_schema,
+};
 use crate::result::ResultContractRef;
 use crate::retrieval::catalog::{
     APPLICATION_ADMINISTRATIVE_PROFILE_ID, APPLICATION_DEFAULT_PROFILE_ID, application_profile_ids,
@@ -596,21 +598,13 @@ where
     Request: JsonSchema,
     Response: JsonSchema,
 {
-    let capability_id = CapabilityId::new(capability_id(operation))?;
-    let manifest = contribution
-        .capabilities()
-        .binary_search_by(|manifest| manifest.capability_id().cmp(&capability_id))
-        .ok()
-        .map(|index| &contribution.capabilities()[index])
-        .ok_or(ApplicationContractError::Inconsistent {
-            field: "configuration schema capability",
-        })?;
-    Ok(ExecutableSchemaAuthority::for_types_at_paths::<
-        Request,
-        Response,
-    >(
-        manifest, request_rust_type_path, result_rust_type_path
-    )?)
+    capability_executable_schema::<Request, Response>(
+        contribution,
+        &CapabilityId::new(capability_id(operation))?,
+        "configuration schema capability",
+        request_rust_type_path,
+        result_rust_type_path,
+    )
 }
 
 pub fn configuration_surface_handler_descriptors()

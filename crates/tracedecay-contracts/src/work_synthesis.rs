@@ -23,8 +23,8 @@ use std::collections::BTreeSet;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
-    ManifestDigest, WorkAttemptIdentityV1, WorkAttemptStateV1, WorkAttemptV1,
-    WorkTerminalEvidenceV1, WorkflowOutputName, canonical_sha256,
+    ManifestDigest, WorkAttemptIdentityV1, WorkAttemptStateV1, WorkAttemptV1, WorkflowOutputName,
+    canonical_sha256,
 };
 
 use crate::work_attempt::{
@@ -318,7 +318,7 @@ fn source_outcome(
     let evidence_digest = || {
         attempt
             .terminal()
-            .map(terminal_digest)
+            .map(|terminal| terminal.evidence_digest().clone())
             .ok_or_else(contract_problem)
     };
     Ok(match attempt.state() {
@@ -340,23 +340,6 @@ fn source_outcome(
         },
         state => WorkSynthesisSourceOutcomeV1::Unknown { state },
     })
-}
-
-fn terminal_digest(terminal: &WorkTerminalEvidenceV1) -> ManifestDigest {
-    match terminal {
-        WorkTerminalEvidenceV1::Succeeded {
-            evidence_digest, ..
-        }
-        | WorkTerminalEvidenceV1::Failed {
-            evidence_digest, ..
-        }
-        | WorkTerminalEvidenceV1::TimedOut {
-            evidence_digest, ..
-        }
-        | WorkTerminalEvidenceV1::Cancelled {
-            evidence_digest, ..
-        } => evidence_digest.clone(),
-    }
 }
 
 /// Groups succeeded sources by the exact artifact digest list they produced,
