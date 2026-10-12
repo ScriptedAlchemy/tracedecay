@@ -38,6 +38,29 @@ fn digest(byte: char) -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", hex_byte.repeat(32))).unwrap()
 }
 
+/// Version 1's immutable lifecycle journal as `(from, to, to_revision)` rows.
+fn transition_journal(
+    store: &RegisteredWorkflowStore,
+    definition: &WorkflowDefinition,
+) -> Vec<(String, String, i64)> {
+    store.inspect(|connection| {
+        connection
+            .prepare(
+                "SELECT from_state, to_state, to_revision
+                 FROM workflow_definition_transition_journal
+                 WHERE definition_id = ?1 AND definition_version = 1
+                 ORDER BY to_revision",
+            )
+            .unwrap()
+            .query_map([definition.definition_id().as_str()], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    })
+}
+
 fn definition(version: u64, operation: &str) -> WorkflowDefinition {
     WorkflowDefinition::new(
         id("workflow.definition.runtime-store"),
@@ -1321,26 +1344,23 @@ fn registration_seeds_a_candidate_disposition_that_activation_advances() {
 
     // The lifecycle is `candidate -> validated -> active`, so the intermediate
     // state is an immutable history entry of its own.
-    let history = WorkflowDefinitionAuthorityPort::transition_history(
-        &authority,
-        definition.definition_id(),
-        1,
-    )
-    .unwrap();
     assert_eq!(
-        history
-            .iter()
-            .map(|entry| (entry.from_state, entry.to_state, entry.to_revision))
-            .collect::<Vec<_>>(),
+        transition_journal(&store, &definition),
         vec![
             (
-                WorkflowDefinitionLifecycleState::Candidate,
-                WorkflowDefinitionLifecycleState::Validated,
+                WorkflowDefinitionLifecycleState::Candidate
+                    .as_str()
+                    .to_owned(),
+                WorkflowDefinitionLifecycleState::Validated
+                    .as_str()
+                    .to_owned(),
                 2
             ),
             (
-                WorkflowDefinitionLifecycleState::Validated,
-                WorkflowDefinitionLifecycleState::Active,
+                WorkflowDefinitionLifecycleState::Validated
+                    .as_str()
+                    .to_owned(),
+                WorkflowDefinitionLifecycleState::Active.as_str().to_owned(),
                 3
             ),
         ]
@@ -1454,13 +1474,7 @@ fn a_replayed_lifecycle_command_appends_no_second_history_entry() {
     assert_eq!(first, replayed);
 
     assert_eq!(
-        WorkflowDefinitionAuthorityPort::transition_history(
-            &authority,
-            definition.definition_id(),
-            1
-        )
-        .unwrap()
-        .len(),
+        transition_journal(&store, &definition).len(),
         2,
         "replay must not append a second immutable history entry"
     );
