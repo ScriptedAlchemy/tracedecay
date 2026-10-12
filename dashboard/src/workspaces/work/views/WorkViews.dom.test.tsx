@@ -30,6 +30,7 @@ import {
 } from '../../../test/workAttemptFixture.ts';
 import { applicationProblem, applicationSuccess } from '../../../test/applicationEnvelope.ts';
 import { workGraphRead, type WorkGraphVersionSpec } from '../../../test/workGraphFixture.ts';
+import { topologyMetricsModel } from '../../../test/workTopologyMetricsFixture.ts';
 import { WorkPage } from '../WorkPage.tsx';
 
 /**
@@ -188,6 +189,10 @@ function serveWork(
     status: 503,
     body: applicationProblem('unavailable'),
   },
+  metrics: { status: number; body: unknown } = {
+    status: 200,
+    body: applicationSuccess('operation.work.topology_metrics', topologyMetricsModel()),
+  },
 ) {
   serve((url) =>
     url.includes('/work/list-attempts')
@@ -200,9 +205,11 @@ function serveWork(
             ? proximity
       : url.includes('/work/views')
         ? views
-        : url.includes('/work/topology')
-          ? topology
-        : { status: 503, body: applicationProblem('unavailable') },
+        : url.includes('/work/topology-metrics')
+          ? metrics
+          : url.includes('/work/topology')
+            ? topology
+            : { status: 503, body: applicationProblem('unavailable') },
   );
 }
 
