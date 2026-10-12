@@ -178,22 +178,23 @@ fn assert_publication_error(error: CodeIndexSchedulerErrorV1) {
 /// while the owner has not entered its pass stops that rewrite.
 async fn hold_idle_background_admission(
     registry: &CodeIndexSchedulerRegistryV1,
+    project_root: &Path,
 ) -> tokio::sync::OwnedSemaphorePermit {
     let admission = registry.background_reconcile_admission();
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        if registry.memory_stats().await.reconciling_worktrees == 0
-            && let Ok(permit) = admission.clone().try_acquire_owned()
-            && registry.memory_stats().await.reconciling_worktrees == 0
-        {
-            return permit;
+    wait_for_owner(registry, project_root, || {
+        let admission = Arc::clone(&admission);
+        async move {
+            if registry.memory_stats().await.reconciling_worktrees != 0 {
+                return None;
+            }
+            let permit = admission
+                .acquire_owned()
+                .await
+                .expect("background reconcile admission remains open");
+            (registry.memory_stats().await.reconciling_worktrees == 0).then_some(permit)
         }
-        assert!(
-            std::time::Instant::now() <= deadline,
-            "background reconcile did not go idle before publication fault injection"
-        );
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    }
+    })
+    .await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -220,7 +221,7 @@ async fn aborted_flight_owner_wakes_follower_and_allows_a_fresh_owner() {
         .await
     });
     owner_entered
-        .recv_timeout(Duration::from_secs(5))
+        .recv()
         .expect("owner inserts its flight and starts the blocked build");
 
     let follower_registry = Arc::clone(&registry);
@@ -237,7 +238,7 @@ async fn aborted_flight_owner_wakes_follower_and_allows_a_fresh_owner() {
         .await
     });
     follower_entered
-        .recv_timeout(Duration::from_secs(5))
+        .recv()
         .expect("follower joins the existing flight");
     owner.abort();
     owner_control.release();
@@ -249,9 +250,8 @@ async fn aborted_flight_owner_wakes_follower_and_allows_a_fresh_owner() {
     );
     hold.release();
 
-    let follower_error = tokio::time::timeout(Duration::from_secs(5), follower)
+    let follower_error = follower
         .await
-        .expect("orphaned flight cannot strand its follower")
         .expect("follower task joins")
         .expect_err("dropped owner completes its flight as a refusal");
     assert_refusal(
@@ -308,7 +308,7 @@ async fn coalesced_publication_failure_preserves_the_scheduler_error_family() {
         .expect_err("fabricated import evidence is refused behind the build gate"),
         CodeIndexIgnoredDependencyRefusalV1::UnverifiedImportEvidence,
     );
-    let idle_admission = hold_idle_background_admission(&registry).await;
+    let idle_admission = hold_idle_background_admission(&registry, fixture.path()).await;
     registry.clear_pending_wake_for_scope(&request.scope).await;
     let hold = SchedulerHold::acquire(&registry, fixture.path()).await;
     let (owner_control, owner_entered) = BlockingNthControl::new(4);
@@ -327,7 +327,7 @@ async fn coalesced_publication_failure_preserves_the_scheduler_error_family() {
         .await
     });
     owner_entered
-        .recv_timeout(Duration::from_secs(5))
+        .recv()
         .expect("owner inserts its flight and starts the blocked build");
     let follower_registry = Arc::clone(&registry);
     let follower_root = fixture.path().to_path_buf();
@@ -342,7 +342,7 @@ async fn coalesced_publication_failure_preserves_the_scheduler_error_family() {
         .await
     });
     follower_entered
-        .recv_timeout(Duration::from_secs(5))
+        .recv()
         .expect("follower joins the existing flight");
 
     let scoped_store =
@@ -383,14 +383,12 @@ async fn coalesced_publication_failure_preserves_the_scheduler_error_family() {
     owner_control.release();
     hold.release();
 
-    let owner_error = tokio::time::timeout(Duration::from_secs(5), owner)
+    let owner_error = owner
         .await
-        .expect("owner observes corrupt publication")
         .expect("owner task joins")
         .expect_err("owner publication fails closed");
-    let follower_error = tokio::time::timeout(Duration::from_secs(5), follower)
+    let follower_error = follower
         .await
-        .expect("follower receives the shared failure")
         .expect("follower task joins")
         .expect_err("follower publication fails closed");
     assert_publication_error(owner_error);

@@ -27,6 +27,9 @@ scripts/measure-unused-tool-context.py --session kimi:SESSION_ID --examples 3
 The table goes to stdout and progress to stderr. `--examples N` prints up to N
 ignored and N used calls per tool with path/symbol keys only (quoted source
 lines are reduced to `quote:<chars>c`). Those sanitized rows are safe to cite.
+`--jobs N` (default 4) loads N sessions at once. Each session is a chain of
+paged `lcm_load_session` calls, so a serial run over hundreds of large
+sessions takes hours. Scoring and output order do not depend on `--jobs`.
 
 ## Columns
 

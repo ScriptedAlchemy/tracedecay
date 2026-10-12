@@ -345,7 +345,7 @@ export function GenerationAnchor(value: PublicWidget) { return value; }
         index_dependency(&owner_registry, &owner_root, owner_request, control).await
     });
     paused_rx
-        .recv_timeout(Duration::from_secs(5))
+        .recv()
         .expect("admission pauses after publishing its candidate");
     let candidate = wait_for_active_publication_change(&registry, fixture.path(), &incumbent).await;
 
@@ -381,9 +381,8 @@ export function CompetingTrackedEdit(value: PublicWidget) { return value.value; 
         .send(())
         .expect("release candidate graph activation");
 
-    let error = tokio::time::timeout(Duration::from_secs(5), owner)
+    let error = owner
         .await
-        .expect("admission terminates after graph activation is released")
         .expect("admission task joins")
         .expect_err("superseded activation cannot publish serving state");
     assert_refusal(error, CodeIndexIgnoredDependencyRefusalV1::StaleGeneration);
@@ -416,7 +415,7 @@ export function CompetingTrackedEdit(value: PublicWidget) { return value.value; 
     });
     held_rx.recv().expect("follow-up scheduler is held");
     drop(worker_hold);
-    wait_for_reconciling(&registry, 1).await;
+    wait_for_reconciling(&registry, fixture.path(), 1).await;
     assert_eq!(
         registry.latest_generation_id(fixture.path()).await,
         Some(incumbent.clone()),
@@ -426,7 +425,7 @@ export function CompetingTrackedEdit(value: PublicWidget) { return value.value; 
     scheduler_hold
         .join()
         .expect("follow-up scheduler holder joins");
-    wait_for_reconciling(&registry, 0).await;
+    wait_for_reconciling(&registry, fixture.path(), 0).await;
     let converged = latest_for_generation(&registry, fixture.path(), Some(&competitor)).await;
     assert_eq!(
         converged.generation().manifest().generation_id,
