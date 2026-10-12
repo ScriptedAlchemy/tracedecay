@@ -467,31 +467,28 @@ where
     /// This is the fence Plan 32 requires: "pause and cancellation fence new
     /// reservations". A run with no control row has never been paused, so it
     /// admits. The absence of a control row is not a denial.
+    #[tracing::instrument(
+        name = "application.work.run_control.admit_reservation",
+        level = "trace",
+        skip_all
+    )]
     pub fn admit_reservation(
         &self,
         context: &RequestContext,
         task_id: &TaskId,
         run_id: &RunId,
     ) -> Result<(), ApplicationProblem> {
-        {
-            let _span =
-                tracing::trace_span!("application.work.run_control.admit_reservation").entered();
-            {
-                let authority = work_authority(context)?;
-                let control = self
-                    .storage
-                    .load_run_control(&authority, task_id, run_id)
-                    .map_err(storage_problem)?;
-                match control {
-                    Some(control) if !control.admits_reservation() => {
-                        Err(ApplicationProblem::conflict(
-                            "application.work-run-control.paused",
-                            "The Work run is paused, so no new attempt reservation is admitted.",
-                        ))
-                    }
-                    Some(_) | None => Ok(()),
-                }
-            }
+        let authority = work_authority(context)?;
+        let control = self
+            .storage
+            .load_run_control(&authority, task_id, run_id)
+            .map_err(storage_problem)?;
+        match control {
+            Some(control) if !control.admits_reservation() => Err(ApplicationProblem::conflict(
+                "application.work-run-control.paused",
+                "The Work run is paused, so no new attempt reservation is admitted.",
+            )),
+            Some(_) | None => Ok(()),
         }
     }
 

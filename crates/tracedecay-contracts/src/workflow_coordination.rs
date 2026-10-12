@@ -163,23 +163,6 @@ pub struct WorkflowDefinitionDisposition {
     pub transitioned_at: UtcMicros,
 }
 
-/// One immutable history entry appended by a lifecycle transition.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct WorkflowDefinitionTransitionEntry {
-    pub definition_id: WorkflowDefinitionId,
-    #[schemars(range(min = 1))]
-    pub definition_version: u64,
-    pub operation: WorkflowLifecycleOperation,
-    pub from_state: WorkflowDefinitionLifecycleState,
-    pub to_state: WorkflowDefinitionLifecycleState,
-    #[schemars(range(min = 1))]
-    pub from_revision: u64,
-    #[schemars(range(min = 2))]
-    pub to_revision: u64,
-    pub transitioned_at: UtcMicros,
-}
-
 /// Compare-and-swap command carried across the effect journal and applied by
 /// the durable authority.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -237,12 +220,6 @@ pub trait WorkflowDefinitionAuthorityPort: Send + Sync {
         &self,
         command: &WorkflowDefinitionLifecycleCommand,
     ) -> Result<WorkflowDefinitionTransitionOutcome, WorkflowDefinitionAuthorityError>;
-
-    fn transition_history(
-        &self,
-        definition_id: &WorkflowDefinitionId,
-        definition_version: u64,
-    ) -> Result<Vec<WorkflowDefinitionTransitionEntry>, WorkflowDefinitionAuthorityError>;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -496,23 +473,22 @@ where
     /// is journaled: structural revalidation plus tool-catalog admission of
     /// every step operation. The one authority both activation paths, this
     /// service and the daemon's journaled effect, run.
+    #[tracing::instrument(
+        name = "application.workflow.definition.admit_activation",
+        level = "trace",
+        skip_all
+    )]
     pub fn admit_activation(
         &self,
         definition_id: &WorkflowDefinitionId,
         definition_version: u64,
     ) -> Result<(), WorkflowCoordinationError> {
-        {
-            let _span =
-                tracing::trace_span!("application.workflow.definition.admit_activation").entered();
-            {
-                let definition = self.get(definition_id, definition_version)?;
-                definition
-                    .validate()
-                    .map_err(|_| WorkflowCoordinationError::InvalidDefinition)?;
-                admit_workflow_definition_operations(&definition)
-                    .map_err(WorkflowCoordinationError::CatalogAdmissionDenied)
-            }
-        }
+        let definition = self.get(definition_id, definition_version)?;
+        definition
+            .validate()
+            .map_err(|_| WorkflowCoordinationError::InvalidDefinition)?;
+        admit_workflow_definition_operations(&definition)
+            .map_err(WorkflowCoordinationError::CatalogAdmissionDenied)
     }
 
     /// Advances a registered definition version to `active`.
@@ -594,43 +570,23 @@ where
         })
     }
 
+    #[tracing::instrument(
+        name = "application.workflow.definition.disposition",
+        level = "trace",
+        skip_all
+    )]
     pub fn disposition(
         &self,
         definition_id: &WorkflowDefinitionId,
         definition_version: u64,
     ) -> Result<WorkflowDefinitionDisposition, WorkflowCoordinationError> {
-        {
-            let _span =
-                tracing::trace_span!("application.workflow.definition.disposition").entered();
-            {
-                if definition_version == 0 {
-                    return Err(WorkflowCoordinationError::InvalidDefinition);
-                }
-                self.authority
-                    .load_disposition(definition_id, definition_version)
-                    .map_err(coordination_authority_error)?
-                    .ok_or(WorkflowCoordinationError::DefinitionNotFound)
-            }
+        if definition_version == 0 {
+            return Err(WorkflowCoordinationError::InvalidDefinition);
         }
-    }
-
-    pub fn lifecycle_history(
-        &self,
-        definition_id: &WorkflowDefinitionId,
-        definition_version: u64,
-    ) -> Result<Vec<WorkflowDefinitionTransitionEntry>, WorkflowCoordinationError> {
-        {
-            let _span =
-                tracing::trace_span!("application.workflow.definition.lifecycle_history").entered();
-            {
-                if definition_version == 0 {
-                    return Err(WorkflowCoordinationError::InvalidDefinition);
-                }
-                self.authority
-                    .transition_history(definition_id, definition_version)
-                    .map_err(coordination_authority_error)
-            }
-        }
+        self.authority
+            .load_disposition(definition_id, definition_version)
+            .map_err(coordination_authority_error)?
+            .ok_or(WorkflowCoordinationError::DefinitionNotFound)
     }
 
     fn apply_lifecycle(
