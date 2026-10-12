@@ -97,3 +97,180 @@ impl<K: Eq + Hash, V> WeakRegistry<K, V> {
         self.lock().is_empty()
     }
 }
+
+type SingleFlightSlot<V> = Arc<tokio::sync::Mutex<Weak<V>>>;
+
+/// Async get-or-open over weak entries with one single-flight slot per key.
+///
+/// The map lock is held only to find or insert a key's slot; the open runs
+/// under that slot's own async lock. Concurrent joins of one key therefore
+/// share a single open while other keys open independently, and a failed or
+/// cancelled open leaves the slot empty for the next join to retry.
+pub struct SingleFlightWeakRegistry<K, V> {
+    slots: Mutex<HashMap<K, SingleFlightSlot<V>>>,
+}
+
+impl<K, V> Default for SingleFlightWeakRegistry<K, V> {
+    fn default() -> Self {
+        Self {
+            slots: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl<K: Eq + Hash, V> SingleFlightWeakRegistry<K, V> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns the live value for `key`, or runs `open` to create it. Joins
+    /// of the same key that arrive while `open` runs wait for and share its
+    /// result; joins of other keys do not wait.
+    pub async fn get_or_open<E, Fut>(
+        &self,
+        key: K,
+        open: impl FnOnce() -> Fut,
+    ) -> std::result::Result<Arc<V>, E>
+    where
+        Fut: std::future::Future<Output = std::result::Result<V, E>>,
+    {
+        let slot = {
+            let mut slots = self.slots.lock().unwrap_or_else(PoisonError::into_inner);
+            // Holding the map lock stops anyone cloning a slot, so a slot only
+            // the map holds is idle and is dead once its value has dropped.
+            slots.retain(|_, slot| {
+                Arc::strong_count(slot) > 1
+                    || slot.try_lock().is_ok_and(|value| value.strong_count() > 0)
+            });
+            Arc::clone(slots.entry(key).or_default())
+        };
+        let mut live = slot.lock().await;
+        if let Some(value) = live.upgrade() {
+            return Ok(value);
+        }
+        let value = Arc::new(open().await?);
+        *live = Arc::downgrade(&value);
+        Ok(value)
+    }
+}
+
+#[cfg(test)]
+mod single_flight_tests {
+    use std::future::Future;
+    use std::pin::pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll, Waker};
+    use std::time::Duration;
+
+    use tokio::sync::oneshot;
+
+    use super::*;
+
+    fn poll_once<F: Future>(future: std::pin::Pin<&mut F>) -> Poll<F::Output> {
+        future.poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_in_flight_open_does_not_delay_other_keys() {
+        let registry = Arc::new(SingleFlightWeakRegistry::<&str, &str>::new());
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+        let slow = tokio::spawn({
+            let registry = Arc::clone(&registry);
+            async move {
+                registry
+                    .get_or_open("a", || async move {
+                        entered_tx.send(()).unwrap();
+                        release_rx.await.unwrap();
+                        Ok::<_, ()>("a")
+                    })
+                    .await
+            }
+        });
+        entered_rx.await.unwrap();
+
+        let other = tokio::time::timeout(
+            Duration::from_secs(30),
+            registry.get_or_open("b", || async { Ok::<_, ()>("b") }),
+        )
+        .await
+        .expect("an open of key b must not wait behind the in-flight open of key a");
+        assert_eq!(*other.unwrap(), "b");
+
+        release_tx.send(()).unwrap();
+        assert_eq!(*slow.await.unwrap().unwrap(), "a");
+    }
+
+    #[tokio::test]
+    async fn concurrent_joins_of_one_key_share_one_open() {
+        let registry = SingleFlightWeakRegistry::<&str, usize>::new();
+        let opens = AtomicUsize::new(0);
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+        let open = |release: Option<oneshot::Receiver<()>>| {
+            let opens = &opens;
+            move || async move {
+                if let Some(release) = release {
+                    release.await.unwrap();
+                }
+                Ok::<_, ()>(opens.fetch_add(1, Ordering::SeqCst))
+            }
+        };
+
+        let mut first = pin!(registry.get_or_open("a", open(Some(release_rx))));
+        assert!(poll_once(first.as_mut()).is_pending());
+        let mut joiner = pin!(registry.get_or_open("a", open(None)));
+        assert!(
+            poll_once(joiner.as_mut()).is_pending(),
+            "a join of key a must wait for its in-flight open"
+        );
+
+        release_tx.send(()).unwrap();
+        let first = first.await.unwrap();
+        let joined = joiner.await.unwrap();
+        assert!(Arc::ptr_eq(&first, &joined));
+        assert_eq!(opens.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_open_leaves_the_key_open_for_the_next_join() {
+        let registry = SingleFlightWeakRegistry::<&str, &str>::new();
+        let failed = registry
+            .get_or_open("a", || async { Err::<&str, _>("store busy") })
+            .await;
+        assert_eq!(failed.err(), Some("store busy"));
+
+        let opened = registry
+            .get_or_open("a", || async { Ok::<_, &str>("a") })
+            .await
+            .unwrap();
+        assert_eq!(*opened, "a");
+    }
+
+    #[tokio::test]
+    async fn a_dropped_value_reopens_and_its_slot_is_swept() {
+        let registry = SingleFlightWeakRegistry::<&str, usize>::new();
+        let first = registry.get_or_open("a", || async { Ok::<_, ()>(1) }).await;
+        drop(first);
+        let second = registry
+            .get_or_open("b", || async { Ok::<_, ()>(2) })
+            .await
+            .unwrap();
+        assert_eq!(
+            registry
+                .slots
+                .lock()
+                .unwrap()
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec!["b"],
+            "the dropped key's slot must be swept on the next join"
+        );
+        let reopened = registry
+            .get_or_open("a", || async { Ok::<_, ()>(3) })
+            .await
+            .unwrap();
+        assert_eq!(*reopened, 3);
+        drop(second);
+    }
+}
