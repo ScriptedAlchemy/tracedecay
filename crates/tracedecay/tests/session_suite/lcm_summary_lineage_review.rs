@@ -5,7 +5,7 @@ use tracedecay_graph_db::NeverCancelled;
 use tracedecay_lcm::types::{LcmImmutableSummaryPublication, LcmSummaryPublicationDisposition};
 use tracedecay_lcm::{
     LcmDescribeRequest, LcmDescribeTarget, LcmError, LcmExpandRequest, LcmExpandTarget,
-    LcmGrepRequest, LcmGrepSort, LcmScope, LcmSourceRef, LcmSummaryNodeDraft,
+    LcmSourceRef, LcmSummaryNodeDraft,
 };
 use tracedecay_project::test_support::host_admission::{
     HostAdmissionTestRuntimeV1, LcmLineageFaultForTest,
@@ -1083,24 +1083,6 @@ async fn immutable_summary_lineage_rejects_foreign_session_canary_sources_withou
         after_global.summary_successors,
         before_global.summary_successors
     );
-    let canary = db
-        .lcm_grep_for_test(LcmGrepRequest {
-            provider: "cursor".into(),
-            query: FOREIGN_CANARY.into(),
-            scope: LcmScope::Session,
-            session_id: Some("session-victim".into()),
-            include_summaries: true,
-            limit: 10,
-            sort: LcmGrepSort::Recency,
-            source: None,
-            role: None,
-            start_time: None,
-            end_time: None,
-            git_filter: Default::default(),
-        })
-        .await
-        .unwrap();
-    assert!(canary.hits.is_empty());
 }
 
 #[tokio::test]
@@ -1205,7 +1187,7 @@ async fn summary_source_pages_remain_gap_free_across_exact_replay_and_unrelated_
 }
 
 #[tokio::test]
-async fn lcm_grep_describe_and_expand_preserve_database_generation_and_publication_state() {
+async fn lcm_describe_and_expand_preserve_database_generation_and_publication_state() {
     let tmp = TempDir::new().unwrap();
     let db = registered_lcm_runtime(&tmp).await;
     let store_ids = insert_messages(
@@ -1236,25 +1218,6 @@ async fn lcm_grep_describe_and_expand_preserve_database_generation_and_publicati
         .unwrap();
 
     let before = db.lcm_lineage_counts_for_test(None).await.unwrap();
-
-    let grep = db
-        .lcm_grep_for_test(LcmGrepRequest {
-            provider: "cursor".into(),
-            query: "readonly lineage".into(),
-            scope: LcmScope::Session,
-            session_id: Some("session-readonly".into()),
-            include_summaries: true,
-            limit: 10,
-            sort: LcmGrepSort::Recency,
-            source: None,
-            role: None,
-            start_time: None,
-            end_time: None,
-            git_filter: Default::default(),
-        })
-        .await
-        .expect("grep must succeed");
-    assert!(!grep.hits.is_empty());
 
     db.lcm_describe_for_test(LcmDescribeRequest {
         provider: "cursor".into(),

@@ -116,32 +116,17 @@ pub use refresh::{
 pub use store::SessionTemporalStore;
 
 impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
-    /// Resolves a Git filter through the store's Git evidence rows.
+    /// Resolves a Git filter through the store's Git evidence rows, reading at
+    /// most `maximum` sessions.
     ///
     /// `None` means the request is unscoped. A non-empty filter always returns
     /// `Some`, including an authoritative empty set when no recorded session
     /// matches. A store that never recorded Git evidence answers typed
     /// unavailable: it cannot prove that no durable session matches.
-    pub async fn git_scope_session_ids(
-        &self,
-        filter: &GitScopeFilter,
-    ) -> Result<Option<Vec<(String, String)>>, GitCorrelationError> {
-        self.git_scope_session_ids_with_bound(filter, None).await
-    }
-
     pub async fn git_scope_session_ids_bounded(
         &self,
         filter: &GitScopeFilter,
         maximum: usize,
-    ) -> Result<Option<Vec<(String, String)>>, GitCorrelationError> {
-        self.git_scope_session_ids_with_bound(filter, Some(maximum))
-            .await
-    }
-
-    async fn git_scope_session_ids_with_bound(
-        &self,
-        filter: &GitScopeFilter,
-        maximum: Option<usize>,
     ) -> Result<Option<Vec<(String, String)>>, GitCorrelationError> {
         if filter.is_empty() {
             return Ok(None);
@@ -155,15 +140,14 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
                 "Git evidence has not been recorded for this project".to_owned(),
             ));
         };
-        let session_ids = match maximum {
-            Some(maximum) => view.session_ids_for_scope_bounded(filter, maximum).await,
-            None => view.session_ids_for_scope(filter).await,
-        }?
-        .ok_or_else(|| {
-            GitCorrelationError::Contract(
-                "Git scope resolution requires a non-empty filter".to_owned(),
-            )
-        })?;
+        let session_ids = view
+            .session_ids_for_scope_bounded(filter, maximum)
+            .await?
+            .ok_or_else(|| {
+                GitCorrelationError::Contract(
+                    "Git scope resolution requires a non-empty filter".to_owned(),
+                )
+            })?;
         Ok(Some(session_ids))
     }
 

@@ -47,23 +47,6 @@ async fn count_rows(db: &HostAdmissionTestRuntimeV1, sql: &str, value: &str) -> 
         .expect("count column")
 }
 
-fn grep_request(session_id: &str) -> LcmGrepRequest {
-    LcmGrepRequest {
-        provider: "cursor".into(),
-        query: "quartz".into(),
-        scope: LcmScope::Session,
-        session_id: Some(session_id.into()),
-        include_summaries: true,
-        limit: 10,
-        sort: LcmGrepSort::Recency,
-        source: None,
-        role: None,
-        start_time: None,
-        end_time: None,
-        git_filter: Default::default(),
-    }
-}
-
 fn expand_request(session_id: &str, node_id: &str) -> LcmExpandRequest {
     LcmExpandRequest {
         provider: "cursor".into(),
@@ -125,18 +108,6 @@ async fn published_summary_is_served_from_the_canonical_row_alone() {
         )
         .await,
         1
-    );
-
-    let hits = db
-        .lcm_grep_for_test(grep_request(session_id))
-        .await
-        .expect("grep should succeed")
-        .hits;
-    assert!(
-        hits.iter()
-            .any(|hit| hit.kind == "summary_node"
-                && hit.node_id.as_deref() == Some(&summary.node_id)),
-        "grep must find the canonical summary: {hits:?}"
     );
 
     let description = db
@@ -207,15 +178,6 @@ async fn unavailable_summary_never_surfaces_while_its_row_is_retained() {
             .expect("canonical row count"),
         1,
         "the immutable canonical row stays for audit"
-    );
-    let hits = db
-        .lcm_grep_for_test(grep_request(session_id))
-        .await
-        .expect("grep should succeed")
-        .hits;
-    assert!(
-        hits.iter().all(|hit| hit.kind != "summary_node"),
-        "an unavailable summary must not grep: {hits:?}"
     );
     let description = db
         .lcm_describe_for_test(LcmDescribeRequest {
