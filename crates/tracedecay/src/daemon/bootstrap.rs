@@ -304,7 +304,10 @@ async fn run_foreground_loopback(
             ),
             tracedecay_daemon_service::shutdown::ShutdownOwner::new(
                 "session_temporal_refresh",
-                || {},
+                {
+                    let session_refresh = Arc::clone(&session_refresh);
+                    move || session_refresh.cancel_supervisors()
+                },
                 async move {
                     session_refresh.shutdown().await;
                 },
