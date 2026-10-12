@@ -844,3 +844,71 @@ async fn repository_commit_requires_the_stored_change_plan() {
         "the repository writer appends the terminal plan event"
     );
 }
+
+/// A saved plan carrying an operation row outside the canonical contract is
+/// corrupt, not bound: both writers reject the commit instead of treating the
+/// extra payload as invisible.
+#[tokio::test]
+async fn both_writers_reject_a_plan_with_extra_operation_rows() {
+    let root = root_revision();
+    let (_directory, db, _owner) = publish_profile("profile-extra-plan-ops.db").await;
+    seed_root(&db, &root).await;
+    let (plan_record, commit) = protected_commit(&root);
+    let store = GlobalDbConfigurationControlStore::new_registered(&db);
+    ConfigurationRevisionStore::save_change_plan(&store, &plan_record)
+        .await
+        .expect("save the plan the commit names");
+
+    let transaction = db
+        .begin_write_transaction()
+        .await
+        .expect("extra operation transaction");
+    transaction
+        .execute(
+            "INSERT INTO configuration_change_plan_operations (
+                plan_id, sequence, payload_schema_revision, sealed_typed_operation,
+                operation_digest
+             ) VALUES (?1, 1, 2, X'00', 'sha256:extrarow')",
+            params![plan_record.plan.plan_id.as_str()],
+        )
+        .await
+        .expect("seed extra plan operation row");
+    transaction
+        .commit()
+        .await
+        .expect("commit extra operation row");
+
+    let request = submit_request(
+        db.binding(),
+        "operation.configuration.extra-plan-ops",
+        "key.configuration.extra-plan-ops",
+        25,
+        RepositoryWritePayloadV1::Configuration(Box::new(commit.clone())),
+    );
+    let error = dispatch(&db, request)
+        .await
+        .expect_err("a plan with extra operation rows must fail the commit");
+    let rendered = format!("{error:?}");
+    assert!(
+        rendered.contains("operation payload"),
+        "extra operation rows reported: {rendered}"
+    );
+    assert_eq!(
+        count_rows(&db, "SELECT COUNT(*) FROM configuration_revisions").await,
+        1,
+        "the rejected commit leaves no revision row"
+    );
+
+    let store_error = store
+        .commit(commit)
+        .await
+        .expect_err("the global-db writer rejects the same stored plan");
+    assert!(
+        matches!(store_error, ConfigurationStoreError::InvalidData(_)),
+        "global-db reports the corrupted plan as invalid data: {store_error}"
+    );
+    assert_eq!(
+        count_rows(&db, "SELECT COUNT(*) FROM configuration_revisions").await,
+        1
+    );
+}

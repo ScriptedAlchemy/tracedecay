@@ -17,8 +17,9 @@ use crate::exact_sql::ExactSqlValue;
 
 use super::configuration_projection::configuration_projection_statements;
 use super::configuration_receipt::{
-    CONFIGURATION_ACTIVATION_DESIRED_RECORDED, advance_component_desired_state,
-    configuration_entry_layer, insert_mutation_receipt,
+    CONFIGURATION_ACTIVATION_DESIRED_RECORDED, STORED_CHANGE_PLAN_SQL, StoredChangePlanColumns,
+    advance_component_desired_state, configuration_entry_layer, decode_stored_change_plan_rows,
+    insert_mutation_receipt,
 };
 use super::support::{conversion, encode, invalid};
 
@@ -341,75 +342,31 @@ fn stored_plan_matches(
     connection: &rusqlite::Connection,
     plan: &ProtectedChangePlan,
 ) -> rusqlite::Result<bool> {
-    let stored = connection
-        .query_row(
-            "SELECT actor_id, base_revision_id, operation_digest, resolved_scope_digest,
-                    membership_digest, authorization_policy_digest, policy_epoch, expires_at,
-                    created_at
-             FROM configuration_change_plans
-             WHERE plan_id = ?1",
-            [plan.plan_id.as_str()],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, i64>(6)?,
-                    row.get::<_, i64>(7)?,
-                    row.get::<_, i64>(8)?,
-                ))
-            },
-        )
-        .optional()?;
-    let Some((
-        actor_id,
-        base_revision_id,
-        operation_digest,
-        resolved_scope_digest,
-        membership_digest,
-        authorization_policy_digest,
-        policy_epoch,
-        expires_at,
-        created_at,
-    )) = stored
-    else {
+    let mut statement = connection.prepare(STORED_CHANGE_PLAN_SQL)?;
+    let rows = statement
+        .query_map([plan.plan_id.as_str()], |row| {
+            Ok(StoredChangePlanColumns {
+                plan_id: row.get(0)?,
+                actor_id: row.get(1)?,
+                base_revision_id: row.get(2)?,
+                operation_digest: row.get(3)?,
+                resolved_scope_digest: row.get(4)?,
+                membership_digest: row.get(5)?,
+                authorization_policy_digest: row.get(6)?,
+                policy_epoch: row.get(7)?,
+                expires_at: row.get(8)?,
+                created_at: row.get(9)?,
+                operation_sequence: row.get(10)?,
+                payload_schema_revision: row.get(11)?,
+                sealed_typed_operation: row.get(12)?,
+                operation_row_digest: row.get(13)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let Some(record) = decode_stored_change_plan_rows(rows).map_err(invalid)? else {
         return Ok(false);
     };
-    let policy_epoch = u64::try_from(policy_epoch).map_err(conversion)?;
-    if actor_id != plan.actor_id.as_str()
-        || base_revision_id != plan.base_revision_id.as_str()
-        || operation_digest != plan.operation_digest.as_str()
-        || resolved_scope_digest != plan.resolved_scope_digest.as_str()
-        || membership_digest.as_deref()
-            != plan
-                .membership_digest
-                .as_ref()
-                .map(|digest| digest.as_str())
-        || authorization_policy_digest != plan.authorization_policy_digest.as_str()
-        || policy_epoch != plan.policy_epoch
-        || expires_at != plan.expires_at.0
-        || created_at != plan.created_at.0
-    {
-        return Ok(false);
-    }
-    let payload: Option<Vec<u8>> = connection
-        .query_row(
-            "SELECT sealed_typed_operation
-             FROM configuration_change_plan_operations
-             WHERE plan_id = ?1 AND sequence = 0",
-            [plan.plan_id.as_str()],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let Some(payload) = payload else {
-        return Ok(false);
-    };
-    let stored_payload: serde_json::Value = serde_json::from_slice(&payload).map_err(conversion)?;
-    let expected_plan = serde_json::to_value(plan).map_err(conversion)?;
-    Ok(stored_payload.get("plan") == Some(&expected_plan))
+    Ok(record.plan == *plan)
 }
 
 fn plan_replay_matches(

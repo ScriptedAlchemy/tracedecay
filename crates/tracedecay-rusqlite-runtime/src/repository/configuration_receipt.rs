@@ -6,16 +6,21 @@
 //! revision advances.
 
 use rusqlite::{Connection, params};
-use tracedecay_domain::UtcMicros;
+use serde::{Deserialize, Serialize};
 use tracedecay_domain::configuration::{
     CandidateDispositionV1, ConfigurationCandidateV1, ConfigurationLayerIdV1,
-    ConfigurationRevisionId,
+    ConfigurationRevisionId, ProtectedChange, ProtectedChangePlan, RollbackModeV1,
 };
+use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_store::ConfigurationCommitV1;
+use tracedecay_store::configuration::{
+    ConfigurationProtectedOperationV1, ConfigurationProtectedPlanRecordV1,
+};
 
 use super::support::invalid;
 
 pub const CONFIGURATION_ACTIVATION_DESIRED_RECORDED: &str = "desired_recorded_v1";
+pub const CONFIGURATION_PLAN_PAYLOAD_SCHEMA_VERSION: u16 = 2;
 
 pub const INSERT_CONFIGURATION_MUTATION_RECEIPT_SQL: &str = "
 INSERT INTO configuration_mutation_receipts (
@@ -40,6 +45,19 @@ SELECT event.component, event.desired_revision_id, event.observed_revision_id,
      WHERE candidate.component = event.component
  )
  ORDER BY event.component ASC";
+
+/// The stored plan row joined with its operation columns: the exact projection
+/// every writer decodes when binding a commit to a saved change plan.
+pub const STORED_CHANGE_PLAN_SQL: &str = "
+SELECT p.plan_id, p.actor_id, p.base_revision_id, p.operation_digest,
+        p.resolved_scope_digest, p.membership_digest,
+        p.authorization_policy_digest, p.policy_epoch, p.expires_at, p.created_at,
+        o.sequence, o.payload_schema_revision, o.sealed_typed_operation,
+        o.operation_digest
+ FROM configuration_change_plans p
+ LEFT JOIN configuration_change_plan_operations o ON o.plan_id = p.plan_id
+ WHERE p.plan_id = ?1
+ ORDER BY o.sequence ASC";
 
 /// Appends one activation event per component whose latest row already exists.
 ///
@@ -259,4 +277,143 @@ pub fn advance_component_desired_state(
         params![revision_id.as_str(), occurred_at.0],
     )?;
     Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum StoredConfigurationProtectedOperationV1 {
+    Change(Box<ProtectedChange>),
+    Rollback {
+        target_revision_id: ConfigurationRevisionId,
+        mode: RollbackModeV1,
+    },
+}
+
+impl From<&ConfigurationProtectedOperationV1> for StoredConfigurationProtectedOperationV1 {
+    fn from(operation: &ConfigurationProtectedOperationV1) -> Self {
+        match operation {
+            ConfigurationProtectedOperationV1::Change(change) => Self::Change(change.clone()),
+            ConfigurationProtectedOperationV1::Rollback {
+                target_revision_id,
+                mode,
+            } => Self::Rollback {
+                target_revision_id: target_revision_id.clone(),
+                mode: *mode,
+            },
+        }
+    }
+}
+
+impl From<StoredConfigurationProtectedOperationV1> for ConfigurationProtectedOperationV1 {
+    fn from(operation: StoredConfigurationProtectedOperationV1) -> Self {
+        match operation {
+            StoredConfigurationProtectedOperationV1::Change(change) => Self::Change(change),
+            StoredConfigurationProtectedOperationV1::Rollback {
+                target_revision_id,
+                mode,
+            } => Self::Rollback {
+                target_revision_id,
+                mode,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoredConfigurationPlanPayload {
+    pub schema_version: u16,
+    pub plan: ProtectedChangePlan,
+    pub operation: StoredConfigurationProtectedOperationV1,
+}
+
+/// The columns of one `STORED_CHANGE_PLAN_SQL` row: the plan projection joined
+/// with its operation columns, NULL when the join matched no operation row.
+pub struct StoredChangePlanColumns {
+    pub plan_id: String,
+    pub actor_id: String,
+    pub base_revision_id: String,
+    pub operation_digest: String,
+    pub resolved_scope_digest: String,
+    pub membership_digest: Option<String>,
+    pub authorization_policy_digest: String,
+    pub policy_epoch: i64,
+    pub expires_at: i64,
+    pub created_at: i64,
+    pub operation_sequence: Option<i64>,
+    pub payload_schema_revision: Option<i64>,
+    pub sealed_typed_operation: Option<Vec<u8>>,
+    pub operation_row_digest: Option<String>,
+}
+
+/// Decodes one stored plan row into the typed record it seals. Every column
+/// must agree with the payload: a stored row that drifts from its sealed plan
+/// is invalid data, not a different plan.
+pub fn decode_stored_change_plan_row(
+    columns: StoredChangePlanColumns,
+) -> Result<ConfigurationProtectedPlanRecordV1, String> {
+    if columns.operation_sequence != Some(0)
+        || columns.payload_schema_revision
+            != Some(i64::from(CONFIGURATION_PLAN_PAYLOAD_SCHEMA_VERSION))
+    {
+        return Err(
+            "configuration plan does not contain its canonical initial operation payload"
+                .to_owned(),
+        );
+    }
+    let Some(sealed_payload) = columns.sealed_typed_operation else {
+        return Err("configuration plan operation payload is missing".to_owned());
+    };
+    let payload = serde_json::from_slice::<StoredConfigurationPlanPayload>(&sealed_payload)
+        .map_err(|error| format!("decode configuration plan payload: {error}"))?;
+    if payload.schema_version != CONFIGURATION_PLAN_PAYLOAD_SCHEMA_VERSION {
+        return Err("unsupported configuration plan payload schema version".to_owned());
+    }
+    let record = ConfigurationProtectedPlanRecordV1 {
+        plan: payload.plan,
+        operation: payload.operation.into(),
+    };
+    record.validate().map_err(|error| error.to_string())?;
+    let stored_policy_epoch = u64::try_from(columns.policy_epoch)
+        .map_err(|_| "configuration plan policy epoch is negative".to_owned())?;
+    if record.plan.plan_id.as_str() != columns.plan_id
+        || record.plan.actor_id.as_str() != columns.actor_id
+        || record.plan.base_revision_id.as_str() != columns.base_revision_id
+        || record.plan.operation_digest.as_str() != columns.operation_digest
+        || record.plan.operation_digest.as_str()
+            != columns.operation_row_digest.as_deref().unwrap_or_default()
+        || record.plan.resolved_scope_digest.as_str() != columns.resolved_scope_digest
+        || record
+            .plan
+            .membership_digest
+            .as_ref()
+            .map(ManifestDigest::as_str)
+            != columns.membership_digest.as_deref()
+        || record.plan.authorization_policy_digest.as_str() != columns.authorization_policy_digest
+        || record.plan.policy_epoch != stored_policy_epoch
+        || record.plan.expires_at.0 != columns.expires_at
+        || record.plan.created_at.0 != columns.created_at
+    {
+        return Err("configuration plan payload does not match immutable projections".to_owned());
+    }
+    Ok(record)
+}
+
+/// Decodes every row `STORED_CHANGE_PLAN_SQL` returns for a plan id: `None`
+/// when no plan row exists, one typed record for the canonical plan, and an
+/// error for any row outside that contract — including extra operation rows.
+pub fn decode_stored_change_plan_rows(
+    rows: Vec<StoredChangePlanColumns>,
+) -> Result<Option<ConfigurationProtectedPlanRecordV1>, String> {
+    let mut plans = Vec::with_capacity(rows.len());
+    for columns in rows {
+        plans.push(decode_stored_change_plan_row(columns)?);
+    }
+    if plans.len() > 1 {
+        return Err(
+            "configuration plan has multiple operation payloads unsupported by this contract"
+                .to_owned(),
+        );
+    }
+    Ok(plans.pop())
 }

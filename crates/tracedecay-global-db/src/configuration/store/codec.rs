@@ -2,16 +2,17 @@
 
 use super::{
     ChangePlanId, ConfigurationAuditEvent, ConfigurationCandidateV1, ConfigurationError,
-    ConfigurationMutationReceiptV1, ConfigurationProtectedOperationV1,
-    ConfigurationProtectedPlanRecordV1, ConfigurationRevisionId, ConfigurationSnapshotV1,
+    ConfigurationMutationReceiptV1, ConfigurationRevisionId, ConfigurationSnapshotV1,
     ConfigurationStoreError, ConfigurationStoreResult, ConfigurationValueV1,
-    DirectConfigurationMutation, Executor, ManifestDigest, ProtectedChange, ProtectedChangePlan,
-    RollbackModeV1, Row, SettingKey,
+    DirectConfigurationMutation, Executor, ManifestDigest, Row, SettingKey,
 };
 use serde::{Deserialize, Serialize};
+pub(super) use tracedecay_rusqlite_runtime::repository::{
+    CONFIGURATION_PLAN_PAYLOAD_SCHEMA_VERSION, StoredChangePlanColumns,
+    StoredConfigurationPlanPayload, StoredConfigurationProtectedOperationV1,
+};
 
 pub(super) const CONFIGURATION_SNAPSHOT_ENTRY_PAYLOAD_SCHEMA_VERSION: u16 = 1;
-pub(super) const CONFIGURATION_PLAN_PAYLOAD_SCHEMA_VERSION: u16 = 2;
 pub(super) const CONFIGURATION_AUDIT_PAYLOAD_SCHEMA_VERSION: u16 = 1;
 pub(super) const CONFIGURATION_SEALED_AUDIT_TARGET_SCHEMA_VERSION: u16 = 1;
 
@@ -25,54 +26,6 @@ pub(super) struct StoredConfigurationSnapshotEntryV1 {
     pub(super) schema_version: u16,
     pub(super) value: Option<ConfigurationValueV1>,
     pub(super) provenance: Vec<ConfigurationCandidateV1>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) enum StoredConfigurationProtectedOperationV1 {
-    Change(Box<ProtectedChange>),
-    Rollback {
-        target_revision_id: ConfigurationRevisionId,
-        mode: RollbackModeV1,
-    },
-}
-
-impl From<&ConfigurationProtectedOperationV1> for StoredConfigurationProtectedOperationV1 {
-    fn from(operation: &ConfigurationProtectedOperationV1) -> Self {
-        match operation {
-            ConfigurationProtectedOperationV1::Change(change) => Self::Change(change.clone()),
-            ConfigurationProtectedOperationV1::Rollback {
-                target_revision_id,
-                mode,
-            } => Self::Rollback {
-                target_revision_id: target_revision_id.clone(),
-                mode: *mode,
-            },
-        }
-    }
-}
-
-impl From<StoredConfigurationProtectedOperationV1> for ConfigurationProtectedOperationV1 {
-    fn from(operation: StoredConfigurationProtectedOperationV1) -> Self {
-        match operation {
-            StoredConfigurationProtectedOperationV1::Change(change) => Self::Change(change),
-            StoredConfigurationProtectedOperationV1::Rollback {
-                target_revision_id,
-                mode,
-            } => Self::Rollback {
-                target_revision_id,
-                mode,
-            },
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct StoredConfigurationPlanPayload {
-    pub(super) schema_version: u16,
-    pub(super) plan: ProtectedChangePlan,
-    pub(super) operation: StoredConfigurationProtectedOperationV1,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -173,108 +126,60 @@ pub(super) async fn insert_configuration_projections(
     Ok(())
 }
 
-pub(super) fn decode_plan_row(
-    row: &Row,
-) -> ConfigurationStoreResult<ConfigurationProtectedPlanRecordV1> {
-    let stored_plan_id = row
-        .get::<String>(0)
-        .map_err(|error| invalid_store_data(format!("read configuration plan id: {error}")))?;
-    let stored_actor_id = row.get::<String>(1).map_err(|error| {
-        invalid_store_data(format!("read configuration plan actor id: {error}"))
-    })?;
-    let stored_base_revision_id = row.get::<String>(2).map_err(|error| {
-        invalid_store_data(format!("read configuration plan base revision id: {error}"))
-    })?;
-    let stored_operation_digest = row.get::<String>(3).map_err(|error| {
-        invalid_store_data(format!("read configuration plan operation digest: {error}"))
-    })?;
-    let stored_scope_digest = row.get::<String>(4).map_err(|error| {
-        invalid_store_data(format!("read configuration plan scope digest: {error}"))
-    })?;
-    let stored_membership_digest = row.get::<Option<String>>(5).map_err(|error| {
-        invalid_store_data(format!(
-            "read configuration plan membership digest: {error}"
-        ))
-    })?;
-    let stored_policy_digest = row.get::<String>(6).map_err(|error| {
-        invalid_store_data(format!("read configuration plan policy digest: {error}"))
-    })?;
-    let stored_policy_epoch = row.get::<i64>(7).map_err(|error| {
-        invalid_store_data(format!("read configuration plan policy epoch: {error}"))
-    })?;
-    let stored_expires_at = row
-        .get::<i64>(8)
-        .map_err(|error| invalid_store_data(format!("read configuration plan expiry: {error}")))?;
-    let stored_created_at = row.get::<i64>(9).map_err(|error| {
-        invalid_store_data(format!("read configuration plan creation time: {error}"))
-    })?;
-    let sequence = row.get::<Option<i64>>(10).map_err(|error| {
-        invalid_store_data(format!(
-            "read configuration plan operation sequence: {error}"
-        ))
-    })?;
-    let payload_schema_revision = row.get::<Option<i64>>(11).map_err(|error| {
-        invalid_store_data(format!(
-            "read configuration plan payload schema revision: {error}"
-        ))
-    })?;
-    let sealed_payload = row.get::<Option<Vec<u8>>>(12).map_err(|error| {
-        invalid_store_data(format!("read configuration plan sealed payload: {error}"))
-    })?;
-    let operation_digest = row.get::<Option<String>>(13).map_err(|error| {
-        invalid_store_data(format!(
-            "read configuration plan operation digest payload: {error}"
-        ))
-    })?;
-
-    if sequence != Some(0)
-        || payload_schema_revision != Some(i64::from(CONFIGURATION_PLAN_PAYLOAD_SCHEMA_VERSION))
-    {
-        return Err(invalid_store_data(
-            "configuration plan does not contain its canonical initial operation payload",
-        ));
-    }
-    let Some(sealed_payload) = sealed_payload else {
-        return Err(invalid_store_data(
-            "configuration plan operation payload is missing",
-        ));
-    };
-    let payload = serde_json::from_slice::<StoredConfigurationPlanPayload>(&sealed_payload)
-        .map_err(|error| {
-            invalid_store_data(format!("decode configuration plan payload: {error}"))
-        })?;
-    if payload.schema_version != CONFIGURATION_PLAN_PAYLOAD_SCHEMA_VERSION {
-        return Err(invalid_store_data(
-            "unsupported configuration plan payload schema version",
-        ));
-    }
-    let record = ConfigurationProtectedPlanRecordV1 {
-        plan: payload.plan,
-        operation: payload.operation.into(),
-    };
-    record.validate().map_err(ConfigurationStoreError::from)?;
-    let stored_policy_epoch = u64::try_from(stored_policy_epoch)
-        .map_err(|_| invalid_store_data("configuration plan policy epoch is negative"))?;
-    if record.plan.plan_id.as_str() != stored_plan_id
-        || record.plan.actor_id.as_str() != stored_actor_id
-        || record.plan.base_revision_id.as_str() != stored_base_revision_id
-        || record.plan.operation_digest.as_str() != stored_operation_digest
-        || record.plan.operation_digest.as_str() != operation_digest.as_deref().unwrap_or_default()
-        || record.plan.resolved_scope_digest.as_str() != stored_scope_digest
-        || record
-            .plan
-            .membership_digest
-            .as_ref()
-            .map(ManifestDigest::as_str)
-            != stored_membership_digest.as_deref()
-        || record.plan.authorization_policy_digest.as_str() != stored_policy_digest
-        || record.plan.policy_epoch != stored_policy_epoch
-        || record.plan.expires_at.0 != stored_expires_at
-        || record.plan.created_at.0 != stored_created_at
-    {
-        return Err(invalid_store_data(
-            "configuration plan payload does not match immutable projections",
-        ));
-    }
-    Ok(record)
+/// Extracts the shared plan projection columns from one engine row, keeping
+/// the per-column read errors. Validation of the stored record lives in
+/// `decode_stored_change_plan_rows` so both writers decode identically.
+pub(super) fn plan_row_columns(row: &Row) -> ConfigurationStoreResult<StoredChangePlanColumns> {
+    Ok(StoredChangePlanColumns {
+        plan_id: row
+            .get::<String>(0)
+            .map_err(|error| invalid_store_data(format!("read configuration plan id: {error}")))?,
+        actor_id: row.get::<String>(1).map_err(|error| {
+            invalid_store_data(format!("read configuration plan actor id: {error}"))
+        })?,
+        base_revision_id: row.get::<String>(2).map_err(|error| {
+            invalid_store_data(format!("read configuration plan base revision id: {error}"))
+        })?,
+        operation_digest: row.get::<String>(3).map_err(|error| {
+            invalid_store_data(format!("read configuration plan operation digest: {error}"))
+        })?,
+        resolved_scope_digest: row.get::<String>(4).map_err(|error| {
+            invalid_store_data(format!("read configuration plan scope digest: {error}"))
+        })?,
+        membership_digest: row.get::<Option<String>>(5).map_err(|error| {
+            invalid_store_data(format!(
+                "read configuration plan membership digest: {error}"
+            ))
+        })?,
+        authorization_policy_digest: row.get::<String>(6).map_err(|error| {
+            invalid_store_data(format!("read configuration plan policy digest: {error}"))
+        })?,
+        policy_epoch: row.get::<i64>(7).map_err(|error| {
+            invalid_store_data(format!("read configuration plan policy epoch: {error}"))
+        })?,
+        expires_at: row.get::<i64>(8).map_err(|error| {
+            invalid_store_data(format!("read configuration plan expiry: {error}"))
+        })?,
+        created_at: row.get::<i64>(9).map_err(|error| {
+            invalid_store_data(format!("read configuration plan creation time: {error}"))
+        })?,
+        operation_sequence: row.get::<Option<i64>>(10).map_err(|error| {
+            invalid_store_data(format!(
+                "read configuration plan operation sequence: {error}"
+            ))
+        })?,
+        payload_schema_revision: row.get::<Option<i64>>(11).map_err(|error| {
+            invalid_store_data(format!(
+                "read configuration plan payload schema revision: {error}"
+            ))
+        })?,
+        sealed_typed_operation: row.get::<Option<Vec<u8>>>(12).map_err(|error| {
+            invalid_store_data(format!("read configuration plan sealed payload: {error}"))
+        })?,
+        operation_row_digest: row.get::<Option<String>>(13).map_err(|error| {
+            invalid_store_data(format!(
+                "read configuration plan operation digest payload: {error}"
+            ))
+        })?,
+    })
 }

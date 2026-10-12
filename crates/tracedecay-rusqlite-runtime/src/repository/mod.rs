@@ -56,8 +56,11 @@ pub use configuration::ConfigurationExecutor;
 pub use configuration_projection::configuration_projection_statements;
 pub use configuration_receipt::{
     ADVANCE_COMPONENT_DESIRED_STATE_SQL, CONFIGURATION_ACTIVATION_DESIRED_RECORDED,
-    INSERT_CONFIGURATION_MUTATION_RECEIPT_SQL, LATEST_COMPONENT_ACTIVATION_STATES_SQL,
-    StoredComponentActivationState, advance_component_desired_state, configuration_entry_layer,
+    CONFIGURATION_PLAN_PAYLOAD_SCHEMA_VERSION, INSERT_CONFIGURATION_MUTATION_RECEIPT_SQL,
+    LATEST_COMPONENT_ACTIVATION_STATES_SQL, STORED_CHANGE_PLAN_SQL, StoredChangePlanColumns,
+    StoredComponentActivationState, StoredConfigurationPlanPayload,
+    StoredConfigurationProtectedOperationV1, advance_component_desired_state,
+    configuration_entry_layer, decode_stored_change_plan_row, decode_stored_change_plan_rows,
     insert_mutation_receipt, validate_activation_error_code, validate_component_name,
 };
 pub use diagnostics::DiagnosticExecutor;
