@@ -136,7 +136,7 @@ fn record_with_bookkeeping(
                 &submission.binding(),
                 &acknowledgement.identity.effect_id,
             )?
-            .ok_or(LedgerError::OutboxEffectConflict)?;
+            .ok_or(LedgerError::OutboxEffectNotEnqueued)?;
             outbox::acknowledge(transaction, &submission.binding(), &entry, acknowledgement)?;
         }
     }

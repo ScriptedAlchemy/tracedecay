@@ -20,10 +20,10 @@
 //! and writes the same receipt and desired-state SQL as
 //! `crates/tracedecay-global-db/src/configuration/store.rs`.
 //!
-//! Git-index operations cross a boundary this attachment does not own, so that
-//! arm rejects them. Effect payloads are recorded by the writer ledger; this
-//! executor accepts enqueue, inbox, and acknowledge without a domain write so
-//! the ledger can persist that lifecycle.
+//! Outbox enqueue, dispatch, and acknowledgement are writer-ledger bookkeeping
+//! with no domain write, so this executor accepts them. Applying an inbox
+//! effect and git-index operations need a domain this attachment does not own,
+//! so those arms reject them.
 
 mod attachment;
 mod configuration;
@@ -158,7 +158,8 @@ impl StorageOperationExecutor for ConcreteRepositoryWriteExecutor {
                 self.project
                     .execute_retrieval_anchor_derivative_write(savepoint, derivative)?;
             }
-            RepositoryWritePayloadV1::GitIndexTransaction(_) => {
+            RepositoryWritePayloadV1::GitIndexTransaction(_)
+            | RepositoryWritePayloadV1::ApplyInbox(_) => {
                 return Err(rusqlite::Error::InvalidParameterName(format!(
                     "repository attachment does not own {}",
                     payload.name()
@@ -166,7 +167,6 @@ impl StorageOperationExecutor for ConcreteRepositoryWriteExecutor {
                 .into());
             }
             RepositoryWritePayloadV1::EnqueueOutbox(_)
-            | RepositoryWritePayloadV1::ApplyInbox(_)
             | RepositoryWritePayloadV1::AcknowledgeOutbox(_) => {}
         }
         Ok(())

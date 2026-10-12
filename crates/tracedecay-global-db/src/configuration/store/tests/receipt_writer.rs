@@ -1,7 +1,7 @@
 //! Configuration receipts and outbox effects through the production registry.
 //!
-//! Both journeys publish a profile store with `open_registered_test_database_fixture`
-//! (the registry and schema installer production admission uses) and submit
+//! Every journey publishes a profile store with `open_registered_test_database_fixture`
+//! (the registry and schema installer production admission uses) and submits
 //! through that publication's writer. Row checks read the committed tables.
 
 use std::sync::Arc;
@@ -570,26 +570,75 @@ fn inbox_receipt(entry: &TransactionalOutboxEntryV1) -> TransactionalInboxReceip
 }
 
 #[tokio::test]
-async fn dispatched_outbox_without_a_pending_row_names_that_cause() {
+async fn outbox_transitions_without_an_enqueued_row_name_that_cause() {
     let (_directory, db, _owner) = publish_profile("profile-outbox-missing.db").await;
-    let mut dispatched = outbox_entry(db.binding(), "effect.parity.missing");
+    let pending = outbox_entry(db.binding(), "effect.parity.missing");
+    let mut dispatched = pending.clone();
     dispatched
         .transition(OutboxEffectStateV1::Dispatched, UtcMicros(2_000))
         .expect("dispatch transition");
+    let transitions = [
+        (
+            "operation.outbox.missing.dispatch",
+            RepositoryWritePayloadV1::EnqueueOutbox(Box::new(dispatched)),
+        ),
+        (
+            "operation.outbox.missing.acknowledge",
+            RepositoryWritePayloadV1::AcknowledgeOutbox(Box::new(inbox_receipt(&pending))),
+        ),
+    ];
+    for (operation_id, payload) in transitions {
+        let request = submit_request(db.binding(), operation_id, operation_id, 2_000, payload);
+        let error = dispatch(&db, request)
+            .await
+            .expect_err("a transition of an effect that was never enqueued must fail");
+        let rendered = format!("{error:?}");
+        assert!(
+            rendered.contains("outbox effect was never enqueued"),
+            "{operation_id} without an enqueued row reported: {rendered}"
+        );
+    }
+    assert_eq!(
+        count_rows(&db, "SELECT COUNT(*) FROM td_runtime_writer_outbox_v1").await,
+        0
+    );
+}
+
+/// The repository attachment owns no effect domain, so it cannot apply an
+/// inbox effect; recording an `applied` receipt here would claim work that
+/// never ran.
+#[tokio::test]
+async fn repository_attachment_rejects_applying_an_inbox_effect() {
+    let (_directory, db, _owner) = publish_profile("profile-inbox.db").await;
+    let binding = db.binding().clone();
+    let mut source = serde_json::to_value(&binding.shard_id).expect("shard json");
+    source["scope"] = json!({ "kind": "project_sessions", "project_id": "project.inbox" });
+    let mut entry = serde_json::to_value(outbox_entry(&binding, "effect.parity.inbox"))
+        .expect("outbox entry json");
+    entry["identity"]["target_watermark"]["shard_id"] =
+        entry["identity"]["source_watermark"]["shard_id"].take();
+    entry["identity"]["source_watermark"]["shard_id"] = source;
+    entry["state"] = json!("dispatched");
+    let entry: TransactionalOutboxEntryV1 =
+        serde_json::from_value(entry).expect("inbound outbox entry");
     let request = submit_request(
-        db.binding(),
-        "operation.outbox.missing",
-        "key.outbox.missing",
+        &binding,
+        "operation.inbox.apply",
+        "key.inbox.apply",
         2_000,
-        RepositoryWritePayloadV1::EnqueueOutbox(Box::new(dispatched)),
+        RepositoryWritePayloadV1::ApplyInbox(Box::new(entry)),
     );
     let error = dispatch(&db, request)
         .await
-        .expect_err("a dispatched effect with no pending row must fail");
+        .expect_err("the repository attachment must not apply an inbox effect");
     let rendered = format!("{error:?}");
     assert!(
-        rendered.contains("no pending row"),
-        "dispatched outbox without a pending row reported: {rendered}"
+        rendered.contains("repository attachment does not own apply inbox effect"),
+        "apply inbox through the repository attachment reported: {rendered}"
+    );
+    assert_eq!(
+        count_rows(&db, "SELECT COUNT(*) FROM td_runtime_writer_inbox_v1").await,
+        0
     );
 }
 
