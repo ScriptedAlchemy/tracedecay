@@ -8,6 +8,7 @@ use super::*;
 #[cfg(any(test, feature = "test-helpers"))]
 use crate::test_support::{
     hold_after_core_publish_for_test, hold_after_independent_owners_for_test,
+    hold_before_route_bind_for_test,
 };
 use tracedecay_agent_hosts::agents::context_scout::owner::unregister_registered_context_scout_owner;
 use tracedecay_agent_hosts::hooks::hook_project_id_for_layout;
@@ -1043,6 +1044,10 @@ impl ProjectOpenInputs<'_> {
         core_candidate: Arc<crate::mcp::McpServer>,
         route_registered: &AtomicBool,
     ) -> Result<CoreRouteBinding> {
+        #[cfg(any(test, feature = "test-helpers"))]
+        {
+            Box::pin(hold_before_route_bind_for_test()).await?;
+        }
         if self.cancellation.is_cancelled() {
             core_candidate.shutdown().await;
             return Err(project_open_cancellation_error());
