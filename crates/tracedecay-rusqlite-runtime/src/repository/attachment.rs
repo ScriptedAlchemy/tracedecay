@@ -870,12 +870,18 @@ mod tests {
 
     use tempfile::TempDir;
     use tracedecay_domain::LocatorDigest;
-    use tracedecay_store::{AdmissionConfigV1, StoreIncarnationV1};
+    use tracedecay_store::{
+        AdmissionConfigV1, CommitSequenceV1, OperationPriorityV1, RuntimeCancellationIdentityV1,
+        RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestControlV1, StoreIncarnationV1,
+        single_shard_required_coverage_v1,
+    };
 
     use crate::{
         CheckpointBlockers, CheckpointKind, MaintenanceCheckpointMode, RuntimeWriteAuthorityError,
         exact_sql::{ExactSqlError, ExactSqlStatement, ExactSqlValue},
+        ledger,
         maintenance::{ExclusiveMaintenancePermit, MaintenanceOwnerId},
+        test_support,
     };
 
     use super::*;
@@ -1631,6 +1637,129 @@ mod tests {
             0,
             "an exclusive TRUNCATE checkpoint must leave a zero-length WAL"
         );
+
+        attachment.drain().unwrap();
+        attachment.close_and_join().unwrap();
+    }
+
+    struct ReadProbe {
+        control: RuntimeRequestControlV1,
+    }
+
+    impl RuntimeRequestProbeV1 for ReadProbe {
+        fn cancellation_identity(&self) -> &RuntimeCancellationIdentityV1 {
+            &self.control.cancellation
+        }
+
+        fn deadline_identity(&self) -> &RuntimeDeadlineV1 {
+            &self.control.deadline
+        }
+
+        fn interruption(&self) -> Option<RuntimeInterruptionV1> {
+            None
+        }
+
+        fn try_begin_commit(&self) -> bool {
+            false
+        }
+    }
+
+    fn at_least_health_read(
+        binding: StoreRuntimeBindingV1,
+        commit_sequence: u64,
+    ) -> (RuntimeReadRequestV1, ReadProbe) {
+        let control: RuntimeRequestControlV1 = serde_json::from_value(serde_json::json!({
+            "requested_at": 1,
+            "deadline": { "deadline_id": "deadline.at-least" },
+            "cancellation": { "cancellation_id": "cancellation.at-least", "generation": 1 }
+        }))
+        .unwrap();
+        let request = RuntimeReadRequestV1::new(
+            binding,
+            ConsistencyModeV1::AtLeast {
+                commit_sequence: CommitSequenceV1(commit_sequence),
+            },
+            RuntimeReadOperationV1::TemporalHealth,
+            OperationPriorityV1::Health,
+            1,
+            control.clone(),
+        )
+        .unwrap();
+        (request, ReadProbe { control })
+    }
+
+    #[test]
+    fn at_least_reads_compare_the_requested_sequence_with_the_stored_checkpoint() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("at-least.sqlite3");
+        let first = test_support::metadata("operation.first", "key.first", 'a');
+        let second = test_support::metadata("operation.second", "key.second", 'b');
+        {
+            let mut connection = rusqlite::Connection::open(&path).unwrap();
+            let transaction = connection.transaction().unwrap();
+            ledger::initialize_schema(&transaction).unwrap();
+            for metadata in [&first, &second] {
+                ledger::record_commit(&transaction, metadata, &test_support::scope(metadata), None)
+                    .unwrap();
+            }
+            transaction.commit().unwrap();
+        }
+        let binding = test_support::binding(&first);
+        let locator = VerifiedStoreLocatorV1::new(
+            binding.shard_id.clone(),
+            binding.incarnation,
+            LocatorDigest::new(format!("sha256:{}", "f".repeat(64))).unwrap(),
+        );
+        let attachment = RepositoryPhysicalAttachmentFactory
+            .attach(
+                binding.clone(),
+                locator,
+                path.canonicalize().unwrap(),
+                AdmissionConfigV1::default(),
+            )
+            .unwrap();
+        let stored = ShardWatermarkV1 {
+            shard_id: binding.shard_id.clone(),
+            incarnation: binding.incarnation,
+            authority_epoch: binding.authority_epoch,
+            commit_sequence: CommitSequenceV1(2),
+        };
+
+        let (ahead, probe) = at_least_health_read(binding.clone(), 3);
+        let outcome = attachment.dispatch_read(ahead.clone(), &probe).unwrap();
+        assert_eq!(
+            outcome.coverage(),
+            &RuntimeReadCoverageV1::Stale {
+                coverage: single_shard_required_coverage_v1(
+                    &binding,
+                    CommitSequenceV1(3),
+                    [stored.clone()],
+                )
+                .unwrap(),
+            },
+            "a read ahead of the stored sequence must not claim complete coverage"
+        );
+        assert!(outcome.value().is_none());
+        assert_eq!(outcome.validate_for(&ahead), Ok(()));
+
+        let (reached, probe) = at_least_health_read(binding.clone(), 2);
+        let outcome = attachment.dispatch_read(reached.clone(), &probe).unwrap();
+        assert_eq!(
+            outcome.coverage(),
+            &RuntimeReadCoverageV1::Complete {
+                coverage: single_shard_required_coverage_v1(
+                    &binding,
+                    CommitSequenceV1(2),
+                    [stored],
+                )
+                .unwrap(),
+            }
+        );
+        assert!(matches!(
+            outcome.value(),
+            Some(RuntimeReadResultV1::TemporalHealth { healthy: true })
+        ));
+        assert_eq!(outcome.validate_for(&reached), Ok(()));
 
         attachment.drain().unwrap();
         attachment.close_and_join().unwrap();
