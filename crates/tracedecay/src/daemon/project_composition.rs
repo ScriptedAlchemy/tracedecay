@@ -134,6 +134,7 @@ async fn release_one_idle_project_server_before_open(
         project_roots,
         profile_identity,
     };
+    let gate_for_release = Arc::clone(&capacity_gate);
     let completion =
         retirement_admission.spawn_and_track_fallible(retired_owner.clone(), async move {
             // Teardown joins every owner-scoped store client, so the release
@@ -153,12 +154,14 @@ async fn release_one_idle_project_server_before_open(
             for data_root in hook_data_roots {
                 super::hook_v2_replay_consumer::shutdown_hook_v2_replay_consumer(&data_root).await;
             }
+            // A prior same-owner retirement can be a bind eviction cleanup,
+            // which waits on this capacity gate before its owner check.
+            // Holding the admission across the wait would deadlock both.
+            drop(capacity_admission);
             for prior in prior_owner_retirements {
                 prior.wait().await?;
             }
-            let released = release_capacity_retired_stores(stores).await;
-            drop(capacity_admission);
-            released
+            Box::pin(release_capacity_unless_re_served(stores, gate_for_release)).await
         });
     drop(retirement_admission);
     completion
@@ -184,6 +187,30 @@ struct CapacityRetirementStores {
     owner: StoreOwnerKey,
     project_roots: std::collections::BTreeSet<PathBuf>,
     profile_identity: profile_identity::LocalProfileIdentityAuthorityV1,
+}
+
+/// The released gate may have let an open remount the retired owner while
+/// the retirement waited on prior same-owner retirements. Fence the
+/// project-wide release behind the gate again and skip a re-served owner:
+/// its fresh owners are not this retirement's to remove.
+async fn release_capacity_unless_re_served(
+    stores: CapacityRetirementStores,
+    capacity_gate: Arc<ProjectOpenGate>,
+) -> Result<()> {
+    let capacity_admission = capacity_gate.lock_owned().await;
+    let re_served = stores
+        .administration
+        .project_servers()
+        .lock()
+        .await
+        .servers
+        .keys()
+        .any(|key| key.owner.project_id == stores.owner.project_id);
+    if !re_served {
+        release_capacity_retired_stores(stores).await?;
+    }
+    drop(capacity_admission);
+    Ok(())
 }
 
 #[tracing::instrument(
@@ -303,6 +330,10 @@ async fn retire_unserved_process_owners(
         .any(|key| same_canonical_path(&key.owner.graph_db_path, graph_db_path));
     if served {
         return;
+    }
+    #[cfg(any(test, feature = "test-helpers"))]
+    {
+        let _ = crate::test_support::hold_after_unserved_owner_check_for_test().await;
     }
     super::hook_v2_replay_consumer::shutdown_hook_v2_replay_consumer(
         &cg.hook_store_layout().data_root,
@@ -1075,6 +1106,8 @@ impl ProjectOpenInputs<'_> {
             route_registered.store(false, Ordering::Release);
             return Err(project_server_capacity_error());
         };
+        let capacity_gate =
+            super::project_routing::project_open_capacity_gate(self.project_open_gates).await;
         for (retired_key, retired_server) in retired {
             let owner = retired_key.owner;
             self.store_administration
@@ -1082,9 +1115,20 @@ impl ProjectOpenInputs<'_> {
                 .retire_project(&owner)
                 .await;
             let store_administration = self.store_administration.clone();
+            let capacity_gate = Arc::clone(&capacity_gate);
             retirement_admission.spawn_and_track(owner, async move {
+                #[cfg(any(test, feature = "test-helpers"))]
+                {
+                    let _ = crate::test_support::hold_before_evicted_owner_retire_for_test().await;
+                }
+                // A reopen of this project adopts the evicted graph's owners
+                // before its route publishes. Waiting out every in-flight open
+                // lets the served check see that route instead of retiring
+                // owners the reopen now relies on.
+                let open_admission = capacity_gate.lock_owned().await;
                 let graph = retired_server.cg().await;
                 retire_unserved_process_owners(&store_administration, &graph).await;
+                drop(open_admission);
                 drop(graph);
                 super::project_server_lifecycle::retire_project_servers(vec![retired_server], None)
                     .await;

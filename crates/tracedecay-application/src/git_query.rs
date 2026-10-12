@@ -26,14 +26,10 @@
 //! It spawns no subprocess of its own, holds no repository handle, and cannot
 //! mutate the index, refs, objects, config, or the worktree.
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracedecay_code_index::git_projection::{
-    GitTopologyProjectionError, GitTopologyProjectionStore,
-};
 use tracedecay_contracts::{GIT_QUERY_DEFAULT_MAX_BYTES, GIT_QUERY_DEFAULT_MAX_ENTRIES};
 use tracedecay_domain::code_intelligence::CodeGenerationId;
 use tracedecay_domain::git::{
@@ -41,12 +37,11 @@ use tracedecay_domain::git::{
     GitFileModeV1, GitHeadStateV1, GitHistoryV1, GitOidV1, GitStatusEntryV1, HunkRefV1,
 };
 use tracedecay_domain::research::{ManifestDigest, RepositoryId, canonical_sha256};
-use tracedecay_graph_db::GraphCancellation;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
 use crate::git_intelligence::{
     GIT_HISTORY_MAX_COUNT_LIMIT, GitBlameRequest, GitHistoryRequest, GitIntelligenceError,
-    GitReadPort, GitTopologyReadPort,
+    GitReadPort,
 };
 
 /// Schema version label for the query-layer generation-join payloads.
@@ -136,18 +131,6 @@ pub enum GitQueryError {
     /// The result could not be serialized for byte measurement.
     #[error("git query result serialization failed: {0}")]
     Serialization(String),
-    /// A topology traversal was requested before its verified projection mounted.
-    #[error("verified Git topology projection is unavailable: {0}")]
-    TopologyUnavailable(String),
-    /// The mounted topology projection no longer matches the repository refs.
-    #[error("verified Git topology projection is stale")]
-    TopologyStale {
-        projected: ManifestDigest,
-        current: ManifestDigest,
-    },
-    /// The verified topology projection failed closed.
-    #[error("verified Git topology projection failed: {0}")]
-    TopologyFailed(String),
 }
 
 // The typed query envelope and status summary are canonical public wire
@@ -267,22 +250,11 @@ impl GenerationGitJoinV1 {
 /// Generation-aware query engine over a borrowed read-only Git port.
 pub struct GitQueryEngine<'a, P: GitReadPort> {
     port: &'a P,
-    topology: Option<&'a GitTopologyProjectionStore>,
 }
 
 impl<'a, P: GitReadPort> GitQueryEngine<'a, P> {
     pub fn new(port: &'a P) -> Self {
-        Self {
-            port,
-            topology: None,
-        }
-    }
-
-    pub fn with_topology(port: &'a P, topology: &'a GitTopologyProjectionStore) -> Self {
-        Self {
-            port,
-            topology: Some(topology),
-        }
+        Self { port }
     }
 
     /// Current repository status summary with per-class counts and a bounded
@@ -482,10 +454,7 @@ impl<'a, P: GitReadPort> GitQueryEngine<'a, P> {
         &self,
         bounds: &GitQueryBounds,
         query: &GenerationBoundGitQueryV1,
-    ) -> Result<GenerationGitJoinV1, GitQueryError>
-    where
-        P: GitTopologyReadPort,
-    {
+    ) -> Result<GenerationGitJoinV1, GitQueryError> {
         bounds.check()?;
         let evidence = self.revision_evidence(bounds)?;
         let mut coverage = evidence.coverage.clone();
@@ -493,48 +462,21 @@ impl<'a, P: GitReadPort> GitQueryEngine<'a, P> {
         let staleness = match (&query.claimed_head, &evidence.head_oid) {
             (Some(claimed), Some(current)) if claimed != current => {
                 bounds.check()?;
-                let reachable = if let Some(topology) = self.topology {
-                    let current_watermark = self.port.topology_ref_watermark()?;
-                    topology
-                        .verify_ref_watermark(&current_watermark)
-                        .map_err(map_topology_error)?;
-                    if topology.repository() != &evidence.repository {
-                        return Err(GitQueryError::TopologyUnavailable(
-                            "mounted Git topology belongs to another repository".to_owned(),
-                        ));
-                    }
-                    for degradation in &topology.coverage().degradations {
-                        coverage.record(*degradation);
-                    }
-                    let limit = bounds.max_entries.max(1) as usize;
-                    let ancestors = topology
-                        .ancestors(
-                            current,
-                            limit,
-                            limit,
-                            Arc::new(QueryGraphCancellation {
-                                cancelled: bounds.cancel.clone(),
-                            }),
-                        )
-                        .map_err(map_topology_error)?;
-                    bounds.check()?;
-                    ancestors.contains(claimed)
-                } else {
-                    let walk = self.bounded_history(
-                        bounds,
-                        &GitHistoryRequest {
-                            max_count: bounds.max_entries.min(GIT_HISTORY_MAX_COUNT_LIMIT),
-                            ..GitHistoryRequest::default()
-                        },
-                    )?;
-                    for degradation in &walk.coverage.degradations {
-                        coverage.record(*degradation);
-                    }
-                    walk.value
-                        .commits
-                        .iter()
-                        .any(|commit| &commit.commit == claimed)
-                };
+                let walk = self.bounded_history(
+                    bounds,
+                    &GitHistoryRequest {
+                        max_count: bounds.max_entries.min(GIT_HISTORY_MAX_COUNT_LIMIT),
+                        ..GitHistoryRequest::default()
+                    },
+                )?;
+                for degradation in &walk.coverage.degradations {
+                    coverage.record(*degradation);
+                }
+                let reachable = walk
+                    .value
+                    .commits
+                    .iter()
+                    .any(|commit| &commit.commit == claimed);
                 if reachable {
                     GenerationStalenessV1::GenerationBehindHead {
                         claimed: claimed.clone(),
@@ -569,34 +511,6 @@ impl<'a, P: GitReadPort> GitQueryEngine<'a, P> {
         };
         check_bytes(bounds, &join)?;
         Ok(join)
-    }
-}
-
-struct QueryGraphCancellation {
-    cancelled: Option<CancellationToken>,
-}
-
-impl GraphCancellation for QueryGraphCancellation {
-    fn is_cancelled(&self) -> bool {
-        self.cancelled
-            .as_ref()
-            .is_some_and(CancellationToken::is_cancelled)
-    }
-}
-
-fn map_topology_error(error: GitTopologyProjectionError) -> GitQueryError {
-    match error {
-        GitTopologyProjectionError::Stale { projected, current } => {
-            GitQueryError::TopologyStale { projected, current }
-        }
-        GitTopologyProjectionError::Unavailable(message) => {
-            GitQueryError::TopologyUnavailable(message)
-        }
-        GitTopologyProjectionError::Cancelled => GitQueryError::Cancelled,
-        GitTopologyProjectionError::BudgetExhausted => {
-            GitQueryError::TopologyFailed("traversal budget was exhausted".to_owned())
-        }
-        error => GitQueryError::TopologyFailed(error.to_string()),
     }
 }
 

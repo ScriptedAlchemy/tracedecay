@@ -47,7 +47,7 @@ async fn graph_reads_refuse_as_unavailable_until_the_graph_seals() {
             project.canonicalize().unwrap(),
         );
     let harness = Box::pin(
-        ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+        crate::support::seeded_composition::open_for_session_retrieval(
             isolation.path(),
             [project.clone()],
         ),

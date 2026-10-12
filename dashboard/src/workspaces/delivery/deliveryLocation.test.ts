@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import {
-  deliveryHref,
   readDeliveryLocation,
   writeDeliveryLocation,
 } from './deliveryLocation.ts';
@@ -69,7 +68,6 @@ describe('deliveryLocation', () => {
     expect(next.get('mode')).toBeNull();
     expect(next.get('layout')).toBeNull();
     expect(next.get('pr')).toBe('x');
-    expect(deliveryHref(new URLSearchParams(''), { mode: 'inbox' })).toBe('/delivery');
   });
 
   it('leaves keys the patch does not name untouched', () => {

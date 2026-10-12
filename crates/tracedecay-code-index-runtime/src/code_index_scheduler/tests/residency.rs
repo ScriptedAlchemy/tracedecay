@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 use tracedecay_contracts::code_index_freshness::{
-    CodeGraphServingReadinessV1, CodeIndexStalenessStateV1,
+    CodeGraphServingReadinessV1, CodeIndexBuildBlockedReasonV1, CodeIndexStalenessStateV1,
 };
 use tracedecay_domain::{CodeGenerationId, ProjectId, WorktreeId};
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
@@ -1484,6 +1484,25 @@ fn sixteen_gib_authority() -> Arc<ProcessResidentMemoryV1> {
     ))
 }
 
+/// A 16 GiB authority reading a fixed process size, so a held ledger refuses
+/// a refresh however much memory the tests beside it hold.
+fn fixed_reading_authority() -> Arc<ProcessResidentMemoryV1> {
+    let limit = NonZeroU64::new(16 * 1024 * 1024 * 1024).unwrap();
+    let process = ProcessResidentSampleV1 {
+        resident_bytes: 256 * 1024 * 1024,
+        unreclaimable_bytes: 256 * 1024 * 1024,
+        swapped_bytes: 0,
+        cgroup_committed_bytes: None,
+    };
+    Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::new(ResidentMemoryPressureV1::with_sampler(
+            limit,
+            Arc::new(move || Some(process)),
+        )),
+    ))
+}
+
 /// Issue #2707: the refresh stopped retrying and the idle release that later
 /// gave its memory back never woke it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1592,22 +1611,7 @@ async fn a_refused_refresh_waits_for_a_release_without_passive_reads_holding_its
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
     let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
-    // A fixed process reading, so the held ledger refuses the refresh however
-    // much memory the tests beside this one hold.
-    let limit = NonZeroU64::new(16 * 1024 * 1024 * 1024).unwrap();
-    let process = ProcessResidentSampleV1 {
-        resident_bytes: 256 * 1024 * 1024,
-        unreclaimable_bytes: 256 * 1024 * 1024,
-        swapped_bytes: 0,
-        cgroup_committed_bytes: None,
-    };
-    let resident_memory = Arc::new(ProcessResidentMemoryV1::with_pressure(
-        limit,
-        Arc::new(ResidentMemoryPressureV1::with_sampler(
-            limit,
-            Arc::new(move || Some(process)),
-        )),
-    ));
+    let resident_memory = fixed_reading_authority();
     let (registry, scope) = mounted_core_query_worktree_in(
         CodeIndexSchedulerRegistryV1::with_resident_memory(1, Arc::clone(&resident_memory))
             .with_resident_owners(Arc::clone(&owners)),
@@ -1692,6 +1696,99 @@ async fn a_refused_refresh_waits_for_a_release_without_passive_reads_holding_its
     );
     assert_eq!(blocked_reason().await, None);
 
+    registry.shutdown().await;
+}
+
+/// A read holding the serving graph through a refresh's memory refusal keeps
+/// both the refusal's yield and the park release from freeing it. The read
+/// ending is what frees that graph, so it must retry the refresh.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refresh_refused_while_a_read_holds_the_graph_retries_when_the_read_ends() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
+    let resident_memory = fixed_reading_authority();
+    let (registry, _) = mounted_core_query_worktree_in(
+        CodeIndexSchedulerRegistryV1::with_resident_memory(1, Arc::clone(&resident_memory))
+            .with_resident_owners(Arc::clone(&owners)),
+        &fixture,
+        &store,
+    )
+    .await;
+    wait_for_settled_owner(&registry, fixture.path()).await;
+    let seated = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let text = wait_for_queryable_text_generation(&registry, fixture.path()).await;
+    install_verified_graph_store_on_text(&text, &seated);
+    drop(seated);
+    let graph_store = text
+        .interactive_graph_store()
+        .expect("installed graph store");
+    graph_store
+        .warm_serving_engine()
+        .expect("pin the serving engine");
+    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    while text.code_graph_serving_readiness() != CodeGraphServingReadinessV1::Ready {
+        assert!(
+            Instant::now() <= deadline,
+            "the installed graph must report ready"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let reader = graph_store
+        .interactive_reader(
+            &text.metadata().manifest().generation_id,
+            &tracedecay_contracts::CancellationSignal::active("cancel.test.graph-reader")
+                .expect("graph cancellation"),
+        )
+        .expect("an open graph read");
+    let blocker = ledger_leaving_one_mib(&resident_memory, "test-other-worktree-build");
+    refresh_refused_for_memory(&registry, &fixture).await;
+    let refused_passes = || async {
+        registry
+            .dashboard_freshness(fixture.path())
+            .await
+            .expect("mounted worktree freshness")
+            .parked
+            .filter(|parked| {
+                parked.blocked_reason == Some(CodeIndexBuildBlockedReasonV1::ResidentMemory)
+            })
+            .map(|parked| parked.observed_passes)
+    };
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let before = loop {
+        if let Some(passes) = refused_passes().await {
+            break passes;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "the refresh parks on resident memory"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    // The worker gives back what it can before it reads as parked.
+    wait_for_worker_phase(&registry, fixture.path(), CodeIndexWorkerPhaseV1::Parked).await;
+
+    // A read can end off the runtime (a catalog re-warm thread holds the
+    // last lease) and while a pass runs.
+    let pass = registry
+        .hold_reconcile_pass_for_test(fixture.path())
+        .await
+        .expect("mounted worktree");
+    std::thread::spawn(move || drop(reader))
+        .join()
+        .expect("ending a graph read off the runtime must not panic");
+    drop(pass);
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while refused_passes().await == Some(before) {
+        assert!(
+            Instant::now() <= deadline,
+            "the graph the ended read freed is the refused refresh's retry"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    drop(blocker);
     registry.shutdown().await;
 }
 

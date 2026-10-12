@@ -19,7 +19,7 @@ use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_global_db::DeliverySourceReceiptReadV1;
 use tracedecay_hooks::{
     HookDeliveryReceiptSpoolV1, HookDeliverySourceReceiptV1, HookReplayAdmissionOutcomeV1,
-    HookReplayPassReportV1, HookSpoolConfigV1, HookSpoolV1,
+    HookReplayPassReportV1, HookScopeBindingV1, HookSpoolConfigV1, HookSpoolV1,
     admit_replayed_envelope_with_authoritative_session, drain_host_spool_once, hook_v2_spool_root,
     published_hook_scope_binding,
 };
@@ -203,18 +203,6 @@ async fn drain_all_hosts(
     let mut sweep = HookReplaySweepV1::default();
     let project_id =
         tracedecay_agent_hosts::hooks::hook_project_id_for_layout(graph.hook_store_layout());
-    // Worktree identity needs only the hook runtime's scope resolver; the
-    // profile is the graph's own.
-    let worktree_id = graph
-        .profile_root()
-        .map(tracedecay_runtime_core::config::ProfileRoot::new)
-        .and_then(|profile| {
-            tracedecay_agent_hosts::hooks::hook_worktree_id_for_layout(
-                &crate::hook_runtime(profile),
-                graph.hook_store_layout(),
-            )
-        })
-        .map_err(|error| format!("hook worktree identity is unavailable: {error}"));
     for host in tracedecay_agent_hosts::hooks::NATIVE_HOOK_HOSTS {
         let now = hook_replay_now();
         match drain_hook_delivery_receipts(data_root, *host, delivery_settlements).await {
@@ -228,7 +216,6 @@ async fn drain_all_hosts(
         let report = match Box::pin(drain_admitted_host_spool(
             *host,
             project_id,
-            &worktree_id,
             now,
             graph,
             project_sessions,
@@ -331,7 +318,6 @@ async fn redrive_pending_work(
 async fn drain_admitted_host_spool(
     host: NativeHostIdentityV1,
     project_id: Option<[u8; 16]>,
-    worktree_id: &Result<[u8; 16], String>,
     now: UtcMicros,
     graph: &tracedecay_project::project::TraceDecay,
     project_sessions: &tracedecay_global_db::RegisteredGlobalDb,
@@ -351,13 +337,22 @@ async fn drain_admitted_host_spool(
     }
     let project_id =
         project_id.ok_or_else(|| "the project layout has no hook project identity".to_owned())?;
-    let worktree_id = worktree_id.clone()?;
-    let binding = published_hook_scope_binding(data_root, worktree_id, host, now);
+    // Sibling worktrees share this data root with their own bindings: resolve
+    // each record against the binding its worktree published rather than this
+    // graph's alone, caching the published lookup once per worktree per pass.
+    let mut resolved_bindings =
+        std::collections::HashMap::<[u8; 16], Option<HookScopeBindingV1>>::new();
+    let mut resolve_binding = |worktree_id: [u8; 16]| {
+        resolved_bindings
+            .entry(worktree_id)
+            .or_insert_with(|| published_hook_scope_binding(data_root, worktree_id, host, now))
+            .clone()
+    };
     let pass = Box::pin(drain_host_spool_once(
             &root,
             HookSpoolConfigV1::stock(host),
             project_id,
-            binding.as_ref(),
+            &mut resolve_binding,
             now,
             |envelope, native_lifecycle| async move {
                 let lifecycle_for_admission = native_lifecycle.clone();

@@ -1725,7 +1725,7 @@ async fn fixture() -> (
     let target_project = isolation.path().join("target-project");
     initialize_protocol_fixture(&active_project, "active");
     initialize_protocol_fixture(&target_project, "target");
-    let harness = ProductionProjectCompositionHarnessV1::open(
+    let harness = crate::support::seeded_composition::open(
         isolation.path(),
         [active_project.clone(), target_project.clone()],
     )

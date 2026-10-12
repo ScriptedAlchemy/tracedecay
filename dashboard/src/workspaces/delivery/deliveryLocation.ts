@@ -131,13 +131,6 @@ export function writeDeliveryLocation(
   return next;
 }
 
-/** A full `/delivery?…` href for a patch over the current location, the
- * anchor form of `writeDeliveryLocation`, for links rather than handlers. */
-export function deliveryHref(current: URLSearchParams, patch: DeliveryLocationPatch): string {
-  const query = writeDeliveryLocation(current, patch).toString();
-  return query === '' ? '/delivery' : `/delivery?${query}`;
-}
-
 export function modeLabel(mode: DeliveryMode): string {
   switch (mode) {
     case 'inbox':

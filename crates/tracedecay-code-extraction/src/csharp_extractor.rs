@@ -146,8 +146,10 @@ impl CSharpExtractor {
             }
             "using_directive" => Self::visit_using(state, node),
             "class_declaration" => Self::visit_class(state, node),
-            "struct_declaration" => Self::visit_struct(state, node),
-            "interface_declaration" => Self::visit_interface(state, node),
+            "struct_declaration" => Self::visit_struct_or_interface(state, node, NodeKind::Struct),
+            "interface_declaration" => {
+                Self::visit_struct_or_interface(state, node, NodeKind::Interface);
+            }
             "enum_declaration" => Self::visit_enum(state, node),
             "method_declaration" => Self::visit_method(state, node),
             "constructor_declaration" => Self::visit_constructor(state, node),
@@ -371,8 +373,8 @@ impl CSharpExtractor {
         state.node_stack.pop();
     }
 
-    /// Extract a struct declaration.
-    fn visit_struct(state: &mut ExtractionState, node: TsNode<'_>) {
+    /// Extract a struct or interface declaration as a node of `kind`.
+    fn visit_struct_or_interface(state: &mut ExtractionState, node: TsNode<'_>, kind: NodeKind) {
         let name = Self::extract_name(state, node).unwrap_or_else(|| "<anonymous>".to_string());
         let visibility = Self::extract_csharp_visibility(node, state);
         let docstring = Self::extract_xml_docstring(state, node);
@@ -381,83 +383,11 @@ impl CSharpExtractor {
         let end_line = node.end_position().row as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = local_node_id(
-            &state.file_path,
-            state.source,
-            &NodeKind::Struct,
-            &name,
-            node,
-        );
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
-            kind: NodeKind::Struct,
-            name: name.clone(),
-            qualified_name,
-            file_path: state.file_path.clone(),
-            start_line,
-            attrs_start_line: node.start_position().row as u32,
-            end_line,
-            start_column,
-            end_column,
-            signature,
-            docstring,
-            visibility,
-            is_async: false,
-            branches: 0,
-            loops: 0,
-            returns: 0,
-            max_nesting: 0,
-            unsafe_blocks: 0,
-            unchecked_calls: 0,
-            assertions: 0,
-            complexity_analysis: ComplexityAnalysisV1::Complete,
-            updated_at: state.timestamp,
-            parent_id: None,
-        };
-        state.nodes.push(graph_node);
-
-        if let Some(parent_id) = state.parent_node_id() {
-            state.edges.push(Edge {
-                source: parent_id.to_string(),
-                target: id.clone(),
-                kind: EdgeKind::Contains,
-                line: Some(start_line),
-            });
-        }
-
-        Self::extract_base_list(state, node, &id, false);
-
-        state.node_stack.push((name, id));
-        state.class_depth += 1;
-        if let Some(body) = node.child_by_field_name("body") {
-            Self::visit_children(state, body);
-        }
-        state.class_depth -= 1;
-        state.node_stack.pop();
-    }
-
-    /// Extract an interface declaration.
-    fn visit_interface(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = Self::extract_name(state, node).unwrap_or_else(|| "<anonymous>".to_string());
-        let visibility = Self::extract_csharp_visibility(node, state);
-        let docstring = Self::extract_xml_docstring(state, node);
-        let signature = Some(Self::extract_declaration_signature(state, node));
-        let (start_line, start_column) = declaration_start(node, CSHARP_ATTRIBUTE_KINDS);
-        let end_line = node.end_position().row as u32;
-        let end_column = node.end_position().column as u32;
-        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = local_node_id(
-            &state.file_path,
-            state.source,
-            &NodeKind::Interface,
-            &name,
-            node,
-        );
-
-        let graph_node = Node {
-            id: id.clone(),
-            kind: NodeKind::Interface,
+            kind,
             name: name.clone(),
             qualified_name,
             file_path: state.file_path.clone(),

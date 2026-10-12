@@ -525,10 +525,7 @@ pub enum CapabilityAvailability {
 /// Why the gateway could not truthfully advertise or serve a capability.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CapabilityUnavailableReason {
-    ExplicitlyUnavailable,
     ClientCapabilityMissing,
-    GatewayCapabilityMissing,
-    UpstreamCapabilityMissing,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

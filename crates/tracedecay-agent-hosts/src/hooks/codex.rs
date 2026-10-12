@@ -2,7 +2,6 @@
 //!
 //! Codex emits its own hook output shape.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tracedecay_contracts::retrieval::HookRuntimeSurfaceRequestV1;
@@ -12,24 +11,15 @@ use serde_json::Value;
 use crate::ports::hook_runtime::HookRuntimeV1;
 use tracedecay_runtime_core::config::ProfileRoot;
 
-use super::claude::is_code_research_prompt;
-use super::steering::{HookWorkspaceStatus, index_status_line};
-use super::tool_hints::{HintCategory, ToolHint, ToolHintInput, decide_hint};
+use super::steering::{HookWorkspaceStatus, UNINDEXED_STATUS_LINE};
+use super::tool_hints::{ToolHint, ToolHintInput, decide_hint};
 use super::{
     additional_context_json, append_tool_hint, deduped_project_hint_with_id, event_cwd_from_parsed,
     event_project_root, event_project_root_from_json, event_project_root_with_identity,
-    event_session_id, format_tool_hint, is_project_like_workspace, mint_hint_id, prompt_like_text,
-    read_hook_event, record_hint_analytics, record_hook_analytics, record_hook_invoked_parsed,
-    record_workspace_status_analytics, rel_under_root, text_field,
+    event_session_id, is_project_like_workspace, mint_hint_id, prompt_like_text, read_hook_event,
+    record_hint_analytics, record_hook_invoked_parsed, record_workspace_status_analytics,
 };
 use tracedecay_domain::HostIntegrationIdV1;
-
-const CODEX_SUBAGENT_START_CONTEXT: &str = "TraceDecay context for this new or code-research \
-subagent: when the task needs unfamiliar code context, use tracedecay_context for concepts, \
-tracedecay_search for symbols, tracedecay_grep for literal or regex text, and \
-tracedecay_callers/callees or tracedecay_impact for relationships. Use native reads for known \
-files. Load a tracedecay skill only when its specific workflow matches the task; use \
-tracedecay_message_search or tracedecay_lcm_expand_query when prior conversation context matters.";
 
 /// Codex `SessionStart` hook handler.
 #[tracing::instrument(name = "hosts.hooks.codex.session_start", level = "trace", skip_all)]
@@ -192,7 +182,7 @@ async fn codex_user_prompt_submit_context_with_root(
     let status = codex_workspace_status(root, cwd.as_deref());
     record_workspace_status_analytics(profile.data_dir(), root, status, session_id.as_deref());
     let mut context = if matches!(status, HookWorkspaceStatus::UnindexedProject) {
-        index_status_line(false, None)
+        UNINDEXED_STATUS_LINE.to_string()
     } else {
         String::new()
     };
@@ -298,196 +288,6 @@ pub async fn hook_codex_post_compact(runtime: &HookRuntimeV1) -> i32 {
     0
 }
 
-/// Pure decision logic for Codex `SubagentStart` events.
-pub fn evaluate_codex_subagent_start(profile: &ProfileRoot, event_json: &str) -> Option<String> {
-    let parsed: Value = serde_json::from_str(event_json).ok()?;
-    let agent_type = parsed
-        .get("agent_type")
-        .or_else(|| parsed.get("subagent_type"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let task = parsed
-        .get("prompt")
-        .or_else(|| parsed.get("task"))
-        .or_else(|| parsed.get("description"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-
-    let is_explore = agent_type.eq_ignore_ascii_case("explore");
-    let is_research = is_explore || is_code_research_prompt(task);
-    let needs_context = codex_subagent_needs_context(&parsed);
-    if is_research || needs_context {
-        let hint = ToolHint {
-            category: if is_research {
-                HintCategory::ExploreSubagent
-            } else {
-                HintCategory::SubagentStartContext
-            },
-            message: "For Codex subagents, add compact TraceDecay context before isolated work."
-                .to_string(),
-            context: CODEX_SUBAGENT_START_CONTEXT.to_string(),
-            nonblocking: true,
-        };
-        let root = event_project_root(profile, &parsed);
-        let hint_id = mint_hint_id();
-        record_hint_analytics(
-            profile.data_dir(),
-            root.as_deref(),
-            "hint_candidate",
-            HostIntegrationIdV1::Codex,
-            event_session_id(&parsed).as_deref(),
-            &hint_id,
-            &hint,
-        );
-        let _ = deduped_codex_hint(profile, &parsed, &hint_id, hint.clone())?;
-        let context = codex_subagent_start_context(Some(hint), needs_context);
-        return Some(additional_context_json("SubagentStart", &context));
-    }
-    None
-}
-
-/// Records a Codex `SubagentStart` and returns the session-local count.
-#[tracing::instrument(
-    name = "hosts.hooks.codex.record_subagent_start",
-    level = "trace",
-    skip_all
-)]
-pub async fn record_codex_subagent_start(runtime: &HookRuntimeV1, event_json: &str) -> Option<u64> {
-    let parsed: Value = serde_json::from_str(event_json).ok()?;
-    let root = event_project_root_with_identity(runtime, &parsed).await?;
-    let layout = (runtime.store_layout_resolver)(&runtime.profile, &root)
-        .await
-        .ok()?;
-    let path = layout.data_root.join("codex_subagent_starts.json");
-    let analytics_session_id = event_session_id(&parsed);
-    let session_id = analytics_session_id
-        .clone()
-        .unwrap_or_else(|| "unknown-codex-session".to_string());
-    let mut counts = read_codex_subagent_start_counts(&path);
-    let count = counts.entry(session_id).or_insert(0);
-    *count = count.saturating_add(1);
-    let next = *count;
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(json) = serde_json::to_string_pretty(&counts) {
-        let _ = std::fs::write(path, format!("{json}\n"));
-    }
-    let agent_type = parsed
-        .get("agent_type")
-        .or_else(|| parsed.get("subagent_type"))
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("unknown");
-    record_hook_analytics(
-        runtime.profile.data_dir(),
-        Some(&root),
-        "codex_subagent_start",
-        serde_json::json!({
-            "agent": HostIntegrationIdV1::Codex.as_key(),
-            "session_id": analytics_session_id.as_deref(),
-            "agent_type": agent_type,
-            "count": next,
-        }),
-    );
-    Some(next)
-}
-
-pub fn codex_subagent_start_log_line(
-    event_json: &str,
-    count: Option<u64>,
-    emitted_context: bool,
-) -> String {
-    let parsed = serde_json::from_str::<Value>(event_json).unwrap_or(Value::Null);
-    let agent_type = parsed
-        .get("agent_type")
-        .or_else(|| parsed.get("subagent_type"))
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("unknown");
-    let session_id = event_session_id(&parsed).unwrap_or_else(|| "unknown".to_string());
-    let count = count.map_or_else(|| "#?".to_string(), |value| format!("#{value}"));
-    format!(
-        "tracedecay Codex SubagentStart {count}: session_id={session_id} agent_type={agent_type} additional_context={emitted_context}"
-    )
-}
-
-fn read_codex_subagent_start_counts(path: &Path) -> BTreeMap<String, u64> {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|content| serde_json::from_str(&content).ok())
-        .unwrap_or_default()
-}
-
-fn codex_subagent_start_context(hint: Option<ToolHint>, no_history: bool) -> String {
-    let mut context = String::new();
-    if no_history {
-        context.push_str("new/no-history subagent: recover only relevant project memory or prior-session context before assuming missing decisions.\n");
-    }
-    context.push_str(CODEX_SUBAGENT_START_CONTEXT);
-    context.push('\n');
-    if let Some(hint) = hint {
-        context.push('\n');
-        context.push_str(&format_tool_hint(&hint));
-        context.push('\n');
-    }
-    context
-}
-
-fn codex_subagent_needs_context(parsed: &Value) -> bool {
-    bool_field(
-        parsed,
-        &["is_new", "new_subagent", "fresh_subagent", "no_history"],
-    ) == Some(true)
-        || bool_field(
-            parsed,
-            &[
-                "has_history",
-                "history_included",
-                "receives_history",
-                "conversation_history_included",
-            ],
-        ) == Some(false)
-        || text_field(
-            parsed,
-            &[
-                "history_mode",
-                "context_mode",
-                "conversation_history",
-                "source",
-                "reason",
-            ],
-        )
-        .is_some_and(|value| matches_no_history_marker(&value))
-        || empty_array_field(parsed, &["history", "messages", "conversation"])
-}
-
-fn bool_field(value: &Value, keys: &[&str]) -> Option<bool> {
-    keys.iter()
-        .find_map(|key| value.get(*key).and_then(Value::as_bool))
-}
-
-fn empty_array_field(value: &Value, keys: &[&str]) -> bool {
-    keys.iter().any(|key| {
-        value
-            .get(*key)
-            .and_then(Value::as_array)
-            .is_some_and(Vec::is_empty)
-    })
-}
-
-fn matches_no_history_marker(value: &str) -> bool {
-    let normalized = value
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .collect::<String>()
-        .to_ascii_lowercase();
-    matches!(
-        normalized.as_str(),
-        "new" | "fresh" | "none" | "empty" | "nohistory" | "withoutconversationhistory"
-    )
-}
-
 /// Resolves the tracedecay project root for a Codex event from its `cwd`.
 ///
 /// Kept as the published Codex-named entry point; the resolution itself is the
@@ -515,42 +315,6 @@ pub fn codex_workspace_status_from_event(
     let root = event_project_root(profile, &parsed);
     let cwd = event_cwd_from_parsed(&parsed);
     codex_workspace_status(root.as_deref(), cwd.as_deref())
-}
-
-/// Codex `apply_patch` envelope prefixes that name a target file path.
-const CODEX_APPLY_PATCH_PATH_PREFIXES: [&str; 4] = [
-    "*** Add File:",
-    "*** Update File:",
-    "*** Delete File:",
-    "*** Move to:",
-];
-
-/// Extracts the project-relative paths touched by a Codex `apply_patch` command.
-pub fn codex_apply_patch_rel_paths(command: &str, cwd: &Path, project_root: &Path) -> Vec<String> {
-    let mut rels: Vec<String> = Vec::new();
-    for line in command.lines() {
-        let line = line.trim();
-        for prefix in CODEX_APPLY_PATCH_PATH_PREFIXES {
-            if let Some(rest) = line.strip_prefix(prefix) {
-                let raw = rest.trim();
-                if raw.is_empty() {
-                    continue;
-                }
-                let candidate = Path::new(raw);
-                let abs = if candidate.is_absolute() {
-                    candidate.to_path_buf()
-                } else {
-                    cwd.join(candidate)
-                };
-                if let Some(rel) = rel_under_root(project_root, &abs)
-                    && !rels.contains(&rel)
-                {
-                    rels.push(rel);
-                }
-            }
-        }
-    }
-    rels
 }
 
 #[tracing::instrument(name = "hosts.hooks.codex.compact_daemon", level = "trace", skip_all)]
@@ -618,6 +382,7 @@ fn codex_prompt_hint(profile: &ProfileRoot, parsed: &Value) -> Option<ToolHint> 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use super::super::tool_hints::HintCategory;
     use super::*;
 
     #[test]

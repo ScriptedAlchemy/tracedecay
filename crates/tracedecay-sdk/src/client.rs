@@ -227,9 +227,8 @@ impl Client {
         Operation::Result: DeserializeOwned,
     {
         crate::observe::mcp_execute(|| {
-            let request = serde_json::to_value(request).map_err(|error| ClientError::Protocol {
-                status: None,
-                message: format!("typed request could not be encoded: {error}"),
+            let request = serde_json::to_value(request).map_err(|error| {
+                statusless_protocol(format!("typed request could not be encoded: {error}"))
             })?;
             let OperationTransport::McpTool { tool_name } = Operation::TRANSPORT else {
                 return Err(ClientError::UnsupportedTransport {
@@ -244,12 +243,11 @@ impl Client {
                         operation_id: Operation::OPERATION_ID,
                     })?;
             let response = transport.call_tool(tool_name, &request)?;
-            serde_json::from_value(response).map_err(|error| ClientError::Protocol {
-                status: None,
-                message: format!(
+            serde_json::from_value(response).map_err(|error| {
+                statusless_protocol(format!(
                     "MCP tool {tool_name} returned a malformed {} result: {error}",
                     Operation::OPERATION_ID
-                ),
+                ))
             })
         })
     }
@@ -266,9 +264,8 @@ impl Client {
         Operation::Result: DeserializeOwned,
     {
         crate::observe::http_execute(|| {
-            let request = serde_json::to_value(request).map_err(|error| ClientError::Protocol {
-                status: None,
-                message: format!("typed request could not be encoded: {error}"),
+            let request = serde_json::to_value(request).map_err(|error| {
+                statusless_protocol(format!("typed request could not be encoded: {error}"))
             })?;
             let OperationTransport::Http { route } = Operation::TRANSPORT else {
                 return Err(ClientError::UnsupportedTransport {
@@ -422,7 +419,7 @@ impl Client {
                     ));
                 }
             }
-            let payload = response.payload().cloned().ok_or_else(|| {
+            let payload = response.payload().ok_or_else(|| {
                 protocol(
                     response.status(),
                     format!(
@@ -447,7 +444,7 @@ impl Client {
                 &request_id,
                 expected_request_id.as_ref(),
                 &request,
-                &payload,
+                payload,
             ) {
                 return Err(protocol(
                     response.status(),
@@ -457,7 +454,7 @@ impl Client {
                     ),
                 ));
             }
-            let result = serde_json::from_value(payload).map_err(|error| {
+            let result = Operation::Result::deserialize(payload).map_err(|error| {
                 protocol(
                     response.status(),
                     format!(
@@ -628,7 +625,7 @@ impl Client {
                 "daemon response is not application/json",
             ));
         }
-        let body: Value = response.json().map_err(|error| {
+        let mut body: Value = response.json().map_err(|error| {
             protocol(
                 status.as_u16(),
                 format!("daemon returned malformed application JSON: {error}"),
@@ -637,8 +634,8 @@ impl Client {
         match body.get("kind").and_then(Value::as_str) {
             Some("success") if status.is_success() => {
                 let value = body
-                    .get("value")
-                    .cloned()
+                    .get_mut("value")
+                    .map(Value::take)
                     .ok_or_else(|| protocol(status.as_u16(), "success envelope has no value"))?;
                 ApplicationResponse::new(value, status.as_u16())
             }
@@ -813,6 +810,15 @@ fn is_terminal_event(event: &str) -> bool {
 fn protocol(status: u16, message: impl Into<String>) -> ClientError {
     ClientError::Protocol {
         status: Some(status),
+        message: message.into(),
+    }
+}
+
+/// A protocol violation detected outside an HTTP status (request encoding,
+/// MCP results, and SSE framing).
+fn statusless_protocol(message: impl Into<String>) -> ClientError {
+    ClientError::Protocol {
+        status: None,
         message: message.into(),
     }
 }
@@ -1153,10 +1159,9 @@ impl OperationStream {
                 .map_err(|error| ClientError::Transport(error.to_string()))?;
             if read == 0 {
                 if self.pending_event.is_some() || self.pending_data.is_some() {
-                    return Err(ClientError::Protocol {
-                        status: None,
-                        message: "event stream ended inside an SSE frame".into(),
-                    });
+                    return Err(statusless_protocol(
+                        "event stream ended inside an SSE frame",
+                    ));
                 }
                 return Ok(None);
             }
@@ -1173,123 +1178,93 @@ impl OperationStream {
                     .pending_event
                     .take()
                     .unwrap_or_else(|| "message".into());
-                let data: Value =
-                    serde_json::from_str(&data_text).map_err(|error| ClientError::Protocol {
-                        status: None,
-                        message: format!("SSE data is not JSON: {error}"),
-                    })?;
+                let data: Value = serde_json::from_str(&data_text).map_err(|error| {
+                    statusless_protocol(format!("SSE data is not JSON: {error}"))
+                })?;
                 if data.get("event").and_then(Value::as_str) != Some(event_name.as_str()) {
-                    return Err(ClientError::Protocol {
-                        status: None,
-                        message: "SSE event name disagrees with its JSON payload".into(),
-                    });
+                    return Err(statusless_protocol(
+                        "SSE event name disagrees with its JSON payload",
+                    ));
                 }
                 let id = self.pending_id.take();
                 if event_name == "open" {
                     if id.is_some() {
-                        return Err(ClientError::Protocol {
-                            status: None,
-                            message: "SSE open event must not carry an ID".into(),
-                        });
+                        return Err(statusless_protocol("SSE open event must not carry an ID"));
                     }
-                    let open_data =
-                        data.get("data").and_then(Value::as_object).ok_or_else(|| {
-                            ClientError::Protocol {
-                                status: None,
-                                message: "SSE open data is malformed".into(),
-                            }
-                        })?;
+                    let open_data = data
+                        .get("data")
+                        .and_then(Value::as_object)
+                        .ok_or_else(|| statusless_protocol("SSE open data is malformed"))?;
                     if open_data.get("correlation_id").and_then(Value::as_str)
                         != Some(self.operation_id.as_str())
                     {
-                        return Err(ClientError::Protocol {
-                            status: None,
-                            message: "SSE open correlation identity does not match operation"
-                                .into(),
-                        });
+                        return Err(statusless_protocol(
+                            "SSE open correlation identity does not match operation",
+                        ));
                     }
                     let frontier = open_data
                         .get("frontier")
                         .and_then(Value::as_object)
-                        .ok_or_else(|| ClientError::Protocol {
-                            status: None,
-                            message: "SSE open frontier is malformed".into(),
-                        })?;
+                        .ok_or_else(|| statusless_protocol("SSE open frontier is malformed"))?;
                     let next_sequence = frontier
                         .get("next_sequence")
                         .and_then(Value::as_u64)
-                        .ok_or_else(|| ClientError::Protocol {
-                            status: None,
-                            message: "SSE open frontier has no next sequence".into(),
+                        .ok_or_else(|| {
+                            statusless_protocol("SSE open frontier has no next sequence")
                         })?;
                     let retained = frontier
                         .get("retained_from_sequence")
                         .and_then(Value::as_u64)
-                        .ok_or_else(|| ClientError::Protocol {
-                            status: None,
-                            message: "SSE open frontier has no retained sequence".into(),
+                        .ok_or_else(|| {
+                            statusless_protocol("SSE open frontier has no retained sequence")
                         })?;
                     if retained > next_sequence {
-                        return Err(ClientError::Protocol {
-                            status: None,
-                            message: "SSE open frontier sequence range is inconsistent".into(),
-                        });
+                        return Err(statusless_protocol(
+                            "SSE open frontier sequence range is inconsistent",
+                        ));
                     }
                     self.next_sequence = Some(next_sequence);
                     self.resume_token = match frontier.get("resume_token") {
                         Some(Value::Null) => None,
                         Some(Value::String(token)) if !token.is_empty() => Some(token.clone()),
                         _ => {
-                            return Err(ClientError::Protocol {
-                                status: None,
-                                message: "SSE open frontier resume token is malformed".into(),
-                            });
+                            return Err(statusless_protocol(
+                                "SSE open frontier resume token is malformed",
+                            ));
                         }
                     };
                 } else {
                     if !matches!(event_name.as_str(), "item" | "progress" | "resume_gap")
                         && !is_terminal_event(&event_name)
                     {
-                        return Err(ClientError::Protocol {
-                            status: None,
-                            message: "SSE event name is not canonical".into(),
-                        });
+                        return Err(statusless_protocol("SSE event name is not canonical"));
                     }
-                    let event_data =
-                        data.get("data").and_then(Value::as_object).ok_or_else(|| {
-                            ClientError::Protocol {
-                                status: None,
-                                message: "SSE event data is malformed".into(),
-                            }
-                        })?;
+                    let event_data = data
+                        .get("data")
+                        .and_then(Value::as_object)
+                        .ok_or_else(|| statusless_protocol("SSE event data is malformed"))?;
                     let sequence = event_data
                         .get("sequence")
                         .and_then(Value::as_u64)
-                        .ok_or_else(|| ClientError::Protocol {
-                            status: None,
-                            message: "SSE event has no canonical sequence".into(),
+                        .ok_or_else(|| {
+                            statusless_protocol("SSE event has no canonical sequence")
                         })?;
                     if id.as_deref() != Some(sequence.to_string().as_str()) {
-                        return Err(ClientError::Protocol {
-                            status: None,
-                            message: "SSE ID disagrees with its canonical sequence".into(),
-                        });
+                        return Err(statusless_protocol(
+                            "SSE ID disagrees with its canonical sequence",
+                        ));
                     }
                     if self
                         .next_sequence
                         .is_some_and(|expected| expected != sequence)
                     {
-                        return Err(ClientError::Protocol {
-                            status: None,
-                            message: "SSE event sequence disagrees with the stream frontier".into(),
-                        });
+                        return Err(statusless_protocol(
+                            "SSE event sequence disagrees with the stream frontier",
+                        ));
                     }
                     match event_name.as_str() {
                         "item" if !event_data.contains_key("item") => {
-                            return Err(ClientError::Protocol {
-                                status: None,
-                                message: "SSE item payload is missing".into(),
-                            });
+                            return Err(statusless_protocol("SSE item payload is missing"));
                         }
                         "progress"
                             if event_data
@@ -1302,10 +1277,7 @@ impl OperationStream {
                                         .and_then(Value::as_u64)
                                         .is_none() =>
                         {
-                            return Err(ClientError::Protocol {
-                                status: None,
-                                message: "SSE progress payload is malformed".into(),
-                            });
+                            return Err(statusless_protocol("SSE progress payload is malformed"));
                         }
                         "resume_gap" => validate_resume_gap(event_data)?,
                         event if is_terminal_event(event) => {
@@ -1313,15 +1285,11 @@ impl OperationStream {
                         }
                         _ => {}
                     }
-                    self.next_sequence =
-                        Some(
-                            sequence
-                                .checked_add(1)
-                                .ok_or_else(|| ClientError::Protocol {
-                                    status: None,
-                                    message: "SSE sequence overflowed".into(),
-                                })?,
-                        );
+                    self.next_sequence = Some(
+                        sequence
+                            .checked_add(1)
+                            .ok_or_else(|| statusless_protocol("SSE sequence overflowed"))?,
+                    );
                 }
                 let event = StreamEvent {
                     event: event_name,
@@ -1363,54 +1331,35 @@ fn validate_resume_gap(event_data: &serde_json::Map<String, Value>) -> Result<()
     let gap = event_data
         .get("gap")
         .and_then(Value::as_object)
-        .ok_or_else(|| ClientError::Protocol {
-            status: None,
-            message: "SSE resume gap is malformed".into(),
-        })?;
+        .ok_or_else(|| statusless_protocol("SSE resume gap is malformed"))?;
     let first = gap
         .get("first_missing_sequence")
         .and_then(Value::as_u64)
-        .ok_or_else(|| ClientError::Protocol {
-            status: None,
-            message: "SSE resume gap has no first sequence".into(),
-        })?;
+        .ok_or_else(|| statusless_protocol("SSE resume gap has no first sequence"))?;
     let last = gap
         .get("last_missing_sequence")
         .and_then(Value::as_u64)
-        .ok_or_else(|| ClientError::Protocol {
-            status: None,
-            message: "SSE resume gap has no last sequence".into(),
-        })?;
+        .ok_or_else(|| statusless_protocol("SSE resume gap has no last sequence"))?;
     let frontier = gap
         .get("frontier")
         .and_then(Value::as_object)
-        .ok_or_else(|| ClientError::Protocol {
-            status: None,
-            message: "SSE resume gap frontier is malformed".into(),
-        })?;
+        .ok_or_else(|| statusless_protocol("SSE resume gap frontier is malformed"))?;
     let next = frontier
         .get("next_sequence")
         .and_then(Value::as_u64)
-        .ok_or_else(|| ClientError::Protocol {
-            status: None,
-            message: "SSE resume gap frontier has no next sequence".into(),
-        })?;
+        .ok_or_else(|| statusless_protocol("SSE resume gap frontier has no next sequence"))?;
     let retained = frontier
         .get("retained_from_sequence")
         .and_then(Value::as_u64)
-        .ok_or_else(|| ClientError::Protocol {
-            status: None,
-            message: "SSE resume gap frontier has no retained sequence".into(),
-        })?;
+        .ok_or_else(|| statusless_protocol("SSE resume gap frontier has no retained sequence"))?;
     let token_valid = matches!(
         frontier.get("resume_token"),
         Some(Value::Null | Value::String(_))
     );
     if first > last || retained > next || !token_valid {
-        return Err(ClientError::Protocol {
-            status: None,
-            message: "SSE resume gap range or frontier is malformed".into(),
-        });
+        return Err(statusless_protocol(
+            "SSE resume gap range or frontier is malformed",
+        ));
     }
     Ok(())
 }
@@ -1422,22 +1371,17 @@ fn validate_terminal(
     let terminal = event_data
         .get("terminal")
         .and_then(Value::as_object)
-        .ok_or_else(|| ClientError::Protocol {
-            status: None,
-            message: "SSE terminal payload is malformed".into(),
-        })?;
+        .ok_or_else(|| statusless_protocol("SSE terminal payload is malformed"))?;
     if terminal.get("termination").and_then(Value::as_str) != Some(event_name) {
-        return Err(ClientError::Protocol {
-            status: None,
-            message: "SSE terminal outcome disagrees with its event".into(),
-        });
+        return Err(statusless_protocol(
+            "SSE terminal outcome disagrees with its event",
+        ));
     }
     let receipt_termination = validate_receipt(terminal.get("receipt"), 200, "terminal.receipt")?;
     if receipt_termination != event_name {
-        return Err(ClientError::Protocol {
-            status: None,
-            message: "SSE terminal receipt disagrees with its event".into(),
-        });
+        return Err(statusless_protocol(
+            "SSE terminal receipt disagrees with its event",
+        ));
     }
     Ok(())
 }
@@ -1454,10 +1398,9 @@ impl Iterator for OperationStream {
                 Ok(Some(event)) => return Some(Ok(event)),
                 Ok(None) if self.reconnects < self.options.max_reconnects => {
                     if self.next_sequence.is_none() || self.resume_token.is_none() {
-                        return Some(Err(ClientError::Protocol {
-                            status: None,
-                            message: "stream ended without a resumable frontier".into(),
-                        }));
+                        return Some(Err(statusless_protocol(
+                            "stream ended without a resumable frontier",
+                        )));
                     }
                     self.reconnects += 1;
                     if let Err(error) = self.connect() {
@@ -1683,21 +1626,7 @@ impl ProblemError {
 }
 
 fn status_matches_problem(status: u16, kind: tracedecay_contracts::ApplicationProblemKind) -> bool {
-    use tracedecay_contracts::ApplicationProblemKind;
-    status
-        == match kind {
-            ApplicationProblemKind::InvalidRequest => 400,
-            ApplicationProblemKind::NotFoundOrNotAuthorized => 404,
-            ApplicationProblemKind::Conflict
-            | ApplicationProblemKind::PartialEffect
-            | ApplicationProblemKind::Stale => 409,
-            ApplicationProblemKind::Unsupported => 422,
-            ApplicationProblemKind::Unavailable | ApplicationProblemKind::ResetRequired => 503,
-            ApplicationProblemKind::ExecutionFailed => 500,
-            ApplicationProblemKind::Saturated => 429,
-            ApplicationProblemKind::Cancelled => 408,
-            ApplicationProblemKind::TimedOut => 504,
-        }
+    status == tracedecay_api::application_problem_status(kind).as_u16()
 }
 
 fn nullable_canonical_string<'a>(

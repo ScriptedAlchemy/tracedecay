@@ -358,6 +358,13 @@ impl VerifiedGraphQuery {
             .map_err(graph_projection_error)
     }
 
+    pub fn file_by_logical_path(&self, path: &str) -> Result<Option<SanitizedCodeFileV1>> {
+        self.refuse_if_bound_closed()?;
+        self.reader
+            .file_by_logical_path(path, Arc::clone(&self.cancellation))
+            .map_err(graph_projection_error)
+    }
+
     /// Generation-wide counts with the `largest_files` most symbol-dense
     /// files, from aggregates the catalog derived when it was built.
     pub fn census(&self, largest_files: usize) -> Result<CodeGraphCensusV1> {

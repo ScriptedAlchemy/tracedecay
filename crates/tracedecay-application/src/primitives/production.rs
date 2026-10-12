@@ -65,8 +65,6 @@ mod managed_test_scope;
 #[path = "production/managed_test_scope_tests.rs"]
 mod managed_test_scope_tests;
 mod retrieval_ports;
-#[cfg(test)]
-mod storage_table_detail_tests;
 mod symbol_graph_snapshot;
 mod test_primitive;
 #[cfg(test)]

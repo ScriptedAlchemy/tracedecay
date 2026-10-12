@@ -27,8 +27,7 @@ mod workflow_emit;
 
 pub use cost_latency::{provider_latency_read_model, unavailable_provider_latency};
 pub use costs::{
-    costs_read_model, costs_read_model_with_provider_usage,
-    costs_read_model_with_provider_usage_and_observability, costs_unavailable_read_model,
+    costs_read_model, costs_read_model_with_provider_usage, costs_unavailable_read_model,
 };
 pub use delivery_recorder::{
     BoundedDeliverySettlementRecorderV1, DeliverySettlementRecordOutcomeV1,

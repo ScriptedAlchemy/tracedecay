@@ -384,11 +384,6 @@ impl RegisteredGlobalDb {
         self.database.truncate_wal_for_offline_maintenance().await
     }
 
-    #[cfg(test)]
-    fn from_database(database: Database) -> Self {
-        Self::from_owned_database(database)
-    }
-
     fn from_owned_database(database: Database) -> Self {
         Self::from_database_with_project_graph(
             database,
@@ -428,7 +423,7 @@ impl RegisteredGlobalDb {
     /// maintenance-scoped publication without bypassing the database facade.
     #[cfg(test)]
     pub(crate) fn from_database_for_wal_maintenance_test(database: Database) -> Self {
-        Self::from_database(database)
+        Self::from_owned_database(database)
     }
 
     pub fn read_connection(&self) -> DatabaseEngineReadConnection {
@@ -818,24 +813,6 @@ impl tracedecay_sessions::runtime::workflow_index::WorkflowIngestWriteTxn
     }
 }
 
-impl tracedecay_runtime_core::db::engine::DatabaseAttachmentExecutor
-    for RegisteredGlobalDbWriteTransaction<'_>
-{
-    #[tracing::instrument(name = "global_db.registered.txn.attach", level = "trace", skip_all)]
-    async fn attach_database(
-        &self,
-        path: &Path,
-        database_name: &str,
-    ) -> tracedecay_runtime_core::db::engine::Result<()> {
-        tracedecay_runtime_core::db::engine::DatabaseAttachmentExecutor::attach_database(
-            &self.transaction,
-            path,
-            database_name,
-        )
-        .await
-    }
-}
-
 impl RegisteredGlobalDbWriteTransaction<'_> {
     pub async fn execute<P>(
         &self,
@@ -1158,7 +1135,7 @@ mod tests {
             )
             .await
             .expect("publish project sessions database");
-        let registered = RegisteredGlobalDb::from_database(sessions_database);
+        let registered = RegisteredGlobalDb::from_owned_database(sessions_database);
         assert!(
             registered.bind_project_graph_runtime(proxy.clone()).is_ok(),
             "database-issued weak graph proxy must bind"

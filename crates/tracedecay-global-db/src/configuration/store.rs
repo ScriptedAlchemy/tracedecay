@@ -10,9 +10,7 @@ use super::contracts::{
 };
 use super::registry::ConfigurationRegistry;
 use super::resolver::{ConfigurationResolutionV1, registry_default_candidate};
-use super::schema::ConfigurationSchemaError;
 use crate::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
-use thiserror::Error;
 use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, CandidateDispositionV1, ChangePlanId, CodeIndexWorkerSelectionV1,
     ConfigurationAuditEvent, ConfigurationAuditEventId, ConfigurationAuditEventKindV1,
@@ -65,16 +63,6 @@ use revision::{insert_revision, insert_revision_with_registry};
 pub use mutation::{
     ConfigurationDirectCommitOutcomeV1, commit_direct_in_transaction, protected_change_snapshot_v1,
 };
-
-#[derive(Debug, Error)]
-pub enum ConfigurationStorageError {
-    #[error("configuration schema error: {0}")]
-    Schema(#[from] ConfigurationSchemaError),
-    #[error("configuration storage error: {0}")]
-    Sql(#[from] tracedecay_runtime_core::db::engine::Error),
-    #[error("configuration storage encoded invalid data: {0}")]
-    Encoding(String),
-}
 
 /// Concrete control-plane adapter over one already-open owned session store.
 /// It never accepts an arbitrary connection, opens a fallback database, or

@@ -591,23 +591,6 @@ impl<T> DashboardEnvelopeV1<T> {
         self.legal_actions = actions;
         self
     }
-
-    #[must_use]
-    pub fn map_payload<U>(self, map: impl FnOnce(T) -> U) -> DashboardEnvelopeV1<U> {
-        DashboardEnvelopeV1 {
-            schema_revision: self.schema_revision,
-            scope: self.scope,
-            version: self.version,
-            time: self.time,
-            source_watermark: self.source_watermark,
-            authorization: self.authorization,
-            coverage: self.coverage,
-            freshness: self.freshness,
-            domain_state: self.domain_state,
-            legal_actions: self.legal_actions,
-            payload: map(self.payload),
-        }
-    }
 }
 
 /// Current wall-clock time in microseconds since the Unix epoch.

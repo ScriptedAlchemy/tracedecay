@@ -34,7 +34,7 @@ export function createExtensionServer({ bridge, assets }: CreateServerOptions): 
     ...SERVER_INFO,
     icons: [{ src: `data:image/svg+xml,${encodeURIComponent(assets.iconSvg)}`, mimeType: "image/svg+xml" }],
   });
-  registerTraceDecayExtension({ server, bridge, html: assets.html, iconSvg: assets.iconSvg });
+  registerTraceDecayExtension({ server, bridge, html: assets.html });
   return server;
 }
 

@@ -21,8 +21,9 @@ use crate::schema::{
     SEQUENCE_PROPERTY, SOURCE_GENERATION_PROPERTY, WATERMARK_PROPERTY, decode_entity,
     decode_identity, decode_relation, entity_key_value, entity_projection_label, has_native_label,
     key_value, namespace_key_id, nodes_with_label, nodes_with_label_count,
-    projection_state_key_value, publication_key_value, relation_edge_value, relation_key_value,
-    relation_projection_label, required_i64, required_string, stable_key,
+    persisted_validation_error, projection_state_key_value, publication_key_value,
+    relation_edge_value, relation_key_value, relation_projection_label, required_i64,
+    required_string, stable_key,
 };
 use crate::{
     GraphCommit, GraphDbError, GraphEntity, GraphEntityId, GraphIdempotencyKey, GraphMutation,
@@ -1335,12 +1336,6 @@ fn unique_property_node(
         found = Some(node_id);
     }
     Ok(found)
-}
-
-fn persisted_validation_error(description: &str, error: GraphDbError) -> GraphDbError {
-    GraphDbError::Corrupt {
-        message: format!("invalid persisted {description}: {error}"),
-    }
 }
 
 #[cfg(test)]

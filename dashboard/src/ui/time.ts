@@ -10,22 +10,6 @@
  * survives without colour. */
 export type FreshnessTier = 'live' | 'recent' | 'aging' | 'dormant';
 
-const FRESHNESS_TIERS: readonly FreshnessTier[] = [
-  'dormant',
-  'aging',
-  'recent',
-  'live',
-];
-
-/** Bucket boundaries, stated once so the legend and the per-row meter can
- * never disagree. */
-export const FRESHNESS_BOUNDS: Readonly<Record<FreshnessTier, string>> = {
-  live: 'under a day',
-  recent: 'under a week',
-  aging: 'under a month',
-  dormant: 'a month or more',
-};
-
 const MINUTE = 60;
 const HOUR = 3600;
 const DAY = 86_400;
@@ -36,11 +20,6 @@ export function freshnessTier(ageSecs: number): FreshnessTier {
   if (ageSecs < 7 * DAY) return 'recent';
   if (ageSecs < MONTH) return 'aging';
   return 'dormant';
-}
-
-/** 1..4, how many steps of the freshness meter are filled. */
-export function freshnessSteps(tier: FreshnessTier): number {
-  return FRESHNESS_TIERS.indexOf(tier) + 1;
 }
 
 /** "15m ago" / "6d ago" / "1mo ago". Returns null for an absent timestamp so

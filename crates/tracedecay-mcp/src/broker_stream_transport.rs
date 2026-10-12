@@ -12,10 +12,7 @@ use rmcp::service::{NotificationContext, RequestContext};
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
 use tracedecay_daemon_protocol::{BrokerReadHalf, BrokerStream, BrokerWriteHalf};
-use tracedecay_framing::{
-    BoundedLineReader, MAX_MCP_JSONRPC_FRAME_BYTES, MCP_OVERSIZE_ID_INSPECT_BYTES,
-    is_wire_oversized_io_error, wire_oversized_io_error_with_prefix,
-};
+use tracedecay_framing::{BoundedLineReader, is_wire_oversized_io_error};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
 use crate::lifecycle::ProjectServerResponseLifecycle;
@@ -199,10 +196,7 @@ impl BrokerStreamTransport {
     }
 
     pub fn push_replay(&mut self, line: String) -> std::io::Result<()> {
-        if line.len() > MAX_MCP_JSONRPC_FRAME_BYTES {
-            let prefix = line.as_bytes()[..line.len().min(MCP_OVERSIZE_ID_INSPECT_BYTES)].to_vec();
-            return Err(wire_oversized_io_error_with_prefix(prefix));
-        }
+        crate::transport::reject_oversized_line(&line)?;
         self.replay.push_back(line);
         Ok(())
     }

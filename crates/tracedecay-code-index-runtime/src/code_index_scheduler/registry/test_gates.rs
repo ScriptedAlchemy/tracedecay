@@ -16,11 +16,12 @@ use super::{
     CodeIndexSchedulerRegistryV1, ColdMountOpenEventV1, ColdMountOpenTestControlV1,
     ColdMountPostCheckTestControlV1, PendingWakeDropGateTestV1, PendingWakeV1,
     QueryAdmissionTestControlV1, ServingGenerationInstallationV1,
-    ServingGenerationRollbackOutcomeV1, WorkerStepGateV1, cold_mount_admission_barriers,
-    cold_mount_open_controls, cold_mount_post_check_controls, complete_seat_probe_miss_gate,
-    graph_decode_gate, opened_published_text_projection_gate, published_text_projection_gate,
-    query_admission_controls, serving_swap_gate, test_gate_root,
-    text_projection_store_contention_gate, unique_mounted_for_scope, wait_notified_if_unset,
+    ServingGenerationRollbackOutcomeV1, WorkerStepGateV1, arm_worker_step_gate,
+    cold_mount_admission_barriers, cold_mount_open_controls, cold_mount_post_check_controls,
+    complete_seat_probe_miss_gate, graph_decode_gate, opened_published_text_projection_gate,
+    published_text_projection_gate, query_admission_controls, serving_swap_gate,
+    take_worker_step_gate, test_gate_root, text_projection_store_contention_gate,
+    unique_mounted_for_scope, wait_notified_if_unset,
 };
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
@@ -33,22 +34,14 @@ impl CodeIndexSchedulerRegistryV1 {
         tokio::sync::oneshot::Receiver<()>,
         tokio::sync::oneshot::Sender<()>,
     ) {
-        let (entered, entered_observed) = tokio::sync::oneshot::channel();
-        let (released, release) = tokio::sync::oneshot::channel();
-        let mut gates = published_text_projection_gate()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert!(
-            gates
-                .insert(
-                    test_gate_root(&project_root),
-                    WorkerStepGateV1 { entered, release },
-                )
-                .is_none(),
-            "one published text projection gate per worktree: {}",
-            project_root.display()
-        );
-        (entered_observed, released)
+        arm_worker_step_gate(
+            published_text_projection_gate(),
+            test_gate_root(&project_root),
+            format_args!(
+                "one published text projection gate per worktree: {}",
+                project_root.display()
+            ),
+        )
     }
 
     /// Hold the next publication's text projection once its first advance
@@ -61,21 +54,14 @@ impl CodeIndexSchedulerRegistryV1 {
         tokio::sync::oneshot::Receiver<()>,
         tokio::sync::oneshot::Sender<()>,
     ) {
-        let (entered, entered_observed) = tokio::sync::oneshot::channel();
-        let (released, release) = tokio::sync::oneshot::channel();
-        let previous = opened_published_text_projection_gate()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                test_gate_root(&project_root),
-                WorkerStepGateV1 { entered, release },
-            );
-        assert!(
-            previous.is_none(),
-            "one opened text projection gate per worktree: {}",
-            project_root.display()
-        );
-        (entered_observed, released)
+        arm_worker_step_gate(
+            opened_published_text_projection_gate(),
+            test_gate_root(&project_root),
+            format_args!(
+                "one opened text projection gate per worktree: {}",
+                project_root.display()
+            ),
+        )
     }
 
     /// Hold the next text projection advance that a held code-generation
@@ -88,47 +74,40 @@ impl CodeIndexSchedulerRegistryV1 {
         tokio::sync::oneshot::Receiver<()>,
         tokio::sync::oneshot::Sender<()>,
     ) {
-        let (entered, entered_observed) = tokio::sync::oneshot::channel();
-        let (released, release) = tokio::sync::oneshot::channel();
-        let previous = text_projection_store_contention_gate()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                test_gate_root(&project_root),
-                WorkerStepGateV1 { entered, release },
-            );
-        assert!(
-            previous.is_none(),
-            "one store contention gate per worktree: {}",
-            project_root.display()
-        );
-        (entered_observed, released)
+        arm_worker_step_gate(
+            text_projection_store_contention_gate(),
+            test_gate_root(&project_root),
+            format_args!(
+                "one store contention gate per worktree: {}",
+                project_root.display()
+            ),
+        )
     }
 
     #[cfg(test)]
     pub(super) async fn wait_for_text_projection_store_contention_gate(project_root: &Path) {
-        let gate = text_projection_store_contention_gate()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&test_gate_root(project_root));
+        let gate = take_worker_step_gate(
+            text_projection_store_contention_gate(),
+            &test_gate_root(project_root),
+        );
         Self::pass_worker_step_gate(gate).await;
     }
 
     #[cfg(test)]
     pub(super) async fn wait_for_opened_published_text_projection_gate(project_root: &Path) {
-        let gate = opened_published_text_projection_gate()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&test_gate_root(project_root));
+        let gate = take_worker_step_gate(
+            opened_published_text_projection_gate(),
+            &test_gate_root(project_root),
+        );
         Self::pass_worker_step_gate(gate).await;
     }
 
     #[cfg(test)]
     pub(super) async fn wait_for_published_text_projection_gate(project_root: &Path) {
-        let gate = published_text_projection_gate()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&test_gate_root(project_root));
+        let gate = take_worker_step_gate(
+            published_text_projection_gate(),
+            &test_gate_root(project_root),
+        );
         Self::pass_worker_step_gate(gate).await;
     }
 
@@ -143,25 +122,16 @@ impl CodeIndexSchedulerRegistryV1 {
         tokio::sync::oneshot::Receiver<()>,
         tokio::sync::oneshot::Sender<()>,
     ) {
-        let (entered, entered_observed) = tokio::sync::oneshot::channel();
-        let (released, release) = tokio::sync::oneshot::channel();
-        let replaced = serving_swap_gate()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                test_gate_root(&project_root),
-                WorkerStepGateV1 { entered, release },
-            );
-        assert!(replaced.is_none(), "one serving swap gate per worktree");
-        (entered_observed, released)
+        arm_worker_step_gate(
+            serving_swap_gate(),
+            test_gate_root(&project_root),
+            format_args!("one serving swap gate per worktree"),
+        )
     }
 
     #[cfg(test)]
     pub(super) async fn wait_for_serving_swap_gate(project_root: &Path) {
-        let gate = serving_swap_gate()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&test_gate_root(project_root));
+        let gate = take_worker_step_gate(serving_swap_gate(), &test_gate_root(project_root));
         Self::pass_worker_step_gate(gate).await;
     }
 
@@ -176,25 +146,16 @@ impl CodeIndexSchedulerRegistryV1 {
         tokio::sync::oneshot::Receiver<()>,
         tokio::sync::oneshot::Sender<()>,
     ) {
-        let (entered, entered_observed) = tokio::sync::oneshot::channel();
-        let (released, release) = tokio::sync::oneshot::channel();
-        let replaced = complete_seat_probe_miss_gate()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(project_root, WorkerStepGateV1 { entered, release });
-        assert!(
-            replaced.is_none(),
-            "one complete-seat probe gate per worktree"
-        );
-        (entered_observed, released)
+        arm_worker_step_gate(
+            complete_seat_probe_miss_gate(),
+            project_root,
+            format_args!("one complete-seat probe gate per worktree"),
+        )
     }
 
     #[cfg(test)]
     pub(super) async fn wait_for_complete_seat_probe_miss_gate(project_root: &Path) {
-        let gate = complete_seat_probe_miss_gate()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(project_root);
+        let gate = take_worker_step_gate(complete_seat_probe_miss_gate(), project_root);
         Self::pass_worker_step_gate(gate).await;
     }
 
@@ -246,14 +207,6 @@ impl CodeIndexSchedulerRegistryV1 {
         let [before, after] = gate?;
         Self::pass_worker_step_gate(Some(before)).await;
         Some(after)
-    }
-
-    #[cfg(test)]
-    pub(super) async fn pass_worker_step_gate(gate: Option<WorkerStepGateV1>) {
-        if let Some(gate) = gate {
-            let _ = gate.entered.send(());
-            let _ = gate.release.await;
-        }
     }
 
     /// Test-only observation of an exact mounted worktree's active owner pass.
@@ -748,21 +701,6 @@ impl CodeIndexSchedulerRegistryV1 {
             .map(|worktree| Arc::clone(&worktree.serving_source_witness))
     }
 
-    /// One mounted root's scheduler mutex, the lock every step that renews the
-    /// source proof must hold, so a test can age that proof and read it back
-    /// without a pass tail re-proving it in between.
-    #[cfg(test)]
-    pub(crate) async fn scheduler_for_root(
-        &self,
-        project_root: &Path,
-    ) -> Option<Arc<std::sync::Mutex<super::super::CodeIndexWorktreeSchedulerV1>>> {
-        let project_root = canonical_existing_identity(project_root).ok()?;
-        let mounted = self.mounted.lock().await;
-        mounted
-            .get(&project_root)
-            .map(|worktree| Arc::clone(&worktree.scheduler))
-    }
-
     /// The shared source-freshness fence for one mounted root, so tests can
     /// age its bounded proof instead of waiting the bound out in wall clock.
     #[cfg(test)]
@@ -849,12 +787,6 @@ impl CodeIndexSchedulerRegistryV1 {
     ) -> ServingGenerationRollbackOutcomeV1 {
         self.resolve_serving_generation_installation(project_root, &installation.claim, true)
             .await
-    }
-
-    /// Latest completed event-to-ready receipt for this registry, if any.
-    #[cfg(test)]
-    pub fn latest_event_to_ready_receipt(&self) -> Option<CodeIndexEventToReadyReceiptV1> {
-        self.cadence_telemetry.borrow().latest().cloned()
     }
 
     /// Every retained event-to-ready receipt, oldest first.

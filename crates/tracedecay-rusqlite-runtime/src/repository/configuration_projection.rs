@@ -12,7 +12,7 @@ use tracedecay_domain::configuration::{
 };
 use tracedecay_domain::{CapabilityId, ConfigurationRevisionId, DomainError, canonical_sha256};
 
-use crate::exact_sql::{ExactSqlStatement, ExactSqlValue};
+use crate::exact_sql::{ExactSqlStatement, ExactSqlValue, optional_text, text};
 
 const SOURCE_BINDINGS_PROJECTION_SQL: &str = "INSERT INTO configuration_source_bindings (
     revision_id, binding_id, source_kind, locator_digest,
@@ -41,14 +41,6 @@ const TOPOLOGY_ROOT_PROJECTION_SQL: &str = "INSERT INTO configuration_topology_r
 const PROTECTED_REF_PROJECTION_SQL: &str = "INSERT INTO configuration_topology_protected_refs (
     revision_id, rule_ordinal, selector_kind, selector_digest, disposition
  ) VALUES (?1, ?2, ?3, ?4, ?5)";
-
-fn text(value: impl Into<String>) -> ExactSqlValue {
-    ExactSqlValue::Text(value.into())
-}
-
-fn optional_text(value: Option<String>) -> ExactSqlValue {
-    value.map_or(ExactSqlValue::Null, ExactSqlValue::Text)
-}
 
 fn integer(value: impl Into<i64>) -> ExactSqlValue {
     ExactSqlValue::Integer(value.into())

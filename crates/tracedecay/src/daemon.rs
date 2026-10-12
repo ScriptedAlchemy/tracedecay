@@ -32,18 +32,15 @@ use scheduler::{
 use tracedecay_contracts::project_open::{
     ProjectOpenStatusReasonV1, ProjectOpenStatusStateV1, ProjectOpenStatusV1,
 };
+#[cfg(unix)]
+pub(crate) use tracedecay_daemon_protocol::ensure_private_socket_parent;
 #[allow(unused_imports)]
 pub(crate) use tracedecay_daemon_protocol::{
-    BrokerListener, BrokerStream, DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION,
-    DaemonAuthPreface, DaemonEndpoint, DaemonInvocationOutcome, DaemonInvocationRequest,
-    DaemonInvocationResponse, default_loopback_endpoint, parse_daemon_invocation_request,
+    BrokerListener, BrokerStream, DaemonAuthPreface, DaemonEndpoint, DaemonInvocationOutcome,
+    DaemonInvocationRequest, DaemonInvocationResponse, default_loopback_endpoint,
+    parse_daemon_invocation_request,
 };
 pub(crate) use tracedecay_daemon_protocol::{DaemonClientIdentity, DaemonHandshake};
-#[cfg(unix)]
-#[allow(unused_imports)]
-pub(crate) use tracedecay_daemon_protocol::{
-    ensure_private_socket_parent, unix_socket_path_within_limit,
-};
 use tracedecay_domain::errors::{ProjectOpenFailureKind, Result, TraceDecayError};
 use tracedecay_mcp::tools::catalog_discovery::{
     catalog_discovery_tools_list_payload, default_catalog_discovery_authority,
@@ -287,17 +284,6 @@ pub fn tool_call_transport_error_is_retryable(error: &TraceDecayError) -> bool {
     )
 }
 
-/// True when a daemon client missed its read deadline.
-///
-/// Keys only on [`tracedecay_daemon_protocol::DAEMON_RESPONSE_STALLED`]. English
-/// detail, including the stalled wait phrase, is not a second classifier.
-pub fn error_is_read_deadline(error: &TraceDecayError) -> bool {
-    matches!(
-        error.project_route_context(),
-        Some((tracedecay_daemon_protocol::DAEMON_RESPONSE_STALLED, _, _))
-    )
-}
-
 mod bootstrap;
 mod bootstrap_route;
 use bootstrap_route::{
@@ -493,9 +479,7 @@ mod tool_surface;
 mod wire_io;
 #[cfg(test)]
 mod work_evidence_retrieval_tests;
-use wire_io::{
-    read_line_handling_wire_oversized, write_daemon_invocation_response, write_json_rpc_response,
-};
+use wire_io::{read_line_handling_wire_oversized, write_daemon_response};
 
 pub use bootstrap::run_foreground;
 

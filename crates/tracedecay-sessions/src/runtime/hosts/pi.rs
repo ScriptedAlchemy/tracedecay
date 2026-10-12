@@ -27,7 +27,7 @@ use tracedecay_store::{ParseOffset, observation::ObservationCoverageReason};
 
 use crate::admission::{HostAdmission, HostDiscoveryQueueEntry};
 use crate::observation::ObservationCancellation;
-use crate::runtime::host_scan::{HOST_SCAN_WINDOW, HostScanBudget};
+use crate::runtime::host_scan::{HOST_SCAN_WINDOW, HostScanBudget, isolatable_source_error};
 use crate::runtime::hosts::codex::{CodexDiscoveryHub, PendingTranscript};
 use crate::runtime::jsonl_observation_admission::{
     JsonlFrameAdmission, JsonlObservationAdmissionProgress, JsonlObservationAdmissionRequest,
@@ -417,7 +417,7 @@ fn read_entries(
             break;
         }
         let path = entry.path();
-        if !charge_discovered_path(budget, &path)? {
+        if !budget.try_charge_path(&path, PROVIDER)? {
             discovery.scan_complete = false;
             discovery.reached_end = false;
             break;
@@ -446,16 +446,6 @@ fn read_entries(
     }
     paths.sort();
     Ok(paths)
-}
-
-fn charge_discovered_path(
-    budget: &mut HostScanBudget,
-    path: &Path,
-) -> TranscriptIngestResult<bool> {
-    let bytes = u64::try_from(path.as_os_str().as_encoded_bytes().len())
-        .map_err(|_| invalid_frame())?
-        .max(1);
-    Ok(budget.try_charge_input(bytes))
 }
 
 fn header_charge(header: &PiSessionHeader) -> u64 {
@@ -923,16 +913,6 @@ fn warn_discovery_failures(discovery: &PiDiscoveryReport) {
             "additional Pi discovery failures were bounded"
         );
     }
-}
-
-fn isolatable_source_error(error: &TranscriptIngestError) -> bool {
-    matches!(
-        error,
-        TranscriptIngestError::ScanIo { .. }
-            | TranscriptIngestError::ScanGenerationChanged { .. }
-            | TranscriptIngestError::NonDurableRecord { .. }
-            | TranscriptIngestError::InvalidSourceIdentity { .. }
-    )
 }
 
 fn warn_isolated_source(path: &Path, kind: PiDiscoveryFailureKind, error_kind: io::ErrorKind) {

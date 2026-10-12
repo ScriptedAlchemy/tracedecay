@@ -273,10 +273,9 @@ async fn init_test_project(project: &Path) -> MountedProductionProject {
     let isolation_root = project
         .parent()
         .expect("graph-analysis project must have an isolation parent");
-    let harness =
-        ProductionProjectCompositionHarnessV1::open(isolation_root, [project.to_path_buf()])
-            .await
-            .expect("production graph-analysis composition");
+    let harness = crate::support::seeded_composition::open(isolation_root, [project.to_path_buf()])
+        .await
+        .expect("production graph-analysis composition");
     let mounted = MountedProductionProject {
         harness,
         project_root: project.to_path_buf(),
@@ -3793,10 +3792,9 @@ async fn pr_context_names_both_refs_when_a_branch_has_diverged() {
     let isolation_root = project
         .parent()
         .expect("graph-analysis project must have an isolation parent");
-    let harness =
-        ProductionProjectCompositionHarnessV1::open(isolation_root, [project.to_path_buf()])
-            .await
-            .expect("production graph-analysis composition");
+    let harness = crate::support::seeded_composition::open(isolation_root, [project.to_path_buf()])
+        .await
+        .expect("production graph-analysis composition");
     let host = MountedProductionProject {
         harness,
         project_root: project.to_path_buf(),

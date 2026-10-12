@@ -14,10 +14,11 @@ use tracedecay_contracts::{
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 
 use crate::exact_sql::{
-    ExactSqlError, ExactSqlHandle, ExactSqlRows, ExactSqlStatement, ExactSqlTransaction,
-    ExactSqlValue, decode_json, encode_json, optional_text_at, text_column,
+    ExactSqlError, ExactSqlHandle, ExactSqlRows, ExactSqlValue, decode_json, encode_json,
+    optional_text_at, text_column,
 };
 use crate::repository::RetainedExactSqlCapability;
+use crate::workflow::{execute_tx, query_tx, statement};
 
 pub const HANDOFF_OPEN_SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS handoff_open_grants_v1 (
@@ -73,10 +74,6 @@ fn codec_unavailable() -> HandoffOpenAuthorityError {
     HandoffOpenAuthorityError::Unavailable
 }
 
-fn statement(sql: &str, params: Vec<ExactSqlValue>) -> Result<ExactSqlStatement, ExactSqlError> {
-    ExactSqlStatement::new(sql.to_owned(), params)
-}
-
 fn query_handle(
     handle: &ExactSqlHandle,
     sql: &str,
@@ -99,22 +96,6 @@ fn require_handoff_open_schema(
     } else {
         Err(HandoffOpenSqliteAuthorityBuildError::Unavailable)
     }
-}
-
-fn query_tx(
-    transaction: &ExactSqlTransaction,
-    sql: &str,
-    params: Vec<ExactSqlValue>,
-) -> Result<ExactSqlRows, ExactSqlError> {
-    transaction.query(statement(sql, params)?)
-}
-
-fn execute_tx(
-    transaction: &ExactSqlTransaction,
-    sql: &str,
-    params: Vec<ExactSqlValue>,
-) -> Result<(), ExactSqlError> {
-    transaction.execute(statement(sql, params)?).map(|_| ())
 }
 
 impl HandoffOpenAuthorityPort for HandoffOpenSqliteAuthority {

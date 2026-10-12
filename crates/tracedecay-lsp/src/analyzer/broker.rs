@@ -293,17 +293,6 @@ impl DiagnosticBroker {
         }
     }
 
-    /// Current statuses for only the languages active in this project.
-    ///
-    /// Doctor consumes this live owner view so disabled adapters for languages
-    /// absent from the project cannot be misreported as project degradation.
-    pub fn project_engine_statuses(&self) -> Vec<EngineStatus> {
-        self.engine_statuses()
-            .into_iter()
-            .filter(|status| self.project_languages.contains(&status.language))
-            .collect()
-    }
-
     /// Every adapter's status as Doctor and `lsp servers` consume it: paired
     /// with project activity and with the executable probe this broker itself
     /// uses, so both surfaces read one resolution on the daemon's PATH.

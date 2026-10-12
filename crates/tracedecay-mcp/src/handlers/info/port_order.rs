@@ -11,11 +11,10 @@ use tracedecay_contracts::retrieval::{
     PortOrderResultV1, PortOrderSurfaceRequestV1, PortOrderSymbolV1,
 };
 use tracedecay_domain::RelationEdgeKindV1;
-use tracedecay_domain::code_intelligence::NodeKind;
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::Result;
 use tracedecay_graph_query::VerifiedGraphQuery;
 
-use super::PORT_DEFAULT_KINDS;
+use super::port_kinds;
 use super::verified::{INFO_RELATION_LIMIT, required_symbol_parts, symbols_in_dir};
 
 #[derive(Clone, Copy)]
@@ -34,29 +33,8 @@ pub async fn compute_port_order(
 ) -> Result<GraphToolCompletionV1> {
     let request: PortOrderSurfaceRequestV1 =
         decode_primitive_request(&args, "tracedecay_port_order")?;
-    let kind_strs = request.kinds.as_ref().map_or_else(
-        || {
-            PORT_DEFAULT_KINDS
-                .iter()
-                .map(std::string::ToString::to_string)
-                .collect()
-        },
-        Clone::clone,
-    );
-
     let limit = request.limit.map_or(50, |value| value.min(500) as usize);
-
-    let kinds: Vec<NodeKind> = kind_strs
-        .iter()
-        .filter_map(|s| NodeKind::from_str(s))
-        .collect();
-
-    if kinds.is_empty() {
-        return Err(TraceDecayError::Config {
-            message: "invalid parameter: kinds must contain at least one supported node kind"
-                .to_owned(),
-        });
-    }
+    let kinds = port_kinds(request.kinds.as_deref())?;
 
     let summaries = {
         let _span = tracing::trace_span!("mcp.info.port_order.symbols").entered();

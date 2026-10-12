@@ -507,25 +507,13 @@ impl CodeIndexActivationV1 {
 
 #[cfg(test)]
 mod tests {
-    use std::process::Command;
+    use super::super::tests::git;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use tempfile::TempDir;
     use tracedecay_domain::ProjectId;
 
     use super::*;
-
-    fn git(root: &Path, arguments: &[&str]) {
-        let status = Command::new(
-            tracedecay_runtime_core::git::try_git_program()
-                .expect("absolute git executable should resolve"),
-        )
-        .current_dir(root)
-        .args(arguments)
-        .status()
-        .expect("run git");
-        assert!(status.success(), "git {arguments:?}");
-    }
 
     fn repository() -> TempDir {
         let root = TempDir::new().expect("repository root");

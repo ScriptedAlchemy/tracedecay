@@ -11,15 +11,15 @@ use tracedecay_domain::{
     SanitizedCodeFileV1, SnapshotFileDispositionV1, canonical_text::sha256_hex,
 };
 
-use crate::code_index::chunks::content_digest;
+use tracedecay_code_index::chunks::content_digest;
 
 // Reached only as `super::…` by `registry`, `ignored_dependencies`,
 // `branch_generations`, and `branch_publication`.
 use self::freshness_witness::SourceContentManifestV1;
-use crate::code_index::{
+use tracedecay_application::code_index::DaemonCodeIndexControlV1;
+use tracedecay_code_index::{
     languages::StaticLanguageRegistry, production::CodeIndexPublishedGenerationV1,
 };
-use tracedecay_application::code_index::DaemonCodeIndexControlV1;
 use tracedecay_contracts::now_micros;
 
 /// Freshness contract for non-git-mediated mutations (raw file writes, rsync,
@@ -234,8 +234,6 @@ pub type CodeIndexGenerationPublishedV1 = registry::CodeIndexGenerationPublished
 // text artifact), and `reconcile` (the per-worktree scheduler). Re-export
 // every item the siblings, the tests, and the crate reach through this
 // module so no path outside the seam files changes.
-#[cfg(test)]
-use crate::query::retrieval::ports::TEXT_ARTIFACT_PAGE_CHUNKS_V1;
 use publication_store::DaemonProjectionSinkV1;
 #[cfg(test)]
 pub use publication_store::{CodeIndexBytePoolStatsV1, HeldActiveDecodeV1};
@@ -272,3 +270,5 @@ use serving::{
     text_artifact_builder_budget, text_artifact_resident_memory_charge,
     text_artifact_source_batch_limits,
 };
+#[cfg(test)]
+use tracedecay_query::retrieval::ports::TEXT_ARTIFACT_PAGE_CHUNKS_V1;

@@ -323,13 +323,7 @@ fn emit_with_coverage(
     let Ok(envelope) = envelope else {
         return WorkOwnerObservationResultV1::Unavailable;
     };
-    match producer.try_emit_owner_fact(envelope) {
-        Ok(ObservabilityEmissionOutcomeV1::Enqueued) => WorkOwnerObservationResultV1::Enqueued,
-        Ok(ObservabilityEmissionOutcomeV1::DroppedAtCapacity) => {
-            WorkOwnerObservationResultV1::DroppedAtCapacity
-        }
-        Err(_) => WorkOwnerObservationResultV1::Unavailable,
-    }
+    super::work_retry_leak_emit::offer(producer, envelope)
 }
 
 const fn terminal(state: WorkAttemptStateV1) -> Option<ProviderAttemptTerminalV1> {

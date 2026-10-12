@@ -38,24 +38,15 @@ use std::path::{Path, PathBuf};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::codex_config_path;
+use super::mcp_registry::{
+    CODEX_HOOKS_KEY, CODEX_MCP_SERVERS_KEY, CODEX_PLUGINS_KEY, read_config_table, table_peers,
+};
 
 /// Name of Codex's own CLI, which owns plugin cache and activation.
 const CODEX_CLI: &str = "codex";
 
 /// What the binary is required *for*, used in the typed absence error.
 pub(super) const CODEX_PLUGIN_CLI_LIFECYCLE: &str = "codex plugin lifecycle";
-
-/// TOML key holding Codex's plugin activation records (`tracedecay@…`).
-const CODEX_PLUGINS_KEY: &str = "plugins";
-
-/// TOML key holding Codex's MCP registry. Read only: this module must not
-/// accept a plugin command that also rewrites MCP servers.
-const CODEX_MCP_SERVERS_KEY: &str = "mcp_servers";
-
-/// TOML key holding Codex's hook-trust records. Read only *here*: the plugin
-/// CLI must never disturb trust records; TraceDecay writes its own managed
-/// entries through [`super::sync_codex_hook_trust`], outside any CLI run.
-const CODEX_HOOKS_KEY: &str = "hooks";
 
 /// Resolve Codex's own CLI, or fail with the typed requirement.
 pub(super) fn require_codex_plugin_cli() -> Result<PathBuf> {
@@ -169,55 +160,11 @@ fn read_config_observation(
     path: &Path,
     owned_key: &str,
 ) -> Result<(Option<Vec<u8>>, CodexPluginPreservedRegionsV1)> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((None, CodexPluginPreservedRegionsV1::default()));
-        }
-        Err(error) => {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "failed to read {} before Codex CLI: {error}",
-                    path.display()
-                ),
-            });
-        }
-    };
-    let text = std::str::from_utf8(&bytes)
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("{} is not valid UTF-8: {error}", path.display()),
-        })?
-        .to_owned();
-    if text.trim().is_empty() {
-        return Ok((Some(bytes), CodexPluginPreservedRegionsV1::default()));
-    }
-    let config: toml::Table = toml::from_str(&text).map_err(|error| TraceDecayError::Config {
-        message: format!("failed to parse {} as TOML: {error}", path.display()),
-    })?;
-    let plugin_peers = match config.get(CODEX_PLUGINS_KEY) {
-        None => toml::Table::new(),
-        Some(plugins) => {
-            let Some(plugins) = plugins.as_table() else {
-                return Err(TraceDecayError::Config {
-                    message: format!(
-                        "{}.{CODEX_PLUGINS_KEY} must be a TOML table",
-                        path.display()
-                    ),
-                });
-            };
-            let mut peers = toml::Table::new();
-            for (name, plugin) in plugins {
-                if name.as_str() != owned_key {
-                    peers.insert(name.clone(), plugin.clone());
-                }
-            }
-            peers
-        }
-    };
+    let (bytes, config) = read_config_table(path)?;
     Ok((
-        Some(bytes),
+        bytes,
         CodexPluginPreservedRegionsV1 {
-            plugin_peers,
+            plugin_peers: table_peers(&config, CODEX_PLUGINS_KEY, owned_key, path)?,
             mcp_servers: config.get(CODEX_MCP_SERVERS_KEY).cloned(),
             hooks: config.get(CODEX_HOOKS_KEY).cloned(),
         },

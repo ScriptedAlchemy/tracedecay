@@ -23,7 +23,7 @@ use super::ProjectServerKey;
 use super::StoreOwnerKey;
 #[cfg(unix)]
 use super::scheduler::{AutomationSchedulerHandle, AutomationSchedulerSignal};
-use super::{DaemonHandshake, DatabaseOwnerRegistry, write_json_rpc_response};
+use super::{DaemonHandshake, DatabaseOwnerRegistry, write_daemon_response};
 use tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationServiceRegistry;
 #[cfg(unix)]
 use tracedecay_automation_runtime::automation::maintenance_termination::MaintenanceTaskTermination;
@@ -379,7 +379,12 @@ impl ProfileHostAdmissionBootstrapContext {
                     error.to_string(),
                 )
             })?;
-        let broker = self.open_broker(&broker_path).await?;
+        let broker = open_host_admission_broker(
+            &self.host_admission_brokers,
+            &self.host_admission_broker_gate,
+            &broker_path,
+        )
+        .await?;
         let Some(replay) = self.profile_host_admission_replay.upgrade() else {
             return Err(TraceDecayError::project_route(
                 "daemon_shutting_down",
@@ -392,43 +397,45 @@ impl ProfileHostAdmissionBootstrapContext {
             .await;
         Ok(())
     }
+}
 
-    #[tracing::instrument(name = "daemon.branch_admin.open_broker", level = "trace", skip_all)]
-    async fn open_broker(
-        &self,
-        path: &Path,
-    ) -> Result<tracedecay_host_admission::SharedHostAdmissionBroker> {
-        if let Some(broker) = self.host_admission_brokers.lock().await.get(path).cloned() {
-            return Ok(broker);
-        }
-
-        let _open = self.host_admission_broker_gate.lock().await;
-        let brokers = self.host_admission_brokers.lock().await;
-        if let Some(broker) = brokers.get(path) {
-            return Ok(Arc::clone(broker));
-        }
-        drop(brokers);
-        let open_path = path.to_path_buf();
-        let (runtime, _) = tokio::task::spawn_blocking(move || {
-            let _span =
-                tracing::trace_span!("daemon.branch_admin.host_admission_runtime.open").entered();
-            tracedecay_host_admission::HostAdmissionRuntime::open_for_database(&open_path)
-        })
-        .await
-        .map_err(|_| {
-            TraceDecayError::project_route(
-                "spool_runtime_unavailable",
-                true,
-                "host-admission spool runtime task failed",
-            )
-        })??;
-        let broker = Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));
-        self.host_admission_brokers
-            .lock()
-            .await
-            .insert(path.to_path_buf(), Arc::clone(&broker));
-        Ok(broker)
+/// Returns the cached broker for `path`, opening its runtime at most once.
+/// First-open publication is serialized by `gate` without holding the broker
+/// map lock across blocking filesystem work.
+#[tracing::instrument(name = "daemon.branch_admin.open_broker", level = "trace", skip_all)]
+async fn open_host_admission_broker(
+    brokers: &HostAdmissionBrokers,
+    gate: &tokio::sync::Mutex<()>,
+    path: &Path,
+) -> Result<tracedecay_host_admission::SharedHostAdmissionBroker> {
+    if let Some(broker) = brokers.lock().await.get(path).cloned() {
+        return Ok(broker);
     }
+
+    let _open = gate.lock().await;
+    if let Some(broker) = brokers.lock().await.get(path).cloned() {
+        return Ok(broker);
+    }
+    let open_path = path.to_path_buf();
+    let (runtime, _) = tokio::task::spawn_blocking(move || {
+        let _span =
+            tracing::trace_span!("daemon.branch_admin.host_admission_runtime.open").entered();
+        tracedecay_host_admission::HostAdmissionRuntime::open_for_database(&open_path)
+    })
+    .await
+    .map_err(|_| {
+        TraceDecayError::project_route(
+            "spool_runtime_unavailable",
+            true,
+            "host-admission spool runtime task failed",
+        )
+    })??;
+    let broker = Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));
+    brokers
+        .lock()
+        .await
+        .insert(path.to_path_buf(), Arc::clone(&broker));
+    Ok(broker)
 }
 
 /// Coordinates every daemon operation that can create, rekey, or remove a
@@ -878,6 +885,14 @@ impl StoreAdministration {
         &self,
     ) -> Result<tracedecay_global_db::RegisteredGlobalDbLeaseV1> {
         let database = Box::pin(self.raw_registered_profile_database()).await?;
+        self.refuse_remotely_deleted_profile(&database).await?;
+        Ok(database)
+    }
+
+    async fn refuse_remotely_deleted_profile(
+        &self,
+        database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    ) -> Result<()> {
         let profile_id = self.profile_identity()?.profile_id().as_str();
         if database
             .remote_account_deletion_tombstone(profile_id)
@@ -890,7 +905,7 @@ impl StoreAdministration {
                 "authenticated profile was remotely deleted",
             ));
         }
-        Ok(database)
+        Ok(())
     }
 
     async fn raw_registered_profile_database(
@@ -907,19 +922,7 @@ impl StoreAdministration {
     )]
     pub(super) async fn ensure_account_active(&self) -> Result<()> {
         let database = Box::pin(self.raw_registered_profile_database()).await?;
-        let profile_id = self.profile_identity()?.profile_id().as_str();
-        if database
-            .remote_account_deletion_tombstone(profile_id)
-            .await?
-            .is_some()
-        {
-            return Err(TraceDecayError::project_route(
-                "remote_deleted",
-                false,
-                "authenticated profile was remotely deleted",
-            ));
-        }
-        Ok(())
+        self.refuse_remotely_deleted_profile(&database).await
     }
 
     #[tracing::instrument(
@@ -1166,18 +1169,7 @@ impl StoreAdministration {
         &self,
         database: &tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     ) -> Result<tracedecay_host_admission::SharedHostAdmissionBroker> {
-        let profile_id = self.profile_identity()?.profile_id().as_str();
-        if database
-            .remote_account_deletion_tombstone(profile_id)
-            .await?
-            .is_some()
-        {
-            return Err(TraceDecayError::project_route(
-                "remote_deleted",
-                false,
-                "authenticated profile was remotely deleted",
-            ));
-        }
+        self.refuse_remotely_deleted_profile(database).await?;
         self.host_admission_broker_for_path(database.db_path())
             .await
     }
@@ -1192,47 +1184,15 @@ impl StoreAdministration {
         database_path: &Path,
     ) -> Result<tracedecay_host_admission::SharedHostAdmissionBroker> {
         let path = authority::canonical_identity_path(database_path)?;
-        if let Some(broker) = self.host_admission_brokers.lock().await.get(&path).cloned() {
-            self.maybe_ensure_user_profile_host_admission_replay(&path, &broker)
-                .await;
-            return Ok(broker);
-        }
-
-        // Serialize first-open publication without retaining the broker map
-        // lock across blocking filesystem work.
-        let _open = self.host_admission_broker_gate.lock().await;
-        let state = {
-            let brokers = self.host_admission_brokers.lock().await;
-            if let Some(broker) = brokers.get(&path) {
-                Arc::clone(broker)
-            } else {
-                drop(brokers);
-                let open_path = path.clone();
-                let (runtime, _) = tokio::task::spawn_blocking(move || {
-                    let _span =
-                        tracing::trace_span!("daemon.branch_admin.host_admission_runtime.open")
-                            .entered();
-                    tracedecay_host_admission::HostAdmissionRuntime::open_for_database(&open_path)
-                })
-                .await
-                .map_err(|_| {
-                    TraceDecayError::project_route(
-                        "spool_runtime_unavailable",
-                        true,
-                        "host-admission spool runtime task failed",
-                    )
-                })??;
-                let broker = Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));
-                self.host_admission_brokers
-                    .lock()
-                    .await
-                    .insert(path.clone(), Arc::clone(&broker));
-                broker
-            }
-        };
-        self.maybe_ensure_user_profile_host_admission_replay(&path, &state)
+        let broker = open_host_admission_broker(
+            &self.host_admission_brokers,
+            &self.host_admission_broker_gate,
+            &path,
+        )
+        .await?;
+        self.maybe_ensure_user_profile_host_admission_replay(&path, &broker)
             .await;
-        Ok(state)
+        Ok(broker)
     }
 
     /// Kick the coalesced user-profile replay worker. Never awaits a replay pass.
@@ -2085,7 +2045,7 @@ pub(super) async fn write_branch_admin_response(
         }
         (Ok(_), Err(error)) => branch_admin_error_response(request.id, &error),
     };
-    write_json_rpc_response(transport, &response).await
+    write_daemon_response(transport, &response).await
 }
 
 #[cfg(test)]

@@ -64,21 +64,11 @@ pub mod tools;
 pub mod transport;
 pub mod workflow;
 
-pub use analysis::{is_ident_byte, line_number_at, skip_ascii_whitespace};
-pub use broker_stream_transport::{
-    BrokerResponseLifecycle, BrokerSelectedResponseAuthority, BrokerSelectedResponseLease,
-    BrokerStreamTransport, BrokerWorkDeliverySettlement,
-};
-pub use context_headings::{
-    CODE_CONTEXT_HEADING, CONTEXT_CODE_HEADING, CONTEXT_ENTRY_POINTS_HEADING,
-    CONTEXT_EXTENSION_POINTS_HEADING, CONTEXT_INDEX_COVERAGE_HINT_HEADING,
-    CONTEXT_MEMORY_FEEDBACK_HINT, CONTEXT_MEMORY_MATCHES_HEADING, CONTEXT_PRIORITY_HEADINGS,
-    CONTEXT_RELATED_SYMBOLS_HEADING, CONTEXT_SEEN_NODE_IDS_LABEL, CONTEXT_TEST_COVERAGE_HEADING,
-};
+pub use analysis::{is_ident_byte, line_number_at};
+pub use broker_stream_transport::{BrokerSelectedResponseLease, BrokerStreamTransport};
 pub use handlers::{
-    decode_primitive_request, effective_path, generic_tool_result, handle_multi_root, handle_work,
-    handle_workflow, rendered_tool_result, require_object_args, require_positive_limit,
-    text_tool_result, tool_json, tool_json_with_md, unique_file_paths,
+    decode_primitive_request, handle_multi_root, handle_work, handle_workflow,
+    require_positive_limit, text_tool_result, unique_file_paths,
 };
 pub use hook_runtime::{
     hook_admission_error, map_claude_observation_ingest_error, map_host_admission_outcome,
@@ -88,13 +78,11 @@ pub use jsonrpc::{
     ErrorCode, JsonRpcDecodeError, JsonRpcError, JsonRpcRequest, JsonRpcResponse, McpTransport,
 };
 pub use tool_call_deadline::{
-    TOOL_CALL_DEADLINE_META_KEY, caller_tool_call_deadline, caller_tool_call_deadline_from_meta,
-    tool_call_deadline_meta,
+    caller_tool_call_deadline, caller_tool_call_deadline_from_meta, tool_call_deadline_meta,
 };
 pub use tool_context::{
-    AdmittedCodeIndex, AdmittedProjectStore, McpAdmittedProjectV1, McpDoctorReportV1,
-    McpProjectIdentityV1, McpRequestAuthoritiesV1, McpToolBinding, McpToolBindingError,
-    McpToolContext, RequestControls,
+    AdmittedCodeIndex, McpAdmittedProjectV1, McpDoctorReportV1, McpProjectIdentityV1,
+    McpRequestAuthoritiesV1, McpToolBinding, McpToolContext, RequestControls,
 };
 #[cfg(test)]
 pub(crate) use tool_errors::structured_hook_error_data;
@@ -103,21 +91,19 @@ pub use tool_errors::{
     reset_required_detail, reset_required_remedy, semantic_failure_reason, serialize_response_line,
     tool_error_response, tool_result_has_semantic_error,
 };
-pub use tools::render::format_relative_time;
 pub use tools::{
     RESERVED_FLAGS_FOOTER, ToolResult, render_tool_cli_help, resolve_property_schema,
     short_tool_name,
 };
 pub use tracedecay_mcp_catalog::{
-    ALWAYS_LOAD_META, MAX_RESPONSE_CHARS, McpCatalogError, ToolDefinition,
-    apply_context_warming_budget, cli_tool_definition, context_description,
-    context_warming_description, explore_call_budget, format_capable_tool_names,
-    get_tool_definitions, get_tool_definitions_ref, get_tool_definitions_with_budget,
-    get_tool_definitions_with_warming_budget, mcp_input_schema, project_catalog_discovery_scope,
+    ALWAYS_LOAD_META, MAX_RESPONSE_CHARS, McpCatalogError, ToolDefinition, cli_tool_definition,
+    context_description, context_warming_description, explore_call_budget,
+    format_capable_tool_names, get_tool_definitions, get_tool_definitions_ref,
+    get_tool_definitions_with_budget, mcp_input_schema, project_catalog_discovery_scope,
     registered_project_reader_tool_names, tool_defaults_to_markdown,
 };
 pub use workflow::{
-    LibtestReport, MAX_TEST_TIMEOUT_SECS, MAX_TESTS_HARD_CAP, RunAffectedArgs, TestProfile,
-    TestRunControl, TestRunFailure, TestRunOutput, TestRunStream, cargo_test_args,
-    libtest_identity, libtest_module_prefix, parse_libtest_output, run_cargo_tests,
+    LibtestReport, MAX_TEST_TIMEOUT_SECS, RunAffectedArgs, TestProfile, TestRunControl,
+    TestRunFailure, TestRunOutput, cargo_test_args, libtest_identity, parse_libtest_output,
+    run_cargo_tests,
 };

@@ -18,7 +18,7 @@ pub(crate) async fn admin_project(
     request: AdminProjectSurfaceRequestV1,
 ) -> Result<AdminProjectResultV1> {
     let handshake = super::client_handshake(profile, Some(project_path))?;
-    let deadline = Instant::now() + crate::tool_command::tool_command_deadline()?;
+    let deadline = crate::tool_command::tool_command_deadline()?;
     admin_project_until(profile, handshake, request, deadline).await
 }
 

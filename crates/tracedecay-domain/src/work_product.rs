@@ -49,8 +49,6 @@ pub enum WorkProductContractError {
     InvalidTime,
     #[error("Work proposal does not match the selected graph or task")]
     ProposalMismatch,
-    #[error("Work provider route was not explicitly selected")]
-    RouteNotSelected,
     #[error("Work acceptance criteria are not satisfied")]
     AcceptanceUnsatisfied,
     #[error("Task evidence is not rooted in the selected task")]

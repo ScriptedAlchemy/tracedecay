@@ -256,22 +256,21 @@ impl CodeIndexSchedulerRegistryV1 {
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                 }
             };
-            let generation =
+            let generation = {
+                let _span = tracing::trace_span!("query.generation.resolve.load").entered();
                 {
-                    let _span = tracing::trace_span!("query.generation.resolve.load").entered();
-                    {
-                        scheduler.generation(&generation_id).map_err(|error| {
+                    scheduler.generation(&generation_id).map_err(|error| {
                             match error {
                         super::CodeIndexSchedulerErrorV1::Production(
-                            crate::code_index::production::CodeIndexProductionErrorV1::Publication(
+                            tracedecay_code_index::production::CodeIndexProductionErrorV1::Publication(
                                 error,
                             ),
                         ) => DaemonCodeIndexPublicationStoreV1::exact_read_error(error),
                         _ => code_search::CodeIndexSearchUnavailableReasonV1::Internal,
                     }
                         })
-                    }
-                }?;
+                }
+            }?;
             Ok(generation.filter(|generation| latest_matches_scope_identity(generation, &scope)))
         });
         let settlement = match crate::ports::park_admission(

@@ -19,8 +19,7 @@ pub(crate) use tracedecay_daemon_protocol::connection::{
     DAEMON_RESTART_GRACE, DAEMON_RESTART_POLL_INTERVAL, daemon_connect_failure_advice,
     is_transient_daemon_connect_error,
 };
-pub use tracedecay_daemon_protocol::daemon_tool_response_bound;
-use tracedecay_daemon_protocol::tool_request_deadline;
+use tracedecay_daemon_protocol::{daemon_tool_response_bound, tool_request_deadline};
 use tracedecay_mcp::server::attach_stateless_request_context;
 use tracedecay_mcp::tool_errors::tool_result_problem;
 use tracedecay_runtime_core::config::ProfileRoot;

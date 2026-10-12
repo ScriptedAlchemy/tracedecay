@@ -302,10 +302,8 @@ impl McpServer {
         self.spawn_observed_ledger_write(std::future::pending::<()>());
     }
 
-    /// Internal: snapshot of the current `file_token_map`. Exposed for
-    /// integration tests only; not part of the stable public API.
-    #[doc(hidden)]
-    pub fn file_token_map_snapshot(&self) -> HashMap<String, u64> {
+    #[cfg(test)]
+    pub(crate) fn file_token_map_snapshot(&self) -> HashMap<String, u64> {
         crate::mcp::server::requests::recover_lock(&self.file_token_map).clone()
     }
 

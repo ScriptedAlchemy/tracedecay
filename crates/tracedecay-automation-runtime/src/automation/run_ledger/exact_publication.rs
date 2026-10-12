@@ -13,6 +13,7 @@ use super::{
     validate_run_id_component,
 };
 use crate::automation::config_error;
+use crate::automation::effect_runtime::journal::replace_automation_file_atomically;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 const EXACT_RUN_SPOOL_DIR: &str = "automation_run_spool";
@@ -24,29 +25,6 @@ const MAX_APPEND_INTENT_QUARANTINES: usize = 16;
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
 
 type AtomicFilePublisher<'a> = dyn Fn(&Path, &Path, &str) -> std::io::Result<()> + 'a;
-
-fn replace_file_atomically(
-    temporary: &Path,
-    destination: &Path,
-    label: &str,
-) -> std::io::Result<()> {
-    #[cfg(windows)]
-    {
-        let temporary_file =
-            tracedecay_runtime_core::windows_security::make_private_file(temporary)?;
-        temporary_file.sync_all()?;
-        drop(temporary_file);
-    }
-    tracedecay_runtime_core::db::DatabaseAuthority::replace_file_atomically(
-        temporary,
-        destination,
-        label,
-    )
-    .map_err(std::io::Error::other)?;
-    #[cfg(windows)]
-    tracedecay_runtime_core::windows_security::validate_private_file(destination)?;
-    Ok(())
-}
 
 pub(super) fn acquire_run_ledger_lock(path: &Path) -> std::io::Result<std::fs::File> {
     let lock_path = tracedecay_runtime_core::storage::append_lock_path(path);
@@ -249,7 +227,7 @@ pub fn bind_staged_run_record_exact<T>(
     bind_staged_run_record_exact_with_publisher(
         dashboard_root,
         record,
-        &replace_file_atomically,
+        &replace_automation_file_atomically,
         bind,
     )
 }
@@ -470,7 +448,7 @@ pub fn publish_staged_run_record_exact_blocking(
         dashboard_root,
         run_id,
         publication,
-        &replace_file_atomically,
+        &replace_automation_file_atomically,
     )
 }
 
@@ -1007,7 +985,7 @@ fn append_intent_path(dashboard_root: &Path) -> PathBuf {
 
 #[cfg(test)]
 fn write_append_intent(dashboard_root: &Path, intent: &LedgerAppendIntent) -> Result<()> {
-    write_append_intent_with_publisher(dashboard_root, intent, &replace_file_atomically)
+    write_append_intent_with_publisher(dashboard_root, intent, &replace_automation_file_atomically)
 }
 
 /// Leaves `dashboard_root` in the state a first writer holds in the middle of
@@ -1260,7 +1238,7 @@ fn cleanup_abandoned_corrupt_append_intent_quarantine_temps(
             continue;
         };
         let path = entry.path();
-        let owned_atomic_temp = is_corrupt_append_intent_quarantine_owned_temp_name(name);
+        let owned_atomic_temp = is_owned_temp_name(name, ".automation-run-corrupt-append-intent");
         // This private directory is exclusively owned by corrupt append-intent
         // quarantine while the cooperative spool lock is held. An exact
         // runtime-core removal tombstone can therefore only derive from this
@@ -1305,29 +1283,12 @@ fn quarantine_tombstone_is_bounded_regular(path: &Path) -> Result<bool> {
     Ok(file.metadata().map_err(TraceDecayError::from)?.len() <= MAX_APPEND_INTENT_BYTES)
 }
 
-fn is_corrupt_append_intent_quarantine_owned_temp_name(name: &str) -> bool {
-    let Some(body) = name
-        .strip_prefix('.')
-        .and_then(|name| name.strip_suffix(".tmp"))
-    else {
-        return false;
-    };
-    let Some((prefix, nonce)) = body.rsplit_once('.') else {
-        return false;
-    };
-    let Some((prefix, process_id)) = prefix.rsplit_once('.') else {
-        return false;
-    };
-    let Some(destination) = prefix.strip_suffix(".automation-run-corrupt-append-intent") else {
-        return false;
-    };
-    is_exact_spool_destination_name(destination)
-        && is_canonical_decimal(process_id, u64::from(u32::MAX))
-        && is_canonical_decimal(nonce, u64::MAX)
-}
-
 fn publish_corrupt_append_intent_quarantine(path: &Path, bytes: &[u8]) -> Result<()> {
-    publish_corrupt_append_intent_quarantine_with_publisher(path, bytes, &replace_file_atomically)
+    publish_corrupt_append_intent_quarantine_with_publisher(
+        path,
+        bytes,
+        &replace_automation_file_atomically,
+    )
 }
 
 fn publish_corrupt_append_intent_quarantine_with_publisher(
@@ -1671,7 +1632,7 @@ fn cleanup_abandoned_exact_spool_temps(directory: &Path) -> Result<()> {
         let Some(name) = name.to_str() else {
             continue;
         };
-        if !is_exact_spool_owned_temp_name(name) {
+        if !is_owned_temp_name(name, ".automation-run-exact-spool") {
             continue;
         }
         tracedecay_runtime_core::storage::PrivateStoreIo::remove_file_durable(&entry.path())
@@ -1680,7 +1641,9 @@ fn cleanup_abandoned_exact_spool_temps(directory: &Path) -> Result<()> {
     Ok(())
 }
 
-fn is_exact_spool_owned_temp_name(name: &str) -> bool {
+/// Whether `name` is a `.<destination><owner_suffix>.<pid>.<nonce>.tmp`
+/// atomic-publication temp file for an exact-spool destination.
+fn is_owned_temp_name(name: &str, owner_suffix: &str) -> bool {
     let Some(body) = name
         .strip_prefix('.')
         .and_then(|name| name.strip_suffix(".tmp"))
@@ -1693,7 +1656,7 @@ fn is_exact_spool_owned_temp_name(name: &str) -> bool {
     let Some((prefix, process_id)) = prefix.rsplit_once('.') else {
         return false;
     };
-    let Some(destination) = prefix.strip_suffix(".automation-run-exact-spool") else {
+    let Some(destination) = prefix.strip_suffix(owner_suffix) else {
         return false;
     };
     is_exact_spool_destination_name(destination)
@@ -2016,7 +1979,7 @@ mod tests {
                     0o600
                 );
                 observed_private_temp.set(true);
-                replace_file_atomically(temporary, destination, label)
+                replace_automation_file_atomically(temporary, destination, label)
             },
             |_| Ok(()),
         )
@@ -2119,7 +2082,7 @@ mod tests {
             &|temporary, destination, label| {
                 assert_eq!(label, "automation run exact spool");
                 republish_calls.set(republish_calls.get() + 1);
-                replace_file_atomically(temporary, destination, label)
+                replace_automation_file_atomically(temporary, destination, label)
             },
             |_| {
                 bind_calls.set(bind_calls.get() + 1);
@@ -2572,7 +2535,7 @@ mod tests {
                 &|temporary, destination, label| {
                     assert_eq!(label, "automation run ledger append intent");
                     republish_calls.set(republish_calls.get() + 1);
-                    replace_file_atomically(temporary, destination, label)
+                    replace_automation_file_atomically(temporary, destination, label)
                 },
             )
             .expect("write-through republish, readback, and exact append"),

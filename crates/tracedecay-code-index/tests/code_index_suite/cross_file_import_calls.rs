@@ -12,8 +12,7 @@ use tracedecay_code_index::{
     chunks::content_digest,
     graph_projection::CodeGraphInteractiveReader,
     production::{
-        CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexProductionOwnerV1,
-        CodeIndexPublishedGenerationV1,
+        CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexPublishedGenerationV1,
     },
 };
 use tracedecay_domain::{
@@ -23,9 +22,7 @@ use tracedecay_domain::{
 use tracedecay_graph_db::NeverCancelled;
 
 use crate::{
-    production_orchestration::{
-        ActiveControl, ApplyingProjectionSink, SharedPublicationStore, config, request_with_source,
-    },
+    production_orchestration::{ActiveControl, applying_owner, request_with_source},
     support::{cold_generation, id},
     typescript_module_resolution::reader,
 };
@@ -247,17 +244,12 @@ pub(crate) fn publish_fixture_tree(root: &Path, tag: &str) -> Arc<CodeIndexPubli
     let files = fixture_files(root);
     let changed = files.iter().map(|(path, _)| path.clone()).collect();
     cold_generation(
-        &CodeIndexProductionOwnerV1::new(
-            config(),
-            SharedPublicationStore::default(),
-            ApplyingProjectionSink,
-        )
-        .expect("production owner")
-        .build_and_publish(
-            fixture_tree_request(tag, 1, &files, &changed),
-            &ActiveControl,
-        )
-        .expect("fixture generation publishes"),
+        &applying_owner()
+            .build_and_publish(
+                fixture_tree_request(tag, 1, &files, &changed),
+                &ActiveControl,
+            )
+            .expect("fixture generation publishes"),
     )
 }
 

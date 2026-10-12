@@ -138,5 +138,3 @@ export const STORY_SURFACES: readonly StorySurface[] = [
     wired: true,
   },
 ] as const;
-
-export type StorySurfaceId = (typeof STORY_SURFACES)[number]['id'];

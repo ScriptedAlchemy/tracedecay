@@ -172,27 +172,11 @@ pub enum ExecutionOwnerV1 {
     DaemonOwned { service_id: ServiceId },
 }
 
-impl ExecutionOwnerV1 {
-    pub fn service_id(&self) -> &ServiceId {
-        match self {
-            Self::Direct { service_id } | Self::DaemonOwned { service_id } => service_id,
-        }
-    }
-}
-
 /// Exact codec and adapter key used for request/result encoding.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "codec")]
 pub enum ExecutableCodecV1 {
     Json { binding_key: CodecBindingKey },
-}
-
-impl ExecutableCodecV1 {
-    pub fn binding_key(&self) -> &CodecBindingKey {
-        match self {
-            Self::Json { binding_key } => binding_key,
-        }
-    }
 }
 
 /// Whether the operation is private composition or exposed by a catalog route.
@@ -338,10 +322,6 @@ impl ExecutableBindingV1 {
 
     pub fn result_schema(&self) -> &SchemaBodyAuthorityV1 {
         &self.result_schema
-    }
-
-    pub fn codec(&self) -> &ExecutableCodecV1 {
-        &self.codec
     }
 
     pub fn exposure(&self) -> &RouteExposureV1 {
@@ -575,13 +555,9 @@ impl SdkExecutableBindingV1 {
         })
     }
 
-    pub fn executable(&self) -> &ExecutableBindingV1 {
-        &self.executable
-    }
-
     /// Canonical execution metadata retained by this SDK binding.
     pub fn binding(&self) -> &ExecutableBindingV1 {
-        self.executable()
+        &self.executable
     }
 
     pub fn operation_id(&self) -> &OperationId {

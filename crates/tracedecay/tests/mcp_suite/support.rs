@@ -421,6 +421,61 @@ pub(crate) fn commit_worktree(project: &Path, message: &str) {
     crate::common::fixture::git_run(project, &["commit", "-qm", message]);
 }
 
+/// [`ProductionProjectCompositionHarnessV1`] openers that first seed a profile
+/// that does not exist yet from the store template, so each composition
+/// admits private copies of initialized stores instead of installing every
+/// schema again. See [`fixture::seed_production_composition_profile`].
+#[cfg(feature = "test-transport")]
+pub(crate) mod seeded_composition {
+    use std::path::{Path, PathBuf};
+
+    use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
+    use tracedecay_domain::errors::Result;
+
+    async fn seed(
+        isolation_root: &Path,
+        project_roots: impl IntoIterator<Item = PathBuf>,
+    ) -> Vec<PathBuf> {
+        let project_roots: Vec<PathBuf> = project_roots.into_iter().collect();
+        crate::fixture::seed_production_composition_profile(isolation_root, &project_roots).await;
+        project_roots
+    }
+
+    pub(crate) async fn open(
+        isolation_root: impl AsRef<Path>,
+        project_roots: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<ProductionProjectCompositionHarnessV1> {
+        let project_roots = seed(isolation_root.as_ref(), project_roots).await;
+        ProductionProjectCompositionHarnessV1::open(isolation_root, project_roots).await
+    }
+
+    pub(crate) async fn open_for_session_retrieval(
+        isolation_root: impl AsRef<Path>,
+        project_roots: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<ProductionProjectCompositionHarnessV1> {
+        let project_roots = seed(isolation_root.as_ref(), project_roots).await;
+        ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+            isolation_root,
+            project_roots,
+        )
+        .await
+    }
+
+    pub(crate) async fn open_with_scope_prefix(
+        isolation_root: impl AsRef<Path>,
+        project_roots: impl IntoIterator<Item = PathBuf>,
+        scope_prefix: impl Into<String>,
+    ) -> Result<ProductionProjectCompositionHarnessV1> {
+        let project_roots = seed(isolation_root.as_ref(), project_roots).await;
+        ProductionProjectCompositionHarnessV1::open_with_scope_prefix(
+            isolation_root,
+            project_roots,
+            scope_prefix,
+        )
+        .await
+    }
+}
+
 #[cfg(feature = "test-transport")]
 pub(crate) async fn production_composition_fixture() -> ProductionCompositionFixture {
     production_composition_fixture_with_sources(fixture::write_indexed_fixture_sources).await
@@ -437,7 +492,7 @@ pub(crate) async fn production_composition_fixture_with_sources(
     common::register_process_runtime_ports();
     let isolation = test_temp_dir();
     let project_root = seed_production_composition_project(isolation.path(), write_sources);
-    let harness = Box::pin(ProductionProjectCompositionHarnessV1::open(
+    let harness = Box::pin(seeded_composition::open(
         isolation.path(),
         vec![project_root.clone()],
     ))
@@ -461,7 +516,7 @@ pub(crate) async fn peer_production_composition(
         isolation.path(),
         fixture::write_indexed_fixture_sources,
     );
-    let harness = Box::pin(ProductionProjectCompositionHarnessV1::open(
+    let harness = Box::pin(seeded_composition::open(
         isolation.path(),
         vec![project_root],
     ))
@@ -498,7 +553,7 @@ pub(crate) async fn init_production_source_edit_project(
         .parent()
         .expect("source-edit project has an isolation parent");
     commit_worktree(project_root, "source edit fixture");
-    let harness = Box::pin(ProductionProjectCompositionHarnessV1::open(
+    let harness = Box::pin(seeded_composition::open(
         isolation_root,
         [project_root.to_path_buf()],
     ))

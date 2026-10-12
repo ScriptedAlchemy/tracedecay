@@ -370,10 +370,6 @@ pub fn doctor_network_probes() -> tracedecay::doctor::AdmittedDoctorNetworkProbe
     }
 }
 
-pub fn is_newer_version(current: &str, latest: &str) -> bool {
-    tracedecay_dashboard_api::cloud::is_newer_version(current, latest)
-}
-
 /// How tracedecay was installed, detected from the binary path.
 pub enum InstallMethod {
     Cargo,

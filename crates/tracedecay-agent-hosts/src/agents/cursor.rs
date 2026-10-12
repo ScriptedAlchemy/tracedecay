@@ -17,30 +17,6 @@ use super::{
 
 pub struct CursorIntegration;
 
-/// Model-invocable skills shipped by the Cursor plugin.
-///
-/// The plugin bundle owns this inventory. Host steering adapters can re-export
-/// it without reaching back into a composition-root hook module.
-pub const CURSOR_PLUGIN_SKILLS: &[&str] = &[
-    "assessing-impact",
-    "code-health",
-    "diagnosing-analytics",
-    "discovering-tracedecay",
-    "editing-safely",
-    "exploring-code",
-    "fixing-build-and-type-errors",
-    "inspecting-managed-skills",
-    "investigating-unexpected-changes",
-    "managing-session-context",
-    "managing-work",
-    "managing-workflows",
-    "project-memory",
-    "reviewing-changes",
-    "routing-tracedecay",
-    "tracing-functions",
-    "using-the-cli",
-];
-
 impl AgentIntegration for CursorIntegration {
     fn name(&self) -> &'static str {
         "Cursor"
@@ -996,33 +972,6 @@ mod tests {
         assert_eq!(
             cursor_native_extension_registration(tmp.path()),
             HostBundleRegistrationStateV1::Current
-        );
-    }
-
-    /// The skill index injected into Cursor `sessionStart` context must match
-    /// the *model-invocable* skills shipped in the bundle, slash dispatchers
-    /// (`disable-model-invocation: true`) are explicit-invoke-only and would
-    /// be noise in steering context.
-    #[test]
-    fn session_context_skill_index_matches_bundle_skills() {
-        let mut bundled: Vec<String> = embedded_plugin_files()
-            .into_iter()
-            .filter_map(|(relative, contents)| {
-                let name = relative
-                    .strip_prefix("skills/")
-                    .and_then(|rest| rest.strip_suffix("/SKILL.md"))?;
-                (!contents.contains("disable-model-invocation: true")).then(|| name.to_string())
-            })
-            .collect();
-        bundled.sort();
-        let mut listed: Vec<String> = CURSOR_PLUGIN_SKILLS
-            .iter()
-            .map(|skill| (*skill).to_string())
-            .collect();
-        listed.sort();
-        assert_eq!(
-            bundled, listed,
-            "hooks::CURSOR_PLUGIN_SKILLS must list exactly the model-invocable bundled skills"
         );
     }
 
