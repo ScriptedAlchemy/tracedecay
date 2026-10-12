@@ -4,7 +4,7 @@ use super::super::clone_codec::{digest_from_key, digest_key};
 use super::super::format::{PostingListEncoderV1, contract_number};
 use super::super::prepared::{PreparedCloneBodyV1, PreparedCodeLexicalArtifactPageV1};
 use super::super::row_codec::{stored_chunk_key, stored_symbol_key};
-use super::super::schema::{field_code, intern_exact_terms};
+use super::super::schema::intern_exact_terms;
 use super::super::{CodeLexicalArtifactErrorV1, checkpoint, sqlite_error};
 use super::admission::{
     EXACT_INSERT_CONTROL_INTERVAL, INSERT_ROWS_PER_STATEMENT, PreparedExactInsertPlanV1,

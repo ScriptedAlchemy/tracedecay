@@ -61,8 +61,8 @@ use append::{
 use finalization::{
     FinalizationSectionV1, PersistedFinalizationPhaseV1, PersistedFinalizationStateV1,
     ServingIndexStepAuthorityV1, absorb_section_row, advance_pre_digest_work, advance_section_rows,
-    base_section_walk_error, content_epoch, ensure_content_epoch, finalization_started,
-    finish_persisted_section, finish_section, initial_section_accumulator, load_finalization_state,
+    base_section_walk_error, ensure_content_epoch, finalization_started, finish_persisted_section,
+    finish_section, initial_section_accumulator, load_finalization_state,
     merge_wake_fits_memory_temp_store, release_free_pages, require_staged_revision,
     store_finalization_state, validate_finalization_state, verify_artifact_state_metadata,
     with_cancellable_sqlite_statement,
@@ -74,8 +74,8 @@ use finalization::{
 };
 pub(super) use mutation::{BuilderMutationGuardV1, register_builder_mutation_gate};
 use mutation::{
-    admitted_documents, authenticated_authority_epoch, create_schema, install_base_freeze,
-    table_exists, verify_builder_mutation_gate_schema,
+    authenticated_authority_epoch, create_schema, install_base_freeze, table_exists,
+    verify_builder_mutation_gate_schema,
 };
 use rayon::prelude::*;
 use rusqlite::config::DbConfig;
@@ -89,7 +89,6 @@ use std::collections::BinaryHeap;
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 use std::num::NonZeroUsize;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU8;

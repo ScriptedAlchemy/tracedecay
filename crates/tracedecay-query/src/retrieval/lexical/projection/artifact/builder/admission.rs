@@ -4,7 +4,7 @@ use super::super::super::CodeLexicalProjectionMetadataV1;
 use super::super::format::contract_number;
 use super::super::postings::document_ngram_scratch;
 use super::super::prepared::{PreparedCodeLexicalArtifactPageV1, PreparedTermPostingV1};
-use super::super::schema::{exact_field_code_from_encoded, field_code, stable_exact_term_id};
+use super::super::schema::{exact_field_code_from_encoded, stable_exact_term_id};
 use super::super::{
     ARTIFACT_SQLITE_CACHE_BYTES, CODE_LEXICAL_ARTIFACT_BUILD_MEMORY_CAP_BYTES_V1,
     CODE_LEXICAL_ARTIFACT_MAXIMUM_ESTIMATED_BATCH_WRITE_BYTES_V1,
