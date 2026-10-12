@@ -772,7 +772,7 @@ export type PublicCodeProject = { readonly canonical_root: string; readonly crea
 export type QuantityEvidenceClassV1 = "owner_receipt" | "locally_measured" | "estimated" | "unknown";
 export type QueryCollectionId = string;
 export type RankDirectionV1 = "incoming" | "outgoing";
-export type RankEdgeKindV1 = "implements" | "extends" | "calls" | "uses" | "contains" | "annotates" | "derives_macro" | "type_of" | "returns" | "receives";
+export type RankEdgeKindV1 = "implements" | "extends" | "calls" | "uses" | "contains" | "annotates" | "type_of" | "returns" | "receives";
 export type RankEntryV1 = { readonly count: number; readonly file: string; readonly id: string; readonly kind: string; readonly line: number; readonly name: string };
 export type RankedAffectedTestV1 = { readonly distance: number; readonly path: string; readonly proximity: string; readonly rank: number };
 export type RankedCandidate = { readonly candidate: FusedCandidate; readonly final_ordinal: number };
@@ -2520,7 +2520,7 @@ const DEFINITIONS = {
   QuantityEvidenceClassV1: {"enum":["owner_receipt","locally_measured","estimated","unknown"],"type":"string"},
   QueryCollectionId: {"description":"Strongly typed canonical identity: `QueryCollectionId`.","type":"string"},
   RankDirectionV1: {"description":"Which endpoint of each counted edge the rank report ranks.","enum":["incoming","outgoing"],"type":"string"},
-  RankEdgeKindV1: {"description":"Relationship the rank report counts.","enum":["implements","extends","calls","uses","contains","annotates","derives_macro","type_of","returns","receives"],"type":"string"},
+  RankEdgeKindV1: {"description":"Relationship the rank report counts.","enum":["implements","extends","calls","uses","contains","annotates","type_of","returns","receives"],"type":"string"},
   RankEntryV1: {"additionalProperties":false,"properties":{"count":{"format":"uint64","minimum":0,"type":"integer"},"file":{"type":"string"},"id":{"type":"string"},"kind":{"type":"string"},"line":{"format":"uint32","minimum":0,"type":"integer"},"name":{"type":"string"}},"required":["id","name","kind","file","line","count"],"type":"object"},
   RankedAffectedTestV1: {"additionalProperties":false,"properties":{"distance":{"format":"uint","minimum":0,"type":"integer"},"path":{"type":"string"},"proximity":{"type":"string"},"rank":{"format":"uint","minimum":0,"type":"integer"}},"required":["path","rank","distance","proximity"],"type":"object"},
   RankedCandidate: {"additionalProperties":false,"description":"A fused candidate with its final deterministic ordinal.","properties":{"candidate":{"$ref":"#/$defs/FusedCandidate"},"final_ordinal":{"format":"uint32","minimum":0,"type":"integer"}},"required":["candidate","final_ordinal"],"type":"object"},
