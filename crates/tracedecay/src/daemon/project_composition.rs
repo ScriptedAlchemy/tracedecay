@@ -376,29 +376,40 @@ async fn preserve_shared_root_replay_consumer(
         .map(|entry| Arc::clone(&entry.server))
         .collect::<Vec<_>>();
     let mut served_graphs = Vec::new();
-    let mut serving = None;
+    let mut eligible = None;
     for server in servers {
         let graph = server.cg().await;
-        if graph.hook_store_layout().data_root == *data_root {
-            served_graphs.push(Arc::downgrade(&graph));
-            serving.get_or_insert(server);
+        if graph.hook_store_layout().data_root != *data_root {
+            continue;
+        }
+        served_graphs.push(Arc::downgrade(&graph));
+        // Only a sibling exposing every replay authority can host the
+        // consumer; registry order is arbitrary, so a core or degraded
+        // match must not preempt a serving full sibling.
+        if eligible.is_none()
+            && let (Some(delivery_settlements), Some(session_db), Some(background_cpu)) = (
+                server.delivery_settlement_authority(),
+                server.project_session_db(),
+                server.background_cpu_authority(),
+            )
+        {
+            eligible = Some((server, delivery_settlements, session_db, background_cpu));
         }
     }
-    let Some(serving) = serving else {
+    if served_graphs.is_empty() {
         return false;
-    };
+    }
     if !super::hook_v2_replay_consumer::replay_consumer_unserved_or_unowned(
         data_root,
         &served_graphs,
     ) {
         return true;
     }
-    let (Some(delivery_settlements), Some(session_db), Some(background_cpu)) = (
-        serving.delivery_settlement_authority(),
-        serving.project_session_db(),
-        serving.background_cpu_authority(),
-    ) else {
-        return true;
+    let Some((serving, delivery_settlements, session_db, background_cpu)) = eligible else {
+        // The incumbent is unserved and no sibling can host it: report the
+        // root unpreserved so the caller retires it instead of stranding
+        // its records under a graph that cannot drain.
+        return false;
     };
     super::hook_v2_replay_consumer::retarget_hook_v2_replay_consumer(
         serving.cg().await,
