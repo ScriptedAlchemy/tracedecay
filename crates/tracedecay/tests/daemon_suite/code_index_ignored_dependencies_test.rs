@@ -18,7 +18,8 @@ use tracedecay_runtime_core::path_safety::{
 use tracedecay_code_index_runtime::code_index_scheduler::{
     CodeGraphActivationPolicyV1, CodeIndexIgnoredDependencyIndexOutcomeV1,
     CodeIndexIgnoredDependencyRefusalV1, CodeIndexIgnoredDependencyRequestV1,
-    CodeIndexSchedulerErrorV1, CodeIndexSchedulerRegistryV1, LatestCompleteCodeIndexV1,
+    CodeIndexOwnerSignalsV1, CodeIndexSchedulerErrorV1, CodeIndexSchedulerRegistryV1,
+    LatestCompleteCodeIndexV1,
 };
 
 mod branch_publication_tests;
@@ -161,20 +162,38 @@ async fn mount(
     registry
 }
 
+/// Wait until `probe` answers for `project_root`, re-probing only when the
+/// owner publishes a change. Subscribing before the first probe means a
+/// change between a probe and the wait still wakes it. The test timeout is
+/// the only bound on a wait that never ends.
+async fn wait_for_owner<T, Probe>(
+    registry: &CodeIndexSchedulerRegistryV1,
+    project_root: &Path,
+    mut probe: impl FnMut() -> Probe,
+) -> T
+where
+    Probe: std::future::Future<Output = Option<T>>,
+{
+    let mut signals = CodeIndexOwnerSignalsV1::subscribe(registry, project_root).await;
+    loop {
+        if let Some(value) = probe().await {
+            return value;
+        }
+        signals
+            .changed()
+            .await
+            .expect("the registry outlives the test's owner signals");
+    }
+}
+
 async fn wait_for_initial_generation(
     registry: &CodeIndexSchedulerRegistryV1,
     project_root: &Path,
 ) -> CodeGenerationId {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(generation) = registry.latest_generation_id(project_root).await {
-                break generation;
-            }
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
+    wait_for_owner(registry, project_root, || {
+        registry.latest_generation_id(project_root)
     })
     .await
-    .expect("initial generation publication")
 }
 
 async fn wait_for_generation_change(
@@ -182,18 +201,13 @@ async fn wait_for_generation_change(
     project_root: &Path,
     previous: &CodeGenerationId,
 ) -> CodeGenerationId {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(generation) = registry.latest_generation_id(project_root).await
-                && &generation != previous
-            {
-                break generation;
-            }
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
+    wait_for_owner(registry, project_root, || async move {
+        registry
+            .latest_generation_id(project_root)
+            .await
+            .filter(|generation| generation != previous)
     })
     .await
-    .expect("changed generation publication")
 }
 
 async fn latest(
@@ -210,33 +224,28 @@ async fn latest_for_generation(
     project_root: &Path,
     expected: Option<&CodeGenerationId>,
 ) -> LatestCompleteCodeIndexV1 {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(latest) = registry.latest_complete_fresh(project_root).await
-                && expected.is_none_or(|expected| {
+    wait_for_owner(registry, project_root, || async move {
+        registry
+            .latest_complete_fresh(project_root)
+            .await
+            .filter(|latest| {
+                expected.is_none_or(|expected| {
                     expected == &latest.generation().manifest().generation_id
                 })
-            {
-                break latest;
-            }
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
+            })
     })
     .await
-    .unwrap_or_else(|error| panic!("serving generation {expected:?} did not seat: {error}"))
 }
 
-async fn wait_for_reconciling(registry: &CodeIndexSchedulerRegistryV1, expected: u64) {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if registry.memory_stats().await.reconciling_worktrees == expected {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(2)).await;
-        }
+async fn wait_for_reconciling(
+    registry: &CodeIndexSchedulerRegistryV1,
+    project_root: &Path,
+    expected: u64,
+) {
+    wait_for_owner(registry, project_root, || async move {
+        (registry.memory_stats().await.reconciling_worktrees == expected).then_some(())
     })
-    .await
-    .expect("background reconcile reaches expected state");
+    .await;
 }
 
 async fn reconcile_through_worker(
@@ -263,10 +272,10 @@ async fn reconcile_through_worker(
         registry.notify_hook_overflow(project_root).await,
         tracedecay_code_index_runtime::code_index_scheduler::CodeIndexDemandAdmissionV1::Queued
     ));
-    wait_for_reconciling(registry, 1).await;
+    wait_for_reconciling(registry, project_root, 1).await;
     release_tx.send(()).expect("release scheduler");
     lock_thread.join().expect("scheduler holder joins");
-    wait_for_reconciling(registry, 0).await;
+    wait_for_reconciling(registry, project_root, 0).await;
 }
 
 fn request_for(
