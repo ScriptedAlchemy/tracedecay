@@ -14,7 +14,7 @@ use tracedecay_runtime_core::storage::PrivateStoreIo;
 use tracedecay_automation::run_labels::AUTOMATION_DISABLED;
 use tracedecay_automation_runtime::automation::jobs::{
     AutomationJob, JobDelivery, UserJobRunOptions, evaluate_and_record_scheduler_skip,
-    job_schedule_decision, job_task_key, load_jobs, run_user_job_with_backend,
+    job_schedule_decision, job_task_key, load_jobs,
     run_user_job_with_backend_for_retained_settlement, save_jobs, validate_job,
 };
 use tracedecay_automation_runtime::automation::scheduler::{
@@ -399,7 +399,7 @@ async fn user_job_delivers_output_to_file_and_records_ledger() {
     let job = sample_job("daily-digest");
     let config = enabled_job_config();
     let backend = ContentBackend::new("# Digest\n\nNothing changed today.");
-    let run = run_user_job_with_backend(
+    let run = settle_user_job(
         &dashboard_root,
         &config,
         &backend,
@@ -492,7 +492,7 @@ async fn scheduled_user_job_resets_a_schema_v1_ledger_and_records_a_v2_run() {
     .unwrap();
 
     let backend = ContentBackend::new("# Digest\n\nNothing changed today.");
-    let run = run_user_job_with_backend(
+    let run = settle_user_job(
         &dashboard_root,
         &enabled_job_config(),
         &backend,
@@ -540,7 +540,7 @@ async fn user_job_pre_run_command_is_refused_unless_allowed() {
     let config = enabled_job_config();
     assert!(!config.allow_job_commands);
     let backend = ContentBackend::new("unused");
-    let run = run_user_job_with_backend(
+    let run = settle_user_job(
         &dashboard_root,
         &config,
         &backend,
@@ -594,7 +594,7 @@ async fn user_job_pre_run_command_is_refused_unless_allowed() {
         allow_job_commands: true,
         ..enabled_job_config()
     };
-    let run = run_user_job_with_backend(
+    let run = settle_user_job(
         &dashboard_root,
         &config,
         &AssertCommandOutputBackend,
@@ -655,7 +655,7 @@ async fn user_job_pre_run_command_runs_from_project_root() {
         allow_job_commands: true,
         ..enabled_job_config()
     };
-    let run = run_user_job_with_backend(
+    let run = settle_user_job(
         &dashboard_root,
         &config,
         &AssertProjectCommandOutputBackend,
@@ -690,7 +690,7 @@ async fn run_scheduled_pre_run_failure(
         ..enabled_job_config()
     };
     let backend = ContentBackend::new("unused");
-    let run = run_user_job_with_backend(
+    let run = settle_user_job(
         &dashboard_root,
         &config,
         &backend,
@@ -843,7 +843,7 @@ async fn scheduler_user_job_uses_explicit_profile_root_for_attached_skills() {
         }
     }
 
-    let run = run_user_job_with_backend(
+    let run = settle_user_job(
         &dashboard_root,
         &enabled_job_config(),
         &AssertAttachedSkillBackend,
@@ -930,7 +930,7 @@ async fn user_job_does_not_attach_archived_managed_skills() {
         }
     }
 
-    let run = run_user_job_with_backend(
+    let run = settle_user_job(
         &dashboard_root,
         &enabled_job_config(),
         &AssertArchivedSkillExcludedBackend,
@@ -961,7 +961,7 @@ async fn user_job_backend_failure_records_failed_ledger_entry() {
         ..enabled_job_config()
     };
     let backend = FailingBackend::new(AgentTaskKind::UserJob);
-    let run = run_user_job_with_backend(
+    let run = settle_user_job(
         &dashboard_root,
         &config,
         &backend,
@@ -1010,7 +1010,7 @@ async fn scheduler_trigger_skips_repeat_and_respects_lock_discipline() {
 
     // Manual schedule: the scheduler skips, recording the skip once.
     for run_id in ["sched-run-1", "sched-run-2"] {
-        let run = run_user_job_with_backend(
+        let run = settle_user_job(
             &dashboard_root,
             &config,
             &backend,
@@ -1036,7 +1036,7 @@ async fn scheduler_trigger_skips_repeat_and_respects_lock_discipline() {
     );
     assert_eq!(records[0].run_id, "sched-run-1");
 
-    let repeated = run_user_job_with_backend(
+    let repeated = settle_user_job(
         &dashboard_root,
         &config,
         &backend,
@@ -1070,7 +1070,7 @@ async fn manual_job_trigger_respects_existing_per_job_lock() {
     let job = sample_job("locked-job");
     let config = enabled_job_config();
     let backend = ContentBackend::new("unused");
-    let run = run_user_job_with_backend(
+    let run = settle_user_job(
         &dashboard_root,
         &config,
         &backend,
@@ -1106,7 +1106,7 @@ async fn disabled_automation_skip_precedes_existing_per_job_lock() {
     let mut config = enabled_job_config();
     config.enabled = false;
     let backend = ContentBackend::new("unused");
-    let run = run_user_job_with_backend(
+    let run = settle_user_job(
         &dashboard_root,
         &config,
         &backend,
@@ -1401,7 +1401,7 @@ async fn concurrent_manual_job_triggers_do_not_double_execute() {
     let (first, second) = tokio::join!(
         async {
             barrier.wait().await;
-            run_user_job_with_backend(
+            settle_user_job(
                 &dashboard_root,
                 &config,
                 &backend,
@@ -1418,7 +1418,7 @@ async fn concurrent_manual_job_triggers_do_not_double_execute() {
         },
         async {
             barrier.wait().await;
-            run_user_job_with_backend(
+            settle_user_job(
                 &dashboard_root,
                 &config,
                 &backend,
@@ -1484,7 +1484,7 @@ async fn retained_user_job_defers_ledger_and_keeps_exact_keyed_lock() {
         "retained user-job history must await outer settlement"
     );
 
-    let competing = run_user_job_with_backend(
+    let competing = settle_user_job(
         &dashboard_root,
         &config,
         &backend,

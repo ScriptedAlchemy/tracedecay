@@ -77,30 +77,6 @@ pub struct MemoryCuratorAutomationRun {
     pub committed_receipt: Option<AutomationCommittedReceipt>,
 }
 
-pub async fn run_memory_curator_with_backend(
-    cg: &AutomationProjectContext,
-    config: &AutomationConfig,
-    configuration_revision_id: &ConfigurationRevisionId,
-    backend: &dyn AgentTaskBackend,
-    options: MemoryCuratorAutomationOptions,
-    run_control: &AutomationRunControl,
-) -> AutomationRunResult<MemoryCuratorAutomationRun> {
-    let sessions_db = super::runner::project_automation_sessions(cg);
-    run_memory_curator_for_store_with_publication(
-        MemoryCuratorStore { cg, sessions_db },
-        config,
-        configuration_revision_id,
-        backend,
-        options,
-        run_control,
-        AutomationRunPublication {
-            ledger: AutomationRunLedgerPublication::Immediate,
-            settlement_guard: None,
-        },
-    )
-    .await
-}
-
 /// Runs one admitted retained Memory Curator effect without publishing its
 /// ledger terminal before the daemon accepts the outer application terminal.
 pub async fn run_memory_curator_with_backend_for_retained_settlement(
@@ -167,9 +143,8 @@ impl MemoryCuratorStore<'_> {
     }
 }
 
-// The single funnel every curator entry point (project and retained
-// settlement) flows through: one static run-lifetime span in the futures lane
-// so suspension and cancellation of long runs stay visible.
+// One static run-lifetime span in the futures lane so suspension and
+// cancellation of long curator runs stay visible.
 #[tracing::instrument(name = "automation.run.memory_curator", level = "trace", skip_all)]
 async fn run_memory_curator_for_store_with_publication(
     store: MemoryCuratorStore<'_>,
