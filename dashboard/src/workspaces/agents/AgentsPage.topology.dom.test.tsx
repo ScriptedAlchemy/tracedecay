@@ -306,6 +306,9 @@ describe('AgentsPage delegation topology', () => {
     ).toBe('/sessions?sessionId=session.gone&sessionProvider=codex');
     expect(document.querySelector('[data-topology-selected]')).toBeNull();
     expect(inspector().getAttribute('data-agent-inspector-id')).toBe('cursor:session.cursor.solo');
+    expect(screen.getAllByRole('navigation', { name: 'Open this session in' })).toEqual([
+      within(unresolved).getByRole('navigation', { name: 'Open this session in' }),
+    ]);
     await waitFor(() => expect(asked).toEqual(['session.cursor.solo']));
   });
 

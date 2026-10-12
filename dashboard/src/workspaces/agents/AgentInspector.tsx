@@ -181,7 +181,7 @@ export function AgentInspector({
           </button>
         ) : null}
       </header>
-      {mode === 'inspecting' ? null : (
+      {mode !== 'selected' ? null : (
         <SessionPivots session={{ provider: node.provider, sessionId: node.session_id }} from="agents" />
       )}
 
