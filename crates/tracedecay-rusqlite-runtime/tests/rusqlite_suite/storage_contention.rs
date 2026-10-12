@@ -21,14 +21,17 @@ use tracedecay_domain::{
 use tracedecay_rusqlite_runtime::{
     ExistingWriterLocator, PersistentWriter, StorageOperationExecutor,
     reader::{ReaderPool, ReaderQueryExecutor},
-    repository::{ConcreteRepositoryReadExecutor, ConcreteRepositoryWriteExecutor},
+    repository::{
+        ConcreteRepositoryReadExecutor, ConcreteRepositoryWriteExecutor,
+        RepositoryPhysicalAttachmentFactory,
+    },
 };
 use tracedecay_store::{
-    AdmissionConfigV1, DiagnosticReadOperationV1, DiagnosticReadResultV1,
-    GENERATION_DIAGNOSTICS_SCHEMA_DDL, ProjectReadOperationV1, ProjectReadResultV1,
-    RepositoryReadOperationV1, RepositoryReadResultV1, RepositoryWritePayloadV1,
-    RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1,
-    RuntimeReadResultV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1,
+    AdmissionConfigV1, CommitSequenceV1, ConsistencyModeV1, DiagnosticReadOperationV1,
+    DiagnosticReadResultV1, GENERATION_DIAGNOSTICS_SCHEMA_DDL, OperationPriorityV1,
+    ProjectReadOperationV1, ProjectReadResultV1, RepositoryReadOperationV1, RepositoryReadResultV1,
+    RepositoryWritePayloadV1, RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadOutcomeV1,
+    RuntimeReadRequestV1, RuntimeReadResultV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1,
     SanitizedCleanDiagnosticSnapshotV1, StorageRuntimeErrorV1, StoreCommitReceiptV1,
     StoreRuntimeBindingV1,
 };
@@ -939,4 +942,71 @@ fn real_file_contention_benchmark() {
         workload(1, 8, operations, reader_threads, records);
         workload(4, 8, operations, reader_threads, records);
     }
+}
+
+#[test]
+fn at_least_attachment_reads_use_the_writers_committed_watermark() {
+    let database = TestDatabase::new("read-commit-coverage.db");
+    seed(&database);
+    let binding = binding(0);
+    let writer = start_writer(
+        &database,
+        &binding,
+        ConcreteRepositoryWriteExecutor::default(),
+    );
+    let receipt = commit(&writer, publication(&binding, "generation.coverage", 1));
+    assert_eq!(receipt.commit_sequence, CommitSequenceV1(1));
+    writer.shutdown_and_join().unwrap();
+    let attachment = RepositoryPhysicalAttachmentFactory
+        .attach(
+            binding.clone(),
+            verified_locator(&binding),
+            database.path.canonicalize().unwrap(),
+            AdmissionConfigV1::default(),
+        )
+        .unwrap();
+    let control = read_request(&binding, "health").control().clone();
+    for required in [CommitSequenceV1(1), CommitSequenceV1(2)] {
+        let request = RuntimeReadRequestV1::new(
+            binding.clone(),
+            ConsistencyModeV1::AtLeast {
+                commit_sequence: required,
+            },
+            RuntimeReadOperationV1::TemporalHealth,
+            OperationPriorityV1::Health,
+            1,
+            control.clone(),
+        )
+        .unwrap();
+        let outcome = attachment
+            .dispatch_read(request.clone(), &Probe::for_read(&request))
+            .unwrap();
+        assert_eq!(outcome.validate_for(&request), Ok(()));
+        let coverage = match outcome.coverage() {
+            RuntimeReadCoverageV1::Complete { coverage } if required == receipt.commit_sequence => {
+                assert!(matches!(
+                    outcome.value(),
+                    Some(RuntimeReadResultV1::TemporalHealth { healthy: true })
+                ));
+                coverage
+            }
+            RuntimeReadCoverageV1::Stale { coverage } if required > receipt.commit_sequence => {
+                assert!(outcome.value().is_none());
+                coverage
+            }
+            coverage => panic!(
+                "read at {required:?} over committed position {:?} returned {coverage:?}",
+                receipt.commit_sequence
+            ),
+        };
+        assert_eq!(
+            coverage
+                .observed(&binding.shard_id)
+                .unwrap()
+                .commit_sequence,
+            receipt.commit_sequence
+        );
+    }
+    attachment.drain().unwrap();
+    attachment.close_and_join().unwrap();
 }
