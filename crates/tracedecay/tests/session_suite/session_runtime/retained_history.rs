@@ -46,16 +46,44 @@ use tracedecay_sessions::serving::{
     SessionProjectionStaleReason,
 };
 
+/// A counter whose every change wakes [`WatchedCount::wait_for`] waiters.
+#[derive(Default)]
+struct WatchedCount(tokio::sync::watch::Sender<usize>);
+
+impl WatchedCount {
+    /// Returns the count before this increment.
+    fn increment(&self) -> usize {
+        let mut previous = 0;
+        self.0.send_modify(|count| {
+            previous = *count;
+            *count += 1;
+        });
+        previous
+    }
+
+    fn get(&self) -> usize {
+        *self.0.borrow()
+    }
+
+    async fn wait_for(&self, predicate: impl FnMut(&usize) -> bool) {
+        self.0
+            .subscribe()
+            .wait_for(predicate)
+            .await
+            .expect("the counter outlives its waiters");
+    }
+}
+
 struct ScriptedHistoricalIngestor {
     outcomes: std::sync::Mutex<VecDeque<SessionHistoricalIngestOutcome>>,
-    passes: AtomicUsize,
+    passes: WatchedCount,
 }
 
 impl ScriptedHistoricalIngestor {
     fn new(outcomes: impl IntoIterator<Item = SessionHistoricalIngestOutcome>) -> Self {
         Self {
             outcomes: std::sync::Mutex::new(outcomes.into_iter().collect()),
-            passes: AtomicUsize::new(0),
+            passes: WatchedCount::default(),
         }
     }
 }
@@ -63,7 +91,7 @@ impl ScriptedHistoricalIngestor {
 impl SessionHistoricalIngestor for ScriptedHistoricalIngestor {
     fn run_pass(&self) -> SessionHistoricalIngestPass<'_> {
         Box::pin(async move {
-            self.passes.fetch_add(1, Ordering::AcqRel);
+            self.passes.increment();
             self.outcomes
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -80,14 +108,14 @@ impl SessionHistoricalIngestor for ScriptedHistoricalIngestor {
 }
 
 struct CancelAwareHistoricalIngestor {
-    entered: AtomicBool,
+    entered: tokio::sync::watch::Sender<bool>,
     exited: AtomicBool,
     cancelled: AtomicBool,
     wake: tokio::sync::Notify,
 }
 
 struct RetryThenBlockHistoricalIngestor {
-    passes: AtomicUsize,
+    passes: WatchedCount,
     cancelled: AtomicBool,
     wake: tokio::sync::Notify,
     capacity: tokio::sync::watch::Sender<u64>,
@@ -95,7 +123,7 @@ struct RetryThenBlockHistoricalIngestor {
 
 struct BlockThirdHistoricalIngestor {
     passes: AtomicUsize,
-    third_entered: AtomicBool,
+    third_entered: tokio::sync::watch::Sender<bool>,
     release_third: tokio::sync::Notify,
     capacity: tokio::sync::watch::Sender<u64>,
 }
@@ -116,7 +144,7 @@ impl SessionTemporalRefreshProjector for CountingDeferredProjector {
 }
 
 struct PanicOnceHistoricalIngestor {
-    passes: AtomicUsize,
+    passes: WatchedCount,
 }
 
 /// Uses the real observation and projection authorities so this scheduler
@@ -126,7 +154,7 @@ struct PanicOnceHistoricalIngestor {
 /// Codex each admitted one durable observation.
 struct HealthyProvidersWithBlockedCursorIngestor {
     database: RegisteredGlobalDbLeaseV1,
-    passes: AtomicUsize,
+    passes: WatchedCount,
     committed: AtomicUsize,
     duplicates: AtomicUsize,
 }
@@ -135,7 +163,7 @@ impl HealthyProvidersWithBlockedCursorIngestor {
     fn new(database: RegisteredGlobalDbLeaseV1) -> Self {
         Self {
             database,
-            passes: AtomicUsize::new(0),
+            passes: WatchedCount::default(),
             committed: AtomicUsize::new(0),
             duplicates: AtomicUsize::new(0),
         }
@@ -175,7 +203,7 @@ impl HealthyProvidersWithBlockedCursorIngestor {
 impl SessionHistoricalIngestor for HealthyProvidersWithBlockedCursorIngestor {
     fn run_pass(&self) -> SessionHistoricalIngestPass<'_> {
         Box::pin(async move {
-            self.passes.fetch_add(1, Ordering::AcqRel);
+            self.passes.increment();
             let claude_progress = self
                 .admit_healthy_provider("claude", "session.healthy.claude")
                 .await;
@@ -203,7 +231,7 @@ struct CompleteHealthyProvidersIngestor(HealthyProvidersWithBlockedCursorIngesto
 impl SessionHistoricalIngestor for CompleteHealthyProvidersIngestor {
     fn run_pass(&self) -> SessionHistoricalIngestPass<'_> {
         Box::pin(async move {
-            self.0.passes.fetch_add(1, Ordering::AcqRel);
+            self.0.passes.increment();
             self.0
                 .admit_healthy_provider("claude", "session.healthy.claude")
                 .await;
@@ -256,7 +284,7 @@ impl SessionHistoricalIngestor for PanicOnceHistoricalIngestor {
     fn run_pass(&self) -> SessionHistoricalIngestPass<'_> {
         Box::pin(async move {
             assert!(
-                self.passes.fetch_add(1, Ordering::AcqRel) != 0,
+                self.passes.increment() != 0,
                 "historical ingest panic fixture"
             );
             SessionHistoricalIngestOutcome::Complete
@@ -273,7 +301,7 @@ impl SessionHistoricalIngestor for PanicOnceHistoricalIngestor {
 impl RetryThenBlockHistoricalIngestor {
     fn new() -> Self {
         Self {
-            passes: AtomicUsize::new(0),
+            passes: WatchedCount::default(),
             cancelled: AtomicBool::new(false),
             wake: tokio::sync::Notify::new(),
             capacity: tokio::sync::watch::Sender::new(0),
@@ -285,7 +313,7 @@ impl BlockThirdHistoricalIngestor {
     fn new() -> Self {
         Self {
             passes: AtomicUsize::new(0),
-            third_entered: AtomicBool::new(false),
+            third_entered: tokio::sync::watch::Sender::new(false),
             release_third: tokio::sync::Notify::new(),
             capacity: tokio::sync::watch::Sender::new(0),
         }
@@ -305,7 +333,7 @@ impl SessionHistoricalIngestor for BlockThirdHistoricalIngestor {
                     }
                 }
                 _ => {
-                    self.third_entered.store(true, Ordering::Release);
+                    self.third_entered.send_replace(true);
                     self.release_third.notified().await;
                     SessionHistoricalIngestOutcome::Blocked {
                         reason_code: "fixture_complete".to_owned(),
@@ -328,7 +356,7 @@ impl SessionHistoricalIngestor for BlockThirdHistoricalIngestor {
 impl SessionHistoricalIngestor for RetryThenBlockHistoricalIngestor {
     fn run_pass(&self) -> SessionHistoricalIngestPass<'_> {
         Box::pin(async move {
-            let pass = self.passes.fetch_add(1, Ordering::AcqRel);
+            let pass = self.passes.increment();
             if pass == 0 {
                 return SessionHistoricalIngestOutcome::Retryable {
                     reason_code: "provider_busy".to_owned(),
@@ -361,7 +389,7 @@ impl SessionHistoricalIngestor for RetryThenBlockHistoricalIngestor {
 impl CancelAwareHistoricalIngestor {
     fn new() -> Self {
         Self {
-            entered: AtomicBool::new(false),
+            entered: tokio::sync::watch::Sender::new(false),
             exited: AtomicBool::new(false),
             cancelled: AtomicBool::new(false),
             wake: tokio::sync::Notify::new(),
@@ -374,7 +402,7 @@ impl SessionHistoricalIngestor for CancelAwareHistoricalIngestor {
         &self,
     ) -> Pin<Box<dyn Future<Output = SessionHistoricalIngestOutcome> + Send + '_>> {
         Box::pin(async move {
-            self.entered.store(true, Ordering::Release);
+            self.entered.send_replace(true);
             loop {
                 let notified = self.wake.notified();
                 if self.cancelled.load(Ordering::Acquire) {
@@ -524,12 +552,10 @@ async fn retained_history_worker_wakes_again_after_idle() {
             ingestor.clone(),
         )
         .await;
-    assert!(
-        registry
-            .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
-            .await
-    );
-    assert_eq!(ingestor.passes.load(Ordering::Acquire), 1);
+    registry
+        .wait_profile_idle(authority.database().db_path())
+        .await;
+    assert_eq!(ingestor.passes.get(), 1);
 
     let second = registry
         .ensure_profile_with_history(
@@ -539,18 +565,10 @@ async fn retained_history_worker_wakes_again_after_idle() {
         )
         .await;
     assert!(first.same_route(&second));
-    assert!(
-        wait_until(
-            || ingestor.passes.load(Ordering::Acquire) == 2,
-            Duration::from_secs(2),
-        )
-        .await
-    );
-    assert!(
-        registry
-            .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
-            .await
-    );
+    ingestor.passes.wait_for(|passes| *passes == 2).await;
+    registry
+        .wait_profile_idle(authority.database().db_path())
+        .await;
 
     registry.shutdown().await;
 }
@@ -575,12 +593,10 @@ async fn blocked_history_is_not_rewoken_by_ensure() {
             ingestor.clone(),
         )
         .await;
-    assert!(
-        registry
-            .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
-            .await
-    );
-    assert_eq!(ingestor.passes.load(Ordering::Acquire), 1);
+    registry
+        .wait_profile_idle(authority.database().db_path())
+        .await;
+    assert_eq!(ingestor.passes.get(), 1);
     assert_eq!(
         first.serving_status().state,
         SessionProjectionServingState::Stale {
@@ -602,7 +618,7 @@ async fn blocked_history_is_not_rewoken_by_ensure() {
         tokio::task::yield_now().await;
     }
     assert_eq!(
-        ingestor.passes.load(Ordering::Acquire),
+        ingestor.passes.get(),
         1,
         "a blocked historical ingest must not re-run because the owner was re-ensured"
     );
@@ -639,11 +655,9 @@ async fn history_only_retry_does_not_admit_projection_snapshots() {
             ingestor.clone(),
         )
         .await;
-    assert!(
-        registry
-            .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
-            .await
-    );
+    registry
+        .wait_profile_idle(authority.database().db_path())
+        .await;
     let baseline_projection_calls = projector.calls.load(Ordering::Acquire);
     assert!(baseline_projection_calls > 0);
 
@@ -654,13 +668,12 @@ async fn history_only_retry_does_not_admit_projection_snapshots() {
             ingestor.clone(),
         )
         .await;
-    assert!(
-        wait_until(
-            || ingestor.third_entered.load(Ordering::Acquire),
-            Duration::from_secs(2),
-        )
+    ingestor
+        .third_entered
+        .subscribe()
+        .wait_for(|entered| *entered)
         .await
-    );
+        .unwrap();
     let after_explicit_wake = projector.calls.load(Ordering::Acquire);
     assert!(
         after_explicit_wake > baseline_projection_calls,
@@ -668,11 +681,9 @@ async fn history_only_retry_does_not_admit_projection_snapshots() {
     );
 
     ingestor.release_third.notify_waiters();
-    assert!(
-        registry
-            .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
-            .await
-    );
+    registry
+        .wait_profile_idle(authority.database().db_path())
+        .await;
     assert_eq!(
         projector.calls.load(Ordering::Acquire),
         after_explicit_wake,
@@ -717,7 +728,7 @@ async fn worker_restart_retains_historical_ingest_owner() {
     let temp = TempDir::new().unwrap();
     let authority = profile_authority(&temp, "history-worker-restart").await;
     let ingestor = Arc::new(PanicOnceHistoricalIngestor {
-        passes: AtomicUsize::new(0),
+        passes: WatchedCount::default(),
     });
     let registry = SessionTemporalRefreshSchedulerRegistry::default();
 
@@ -729,18 +740,10 @@ async fn worker_restart_retains_historical_ingest_owner() {
         )
         .await;
 
-    assert!(
-        wait_until(
-            || ingestor.passes.load(Ordering::Acquire) == 2,
-            Duration::from_secs(2),
-        )
-        .await
-    );
-    assert!(
-        registry
-            .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
-            .await
-    );
+    ingestor.passes.wait_for(|passes| *passes == 2).await;
+    registry
+        .wait_profile_idle(authority.database().db_path())
+        .await;
 
     registry.shutdown().await;
 }
@@ -759,13 +762,12 @@ async fn shutdown_cancels_and_joins_in_flight_history_pass() {
             ingestor.clone(),
         )
         .await;
-    assert!(
-        wait_until(
-            || ingestor.entered.load(Ordering::Acquire),
-            Duration::from_secs(2),
-        )
+    ingestor
+        .entered
+        .subscribe()
+        .wait_for(|entered| *entered)
         .await
-    );
+        .unwrap();
 
     tokio::time::timeout(Duration::from_secs(2), registry.shutdown())
         .await
@@ -815,32 +817,20 @@ async fn saturated_history_admission_defers_the_pass_and_resumes() {
         "the deferred pass must surface as typed retryable staleness"
     );
     assert_eq!(
-        ingestor.passes.load(Ordering::Acquire),
+        ingestor.passes.get(),
         0,
         "a saturated admission must not run the historical pass"
     );
-    assert!(
-        registry
-            .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
-            .await,
-        "the worker keeps serving between deferred history retries"
-    );
-    assert_eq!(ingestor.passes.load(Ordering::Acquire), 0);
+    registry
+        .wait_profile_idle(authority.database().db_path())
+        .await;
+    assert_eq!(ingestor.passes.get(), 0);
 
     drop(held);
-    assert!(
-        wait_until(
-            || ingestor.passes.load(Ordering::Acquire) >= 1,
-            Duration::from_secs(2),
-        )
-        .await,
-        "the deferred pass must run once a permit frees"
-    );
-    assert!(
-        registry
-            .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
-            .await
-    );
+    ingestor.passes.wait_for(|passes| *passes >= 1).await;
+    registry
+        .wait_profile_idle(authority.database().db_path())
+        .await;
 
     registry.shutdown().await;
 }
@@ -886,25 +876,15 @@ async fn a_saturated_history_pass_runs_with_the_permit_its_queue_turn_grants() {
         )
         .await
     );
-    assert!(
-        registry
-            .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
-            .await,
-        "the refused worker waits in the admission queue"
-    );
+    registry
+        .wait_profile_idle(authority.database().db_path())
+        .await;
 
     let next_waiter = tokio::spawn(Arc::clone(&admission).acquire_owned());
     tokio::task::yield_now().await;
     held.pop();
 
-    assert!(
-        wait_until(
-            || ingestor.passes.load(Ordering::Acquire) >= 1,
-            Duration::from_secs(2),
-        )
-        .await,
-        "the worker first in the admission queue must run its pass with the freed permit"
-    );
+    ingestor.passes.wait_for(|passes| *passes >= 1).await;
     let next_permit = tokio::time::timeout(Duration::from_secs(2), next_waiter)
         .await
         .expect("the pass returns its permit to the next queued waiter")
@@ -930,16 +910,10 @@ async fn retrying_history_is_typed_stale() {
             ingestor.clone(),
         )
         .await;
-    assert!(
-        wait_until(
-            || ingestor.passes.load(Ordering::Acquire) >= 1,
-            Duration::from_secs(2),
-        )
-        .await
-    );
+    ingestor.passes.wait_for(|passes| *passes >= 1).await;
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(
-        ingestor.passes.load(Ordering::Acquire),
+        ingestor.passes.get(),
         1,
         "a pass that committed nothing must not rerun before its capacity is released"
     );
@@ -954,14 +928,7 @@ async fn retrying_history_is_typed_stale() {
     );
 
     ingestor.capacity.send_modify(|epoch| *epoch += 1);
-    assert!(
-        wait_until(
-            || ingestor.passes.load(Ordering::Acquire) >= 2,
-            Duration::from_secs(2),
-        )
-        .await,
-        "the released capacity must resume the backpressured pass"
-    );
+    ingestor.passes.wait_for(|passes| *passes >= 2).await;
 
     registry.shutdown().await;
 }
@@ -982,20 +949,10 @@ async fn blocked_cursor_failure_projects_healthy_provider_progress_once_across_r
             ingestor.clone(),
         )
         .await;
-    assert!(
-        wait_until(
-            || ingestor.passes.load(Ordering::Acquire) >= 1,
-            Duration::from_secs(2),
-        )
-        .await,
-        "the initial historical sweep must run"
-    );
-    assert!(
-        registry
-            .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
-            .await,
-        "healthy provider progress must request temporal projection even while Cursor is blocked"
-    );
+    ingestor.passes.wait_for(|passes| *passes >= 1).await;
+    registry
+        .wait_profile_idle(authority.database().db_path())
+        .await;
     assert_eq!(
         wake.serving_status().state,
         SessionProjectionServingState::Stale {
@@ -1042,19 +999,10 @@ async fn blocked_cursor_failure_projects_healthy_provider_progress_once_across_r
             ingestor.clone(),
         )
         .await;
-    assert!(
-        wait_until(
-            || ingestor.passes.load(Ordering::Acquire) >= 2,
-            Duration::from_secs(2),
-        )
-        .await,
-        "the restarted worker must replay the retained historical source"
-    );
-    assert!(
-        restarted
-            .wait_profile_idle(authority.database().db_path(), Duration::from_secs(2))
-            .await
-    );
+    ingestor.passes.wait_for(|passes| *passes >= 2).await;
+    restarted
+        .wait_profile_idle(authority.database().db_path())
+        .await;
     assert_eq!(
         restarted_wake.serving_status().state,
         SessionProjectionServingState::Stale {

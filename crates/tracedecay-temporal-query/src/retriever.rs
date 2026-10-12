@@ -16,12 +16,13 @@ use tracedecay_domain::{
 
 use super::context::VersionedTokenEstimator;
 use super::context::assembly::assemble_context_with_frames_controlled;
+use super::cursor::{CursorPosition, SessionCursorAuthenticator, encode_cursor_position};
 use super::hydration::{TemporalHydrationPort, hydrate_selected};
 use super::snapshot::{TemporalParticipantGeneration, TemporalSourceAccess};
 use super::{
     TemporalCandidateExport, TemporalHydratedResult, TemporalKernelError, TemporalKernelRequest,
     TemporalKernelResult, check_control, map_context_error, map_hydration_error,
-    public_summary_omissions, temporal_context_frames,
+    public_summary_omissions, stable_sort_key, temporal_context_frames,
 };
 use crate::execution::TemporalPortError;
 
@@ -343,16 +344,24 @@ pub async fn hydrate_temporal_candidate_selection(
         selected.push(candidate);
     }
     export.ranked = selected;
-    hydrate_temporal_candidate_export(request, export, hydration_port, token_estimator).await
+    // The selection is fixed by its caller, so a selection that overfills the
+    // hydration bytes is refused rather than silently shortened.
+    hydrate_temporal_candidate_export(request, export, hydration_port, token_estimator, None).await
 }
 
-/// Hydrate the entire temporal page without changing its lane-local selection.
+/// Hydrate the temporal page in its lane-local order.
+///
+/// A page whose payloads fill the hydration byte budget before its last anchor
+/// ends at the last anchor that fit. With `continuation`, the shortened page
+/// carries a cursor that resumes at the first anchor that did not fit; without
+/// one, or when the page has no continuation, the overfilled page is refused.
 #[tracing::instrument(name = "temporal.hydrate.export", level = "trace", skip_all)]
 pub async fn hydrate_temporal_candidate_export(
     request: &TemporalKernelRequest,
     export: TemporalCandidateExport,
     hydration_port: &impl TemporalHydrationPort,
     token_estimator: &impl VersionedTokenEstimator,
+    continuation: Option<&dyn SessionCursorAuthenticator>,
 ) -> Result<TemporalKernelResult, TemporalKernelError> {
     if !export
         .snapshot
@@ -375,12 +384,9 @@ pub async fn hydrate_temporal_candidate_export(
         summaries,
         summary_eligibility,
         strict_population,
+        window_keyset,
     } = export;
     check_control(&snapshot)?;
-    let ranked_anchors = ranked
-        .iter()
-        .map(|candidate| candidate.anchor_id.clone())
-        .collect::<BTreeSet<_>>();
     let anchors = ranked
         .iter()
         .map(|candidate| candidate.anchor_id.clone())
@@ -389,6 +395,32 @@ pub async fn hydrate_temporal_candidate_export(
         .await
         .map_err(map_hydration_error)?;
     check_control(&snapshot)?;
+    let (ranked, next_cursor) = match hydration.page_end {
+        None => (ranked, next_cursor),
+        Some(end) => {
+            let (Some(authenticator), None) = (continuation, strict_population) else {
+                return Err(TemporalKernelError::BudgetExceeded);
+            };
+            let mut ranked = ranked;
+            ranked.truncate(end);
+            let last = ranked.last().ok_or(TemporalKernelError::BudgetExceeded)?;
+            let position = CursorPosition {
+                candidate_keyset: window_keyset,
+                last_sort_key: Some(stable_sort_key(last)),
+            };
+            let cursor = encode_cursor_position(
+                &snapshot,
+                &request.cursor_binding,
+                &position,
+                authenticator,
+            )?;
+            (ranked, Some(cursor))
+        }
+    };
+    let ranked_anchors = ranked
+        .iter()
+        .map(|candidate| candidate.anchor_id.clone())
+        .collect::<BTreeSet<_>>();
     let mut frames = temporal_context_frames(
         &result_eligible_anchors,
         &visible_anchors,
