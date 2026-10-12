@@ -203,18 +203,6 @@ async fn drain_all_hosts(
     let mut sweep = HookReplaySweepV1::default();
     let project_id =
         tracedecay_agent_hosts::hooks::hook_project_id_for_layout(graph.hook_store_layout());
-    // Worktree identity needs only the hook runtime's scope resolver; the
-    // profile is the graph's own.
-    let worktree_id = graph
-        .profile_root()
-        .map(tracedecay_runtime_core::config::ProfileRoot::new)
-        .and_then(|profile| {
-            tracedecay_agent_hosts::hooks::hook_worktree_id_for_layout(
-                &crate::hook_runtime(profile),
-                graph.hook_store_layout(),
-            )
-        })
-        .map_err(|error| format!("hook worktree identity is unavailable: {error}"));
     for host in tracedecay_agent_hosts::hooks::NATIVE_HOOK_HOSTS {
         let now = hook_replay_now();
         match drain_hook_delivery_receipts(data_root, *host, delivery_settlements).await {
@@ -228,7 +216,6 @@ async fn drain_all_hosts(
         let report = match Box::pin(drain_admitted_host_spool(
             *host,
             project_id,
-            &worktree_id,
             now,
             graph,
             project_sessions,
@@ -331,7 +318,6 @@ async fn redrive_pending_work(
 async fn drain_admitted_host_spool(
     host: NativeHostIdentityV1,
     project_id: Option<[u8; 16]>,
-    _worktree_id: &Result<[u8; 16], String>,
     now: UtcMicros,
     graph: &tracedecay_project::project::TraceDecay,
     project_sessions: &tracedecay_global_db::RegisteredGlobalDb,
