@@ -131,7 +131,7 @@ pub(crate) fn work_leak_observation_envelope(
     .ok()
 }
 
-fn offer(
+pub(super) fn offer(
     producer: &BoundedObservabilityProducerV1,
     envelope: tracedecay_domain::ObservabilityEnvelopeV1,
 ) -> WorkOwnerObservationResultV1 {

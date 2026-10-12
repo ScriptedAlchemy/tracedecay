@@ -51,7 +51,7 @@ use tracedecay_domain::{
 
 use crate::http::{
     HttpApplicationControls, MAX_HTTP_APPLICATION_BODY_BYTES, adapter_problem_response,
-    invalid_request_response,
+    dispatch_json_operation, invalid_request_response,
 };
 
 fn schema_name<T: JsonSchema>() -> Cow<'static, str> {
@@ -490,39 +490,21 @@ async fn dispatch<O>(
 where
     O: WorkApplicationOwner,
 {
-    let match_result = {
-        let _span = tracing::trace_span!("api.http.admission").entered();
-        {
-            // An operation this build does not mount is concealed the same way an
-            // unauthorised one is, so probing a path cannot reveal what exists.
-            match WorkOperation::from_route_segment(&segment) {
-                None => Err(adapter_problem_response(
-                    request_id,
-                    ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-                )),
-                Some(operation) => match body {
-                    Ok(Json(body)) => Ok(WorkHttpRequest {
-                        operation,
-                        request_id,
-                        controls,
-                        body,
-                    }),
-                    Err(_) => Err(invalid_request_response(
-                        request_id,
-                        "work.invalid_body",
-                        "The Work request body is invalid or exceeds the configured limit",
-                    )),
-                },
-            }
-        }
-    };
-    let request = match match_result {
-        Ok(request) => request,
-        Err(response) => return response,
-    };
-    tracing::Instrument::instrument(
-        async move { owner.invoke_work(request).await },
-        tracing::trace_span!("api.http.handler"),
+    dispatch_json_operation(
+        WorkOperation::from_route_segment(&segment),
+        request_id,
+        body,
+        (
+            "work.invalid_body",
+            "The Work request body is invalid or exceeds the configured limit",
+        ),
+        |operation, request_id, body| WorkHttpRequest {
+            operation,
+            request_id,
+            controls,
+            body,
+        },
+        |request| owner.invoke_work(request),
     )
     .await
 }

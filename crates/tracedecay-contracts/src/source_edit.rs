@@ -14,7 +14,9 @@ use crate::capability_manifest::{
 };
 use crate::current_bindings;
 use crate::error::ApplicationContractError;
-use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
+use crate::handlers::{
+    ApplicationHandlerDescriptor, ApplicationOperation, capability_executable_schema,
+};
 use crate::result::ResultContractRef;
 use crate::retrieval::catalog::APPLICATION_DEFAULT_PROFILE_ID;
 use crate::schema_bodies::{SchemaBodyMaterialization, attach_schema_bodies};
@@ -664,9 +666,10 @@ fn source_edit_executable_schemas(
 ) -> Result<Vec<ExecutableSchemaAuthority>, ApplicationContractError> {
     macro_rules! schema {
         ($capability:expr, $request:ty, $result:ty) => {
-            source_edit_executable_schema::<$request, $result>(
+            capability_executable_schema::<$request, $result>(
                 contribution,
                 $capability,
+                "source edit executable schema capability",
                 concat!("tracedecay_contracts::source_edit::", stringify!($request)),
                 concat!("tracedecay_contracts::source_edit::", stringify!($result)),
             )?
@@ -727,31 +730,6 @@ fn source_edit_executable_schemas(
             SourceEditSurfaceResultV1
         ),
     ])
-}
-
-fn source_edit_executable_schema<Request, Response>(
-    contribution: &CatalogContributionV1,
-    capability_id: &CapabilityId,
-    request_rust_type_path: &'static str,
-    result_rust_type_path: &'static str,
-) -> Result<ExecutableSchemaAuthority, ApplicationContractError>
-where
-    Request: JsonSchema,
-    Response: JsonSchema,
-{
-    let manifest = contribution
-        .capabilities()
-        .iter()
-        .find(|manifest| manifest.capability_id() == capability_id)
-        .ok_or(ApplicationContractError::Inconsistent {
-            field: "source edit executable schema capability",
-        })?;
-    Ok(ExecutableSchemaAuthority::for_types_at_paths::<
-        Request,
-        Response,
-    >(
-        manifest, request_rust_type_path, result_rust_type_path
-    )?)
 }
 
 pub fn source_edit_reconciliation_operation()

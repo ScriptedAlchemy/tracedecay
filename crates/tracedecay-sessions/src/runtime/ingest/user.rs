@@ -418,26 +418,6 @@ pub(super) fn provider_selected(
     scope.is_none() || scope == Some(candidate)
 }
 
-pub async fn ingest_user_global_sources_for_provider_with_authorities<A: SessionIngestAuthority>(
-    brain_id: &BrainId,
-    profile_id: &UserProfileId,
-    registered: &A,
-    registry_db: &A,
-    profile_root: &Path,
-    provider: Option<SessionProvider>,
-) -> TranscriptIngestOutcome {
-    ingest_user_global_sources_for_provider_with_authorities_and_cancellation(
-        brain_id,
-        profile_id,
-        registered,
-        registry_db,
-        profile_root,
-        provider,
-        &ObservationCancellation::default(),
-    )
-    .await
-}
-
 pub async fn ingest_user_global_sources_for_provider_with_authorities_and_cancellation<
     A: SessionIngestAuthority,
 >(

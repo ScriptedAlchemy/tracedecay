@@ -580,34 +580,6 @@ const fn compiler_severity_code(severity: crate::diagnose::Severity) -> &'static
     }
 }
 
-/// Builds a GitHub review contribution from the pillar's own immutable anchor.
-///
-/// [`tracedecay_domain::feedback::GitHubReviewImmutableAnchorV1`] already
-/// carries the exact file, content digest, and span the diagnostics store
-/// needs, so no identity is invented here. An anchor without a span cannot be
-/// projected into an LSP range and is refused rather than published at an
-/// arbitrary offset.
-///
-/// `notice` is the bounded advisory notice text; the review body itself stays
-/// behind the authorized expansion path and is never copied in.
-pub fn github_review_contribution_v1(
-    anchor: &tracedecay_domain::feedback::GitHubReviewImmutableAnchorV1,
-    code: &str,
-    severity: DiagnosticSeverityV1,
-    notice: &str,
-) -> Option<DiagnosticContributionV1> {
-    Some(DiagnosticContributionV1 {
-        anchor: anchor.retrieval_anchor_id.clone(),
-        file_occurrence_id: anchor.file.clone(),
-        content_digest: anchor.content_digest.clone(),
-        span: anchor.span?,
-        symbol_occurrence_id: anchor.symbol.clone(),
-        code: code.to_owned(),
-        severity,
-        message: bounded_notice(notice),
-    })
-}
-
 /// A parsed compiler diagnostic resolved against real file content.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedCompilerDiagnosticV1 {
@@ -1539,49 +1511,6 @@ mod tests {
                 .is_none()
         );
         assert!(code_index_logical_path(Path::new("/project"), "/project-other/lib.rs").is_none());
-    }
-
-    #[test]
-    fn spanless_github_anchor_is_refused_rather_than_placed_at_an_arbitrary_offset() {
-        let mut anchor = tracedecay_domain::feedback::GitHubReviewImmutableAnchorV1 {
-            repository_id: id("repository.fixture"),
-            commit_id: id("commit.abc123"),
-            retrieval_anchor_id: id("anchor.github-code.2"),
-            file: id("src/lib.rs"),
-            content_digest: id(&digest('a')),
-            span: None,
-            symbol: None,
-        };
-        let contribute = |anchor: &tracedecay_domain::feedback::GitHubReviewImmutableAnchorV1| {
-            github_review_contribution_v1(
-                anchor,
-                "github-review",
-                DiagnosticSeverityV1::Information,
-                "unresolved review comment",
-            )
-        };
-        assert_eq!(contribute(&anchor), None);
-
-        anchor.span = Some(SourceSpan {
-            start_byte: 4,
-            end_byte: 9,
-        });
-        assert_eq!(
-            contribute(&anchor),
-            Some(DiagnosticContributionV1 {
-                anchor: id("anchor.github-code.2"),
-                file_occurrence_id: id("src/lib.rs"),
-                content_digest: id(&digest('a')),
-                span: SourceSpan {
-                    start_byte: 4,
-                    end_byte: 9,
-                },
-                symbol_occurrence_id: None,
-                code: "github-review".to_owned(),
-                severity: DiagnosticSeverityV1::Information,
-                message: "unresolved review comment".to_owned(),
-            })
-        );
     }
 
     #[tokio::test]

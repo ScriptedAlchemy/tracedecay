@@ -1,18 +1,11 @@
-pub(crate) const DEFAULT_MAX_RECORD_BYTES: usize = 1024 * 1024;
-
-pub(crate) const DEFAULT_MAX_SOURCE_BYTES: usize = 256;
-
-pub(crate) const DEFAULT_MAX_SPOOL_BYTES: usize = 16 * 1024 * 1024;
-
-pub(crate) const DEFAULT_MAX_RECORDS: usize = 4096;
-
-pub(crate) const DEFAULT_MAX_SPOOL_BYTES_PER_SOURCE: usize = 4 * 1024 * 1024;
+use tracedecay_sessions::admission::bounds::{
+    DEFAULT_MAX_RECORD_BYTES, DEFAULT_MAX_RECORDS, DEFAULT_MAX_RECORDS_PER_SOURCE,
+    DEFAULT_MAX_SOURCE_BYTES, DEFAULT_MAX_SPOOL_BYTES, DEFAULT_MAX_SPOOL_BYTES_PER_SOURCE,
+};
 
 use super::frames::{CHECKSUM_BYTES, FRAME_HEADER_BYTES};
 use super::quarantine::FRAME_OVERHEAD as QUARANTINE_FRAME_OVERHEAD;
 use super::types::SpoolError;
-
-pub(crate) const DEFAULT_MAX_RECORDS_PER_SOURCE: usize = 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(clippy::struct_field_names)]

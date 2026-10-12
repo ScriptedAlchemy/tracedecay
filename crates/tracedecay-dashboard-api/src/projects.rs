@@ -226,20 +226,21 @@ pub async fn list(
 ) -> Json<DashboardEnvelopeV1<ProjectsPayloadV1>> {
     let active = runtime.active();
     let limit = params.limit.unwrap_or(100).clamp(1, 250);
+    let unavailable_payload = |status: &str, error: Option<String>| ProjectsPayloadV1 {
+        status: status.to_owned(),
+        error,
+        limit,
+        truncated: None,
+        projects: None,
+        active_project_id: active.project_id.clone(),
+        active_project_root: active.project_root.display().to_string(),
+        summary: None,
+        project_tree: None,
+    };
     let Some(db) = active.savings_db.as_ref() else {
         return registry_list_unavailable(
             &active,
-            ProjectsPayloadV1 {
-                status: "missing_registry".to_owned(),
-                error: None,
-                limit,
-                truncated: None,
-                projects: None,
-                active_project_id: active.project_id.clone(),
-                active_project_root: active.project_root.display().to_string(),
-                summary: None,
-                project_tree: None,
-            },
+            unavailable_payload("missing_registry", None),
             "project_registry_not_mounted",
         );
     };
@@ -249,17 +250,7 @@ pub async fn list(
         Err(error) => {
             return registry_list_unavailable(
                 &active,
-                ProjectsPayloadV1 {
-                    status: "registry_unavailable".to_owned(),
-                    error: Some(error.to_string()),
-                    limit,
-                    truncated: None,
-                    projects: None,
-                    active_project_id: active.project_id.clone(),
-                    active_project_root: active.project_root.display().to_string(),
-                    summary: None,
-                    project_tree: None,
-                },
+                unavailable_payload("registry_unavailable", Some(error.to_string())),
                 error.to_string(),
             );
         }
@@ -272,17 +263,7 @@ pub async fn list(
         Err(error) => {
             return registry_list_unavailable(
                 &active,
-                ProjectsPayloadV1 {
-                    status: "registry_unavailable".to_owned(),
-                    error: Some(error.to_string()),
-                    limit,
-                    truncated: None,
-                    projects: None,
-                    active_project_id,
-                    active_project_root: active.project_root.display().to_string(),
-                    summary: None,
-                    project_tree: None,
-                },
+                unavailable_payload("registry_unavailable", Some(error.to_string())),
                 error.to_string(),
             );
         }

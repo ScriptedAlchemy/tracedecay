@@ -368,23 +368,6 @@ impl CatalogSnapshotV1 {
         protocol_revision: u32,
         negotiated_features: &BTreeSet<FeatureId>,
     ) -> Option<&CapabilityManifestV1> {
-        self.resolve_binding_capability(
-            profile_id,
-            surface,
-            operation,
-            protocol_revision,
-            negotiated_features,
-        )
-    }
-
-    fn resolve_binding_capability(
-        &self,
-        profile_id: &ProfileId,
-        surface: BindingSurface,
-        operation: &SurfaceOperationName,
-        protocol_revision: u32,
-        negotiated_features: &BTreeSet<FeatureId>,
-    ) -> Option<&CapabilityManifestV1> {
         let profile = self.profiles.get(profile_id)?;
         if !profile.enables_surface(surface) {
             return None;

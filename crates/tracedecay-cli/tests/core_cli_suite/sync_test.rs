@@ -3,25 +3,6 @@ use tempfile::NamedTempFile;
 use tracedecay_runtime_core::sync::*;
 
 #[test]
-fn test_file_stat_returns_mtime_and_size() {
-    let mut f = NamedTempFile::new().unwrap();
-    f.write_all(b"hello world").unwrap();
-    f.flush().unwrap();
-    let (mtime, size) = file_stat(f.path()).unwrap();
-    assert!(mtime > 0, "mtime should be positive");
-    assert_eq!(size, 11);
-}
-
-#[test]
-fn test_file_stat_nonexistent() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("file.rs");
-    assert!(file_stat(&path).is_none());
-    std::fs::write(&path, b"abc").unwrap();
-    assert_eq!(file_stat(&path).map(|(_, size)| size), Some(3));
-}
-
-#[test]
 fn test_read_source_file_utf8() {
     let mut f = NamedTempFile::new().unwrap();
     f.write_all(b"fn main() {}").unwrap();

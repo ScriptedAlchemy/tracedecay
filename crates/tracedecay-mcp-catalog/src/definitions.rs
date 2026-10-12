@@ -140,11 +140,14 @@ fn string_property(description: &str) -> Value {
     })
 }
 
-fn project_selector_properties() -> Value {
+/// A timestamp filter accepting Unix seconds or a parsed time string.
+fn time_filter_schema(description: &str) -> Value {
     json!({
-        "project_selector": project_selector_object(
-            "Optional registered project selector. Omit to use the active project."
-        )
+        "oneOf": [
+            { "type": "integer", "minimum": 0 },
+            { "type": "string" }
+        ],
+        "description": description
     })
 }
 
@@ -155,13 +158,12 @@ fn project_selector_properties() -> Value {
 /// would drop the field from the schema they show the agent, so the copy
 /// stays inline.
 fn with_project_selector_properties(mut properties: Value) -> Value {
-    let Some(target) = properties.as_object_mut() else {
-        return properties;
-    };
-    if let Some(selector_props) = project_selector_properties().as_object() {
-        for (key, value) in selector_props {
-            target.entry(key.clone()).or_insert_with(|| value.clone());
-        }
+    if let Some(target) = properties.as_object_mut() {
+        target.entry("project_selector").or_insert_with(|| {
+            project_selector_object(
+                "Optional registered project selector. Omit to use the active project.",
+            )
+        });
     }
     properties
 }
@@ -244,30 +246,12 @@ pub fn project_catalog_discovery_scope() -> BTreeSet<ScopeDimension> {
     .collect()
 }
 
-/// Returns tool definitions with a conservative temporary context budget while
-/// a daemon opens the project graph needed to calculate the exact node count.
-pub fn get_tool_definitions_with_warming_budget(
-    budget: u8,
-) -> Result<Vec<ToolDefinition>, McpCatalogError> {
-    let mut defs = get_tool_definitions()?;
-    apply_context_warming_budget(&mut defs, budget);
-    Ok(defs)
-}
-
 /// The `tracedecay_context` description while the project graph is still warming.
 pub fn context_warming_description(budget: u8) -> String {
     format!(
         "{CONTEXT_DESCRIPTION} The graph is still warming, and {budget} broad context calls \
          are available."
     )
-}
-
-pub fn apply_context_warming_budget(defs: &mut [ToolDefinition], budget: u8) {
-    for def in defs {
-        if def.name == "tracedecay_context" {
-            def.description = context_warming_description(budget);
-        }
-    }
 }
 
 /// Returns the list of all tool definitions exposed by this MCP server.
@@ -320,8 +304,8 @@ fn build_search_cli_definition() -> Result<ToolDefinition, McpCatalogError> {
 ///
 /// Every input is static for the life of the process: the application catalog
 /// is a `LazyLock` snapshot. Nothing session-scoped is frozen here, the
-/// per-session passes (`apply_context_budget`, `apply_context_warming_budget`,
-/// and the profile/capability filtering in
+/// per-session passes (the context description budget and the
+/// profile/capability filtering in
 /// `get_catalog_filtered_tool_definitions_with_budget`) all run on a clone,
 /// after the cache.
 pub fn get_tool_definitions_ref() -> Result<&'static [ToolDefinition], McpCatalogError> {
@@ -594,137 +578,12 @@ fn add_registered_project_selector_properties(definitions: &mut [ToolDefinition]
     }
 }
 
-const FORMAT_CAPABLE_NON_APPLICATION_TOOL_NAMES: &[&str] = &[
-    // graph
-    "tracedecay_search",
-    "tracedecay_grep",
-    "tracedecay_ast_grep_search",
-    "tracedecay_context",
-    "tracedecay_impact",
-    "tracedecay_node",
-    "tracedecay_similar",
-    "tracedecay_redundancy",
-    "tracedecay_rename_preview",
-    "tracedecay_find_exact_symbol",
-    "tracedecay_by_qualified_name",
-    "tracedecay_signature",
-    "tracedecay_derives",
-    // info
-    "tracedecay_status",
-    "tracedecay_project_list",
-    "tracedecay_project_search",
-    "tracedecay_project_context",
-    "tracedecay_files",
-    "tracedecay_todos",
-    "tracedecay_config",
-    "tracedecay_port_status",
-    "tracedecay_port_order",
-    // git
-    "tracedecay_git_status",
-    "tracedecay_git_diff",
-    "tracedecay_git_history",
-    "tracedecay_git_blame",
-    "tracedecay_git_hunks",
-    "tracedecay_affected",
-    "tracedecay_diff_context",
-    "tracedecay_changelog",
-    "tracedecay_commit_context",
-    "tracedecay_pr_context",
-    "tracedecay_branch_search",
-    "tracedecay_branch_diff",
-    "tracedecay_remote_status",
-    // analysis
-    "tracedecay_dead_code",
-    "tracedecay_circular",
-    "tracedecay_hotspots",
-    "tracedecay_unmounted_files",
-    "tracedecay_rank",
-    "tracedecay_largest",
-    "tracedecay_coupling",
-    "tracedecay_inheritance_depth",
-    "tracedecay_distribution",
-    "tracedecay_recursion",
-    "tracedecay_complexity",
-    "tracedecay_doc_coverage",
-    "tracedecay_god_class",
-    "tracedecay_unsafe_patterns",
-    "tracedecay_constructors",
-    "tracedecay_field_sites",
-    // health
-    "tracedecay_test_map",
-    "tracedecay_gini",
-    "tracedecay_dependency_depth",
-    "tracedecay_health",
-    "tracedecay_runtime",
-    "tracedecay_test_risk",
-    // memory
-    "tracedecay_memory_status",
-    "tracedecay_fact_store_add",
-    "tracedecay_fact_store_curate",
-    "tracedecay_fact_store_search",
-    "tracedecay_fact_store_probe",
-    "tracedecay_fact_store_related",
-    "tracedecay_fact_store_reason",
-    "tracedecay_fact_store_contradict",
-    "tracedecay_fact_store_get",
-    "tracedecay_fact_store_update",
-    "tracedecay_fact_store_remove",
-    "tracedecay_fact_store_supersede",
-    "tracedecay_fact_store_list",
-    "tracedecay_fact_feedback",
-    // workflow
-    "tracedecay_diagnose",
-    "tracedecay_run_affected_tests",
-    // session / LCM
-    "tracedecay_message_search",
-    "tracedecay_sessions_for",
-    "tracedecay_workflows",
-    "tracedecay_lcm_status",
-    "tracedecay_lcm_doctor",
-    "tracedecay_lcm_load_session",
-    "tracedecay_lcm_grep",
-    "tracedecay_lcm_describe",
-    "tracedecay_lcm_expand",
-    "tracedecay_lcm_expand_query",
-    "tracedecay_session_refresh_begin",
-    "tracedecay_session_refresh_status",
-    "tracedecay_session_refresh_cancel",
-    "tracedecay_skill_list",
-    "tracedecay_skill_view",
-    "tracedecay_automation_run_list",
-    "tracedecay_automation_run_view",
-    "tracedecay_automation_run_artifact_view",
-    "tracedecay_hermes_skill_bridge",
-    // edit
-    "tracedecay_str_replace",
-    "tracedecay_multi_str_replace",
-    "tracedecay_insert_at",
-    "tracedecay_insert_at_symbol",
-    "tracedecay_replace_symbol",
-    "tracedecay_move_symbol",
-    "tracedecay_rename_symbol",
-    "tracedecay_ast_grep_rewrite",
-    "tracedecay_source_edit_reconcile",
-    "tracedecay_source_edit_rollback",
-    // git & info
-    "tracedecay_branch_list",
-    "tracedecay_active_project",
-    // misc
-    "tracedecay_dashboard",
-    "tracedecay_retrieve",
-    "tracedecay_analytics",
-];
-
+/// Every public application operation accepts the `format` presentation flag.
 static FORMAT_CAPABLE_TOOL_NAMES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
-    FORMAT_CAPABLE_NON_APPLICATION_TOOL_NAMES
-        .iter()
-        .copied()
-        .chain(
-            ApplicationSurfaceOperation::ALL
-                .into_iter()
-                .filter(|operation| !operation.is_internal())
-                .map(ApplicationSurfaceOperation::mcp_tool_name),
-        )
+    ApplicationSurfaceOperation::ALL
+        .into_iter()
+        .filter(|operation| !operation.is_internal())
+        .map(ApplicationSurfaceOperation::mcp_tool_name)
         .collect()
 });
 

@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use tracedecay_contracts::{
     ApplicationExecutionFailureClassV1, ApplicationProblem, ApplicationProblemDetailV1,
-    CancellationContext, Deadline, RequestId, SafeDiagnostic, SourceEditInvocationV1,
-    SourceEditReconciliationInvocationV1, SourceEditRollbackInvocationV1,
+    CancellationContext, CancellationSignal, Deadline, RequestId, SafeDiagnostic,
+    SourceEditInvocationV1, SourceEditReconciliationInvocationV1, SourceEditRollbackInvocationV1,
 };
 use tracedecay_daemon_protocol::DaemonInvocationProblem;
 
@@ -21,44 +21,50 @@ use super::{
     concealed_application_problem, runtime_mounting_problem, runtime_publication_failed_problem,
 };
 
-pub(super) async fn execute_source_edit(
-    request_id: String,
+type AdmittedSourceEdit = (Arc<ProjectSourceEditOwnerV1>, RequestId, CancellationSignal);
+
+/// Resolves what every source-edit mutation needs before it reaches the
+/// owner: the owner itself, a typed request id, and a live cancellation signal.
+fn admit_source_edit(
+    request_id: &str,
     owner: Option<Arc<ProjectSourceEditOwnerV1>>,
-    request: SourceEditInvocationV1,
+    unavailable_message: &str,
     observed_at: UtcMicros,
-    deadline: Deadline,
-    cancellation: CancellationContext,
-) -> DaemonInvocationResponse {
+    cancellation: &CancellationContext,
+) -> Result<AdmittedSourceEdit, Box<DaemonInvocationResponse>> {
     let Some(owner) = owner else {
-        return application_problem(
-            request_id,
-            ApplicationProblem::unavailable(tracedecay_contracts::SafeDiagnostic {
+        return Err(Box::new(application_problem(
+            request_id.to_owned(),
+            ApplicationProblem::unavailable(SafeDiagnostic {
                 code: "source_edit.authority_unavailable".to_owned(),
-                message: "The daemon-owned source edit authority is unavailable".to_owned(),
+                message: unavailable_message.to_owned(),
             }),
-        );
+        )));
     };
-    let typed_request_id = match RequestId::new(request_id.clone()) {
-        Ok(request_id) => request_id,
-        Err(_) => {
-            return application_problem(
-                request_id,
-                ApplicationProblem::invalid_request(
-                    "source_edit.invalid_request_id",
-                    "The source-edit request id is invalid",
-                ),
-            );
-        }
+    let Ok(typed_request_id) = RequestId::new(request_id.to_owned()) else {
+        return Err(Box::new(application_problem(
+            request_id.to_owned(),
+            ApplicationProblem::invalid_request(
+                "source_edit.invalid_request_id",
+                "The source-edit request id is invalid",
+            ),
+        )));
     };
     let cancellation =
-        match super::native_integration::live_cancellation_signal(&cancellation, observed_at) {
-            Ok(cancellation) => cancellation,
-            Err(problem) => return application_problem(request_id, problem),
-        };
-    match owner
-        .execute(typed_request_id, request, deadline, cancellation)
-        .await
-    {
+        super::native_integration::live_cancellation_signal(cancellation, observed_at)
+            .map_err(|problem| Box::new(application_problem(request_id.to_owned(), problem)))?;
+    Ok((owner, typed_request_id, cancellation))
+}
+
+fn source_edit_response(
+    request_id: String,
+    owner: &ProjectSourceEditOwnerV1,
+    result: Result<
+        tracedecay_contracts::source_edit::SourceEditSurfaceResultV1,
+        SourceEditOwnerError,
+    >,
+) -> DaemonInvocationResponse {
+    match result {
         Ok(result) => DaemonInvocationResponse::with_outcome(
             request_id,
             DaemonInvocationOutcome::SourceEdit {
@@ -68,6 +74,30 @@ pub(super) async fn execute_source_edit(
         ),
         Err(error) => map_source_edit_error(request_id, error),
     }
+}
+
+pub(super) async fn execute_source_edit(
+    request_id: String,
+    owner: Option<Arc<ProjectSourceEditOwnerV1>>,
+    request: SourceEditInvocationV1,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+) -> DaemonInvocationResponse {
+    let (owner, typed_request_id, cancellation) = match admit_source_edit(
+        &request_id,
+        owner,
+        "The daemon-owned source edit authority is unavailable",
+        observed_at,
+        &cancellation,
+    ) {
+        Ok(admitted) => admitted,
+        Err(response) => return *response,
+    };
+    let result = owner
+        .execute(typed_request_id, request, deadline, cancellation)
+        .await;
+    source_edit_response(request_id, &owner, result)
 }
 
 pub(super) async fn execute_source_edit_reconcile(
@@ -78,46 +108,20 @@ pub(super) async fn execute_source_edit_reconcile(
     deadline: Deadline,
     cancellation: CancellationContext,
 ) -> DaemonInvocationResponse {
-    let Some(owner) = owner else {
-        return application_problem(
-            request_id,
-            ApplicationProblem::unavailable(tracedecay_contracts::SafeDiagnostic {
-                code: "source_edit.authority_unavailable".to_owned(),
-                message: "The daemon-owned source edit reconciliation authority is unavailable"
-                    .to_owned(),
-            }),
-        );
+    let (owner, typed_request_id, cancellation) = match admit_source_edit(
+        &request_id,
+        owner,
+        "The daemon-owned source edit reconciliation authority is unavailable",
+        observed_at,
+        &cancellation,
+    ) {
+        Ok(admitted) => admitted,
+        Err(response) => return *response,
     };
-    let typed_request_id = match RequestId::new(request_id.clone()) {
-        Ok(request_id) => request_id,
-        Err(_) => {
-            return application_problem(
-                request_id,
-                ApplicationProblem::invalid_request(
-                    "source_edit.invalid_request_id",
-                    "The source-edit request id is invalid",
-                ),
-            );
-        }
-    };
-    let cancellation =
-        match super::native_integration::live_cancellation_signal(&cancellation, observed_at) {
-            Ok(cancellation) => cancellation,
-            Err(problem) => return application_problem(request_id, problem),
-        };
-    match owner
+    let result = owner
         .reconcile(typed_request_id, request, deadline, cancellation)
-        .await
-    {
-        Ok(result) => DaemonInvocationResponse::with_outcome(
-            request_id,
-            DaemonInvocationOutcome::SourceEdit {
-                scope: owner.scope(),
-                result,
-            },
-        ),
-        Err(error) => map_source_edit_error(request_id, error),
-    }
+        .await;
+    source_edit_response(request_id, &owner, result)
 }
 
 pub(super) async fn execute_source_edit_rollback(
@@ -128,46 +132,20 @@ pub(super) async fn execute_source_edit_rollback(
     deadline: Deadline,
     cancellation: CancellationContext,
 ) -> DaemonInvocationResponse {
-    let Some(owner) = owner else {
-        return application_problem(
-            request_id,
-            ApplicationProblem::unavailable(tracedecay_contracts::SafeDiagnostic {
-                code: "source_edit.authority_unavailable".to_owned(),
-                message: "The daemon-owned source edit rollback authority is unavailable"
-                    .to_owned(),
-            }),
-        );
+    let (owner, typed_request_id, cancellation) = match admit_source_edit(
+        &request_id,
+        owner,
+        "The daemon-owned source edit rollback authority is unavailable",
+        observed_at,
+        &cancellation,
+    ) {
+        Ok(admitted) => admitted,
+        Err(response) => return *response,
     };
-    let typed_request_id = match RequestId::new(request_id.clone()) {
-        Ok(request_id) => request_id,
-        Err(_) => {
-            return application_problem(
-                request_id,
-                ApplicationProblem::invalid_request(
-                    "source_edit.invalid_request_id",
-                    "The source-edit request id is invalid",
-                ),
-            );
-        }
-    };
-    let cancellation =
-        match super::native_integration::live_cancellation_signal(&cancellation, observed_at) {
-            Ok(cancellation) => cancellation,
-            Err(problem) => return application_problem(request_id, problem),
-        };
-    match owner
+    let result = owner
         .rollback(typed_request_id, request, deadline, cancellation)
-        .await
-    {
-        Ok(result) => DaemonInvocationResponse::with_outcome(
-            request_id,
-            DaemonInvocationOutcome::SourceEdit {
-                scope: owner.scope(),
-                result,
-            },
-        ),
-        Err(error) => map_source_edit_error(request_id, error),
-    }
+        .await;
+    source_edit_response(request_id, &owner, result)
 }
 
 fn map_source_edit_error(

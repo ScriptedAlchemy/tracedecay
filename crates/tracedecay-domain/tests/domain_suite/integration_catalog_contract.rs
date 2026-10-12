@@ -288,7 +288,7 @@ fn stock_host_capability_matrix_is_sole_capability_authority() {
         }
         assert_eq!(
             view.capabilities(),
-            catalog.stock_host_capabilities(view.host())
+            &catalog.stock_host_capabilities(view.host())
         );
         let digest = catalog.host_capability_digest(view.host()).unwrap();
         assert_ne!(digest, [0; 32]);

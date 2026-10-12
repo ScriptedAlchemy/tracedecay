@@ -6,6 +6,7 @@ import type {
 } from '../../contracts/generated.ts';
 import { StateChip, type DomainStateKind } from '../../ui/StateChip.tsx';
 import { Panel } from '../../ui/instrument.tsx';
+import { formatMicrosUtc } from '../../ui/format.ts';
 import type { WorkResult } from '../../workspaces/work/workApi.ts';
 import {
   encounterAt,
@@ -97,7 +98,7 @@ export function ProximityPanel({
               <span className="mt-1 block text-3xs text-text-muted">
                 {encounter.participants.map((participant) => participant.agent_id).join(' + ')}
                 {' · '}
-                {formatMicros(encounter.interval.start)} to {formatMicros(encounter.interval.end)}
+                {formatMicrosUtc(encounter.interval.start)} to {formatMicrosUtc(encounter.interval.end)}
               </span>
             </button>
           ))}
@@ -152,7 +153,7 @@ function EncounterDetail({
       </button>
       <StateChip
         kind={encounterCoverageKind(encounter.coverage)}
-        detail={`${proximityLabel(encounter.relation)} · observed ${formatMicros(encounter.observed_at)} · expires ${formatMicros(encounter.expires_at)}`}
+        detail={`${proximityLabel(encounter.relation)} · observed ${formatMicrosUtc(encounter.observed_at)} · expires ${formatMicrosUtc(encounter.expires_at)}`}
       />
       <div className="mt-2 grid gap-2 md:grid-cols-2">
         {encounter.participants.map((participant) => (
@@ -267,8 +268,4 @@ function codeHref(relation: FeedbackProximityRelationV1): string {
       return unhandled;
     }
   }
-}
-
-function formatMicros(value: number): string {
-  return new Date(value / 1_000).toISOString();
 }

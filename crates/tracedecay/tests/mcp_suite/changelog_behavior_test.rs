@@ -16,7 +16,7 @@ async fn open_repo(prepare: impl FnOnce(&GitFixture)) -> ChangelogRepo {
     let project_root = isolation.path().join("project");
     let fixture = GitFixture::primary(&project_root);
     prepare(&fixture);
-    let harness = Box::pin(ProductionProjectCompositionHarnessV1::open(
+    let harness = Box::pin(crate::support::seeded_composition::open(
         isolation.path(),
         vec![project_root.clone()],
     ))

@@ -16,7 +16,7 @@ use tracedecay_runtime_core::git_discovery::{
     GitRepositoryIdentityOutcome, discover_repository_identity_cli_first,
 };
 
-pub use crate::{NewRows, StoredCursor, TranscriptIngestStats};
+pub use crate::{StoredCursor, TranscriptIngestStats};
 
 /// Shareable handle to a read-only rusqlite connection over a foreign
 /// (non-TraceDecay-owned) `SQLite` store.
@@ -58,96 +58,6 @@ impl SqliteReadConn {
 /// Generic per-transcript backlog threshold for warning that automatic
 /// session transcript catch-up may not drain recall transcripts quickly enough.
 pub const SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES: u64 = 2 * 1024 * 1024;
-
-/// **`RowCursor`** reader for SQLite-backed transcript stores (Zed, Copilot CLI
-/// `session-store.db`).
-///
-/// Selects rows whose rowid is greater than `prev.position` (the last-seen
-/// rowid), ordered ascending, mapping each through `map_row` *during* iteration
-/// (rows must not outlive the statement cursor) and advancing the stored cursor
-/// to the maximum rowid seen. `select_sql` must select the rowid as its first
-/// column and accept a single `?` bound to the previous rowid, e.g.
-/// `"SELECT rowid, role, text FROM turns WHERE rowid > ? ORDER BY rowid"`.
-/// Fail-open: any query error yields `None`; `map_row` returning `None` skips
-/// that row while still advancing the cursor. The whole read runs as one
-/// blocking call on the connection's thread.
-pub async fn read_new_rows<T, F>(
-    conn: &SqliteReadConn,
-    select_sql: &str,
-    prev: StoredCursor,
-    map_row: F,
-) -> Option<NewRows<T>>
-where
-    T: Send + 'static,
-    F: FnMut(i64, &rusqlite::Row<'_>) -> Option<T> + Send + 'static,
-{
-    let select_sql = select_sql.to_string();
-    conn.with(move |conn| read_new_rows_sync(conn, &select_sql, prev, map_row))
-        .await
-        .flatten()
-}
-
-#[tracing::instrument(name = "sessions.shared.read_new_rows_sync", level = "trace", skip_all)]
-fn read_new_rows_sync<T>(
-    conn: &rusqlite::Connection,
-    select_sql: &str,
-    prev: StoredCursor,
-    mut map_row: impl FnMut(i64, &rusqlite::Row<'_>) -> Option<T>,
-) -> Option<NewRows<T>> {
-    let mut statement = match conn.prepare_cached(select_sql) {
-        Ok(statement) => statement,
-        Err(error) => {
-            tracing::debug!(
-                select_sql,
-                previous_rowid = prev.position,
-                error = %error,
-                "skipping transcript row source query"
-            );
-            return None;
-        }
-    };
-    let mut result_rows = match statement.query(rusqlite::params![prev.position as i64]) {
-        Ok(rows) => rows,
-        Err(error) => {
-            tracing::debug!(
-                select_sql,
-                previous_rowid = prev.position,
-                error = %error,
-                "skipping transcript row source query"
-            );
-            return None;
-        }
-    };
-
-    let mut items = Vec::new();
-    let mut max_rowid = prev.position;
-    while let Ok(Some(row)) = result_rows.next() {
-        let Ok(rowid) = row.get::<_, i64>(0) else {
-            tracing::debug!(
-                select_sql,
-                "skipping transcript row without rowid in column 0"
-            );
-            continue;
-        };
-        if rowid as u64 > max_rowid {
-            max_rowid = rowid as u64;
-        }
-        if let Some(item) = map_row(rowid, row) {
-            items.push(item);
-        }
-    }
-
-    Some(NewRows {
-        items,
-        new_cursor: StoredCursor {
-            position: max_rowid,
-            // Row stores have no single file mtime; the rowid alone is the
-            // monotonic cursor, so mtime is left as a sentinel.
-            mtime: 0,
-            file_id: 0,
-        },
-    })
-}
 
 /// Compare two paths for equality, canonicalizing when possible so that
 /// symlinks/`..`/trailing differences do not cause false mismatches. Falls back

@@ -193,10 +193,6 @@ pub struct NativeGitIntelligence {
     command_bounds: tracedecay_runtime_core::git::GitCommandBounds,
 }
 
-pub trait GitTopologyReadPort {
-    fn topology_ref_watermark(&self) -> Result<ManifestDigest, GitIntelligenceError>;
-}
-
 fn map_repository_error(
     error: tracedecay_runtime_core::git_repository::GitRepositoryError,
 ) -> GitIntelligenceError {
@@ -1373,12 +1369,6 @@ impl NativeGitIntelligence {
             by_path.insert(path, (digest, special));
         }
         Ok(by_path)
-    }
-}
-
-impl GitTopologyReadPort for NativeGitIntelligence {
-    fn topology_ref_watermark(&self) -> Result<ManifestDigest, GitIntelligenceError> {
-        NativeGitIntelligence::topology_ref_watermark(self)
     }
 }
 

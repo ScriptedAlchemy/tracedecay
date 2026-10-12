@@ -43,9 +43,9 @@ use tracedecay_domain::{
     PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionBatchRequestV1, ProjectionKeyV1,
     ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1, ProviderEvaluationStateV1, RefId,
     RelationEdgeKindV1, RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId,
-    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1,
-    SymbolOccurrenceId, TestAttributionEvidenceClassV1, TreeId, UtcMicros, WorktreeId,
-    sha256_hex_suffix,
+    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SensitivityLevelV1,
+    SnapshotFileDispositionV1, SymbolOccurrenceId, TestAttributionEvidenceClassV1, TreeId,
+    UtcMicros, WorktreeId, sha256_hex_suffix,
 };
 use tracedecay_graph_db::{GraphDbError, GraphNamespace, GraphProjectorRevision};
 
@@ -279,6 +279,18 @@ pub(super) fn config() -> CodeIndexProductionConfigV1 {
     }
 }
 
+/// A production owner over a fresh in-memory publication store that applies
+/// every projection batch.
+pub(super) fn applying_owner()
+-> CodeIndexProductionOwnerV1<SharedPublicationStore, ApplyingProjectionSink> {
+    CodeIndexProductionOwnerV1::new(
+        config(),
+        SharedPublicationStore::default(),
+        ApplyingProjectionSink,
+    )
+    .expect("production owner")
+}
+
 fn projection_key() -> ProjectionKeyV1 {
     ProjectionKeyV1 {
         kind: ProjectionKindV1::Lexical,
@@ -377,6 +389,29 @@ pub(super) fn request_with_source(
     request
 }
 
+pub(super) fn add_present_typescript_file(
+    request: &mut CodeIndexBuildRequestV1,
+    occurrence: &str,
+    logical_path: &str,
+    source: &str,
+) {
+    let bytes = source.as_bytes().to_vec();
+    let file_occurrence_id = id::<FileOccurrenceId>(occurrence);
+    request.snapshot.files.push(SanitizedCodeFileV1 {
+        file_occurrence_id: file_occurrence_id.clone(),
+        logical_path: logical_path.to_owned(),
+        language: Some(id::<LanguageId>("typescript")),
+        content_digest: content_digest(&bytes),
+        disposition: SnapshotFileDispositionV1::Present,
+    });
+    request.captured_files.push(CodeIndexCapturedFileV1 {
+        file_occurrence_id,
+        sanitized_bytes: Arc::from(bytes),
+        sensitivity_level: SensitivityLevelV1::Public,
+    });
+    request.changed_files.insert(logical_path.to_owned());
+}
+
 #[test]
 fn cross_file_edges_require_path_binding_evidence() {
     let sources = [
@@ -454,14 +489,9 @@ fn cross_file_edges_require_path_binding_evidence() {
     }
     request.snapshot.content_identity = content_digest(&identity.finalize());
 
-    let generation = CodeIndexProductionOwnerV1::new(
-        config(),
-        SharedPublicationStore::default(),
-        ApplyingProjectionSink,
-    )
-    .expect("production owner")
-    .build_and_publish(request, &ActiveControl)
-    .expect("generation publishes");
+    let generation = applying_owner()
+        .build_and_publish(request, &ActiveControl)
+        .expect("generation publishes");
     let generation = cold_generation(&generation);
     let occurrence = |qualified_name: &str| {
         generation
@@ -1366,12 +1396,7 @@ fn sealed_store_drops_whitespace_only_window_chunks() {
     let source: String = (0..FUNCTIONS)
         .map(|index| format!("pub fn symbol_{index}() {{}}\n\n"))
         .collect();
-    let mut owner = CodeIndexProductionOwnerV1::new(
-        config(),
-        SharedPublicationStore::default(),
-        ApplyingProjectionSink,
-    )
-    .expect("production owner");
+    let mut owner = applying_owner();
     let generation = owner
         .build_and_publish(
             request_with_source(
@@ -4581,14 +4606,9 @@ def publish(value):
     request.snapshot.content_identity = content_digest(PYTHON_SOURCE.as_bytes());
     request.captured_files[0].sanitized_bytes = Arc::from(PYTHON_SOURCE.as_bytes());
 
-    let generation = CodeIndexProductionOwnerV1::new(
-        config(),
-        SharedPublicationStore::default(),
-        ApplyingProjectionSink,
-    )
-    .expect("production owner")
-    .build_and_publish(request, &ActiveControl)
-    .expect("one empty Python suite must not refuse the generation");
+    let generation = applying_owner()
+        .build_and_publish(request, &ActiveControl)
+        .expect("one empty Python suite must not refuse the generation");
     let generation = cold_generation(&generation);
     let names = generation
         .symbols()
@@ -4658,14 +4678,9 @@ fn a_500_file_generation_holds_its_clone_streams_within_the_resident_budget() {
     }
     request.snapshot.content_identity = content_digest(&identity.finalize());
 
-    let generation = CodeIndexProductionOwnerV1::new(
-        config(),
-        SharedPublicationStore::default(),
-        ApplyingProjectionSink,
-    )
-    .expect("production owner")
-    .build_and_publish(request, &ActiveControl)
-    .expect("generation publishes");
+    let generation = applying_owner()
+        .build_and_publish(request, &ActiveControl)
+        .expect("generation publishes");
     let generation = cold_generation(&generation);
 
     assert_eq!(generation.symbols().symbols.len(), 1_000);

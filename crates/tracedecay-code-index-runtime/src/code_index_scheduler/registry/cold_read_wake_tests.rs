@@ -1,18 +1,17 @@
 //! Cold-read wake behavior while the retained code-index owner is active.
 
 use std::fs;
-use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 
 use tempfile::TempDir;
 use tracedecay_contracts::ResolvedScope;
 
+use super::super::tests::commit_fixture_checkout;
 use super::super::{
     CodeIndexBuildProgressSlotStateV1, DaemonCodeIndexControlV1, ReconcilePassGuard,
 };
 use super::{CodeIndexReconcileAdmissionV1, CodeIndexSchedulerRegistryV1};
-use crate::code_index::production::CodeIndexExecutionControlV1;
+use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 #[tokio::test]
@@ -21,9 +20,7 @@ async fn cold_read_wakes_do_not_cancel_an_in_flight_reconcile_snapshot() {
     let project = fixture.path().join("project");
     fs::create_dir_all(project.join("src")).expect("create source root");
     fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("write source");
-    run_git_in(&project, &["init", "-q", "-b", "main"]);
-    run_git_in(&project, &["add", "."]);
-    run_git_in(&project, &["commit", "-qm", "fixture"]);
+    commit_fixture_checkout(&project);
 
     let project_id =
         tracedecay_domain::ProjectId::new("project.cold-read-wake").expect("project identity");
@@ -171,23 +168,6 @@ async fn cold_read_wakes_do_not_cancel_an_in_flight_reconcile_snapshot() {
     registry.shutdown().await;
 }
 
-fn run_git_in(root: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .env("GIT_AUTHOR_NAME", "TraceDecay Test")
-        .env("GIT_AUTHOR_EMAIL", "test@tracedecay.invalid")
-        .env("GIT_COMMITTER_NAME", "TraceDecay Test")
-        .env("GIT_COMMITTER_EMAIL", "test@tracedecay.invalid")
-        .output()
-        .expect("git command should run");
-    assert!(
-        output.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
 #[tokio::test]
 async fn source_hint_interrupts_attribution_and_owned_noop_retries_same_generation() {
     use super::AttributionPreparationControlV1;
@@ -229,9 +209,7 @@ async fn source_hint_interrupts_attribution_and_owned_noop_retries_same_generati
         "fn helper() {}\n#[test] fn first() { helper(); }\n#[test] fn second() { first(); }\n",
     )
     .unwrap();
-    run_git_in(&project, &["init", "-q", "-b", "main"]);
-    run_git_in(&project, &["add", "."]);
-    run_git_in(&project, &["commit", "-qm", "fixture"]);
+    commit_fixture_checkout(&project);
     let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
     let admission = registry
         .background_reconcile_admission()

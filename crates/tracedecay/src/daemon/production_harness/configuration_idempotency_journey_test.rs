@@ -16,22 +16,11 @@ use tracedecay_sdk::client::{Client, ClientError, ConnectionMode};
 use tracedecay_sdk::operations::{ApplicationConfigurationSet, TypedOperation};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
-use super::journey_test_support::tool_payload;
+use super::journey_test_support::{initialize_project, tool_payload};
 use super::*;
 use tracedecay_daemon_service::daemon_operation_event_authority;
 
 const HTTP_AUTH_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-
-fn initialize_project(project: &Path) {
-    std::fs::create_dir_all(project.join("src")).expect("project source");
-    std::fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").expect("project source file");
-    let status = std::process::Command::new("git")
-        .current_dir(project)
-        .args(["init", "--quiet"])
-        .status()
-        .expect("initialize Git project");
-    assert!(status.success(), "Git project initialization failed");
-}
 
 async fn current_revision(
     harness: &ProductionProjectCompositionHarnessV1,

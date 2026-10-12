@@ -1,5 +1,6 @@
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_domain::{
     CanonicalGitEvidenceKindV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, CanonicalReasoningVisibilityV1,
@@ -12,7 +13,7 @@ use tracedecay_store::cursor_dispatch::{cursor_model_string, is_subagent_dispatc
 
 use crate::git_facts::append_diff_and_pull_request_facts;
 use crate::{
-    ObservationRecordParseErrorV1, parse::canonical_u64_i64 as canonical_u64, parse::sha256_hex,
+    ObservationRecordParseErrorV1, parse::canonical_u64_i64 as canonical_u64,
     parse_cursor_human_timestamp,
 };
 
@@ -499,7 +500,7 @@ pub fn observation_native_record_id(
         hasher.update(native_id.as_bytes());
         return ObservationId::new(format!(
             "cursor.native.sha256:{}",
-            sha256_hex(&hasher.finalize())
+            encode_lowercase_hex(&hasher.finalize())
         ))
         .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed);
     }
@@ -514,7 +515,7 @@ pub fn observation_native_record_id(
     );
     ObservationId::new(format!(
         "cursor.native.sha256:{}",
-        sha256_hex(&hasher.finalize())
+        encode_lowercase_hex(&hasher.finalize())
     ))
     .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
 }

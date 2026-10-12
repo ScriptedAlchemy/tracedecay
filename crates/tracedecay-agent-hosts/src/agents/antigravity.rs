@@ -29,7 +29,8 @@ use tracedecay_domain::errors::Result;
 
 use super::host_bundle::{HostBundleRegistrationStateV1, HostComponentV1};
 use super::mcp_registration::{
-    McpRegistrationOutcome, remove_mcp_server_entry, set_mcp_server_entry,
+    McpRegistrationOutcome, remove_mcp_server_entry, serve_entry_registration_state,
+    set_mcp_server_entry,
 };
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
@@ -151,24 +152,11 @@ fn document_registration_state(
     let Ok(settings) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
         return HostBundleRegistrationStateV1::Corrupt;
     };
-    let Some(server) = settings.pointer("/mcpServers/tracedecay") else {
-        return HostBundleRegistrationStateV1::Missing;
-    };
-    let command_matches = server
-        .get("command")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|command| {
-            expected_binary.map_or_else(|| !command.is_empty(), |expected| command == expected)
-        });
-    let serves_tracedecay = server
-        .get("args")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|args| args.len() == 1 && args[0].as_str() == Some("serve"));
-    if server.is_object() && command_matches && serves_tracedecay {
-        HostBundleRegistrationStateV1::Current
-    } else {
-        HostBundleRegistrationStateV1::Repairable
-    }
+    settings
+        .pointer("/mcpServers/tracedecay")
+        .map_or(HostBundleRegistrationStateV1::Missing, |server| {
+            serve_entry_registration_state(server, expected_binary)
+        })
 }
 
 fn antigravity_registration_state(

@@ -1,6 +1,7 @@
 import type { FeedbackProximityReadResultV1 } from '../../../contracts/generated.ts';
 import { StateChip } from '../../../ui/StateChip.tsx';
 import { Panel } from '../../../ui/instrument.tsx';
+import { formatMicrosUtc } from '../../../ui/format.ts';
 import { ProximityPanel } from '../../../viz/proximity/index.ts';
 import type { WorkResult } from '../workApi.ts';
 import type { ConcurrentAttemptsReading } from '../workConcurrentAttempts.ts';
@@ -33,15 +34,15 @@ export function WorkConcurrentAttemptsView({
                   {row.left.identity.attempt_id} + {row.right.identity.attempt_id}
                 </span>
                 <span>
-                  {formatMicros(row.left.span.started_at)} to{' '}
+                  {formatMicrosUtc(row.left.span.started_at)} to{' '}
                   {row.left.span.ended_at === null
                     ? 'open'
-                    : formatMicros(row.left.span.ended_at)}
+                    : formatMicrosUtc(row.left.span.ended_at)}
                   {' · '}
-                  {formatMicros(row.right.span.started_at)} to{' '}
+                  {formatMicrosUtc(row.right.span.started_at)} to{' '}
                   {row.right.span.ended_at === null
                     ? 'open'
-                    : formatMicros(row.right.span.ended_at)}
+                    : formatMicrosUtc(row.right.span.ended_at)}
                 </span>
               </button>
             ))}
@@ -78,8 +79,4 @@ function ReadingState({ reading }: { reading: ConcurrentAttemptsReading }) {
       return unhandled;
     }
   }
-}
-
-function formatMicros(value: number): string {
-  return new Date(value / 1_000).toISOString();
 }

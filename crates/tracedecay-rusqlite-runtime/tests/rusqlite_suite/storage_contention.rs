@@ -32,8 +32,9 @@ use tracedecay_store::{
     ProjectReadOperationV1, ProjectReadResultV1, RepositoryReadOperationV1, RepositoryReadResultV1,
     RepositoryWritePayloadV1, RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadOutcomeV1,
     RuntimeReadRequestV1, RuntimeReadResultV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1,
-    SanitizedCleanDiagnosticSnapshotV1, StorageRuntimeErrorV1, StoreCommitReceiptV1,
-    StoreRuntimeBindingV1,
+    SanitizedCleanDiagnosticSnapshotV1, StorageRuntimeErrorV1, StoreAuthorityEpochV1,
+    StoreCommitReceiptV1, StoreRuntimeBindingV1, UnavailableReasonV1,
+    single_shard_required_coverage_v1,
 };
 
 use crate::runtime_test_support::{
@@ -1000,6 +1001,60 @@ fn at_least_attachment_reads_use_the_writers_committed_watermark() {
             receipt.commit_sequence
         );
     }
+    attachment.drain().unwrap();
+    attachment.close_and_join().unwrap();
+}
+
+#[test]
+fn at_least_reads_under_a_superseded_authority_epoch_are_typed_unavailable() {
+    let database = TestDatabase::new("read-superseded-epoch.db");
+    seed(&database);
+    let superseded = binding(0);
+    let mut current = superseded.clone();
+    current.authority_epoch =
+        StoreAuthorityEpochV1::new(superseded.authority_epoch.get() + 1).unwrap();
+    let writer = start_writer(
+        &database,
+        &current,
+        ConcreteRepositoryWriteExecutor::default(),
+    );
+    commit(&writer, publication(&current, "generation.superseded", 1));
+    writer.shutdown_and_join().unwrap();
+    let attachment = RepositoryPhysicalAttachmentFactory
+        .attach(
+            superseded.clone(),
+            verified_locator(&superseded),
+            database.path.canonicalize().unwrap(),
+            AdmissionConfigV1::default(),
+        )
+        .unwrap();
+    let request = RuntimeReadRequestV1::new(
+        superseded.clone(),
+        ConsistencyModeV1::AtLeast {
+            commit_sequence: CommitSequenceV1(1),
+        },
+        RuntimeReadOperationV1::TemporalHealth,
+        OperationPriorityV1::Health,
+        1,
+        read_request(&superseded, "health").control().clone(),
+    )
+    .unwrap();
+
+    let outcome = attachment
+        .dispatch_read(request.clone(), &Probe::for_read(&request))
+        .unwrap();
+
+    assert_eq!(
+        outcome.coverage(),
+        &RuntimeReadCoverageV1::Unavailable {
+            coverage: Some(
+                single_shard_required_coverage_v1(&superseded, CommitSequenceV1(1), []).unwrap()
+            ),
+            reason: UnavailableReasonV1::WrongAuthorityEpoch,
+        }
+    );
+    assert!(outcome.value().is_none());
+    assert_eq!(outcome.validate_for(&request), Ok(()));
     attachment.drain().unwrap();
     attachment.close_and_join().unwrap();
 }

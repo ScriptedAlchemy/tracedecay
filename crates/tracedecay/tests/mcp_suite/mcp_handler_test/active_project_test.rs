@@ -233,7 +233,7 @@ async fn open_checkout() -> OpenedCheckout {
     let project_root = canonical_existing_identity(&project_root).expect("canonical project");
     let isolation_root =
         canonical_existing_identity(isolation.path()).expect("canonical isolation");
-    let harness = ProductionProjectCompositionHarnessV1::open_with_scope_prefix(
+    let harness = crate::support::seeded_composition::open_with_scope_prefix(
         &isolation_root,
         [project_root.clone()],
         SCOPE_PREFIX,

@@ -6,17 +6,13 @@
 //! spawner (root `src/hooks/`). Depending on either from here would point the
 //! session layer back at the composition root.
 //!
-//! The unregistered-admission factory is a process-global slot the
-//! composition root fills once during startup; it reads as "unwired" until
-//! then. The session review scheduler is different:
-//! it is an explicit [`session_review::SessionReviewPort`] value that a user
+//! The session review scheduler is an explicit [`session_review::SessionReviewPort`] value that a user
 //! ingest pass receives through its `SessionIngestAuthority`, so an unwired
 //! pass is a typed refusal rather than a silent skip.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::OnceLock;
 
 /// Schedules the post-ingest user session review.
 ///
@@ -48,42 +44,6 @@ pub mod session_review {
         pub async fn schedule(self, provider: &str, session_id: Option<&str>) {
             (self.scheduler)(provider, session_id).await;
         }
-    }
-}
-
-/// Builds an *unregistered* admission facade, one with no durable authority
-/// behind it, which fails closed on every capture.
-///
-/// Standalone callers (a CLI invocation with no daemon-owned registry mount)
-/// still need an admission handle to walk a transcript and count what it
-/// *would* admit. Only the composition root can build one, so it installs the
-/// factory here.
-pub mod unregistered_admission {
-    use super::OnceLock;
-    use crate::admission::HostAdmission;
-    use tracedecay_domain::ProjectId;
-
-    #[derive(Clone, Debug)]
-    pub enum Scope {
-        /// Bound to one project identity, without a registered database.
-        Project(ProjectId),
-        /// Bound to the profile, without a registered database.
-        Profile,
-    }
-
-    pub type Factory = fn(Scope) -> Box<dyn HostAdmission>;
-
-    static FACTORY: OnceLock<Factory> = OnceLock::new();
-
-    /// Installs the unregistered-facade factory. First call wins.
-    pub fn register(factory: Factory) {
-        let _ = FACTORY.set(factory);
-    }
-
-    /// Builds an unregistered facade, or `None` when unwired.
-    #[must_use]
-    pub fn create(scope: Scope) -> Option<Box<dyn HostAdmission>> {
-        FACTORY.get().map(|factory| factory(scope))
     }
 }
 

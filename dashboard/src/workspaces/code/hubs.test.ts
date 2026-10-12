@@ -64,9 +64,6 @@ describe('annotateHubs', () => {
 });
 
 describe('describeSubgraph', () => {
-  const nodes = Array.from({ length: 80 }, (_, i) => ({ id: `n${i}` }));
-  const edges = Array.from({ length: 120 }, (_, i) => ({ id: `e${i}` }));
-
   it('distinguishes a query that matched nothing from an empty graph', () => {
     expect(
       describeSubgraph({ mode: 'seeded', seed_id: null, nodes: [], edges: [] }, 100)!.rule,

@@ -28,6 +28,10 @@ use serde_json::Value;
 use tokio::sync::OnceCell;
 use tracedecay_domain::errors::Result as TdResult;
 use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
+#[cfg(feature = "test-transport")]
+use tracedecay_runtime_core::branch::detect_default_branch;
+#[cfg(feature = "test-transport")]
+use tracedecay_runtime_core::branch_meta::{BranchMeta, save_branch_meta};
 use tracedecay_runtime_core::path_safety::{canonical_existing_identity, canonical_root_identity};
 use tracedecay_runtime_core::storage::{PrivateStoreIo, default_profile_project_id};
 
@@ -166,6 +170,65 @@ async fn init_project_from_template_root(
     Box::pin(TraceDecay::open_with_options(project_root, options)).await
 }
 
+/// Seeds the profile a production composition over `isolation_root` will
+/// open with the template's initialized (schema-complete, empty) databases:
+/// `global.db`, `user-sessions.db`, and each project's graph and sessions
+/// databases. The composition then admits existing stores instead of
+/// installing every schema again. Only databases and the rebound store
+/// manifest are copied: the template's branch metadata and hook state
+/// describe the template project, so branch metadata is bootstrapped from
+/// each project's own repository and hook state is left to the composition.
+/// Each call copies private files; nothing is shared between tests. A profile
+/// that already exists is a reopen and is left exactly as it is.
+#[cfg(feature = "test-transport")]
+pub async fn seed_production_composition_profile(isolation_root: &Path, project_roots: &[PathBuf]) {
+    let profile_root = isolation_root.join("profile");
+    if profile_root.exists() {
+        return;
+    }
+    let template = template_root()
+        .await
+        .unwrap_or_else(|error| panic!("mcp suite store template is unavailable: {error}"))
+        .join(EMPTY_FLAVOR);
+    seed_profile_databases(&template, &profile_root, project_roots)
+        .unwrap_or_else(|error| panic!("mcp suite store template seed failed: {error}"));
+}
+
+#[cfg(feature = "test-transport")]
+fn seed_profile_databases(
+    template: &Path,
+    profile_root: &Path,
+    project_roots: &[PathBuf],
+) -> io::Result<()> {
+    let src_home = template.join("home").join(".tracedecay");
+    let src_data = sole_subdir(&src_home.join("projects"))?;
+    for project_root in project_roots {
+        let project_id = default_profile_project_id(project_root);
+        let data_dest = profile_root.join("projects").join(&project_id);
+        PrivateStoreIo::create_dir_all(&data_dest)?;
+        for database in ["tracedecay.db", "sessions.db"] {
+            copy_db_files(&src_data.join(database), &data_dest.join(database))?;
+        }
+        fs::copy(
+            src_data.join("store_manifest.json"),
+            data_dest.join("store_manifest.json"),
+        )?;
+        rebind_store_manifest(&data_dest, &project_id, project_root)?;
+        // As project init does: an existing store never bootstraps it.
+        if let Some(default_branch) = detect_default_branch(project_root) {
+            save_branch_meta(&data_dest, &BranchMeta::new(&default_branch))?;
+        }
+    }
+    for database in [
+        src_home.join("global.db"),
+        tracedecay_sessions::runtime::user_sessions_db_path(&src_home),
+    ] {
+        let name = database.file_name().expect("template database file name");
+        copy_db_files(&database, &profile_root.join(name))?;
+    }
+    Ok(())
+}
+
 fn config_error(message: impl Into<String>) -> tracedecay_domain::errors::TraceDecayError {
     tracedecay_domain::errors::TraceDecayError::Config {
         message: message.into(),
@@ -214,20 +277,7 @@ fn seed_store(flavor: &Path, project_root: &Path, targets: &SeedTargets) -> io::
     // permission validation accepts the template copy under any umask.
     PrivateStoreIo::create_dir_all(&data_dest)?;
     copy_tree(&src_data, &data_dest)?;
-
-    rewrite_json(&data_dest.join("store_manifest.json"), |manifest| {
-        manifest["project_id"] = Value::String(project_id.clone());
-        manifest["project_root"] = Value::String(
-            canonical_root_identity(project_root)
-                .to_string_lossy()
-                .into_owned(),
-        );
-        manifest["data_root"] = Value::String(
-            canonical_root_identity(&data_dest)
-                .to_string_lossy()
-                .into_owned(),
-        );
-    })?;
+    rebind_store_manifest(&data_dest, &project_id, project_root)?;
 
     if !targets.global_db_path.exists() {
         if let Some(parent) = targets.global_db_path.parent() {
@@ -517,6 +567,27 @@ fn sibling_with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(suffix);
     path.with_file_name(name)
+}
+
+/// Points a copied `store_manifest.json` at its new project and data dir.
+fn rebind_store_manifest(
+    data_dest: &Path,
+    project_id: &str,
+    project_root: &Path,
+) -> io::Result<()> {
+    rewrite_json(&data_dest.join("store_manifest.json"), |manifest| {
+        manifest["project_id"] = Value::String(project_id.to_owned());
+        manifest["project_root"] = Value::String(
+            canonical_root_identity(project_root)
+                .to_string_lossy()
+                .into_owned(),
+        );
+        manifest["data_root"] = Value::String(
+            canonical_root_identity(data_dest)
+                .to_string_lossy()
+                .into_owned(),
+        );
+    })
 }
 
 fn rewrite_json(path: &Path, edit: impl FnOnce(&mut Value)) -> io::Result<()> {

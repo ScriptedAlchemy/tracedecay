@@ -601,22 +601,7 @@ async fn invoke_admitted_work_operation(
     let response =
         tracedecay_daemon_service::application_surface::invoke_work_operation(executor, request)
             .await;
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .map_err(|error| {
-            TraceDecayError::project_route(
-                "work.response_unavailable",
-                true,
-                format!("The Work application response could not be read: {error}"),
-            )
-        })?;
-    serde_json::from_slice(&body).map_err(|error| {
-        TraceDecayError::project_route(
-            "work.response_invalid",
-            true,
-            format!("The Work application response was not valid JSON: {error}"),
-        )
-    })
+    read_application_envelope(response, "work", "Work").await
 }
 
 /// Reads the canonical Workflow HTTP envelope the daemon owner already produced.
@@ -628,20 +613,28 @@ async fn invoke_admitted_workflow_operation(
         executor, request,
     )
     .await;
+    read_application_envelope(response, "workflow", "Workflow").await
+}
+
+async fn read_application_envelope(
+    response: axum::response::Response,
+    reason_prefix: &str,
+    surface: &str,
+) -> Result<Value> {
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .map_err(|error| {
             TraceDecayError::project_route(
-                "workflow.response_unavailable",
+                format!("{reason_prefix}.response_unavailable"),
                 true,
-                format!("The Workflow application response could not be read: {error}"),
+                format!("The {surface} application response could not be read: {error}"),
             )
         })?;
     serde_json::from_slice(&body).map_err(|error| {
         TraceDecayError::project_route(
-            "workflow.response_invalid",
+            format!("{reason_prefix}.response_invalid"),
             true,
-            format!("The Workflow application response was not valid JSON: {error}"),
+            format!("The {surface} application response was not valid JSON: {error}"),
         )
     })
 }

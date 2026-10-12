@@ -482,9 +482,8 @@ appearing in more than one of the four columns or more than once in one column.
 
 ## 9. Configuration knobs
 
-`LcmGcConfig` is daemon-owned maintenance policy. Read-only Doctor diagnostics
-may classify noise through `LcmNoiseClassificationConfig`, but neither Doctor
-nor MCP accepts GC policy or invokes maintenance.
+`LcmGcConfig` is daemon-owned maintenance policy. Neither Doctor nor MCP
+accepts GC policy or invokes maintenance.
 
 | Knob | Type | Default | Bounds | Effect |
 |---|---|---|---|---|

@@ -1175,7 +1175,7 @@ fn hydration_omission(
     })
 }
 
-fn root_error(error: WorkEvidenceRootReadErrorV1) -> WorkProductApplicationErrorV1 {
+pub(crate) fn root_error(error: WorkEvidenceRootReadErrorV1) -> WorkProductApplicationErrorV1 {
     match error {
         WorkEvidenceRootReadErrorV1::NotFoundOrNotAuthorized => {
             WorkProductApplicationErrorV1::NotFoundOrNotAuthorized

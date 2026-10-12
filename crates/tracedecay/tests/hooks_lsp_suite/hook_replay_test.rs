@@ -85,8 +85,8 @@ fn replays(root: &str) -> Vec<Replay> {
             stdin: None,
             tool_input_env: Some(json!({
                 "session_id": "claude-s1",
-                "subagent_type": "general-purpose",
-                "prompt": "implement the parser",
+                "subagent_type": "Explore",
+                "prompt": "explore the codebase and find where the parser is defined",
             })),
         },
         Replay {
@@ -197,7 +197,10 @@ fn replays(root: &str) -> Vec<Replay> {
                 "hook_event_name": "preToolUse",
                 "session_id": "kiro-s1",
                 "cwd": root,
-                "tool_name": "fsWrite",
+                "tool_name": "delegate",
+                "tool_input": {
+                    "task": "explore the codebase and find where the parser is defined",
+                },
             })),
             tool_input_env: None,
         },
@@ -333,6 +336,17 @@ fn run_replay(home: &Path, project_root: &Path, replay: &Replay) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
+    // Research-shaped pre-tool payloads must reach the host as an allow: no
+    // permission decision on stdout, nothing for the model on stderr.
+    if replay.hook_name == "preToolUse" {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            matches!(stdout.trim(), "" | "{}") && output.stderr.is_empty(),
+            "{} must not refuse research\nstdout: {stdout}\nstderr: {}",
+            replay.subcommand,
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
 }
 
 fn read_jsonl_rows(path: &Path) -> Vec<Value> {

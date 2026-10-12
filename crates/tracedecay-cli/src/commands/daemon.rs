@@ -3,7 +3,7 @@ use serde_json::Value;
 use tokio::time::Instant;
 use tracedecay_contracts::graph_tool::GraphToolResultV1;
 use tracedecay_contracts::retrieval::{
-    AdminCliResultV1, AdminCliScopeV1, AdminCliSurfaceRequestV1,
+    AdminCliRegistryContextV1, AdminCliResultV1, AdminCliScopeV1, AdminCliSurfaceRequestV1,
 };
 use tracedecay_contracts::{ApplicationEnvelope, ApplicationOutcome, ApplicationProblemEnvelope};
 use tracedecay_runtime_core::config::ProfileRoot;
@@ -119,11 +119,7 @@ pub(crate) async fn admin_cli_result(
     project_path: Option<&std::path::Path>,
     request: AdminCliSurfaceRequestV1,
 ) -> tracedecay_domain::errors::Result<AdminCliResultV1> {
-    let deadline = Instant::now()
-        .checked_add(crate::tool_command::tool_command_deadline()?)
-        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
-            message: "the CLI tool deadline exceeds the supported monotonic range".to_owned(),
-        })?;
+    let deadline = crate::tool_command::tool_command_deadline()?;
     let result = crate::tool_command::owner_operation_result(
         profile,
         client_handshake(profile, project_path)?,
@@ -135,6 +131,21 @@ pub(crate) async fn admin_cli_result(
     match result {
         GraphToolResultV1::AdminCli(result) => Ok(*result),
         _ => Err(admin_cli_result_mismatch("tracedecay_admin_cli")),
+    }
+}
+
+/// The profile registry's context for one project selector: a project id, a
+/// root path, or a registered alias.
+pub(crate) async fn registry_context(
+    profile: &ProfileRoot,
+    selector: std::path::PathBuf,
+) -> tracedecay_domain::errors::Result<AdminCliRegistryContextV1> {
+    let request = AdminCliSurfaceRequestV1::RegistryContext {
+        project_arg: Some(selector),
+    };
+    match admin_cli_result(profile, None, request).await? {
+        AdminCliResultV1::RegistryContext(context) => Ok(context),
+        _ => Err(admin_cli_result_mismatch("registry_context")),
     }
 }
 

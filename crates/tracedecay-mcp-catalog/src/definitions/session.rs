@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use tracedecay_contracts::retained_surfaces::{MessageRelationshipScopeV1, MessageTypeFilterV1};
 
-use super::{def, def_rw, project_selector_object, string_property};
+use super::{def, def_rw, project_selector_object, string_property, time_filter_schema};
 use crate::ToolDefinition;
 
 pub(super) fn def_session_refresh_begin(input_schema: Value) -> ToolDefinition {
@@ -105,8 +105,8 @@ pub(super) fn def_message_search() -> ToolDefinition {
                 "branch": string_property("Optional git branch filter: only messages from sessions active on this branch (via the session-git correlation index)."),
                 "worktree": string_property("Optional git worktree root path filter: only messages from sessions active in this worktree (via the session-git correlation index)."),
                 "commit": string_property("Optional commit sha filter (full or >=6-char hex prefix): only messages from sessions attributed to this commit (via the session-git correlation index)."),
-                "workflow_run": workflow_run_scope_schema(),
-                "workflow_agent": workflow_agent_scope_schema(),
+                "workflow_run": string_property("Optional workflow run id (`wf_*`) filter: only messages from sessions that spawned this workflow run (via the workflow-run index). Pair with agent_label to scope to one agent."),
+                "workflow_agent": string_property("Optional workflow agent label filter, used with workflow_run to scope to a single agent of that run."),
                 "format": {
                     "type": "string",
                     "enum": ["markdown", "json"],
@@ -201,30 +201,6 @@ pub(super) fn def_workflows() -> ToolDefinition {
             ]
         }),
     )
-}
-
-fn time_filter_schema(description: &str) -> Value {
-    json!({
-        "oneOf": [
-            { "type": "integer", "minimum": 0 },
-            { "type": "string" }
-        ],
-        "description": description
-    })
-}
-
-fn workflow_run_scope_schema() -> Value {
-    json!({
-        "type": "string",
-        "description": "Optional workflow run id (`wf_*`) filter: only messages from sessions that spawned this workflow run (via the workflow-run index). Pair with agent_label to scope to one agent."
-    })
-}
-
-fn workflow_agent_scope_schema() -> Value {
-    json!({
-        "type": "string",
-        "description": "Optional workflow agent label filter, used with workflow_run to scope to a single agent of that run."
-    })
 }
 
 #[cfg(test)]

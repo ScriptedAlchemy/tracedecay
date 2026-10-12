@@ -262,7 +262,7 @@ function streamGeneration(runId: string): number {
   return Number.isSafeInteger(epoch) && epoch >= 0 ? epoch : 0;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 

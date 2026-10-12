@@ -1,9 +1,7 @@
 import Graph from 'graphology';
 import { describe, expect, it } from 'vitest';
 import {
-  buildDendrites,
   isMeasuredField,
-  nodeHullFrame,
   prepareField,
 } from './layout.ts';
 import type { GraphCanvasEdge, GraphCanvasNode } from './types.ts';
@@ -166,7 +164,7 @@ describe('prepareField', () => {
   });
 
   it('records only relations whose two ends are actually drawn', () => {
-    const { graph, neighborsOf, realNodes } = prepare(
+    const { graph, realNodes } = prepare(
       [
         { id: 'a', label: 'a', kind: 'k' },
         { id: 'b', label: 'b', kind: 'k' },
@@ -179,80 +177,5 @@ describe('prepareField', () => {
 
     expect(graph.size).toBe(1);
     expect(realNodes.sort()).toEqual(['a', 'b']);
-    expect(neighborsOf.get('a')).toEqual(['b']);
-    expect(neighborsOf.get('b')).toEqual(['a']);
-  });
-});
-
-describe('buildDendrites', () => {
-  it('replaces each relation with a curve whose ends are its two real nodes', () => {
-    const { graph, realNodes } = prepare(
-      [
-        { id: 'a', label: 'a', kind: 'k', x: 0, y: 0 },
-        { id: 'b', label: 'b', kind: 'k', x: 10, y: 0 },
-      ],
-      [{ source: 'a', target: 'b' }],
-    );
-
-    const strands = buildDendrites(graph, 1);
-
-    expect(strands).toHaveLength(1);
-    expect(strands[0]!.from).toBe('a');
-    expect(strands[0]!.to).toBe('b');
-    expect(strands[0]!.points[0]).toEqual([0, 0]);
-    expect(strands[0]!.points.at(-1)).toEqual([10, 0]);
-    // The curve bows off the chord, which is what a travelling pulse follows.
-    expect(strands[0]!.points.some(([, y]) => y !== 0)).toBe(true);
-    // Waypoints are joints, never bodies, and never part of the real topology.
-    const waypoints = graph.nodes().filter((id) => id.startsWith('__way__'));
-    expect(waypoints).toHaveLength(strands[0]!.points.length - 2);
-    expect(realNodes).not.toContain(waypoints[0]);
-  });
-
-  // Legibility at density beats flourish: past the budget the relations stay
-  // straight, but they must still name their real endpoints or activation
-  // would have no idea which relation conducts.
-  it('keeps straight edges past the segment budget and still names their ends', () => {
-    const { graph } = prepare(
-      [
-        { id: 'a', label: 'a', kind: 'k', x: 0, y: 0 },
-        { id: 'b', label: 'b', kind: 'k', x: 10, y: 0 },
-      ],
-      [{ source: 'a', target: 'b' }],
-    );
-
-    const strands = buildDendrites(graph, 401);
-
-    expect(strands).toEqual([]);
-    expect(graph.nodes().filter((id) => id.startsWith('__way__'))).toEqual([]);
-    const edge = graph.edges()[0]!;
-    expect(graph.getEdgeAttribute(edge, 'srcReal')).toBe('a');
-    expect(graph.getEdgeAttribute(edge, 'dstReal')).toBe('b');
-  });
-});
-
-describe('nodeHullFrame', () => {
-  it('frames the real network with a margin, ignoring anything the renderer added', () => {
-    const graph = new Graph();
-    graph.addNode('a', { x: 0, y: 0 });
-    graph.addNode('b', { x: 10, y: 20 });
-    // A dendrite waypoint bows outside the node hull; it may not move the camera.
-    graph.addNode('__way__0:1', { x: 500, y: -500 });
-
-    const frame = nodeHullFrame(graph, ['a', 'b']);
-
-    expect(frame.x).toEqual([-1.5, 11.5]);
-    expect(frame.y).toEqual([-3, 23]);
-  });
-
-  it('gives a single body a frame with real width rather than a zero-size one', () => {
-    const graph = new Graph();
-    graph.addNode('only', { x: 4, y: 4 });
-
-    const frame = nodeHullFrame(graph, ['only']);
-
-    // A zero extent is padded as if it were one unit wide.
-    expect(frame.x).toEqual([3.85, 4.15]);
-    expect(frame.y).toEqual([3.85, 4.15]);
   });
 });

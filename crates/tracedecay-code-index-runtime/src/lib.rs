@@ -52,10 +52,6 @@ pub mod project_reads;
 /// index crate for that one call.
 pub use tracedecay_code_index::parallelism;
 
-/// Historical `crate::code_index` / `crate::query` paths from the root move.
-pub(crate) use tracedecay_code_index as code_index;
-pub(crate) use tracedecay_query as query;
-
 /// Same abort authority re-exported by `tracedecay-daemon-service`.
 pub use tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE;
 

@@ -21,6 +21,7 @@ use crate::{
     RuntimeWriteAuthorityStage, WriterActorError, WriterStartError, WriterState,
     connection::{OpenedDatabaseFile, OpenedDatabaseFileError},
     exact_sql::{ExactSqlError, ExactSqlHandle},
+    ledger::{self, LedgerError},
     reader::{
         ExistingReaderLocator, ReaderAcquireError, ReaderCheckpointBlockers, ReaderPool,
         ReaderQueryExecutor, ReaderStartError,
@@ -815,10 +816,18 @@ impl ReaderQueryExecutor for RepositoryRuntimeReadExecutor {
         let coverage = match request.consistency() {
             ConsistencyModeV1::LatestAvailable => RuntimeReadCoverageV1::Latest { observed: None },
             ConsistencyModeV1::AtLeast { commit_sequence } => {
-                let observed = crate::ledger::current_watermark(snapshot, request.binding())
-                    .map_err(|error| {
-                        infrastructure(format!("read repository commit watermark: {error}"))
-                    })?;
+                let (observed, reason) =
+                    match ledger::current_watermark(snapshot, request.binding()) {
+                        Ok(observed) => (observed, UnavailableReasonV1::MissingAuthority),
+                        Err(LedgerError::StaleAuthority { .. }) => {
+                            (None, UnavailableReasonV1::WrongAuthorityEpoch)
+                        }
+                        Err(error) => {
+                            return Err(infrastructure(format!(
+                                "read repository commit watermark: {error}"
+                            )));
+                        }
+                    };
                 let coverage = single_shard_required_coverage_v1(
                     request.binding(),
                     *commit_sequence,
@@ -830,7 +839,7 @@ impl ReaderQueryExecutor for RepositoryRuntimeReadExecutor {
                 if observed.is_none() {
                     RuntimeReadCoverageV1::Unavailable {
                         coverage: Some(coverage),
-                        reason: UnavailableReasonV1::MissingAuthority,
+                        reason,
                     }
                 } else if coverage.is_complete() {
                     RuntimeReadCoverageV1::Complete { coverage }

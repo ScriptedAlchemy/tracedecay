@@ -1,50 +1,15 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use super::doctor_runtime_route_tests::initialize_test_project;
 use crate::daemon::{DaemonHandshake, StoreAdministration};
 use crate::mcp::McpServer;
 use crate::mcp::server::McpServerConstructionContext;
 use tracedecay_daemon_protocol::DaemonClientIdentity;
-use tracedecay_project::project::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
 static REGISTERED_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
-
-async fn initialize_test_project(
-    project_root: &Path,
-    profile_root: &Path,
-) -> tracedecay_runtime_core::storage::StoreLayout {
-    crate::register_runtime_ports().expect("runtime port registration");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(profile_root, std::fs::Permissions::from_mode(0o700))
-            .expect("secure fixture profile root");
-    }
-    let options = TraceDecayOpenOptions {
-        profile_root: Some(profile_root.to_path_buf()),
-        global_db_path: Some(profile_root.join("registry.db")),
-    };
-    let lifecycle = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
-        profile_root,
-        "truthful core Doctor fixture initialization",
-    )
-    .expect("acquire fixture lifecycle authority");
-    let _database_scope = tracedecay_runtime_core::db::enter_maintenance_database_scope(
-        &lifecycle,
-        profile_root,
-        "truthful core Doctor fixture initialization",
-    )
-    .expect("enter fixture maintenance database scope");
-    let initialized =
-        TraceDecay::init_with_exclusive_maintenance(project_root, options, &lifecycle)
-            .await
-            .expect("initialize core Doctor fixture");
-    let layout = initialized.store_layout().clone();
-    initialized.close();
-    layout
-}
 
 fn handshake(
     project_path: PathBuf,

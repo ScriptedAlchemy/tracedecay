@@ -120,7 +120,7 @@ async fn resume_attempts_refuses_a_live_holder_and_reports_the_lost_attempt() {
     assert_eq!(evidence.settled_status["terminal"]["outcome"], "succeeded");
 
     let harness =
-        ProductionProjectCompositionHarnessV1::open(isolation.path(), [project_root.clone()])
+        crate::support::seeded_composition::open(isolation.path(), [project_root.clone()])
             .await
             .expect("restart production composition after the provider holder was lost");
     let server = harness
@@ -446,12 +446,12 @@ async fn drive_live_daemon(
     project_root: PathBuf,
 ) -> (ProductionProjectCompositionHarnessV1, LiveDaemonEvidence) {
     let harness =
-        ProductionProjectCompositionHarnessV1::open(isolation.clone(), [project_root.clone()])
+        crate::support::seeded_composition::open(isolation.clone(), [project_root.clone()])
             .await
             .expect("production composition");
     configure_hold_provider(&harness, &project_root, &isolation).await;
     harness.shutdown().await;
-    let harness = ProductionProjectCompositionHarnessV1::open(isolation, [project_root.clone()])
+    let harness = crate::support::seeded_composition::open(isolation, [project_root.clone()])
         .await
         .expect("reopen production composition with the hold provider");
     let server = harness

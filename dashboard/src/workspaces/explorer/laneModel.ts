@@ -21,7 +21,6 @@ import type {
   ExplorerResultPageV1,
   ExplorerRunStateV1,
   ExplorerSourceIdV1,
-  ExplorerSourceOutcomeV1,
   ExplorerSourcePhaseV1,
   ExplorerSourceProgressV1,
   DashboardDomainStateV1,
@@ -563,32 +562,6 @@ export function runStateKind(state: ExplorerRunStateV1): DomainStateKind {
       return 'error';
     default: {
       const exhaustive: never = state;
-      return exhaustive;
-    }
-  }
-}
-
-/** The chip for one source's outcome as the coordinator reported it. */
-export function sourceOutcomeStateKind(outcome: ExplorerSourceOutcomeV1): DomainStateKind {
-  switch (outcome) {
-    case 'pending':
-      return 'loading';
-    case 'ready':
-      return 'ready';
-    case 'partial':
-      return 'partial';
-    case 'stale':
-      return 'stale';
-    case 'timed_out':
-      return 'timed_out';
-    case 'unavailable':
-      return 'unavailable';
-    case 'error':
-      return 'error';
-    case 'cancelled':
-      return 'cancelled';
-    default: {
-      const exhaustive: never = outcome;
       return exhaustive;
     }
   }

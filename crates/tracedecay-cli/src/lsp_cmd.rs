@@ -120,7 +120,13 @@ where
         }
 
         if let Some(frame) = pending_client_frame.as_deref() {
-            match send_client_frame_with_reconnect(session, frame).await? {
+            let sent = with_reconnect(session, async |session, deadline, cancellation| {
+                session
+                    .try_send_client_frame(frame, deadline, cancellation)
+                    .await
+            })
+            .await?;
+            match sent {
                 FrameSend::Sent => {
                     pending_client_frame = None;
                     continue;
@@ -345,13 +351,22 @@ async fn flush_daemon_frame<W: AsyncWrite + Unpin>(
     session: &mut DaemonLspSessionClient,
     stdout: &mut W,
 ) -> tracedecay_domain::errors::Result<bool> {
-    match poll_daemon_frame_with_reconnect(session).await? {
+    let polled = with_reconnect(session, async |session, deadline, cancellation| {
+        session.poll_daemon_frame(deadline, cancellation).await
+    })
+    .await?;
+    match polled {
         FramePoll::Frame(frame) => {
             let encoded = ContentLengthCodec::encode(&frame)
                 .map_err(|error| bridge_error("encode", error))?;
             stdout.write_all(&encoded).await?;
             stdout.flush().await?;
-            acknowledge_daemon_frame_with_reconnect(session).await?;
+            with_reconnect(session, async |session, deadline, cancellation| {
+                session
+                    .acknowledge_daemon_frame(deadline, cancellation)
+                    .await
+            })
+            .await?;
             Ok(false)
         }
         FramePoll::Pending => Ok(false),
@@ -359,64 +374,26 @@ async fn flush_daemon_frame<W: AsyncWrite + Unpin>(
     }
 }
 
-async fn send_client_frame_with_reconnect(
+/// Runs one session call under fresh request controls; an unavailable daemon
+/// connection is reconnected once and the call retried.
+async fn with_reconnect<T>(
     session: &mut DaemonLspSessionClient,
-    frame: &str,
-) -> tracedecay_domain::errors::Result<FrameSend> {
+    mut call: impl AsyncFnMut(
+        &mut DaemonLspSessionClient,
+        Deadline,
+        CancellationSignal,
+    ) -> Result<T, InvocationError>,
+) -> tracedecay_domain::errors::Result<T> {
     let (deadline, cancellation) = lsp_request_control().map_err(lsp_invocation_error)?;
-    match session
-        .try_send_client_frame(frame, deadline, cancellation)
-        .await
-    {
-        Ok(outcome) => Ok(outcome),
+    match call(session, deadline, cancellation).await {
         Err(InvocationError::Unavailable) => {
             reconnect_session(session).await?;
             let (deadline, cancellation) = lsp_request_control().map_err(lsp_invocation_error)?;
-            session
-                .try_send_client_frame(frame, deadline, cancellation)
+            call(session, deadline, cancellation)
                 .await
                 .map_err(lsp_invocation_error)
         }
-        Err(error) => Err(lsp_invocation_error(error)),
-    }
-}
-
-async fn poll_daemon_frame_with_reconnect(
-    session: &mut DaemonLspSessionClient,
-) -> tracedecay_domain::errors::Result<FramePoll> {
-    let (deadline, cancellation) = lsp_request_control().map_err(lsp_invocation_error)?;
-    match session.poll_daemon_frame(deadline, cancellation).await {
-        Ok(outcome) => Ok(outcome),
-        Err(InvocationError::Unavailable) => {
-            reconnect_session(session).await?;
-            let (deadline, cancellation) = lsp_request_control().map_err(lsp_invocation_error)?;
-            session
-                .poll_daemon_frame(deadline, cancellation)
-                .await
-                .map_err(lsp_invocation_error)
-        }
-        Err(error) => Err(lsp_invocation_error(error)),
-    }
-}
-
-async fn acknowledge_daemon_frame_with_reconnect(
-    session: &mut DaemonLspSessionClient,
-) -> tracedecay_domain::errors::Result<()> {
-    let (deadline, cancellation) = lsp_request_control().map_err(lsp_invocation_error)?;
-    match session
-        .acknowledge_daemon_frame(deadline, cancellation)
-        .await
-    {
-        Ok(()) => Ok(()),
-        Err(InvocationError::Unavailable) => {
-            reconnect_session(session).await?;
-            let (deadline, cancellation) = lsp_request_control().map_err(lsp_invocation_error)?;
-            session
-                .acknowledge_daemon_frame(deadline, cancellation)
-                .await
-                .map_err(lsp_invocation_error)
-        }
-        Err(error) => Err(lsp_invocation_error(error)),
+        outcome => outcome.map_err(lsp_invocation_error),
     }
 }
 

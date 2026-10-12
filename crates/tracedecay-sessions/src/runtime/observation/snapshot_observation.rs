@@ -22,8 +22,6 @@ use tracedecay_privacy::ObservationRecordParseErrorV1;
 
 mod admission;
 
-#[cfg(test)]
-pub use admission::snapshot_cursor_after;
 pub use admission::{
     SnapshotAdmissionBatch, SnapshotAdmissionRecord, SnapshotAdmissionRunner,
     SnapshotCaptureOutcome, advance_snapshot_coverage, advance_snapshot_coverage_maybe,

@@ -5,7 +5,7 @@
 
 use std::future::Future;
 use std::io::Write;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -49,26 +49,20 @@ pub use dispatch::worktree_id_for_layout as hook_worktree_id_for_layout;
 pub use tracedecay_hooks::NativeContextScoutLifecycleV1;
 
 pub use claude::{
-    evaluate_hook_decision, hook_claude_post_compact, hook_claude_post_tool_use,
-    hook_claude_session_start, hook_stop,
+    hook_claude_post_compact, hook_claude_post_tool_use, hook_claude_session_start, hook_stop,
 };
 pub use codex::{
-    codex_apply_patch_rel_paths, codex_project_root_from_event, codex_subagent_start_log_line,
-    codex_user_prompt_submit_context_for_event, codex_workspace_status_from_event,
-    evaluate_codex_subagent_start, hook_codex_post_compact, hook_codex_post_tool_use,
-    hook_codex_session_start, hook_codex_user_prompt_submit, record_codex_subagent_start,
+    codex_project_root_from_event, codex_user_prompt_submit_context_for_event,
+    codex_workspace_status_from_event, hook_codex_post_compact, hook_codex_post_tool_use,
+    hook_codex_session_start, hook_codex_user_prompt_submit,
 };
 pub use cursor::{
     CURSOR_CATCH_UP_INGEST_MAX_BYTES, cursor_project_root_from_event, cursor_session_start_json,
-    evaluate_cursor_subagent_start, hook_cursor_post_tool_use, hook_cursor_session_start,
+    hook_cursor_post_tool_use, hook_cursor_session_start,
 };
 pub use cursor_compact::{CursorPreCompactOutcome, cursor_pre_compact_via_daemon};
-pub use kiro::{evaluate_kiro_pre_tool_use, hook_kiro_prompt_submit, kiro_post_tool_use_rel_paths};
-pub use steering::{
-    CODEX_SESSION_CONTEXT_BUDGET, CURSOR_PLUGIN_SKILLS, CURSOR_SESSION_CONTEXT_BUDGET,
-    HookWorkspaceStatus, build_codex_session_context, build_codex_session_context_for_workspace,
-    build_cursor_session_context, cursor_staleness_hint,
-};
+pub use kiro::hook_kiro_prompt_submit;
+pub use steering::HookWorkspaceStatus;
 
 #[cfg(test)]
 use analytics::HOOK_ANALYTICS_FILENAME;
@@ -78,9 +72,9 @@ pub use analytics::{
     measure_host_event_payload_bytes,
 };
 use analytics::{
-    HookStdinRefusal, record_hint_analytics, record_hint_emitted, record_hook_analytics,
-    record_hook_invoked, record_hook_invoked_parsed, record_hook_stdin_refused,
-    record_native_hook_invoked_parsed, record_workspace_status_analytics,
+    HookStdinRefusal, record_hint_analytics, record_hint_emitted, record_hook_invoked,
+    record_hook_invoked_parsed, record_hook_stdin_refused, record_native_hook_invoked_parsed,
+    record_workspace_status_analytics,
 };
 
 pub fn aggregate_hook_completed_readiness(rows: &[Value]) -> HookCompletedReadinessDistributions {
@@ -999,25 +993,6 @@ pub async fn schedule_user_session_review(
     let _ = tokio::time::timeout(std::time::Duration::from_millis(25), hint).await;
 }
 
-const TRACEDECAY_RESEARCH_BLOCK_REASON: &str = "STOP: Use tracedecay MCP tools \
-(tracedecay_context, tracedecay_grep, tracedecay_search, tracedecay_callees, \
-tracedecay_callers, tracedecay_impact, tracedecay_files, tracedecay_affected) \
-instead of agents for code research. Route literal/regex text to tracedecay_grep, \
-symbol names to tracedecay_search, and concepts to tracedecay_context. TraceDecay \
-is faster and more precise for symbol relationships, call paths, and code structure. \
-Only use agents for code exploration if you have already tried tracedecay and it \
-cannot answer the question.";
-
-fn research_block_reason(hint: Option<ToolHint>) -> String {
-    let base = std::env::var("TRACEDECAY_RESEARCH_BLOCK_REASON")
-        .ok()
-        .unwrap_or_else(|| TRACEDECAY_RESEARCH_BLOCK_REASON.to_string());
-    hint.map_or_else(
-        || base.clone(),
-        |hint| format!("{}\n\n{}", base, format_tool_hint(&hint)),
-    )
-}
-
 #[cfg(test)]
 pub(crate) fn block_on_hook_test_runtime<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::runtime::Builder::new_multi_thread()
@@ -1253,22 +1228,6 @@ fn project_marker_exists(dir: &Path) -> bool {
         "tsconfig.json",
     ];
     MARKERS.iter().any(|marker| dir.join(marker).exists())
-}
-
-fn rel_under_root(root: &Path, abs: &Path) -> Option<String> {
-    let stripped = abs.strip_prefix(root).ok()?;
-    if stripped.as_os_str().is_empty() {
-        return None;
-    }
-    if stripped.components().any(|component| {
-        matches!(
-            component,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
-        )
-    }) {
-        return None;
-    }
-    Some(stripped.to_string_lossy().replace('\\', "/"))
 }
 
 fn text_field(value: &Value, keys: &[&str]) -> Option<String> {

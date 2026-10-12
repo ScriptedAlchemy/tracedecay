@@ -1,7 +1,15 @@
 use tracedecay_lcm::security::{
-    heartbeat_noise_reason, ignore_message_reason, pattern_matches, quarantine_reason,
-    should_externalize,
+    compile_message_patterns, ignore_message_reason_with_compiled, matches_any_pattern,
+    quarantine_reason, should_externalize,
 };
+
+fn ignore_message_reason(content: &str, patterns: &[&str]) -> Option<&'static str> {
+    ignore_message_reason_with_compiled(content, &compile_message_patterns(patterns))
+}
+
+fn pattern_matches(pattern: &str, value: &str) -> bool {
+    matches_any_pattern(&[pattern], value)
+}
 
 #[test]
 fn classifies_data_uri_and_long_base64_for_externalization() {
@@ -116,20 +124,6 @@ fn classifies_repetitive_assistant_output_for_quarantine() {
     );
 }
 #[test]
-fn heartbeat_noise_is_diagnostic_only() {
-    assert_eq!(
-        heartbeat_noise_reason("assistant", "Still working..."),
-        Some("heartbeat_progress")
-    );
-    assert!(!should_externalize(
-        "assistant",
-        Some("message"),
-        "Still working..."
-    ));
-    assert_eq!(heartbeat_noise_reason("user", "Still working..."), None);
-}
-
-#[test]
 fn ignore_and_stateless_patterns_use_hermes_style_globs() {
     assert!(pattern_matches("cron-*", "cron-20260414"));
     assert!(pattern_matches("tmp-session-*", "tmp-session-a"));
@@ -141,20 +135,13 @@ fn ignore_and_stateless_patterns_use_hermes_style_globs() {
 
 #[test]
 fn ignore_message_reason_classifies_only_configured_noise_without_body_leakage() {
+    assert_eq!(ignore_message_reason("Still working...", &[]), None);
     assert_eq!(
-        ignore_message_reason("assistant", "Still working...", &Vec::<String>::new()),
-        None
-    );
-    assert_eq!(
-        ignore_message_reason(
-            "user",
-            "Cronjob Response: noisy heartbeat",
-            &["Cronjob Response:*"]
-        ),
+        ignore_message_reason("Cronjob Response: noisy heartbeat", &["Cronjob Response:*"]),
         Some("ignore_message_pattern")
     );
     assert_eq!(
-        ignore_message_reason("user", "real user request", &["Cronjob Response:*"]),
+        ignore_message_reason("real user request", &["Cronjob Response:*"]),
         None
     );
 }
@@ -162,16 +149,11 @@ fn ignore_message_reason_classifies_only_configured_noise_without_body_leakage()
 #[test]
 fn ignore_message_patterns_use_regex_search_with_anchors_and_inline_flags() {
     assert_eq!(
-        ignore_message_reason(
-            "user",
-            "Cronjob Response: noisy heartbeat",
-            &["^Cronjob Response:"]
-        ),
+        ignore_message_reason("Cronjob Response: noisy heartbeat", &["^Cronjob Response:"]),
         Some("ignore_message_pattern")
     );
     assert_eq!(
         ignore_message_reason(
-            "user",
             "prefix Cronjob Response: quoted text",
             &["^Cronjob Response:"]
         ),
@@ -179,7 +161,6 @@ fn ignore_message_patterns_use_regex_search_with_anchors_and_inline_flags() {
     );
     assert_eq!(
         ignore_message_reason(
-            "user",
             "  >>> Cronjob Response: noisy heartbeat",
             &[r"(?is)^\s*(>>>\s*)?Cronjob Response"]
         ),

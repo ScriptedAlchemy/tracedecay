@@ -12,6 +12,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import {
   connectEvents,
   eventProjectId,
+  isRecord,
   type LiveActivityPulse,
   type SseConnection,
   type SseConnectionState,
@@ -385,7 +386,3 @@ export function useLiveActivity(): {
 }
 
 const EMPTY_PULSES: readonly LiveActivityPulse[] = [];
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
