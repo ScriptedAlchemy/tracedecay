@@ -7,21 +7,13 @@ use super::{LCM_SCAN_PAGE_ROWS, LcmError};
 pub(super) async fn all_payload_metadata_refs(
     conn: &(impl QueryExecutor + ?Sized),
 ) -> Result<BTreeSet<String>, LcmError> {
-    payload_metadata_refs(conn, "all", None).await
-}
-
-pub(super) async fn payload_metadata_refs_for_scope(
-    conn: &(impl QueryExecutor + ?Sized),
-    provider: &str,
-    session_id: Option<&str>,
-) -> Result<BTreeSet<String>, LcmError> {
-    payload_metadata_refs(conn, provider, session_id).await
+    payload_metadata_refs_for_scope(conn, "all", None).await
 }
 
 /// Collects payload-metadata references through `rowid` keyset pages: the
 /// whole `lcm_external_payloads` table exceeds what the `SQLite` runtime will
 /// materialize for one query on a long-lived profile.
-async fn payload_metadata_refs(
+pub(super) async fn payload_metadata_refs_for_scope(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     session_id: Option<&str>,
