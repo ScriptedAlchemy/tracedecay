@@ -15,8 +15,8 @@ use tracedecay_store::{
 
 use super::crud::list_project_memory_facts_controlled_tx;
 use super::primitives::{
-    OwnerKey, PROJECT_MEMORY_READ_OPERATION, ensure_project_memory_read_active,
-    project_memory_category_label, row_f64, row_string, storage_error, storage_message,
+    OwnerKey, PROJECT_MEMORY_READ_OPERATION, ensure_project_memory_read_active, row_f64,
+    row_string, storage_error, storage_message,
 };
 use super::projection::load_project_memory_projections_controlled_tx;
 use super::scoring::{project_memory_normalize_fts5_ranks, project_memory_tokens};
@@ -95,9 +95,7 @@ fn project_memory_category_filter(
         .category()
         .map_or_else(String::new, |category| {
             let index = values.len() + 1;
-            values.push(Value::Text(
-                project_memory_category_label(category).to_owned(),
-            ));
+            values.push(Value::Text(category.as_str().to_owned()));
             format!("AND json_extract(payloads.payload_json, '$.category') = ?{index}")
         })
 }
