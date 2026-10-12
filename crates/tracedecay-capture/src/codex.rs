@@ -998,7 +998,7 @@ fn response_item_tool_arguments(payload: &Value, item_kind: &str) -> Value {
     }
 }
 
-fn string_field(payload: &Value, key: &str) -> Option<String> {
+pub fn string_field(payload: &Value, key: &str) -> Option<String> {
     payload
         .get(key)
         .and_then(Value::as_str)
@@ -1006,7 +1006,7 @@ fn string_field(payload: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn nested_string_field(payload: &Value, pointer: &str) -> Option<String> {
+pub fn nested_string_field(payload: &Value, pointer: &str) -> Option<String> {
     payload
         .pointer(pointer)
         .and_then(Value::as_str)
