@@ -678,6 +678,7 @@ impl DaemonGitIndexTransactionServiceRegistry {
         tokio::task::spawn_blocking(move || {
             owner
                 .service
+                .port
                 .quarantine_preview_for_test(&preview, observed_at)
         })
         .await
