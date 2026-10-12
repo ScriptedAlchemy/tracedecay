@@ -3,17 +3,14 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-#[cfg(not(windows))]
-use cap_fs_ext::OpenOptionsMaybeDirExt;
 use cap_fs_ext::{DirExt, ambient_authority};
 use cap_std::fs::Dir;
-#[cfg(not(windows))]
-use cap_std::fs::OpenOptions;
 use tracedecay_contracts::storage::{
     IncidentDebrisArtifactV1, IncidentDebrisKindV1, IncidentDebrisScanV1,
     RETIRED_BRANCH_STORE_DIRECTORY, RelativeArtifactPathV1, StorageByteSizeV1, StoreKeyV1,
 };
 use tracedecay_domain::UtcMicros;
+use tracedecay_private_fs::capability_dir::sync_directory;
 
 use super::orphan_stores::StoreCensusEntry;
 
@@ -273,7 +270,7 @@ fn delete_loose_debris(capability: &StoreDebrisCapability, report: &mut Incident
     if retired_branch_store {
         removed |= delete_retired_branch_store(capability, report);
     }
-    if removed && sync_dir(&capability.root).is_err() {
+    if removed && sync_directory(&capability.root).is_err() {
         push_failure(
             report,
             &capability.store_id,
@@ -354,7 +351,7 @@ fn delete_retired_branch_store(
         report.collected = report.collected.saturating_add(1);
         report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(size_bytes);
     }
-    if removed && sync_dir(&listing.directory).is_err() {
+    if removed && sync_directory(&listing.directory).is_err() {
         push_failure(
             report,
             &capability.store_id,
@@ -397,21 +394,6 @@ fn application_artifact(
     .ok()
     .flatten()
     .filter(|artifact| artifact.kind == kind)
-}
-
-fn sync_dir(directory: &Dir) -> io::Result<()> {
-    #[cfg(windows)]
-    {
-        directory.dir_metadata().map(|_| ())
-    }
-    #[cfg(not(windows))]
-    {
-        let mut options = OpenOptions::new();
-        options.read(true).maybe_dir(true);
-        directory
-            .open_with(".", &options)
-            .and_then(|file| file.sync_all())
-    }
 }
 
 #[cfg(test)]
