@@ -339,14 +339,14 @@ async fn blocking_join_releases_registry_lock_and_reserves_evicted_and_opening_k
 
         let evicted_open = registry.begin_or_join_open(&evicted_request);
         let duplicate_open = registry.begin_or_join_open(&opening_request);
-        let lease = registry.acquire_lease(active_lease(&binding, "lease.eviction-race"));
-        (evicted_open, duplicate_open, lease)
+        let lookup = registry.lookup(&binding);
+        (evicted_open, duplicate_open, lookup)
     });
 
     control.close_gate.release();
     let initial_open = eviction.join().unwrap();
     inventory_thread.join().unwrap();
-    let Some((evicted_open, duplicate_open, lease)) = observations else {
+    let Some((evicted_open, duplicate_open, lookup)) = observations else {
         panic!("registry lock remained held during close_and_join");
     };
 
@@ -356,10 +356,7 @@ async fn blocking_join_releases_registry_lock_and_reserves_evicted_and_opening_k
             StoreRuntimeRegistryFailure::RuntimeEvictionInProgress { .. }
         )
     ));
-    assert!(matches!(
-        lease,
-        StoreRuntimeLeaseAcquireResult::Evicting { .. }
-    ));
+    assert!(matches!(lookup, StoreRuntimeLookup::Evicting { .. }));
     let initial_join = match initial_open {
         StoreRuntimeOpenBegin::Started(join) => join,
         other => panic!("reserved open did not start after eviction: {other:?}"),

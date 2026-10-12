@@ -170,7 +170,7 @@ impl RuntimeRegistrySnapshot {
                 health_lane_services: aggregate.health_lane_services,
                 queued_operations: aggregate.queued_operations,
                 queued_bytes: aggregate.queued_bytes,
-                total_leases: aggregate.total_leases,
+                total_leases: aggregate.client_leases,
                 wal_bytes: aggregate.wal_bytes,
                 memory_estimate_bytes: aggregate.memory_estimate_bytes,
                 global_queued_bytes: aggregate.global_queued_bytes,
@@ -213,12 +213,7 @@ impl RuntimeRegistryShardSnapshot {
                 }),
             queued_operations: telemetry.queued_operations,
             queued_bytes: telemetry.queued_bytes,
-            total_leases: u64::from(telemetry.leases.general_readers)
-                .saturating_add(u64::from(telemetry.leases.health_readers))
-                .saturating_add(u64::from(telemetry.leases.snapshots))
-                .saturating_add(u64::from(telemetry.leases.watchers))
-                .saturating_add(u64::from(telemetry.leases.schedulers))
-                .saturating_add(u64::from(telemetry.leases.clients)),
+            total_leases: u64::from(telemetry.client_leases),
             wal_bytes: telemetry.wal_bytes,
             memory_estimate_bytes: telemetry.memory_estimate_bytes,
             pinned_profile: telemetry.pinned_profile,

@@ -56,8 +56,8 @@ pub use graph::{
     CanonicalGraphStoreOwnerAttachmentV1, CanonicalGraphStoreOwnerRetirementTargetV1,
 };
 pub use leases::{
-    ProfileAuthorityPin, ProfileAuthorityPinResult, StoreRuntimeAccessMode,
-    StoreRuntimeLeaseAcquireResult, StoreRuntimeOpenMode, StoreRuntimeOpenRequest,
+    ProfileAuthorityPin, ProfileAuthorityPinResult, StoreRuntimeAccessMode, StoreRuntimeOpenMode,
+    StoreRuntimeOpenRequest,
 };
 #[cfg(test)]
 pub(crate) use open::StoreRuntimeOpenBegin;
@@ -1292,13 +1292,6 @@ pub enum StoreRuntimeRegistryFailure {
     },
     ProfileAuthorityShardIsNotProfile {
         shard_id: Box<StoreShardIdV1>,
-    },
-    InvalidLease {
-        message: String,
-    },
-    LeaseBindingMismatch {
-        expected: Box<StoreRuntimeBindingV1>,
-        actual: Box<StoreRuntimeBindingV1>,
     },
     LeaseRejected {
         message: String,
