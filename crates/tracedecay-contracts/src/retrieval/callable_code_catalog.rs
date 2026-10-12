@@ -324,7 +324,7 @@ fn code_query_description(kind: CallableCodeOperationKind) -> Option<&'static st
             "What does this call: outgoing calls of a known symbol node ID up to `maximum_depth` (default 3). A callee that is a trait method also returns the concrete impl methods reachable through the trait, tagged `dispatch_via_trait` with `dispatch_from`; set `resolve_trait_dispatch: false` for direct call edges only.",
         ),
         CallableCodeOperationKind::PhraseSearch => Some(
-            "Rank indexed code text against a query plus one or more required `phrases`, returning scored occurrences with the terms and phrases each matched, optionally limited to chosen fields. Use grep for every literal or regex match in the working tree, or code_exact_occurrence for where a name is defined.",
+            "Rank indexed code text against `query` plus one or more boosting `phrases`, returning scored occurrences with the terms and phrases each matched, optionally limited to chosen fields. Use grep for every literal or regex match in the working tree, or code_exact_occurrence for where a name is defined.",
         ),
         CallableCodeOperationKind::Facets => Some(
             "Count indexed symbols by kind, or files by language or path, in the latest code-index generation under an optional `scope.path_prefix`, one row per value. Use code_timeline for the generation's total file and symbol counts.",
@@ -336,10 +336,10 @@ fn code_query_description(kind: CallableCodeOperationKind) -> Option<&'static st
             "Return the symbol record (name, kind, file, lines, signature) for a known symbol node ID, or nothing when it falls outside `scope.path_prefix`; it does not resolve a use site to its declaration. Use qualified_name or find_exact_symbol when you have a name rather than a node ID.",
         ),
         CallableCodeOperationKind::TypeDefinition => Some(
-            "For a symbol node ID, return the node itself when its kind names a type (struct, enum, class, interface, trait, type), otherwise the types its outgoing TypeOf edges point to. Use code_type_hierarchy to walk the implementors and extenders of a type.",
+            "For a symbol node ID, return the node itself when its kind names a type (struct, enum, class, interface, trait, type), otherwise the types its outgoing TypeOf edges point to. Use type_hierarchy to walk the implementors and extenders of a type.",
         ),
         CallableCodeOperationKind::References => Some(
-            "List the symbols with a direct (one-hop) Calls, Uses, TypeOf, or Annotates edge into a known symbol node ID, marked partial when call targets or imports are unresolved. Use code_callers for inbound callers beyond one hop, or grep for textual mentions.",
+            "List the symbols with a direct (one-hop) Calls, Uses, TypeOf, or Annotates edge into a known symbol node ID, marked partial when call targets or imports are unresolved. Use callers for inbound callers beyond one hop, or grep for textual mentions.",
         ),
         CallableCodeOperationKind::SymbolSearch
         | CallableCodeOperationKind::QualifiedName

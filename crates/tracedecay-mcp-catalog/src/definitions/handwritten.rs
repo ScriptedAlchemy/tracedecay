@@ -404,7 +404,7 @@ pub(super) const HANDWRITTEN_TOOLS: &[HandwrittenTool] = &[
         "tracedecay_by_qualified_name",
         "Lookup by qualified name",
         "List the locations of up to 1000 symbols whose qualified name equals the input exactly and case-sensitively, covering overloads, generics, and separate impl blocks. \
-         Use find_exact_symbol for a bare name, or signature for the matches' signatures. \
+         Use find_exact_symbol for a bare name, qualified_name for full symbol records, or signature for the matches' signatures. \
          Useful for cross-run lookups where the content-hash node ID has changed.",
     ),
     read(
@@ -450,7 +450,7 @@ pub(super) const HANDWRITTEN_TOOLS: &[HandwrittenTool] = &[
     read(
         "tracedecay_fact_store_search",
         "Fact Store Search",
-        "Rank durable memory facts against free text by text match, holographic similarity, trust, and recency, with a `why` for each score. \
+        "Rank durable memory facts against free text by text match, holographic similarity, trust, recency, and retrieval count, with a `why` for each score. \
          Use fact_store_probe or fact_store_reason when you know the exact entity names.",
     ),
     read(
