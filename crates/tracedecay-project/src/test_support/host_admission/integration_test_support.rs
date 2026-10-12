@@ -126,24 +126,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    pub async fn project_git_sessions_for_test(
-        &self,
-        query: &tracedecay_sessions::runtime::git_correlation::SessionsForQuery,
-    ) -> Result<Vec<tracedecay_sessions::runtime::git_correlation::SessionGitCorrelationHit>> {
-        tracedecay_global_db::GlobalDbGitCorrelationStore::new(self.project_database_for_test()?)
-            .sessions_for_with_relation_and_presence(
-                query,
-                tracedecay_sessions::runtime::git_correlation::CommitRelationFilter::Produced,
-            )
-            .await
-            .map(|(hits, _)| hits)
-            .map_err(|error| TraceDecayError::Database {
-                operation: "query registered project git sessions".to_owned(),
-                message: error.to_string(),
-            })
-    }
-
-    #[doc(hidden)]
     pub async fn run_git_backfill_for_test(
         &self,
         analytics_events: &[tracedecay_global_db::AnalyticsEventRecord],

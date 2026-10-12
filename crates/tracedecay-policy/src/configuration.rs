@@ -82,20 +82,12 @@ pub enum ConfigurationMutationRecheckDispositionV1 {
     Indeterminate,
 }
 
-pub trait ConfigurationMutationPolicyEvaluator {
-    fn evaluate(
-        &self,
-        current: &ConfigurationMutationGrantSnapshotV1,
-        input: ConfigurationMutationRecheckInputV1<'_>,
-    ) -> ConfigurationMutationRecheckDispositionV1;
-}
-
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ConfigurationMutationPolicyEvaluatorV1;
 
-impl ConfigurationMutationPolicyEvaluator for ConfigurationMutationPolicyEvaluatorV1 {
+impl ConfigurationMutationPolicyEvaluatorV1 {
     #[tracing::instrument(name = "policy.configuration.evaluate", level = "trace", skip_all)]
-    fn evaluate(
+    pub fn evaluate(
         &self,
         current: &ConfigurationMutationGrantSnapshotV1,
         input: ConfigurationMutationRecheckInputV1<'_>,
