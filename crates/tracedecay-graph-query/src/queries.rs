@@ -219,12 +219,13 @@ impl<'a> GraphQueryManager<'a> {
                     })
             }
         }?;
+        let contained = self.edges_among(&occurrences, &[RelationEdgeKindV1::Contains])?;
         let classification = TestClassification::new(
             &symbols
                 .iter()
                 .filter_map(classified_symbol)
                 .collect::<Vec<_>>(),
-            &edges,
+            edges.iter().chain(&contained),
         );
         let live_targets = edges
             .iter()
@@ -486,12 +487,13 @@ impl<'a> GraphQueryManager<'a> {
         let _span = tracing::trace_span!("usecases.graph.health.edges").entered();
         let Some(paths) = logical_paths else {
             let edges = self.edges_among(&occurrences, &HEALTH_EDGE_KINDS)?;
+            let contained = self.edges_among(&occurrences, &[RelationEdgeKindV1::Contains])?;
             let classification = TestClassification::new(
                 &symbols
                     .iter()
                     .filter_map(classified_symbol)
                     .collect::<Vec<_>>(),
-                &edges,
+                edges.iter().chain(&contained),
             );
             return Ok((symbols, edges, classification));
         };
@@ -518,8 +520,11 @@ impl<'a> GraphQueryManager<'a> {
                 .iter()
                 .map(|symbol| symbol.occurrence.clone())
                 .collect::<Vec<_>>(),
-            &[RelationEdgeKindV1::Annotates],
+            &[RelationEdgeKindV1::Annotates, RelationEdgeKindV1::Contains],
         )?;
+        // `#[cfg(test)]` containment is intra-file, so every member a gate
+        // encloses sits inside the scoped census.
+        let contained = self.edges_among(&occurrences, &[RelationEdgeKindV1::Contains])?;
         let classification = TestClassification::new(
             &symbols
                 .iter()
@@ -527,7 +532,7 @@ impl<'a> GraphQueryManager<'a> {
                 .chain(&declarers)
                 .filter_map(classified_symbol)
                 .collect::<Vec<_>>(),
-            edges.iter().chain(&declarer_edges),
+            edges.iter().chain(&declarer_edges).chain(&contained),
         );
         Ok((symbols, edges, classification))
     }
