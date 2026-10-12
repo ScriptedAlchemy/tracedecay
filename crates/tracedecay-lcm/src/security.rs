@@ -65,43 +65,6 @@ pub fn quarantine_reason(role: &str, _kind: Option<&str>, content: &str) -> Opti
     }
 }
 
-pub fn heartbeat_noise_reason(role: &str, content: &str) -> Option<&'static str> {
-    if !matches!(
-        role.to_ascii_lowercase().as_str(),
-        "assistant" | "tool" | "system"
-    ) {
-        return None;
-    }
-    let normalized = collapse_whitespace(content);
-    if normalized.is_empty() || char_count_exceeds(&normalized, 256) {
-        return None;
-    }
-    let lower = normalized
-        .trim_matches(|ch: char| matches!(ch, '.' | '!' | '…' | '-' | ' '))
-        .to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        "still working"
-            | "working on it"
-            | "processing"
-            | "checking"
-            | "one moment"
-            | "ping"
-            | "heartbeat"
-            | "no update"
-    )
-    .then_some("heartbeat_progress")
-}
-
-pub fn ignore_message_reason<S: AsRef<str>>(
-    _role: &str,
-    content: &str,
-    ignore_message_patterns: &[S],
-) -> Option<&'static str> {
-    let patterns = compile_message_patterns(ignore_message_patterns);
-    ignore_message_reason_with_compiled(content, &patterns)
-}
-
 pub fn ignore_message_reason_with_compiled(
     content: &str,
     patterns: &CompiledPatternSet,
@@ -150,14 +113,6 @@ pub fn compile_session_patterns<S: AsRef<str>>(patterns: &[S]) -> CompiledPatter
 #[tracing::instrument(name = "sessions.lcm.compile_message", level = "trace", skip_all)]
 pub fn compile_message_patterns<S: AsRef<str>>(patterns: &[S]) -> CompiledPatternSet {
     compile_patterns(patterns, |pattern| Regex::new(pattern).ok())
-}
-
-pub fn pattern_matches(pattern: &str, value: &str) -> bool {
-    let pattern = pattern.trim();
-    if pattern.is_empty() {
-        return false;
-    }
-    Regex::new(&session_pattern_regex(pattern)).is_ok_and(|regex| regex.is_match(value))
 }
 
 fn session_pattern_regex(pattern: &str) -> String {
