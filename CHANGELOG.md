@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
+* **configuration:** write revision projections and reject malformed stored plans ([055922b](https://github.com/ScriptedAlchemy/tracedecay/commit/055922b7955352e22712cc0cec3fc2caa22334db))
+* **daemon:** stop replay consumers after cancelled project opens ([a023651](https://github.com/ScriptedAlchemy/tracedecay/commit/a0236512f856dfe65542ac3de3e6af8ccc40d9a5))
+* **sessions:** retain queued refresh requests across interrupted rekeys ([b0fa8fe](https://github.com/ScriptedAlchemy/tracedecay/commit/b0fa8fe018b5d6dc2f59a72c5961b14ebd5c1f44))
+* **storage:** derive read coverage from durable commit watermarks ([da0bf01](https://github.com/ScriptedAlchemy/tracedecay/commit/da0bf01cfb31856b6f12cb9349df1121dfb9425f))
+* **storage:** reject inbox effects the repository cannot apply ([2e90fb4](https://github.com/ScriptedAlchemy/tracedecay/commit/2e90fb42f3a885a85e5657b5a4797b5925e28860))
+
 * **configuration:** share receipt SQL and outbox lifecycle ([9c9b339](https://github.com/ScriptedAlchemy/tracedecay/commit/9c9b3397dd52928108fff6f334ed7290fb81511d))
 * **configuration:** share receipt SQL and outbox lifecycle ([7ee6faa](https://github.com/ScriptedAlchemy/tracedecay/commit/7ee6faa7bce0aa0dd23624e58f738e750b85758a))
 * **configuration:** validate receipt bindings across writers ([9bce658](https://github.com/ScriptedAlchemy/tracedecay/commit/9bce6587db3e435660ed1ae877931978ff9a9b50))
