@@ -3,7 +3,7 @@
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use super::dispatch_test_support::registered_lib_fixture;
+use super::dispatch_test_support::{registered_lib_fixture, tool_json};
 use super::*;
 
 #[tokio::test]
@@ -27,12 +27,7 @@ async fn runtime_mcp_marks_missing_generation_census_authority_unavailable() {
     )
     .await
     .expect("missing generation authority is an observed runtime state");
-    let payload: Value = serde_json::from_str(
-        result.value["content"][0]["text"]
-            .as_str()
-            .expect("runtime JSON text"),
-    )
-    .expect("parse runtime JSON");
+    let payload: Value = tool_json(&result);
 
     assert_eq!(
         payload["database"]["generation_census"],

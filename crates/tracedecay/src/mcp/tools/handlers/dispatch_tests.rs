@@ -206,12 +206,7 @@ async fn unmounted_files_graph_tool_owner_reports_a_real_orphaned_rust_source() 
     )
     .await
     .expect("the graph-tool owner computes the unmounted-files report");
-    let payload: Value = serde_json::from_str(
-        result.value["content"][0]["text"]
-            .as_str()
-            .expect("unmounted-files JSON text"),
-    )
-    .expect("unmounted-files JSON payload");
+    let payload: Value = tool_json(&result);
 
     assert_eq!(payload["unmounted_file_count"], 1);
     assert_eq!(payload["returned_count"], 1);
@@ -505,16 +500,8 @@ async fn status_and_runtime_share_cursor_session_ingest_authority() {
     )
     .await
     .unwrap();
-    let parse = |result: ToolResult| {
-        serde_json::from_str::<Value>(
-            result.value["content"][0]["text"]
-                .as_str()
-                .expect("tool JSON text"),
-        )
-        .expect("parse tool JSON")
-    };
-    let status = parse(status);
-    let runtime_result = parse(runtime_result);
+    let status = tool_json(&status);
+    let runtime_result = tool_json(&runtime_result);
 
     assert_eq!(
         status["session_ingest"],
@@ -679,15 +666,6 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
             });
         reader
     };
-    let status_output = |result: ToolResult| {
-        serde_json::from_str::<Value>(
-            result.value["content"][0]["text"]
-                .as_str()
-                .expect("status JSON text"),
-        )
-        .expect("parse status JSON")
-    };
-
     // Fresh daemon: the census answers, nothing has sealed yet.
     let rebuilding = dispatch_on_graph_authority(
         &cg,
@@ -702,7 +680,7 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     )
     .await
     .expect("status answers while nothing serves");
-    let rebuilding = status_output(rebuilding);
+    let rebuilding = tool_json(&rebuilding);
     assert_eq!(
         rebuilding["retrieval_serving"],
         json!({"status": "unavailable", "reason": "generation_rebuilding"}),
@@ -731,7 +709,7 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     )
     .await
     .expect("status answers while serving");
-    let serving = status_output(serving);
+    let serving = tool_json(&serving);
     assert_eq!(
         serving["retrieval_serving"],
         json!({"status": "serving", "freshness": "current"})
@@ -792,7 +770,7 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     )
     .await
     .expect("status answers for stale public branch generation");
-    let stale_public = status_output(stale_public);
+    let stale_public = tool_json(&stale_public);
     assert_eq!(stale_public["serving_branch"], json!("main"));
     assert_ne!(stale_public["branch_resolution"], json!("exact"));
 
@@ -810,7 +788,7 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     )
     .await
     .expect("status answers for current public branch generation");
-    let current_public = status_output(current_public);
+    let current_public = tool_json(&current_public);
     assert_eq!(current_public["active_branch"], json!("public-feature"));
     assert_eq!(current_public["serving_branch"], json!("public-feature"));
     assert_eq!(current_public["branch_resolution"], json!("exact"));
@@ -841,7 +819,7 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     )
     .await
     .expect("active project answers for current public branch generation");
-    let active_public = status_output(active_public);
+    let active_public = tool_json(&active_public);
     assert_eq!(
         active_public["branch"]["current_branch"],
         json!("public-feature")
@@ -914,7 +892,7 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     )
     .await
     .expect("status answers after branch publication");
-    let published_feature = status_output(published_feature);
+    let published_feature = tool_json(&published_feature);
     assert_eq!(published_feature["active_branch"], json!("feature"));
     assert_eq!(published_feature["serving_branch"], json!("feature"));
     assert_eq!(published_feature["branch_drifted"], json!(false));
@@ -953,7 +931,7 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     )
     .await
     .expect("compact status answers after branch publication");
-    let compact_feature = status_output(compact_feature);
+    let compact_feature = tool_json(&compact_feature);
     assert_eq!(compact_feature["active_branch"], json!("feature"));
     assert_eq!(compact_feature["serving_branch"], json!("feature"));
 
@@ -974,7 +952,7 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     )
     .await
     .expect("status answers while a stale seat is rebuilding");
-    let rebuilding = status_output(rebuilding);
+    let rebuilding = tool_json(&rebuilding);
     assert_eq!(
         rebuilding["retrieval_serving"]["freshness"],
         json!("last_complete_stale")
@@ -1020,7 +998,7 @@ async fn status_serving_branch_reports_the_lane_serving_truth() {
     )
     .await
     .expect("status answers for an aged seat");
-    let aged = status_output(aged);
+    let aged = tool_json(&aged);
     assert_eq!(aged["retrieval_serving"]["status"], json!("serving"));
     assert_eq!(
         aged["retrieval_serving"]["freshness"],
@@ -1546,12 +1524,7 @@ async fn pr_context_returns_git_evidence_while_verified_graph_is_unavailable() {
         .await
         .expect("transient verified graph failure must preserve available Git evidence");
         assert_ne!(result.semantic_error(), Some(true));
-        let payload = serde_json::from_str::<Value>(
-            result.value["content"][0]["text"]
-                .as_str()
-                .expect("PR context JSON text"),
-        )
-        .expect("parse PR context JSON");
+        let payload = tool_json(&result);
 
         assert_eq!(payload["base"], "main");
         assert_eq!(payload["head"], "HEAD");

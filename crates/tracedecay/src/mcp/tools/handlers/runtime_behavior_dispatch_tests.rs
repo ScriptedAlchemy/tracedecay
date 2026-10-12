@@ -11,7 +11,9 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use super::dispatch_test_support::{dispatch_on_graph_authority, registered_lib_fixture};
+use super::dispatch_test_support::{
+    dispatch_on_graph_authority, registered_lib_fixture, tool_json,
+};
 use super::*;
 
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
@@ -40,12 +42,7 @@ async fn runtime_payload(cg: &TraceDecay, args: Value) -> Value {
     .await
     .expect("tracedecay_runtime call");
     assert_eq!(result.value["content"][0]["type"], "text");
-    serde_json::from_str(
-        result.value["content"][0]["text"]
-            .as_str()
-            .expect("runtime JSON text"),
-    )
-    .expect("parse runtime JSON")
+    tool_json(&result)
 }
 
 async fn runtime_fixture(dir: &TempDir, name: &str) -> TraceDecay {

@@ -4,7 +4,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use serde_json::{Value, json};
+use serde_json::json;
 use tempfile::TempDir;
 use tracedecay_contracts::retained_surfaces::{
     AutomationRunRequestV1, AutomationTaskRequestV1, FactStoreCurateResultV1,
@@ -24,7 +24,7 @@ use tracedecay_domain::{
 };
 use tracedecay_tool_catalog::EffectClass;
 
-use super::dispatch_test_support::registered_lib_fixture;
+use super::dispatch_test_support::{registered_lib_fixture, tool_json};
 use super::*;
 
 use tracedecay_domain::test_fixtures::digest;
@@ -81,15 +81,6 @@ fn deadline_from_now(offset: Duration) -> Deadline {
         tracedecay_contracts::now_micros().0.saturating_add(offset),
     ))
     .expect("fixture deadline")
-}
-
-fn mcp_payload(result: ToolResult) -> Value {
-    serde_json::from_str(
-        result.value["content"][0]["text"]
-            .as_str()
-            .expect("retained MCP JSON result"),
-    )
-    .expect("retained MCP JSON envelope")
 }
 
 fn fact_store_curate_run(
@@ -394,7 +385,7 @@ async fn fact_store_curate_forwards_only_bounds_and_preserves_canonical_success(
     )
     .await
     .expect("canonical fact-store curation result");
-    let payload = mcp_payload(result);
+    let payload = tool_json(&result);
 
     assert_eq!(executor.calls.load(Ordering::SeqCst), 1);
     assert_eq!(payload["request_id"], request_id.as_str());
@@ -877,7 +868,7 @@ async fn a_stale_refresh_frontier_reaches_mcp_as_typed_detail() {
                 assert!(text.contains(line), "missing `{line}` in:\n{text}");
             }
         } else {
-            assert_eq!(mcp_payload(result)["problem"], problem);
+            assert_eq!(tool_json(&result)["problem"], problem);
         }
     }
     cg.close();

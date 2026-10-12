@@ -13,6 +13,7 @@ use tracedecay_domain::UtcMicros;
 use tracedecay_mcp::handle_work;
 use tracedecay_mcp::handlers::work::work_operation_for_tool;
 
+use super::dispatch_test_support::tool_json;
 use super::invoke_admitted_work_operation;
 
 /// Refuses the request after recording its closed route. Both transports
@@ -71,13 +72,6 @@ async fn response_json(response: axum::response::Response) -> Value {
         .await
         .expect("bounded Work HTTP response");
     serde_json::from_slice(&body).expect("JSON Work HTTP response")
-}
-
-fn mcp_json(result: tracedecay_mcp::ToolResult) -> Value {
-    let text = result.value["content"][0]["text"]
-        .as_str()
-        .expect("MCP Work JSON content");
-    serde_json::from_str(text).expect("MCP Work JSON envelope")
 }
 
 #[tokio::test]
@@ -156,7 +150,7 @@ async fn read_mutation_and_evidence_preserve_the_typed_http_work_envelope() {
 
         assert_eq!(mcp.semantic_error(), Some(true));
         assert_eq!(
-            mcp_json(mcp),
+            tool_json(&mcp),
             http,
             "{tool_name} MCP envelope drifted from HTTP"
         );

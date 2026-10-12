@@ -174,12 +174,7 @@ async fn completed_primary_search_is_not_retried_after_graph_admission_case() {
     )
     .await
     .expect("first complete search outcome must remain authoritative");
-    let payload: Value = serde_json::from_str(
-        result.value["content"][0]["text"]
-            .as_str()
-            .expect("single-attempt search JSON text"),
-    )
-    .expect("single-attempt search JSON payload");
+    let payload: Value = crate::mcp::tools::handlers::dispatch_test_support::tool_json(&result);
 
     assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
     assert_eq!(payload["results"].as_array().map(Vec::len), Some(1));
@@ -234,12 +229,7 @@ async fn generation_mismatch_retry_cannot_erase_a_complete_sparse_search_case() 
     )
     .await
     .expect("failed refresh must preserve the first complete search");
-    let payload: Value = serde_json::from_str(
-        result.value["content"][0]["text"]
-            .as_str()
-            .expect("generation mismatch JSON text"),
-    )
-    .expect("generation mismatch JSON payload");
+    let payload: Value = crate::mcp::tools::handlers::dispatch_test_support::tool_json(&result);
 
     assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
     assert_eq!(payload["results"].as_array().map(Vec::len), Some(1));

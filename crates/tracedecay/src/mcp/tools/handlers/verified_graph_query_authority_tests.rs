@@ -4,7 +4,8 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use super::dispatch_test_support::{
-    SelectorProfile, dispatch_on_graph_authority, registered_lib_fixture, verified_graph_options,
+    SelectorProfile, dispatch_on_graph_authority, registered_lib_fixture, tool_json,
+    verified_graph_options,
 };
 use super::*;
 
@@ -277,12 +278,7 @@ async fn changelog_reports_absent_query_port_as_typed_coverage() {
     )
     .await
     .expect("changelog must answer without a mounted verified graph query");
-    let payload: serde_json::Value = serde_json::from_str(
-        result.value["content"][0]["text"]
-            .as_str()
-            .expect("changelog json text"),
-    )
-    .expect("changelog payload");
+    let payload: serde_json::Value = tool_json(&result);
     assert_eq!(payload["status"], "partial");
     assert_eq!(payload["symbol_changes_coverage"]["status"], "unavailable");
     assert_eq!(
@@ -318,12 +314,7 @@ async fn search_and_context_report_absent_query_port_as_typed_evidence() {
         let error = dispatch_on_graph_authority(&cg, tool_name, args, options.clone()).await;
         match error {
             Ok(result) => {
-                let payload: serde_json::Value = serde_json::from_str(
-                    result.value["content"][0]["text"]
-                        .as_str()
-                        .expect("json text"),
-                )
-                .expect("payload");
+                let payload: serde_json::Value = tool_json(&result);
                 assert_eq!(
                     payload["verified_graph_evidence"]["reason_code"],
                     "verified-code-graph-read-unavailable",

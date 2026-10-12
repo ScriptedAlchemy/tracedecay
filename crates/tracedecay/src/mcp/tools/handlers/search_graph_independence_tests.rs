@@ -11,7 +11,8 @@ use tracedecay_domain::{
 };
 
 use super::dispatch_test_support::{
-    SelectorProfile, dispatch_on_graph_authority, registered_lib_fixture, verified_graph_options,
+    SelectorProfile, dispatch_on_graph_authority, registered_lib_fixture, tool_json,
+    verified_graph_options,
 };
 use super::*;
 
@@ -229,12 +230,7 @@ async fn tracedecay_search_preserves_lexical_results_when_graph_admission_is_mis
     )
     .await
     .expect("missing graph admission must not erase lexical search");
-    let payload: Value = serde_json::from_str(
-        result.value["content"][0]["text"]
-            .as_str()
-            .expect("search JSON text"),
-    )
-    .expect("search JSON payload");
+    let payload: Value = tool_json(&result);
 
     assert_eq!(payload["results"].as_array().map(Vec::len), Some(1));
     assert_eq!(payload["results"][0]["display"]["name"], "LexicalWidget");
@@ -285,12 +281,7 @@ async fn tracedecay_search_refuses_foreign_generation_graph_evidence_without_era
     )
     .await
     .expect("foreign graph generation must remain optional for lexical search");
-    let payload: Value = serde_json::from_str(
-        result.value["content"][0]["text"]
-            .as_str()
-            .expect("mismatch search JSON text"),
-    )
-    .expect("mismatch search JSON payload");
+    let payload: Value = tool_json(&result);
 
     assert_eq!(payload["results"].as_array().map(Vec::len), Some(1));
     assert_eq!(payload["results"][0]["display"]["name"], "LexicalWidget");
@@ -342,12 +333,7 @@ async fn tracedecay_search_does_not_wait_for_slow_graph_admission() {
     .await
     .expect("primary search must not wait for pending graph admission")
     .expect("pending graph admission must not erase lexical search");
-    let payload: Value = serde_json::from_str(
-        result.value["content"][0]["text"]
-            .as_str()
-            .expect("slow graph search JSON text"),
-    )
-    .expect("slow graph search JSON payload");
+    let payload: Value = tool_json(&result);
 
     assert_eq!(payload["results"].as_array().map(Vec::len), Some(1));
     assert_eq!(payload["results"][0]["display"]["name"], "LexicalWidget");
@@ -420,12 +406,7 @@ async fn tracedecay_context_preserves_fallback_results_while_graph_warms() {
     )
     .await
     .expect("a warming graph lane must not erase fallback context");
-    let payload: Value = serde_json::from_str(
-        result.value["content"][0]["text"]
-            .as_str()
-            .expect("context JSON text"),
-    )
-    .expect("context JSON payload");
+    let payload: Value = tool_json(&result);
 
     assert_eq!(
         payload["code_generation"],
@@ -497,12 +478,7 @@ async fn tracedecay_context_waits_for_requested_code_graph_admission() {
     )
     .await
     .expect("requested code keeps the graph admission result");
-    let payload: Value = serde_json::from_str(
-        result.value["content"][0]["text"]
-            .as_str()
-            .expect("context JSON text"),
-    )
-    .expect("context JSON payload");
+    let payload: Value = tool_json(&result);
 
     assert_eq!(payload["search_matches"].as_array().map(Vec::len), Some(1));
     assert_eq!(payload["symbols"].as_array().map(Vec::len), Some(1));
@@ -557,12 +533,7 @@ async fn tracedecay_context_hydrates_search_matches_when_catalog_is_warming() {
     )
     .await
     .expect("warming catalog must hydrate from search matches");
-    let payload: Value = serde_json::from_str(
-        result.value["content"][0]["text"]
-            .as_str()
-            .expect("warming catalog JSON text"),
-    )
-    .expect("warming catalog JSON payload");
+    let payload: Value = tool_json(&result);
 
     assert_eq!(payload["freshness"], json!({"state": "fresh"}));
     assert_eq!(payload["search_matches"].as_array().map(Vec::len), Some(1));
@@ -609,12 +580,7 @@ async fn tracedecay_context_hydrates_search_matches_when_catalog_is_warming() {
     )
     .await
     .expect("partial code must not erase the lexical match");
-    let clipped: Value = serde_json::from_str(
-        clipped.value["content"][0]["text"]
-            .as_str()
-            .expect("context JSON text"),
-    )
-    .expect("context JSON payload");
+    let clipped: Value = tool_json(&clipped);
     assert_eq!(clipped["search_matches"], payload["search_matches"]);
     assert_eq!(clipped["symbols"], payload["symbols"]);
     assert_eq!(clipped["code"], json!([]));
@@ -669,12 +635,7 @@ async fn tracedecay_context_keeps_matches_without_inventing_a_declaration_extent
     )
     .await
     .expect("a lexical match remains useful without declaration authority");
-    let payload: Value = serde_json::from_str(
-        result.value["content"][0]["text"]
-            .as_str()
-            .expect("attested window JSON text"),
-    )
-    .expect("attested window JSON payload");
+    let payload: Value = tool_json(&result);
 
     assert_eq!(payload["symbols"].as_array().map(Vec::len), Some(1));
     assert_eq!(payload["search_matches"].as_array().map(Vec::len), Some(1));
@@ -738,12 +699,7 @@ async fn tracedecay_context_reports_code_unavailable_when_attested_source_is_mis
     )
     .await
     .expect("missing source must report typed unavailability");
-    let payload: Value = serde_json::from_str(
-        result.value["content"][0]["text"]
-            .as_str()
-            .expect("missing source JSON text"),
-    )
-    .expect("missing source JSON payload");
+    let payload: Value = tool_json(&result);
 
     assert_eq!(payload["symbols"].as_array().map(Vec::len), Some(1));
     assert_eq!(payload["symbols"][0]["start_line"], 0);
@@ -804,12 +760,7 @@ async fn tracedecay_context_marks_code_unavailable_when_symbol_lines_drift() {
     )
     .await
     .expect("drifted source must report typed unavailability");
-    let payload: Value = serde_json::from_str(
-        result.value["content"][0]["text"]
-            .as_str()
-            .expect("drifted source JSON text"),
-    )
-    .expect("drifted source JSON payload");
+    let payload: Value = tool_json(&result);
 
     assert_eq!(payload["symbols"].as_array().map(Vec::len), Some(1));
     assert_eq!(payload["symbols"][0]["start_line"], 1);
@@ -894,12 +845,7 @@ async fn tracedecay_context_excludes_file_hits_from_symbols_but_serves_their_win
     )
     .await
     .expect("file hit must not invent a symbol location");
-    let payload: Value = serde_json::from_str(
-        result.value["content"][0]["text"]
-            .as_str()
-            .expect("file hit JSON text"),
-    )
-    .expect("file hit JSON payload");
+    let payload: Value = tool_json(&result);
 
     assert_eq!(payload["search_matches"].as_array().map(Vec::len), Some(2));
     assert_eq!(payload["symbols"].as_array().map(Vec::len), Some(1));
@@ -956,12 +902,7 @@ async fn tracedecay_context_returns_typed_pending_coverage_when_every_code_lane_
     )
     .await
     .expect("cold code lanes must return typed partial context");
-    let payload: Value = serde_json::from_str(
-        result.value["content"][0]["text"]
-            .as_str()
-            .expect("cold context JSON text"),
-    )
-    .expect("cold context JSON payload");
+    let payload: Value = tool_json(&result);
 
     assert!(payload.get("code_generation").is_none());
     assert!(payload.get("search_matches").is_none());
@@ -1014,12 +955,7 @@ async fn tracedecay_context_preserves_stale_lane_coverage_markers() {
     )
     .await
     .expect("serve-stale context must still answer");
-    let payload: Value = serde_json::from_str(
-        result.value["content"][0]["text"]
-            .as_str()
-            .expect("stale context JSON text"),
-    )
-    .expect("stale context JSON payload");
+    let payload: Value = tool_json(&result);
 
     assert_eq!(
         payload["code_generation"],

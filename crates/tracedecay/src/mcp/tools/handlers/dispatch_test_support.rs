@@ -362,6 +362,14 @@ impl SelectorProfile {
     }
 }
 
+/// The JSON document a `format: json` tool result carries as its text.
+pub(super) fn tool_json(result: &ToolResult) -> Value {
+    let text = result.value["content"][0]["text"]
+        .as_str()
+        .expect("tool result text");
+    serde_json::from_str(text).expect("tool result JSON")
+}
+
 /// Registers `<root>/<name>`, whose only source is `src/lib.rs` holding
 /// `source`, as `project_id` in the isolated profile under `root`. The caller
 /// owns `root` and must hold the returned runtime while it uses the graph.
