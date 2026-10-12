@@ -460,7 +460,7 @@ pub use work_attempt_effect::{
 };
 pub use work_catalog::{
     WORK_APPLICATION_OPERATION_IDS_V1, work_executable_binding, work_executable_binding_registry,
-    work_executable_catalog_digest,
+    work_executable_catalog_digest, work_profile_eligibility,
 };
 pub use work_duplicate_adjudication::{
     MAX_WORK_DUPLICATE_CLASSIFICATION_ATTEMPTS_V1, PrepareWorkDuplicateAdjudicationRequestV1,
@@ -572,6 +572,7 @@ pub use work_topology_view::{
 pub use workflow_admission::WorkflowCatalogAdmissionError;
 pub use workflow_catalog::{
     WORKFLOW_APPLICATION_OPERATION_IDS, workflow_executable_binding_registry,
+    workflow_profile_eligibility,
 };
 pub use workflow_coordination::{
     TASK_HANDOFF_LIFETIME_MICROS, TaskHandoffAuthorityError, TaskHandoffAuthorityPort,

@@ -3,12 +3,22 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, LazyLock, RwLock};
 
+use crate::handlers::multi_root_tool_name;
 use crate::{
     ToolDefinition, context_description, context_warming_description, get_tool_definitions,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tracedecay_tool_catalog::{CapabilityId, FeatureId, ProfileId, ScopeDimension};
+use tracedecay_api::{WorkOperation, WorkflowOperation};
+use tracedecay_contracts::catalog_composition::CatalogProfileName;
+use tracedecay_contracts::multi_root::{
+    MultiRootApplicationOperation, multi_root_capability_manifest,
+};
+use tracedecay_mcp_catalog::{work_tool_name, workflow_tool_name};
+use tracedecay_tool_catalog::{
+    BindingSurface, CapabilityId, CatalogSnapshotV1, FeatureId, ProfileId, ScopeDimension,
+    SurfaceBindingV1,
+};
 
 use super::dispatch::McpDispatchMetadataError;
 
@@ -102,15 +112,9 @@ fn compose_node_independent_definitions(
             available_scope,
         )
         .into_iter()
-        .map(|(binding, _)| format!("tracedecay_{}", binding.operation().as_str()))
+        .map(|(binding, _)| mcp_tool_name(binding))
         .collect::<BTreeSet<_>>();
-    let catalog_operations = catalog
-        .capabilities()
-        .flat_map(tracedecay_tool_catalog::CapabilityManifestV1::binding_ids)
-        .filter_map(|binding_id| catalog.binding(binding_id))
-        .filter(|binding| binding.surface() == tracedecay_tool_catalog::BindingSurface::Mcp)
-        .map(|binding| format!("tracedecay_{}", binding.operation().as_str()))
-        .collect::<BTreeSet<_>>();
+    let catalog_operations = catalog_mcp_tool_names(catalog);
     let mut definitions = get_tool_definitions()?
         .into_iter()
         .filter(|definition| {
@@ -120,6 +124,64 @@ fn compose_node_independent_definitions(
         .collect::<Vec<_>>();
     super::dispatch::attach_dispatch_metadata(&mut definitions)?;
     Ok(definitions)
+}
+
+fn mcp_tool_name(binding: &SurfaceBindingV1) -> String {
+    format!("tracedecay_{}", binding.operation().as_str())
+}
+
+/// Every MCP tool name the catalog binds, whatever its profile.
+fn catalog_mcp_tool_names(catalog: &CatalogSnapshotV1) -> BTreeSet<String> {
+    catalog
+        .capabilities()
+        .flat_map(tracedecay_tool_catalog::CapabilityManifestV1::binding_ids)
+        .filter_map(|binding_id| catalog.binding(binding_id))
+        .filter(|binding| binding.surface() == BindingSurface::Mcp)
+        .map(mcp_tool_name)
+        .collect()
+}
+
+fn profile_mcp_tool_names(catalog: &CatalogSnapshotV1, profile_id: &ProfileId) -> BTreeSet<String> {
+    catalog
+        .profile_bindings(profile_id, BindingSurface::Mcp, 1, &BTreeSet::new())
+        .into_iter()
+        .map(|(binding, _)| mcp_tool_name(binding))
+        .collect()
+}
+
+/// Tool names the default `tools/list` carries that `profile` does not list:
+/// catalog bindings the profile hides, and Work, Workflow, and multi-root
+/// tools whose manifest eligibility excludes it. Those families are mounted
+/// beside the catalog snapshot, so the snapshot cannot hide them. Tools with
+/// no manifest stay listed under every profile.
+pub fn catalog_profile_withheld_tool_names(
+    profile: &CatalogProfileName,
+) -> Result<BTreeSet<String>, McpDispatchMetadataError> {
+    let catalog =
+        tracedecay_daemon_service::application_surface::application_surface_binding_catalog_ref()?;
+    let profile_id = profile.profile_id();
+    let default_profile = ProfileId::new(tracedecay_contracts::APPLICATION_DEFAULT_PROFILE_ID)
+        .map_err(|error| McpDispatchMetadataError::Initialization(error.to_string()))?;
+    let listed = profile_mcp_tool_names(catalog, profile_id);
+    let mut withheld = profile_mcp_tool_names(catalog, &default_profile)
+        .into_iter()
+        .filter(|name| !listed.contains(name))
+        .collect::<BTreeSet<_>>();
+    if !tracedecay_contracts::work_profile_eligibility()?.contains(profile_id) {
+        withheld.extend(WorkOperation::ALL.into_iter().map(work_tool_name));
+    }
+    if !tracedecay_contracts::workflow_profile_eligibility()?.contains(profile_id) {
+        withheld.extend(WorkflowOperation::ALL.into_iter().map(workflow_tool_name));
+    }
+    for operation in MultiRootApplicationOperation::ALL {
+        if !multi_root_capability_manifest(operation)?
+            .profile_eligibility()
+            .contains(profile_id)
+        {
+            withheld.insert(multi_root_tool_name(operation));
+        }
+    }
+    Ok(withheld)
 }
 
 fn discovery_cache_get_or_insert(
@@ -391,6 +453,55 @@ mod tests {
                     && definition.name != "tracedecay_git_preview"
             }),
             "catalog-bound tools require explicit capability authority"
+        );
+    }
+
+    fn withheld_under(profile: &str) -> BTreeSet<String> {
+        let catalog =
+            tracedecay_daemon_service::application_surface::application_surface_binding_catalog_ref()
+                .expect("binding catalog");
+        catalog_profile_withheld_tool_names(
+            &CatalogProfileName::parse(catalog, profile).expect("catalog profile"),
+        )
+        .expect("withheld tool names")
+    }
+
+    #[test]
+    fn the_default_profile_withholds_nothing() {
+        assert_eq!(withheld_under("default"), BTreeSet::new());
+    }
+
+    #[test]
+    fn compact_withholds_every_mounted_family_tool_and_keeps_its_own_bindings() {
+        let withheld = withheld_under("compact");
+        let listed = get_tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect::<BTreeSet<_>>();
+        let family = listed
+            .iter()
+            .filter(|name| {
+                name.starts_with("tracedecay_work_")
+                    || name.starts_with("tracedecay_workflow_")
+                    || name.starts_with("tracedecay_multi_root_")
+            })
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert!(
+            family.len() > 40,
+            "Work, Workflow, and multi-root are mounted: {family:?}"
+        );
+        let unwithheld = family.difference(&withheld).collect::<Vec<_>>();
+        assert!(unwithheld.is_empty(), "{unwithheld:?}");
+        let unlisted = withheld.difference(&listed).collect::<Vec<_>>();
+        assert!(
+            unlisted.is_empty(),
+            "every withheld name is a real tool: {unlisted:?}"
+        );
+        assert!(
+            !withheld.contains("tracedecay_source_lines"),
+            "a compact binding stays listed"
         );
     }
 

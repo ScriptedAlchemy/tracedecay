@@ -23,6 +23,7 @@ use super::{
     REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE, connect_to_current_daemon_within,
     json_rpc_error_is_project_open_retryable, next_daemon_response_line, write_daemon_preamble,
 };
+use tracedecay_contracts::catalog_composition::CatalogProfileName;
 use tracedecay_daemon_protocol::{DAEMON_TOOL_RESPONSE_GRACE, version_skew_action};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_mcp::JsonRpcRequest;
@@ -76,15 +77,18 @@ pub async fn should_proxy_serve_to_daemon(
 }
 
 /// `full_tool_list` serves the daemon's catalog unchanged; otherwise tools the
-/// catalog does not mark always-loaded are listed as stubs.
+/// catalog does not mark always-loaded are listed as stubs. `catalog_profile`
+/// omits the tools that profile excludes; `None` lists the default profile.
 #[tracing::instrument(name = "daemon.engine.proxy.stdio", level = "trace", skip_all)]
 pub async fn proxy_stdio_to_daemon(
     socket_path: &Path,
     handshake: &DaemonHandshake,
     replay_line: Option<String>,
     full_tool_list: bool,
+    catalog_profile: Option<&CatalogProfileName>,
     repeated_query_hints: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
+    let surface = ToolSurface::new(full_tool_list, catalog_profile)?;
     let mut transport = StdioTransport::new();
     proxy_transport_to_daemon_with_drain_bound(
         socket_path,
@@ -92,7 +96,7 @@ pub async fn proxy_stdio_to_daemon(
         replay_line,
         &mut transport,
         None,
-        ToolSurface::new(full_tool_list),
+        surface,
         repeated_query_hints,
     )
     .await
@@ -145,7 +149,7 @@ pub async fn proxy_transport_to_daemon(
         replay_line,
         transport,
         None,
-        ToolSurface::new(true),
+        ToolSurface::new(true, None)?,
         tokio::sync::watch::channel(false).1,
     )
     .await

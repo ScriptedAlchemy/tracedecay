@@ -34,6 +34,8 @@ use application::*;
 pub use application_schema::mcp_input_schema;
 use application_schema::{canonical_application_request_schema, project_input_schema};
 use handwritten::{HANDWRITTEN_TOOLS, HandwrittenTool, ToolSchema};
+pub use work::work_tool_name;
+pub use workflow::workflow_tool_name;
 
 /// Build one handwritten row's definition with `input_schema` and no `_meta`.
 fn handwritten_definition(tool: &HandwrittenTool, input_schema: Value) -> ToolDefinition {

@@ -4,6 +4,7 @@ use std::io::Write;
 use std::path::Path;
 use tracedecay_runtime_core::config::ProfileRoot;
 
+use tracedecay_contracts::catalog_composition::CatalogProfileName;
 use tracedecay_domain::errors::Result;
 use tracedecay_project::project::TraceDecay;
 
@@ -64,6 +65,16 @@ pub fn sanitize_serve_path_arg(path: Option<String>) -> Option<String> {
     None
 }
 
+/// Parses `--catalog-profile` against the catalog snapshot's own profiles.
+/// Only a serve given the flag composes the snapshot.
+pub(crate) fn parse_catalog_profile(
+    name: &str,
+) -> std::result::Result<CatalogProfileName, Box<dyn std::error::Error + Send + Sync>> {
+    let catalog =
+        tracedecay_daemon_service::application_surface::application_surface_binding_catalog_ref()?;
+    Ok(CatalogProfileName::parse(catalog, name)?)
+}
+
 /// Runs the `serve` command as a database-free proxy to the managed daemon.
 #[tracing::instrument(name = "cli.serve.proxy", level = "trace", skip_all)]
 pub async fn run_serve(
@@ -71,6 +82,7 @@ pub async fn run_serve(
     path_arg: Option<String>,
     timings: bool,
     full_tool_list: bool,
+    catalog_profile: Option<CatalogProfileName>,
 ) -> Result<()> {
     let original_cwd = std::env::current_dir().ok();
     let socket_path = tracedecay_daemon_control::default_socket_path(profile.data_dir())?;
@@ -101,6 +113,7 @@ pub async fn run_serve(
         &handshake,
         None,
         full_tool_list,
+        catalog_profile.as_ref(),
         repeated_query_hints,
     )
     .await
