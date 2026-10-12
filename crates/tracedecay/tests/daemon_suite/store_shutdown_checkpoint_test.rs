@@ -10,14 +10,15 @@ use std::fs;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::code_index_journey::{
     commit_all, exact_identity, git, initialize_tracedecay, stop_daemon_gracefully,
     wait_for_open_phase, wait_for_terminal_generation,
 };
 use crate::common::{
-    IsolatedHome, daemon_socket_path, spawn_tracedecay_daemon_logged, spawn_tracedecay_daemon_with,
-    tracedecay_command_with_home,
+    IsolatedHome, daemon_socket_path, poll_until, spawn_tracedecay_daemon_logged,
+    spawn_tracedecay_daemon_with, tracedecay_command_with_home,
 };
 
 const ANCHOR: &str = "shutdown_checkpoint_anchor";
@@ -175,6 +176,80 @@ async fn stop_during_project_open_truncates_project_store_wals() {
         );
     }
     assert_clean_shutdown_log(&fs::read_to_string(&log_path).expect("daemon log"));
+}
+
+/// The open is parked after its independent owners registered, so the Hook V2
+/// replay consumer is running when the stop cancels it. The failed open removes
+/// its servers before shutdown can find them, so it must stop that consumer
+/// itself or the consumer's leases hold both project stores open.
+#[tokio::test]
+async fn stop_after_independent_owners_releases_every_project_store() {
+    let (environment, project) = IsolatedHome::new();
+    let project = project.canonicalize().expect("canonical fixture project");
+    initialize_repository(&project);
+    let log_path = environment.scratch().join("owners-registered.log");
+    let hold = environment.scratch().join("hold-after-independent-owners");
+    fs::write(&hold, b"hold").expect("hold file");
+    let entered = PathBuf::from(format!("{}.entered", hold.display()));
+    let socket = daemon_socket_path(environment.home());
+    let mut daemon = spawn_tracedecay_daemon_logged(environment.home(), &log_path, |command| {
+        command.env("TRACEDECAY_TEST_HOLD_AFTER_INDEPENDENT_OWNERS", &hold);
+    });
+
+    let init = init_until_open_phase(
+        environment.home(),
+        &project,
+        &log_path,
+        "independent_owners_registered",
+    )
+    .await;
+    poll_until(
+        Instant::now() + Duration::from_secs(30),
+        Duration::from_millis(20),
+        || entered.is_file().then_some(()),
+        || "the project open never parked after its owners registered".to_owned(),
+    );
+    let signal_result = unsafe { libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM) };
+    assert_eq!(signal_result, 0, "send SIGTERM to daemon");
+    // Shutdown cancels every admitted open before it starts draining clients.
+    poll_until(
+        Instant::now() + Duration::from_secs(30),
+        Duration::from_millis(20),
+        || {
+            fs::read_to_string(&log_path)
+                .unwrap_or_default()
+                .contains("outcome=client_drain_start")
+                .then_some(())
+        },
+        || "the daemon never started draining".to_owned(),
+    );
+    fs::remove_file(&hold).expect("release the held open");
+    let exit = daemon
+        .wait_for_exit(Duration::from_secs(120))
+        .expect("wait for daemon shutdown")
+        .expect("daemon exits once the held open settles");
+    assert!(exit.success(), "daemon did not stop cleanly: {exit}");
+    settle_interrupted_init(init, &socket);
+
+    let log = fs::read_to_string(&log_path).expect("daemon log");
+    assert!(
+        log.contains(&format!(
+            "event=project_server_warmup outcome=cancelled project={}",
+            project.display()
+        )),
+        "the stop must record the open as cancelled; log={log}"
+    );
+    assert_clean_shutdown_log(&log);
+    let (graph_db, sessions_db) = project_stores(environment.home(), &project);
+    for store in [&graph_db, &sessions_db] {
+        assert!(store.is_file(), "{} was mounted", store.display());
+        assert_eq!(
+            wal_bytes(store),
+            0,
+            "a stop after owner registration keeps no WAL for {}",
+            store.display()
+        );
+    }
 }
 
 #[tokio::test]
