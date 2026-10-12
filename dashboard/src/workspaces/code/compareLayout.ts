@@ -37,13 +37,6 @@ const PARAMS = {
   kind: 'compare_kind',
 } as const;
 
-export const EMPTY_COMPARE_SELECTION: CompareSelection = {
-  base: { branch: '', revision: '' },
-  head: { branch: '', revision: '' },
-  file: '',
-  kind: '',
-};
-
 export function readCompareSelection(params: URLSearchParams): CompareSelection {
   return {
     base: {

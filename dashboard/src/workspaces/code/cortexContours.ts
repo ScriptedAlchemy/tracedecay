@@ -140,14 +140,3 @@ export function independentOfFileMass(encoding: ContourEncodingId): boolean {
 export function statesSealedWithoutARatio(encoding: ContourEncodingId): boolean {
   return sketchContour(encoding, SEALED).kind === 'sealed';
 }
-
-/** The unique encoding that passes every witness, or null when the space is tied. */
-export function winningContourEncoding(): ContourEncodingId | null {
-  const winners = CONTOUR_ENCODINGS.filter(
-    (encoding) =>
-      separatesEqualMassLeakage(encoding) &&
-      independentOfFileMass(encoding) &&
-      statesSealedWithoutARatio(encoding),
-  );
-  return winners.length === 1 ? winners[0]! : null;
-}

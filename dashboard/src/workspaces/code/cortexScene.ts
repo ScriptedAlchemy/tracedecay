@@ -226,10 +226,6 @@ export function project(camera: Camera, x: number, y: number): { x: number; y: n
   return { x: x * camera.k + camera.tx, y: y * camera.k + camera.ty };
 }
 
-export function unproject(camera: Camera, x: number, y: number): { x: number; y: number } {
-  return { x: (x - camera.tx) / camera.k, y: (y - camera.ty) / camera.k };
-}
-
 /* ---- painter contract ---------------------------------------------------- */
 
 /** Token colours sampled from the night-window block; a canvas cannot read CSS. */

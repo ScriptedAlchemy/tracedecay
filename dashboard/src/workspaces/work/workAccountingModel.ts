@@ -236,16 +236,6 @@ export interface WorkAccountingProvenance {
   readonly anchors: WorkChannel<readonly WorkAccountingAnchor[]>;
 }
 
-export const WORK_ACCOUNTING_FACETS = [
-  'support',
-  'eligible',
-  'censoring',
-  'intervalCoverage',
-  'horizon',
-  'descriptorRevision',
-  'anchors',
-] as const satisfies readonly (keyof WorkAccountingProvenance)[];
-
 /** A reading the card is obliged to print but that contradicts itself. Never
  * clamped and never dropped: two typed fields of one contract disagreeing is a
  * fact about the record, and rounding it away would make the record look

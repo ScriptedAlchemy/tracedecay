@@ -6,17 +6,24 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  COMMITTED_CONTOUR_ENCODING,
   CONTOUR_ENCODINGS,
   independentOfFileMass,
   separatesEqualMassLeakage,
   sketchContour,
   statesSealedWithoutARatio,
-  winningContourEncoding,
 } from './cortexContours.ts';
 
 describe('contour encoding comparison', () => {
   it('commits coupling ratio because it is the only sketch that passes every witness', () => {
-    expect(winningContourEncoding()).toBe('coupling_ratio');
+    const winners = CONTOUR_ENCODINGS.filter(
+      (encoding) =>
+        separatesEqualMassLeakage(encoding) &&
+        independentOfFileMass(encoding) &&
+        statesSealedWithoutARatio(encoding),
+    );
+    expect(winners).toEqual([COMMITTED_CONTOUR_ENCODING]);
+    expect(COMMITTED_CONTOUR_ENCODING).toBe('coupling_ratio');
   });
 
   it('rejects edges-per-file: equal mass and equal internal edges share one ring count', () => {
