@@ -218,8 +218,6 @@ export const ADOPTION_FUNNEL_STAGES = [
   'RepeatUseful',
 ] as const;
 
-export type AdoptionFunnelStage = (typeof ADOPTION_FUNNEL_STAGES)[number];
-
 export interface FunnelStageCount {
   stage: string;
   count: number | null;

@@ -36,10 +36,6 @@ export interface SessionSelection {
   readonly sessionId: string;
 }
 
-export function selectionKey(selection: SessionSelection): string {
-  return `${selection.provider ?? ''}\u0000${selection.sessionId}`;
-}
-
 export function sameSelection(
   left: SessionSelection | null,
   right: SessionSelection | null,

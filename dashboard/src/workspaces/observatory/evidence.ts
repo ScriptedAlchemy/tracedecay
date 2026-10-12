@@ -83,19 +83,6 @@ export type EvidenceState =
   | 'failed'
   | 'unavailable';
 
-export const EVIDENCE_STATES: readonly EvidenceState[] = [
-  'measured',
-  'empty',
-  'partial',
-  'stale',
-  'building',
-  'loading',
-  'restricted',
-  'denied',
-  'failed',
-  'unavailable',
-];
-
 export interface EvidenceCoverage {
   completeness: DashboardCoverageCompletenessV1;
   examined: number | null;

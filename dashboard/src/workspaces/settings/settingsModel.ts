@@ -671,7 +671,7 @@ function validateCodeIndexWorkerValues(
   return errors;
 }
 
-function sameCodeIndexWorkerSelection(
+export function sameCodeIndexWorkerSelection(
   left: CodeIndexWorkerSelectionV1,
   right: CodeIndexWorkerSelectionV1,
 ): boolean {

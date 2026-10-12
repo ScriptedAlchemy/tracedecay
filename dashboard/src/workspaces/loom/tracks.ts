@@ -40,21 +40,6 @@ export function clampWindow(view: LoomWindow, extent: LoomWindow): LoomWindow {
   return { start, end: start + span };
 }
 
-export function zoomWindow(
-  view: LoomWindow,
-  extent: LoomWindow,
-  factor: number,
-  focusTime: number,
-): LoomWindow {
-  const span = view.end - view.start;
-  const nextSpan = span * factor;
-  const ratio = span === 0 ? 0.5 : (focusTime - view.start) / span;
-  return clampWindow(
-    { start: focusTime - ratio * nextSpan, end: focusTime + (1 - ratio) * nextSpan },
-    extent,
-  );
-}
-
 /** True when the viewport is (near enough) the whole fitted extent. */
 export function isFitted(view: LoomWindow, extent: LoomWindow): boolean {
   const full = fittedWindow(extent);

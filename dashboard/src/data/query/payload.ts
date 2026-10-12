@@ -1,4 +1,3 @@
-import { z } from 'zod';
 import { decodeJsonBody, UNDECODABLE } from './responseBody.ts';
 import type { WireSchema } from './wireSchema.ts';
 import { readOnlyScopeRefusal, type ReadOnlyScopeRefusal } from '../scope/store.ts';
@@ -169,6 +168,3 @@ export function fetchPayloadWrite<T>(
 ): Promise<PayloadWriteResult<T>> {
   return readPayloadResponse(url, schema, init);
 }
-
-/** Loose object schema for payloads we render generically. */
-export const AnyObject = z.record(z.string(), z.unknown());
