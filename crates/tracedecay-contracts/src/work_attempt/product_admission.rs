@@ -22,7 +22,8 @@ use crate::{
 
 use super::{
     StartWorkAttemptCommand, WorkAttemptAdmissionKind, WorkAttemptStorageError,
-    WorkAttemptStoragePort, contract_problem, denied_problem, not_found_problem, storage_problem,
+    WorkAttemptStoragePort, contract_problem, denied_problem, not_found_problem,
+    placement_root_conflict_problem, storage_problem,
 };
 
 const WORK_PRODUCT_START_INPUT_DIGEST_DOMAIN: &str =
@@ -227,6 +228,9 @@ pub(crate) fn product_admission_problem(
             "application.work-attempt.capacity-exhausted",
             "The registered Work topology has no parallel attempt capacity.",
         ),
+        WorkProductAttemptAdmissionErrorV1::PlacementRootConflict => {
+            placement_root_conflict_problem()
+        }
         WorkProductAttemptAdmissionErrorV1::Unavailable => {
             ApplicationProblem::unavailable(crate::SafeDiagnostic {
                 code: "application.work-attempt.product-admission-unavailable".to_owned(),

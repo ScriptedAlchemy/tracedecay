@@ -35,7 +35,7 @@ pub use capacity::{
 };
 use problem::{
     contract_problem, cursor_binding_problem, denied_problem, list_page_contract_problem,
-    not_found_problem, stale_cursor_problem, storage_problem,
+    not_found_problem, placement_root_conflict_problem, stale_cursor_problem, storage_problem,
 };
 pub use product_admission::WorkProductAttemptServiceV1;
 pub(crate) use product_admission::{
@@ -66,6 +66,8 @@ pub enum WorkAttemptStorageError {
     FenceConflict,
     #[error("work attempt concurrency capacity is exhausted")]
     CapacityExceeded,
+    #[error("work attempt names a worktree root outside its run's admitted placement")]
+    PlacementRootConflict,
     #[error("work attempt storage is unavailable")]
     Unavailable,
 }
