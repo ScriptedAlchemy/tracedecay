@@ -1,18 +1,5 @@
 use super::*;
 
-/// How dead a registry row's project root must be before the row counts as
-/// stale. This is the single definition of both GC scopes, so a reader never
-/// has to reassemble the effective condition from scattered half-checks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StaleRootScope {
-    /// Manual registry cleanup scope: the canonical root is
-    /// gone (the user reviews candidates before applying).
-    CanonicalRootMissing,
-    /// Post-update auto-GC scope: both the canonical and display roots are
-    /// gone, stricter, because nobody reviews the deletion.
-    AllRootsMissing,
-}
-
 /// Whether a recorded root could be proven present or absent.
 ///
 /// Deletion authority requires proof of *absence*. An inspection that fails,
@@ -67,17 +54,12 @@ pub fn code_project_root_liveness(project: &CodeProjectRecord) -> RootLivenessV1
     liveness
 }
 
-/// Returns true unless every root this row records was *proven* absent.
-pub fn code_project_root_exists(project: &CodeProjectRecord) -> bool {
-    !code_project_root_liveness(project).permits_retirement()
-}
-
 /// Liveness of a fully-resolved registry identity: every root of the project
 /// row plus every registered alias path.
 ///
 /// A registered store instance keeps the identity live on its own. Deleting the
-/// `code_projects` row cascades its aliases and store instances away, so a row
-/// that still owns a store must never be retired by an unreviewed pass.
+/// `code_projects` row cascades its aliases and store instances away, so
+/// registry cleanup retires an identity only when this proves it absent.
 pub fn project_context_liveness(context: &ProjectRegistryContext) -> RootLivenessV1 {
     if !context.stores.is_empty() {
         return RootLivenessV1::Live;
@@ -88,61 +70,23 @@ pub fn project_context_liveness(context: &ProjectRegistryContext) -> RootLivenes
     )
 }
 
-/// Registry identities that are stale under `scope` across every root and alias
-/// they record, restricted to canonical roots under one of `prefixes`.
-///
-/// This is the context-aware counterpart of [`stale_code_projects`]: an
-/// unreviewed pass must resolve aliases and store instances before retiring an
-/// identity, or it will retire a project another checkout is still using.
-pub fn stale_project_contexts<'a>(
-    contexts: &'a [ProjectRegistryContext],
-    prefixes: &[PathBuf],
-    scope: StaleRootScope,
-) -> Vec<&'a ProjectRegistryContext> {
-    contexts
-        .iter()
-        .filter(|context| {
-            let canonical_root = Path::new(&context.project.canonical_root);
-            prefixes.is_empty()
-                || prefixes
-                    .iter()
-                    .any(|prefix| canonical_root.starts_with(prefix))
-        })
-        .filter(|context| match scope {
-            StaleRootScope::CanonicalRootMissing => {
-                probe_root(Path::new(&context.project.canonical_root)).permits_retirement()
-                    && project_context_liveness(context).permits_retirement()
-            }
-            StaleRootScope::AllRootsMissing => {
-                project_context_liveness(context).permits_retirement()
-            }
-        })
-        .collect()
-}
-
-/// Filters registry rows that are stale under `scope`, restricted to
+/// Registry rows whose canonical root was proven absent, restricted to
 /// canonical roots under one of `prefixes` (an empty slice means no
-/// restriction). Shared by explicit registry cleanup and the
-/// post-update health pass so both agree on what counts as a GC candidate.
-pub fn stale_code_projects<'a>(
-    projects: &'a [CodeProjectRecord],
+/// restriction). Each is either retirable or protected, see
+/// [`project_context_liveness`].
+fn canonical_root_missing(
+    projects: Vec<CodeProjectRecord>,
     prefixes: &[PathBuf],
-    scope: StaleRootScope,
-) -> Vec<&'a CodeProjectRecord> {
+) -> Vec<CodeProjectRecord> {
     projects
-        .iter()
+        .into_iter()
         .filter(|project| {
             let canonical_root = Path::new(&project.canonical_root);
-            prefixes.is_empty()
+            (prefixes.is_empty()
                 || prefixes
                     .iter()
-                    .any(|prefix| canonical_root.starts_with(prefix))
-        })
-        .filter(|project| match scope {
-            StaleRootScope::CanonicalRootMissing => {
-                probe_root(Path::new(&project.canonical_root)).permits_retirement()
-            }
-            StaleRootScope::AllRootsMissing => !code_project_root_exists(project),
+                    .any(|prefix| canonical_root.starts_with(prefix)))
+                && probe_root(canonical_root).permits_retirement()
         })
         .collect()
 }
@@ -156,18 +100,17 @@ pub async fn registry_gc_report(
     prefix: Option<String>,
 ) -> tracedecay_domain::errors::Result<RegistryGcReport> {
     let prefixes = prefix.iter().map(PathBuf::from).collect::<Vec<_>>();
-    let projects = db.list_code_projects(usize::MAX).await?;
+    let projects = canonical_root_missing(db.list_code_projects(usize::MAX).await?, &prefixes);
+    // Deleting a `code_projects` row cascades its aliases and store instances,
+    // so a missing canonical root alone never retires an identity that a
+    // linked worktree, its git common directory, or a store still uses.
     let mut candidates = Vec::new();
     let mut protected_code_projects = Vec::new();
-    for project in stale_code_projects(&projects, &prefixes, StaleRootScope::CanonicalRootMissing) {
-        if db
-            .try_list_store_instances_for_project(&project.project_id)
-            .await?
-            .is_empty()
-        {
-            candidates.push(project.clone());
+    for context in db.project_registry_contexts_for_projects(&projects).await? {
+        if project_context_liveness(&context).permits_retirement() {
+            candidates.push(context.project);
         } else {
-            protected_code_projects.push(project.clone());
+            protected_code_projects.push(context.project);
         }
     }
 
