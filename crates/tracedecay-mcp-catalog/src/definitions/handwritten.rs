@@ -506,7 +506,7 @@ pub(super) const HANDWRITTEN_TOOLS: &[HandwrittenTool] = &[
     read(
         "tracedecay_memory_status",
         "Memory Status",
-        "Inspect canonical memory state: return the owner, fact/entity counts, algebra identity and capacity, trust distribution, below-threshold facts, feedback totals, and retrieval funnel. Defaults to the active project; pass an exact project_selector only when intentionally checking another registered project. Human/operator equivalent: `tracedecay memory status`.",
+        "Inspect canonical memory state: return the owner, fact/entity counts, vector algebra with its per-vector superposition estimate (not a fact limit), trust distribution, below-threshold facts, feedback totals, and retrieval funnel. Defaults to the active project; pass an exact project_selector only when intentionally checking another registered project. Human/operator equivalent: `tracedecay memory status`.",
     ),
     write(
         "tracedecay_fact_store_curate",
