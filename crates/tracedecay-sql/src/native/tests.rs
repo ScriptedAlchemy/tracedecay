@@ -1233,7 +1233,7 @@ mod driver {
             transaction.rollback().unwrap();
 
             let mut transaction = connection.transaction().unwrap();
-            let mut kept = transaction.savepoint().unwrap();
+            let kept = transaction.savepoint().unwrap();
             kept.prepare_cached("INSERT INTO t VALUES (?1)")
                 .unwrap()
                 .execute([value + 1_000])
@@ -1289,19 +1289,23 @@ mod driver {
     }
 
     /// Catches a write-path FTS merge that rewrites more of the index per
-    /// insert as the index grows. Each one-row INSERT flushes one segment,
-    /// and past `fts_merge_threshold` segments the flush merges some of
-    /// them. A size-tiered policy rewrites each document once per tier, so
-    /// an insert's share of merge work grows with log n; merging every
-    /// segment under a fixed byte ceiling rewrites the largest of them with
-    /// each small batch. A merge reads exactly the segments it rewrites,
-    /// and the rewrite is what reaches the log, so the log bytes each insert
-    /// appends measure that work while a warm page cache hides the reads.
+    /// insert as the index grows. A statement flushes one segment for the
+    /// documents it wrote, and past `fts_merge_threshold` segments the flush
+    /// merges some of them. The index is grown in bulk statements, as a
+    /// backfill does, so it holds a few large segments and one-row inserts
+    /// stream in after them. A size-tiered policy merges the small segments
+    /// among themselves and rewrites each document once per tier, so an
+    /// insert's share of merge work grows with log n; merging every segment
+    /// under a fixed byte ceiling rewrites the large ones with each batch of
+    /// small ones, so that share grows with n. A merge reads exactly the
+    /// segments it rewrites, and the rewrite is what reaches the log, so the
+    /// log bytes each insert appends measure that work while a warm page
+    /// cache hides the reads.
     #[test]
     fn fts_insert_merge_work_grows_logarithmically_with_the_index() {
-        const BASE: u64 = 128;
-        const GROWTH: u64 = 8;
-        const WORDS: u64 = 48;
+        const BASE_DOCS: i64 = 1_000;
+        const GROWTH: i64 = 8;
+        const STREAMED: i64 = 128;
         let (_directory, path, connection) = open();
         connection
             .execute_batch(
@@ -1312,40 +1316,52 @@ mod driver {
         let mut wal = path.clone().into_os_string();
         wal.push("-wal");
         let log_bytes = || std::fs::metadata(&wal).map_or(0, |metadata| metadata.len());
-        let insert = |from: u64, to: u64| {
-            let before = log_bytes();
-            for id in from..to {
-                let body = (0..WORDS)
-                    .map(|word| format!("shared{} unique{id}x{word}", word % 7))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                connection
-                    .prepare_cached("INSERT INTO docs(id, body) VALUES (?1, ?2)")
-                    .unwrap()
-                    .execute((i64::try_from(id).unwrap(), body))
-                    .unwrap();
-            }
-            (log_bytes() - before) / (to - from)
+        // One statement writes ids [?1, ?2).
+        let insert = |from: i64, to: i64| {
+            connection
+                .prepare_cached(
+                    "WITH RECURSIVE n(i) AS (SELECT ?1 UNION ALL SELECT i + 1 FROM n \
+                     WHERE i + 1 < ?2) \
+                     INSERT INTO docs(id, body) SELECT i, printf('u%d a%d b%d c%d d%d e%d \
+                     f%d g%d h%d j%d k%d m%d', i, i * 3, i * 5, i * 7, i * 11, i * 13, \
+                     i * 17, i * 19, i * 23, i * 29, i * 31, i * 37) FROM n",
+                )
+                .unwrap()
+                .execute((from, to))
+                .unwrap();
         };
-        insert(0, BASE);
-        let base = insert(BASE, 2 * BASE);
-        insert(2 * BASE, GROWTH * BASE);
-        let grown = insert(GROWTH * BASE, 2 * GROWTH * BASE);
+        let streamed = |from: i64| {
+            let before = log_bytes();
+            for id in from..from + STREAMED {
+                insert(id, id + 1);
+            }
+            (log_bytes() - before) / STREAMED.unsigned_abs()
+        };
+        let mut next = 0;
+        let mut seed = |docs: i64| {
+            while next < docs {
+                insert(next, docs.min(next + BASE_DOCS));
+                next = docs.min(next + BASE_DOCS);
+            }
+        };
+        seed(BASE_DOCS);
+        let base = streamed(GROWTH * BASE_DOCS * 2);
+        seed(GROWTH * BASE_DOCS);
+        let grown = streamed(GROWTH * BASE_DOCS * 2 + STREAMED);
         let hits: i64 = connection
             .query_row(
-                "SELECT count(*) FROM docs WHERE fts_match(body, 'unique77x5')",
+                "SELECT count(*) FROM docs WHERE fts_match(body, 'u777')",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
         assert_eq!(hits, 1, "the merged index lost or duplicated a document");
 
-        // log2 of the index size at the end of each window.
         let (base_log, grown_log) = (
-            u64::from((2 * BASE).ilog2()),
-            u64::from((2 * GROWTH * BASE).ilog2()),
+            u64::from(BASE_DOCS.ilog2()),
+            u64::from((GROWTH * BASE_DOCS).ilog2()),
         );
-        eprintln!("fts log bytes per insert: base={base} grown={grown}");
+        eprintln!("fts log bytes per streamed insert: base={base} grown={grown}");
         assert!(
             grown * base_log <= base * grown_log,
             "an {GROWTH}x larger FTS index must grow each insert's merge work by at most \
