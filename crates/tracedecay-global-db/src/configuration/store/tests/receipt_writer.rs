@@ -257,6 +257,59 @@ fn require_committed(outcome: RuntimeSubmitOutcomeV1, step: &str) {
     );
 }
 
+#[tokio::test]
+async fn configuration_commit_admission_rejects_a_foreign_audit_actor() {
+    let root = root_revision();
+    let (_directory, db, _owner) = publish_profile("profile-audit-binding.db").await;
+    seed_root(&db, &root).await;
+    let mut commit = child_commit(&root, "audit-binding");
+    let valid_request = submit_request(
+        db.binding(),
+        "operation.configuration.audit-binding",
+        "key.configuration.audit-binding",
+        21,
+        RepositoryWritePayloadV1::Configuration(Box::new(commit.clone())),
+    );
+    commit.audit_event.actor_id = id("actor.foreign");
+    let mut envelope = valid_request.envelope().clone();
+    envelope.payload = RepositoryWritePayloadV1::Configuration(Box::new(commit.clone()));
+    assert!(
+        RuntimeSubmitRequestV1::new(
+            envelope,
+            valid_request.transaction_scope().clone(),
+            valid_request.control().clone(),
+        )
+        .is_err(),
+        "repository admission must reject an audit actor foreign to its receipt"
+    );
+    assert!(
+        GlobalDbConfigurationControlStore::new_registered(&db)
+            .commit(commit)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        count_rows(&db, "SELECT COUNT(*) FROM configuration_revisions").await,
+        1
+    );
+    assert_eq!(
+        count_rows(&db, "SELECT COUNT(*) FROM configuration_mutation_receipts").await,
+        0
+    );
+    assert_eq!(
+        count_rows(&db, "SELECT COUNT(*) FROM configuration_audit_events").await,
+        0
+    );
+    assert_eq!(
+        count_rows(
+            &db,
+            "SELECT COUNT(*) FROM configuration_component_activation_events"
+        )
+        .await,
+        1
+    );
+}
+
 /// A repository commit and a global-db commit of the same idempotency key are
 /// one receipt: each direction replays, and the row carries the store's
 /// desired-activation status plus a desired-state event.

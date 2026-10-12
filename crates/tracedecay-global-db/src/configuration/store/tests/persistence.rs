@@ -1,8 +1,6 @@
 //! Revision and audit persistence tests.
 
-use super::super::mutation::{
-    commit_configuration_transaction, map_store_error, validate_commit_bindings,
-};
+use super::super::mutation::{commit_configuration_transaction, map_store_error};
 use super::super::read::{current_revision_id_from_executor, read_revision_from_executor};
 use super::super::{
     ActivationDriftV1, AuthorizedActor, ConfigurationControlStore, ConfigurationError,
@@ -437,7 +435,7 @@ async fn failed_configuration_commit_leaves_no_partial_revision_receipt_or_audit
     let (plan, commit) = protected_commit(&root);
     store.save_change_plan(&plan).await.unwrap();
 
-    validate_commit_bindings(&commit).unwrap();
+    commit.validate().unwrap();
     let transaction = db.begin_write_transaction().await.unwrap();
     assert!(
         commit_configuration_transaction(&transaction, &commit, true, None)

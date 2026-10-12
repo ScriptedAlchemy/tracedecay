@@ -32,13 +32,6 @@ impl ConfigurationExecutor {
         commit: &ConfigurationCommitV1,
     ) -> rusqlite::Result<()> {
         commit.validate().map_err(invalid)?;
-        if commit.next_revision.parent_revision_id.as_ref()
-            != Some(&commit.expected_base_revision_id)
-        {
-            return Err(invalid(
-                "configuration revision does not name the expected base revision",
-            ));
-        }
         match receipt_replay(savepoint, commit)? {
             ReceiptReplay::Exact => return Ok(()),
             ReceiptReplay::Conflict => {

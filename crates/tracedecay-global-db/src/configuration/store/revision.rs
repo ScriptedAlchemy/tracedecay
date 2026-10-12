@@ -4,7 +4,7 @@ use std::future::Future;
 
 use super::audit::audit_from_transaction;
 use super::codec::insert_configuration_projections;
-use super::mutation::{commit_configuration_transaction, validate_commit_bindings};
+use super::mutation::commit_configuration_transaction;
 use super::read::{
     current_revision_id_from_executor, read_change_plan_from_executor, read_revision_from_executor,
     validate_snapshot_registry_completeness_with_registry,
@@ -159,7 +159,7 @@ impl ConfigurationRevisionStore for GlobalDbConfigurationControlStore<'_> {
         &self,
         commit: ConfigurationCommitV1,
     ) -> ConfigurationStoreResult<ConfigurationMutationReceiptV1> {
-        validate_commit_bindings(&commit)?;
+        commit.validate().map_err(ConfigurationStoreError::from)?;
         let transaction = self
             .db
             .begin_write_transaction()

@@ -8,7 +8,6 @@ use super::activation::advance_component_desired_state;
 use super::audit::{
     append_terminal_plan_event, has_matching_terminal_plan_event,
     insert_audit_event_with_receipt_digest, read_audit_event_from_transaction, seal_audit_target,
-    terminal_plan_event_kind,
 };
 use super::codec::{StoredMutationReceipt, decode_id, redacted_direct_audit_target};
 use super::read::{
@@ -210,45 +209,6 @@ pub(super) async fn insert_mutation_receipt(
         )
         .await
         .map_err(unavailable_store)?;
-    Ok(())
-}
-
-pub(super) fn validate_commit_bindings(
-    commit: &ConfigurationCommitV1,
-) -> ConfigurationStoreResult<()> {
-    commit.validate().map_err(ConfigurationStoreError::from)?;
-    if commit.next_revision.parent_revision_id.as_ref() != Some(&commit.expected_base_revision_id) {
-        return Err(invalid_store_data(
-            "configuration commit next revision does not name the expected base revision",
-        ));
-    }
-    if commit.audit_event.actor_id != commit.receipt.actor_id
-        || commit.audit_event.idempotency_key.as_ref() != Some(&commit.receipt.idempotency_key)
-        || commit.audit_event.base_revision_id != commit.receipt.base_revision_id
-        || commit.audit_event.result_revision_id.as_ref()
-            != Some(&commit.receipt.result_revision_id)
-        || commit.audit_event.operation_digest != commit.receipt.operation_digest
-        || commit.audit_event.receipt_id.as_ref() != Some(&commit.receipt.receipt_id)
-    {
-        return Err(invalid_store_data(
-            "configuration audit event does not bind the mutation receipt",
-        ));
-    }
-    if let Some(plan) = &commit.change_plan {
-        if plan.actor_id != commit.receipt.actor_id
-            || plan.base_revision_id != commit.expected_base_revision_id
-            || plan.operation_digest != commit.receipt.operation_digest
-        {
-            return Err(invalid_store_data(
-                "configuration change plan does not bind the mutation receipt",
-            ));
-        }
-        if terminal_plan_event_kind(commit.audit_event.event_kind).is_none() {
-            return Err(invalid_store_data(
-                "configuration change plan commit lacks a terminal applied audit event",
-            ));
-        }
-    }
     Ok(())
 }
 
