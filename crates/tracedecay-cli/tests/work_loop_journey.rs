@@ -65,6 +65,10 @@ const SETTLED_ATTEMPT_ID: &str = "attempt.work-loop-journey.settled";
 /// The attempt cancelled while its provider is still running, i.e. before the
 /// effect commit point.
 const CANCELLED_ATTEMPT_ID: &str = "attempt.work-loop-journey.cancelled";
+/// A run whose attempts are bound to an admitted linked-worktree placement.
+const PLACED_RUN_ID: &str = "run.work-loop-journey.placed";
+const MISPLACED_ATTEMPT_ID: &str = "attempt.work-loop-journey.misplaced";
+const PLACED_ATTEMPT_ID: &str = "attempt.work-loop-journey.placed";
 
 /// Executable ids pinned through the configuration control plane. They sort
 /// ascending, which the setting's own validator requires.
@@ -754,14 +758,16 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
     let argv_marker = scripts.path().join("argv");
     let stdin_marker = scripts.path().join("stdin");
     let started_marker = scripts.path().join("started");
+    let cwd_marker = scripts.path().join("cwd");
     let (provider_path, provider_digest) = pinned_executable(
         scripts.path(),
         "provider",
         &format!(
-            "#!/bin/sh\nprintf '%s' \"$*\" > {argv}\ninput=$(cat)\nprintf '%s' \"$input\" > {stdin}\n\
+            "#!/bin/sh\npwd -P > {cwd}\nprintf '%s' \"$*\" > {argv}\ninput=$(cat)\nprintf '%s' \"$input\" > {stdin}\n\
              case \"$input\" in\n  *cancellation*) printf x > {started}; i=0; while [ $i -lt 300 ]; do sleep 1; i=$((i+1)); done;;\n\
              esac\nprintf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\"}}'\n\
              printf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}}'\nexit 0\n",
+            cwd = cwd_marker.display(),
             argv = argv_marker.display(),
             stdin = stdin_marker.display(),
             started = started_marker.display(),
@@ -1092,6 +1098,11 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         INSTRUCTIONS,
         "the attempt instructions must reach the provider's stdin"
     );
+    assert_eq!(
+        fs::read_to_string(&cwd_marker).expect("provider cwd marker"),
+        format!("{}\n", fixture.project.canonicalize().unwrap().display()),
+        "a run without a placement runs in the worktree root the start named"
+    );
 
     // The receipt is truthful about the route: it reports what was requested
     // and what actually ran, as two separate facts.
@@ -1258,6 +1269,88 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         "a cancelled attempt seals a cancelled receipt, never a success: {cancelled}"
     );
 
+    // An admitted placement binds where its run's attempts run. A start that
+    // names the primary checkout is refused before anything is leased; a
+    // start that names the placement root runs the provider there.
+    let placement_root = fixture._home.path().join("placement");
+    run_ok(
+        Command::new("git")
+            .args(["worktree", "add", "--detach", "--quiet"])
+            .arg(&placement_root)
+            .arg("HEAD")
+            .current_dir(&fixture.project),
+        "git worktree add placement",
+    );
+    let placement_root = placement_root.canonicalize().expect("canonical placement");
+    let placement = fixture.payload(
+        "admit placement",
+        "/application/work/admit-placement",
+        &json!({
+            "task_id": TASK_ID,
+            "run_id": PLACED_RUN_ID,
+            "target": {
+                "kind": "linked_worktree",
+                "root": placement_root.to_string_lossy(),
+                "network_free": true,
+                "in_place_acknowledged": false,
+            },
+            "occurred_at": now_micros(),
+        }),
+    );
+    assert_eq!(placement["state"], "admitted", "{placement}");
+    let mut misplaced = start_attempt_body(
+        &fixture.project,
+        MISPLACED_ATTEMPT_ID,
+        admitted["execution_snapshot"].clone(),
+        INSTRUCTIONS,
+        now_micros(),
+    );
+    misplaced["run_id"] = json!(PLACED_RUN_ID);
+    let refused = fixture.problem(
+        "start a placed run outside its placement",
+        "/application/work/start-attempt",
+        &misplaced,
+    );
+    assert_eq!(
+        refused["code"], "application.work-attempt.placement-root-conflict",
+        "a start outside the admitted placement root must be refused: {refused}"
+    );
+    let mut placed = start_attempt_body(
+        &placement_root,
+        PLACED_ATTEMPT_ID,
+        admitted["execution_snapshot"].clone(),
+        INSTRUCTIONS,
+        now_micros(),
+    );
+    placed["run_id"] = json!(PLACED_RUN_ID);
+    fixture.payload(
+        "start a placed run in its placement",
+        "/application/work/start-attempt",
+        &placed,
+    );
+    let placed_status = json!({
+        "task_id": TASK_ID,
+        "run_id": PLACED_RUN_ID,
+        "attempt_id": PLACED_ATTEMPT_ID,
+    });
+    poll_until("the placed attempt terminal receipt", || {
+        let attempt = fixture.payload(
+            "placed attempt status",
+            "/application/work/attempt-status",
+            &placed_status,
+        );
+        match attempt["state"].as_str() {
+            Some("succeeded") => Ok(()),
+            Some("leased" | "running") => Err(format!("{attempt}")),
+            _ => panic!("the placed attempt reached an unexpected state: {attempt}"),
+        }
+    });
+    assert_eq!(
+        fs::read_to_string(&cwd_marker).expect("placed provider cwd marker"),
+        format!("{}\n", placement_root.display()),
+        "a placed run's provider must run in the placement root"
+    );
+
     let complete_runtime = product_graph(&fixture, "product graph with complete runtime coverage");
     assert_eq!(
         complete_runtime["snapshot"]["runtime"]["coverage"],
@@ -1268,8 +1361,8 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         complete_runtime["snapshot"]["runtime"]["attempts"]
             .as_array()
             .map(Vec::len),
-        Some(2),
-        "complete coverage must include both accepted attempts: {complete_runtime}"
+        Some(3),
+        "complete coverage must include every accepted attempt: {complete_runtime}"
     );
     let complete_replan = fixture.payload(
         "generate a replan proposal with complete runtime coverage",
