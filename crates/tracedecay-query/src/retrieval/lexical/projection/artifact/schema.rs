@@ -7,7 +7,7 @@ use super::{CodeLexicalArtifactErrorV1, checkpoint};
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 use tracedecay_domain::{ExactFieldV1, nonnegative_sha256_prefix};
 
-/// Revision 31 is the only layout this build serves: interned exact terms,
+/// Revision 32 is the only layout this build serves: interned exact terms,
 /// integer field codes, rows stored as deflated blocks of consecutive
 /// documents with an uncompressed scoring preface (chunk id, field lengths,
 /// and trimmed normalized-text length) ahead of the deflated payload
@@ -19,9 +19,8 @@ use tracedecay_domain::{ExactFieldV1, nonnegative_sha256_prefix};
 /// the stored rows (the case-preserving kind holds only windows with an ASCII
 /// uppercase byte; every other raw window is its normalized window), n-gram and
 /// term posting values above 1 KiB stored deflated when that is smaller, and
-/// the clone index (binary payloads keyed by 32-byte
-/// digest, content-only occurrences keyed by symbol digest, and exact and
-/// positional winnowed fingerprint postings, each naming its payload or
+/// the clone index (binary payloads keyed by 32-byte digest, content-only
+/// occurrences keyed by symbol digest, and exact postings naming their
 /// occurrence by integer ordinal) sealed by the same build, with the receipt
 /// carrying the clone census the seal computed over those tables. Batches append
 /// page-ordered staging that finalization merges and drops, so no secondary
@@ -43,11 +42,11 @@ use tracedecay_domain::{ExactFieldV1, nonnegative_sha256_prefix};
 /// whose rows name each entry so a carried dictionary retires exactly the
 /// entries no page names. Every other revision is refused as incompatible
 /// and rebuilt from the sealed generation. There is no reader for an older
-/// layout. The digest domain is `tracedecay.code-lexical-artifact.v31`.
+/// layout. The digest domain is `tracedecay.code-lexical-artifact.v32`.
 /// Callers take the revision from this constant.
-pub const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 31;
+pub const CODE_LEXICAL_ARTIFACT_FORMAT_REVISION_V1: u32 = 32;
 
-const DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v31\0";
+const DIGEST_DOMAIN: &[u8] = b"tracedecay.code-lexical-artifact.v32\0";
 
 const FIELD_SYMBOL_NAME: i64 = 1;
 const FIELD_QUALIFIED_NAME: i64 = 2;

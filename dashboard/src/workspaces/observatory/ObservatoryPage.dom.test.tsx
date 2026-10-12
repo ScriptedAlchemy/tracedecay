@@ -298,10 +298,6 @@ describe('ObservatoryPage store telemetry', () => {
         unique_payloads: 0,
         payloads_reused: 0,
         exact_postings: 0,
-        near_fingerprint_bodies: 0,
-        near_fingerprint_postings: 0,
-        hot_postings_skipped: 0,
-        hot_posting_rows_skipped: 0,
         excluded_too_small_bodies: 0,
         excluded_too_large_bodies: 0,
         excluded_incomplete_tokenization_bodies: 0,
@@ -332,9 +328,8 @@ describe('ObservatoryPage store telemetry', () => {
     expect(panel.textContent).toContain('4 / 6');
     expect(panel.textContent).toContain('prior payload reuse5 occurrences');
     expect(panel.textContent).toContain('unique payloads5');
-    expect(panel.textContent).toContain('16,384 posting rows');
-    expect(panel.textContent).toContain('64 body comparisons');
-    expect(panel.textContent).toContain('minimum directional coverage · 70.0%');
+    expect(panel.textContent).toContain('minimum 30 tokens');
+    expect(panel.textContent).not.toContain('fingerprint');
     expect(panel.textContent).toContain('2.0 MiB on disk');
     expect(panel.textContent).toContain('2.40ms');
     expect(panel.textContent).toContain('generation.empty');
@@ -388,11 +383,10 @@ describe('ObservatoryPage store telemetry', () => {
                 ...observation,
                 coverage: {
                   ...observation.coverage,
-                  near_fingerprint_bodies: null,
-                  near_fingerprint_postings: null,
+                  conservative_normalized_bodies: 5,
                 },
               },
-              omission_reasons: ['positional fingerprints do not cover every eligible body'],
+              omission_reasons: ['conservative normalization postings do not cover every eligible body'],
             },
           },
           {
@@ -417,12 +411,12 @@ describe('ObservatoryPage store telemetry', () => {
     });
     renderObservatory('pipeline');
 
-    await screen.findByText('positional fingerprints do not cover every eligible body');
+    await screen.findByText('conservative normalization postings do not cover every eligible body');
     for (const state of ['partial', 'stale', 'unavailable']) {
       expect(document.querySelector(`[data-clone-index-state="${state}"]`)).toBeTruthy();
     }
     expect(
-      screen.getByText('positional fingerprints do not cover every eligible body'),
+      screen.getByText('conservative normalization postings do not cover every eligible body'),
     ).toBeTruthy();
     expect(screen.getByText('the sealed lexical artifact is unreadable')).toBeTruthy();
     // Said on the overview rail and again in the exact readiness list.
@@ -626,10 +620,6 @@ function cloneIndexObservation() {
       unique_payloads: 5,
       payloads_reused: 5,
       exact_postings: 10,
-      near_fingerprint_bodies: 6,
-      near_fingerprint_postings: 72,
-      hot_postings_skipped: 1,
-      hot_posting_rows_skipped: 1_025,
       excluded_too_small_bodies: 1,
       excluded_too_large_bodies: 0,
       excluded_incomplete_tokenization_bodies: 1,
@@ -637,13 +627,7 @@ function cloneIndexObservation() {
       rename_unsupported_bodies: 1,
     },
     budgets: {
-      posting_rows: 16_384,
-      candidate_bodies: 256,
-      verification_bodies: 64,
-      verification_token_work: 2_000_000,
-      hot_posting_rows: 1_024,
       minimum_body_tokens: 30,
-      minimum_directional_coverage_millionths: 700_000,
     },
     resources: {
       bytes_on_disk: 2_097_152,

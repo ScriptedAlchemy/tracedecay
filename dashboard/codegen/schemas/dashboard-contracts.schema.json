@@ -3482,52 +3482,16 @@
       "type": "string"
     },
     "CodeCloneIndexBudgetsV1": {
-      "description": "Fixed per-request clone candidate and verification budgets.",
+      "description": "Fixed automatic clone-discovery limits.",
       "properties": {
-        "candidate_bodies": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "hot_posting_rows": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
         "minimum_body_tokens": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "minimum_directional_coverage_millionths": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "posting_rows": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "verification_bodies": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "verification_token_work": {
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
         }
       },
       "required": [
-        "posting_rows",
-        "candidate_bodies",
-        "verification_bodies",
-        "verification_token_work",
-        "hot_posting_rows",
-        "minimum_body_tokens",
-        "minimum_directional_coverage_millionths"
+        "minimum_body_tokens"
       ],
       "type": "object"
     },
@@ -3581,42 +3545,6 @@
         },
         "excluded_too_small_bodies": {
           "description": "Bodies excluded because they are below the automatic-discovery minimum.",
-          "format": "uint64",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "hot_posting_rows_skipped": {
-          "description": "Positional rows omitted when those hot posting lists are skipped.",
-          "format": "uint64",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "hot_postings_skipped": {
-          "description": "Fingerprint posting lists above the interactive read threshold.",
-          "format": "uint64",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "near_fingerprint_bodies": {
-          "description": "Eligible bodies represented by positional fingerprints.",
-          "format": "uint64",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "near_fingerprint_postings": {
-          "description": "Positional fingerprint posting rows retained by the artifact.",
           "format": "uint64",
           "minimum": 0,
           "type": [
@@ -3687,10 +3615,6 @@
         "unique_payloads",
         "payloads_reused",
         "exact_postings",
-        "near_fingerprint_bodies",
-        "near_fingerprint_postings",
-        "hot_postings_skipped",
-        "hot_posting_rows_skipped",
         "excluded_too_small_bodies",
         "excluded_too_large_bodies",
         "excluded_incomplete_tokenization_bodies",
@@ -3846,7 +3770,7 @@
           "type": "object"
         },
         {
-          "description": "Required exact and fingerprint postings cover every eligible body.",
+          "description": "Required exact postings cover every eligible body.",
           "properties": {
             "observation": {
               "$ref": "#/$defs/CodeCloneIndexObservationV1"

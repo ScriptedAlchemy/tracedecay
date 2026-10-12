@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use rayon::prelude::*;
 use rusqlite::Connection;
@@ -9,7 +9,6 @@ use tracedecay_code_index::clones::{
 use tracedecay_code_index::production::CodeIndexExecutionControlV1;
 
 use super::clone_codec::{decode_clone_eligibility, decode_clone_payload, digest_from_key};
-use super::format::decode_fingerprint_postings;
 use super::{CodeLexicalArtifactErrorV1, checkpoint, sqlite_error};
 
 /// Clone-index coverage of one sealed artifact.
@@ -25,10 +24,6 @@ pub struct CodeLexicalCloneIndexCensusV1 {
     pub rename_normalized_bodies: u64,
     pub unique_payloads: u64,
     pub exact_postings: u64,
-    pub near_fingerprint_bodies: u64,
-    pub near_fingerprint_postings: u64,
-    pub hot_postings: u64,
-    pub hot_posting_rows: u64,
     pub excluded_too_small_bodies: u64,
     pub excluded_too_large_bodies: u64,
     pub excluded_incomplete_tokenization_bodies: u64,
@@ -136,12 +131,10 @@ fn validate_payload_batch(
 }
 
 /// Walk every clone table of a staged or sealed artifact. This validates each
-/// stored payload against its digest and decodes every fingerprint posting,
-/// so it is corpus-sized: the seal runs it once, and an explicit verification
-/// re-runs it against the sealed receipt.
+/// stored payload against its digest, so it is corpus-sized: the seal runs it
+/// once, and an explicit verification re-runs it against the sealed receipt.
 pub(super) fn read_clone_index_census(
     connection: &Connection,
-    hot_posting_threshold: u64,
     control: &dyn CodeIndexExecutionControlV1,
 ) -> Result<CodeLexicalCloneIndexCensusV1, CodeLexicalArtifactErrorV1> {
     let mut census = CodeLexicalCloneIndexCensusV1::default();
@@ -243,48 +236,6 @@ pub(super) fn read_clone_index_census(
     census.conservative_normalized_bodies = count(conservative)?;
     census.rename_normalized_bodies = count(rename)?;
 
-    let (fingerprint_postings, hot_postings, hot_rows): (i64, i64, i64) = connection
-        .query_row(
-            "SELECT
-               COALESCE(SUM(posting_count), 0),
-               COUNT(*) FILTER (WHERE posting_count > ?1),
-               COALESCE(SUM(posting_count) FILTER (WHERE posting_count > ?1), 0)
-             FROM clone_fingerprint_postings",
-            [i64::try_from(hot_posting_threshold)
-                .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .map_err(sqlite_error)?;
-    // Bodies with positional fingerprints are the distinct occurrences their
-    // lists name.
-    let mut fingerprinted = HashSet::new();
-    let mut statement = connection
-        .prepare("SELECT postings FROM clone_fingerprint_postings")
-        .map_err(sqlite_error)?;
-    let mut rows = statement.query([]).map_err(sqlite_error)?;
-    let mut posting_rows = 0u64;
-    while let Some(row) = rows.next().map_err(sqlite_error)? {
-        if posting_rows.is_multiple_of(4_096) {
-            checkpoint(control)?;
-        }
-        posting_rows += 1;
-        let encoded = row
-            .get_ref(0)
-            .and_then(|value| value.as_blob().map_err(rusqlite::Error::from))
-            .map_err(sqlite_error)?;
-        fingerprinted.extend(
-            decode_fingerprint_postings(encoded)?
-                .into_iter()
-                .map(|(occurrence, _)| occurrence),
-        );
-    }
-    let fingerprint_bodies = i64::try_from(fingerprinted.len())
-        .map_err(|error| CodeLexicalArtifactErrorV1::Contract(error.to_string()))?;
-    census.near_fingerprint_bodies = count(fingerprint_bodies)?;
-    census.near_fingerprint_postings = count(fingerprint_postings)?;
-    census.hot_postings = count(hot_postings)?;
-    census.hot_posting_rows = count(hot_rows)?;
-
     Ok(census)
 }
 
@@ -332,10 +283,6 @@ pub(super) mod tests {
                     class INTEGER NOT NULL,
                     digest BLOB NOT NULL,
                     occurrence_ordinal INTEGER NOT NULL
-                 );
-                 CREATE TABLE clone_fingerprint_postings(
-                    posting_count INTEGER NOT NULL,
-                    postings BLOB NOT NULL
                  );",
             )
             .expect("census schema");
@@ -415,7 +362,7 @@ pub(super) mod tests {
         store_occurrence(&connection, "symbol.present", present);
         store_occurrence(&connection, "symbol.absent", present + 1);
 
-        let error = read_clone_index_census(&connection, 8, &ActiveControl)
+        let error = read_clone_index_census(&connection, &ActiveControl)
             .expect_err("an occurrence without its payload row must refuse the census");
         assert!(
             matches!(error, CodeLexicalArtifactErrorV1::Corrupt(_)),
@@ -444,7 +391,7 @@ pub(super) mod tests {
         }
 
         let started = std::time::Instant::now();
-        let census = read_clone_index_census(&connection, 8, &ActiveControl).expect("census");
+        let census = read_clone_index_census(&connection, &ActiveControl).expect("census");
         let elapsed = started.elapsed();
         assert_eq!(
             census.source_bodies,

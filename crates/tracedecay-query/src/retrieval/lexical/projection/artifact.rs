@@ -7,14 +7,12 @@
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
-pub use tracedecay_code_index::clones::CloneSelectedBlockV1;
 use tracedecay_code_index::production::{CodeIndexExecutionControlV1, CodeIndexInterruptionV1};
 use tracedecay_runtime_core::path_safety::{SqliteDatabasePathError, sqlite_database_path};
 
 mod builder;
 mod clone_census;
 mod clone_codec;
-mod fingerprints;
 mod format;
 mod increment;
 mod postings;
@@ -29,16 +27,6 @@ pub use builder::{
     PreparedCodeLexicalArtifactBatchV1,
 };
 pub use clone_census::CodeLexicalCloneIndexCensusV1;
-pub use fingerprints::{
-    CLONE_FINGERPRINT_CANDIDATE_BODY_BUDGET_V1, CLONE_FINGERPRINT_HOT_POSTING_THRESHOLD_V1,
-    CLONE_FINGERPRINT_POSTING_ROW_BUDGET_V1, CLONE_NEAR_MATCH_BODY_COMPARISON_BUDGET_V1,
-    CLONE_NEAR_MATCH_MINIMUM_COVERAGE_MILLIONTHS_V1, CLONE_NEAR_MATCH_TOKEN_WORK_BUDGET_V1,
-    CloneFingerprintArtifactReadV1, CloneFingerprintCancellationPointV1,
-    CloneFingerprintPartialReasonV1, CloneFingerprintReadAccountingV1,
-    CloneFingerprintStreamDescriptorV1, CloneNearMatchArtifactV1, CloneNearMatchExtentV1,
-    CloneSelectedBlockArtifactCandidateV1, CloneSelectedBlockArtifactReadV1,
-    CloneSelectedBlockContainmentClassV1, MAX_CLONE_FINGERPRINT_PAGE_BODIES_V1,
-};
 pub use format::{
     CodeLexicalArtifactOccurrenceV1, CodeLexicalArtifactSectionDigestV1,
     VerifiedCodeLexicalArtifactV1, code_lexical_artifact_content_key,
