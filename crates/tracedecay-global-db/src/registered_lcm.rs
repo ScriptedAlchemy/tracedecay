@@ -3,8 +3,7 @@ use std::path::Path;
 use tracedecay_domain::SessionId;
 use tracedecay_lcm::{
     LcmCompressionRequest, LcmCompressionResponse, LcmDescribeRequest, LcmDescribeResponse,
-    LcmError, LcmExpandQueryRequest, LcmExpandQueryResponse, LcmExpandRequest, LcmExpandResponse,
-    LcmGcConfig, LcmGcReport, LcmGrepOutcome, LcmGrepRequest, LcmLoadSessionPage,
+    LcmError, LcmExpandRequest, LcmExpandResponse, LcmGcConfig, LcmGcReport, LcmLoadSessionPage,
     LcmLoadSessionRequest, LcmPreflightRequest, LcmPreflightResponse, LcmRecentSession,
     LcmRelationProjectionStatus, LcmSessionBoundaryRequest, LcmSessionBoundaryResponse,
     LcmSessionReplayRequest, LcmSessionReplaySlice, LcmStatus, LcmSummaryExpansion, compression,
@@ -76,26 +75,6 @@ impl RegisteredGlobalDb {
     ) -> Result<LcmSummaryExpansion, LcmError> {
         SessionStoreAccess::new(self)
             .lcm_expand_summary_node(provider, session_id, node_id)
-            .await
-    }
-
-    pub async fn lcm_expand_query(
-        &self,
-        request: LcmExpandQueryRequest,
-    ) -> Result<LcmExpandQueryResponse, LcmError> {
-        SessionStoreAccess::new(self)
-            .lcm_expand_query(request)
-            .await
-    }
-
-    #[tracing::instrument(name = "global_db.registered.lcm.grep", level = "trace", skip_all)]
-    pub async fn lcm_grep(&self, request: LcmGrepRequest) -> Result<LcmGrepOutcome, LcmError> {
-        let git_scope_session_ids = SessionTemporalAccess::new(self)
-            .git_scope_session_ids(&request.git_filter)
-            .await
-            .map_err(|error| LcmError::Db(error.to_string()))?;
-        SessionStoreAccess::new(self)
-            .lcm_grep(request, git_scope_session_ids.as_deref())
             .await
     }
 

@@ -3986,7 +3986,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 self.identity.head_tree(),
             )
         {
-            match self.capture_exact_git_tree_snapshot(
+            match self.capture_clean_head_tree_snapshot(
                     &git_tree_capture::ExactGitTreeSourceV1 {
                         reference: reference.clone(),
                         revision: revision.clone(),

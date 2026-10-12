@@ -41,18 +41,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    pub async fn lcm_expand_query_for_test(
-        &self,
-        request: tracedecay_lcm::LcmExpandQueryRequest,
-    ) -> std::result::Result<tracedecay_lcm::LcmExpandQueryResponse, tracedecay_lcm::LcmError> {
-        self.project_registered
-            .as_deref()
-            .unwrap_or(self.profile_registered.as_ref())
-            .lcm_expand_query(request)
-            .await
-    }
-
-    #[doc(hidden)]
     pub async fn lcm_expand_summary_node_for_test(
         &self,
         provider: &str,
@@ -63,18 +51,6 @@ impl HostAdmissionTestRuntimeV1 {
             .as_deref()
             .unwrap_or(self.profile_registered.as_ref())
             .lcm_expand_summary_node(provider, session_id, node_id)
-            .await
-    }
-
-    #[doc(hidden)]
-    pub async fn lcm_grep_for_test(
-        &self,
-        request: tracedecay_lcm::LcmGrepRequest,
-    ) -> std::result::Result<tracedecay_lcm::LcmGrepOutcome, tracedecay_lcm::LcmError> {
-        self.project_registered
-            .as_deref()
-            .unwrap_or(self.profile_registered.as_ref())
-            .lcm_grep(request)
             .await
     }
 

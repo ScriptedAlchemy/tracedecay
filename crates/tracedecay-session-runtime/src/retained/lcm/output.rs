@@ -17,6 +17,7 @@ use tracedecay_lcm::contracts::{
     LcmContentRange, LcmDataFreshness, LcmDescribeResponse, LcmExpandResponse, LcmRawMessage,
     LcmRawMessageMetadata, LcmRetrievalOutcome, LcmSourceRef, LcmStorageKind, LcmSummaryNode,
 };
+use tracedecay_lcm::retrieval_content::is_noise_block_content;
 use tracedecay_lcm::{
     LCM_EXPAND_QUERY_SYNTHESIS_SYSTEM_PROMPT, LcmContentSlice, LcmExpandQueryBudget,
     LcmExpandQueryContextBlock, LcmExpandQueryMatch, LcmExpandQueryResponse,
@@ -578,6 +579,12 @@ pub(super) fn assemble_query(
     context_max_tokens: usize,
     sources: Vec<(&'static str, Option<String>, String)>,
 ) -> Result<(LcmExpandQueryResponse, usize), RetainedSurfaceExecutionErrorV1> {
+    // Signature blobs are dropped before they consume the budget. They are not
+    // omitted evidence, so they never count toward `dropped`.
+    let sources: Vec<_> = sources
+        .into_iter()
+        .filter(|(_, _, content)| !is_noise_block_content(content))
+        .collect();
     let source_count = sources.len();
     let mut context = OrderedTextContextAssembler::new(context_max_tokens);
     let mut context_truncated = false;
