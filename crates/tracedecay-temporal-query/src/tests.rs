@@ -5,10 +5,10 @@ use std::sync::{
 };
 
 use tracedecay_domain::{
-    AuthorizationRevision, ComponentRevision, FreshnessVectorDigest, FusionProfileId,
-    HydrationStateV1, MessageOccurrenceIdV1, PrincipalId, RepositoryId, RetrievalAnchorId,
-    RetrievalBudget, RetrievalGrainV1, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
-    RetrieverKind, ScoreDomainId, SessionAuthorityClassV1, SessionCursorKeyIdV1,
+    AuthorizationRevision, ComponentRevision, ContextOmissionReasonV1, FreshnessVectorDigest,
+    FusionProfileId, HydrationStateV1, MessageOccurrenceIdV1, PrincipalId, RepositoryId,
+    RetrievalAnchorId, RetrievalBudget, RetrievalGrainV1, RetrievalRequest, RetrievalScope,
+    RetrievalSnapshot, RetrieverKind, ScoreDomainId, SessionAuthorityClassV1, SessionCursorKeyIdV1,
     SessionCursorVersionV1, SessionId, SessionSummaryIdV1, SessionSummaryRecordV1,
     SignedCursorKeyRefV1, SingleRootScopeV1, SummarySourceHorizonV1, TemporalAssertionKindV1,
     TemporalCandidateChannelV1, TemporalModeV1, TemporalValidityV1, UtcMicros, VectorWatermark,
@@ -1749,6 +1749,130 @@ fn full_pipeline_is_deterministic_across_restart_and_cursor_resume() {
         assert_eq!(resumed.ranked.len(), 1);
         assert_ne!(resumed.ranked[0].stable_id, restarted.ranked[0].stable_id);
         assert!(resumed.next_cursor.is_none());
+    });
+}
+
+#[test]
+fn a_page_that_fills_its_hydration_bytes_ends_early_and_pages_every_record() {
+    block_on(async {
+        let port = || {
+            FakeReadPort::new(
+                vec![
+                    candidate("a", "a", 30),
+                    candidate("b", "b", 20),
+                    candidate("c", "c", 10),
+                ],
+                vec![
+                    TemporalRecord::Occurrence(occurrence('a', "a", 30)),
+                    TemporalRecord::Occurrence(occurrence('b', "b", 20)),
+                    TemporalRecord::Occurrence(occurrence('c', "c", 10)),
+                ],
+            )
+        };
+        let hydrator = FakeHydrator {
+            payloads: [
+                (anchor("a"), vec![b'a'; 40]),
+                (anchor("b"), vec![b'b'; 40]),
+                (anchor("c"), vec![b'c'; 100]),
+            ]
+            .into_iter()
+            .collect(),
+            ..FakeHydrator::default()
+        };
+        let mut paged = request(TemporalModeV1::Current, 3);
+        paged.snapshot = paged
+            .snapshot
+            .with_limits(ExecutionLimits {
+                hydration_total_bytes: 64,
+                ..ExecutionLimits::default()
+            })
+            .expect("tightened hydration bytes");
+
+        let mut pages = Vec::new();
+        loop {
+            let page = execute_temporal_kernel(
+                &paged,
+                &port(),
+                &hydrator,
+                &authenticator("key-1", 1, 7),
+                &Words,
+            )
+            .await
+            .expect("a page that fills its byte budget is a shorter page, not a refusal");
+            pages.push(
+                page.ranked
+                    .iter()
+                    .map(|candidate| candidate.stable_id.clone())
+                    .collect::<Vec<_>>(),
+            );
+            match page.next_cursor {
+                Some(cursor) => paged.cursor = Some(cursor),
+                None => break,
+            }
+        }
+
+        assert_eq!(pages, [vec!["a"], vec!["b"], vec!["c"]]);
+    });
+}
+
+#[test]
+fn every_context_byte_budget_omits_records_instead_of_refusing_the_page() {
+    block_on(async {
+        let port = || {
+            FakeReadPort::new(
+                vec![candidate("a", "a", 20), candidate("b", "b", 10)],
+                vec![
+                    TemporalRecord::Occurrence(occurrence('a', "a", 20)),
+                    TemporalRecord::Occurrence(occurrence('b', "b", 10)),
+                ],
+            )
+        };
+        let hydrator = FakeHydrator {
+            payloads: [
+                (anchor("a"), vec![b'a'; 200]),
+                (anchor("b"), vec![b'b'; 200]),
+            ]
+            .into_iter()
+            .collect(),
+            ..FakeHydrator::default()
+        };
+        let run = |max_bytes: u64| {
+            let mut paged = request(TemporalModeV1::Current, 2);
+            paged.context_budget.max_bytes = max_bytes;
+            let port = port();
+            let hydrator = &hydrator;
+            async move {
+                execute_temporal_kernel(
+                    &paged,
+                    &port,
+                    hydrator,
+                    &authenticator("key-1", 1, 7),
+                    &Words,
+                )
+                .await
+            }
+        };
+        let whole = run(100_000).await.expect("unbounded page");
+        let first_only = run(whole.context.accounted_bytes - 1)
+            .await
+            .expect("one record over budget");
+        // Between a one-record context without its budget omission and the
+        // whole page lies a budget where the longest prefix fits only until
+        // the omission is recorded.
+        for max_bytes in first_only.context.accounted_bytes / 2..whole.context.accounted_bytes {
+            let page = run(max_bytes)
+                .await
+                .unwrap_or_else(|error| panic!("budget {max_bytes} refused the page: {error}"));
+            assert_eq!(page.ranked.len(), 2);
+            assert!(page.context.accounted_bytes <= max_bytes);
+            assert!(
+                page.context
+                    .bundle
+                    .omissions
+                    .iter()
+                    .any(|omission| omission.reason == ContextOmissionReasonV1::ByteBudget)
+            );
+        }
     });
 }
 

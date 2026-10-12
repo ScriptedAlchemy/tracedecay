@@ -67,6 +67,7 @@ impl<'a> HydrationGrant<'a> {
 pub struct HydrationSink<'a> {
     grant: &'a HydrationGrant<'a>,
     bytes: Zeroizing<Vec<u8>>,
+    page_full: bool,
 }
 
 impl<'a> HydrationSink<'a> {
@@ -84,6 +85,7 @@ impl<'a> HydrationSink<'a> {
         Ok(Self {
             grant,
             bytes: Zeroizing::new(bytes),
+            page_full: false,
         })
     }
 
@@ -116,6 +118,7 @@ impl<'a> HydrationSink<'a> {
             });
         }
         if next_len > self.grant.remaining_total_bytes {
+            self.page_full = true;
             return Err(HydrationError::BudgetExceeded {
                 resource: "total bytes",
             });
@@ -216,6 +219,10 @@ impl UnavailableHydration {
 pub struct HydrationBatch {
     pub available: Vec<HydratedPayload>,
     pub unavailable: Vec<UnavailableHydration>,
+    /// Index of the first requested anchor whose payload did not fit the
+    /// page's remaining hydration bytes. It and every later anchor were not
+    /// read; the page ends before it.
+    pub page_end: Option<usize>,
 }
 
 #[tracing::instrument(name = "temporal.hydrate.selected", level = "trace", skip_all)]
@@ -246,14 +253,14 @@ pub async fn hydrate_selected(
     // authorized read is granted `remaining_total = hydration_total_bytes -
     // total_bytes`, where `total_bytes` is the running sum of every prior
     // anchor's read. That gate bounds the sink and decides whether a read
-    // truncates, succeeds, or trips `BudgetExceeded` at a specific anchor; the
-    // resulting payloads are also appended to `batch` in anchor order. Running
-    // anchors concurrently would have to grant each read a budget computed
-    // before its predecessors finished, changing truncation, the first
-    // over-budget anchor, and batch ordering, i.e. changing the output.
+    // succeeds or ends the page at a specific anchor; the resulting payloads
+    // are also appended to `batch` in anchor order. Running anchors
+    // concurrently would have to grant each read a budget computed before its
+    // predecessors finished, changing where the page ends and batch ordering,
+    // i.e. changing the output.
     // Bounded concurrency cannot preserve this running-budget semantics, so the
     // sequential walk is the correct implementation.
-    for anchor_id in anchors {
+    for (index, anchor_id) in anchors.iter().enumerate() {
         snapshot.request().execution_control().checkpoint()?;
         if !seen.insert(anchor_id.clone()) {
             continue;
@@ -274,12 +281,14 @@ pub async fn hydrate_selected(
                 });
             }
             HydrationAuthorization::Authorized => {
-                let remaining_total = limits
-                    .hydration_total_bytes
-                    .checked_sub(total_bytes)
-                    .ok_or(HydrationError::BudgetExceeded {
-                        resource: "total bytes",
-                    })?;
+                // The page's first payload is bounded only by the per-payload
+                // ceiling, so a record larger than the page budget still pages
+                // instead of refusing every page that reaches it.
+                let remaining_total = if total_bytes == 0 {
+                    limits.hydration_payload_bytes
+                } else {
+                    limits.hydration_total_bytes.saturating_sub(total_bytes)
+                };
                 let grant = HydrationGrant {
                     snapshot,
                     anchor_id,
@@ -288,7 +297,12 @@ pub async fn hydrate_selected(
                     remaining_total_bytes: remaining_total,
                 };
                 let mut sink = HydrationSink::with_grant(&grant)?;
-                await_controlled(control, port.read_authorized(&grant, &mut sink)).await?;
+                let read = await_controlled(control, port.read_authorized(&grant, &mut sink)).await;
+                if sink.page_full {
+                    batch.page_end = Some(index);
+                    break;
+                }
+                read?;
                 total_bytes = total_bytes.checked_add(sink.bytes.len()).ok_or(
                     HydrationError::BudgetExceeded {
                         resource: "total bytes",
@@ -383,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn hydration_sink_enforces_total_bound_across_authorized_reads() {
+    fn hydration_total_bound_ends_the_page_before_the_payload_that_does_not_fit() {
         block_on(async {
             let snapshot = snapshot_with_limits(ExecutionLimits {
                 hydration_payload_bytes: 8,
@@ -391,17 +405,45 @@ mod tests {
                 ..ExecutionLimits::default()
             });
 
+            let batch = hydrate_selected(
+                &FixedPayloadHydrator,
+                &snapshot,
+                &[anchor("first"), anchor("second"), anchor("third")],
+            )
+            .await
+            .expect("a full page ends early");
+            assert_eq!(batch.page_end, Some(1));
             assert_eq!(
-                hydrate_selected(
-                    &FixedPayloadHydrator,
-                    &snapshot,
-                    &[anchor("first"), anchor("second")],
-                )
-                .await,
-                Err(HydrationError::BudgetExceeded {
-                    resource: "total bytes"
-                })
+                batch
+                    .available
+                    .iter()
+                    .map(|payload| (payload.anchor_id().clone(), payload.bytes().to_vec()))
+                    .collect::<Vec<_>>(),
+                [(anchor("first"), b"12345".to_vec())]
             );
+            assert!(batch.unavailable.is_empty());
+        });
+    }
+
+    #[test]
+    fn hydration_admits_a_first_payload_larger_than_the_page_total() {
+        block_on(async {
+            let snapshot = snapshot_with_limits(ExecutionLimits {
+                hydration_payload_bytes: 8,
+                hydration_total_bytes: 4,
+                ..ExecutionLimits::default()
+            });
+
+            let batch = hydrate_selected(
+                &FixedPayloadHydrator,
+                &snapshot,
+                &[anchor("large"), anchor("next")],
+            )
+            .await
+            .expect("the first payload pages within the per-payload ceiling");
+            assert_eq!(batch.page_end, Some(1));
+            assert_eq!(batch.available.len(), 1);
+            assert_eq!(batch.available[0].bytes(), b"12345");
         });
     }
 

@@ -18,7 +18,9 @@ use tracedecay_domain::errors::Result;
 use tracedecay_domain::{
     ExactClass, MAX_CHUNK_TEXT_BYTES, RankedCandidate, RelationEdgeKindV1, RetrieverKind,
 };
-use tracedecay_query::retrieval::lexical::{preferred_symbol_tokens, task_is_name_shaped};
+use tracedecay_query::retrieval::lexical::{
+    LexicalRouteKindV1, preferred_symbol_tokens, task_is_name_shaped,
+};
 
 use crate::McpToolContext;
 use crate::analysis::line_number_at;
@@ -131,9 +133,33 @@ fn context_search_matches(
                 exact_class: exact_class.to_owned(),
                 rank: ranked.final_ordinal.saturating_add(1),
                 utility_micros: ranked.candidate.utility_micros,
+                anchors: match_anchors(complete, ranked),
             })
         })
         .collect()
+}
+
+/// Each anchor whose route ranked `ranked`, once, in route order: one anchor
+/// can rank a site through several of its fields.
+fn match_anchors(
+    complete: &tracedecay_query::code_search::CodeIndexSearchCompletedV1,
+    ranked: &RankedCandidate,
+) -> Vec<String> {
+    let mut anchors = Vec::<String>::new();
+    for route_match in complete
+        .lexical_routes
+        .matches_by_anchor
+        .get(&ranked.candidate.anchor_id)
+        .into_iter()
+        .flatten()
+    {
+        if let LexicalRouteKindV1::Anchor { anchor } = &route_match.route
+            && !anchors.iter().any(|seen| seen == anchor.as_str())
+        {
+            anchors.push(anchor.as_str().to_owned());
+        }
+    }
+    anchors
 }
 
 /// Each display's serving-lane-attested site, keyed by its anchor's wire

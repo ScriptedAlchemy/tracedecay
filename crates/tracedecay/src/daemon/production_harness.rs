@@ -1514,53 +1514,7 @@ mod code_index_activation_test {
             tracedecay_domain::configuration::CodeIndexWorkerSelectionV1::Automatic {},
             "a fresh harness must install the profile-scoped default selection"
         );
-        let query = timeout(Duration::from_secs(20), async {
-            loop {
-                let response = harness
-                    .call_tool(
-                        &project,
-                        "tracedecay_search",
-                        json!({
-                            "query": "indexed_symbol",
-                            "limit": 1,
-                            "format": "json",
-                        }),
-                    )
-                    .await
-                    .expect("fresh-profile production search response");
-                let payload = super::journey_test_support::tool_payload(&response);
-                let served_symbol = payload["results"].as_array().is_some_and(|results| {
-                    results
-                        .iter()
-                        .any(|result| result["display"]["name"] == json!("indexed_symbol"))
-                });
-                if served_symbol {
-                    break payload;
-                }
-                if payload["status"] == json!("unavailable") {
-                    let retryable = matches!(
-                        payload["reason"].as_str(),
-                        Some(
-                            "authority_unavailable"
-                                | "generation_unavailable"
-                                | "generation_unverified"
-                                | "search_capacity_unavailable"
-                        )
-                    );
-                    assert!(
-                        retryable,
-                        "fresh-profile production search failed terminally: {payload}"
-                    );
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                    continue;
-                }
-                panic!(
-                    "fresh-profile production search completed without indexed_symbol: {payload}"
-                );
-            }
-        })
-        .await
-        .expect("fresh-profile query authority becomes ready within the existing bound");
+        let query = search_until_indexed_symbol_serves(&harness, &project).await;
         assert!(
             query["results"].as_array().is_some_and(|results| {
                 results
@@ -1575,7 +1529,10 @@ mod code_index_activation_test {
     /// A linked worktree mounted without the `sync.watch_linked_worktrees`
     /// opt-in is the typed `linked_worktree_disabled` route: the composition
     /// must open on it (the daemon does), not exhaust the publication wait
-    /// for a generation that admission forbids.
+    /// for a generation that admission forbids. Until an operator indexes it,
+    /// status and readiness waits name the same policy refusal search does;
+    /// once `tracedecay_admin_sync` seats a generation, status and search
+    /// both serve it.
     #[tokio::test(flavor = "multi_thread")]
     async fn linked_worktree_without_opt_in_mounts_as_the_typed_disabled_route() {
         let isolation = TempDir::new().expect("production harness isolation");
@@ -1656,7 +1613,119 @@ mod code_index_activation_test {
             json!("linked_worktree_disabled"),
             "{payload}"
         );
+
+        let status = super::journey_test_support::tool_payload(
+            &harness
+                .call_tool(&linked, "tracedecay_status", json!({ "format": "json" }))
+                .await
+                .expect("linked-route status response"),
+        );
+        assert_eq!(
+            status["retrieval_serving"],
+            json!({ "status": "unavailable", "reason": "linked_worktree_disabled" }),
+            "{status}"
+        );
+        let warning = status["code_index_freshness_warning"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the policy refusal names its remediation: {status}"));
+        assert!(warning.contains("tracedecay sync"), "{warning}");
+        assert!(warning.contains("sync.watch_linked_worktrees"), "{warning}");
+        let waited = super::journey_test_support::tool_payload(
+            &harness
+                .call_tool(
+                    &linked,
+                    "tracedecay_status",
+                    json!({ "wait_for": { "state": "fresh", "timeout_ms": 20_000 }, "format": "json" }),
+                )
+                .await
+                .expect("linked-route readiness wait response"),
+        );
+        assert_eq!(
+            waited["wait"],
+            json!({ "outcome": "unavailable", "reason": "linked_worktree_disabled" }),
+            "{waited}"
+        );
+
+        let receipt = super::journey_test_support::tool_payload(
+            &harness
+                .call_tool(
+                    &linked,
+                    "tracedecay_admin_sync",
+                    json!({ "format": "json" }),
+                )
+                .await
+                .expect("linked-route operator sync response"),
+        );
+        assert_eq!(receipt["status"], json!("queued"), "{receipt}");
+        let seated = super::journey_test_support::tool_payload(
+            &harness
+                .call_tool(
+                    &linked,
+                    "tracedecay_status",
+                    json!({ "wait_for": { "state": "fresh", "timeout_ms": 20_000 }, "format": "json" }),
+                )
+                .await
+                .expect("linked-route seat wait response"),
+        );
+        assert_eq!(seated["wait"]["outcome"], json!("reached"), "{seated}");
+        assert_eq!(
+            seated["retrieval_serving"]["status"],
+            json!("serving"),
+            "{seated}"
+        );
+        search_until_indexed_symbol_serves(&harness, &linked).await;
         harness.shutdown().await;
+    }
+
+    /// Search `project` for `indexed_symbol` until a result names it, retrying
+    /// only the transient refusals a route reports while its query authority
+    /// installs; any other refusal fails the test with its payload.
+    async fn search_until_indexed_symbol_serves(
+        harness: &ProductionProjectCompositionHarnessV1,
+        project: &Path,
+    ) -> serde_json::Value {
+        timeout(Duration::from_secs(20), async {
+            loop {
+                let response = harness
+                    .call_tool(
+                        project,
+                        "tracedecay_search",
+                        json!({
+                            "query": "indexed_symbol",
+                            "limit": 1,
+                            "format": "json",
+                        }),
+                    )
+                    .await
+                    .expect("production search response");
+                let payload = super::journey_test_support::tool_payload(&response);
+                let served_symbol = payload["results"].as_array().is_some_and(|results| {
+                    results
+                        .iter()
+                        .any(|result| result["display"]["name"] == json!("indexed_symbol"))
+                });
+                if served_symbol {
+                    break payload;
+                }
+                if payload["status"] == json!("unavailable") {
+                    let retryable = matches!(
+                        payload["reason"].as_str(),
+                        Some(
+                            "authority_unavailable"
+                                | "generation_unavailable"
+                                | "generation_unverified"
+                                | "search_capacity_unavailable"
+                        )
+                    );
+                    assert!(retryable, "production search failed terminally: {payload}");
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    continue;
+                }
+                panic!("production search completed without indexed_symbol: {payload}");
+            }
+        })
+        .await
+        .expect("query authority becomes ready within the existing bound")
     }
 
     #[cfg(unix)]
