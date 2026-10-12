@@ -6,6 +6,9 @@
  * Parsing is defensive: a malformed value is ignored rather than turned into a
  * window or a filter the reader never asked for.
  */
+import { assertNever, type LoomSessionRowV1 } from '../../contracts/generated.ts';
+import { sessionLaneId, UNRECORDED_PROVIDER } from '../../viz/temporal/journey.ts';
+import { joinIndexRow, type SessionSelection } from '../sessions/model.ts';
 import {
   JOURNEY_EVENT_KINDS,
   type JourneyEventKind,
@@ -27,6 +30,79 @@ export const LOOM_PARAMS = {
 /** Earliest epoch second a Loom window may name. Anything smaller is not a
  * time this store could have recorded and is treated as malformed. */
 const EPOCH_FLOOR = 1_000_000_000;
+
+/**
+ * `loomSession` has two shipped forms: the lane id, a JSON tuple
+ * `["provider","session_id"]` that Loom itself writes, and a bare session id
+ * (Delivery's link), which names no provider. Anything that is not a
+ * two-string tuple is a bare id. Loom never rewrites either; a click writes the
+ * lane id, so links converge without an effect.
+ */
+type LoomSessionParam =
+  | { readonly kind: 'lane'; readonly laneId: string; readonly selection: SessionSelection }
+  | { readonly kind: 'bare_id'; readonly selection: SessionSelection };
+
+export function parseLoomSession(raw: string | null): LoomSessionParam | null {
+  if (raw == null || raw === '') return null;
+  const tuple = parseTuple(raw);
+  if (tuple === null) return { kind: 'bare_id', selection: { provider: null, sessionId: raw } };
+  const [provider, sessionId] = tuple;
+  return {
+    kind: 'lane',
+    laneId: sessionLaneId(provider, sessionId),
+    // The lane sentinel covers a recorded empty provider, so it names none.
+    selection: { provider: provider === '' || provider === UNRECORDED_PROVIDER ? null : provider, sessionId },
+  };
+}
+
+function parseTuple(raw: string): [string, string] | null {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) &&
+      parsed.length === 2 &&
+      typeof parsed[0] === 'string' &&
+      typeof parsed[1] === 'string'
+      ? [parsed[0], parsed[1]]
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The lane id the field draws for a stored session. */
+export function loomSessionValue(session: { provider: string; sessionId: string }): string {
+  return sessionLaneId(session.provider, session.sessionId);
+}
+
+export type LoomSelection =
+  | { readonly kind: 'none' }
+  | { readonly kind: 'lane'; readonly laneId: string; readonly row: LoomSessionRowV1 }
+  /** A bare id more than one provider answers to on this page. */
+  | { readonly kind: 'ambiguous'; readonly selection: SessionSelection; readonly count: number }
+  /** Named, but not on the loaded page. */
+  | { readonly kind: 'outside_page'; readonly selection: SessionSelection };
+
+export function resolveLoomSession(
+  rows: readonly LoomSessionRowV1[],
+  param: LoomSessionParam | null,
+): LoomSelection {
+  if (param === null) return { kind: 'none' };
+  if (param.kind === 'lane') {
+    const row = rows.find((candidate) => sessionLaneId(candidate.provider, candidate.session_id) === param.laneId);
+    return row ? { kind: 'lane', laneId: param.laneId, row } : { kind: 'outside_page', selection: param.selection };
+  }
+  const join = joinIndexRow(rows, param.selection);
+  switch (join.kind) {
+    case 'exact':
+      return { kind: 'lane', laneId: sessionLaneId(join.row.provider, join.row.session_id), row: join.row };
+    case 'ambiguous':
+      return { kind: 'ambiguous', selection: param.selection, count: join.rows.length };
+    case 'absent':
+      return { kind: 'outside_page', selection: param.selection };
+    default:
+      return assertNever(join);
+  }
+}
 
 export function parseWindow(raw: string | null): SceneWindow | null {
   if (raw == null) return null;

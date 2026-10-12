@@ -45,6 +45,7 @@ import { ReadSection, envelopeReadState, type ReadState } from '../../ui/ReadSec
 import { StateChip, type DomainStateKind } from '../../ui/StateChip';
 import { Fact, Legend, Meter, Readout } from '../../ui/instrument.tsx';
 import { formatStamp, splitCount } from '../../ui/format.ts';
+import { LOOM_PARAMS, loomSessionValue } from '../loom/loomUrl.ts';
 import { formatDurationSeconds } from '../loom/tracks.ts';
 import { tokenCountLabel } from './tokenLabel.ts';
 import {
@@ -343,7 +344,7 @@ function LoomPivot({ provider, sessionId }: { provider: string; sessionId: strin
     const value = params.get(key);
     if (value !== null) search.set(key, value);
   }
-  search.set('loomSession', JSON.stringify([provider, sessionId]));
+  search.set(LOOM_PARAMS.session, loomSessionValue({ provider, sessionId }));
   return (
     <Link
       to={{ pathname: '/loom', search: `?${search.toString()}` }}

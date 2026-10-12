@@ -32,6 +32,8 @@ import { useReducedMotion } from '../../viz/trace/reducedMotion.ts';
 import { BranchNavigator } from './BranchNavigator.tsx';
 import {
   LOOM_PARAMS,
+  parseLoomSession,
+  resolveLoomSession,
   parseHiddenKinds,
   parseLaneSet,
   parseWindow,
@@ -163,12 +165,11 @@ function TemporalBody({
   const data = envelope.payload;
   const rows = data.sessions ?? [];
 
-  const selectedLane = useMemo(() => {
-    const row = rows.find(
-      (session) => JSON.stringify([session.provider || 'unknown', session.session_id]) === selectedId,
-    );
-    return row ? { id: selectedId!, sessionId: row.session_id } : null;
-  }, [rows, selectedId]);
+  const selection = useMemo(() => resolveLoomSession(rows, parseLoomSession(selectedId)), [rows, selectedId]);
+  const selectedLane = useMemo(
+    () => (selection.kind === 'lane' ? { id: selection.laneId, sessionId: selection.row.session_id } : null),
+    [selection],
+  );
 
   const chain = useEnvelope(
     ['loom', 'chain', selectedLane?.id ?? 'none'],
@@ -400,10 +401,16 @@ function TemporalBody({
         tabIndex={0}
         className={cn('flex min-h-0 flex-1 flex-col gap-2 overflow-auto px-3 py-1 [scrollbar-gutter:stable]')}
       >
-        {selectedId && !selectedLane ? (
+        {selection.kind === 'outside_page' ? (
           <StateChip
             kind="unavailable"
             detail="Selected session is outside this loaded page; choose a retained session."
+          />
+        ) : null}
+        {selection.kind === 'ambiguous' ? (
+          <StateChip
+            kind="conflicting"
+            detail={`Linked session ${selection.selection.sessionId} names ${selection.count} sessions on this loaded page; choose one in the field.`}
           />
         ) : null}
 

@@ -1,14 +1,33 @@
 import { describe, expect, it } from 'vitest';
+import type { LoomSessionRowV1 } from '../../contracts/generated.ts';
 import {
+  loomSessionValue,
   parseHiddenKinds,
   parseLaneSet,
+  parseLoomSession,
   parseWindow,
   parseZoom,
+  resolveLoomSession,
   serializeHiddenKinds,
   serializeLaneSet,
   serializeWindow,
   toggleInSet,
 } from './loomUrl.ts';
+
+function row(provider: string, sessionId: string): LoomSessionRowV1 {
+  return {
+    session_id: sessionId,
+    provider,
+    title: null,
+    started_at: 1_784_700_000,
+    ended_at: null,
+    last_message_at: null,
+    messages: 1,
+    models: [],
+    is_subagent: false,
+    edited_files_recorded: true,
+  };
+}
 
 describe('loomUrl', () => {
   it('round-trips a window and refuses one that is not a time this store could record', () => {
@@ -43,6 +62,63 @@ describe('loomUrl', () => {
     expect(parseZoom('workstream')).toBe('workstream');
     expect(parseZoom('event')).toBe('agent');
     expect(parseZoom(null)).toBe('agent');
+  });
+
+  it('reads loomSession as a lane tuple or as the bare id Delivery links with', () => {
+    expect(parseLoomSession(null)).toBeNull();
+    expect(parseLoomSession('')).toBeNull();
+    expect(parseLoomSession('["claude","a"]')).toEqual({
+      kind: 'lane',
+      laneId: '["claude","a"]',
+      selection: { provider: 'claude', sessionId: 'a' },
+    });
+    expect(parseLoomSession('["unknown","a"]')).toEqual({
+      kind: 'lane',
+      laneId: '["unknown","a"]',
+      selection: { provider: null, sessionId: 'a' },
+    });
+    expect(parseLoomSession('session.alpha.1')).toEqual({
+      kind: 'bare_id',
+      selection: { provider: null, sessionId: 'session.alpha.1' },
+    });
+    expect(parseLoomSession('["claude"')).toEqual({
+      kind: 'bare_id',
+      selection: { provider: null, sessionId: '["claude"' },
+    });
+    expect(parseLoomSession('["claude"]')).toMatchObject({ kind: 'bare_id' });
+  });
+
+  it('writes the lane id the field draws, including the unrecorded-provider lane', () => {
+    expect(loomSessionValue({ provider: 'claude', sessionId: 'a' })).toBe('["claude","a"]');
+    expect(loomSessionValue({ provider: '', sessionId: 'a' })).toBe('["unknown","a"]');
+  });
+
+  it('resolves a link against the loaded page without guessing between providers', () => {
+    const claude = row('claude', 'shared');
+    const codex = row('codex', 'shared');
+    const unrecorded = row('', 'quiet');
+    const rows = [claude, codex, unrecorded];
+    const resolve = (raw: string | null) => resolveLoomSession(rows, parseLoomSession(raw));
+
+    expect(resolve(null)).toEqual({ kind: 'none' });
+    expect(resolve('["codex","shared"]')).toEqual({ kind: 'lane', laneId: '["codex","shared"]', row: codex });
+    expect(resolve('["unknown","quiet"]')).toEqual({ kind: 'lane', laneId: '["unknown","quiet"]', row: unrecorded });
+    expect(resolve('quiet')).toEqual({ kind: 'lane', laneId: '["unknown","quiet"]', row: unrecorded });
+    // The empty-provider tuple older Sessions links wrote lands on the same lane.
+    expect(resolve('["","quiet"]')).toEqual({ kind: 'lane', laneId: '["unknown","quiet"]', row: unrecorded });
+    expect(resolve('shared')).toEqual({
+      kind: 'ambiguous',
+      selection: { provider: null, sessionId: 'shared' },
+      count: 2,
+    });
+    expect(resolve('elsewhere')).toEqual({
+      kind: 'outside_page',
+      selection: { provider: null, sessionId: 'elsewhere' },
+    });
+    expect(resolve('["claude","elsewhere"]')).toEqual({
+      kind: 'outside_page',
+      selection: { provider: 'claude', sessionId: 'elsewhere' },
+    });
   });
 
   it('toggles without mutating the input set', () => {

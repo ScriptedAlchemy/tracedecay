@@ -204,19 +204,19 @@ export function recordedModels(row: LoomSessionRowV1): { models: string[]; unrec
  * Selection → index row join
  * ------------------------------------------------------------------------ */
 
-type IndexJoin =
-  | { kind: 'exact'; row: LoomSessionRowV1 }
+type IndexJoin<R> =
+  | { kind: 'exact'; row: R }
   /** More than one loaded row answers to the id; a selection without a
    * provider cannot pick between providers and does not. */
-  | { kind: 'ambiguous'; rows: readonly LoomSessionRowV1[] }
-  /** The loaded index page holds no such row. Not "the session does not
-   * exist", the page is one window over the store. */
+  | { kind: 'ambiguous'; rows: readonly R[] }
+  /** The loaded rows hold no such session. Not "the session does not
+   * exist", a page or a tree is one window over the store. */
   | { kind: 'absent' };
 
-export function joinIndexRow(
-  rows: readonly LoomSessionRowV1[],
+export function joinIndexRow<R extends { provider: string; session_id: string }>(
+  rows: readonly R[],
   selection: SessionSelection,
-): IndexJoin {
+): IndexJoin<R> {
   const candidates = rows.filter(
     (row) =>
       row.session_id === selection.sessionId &&

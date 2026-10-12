@@ -321,6 +321,23 @@ describe('Session provenance inspector', () => {
     expect(onSelectProvider).toHaveBeenCalledWith('codex');
   });
 
+  it('links a session whose provider was never recorded to the lane Loom draws for it', () => {
+    stubTranscript();
+    renderWith(
+      <SessionInspector
+        selection={{ provider: null, sessionId: 'quiet' }}
+        index={ready(indexPayload({ sessions: [indexRow({ provider: '', session_id: 'quiet' })] }))}
+        indexPage={1}
+        onSelectProvider={() => {}}
+        onClose={() => {}}
+      />,
+    );
+    const pivot = screen.getByRole('link', { name: /Open in Loom/ });
+    expect(new URL(pivot.getAttribute('href') ?? '', 'http://dashboard.test').searchParams.get('loomSession')).toBe(
+      '["unknown","quiet"]',
+    );
+  });
+
   it('reports a blocked index read as the reason identity and relations are missing', () => {
     stubTranscript();
     renderWith(

@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LoomPage } from './LoomPage.tsx';
+import { loomSessionValue } from './loomUrl.ts';
 import { useScope } from '../../data/scope/store.ts';
 import { applicationSuccess } from '../../test/applicationEnvelope.ts';
 import { responseWithBodyPendingUntilAbort } from '../../test/pendingBody.ts';
@@ -744,6 +745,38 @@ describe('LoomPage', () => {
     expect(document.querySelectorAll('[data-event][data-kind="test_run"]')).toHaveLength(0);
     await user.click(filter);
     expect(document.querySelectorAll(selector)).toHaveLength(1);
+  });
+
+  it('opens the thread a Delivery link names by its bare session id', async () => {
+    const temporal = structuredClone(TEMPORAL);
+    temporal.payload.sessions[0]!.session_id = 'session.alpha.1';
+    renderLoom({ ...HAPPY, '/api/loom/temporal': { status: 200, body: temporal } }, '/loom?loomSession=session.alpha.1');
+    const thread = await screen.findByRole('region', { name: 'Loaded execution' });
+    expect(thread.textContent).toContain('Deliver Git primitive runtime');
+    expect(screen.queryByText(/outside this loaded page/)).toBeNull();
+    expect(screen.getByTestId('loom-url').textContent).toBe('?loomSession=session.alpha.1');
+  });
+
+  it('opens no thread for a bare id two providers answer to and says so', async () => {
+    const temporal = structuredClone(TEMPORAL);
+    temporal.payload.sessions[1]!.session_id = 'sess-open';
+    renderLoom({ ...HAPPY, '/api/loom/temporal': { status: 200, body: temporal } }, '/loom?loomSession=sess-open');
+    expect(await screen.findByText(/names 2 sessions on this loaded page/)).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'Loaded execution' })).toBeNull();
+    expect(screen.queryByText(/outside this loaded page/)).toBeNull();
+  });
+
+  it('selects a session whose provider was never recorded through the link Loom writes for it', async () => {
+    const temporal = structuredClone(TEMPORAL);
+    temporal.payload.sessions[0]!.provider = '';
+    const value = loomSessionValue({ provider: '', sessionId: 'sess-open' });
+    renderLoom(
+      { ...HAPPY, '/api/loom/temporal': { status: 200, body: temporal } },
+      `/loom?loomSession=${encodeURIComponent(value)}`,
+    );
+    const thread = await screen.findByRole('region', { name: 'Loaded execution' });
+    expect(thread.textContent).toContain('Deliver Git primitive runtime');
+    expect(screen.queryByText(/outside this loaded page/)).toBeNull();
   });
 
   it('cancels the temporal read when the reader leaves before it settles', async () => {
