@@ -21,7 +21,9 @@ use crate::capability_manifest::{
     ApplicationCapabilityManifestInput, application_capability_manifest,
 };
 use crate::error::ApplicationContractError;
-use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
+use crate::handlers::{
+    ApplicationHandlerDescriptor, ApplicationOperation, capability_executable_schema,
+};
 use crate::result::ResultContractRef;
 use crate::retrieval::catalog::APPLICATION_DEFAULT_PROFILE_ID;
 use crate::schema_bodies::{SchemaBodyMaterialization, attach_schema_bodies};
@@ -137,10 +139,6 @@ impl RetainedSurfaceOperation {
     /// routes, and the SDK all derive from this exact mounted set, which is
     /// the full catalog today.
     pub const CALLABLE: [Self; 27] = Self::ALL;
-
-    /// Every current retained action has an exact project-open production
-    /// adapter. SDK clients invoke the operation-selected routes.
-    pub const SDK_EXECUTABLE: [Self; 27] = Self::ALL;
 
     /// Additional SDK controls that cannot live in the bounds-only operation body.
     pub const fn sdk_operation_contract(self) -> RetainedSdkOperationContractV1 {
@@ -487,20 +485,13 @@ where
     Request: JsonSchema,
     Response: JsonSchema,
 {
-    let capability_id = CapabilityId::new(capability_id(operation))?;
-    let manifest = contribution
-        .capabilities()
-        .iter()
-        .find(|manifest| manifest.capability_id() == &capability_id)
-        .ok_or(ApplicationContractError::Inconsistent {
-            field: "retained executable schema capability",
-        })?;
-    Ok(ExecutableSchemaAuthority::for_types_at_paths::<
-        Request,
-        Response,
-    >(
-        manifest, request_rust_type_path, result_rust_type_path
-    )?)
+    capability_executable_schema::<Request, Response>(
+        contribution,
+        &CapabilityId::new(capability_id(operation))?,
+        "retained executable schema capability",
+        request_rust_type_path,
+        result_rust_type_path,
+    )
 }
 
 pub fn retained_surface_handler_descriptors()
@@ -837,7 +828,6 @@ mod tests {
 
         assert!(RetainedSurfaceOperation::ALL.contains(&operation));
         assert!(RetainedSurfaceOperation::CALLABLE.contains(&operation));
-        assert!(RetainedSurfaceOperation::SDK_EXECUTABLE.contains(&operation));
         let catalog_launchers = contribution
             .executable_schemas()
             .iter()
@@ -947,7 +937,7 @@ mod tests {
     #[test]
     fn every_mounted_retained_action_is_sdk_executable() {
         let registry = crate::application_http_executable_binding_registry().expect("registry");
-        for operation in RetainedSurfaceOperation::SDK_EXECUTABLE {
+        for operation in RetainedSurfaceOperation::ALL {
             let operation_id = format!("operation.application.{}", operation.as_str());
             let binding = registry
                 .iter()

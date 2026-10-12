@@ -192,28 +192,6 @@ pub struct RegisteredPolicyCapabilityV1 {
     capability_digest: ManifestDigest,
 }
 
-impl RegisteredPolicyCapabilityV1 {
-    pub fn capability_id(&self) -> &str {
-        &self.capability_id
-    }
-
-    pub const fn effect_class(&self) -> EffectClass {
-        self.effect_class
-    }
-
-    pub const fn catalog_availability(&self) -> CapabilityAvailabilityV1 {
-        self.catalog_availability
-    }
-
-    pub fn use_case_id(&self) -> &str {
-        &self.use_case_id
-    }
-
-    pub fn capability_digest(&self) -> &ManifestDigest {
-        &self.capability_digest
-    }
-}
-
 /// Production composition of existing pure evaluators.
 ///
 /// This is ordinary typed application wiring, not a policy engine or generic

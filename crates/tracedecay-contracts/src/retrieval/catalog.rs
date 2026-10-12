@@ -24,7 +24,9 @@ use crate::capability_manifest::{
     ApplicationCapabilityManifestInput, application_capability_manifest,
 };
 use crate::error::ApplicationContractError;
-use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
+use crate::handlers::{
+    ApplicationHandlerDescriptor, ApplicationOperation, capability_executable_schema,
+};
 use crate::remote::status::RemoteOperationalStatusReadV1;
 use crate::result::ResultContractRef;
 use crate::retrieval::DependencyDepthResultV1;
@@ -1249,19 +1251,13 @@ where
         "capability.application.primitive.{}",
         operation.replace('_', "-")
     ))?;
-    let manifest = contribution
-        .capabilities()
-        .iter()
-        .find(|manifest| manifest.capability_id() == &capability_id)
-        .ok_or(ApplicationContractError::Inconsistent {
-            field: "primitive schema capability",
-        })?;
-    Ok(ExecutableSchemaAuthority::for_types_at_paths::<
-        Request,
-        Response,
-    >(
-        manifest, request_rust_type_path, result_rust_type_path
-    )?)
+    capability_executable_schema::<Request, Response>(
+        contribution,
+        &capability_id,
+        "primitive schema capability",
+        request_rust_type_path,
+        result_rust_type_path,
+    )
 }
 
 pub fn symbol_search_request_schema() -> Result<SchemaRef, ApplicationContractError> {

@@ -881,7 +881,13 @@ impl WorkTerminalEvidenceV1 {
         &self,
         run_id: RunId,
     ) -> Result<RuntimeEvidenceRef, WorkRuntimeContractError> {
-        let evidence_digest = match self {
+        RuntimeEvidenceRef::new(run_id, self.evidence_digest().clone(), true)
+            .map_err(|_| WorkRuntimeContractError::InconsistentAttemptState)
+    }
+
+    /// The provider evidence digest every terminal carries.
+    pub const fn evidence_digest(&self) -> &ManifestDigest {
+        match self {
             Self::Succeeded {
                 evidence_digest, ..
             }
@@ -893,10 +899,8 @@ impl WorkTerminalEvidenceV1 {
             }
             | Self::Cancelled {
                 evidence_digest, ..
-            } => evidence_digest.clone(),
-        };
-        RuntimeEvidenceRef::new(run_id, evidence_digest, true)
-            .map_err(|_| WorkRuntimeContractError::InconsistentAttemptState)
+            } => evidence_digest,
+        }
     }
 
     /// The durable instant at which the provider terminal was observed.
