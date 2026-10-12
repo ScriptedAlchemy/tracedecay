@@ -460,15 +460,50 @@ pub(crate) fn hook_v2_replay_consumer_registered(data_root: &Path) -> bool {
     })
 }
 
-/// Start the per-project replay consumer exactly once per hook data root and
-/// project open. Returns `false` when the running consumer already belongs to
-/// this open; an incumbent bound to a different open is displaced instead —
-/// relying on it would lose the drain the moment that open's graph drops.
+/// Start the per-project replay consumer exactly once per hook data root.
+/// Returns `false` while the running consumer's graph and settlements are
+/// alive: distinct served worktrees share the data root, so a live incumbent
+/// keeps draining for every open of the store. A dead incumbent is displaced.
 pub(crate) fn register_hook_v2_replay_consumer(
     graph: Arc<tracedecay_project::project::TraceDecay>,
     delivery_settlements: Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>,
     project_sessions: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     background_cpu: Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,
+) -> bool {
+    register_hook_v2_replay_consumer_with(
+        graph,
+        delivery_settlements,
+        project_sessions,
+        background_cpu,
+        None,
+    )
+}
+
+/// Rebind the data root's consumer to a still-served graph during retirement.
+/// An incumbent bound to `retiring` is displaced even though its graph is
+/// still alive — the retire ends it — but a live third party's is kept.
+pub(crate) fn retarget_hook_v2_replay_consumer(
+    graph: Arc<tracedecay_project::project::TraceDecay>,
+    delivery_settlements: Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>,
+    project_sessions: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    background_cpu: Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,
+    retiring: &Weak<tracedecay_project::project::TraceDecay>,
+) -> bool {
+    register_hook_v2_replay_consumer_with(
+        graph,
+        delivery_settlements,
+        project_sessions,
+        background_cpu,
+        Some(retiring),
+    )
+}
+
+fn register_hook_v2_replay_consumer_with(
+    graph: Arc<tracedecay_project::project::TraceDecay>,
+    delivery_settlements: Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>,
+    project_sessions: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+    background_cpu: Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,
+    displace_bound: Option<&Weak<tracedecay_project::project::TraceDecay>>,
 ) -> bool {
     let data_root = graph.hook_store_layout().data_root.clone();
     let project_root = graph.project_root().to_path_buf();
@@ -478,8 +513,9 @@ pub(crate) fn register_hook_v2_replay_consumer(
     match registered_replay_roots().lock() {
         Ok(mut roots) => {
             if roots.get(&data_root).is_some_and(|consumer| {
-                Weak::ptr_eq(&consumer.graph, &graph)
+                consumer.graph.upgrade().is_some()
                     && consumer.delivery_settlements.upgrade().is_some()
+                    && !displace_bound.is_some_and(|bound| Weak::ptr_eq(&consumer.graph, bound))
             }) {
                 return false;
             }
@@ -566,6 +602,19 @@ pub(crate) fn register_hook_v2_replay_consumer(
         Err(_) => task.abort(),
     }
     true
+}
+
+/// The data root has no registered consumer, or the registered one's graph is
+/// dead or `bound` — the only states a still-served graph may take over.
+pub(crate) fn replay_consumer_unowned_or_bound_to(
+    data_root: &Path,
+    bound: &Weak<tracedecay_project::project::TraceDecay>,
+) -> bool {
+    registered_replay_roots().lock().is_ok_and(|roots| {
+        roots.get(data_root).is_none_or(|consumer| {
+            consumer.graph.upgrade().is_none() || Weak::ptr_eq(&consumer.graph, bound)
+        })
+    })
 }
 
 /// Stop and join the exact project replay consumer before releasing its graph.

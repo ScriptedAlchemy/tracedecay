@@ -1228,6 +1228,12 @@ impl McpServer {
         self.project_session_db.clone()
     }
 
+    pub(crate) fn delivery_settlement_authority(
+        &self,
+    ) -> Option<Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>> {
+        self.delivery_settlement_authority.clone()
+    }
+
     /// The mounted project session retrieval service and its identity.
     pub(crate) fn project_session_retrieval(
         &self,

@@ -153,12 +153,14 @@ async fn release_one_idle_project_server_before_open(
             for data_root in hook_data_roots {
                 super::hook_v2_replay_consumer::shutdown_hook_v2_replay_consumer(&data_root).await;
             }
+            // Prior same-owner retirements may include a bind eviction that
+            // itself waits on this capacity gate before its owner check —
+            // holding the admission across the wait deadlocks both.
+            drop(capacity_admission);
             for prior in prior_owner_retirements {
                 prior.wait().await?;
             }
-            let released = release_capacity_retired_stores(stores).await;
-            drop(capacity_admission);
-            released
+            release_capacity_retired_stores(stores).await
         });
     drop(retirement_admission);
     completion
@@ -296,17 +298,19 @@ pub(crate) fn daemon_transcript_source_profile(
 /// retiring graph's owners from the live replacement's.
 async fn retire_unserved_process_owners(
     store_administration: &StoreAdministration,
-    cg: &tracedecay_project::project::TraceDecay,
+    cg: &Arc<tracedecay_project::project::TraceDecay>,
 ) {
     let graph_db_path = cg.db().canonical_database_path();
-    let served = store_administration
+    let serving = store_administration
         .project_servers()
         .lock()
         .await
         .servers
-        .keys()
-        .any(|key| same_canonical_path(&key.owner.graph_db_path, graph_db_path));
-    if served {
+        .iter()
+        .find(|(key, _)| same_canonical_path(&key.owner.graph_db_path, graph_db_path))
+        .map(|(_, entry)| Arc::clone(&entry.server));
+    if let Some(serving) = serving {
+        transfer_served_replay_consumer(cg, &serving).await;
         return;
     }
     #[cfg(any(test, feature = "test-helpers"))]
@@ -320,6 +324,38 @@ async fn retire_unserved_process_owners(
     if let Some(project_id) = hook_project_id_for_layout(cg.hook_store_layout()) {
         unregister_registered_context_scout_owner(project_id, graph_db_path);
     }
+}
+
+/// Another server still serves the retiring graph's database, so the data
+/// root's replay must outlive this retire. When the registered consumer is
+/// unowned, bound to a dead graph, or bound to the graph being retired, it
+/// re-registers under the served server's graph — replacing any incumbent
+/// bound to the retiring graph outright, never a live third party's.
+async fn transfer_served_replay_consumer(
+    retiring: &Arc<tracedecay_project::project::TraceDecay>,
+    serving: &Arc<crate::mcp::McpServer>,
+) {
+    let data_root = retiring.hook_store_layout().data_root.clone();
+    if !super::hook_v2_replay_consumer::replay_consumer_unowned_or_bound_to(
+        &data_root,
+        &Arc::downgrade(retiring),
+    ) {
+        return;
+    }
+    let (Some(delivery_settlements), Some(session_db), Some(background_cpu)) = (
+        serving.delivery_settlement_authority(),
+        serving.project_session_db(),
+        serving.background_cpu_authority(),
+    ) else {
+        return;
+    };
+    super::hook_v2_replay_consumer::retarget_hook_v2_replay_consumer(
+        serving.cg().await,
+        delivery_settlements,
+        session_db,
+        background_cpu,
+        &Arc::downgrade(retiring),
+    );
 }
 
 /// Retire the process-global owners and drain of one server a route-bind

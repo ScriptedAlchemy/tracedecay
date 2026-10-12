@@ -454,6 +454,8 @@ async fn route_bind_eviction_cannot_retire_a_reopened_projects_owners() {
         .scratch()
         .join("hold-after-unserved-owner-check");
     let check_entered = PathBuf::from(format!("{}.entered", check_hold.display()));
+    let owners_hold = environment.scratch().join("hold-after-independent-owners");
+    let owners_entered = PathBuf::from(format!("{}.entered", owners_hold.display()));
     let socket = daemon_socket_path(environment.home());
     let mut daemon = spawn_tracedecay_daemon_logged(environment.home(), &log_path, |command| {
         command
@@ -465,6 +467,10 @@ async fn route_bind_eviction_cannot_retire_a_reopened_projects_owners() {
             .env(
                 "TRACEDECAY_TEST_HOLD_AFTER_UNSERVED_OWNER_CHECK",
                 &check_hold,
+            )
+            .env(
+                "TRACEDECAY_TEST_HOLD_AFTER_INDEPENDENT_OWNERS",
+                &owners_hold,
             );
     });
     tracedecay_project::product_runtime::register_fixture_product_runtime();
@@ -501,7 +507,12 @@ async fn route_bind_eviction_cannot_retire_a_reopened_projects_owners() {
     // The eviction's detached cleanup parks ahead of its retire; the reopen
     // then parks at its own bind with its Scout owner already adopted.
     let _ = fs::remove_file(&retire_entered);
+    let _ = fs::remove_file(&owners_entered);
     fs::write(&retire_hold, b"hold").expect("hold file");
+    // Park the incoming open at its owner mounts too: catching the marker
+    // here is the deterministic signal that its owner phase already ran, so
+    // a later park on the same hold can only belong to the reopen.
+    fs::write(&owners_hold, b"hold").expect("hold file");
     fs::remove_file(&bind_hold).expect("release the held bind");
     poll_until(
         Instant::now() + RECEIPT_TIMEOUT,
@@ -509,6 +520,13 @@ async fn route_bind_eviction_cannot_retire_a_reopened_projects_owners() {
         || retire_entered.is_file().then_some(()),
         || "the eviction cleanup never reached its retire".to_owned(),
     );
+    poll_until(
+        Instant::now() + RECEIPT_TIMEOUT,
+        Duration::from_millis(20),
+        || owners_entered.is_file().then_some(()),
+        || "the incoming open never reached its owner mounts".to_owned(),
+    );
+    fs::remove_file(&owners_hold).expect("release the held owner mounts");
     init.join().expect("the ninth project initializes");
 
     let _ = fs::remove_file(&bind_entered);
@@ -542,6 +560,12 @@ async fn route_bind_eviction_cannot_retire_a_reopened_projects_owners() {
     // release the evicting project, and that release runs the same unserved-
     // owner check — parking it here would deadlock the open before its bind.
     fs::write(&check_hold, b"hold").expect("hold file");
+    // The replay consumer registers inside the reopen's owner mounts — after
+    // its core route publishes — and keeps the still-live incumbent rather
+    // than displacing it. Parking the reopen there leaves it relying on the
+    // exact consumer the eviction's kill is staged to remove next.
+    let _ = fs::remove_file(&owners_entered);
+    fs::write(&owners_hold, b"hold").expect("hold file");
 
     // Release the cleanup while the reopen still parks before publishing with
     // its capacity admission held. On the unguarded build it runs the served
@@ -559,13 +583,21 @@ async fn route_bind_eviction_cannot_retire_a_reopened_projects_owners() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     fs::remove_file(&bind_hold).expect("release the held reopen bind");
+    // The reopen publishes, registers its owners, and parks; only then can
+    // the unguarded kill fall on an incumbent that open already relies on.
+    let owners_deadline = Instant::now() + RECEIPT_TIMEOUT;
+    while !owners_entered.is_file() {
+        assert!(
+            Instant::now() < owners_deadline,
+            "the reopened open never reached its owner mounts"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    fs::remove_file(&check_hold).expect("release the held owner check");
+    fs::remove_file(&owners_hold).expect("release the held owner mounts");
     let reopened = reopen
         .await
         .expect("the reopened session finishes its initialize");
-
-    // The unguarded cleanup removes the consumer the reopen relies on only
-    // after that open publishes; its served check already passed.
-    fs::remove_file(&check_hold).expect("release the held owner check");
 
     let observed = wait_for_readiness(&socket, &reopen_handshake, "ready", RECEIPT_TIMEOUT).await;
     // The unguarded cleanup's kill lands asynchronously: it detaches the
