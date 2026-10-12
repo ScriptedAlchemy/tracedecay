@@ -12,9 +12,9 @@ import {
   ControlLink,
   IdentityRow,
   ProviderStateChip,
-  microsToIso,
   shortSha,
 } from './deliveryChrome.tsx';
+import { formatMicrosUtc } from '../../ui/format.ts';
 import { providerStateSentence } from './evidence.ts';
 import {
   laneServes,
@@ -168,7 +168,7 @@ function CommitsPanel({ projection }: { projection: DeliveryOverviewV1['commits'
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-xs text-text-primary">{commit.subject}</span>
                   <span className="block truncate font-mono text-3xs text-text-muted">
-                    {commit.author_name} · {microsToIso(commit.committer_at_micros)}
+                    {commit.author_name} · {formatMicrosUtc(commit.committer_at_micros)}
                   </span>
                 </span>
               </li>

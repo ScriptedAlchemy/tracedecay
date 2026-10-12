@@ -10,7 +10,7 @@
  */
 
 /** Face-plane utilities in the same order as the chart palette. */
-export const SERIES_SWATCH_CLASSES = [
+const SERIES_SWATCH_CLASSES = [
   'bg-accent',
   'bg-alert',
   'bg-state-ready',
@@ -19,9 +19,9 @@ export const SERIES_SWATCH_CLASSES = [
   'bg-text-secondary',
 ] as const;
 
-export type SeriesLineStyle = 'solid' | 'dashed' | 'dotted';
+type SeriesLineStyle = 'solid' | 'dashed' | 'dotted';
 
-export const SERIES_LINE_STYLES: readonly SeriesLineStyle[] = ['solid', 'dashed', 'dotted'];
+const SERIES_LINE_STYLES: readonly SeriesLineStyle[] = ['solid', 'dashed', 'dotted'];
 
 export function seriesSwatchClass(index: number): string {
   return SERIES_SWATCH_CLASSES[index % SERIES_SWATCH_CLASSES.length] ?? 'bg-accent';

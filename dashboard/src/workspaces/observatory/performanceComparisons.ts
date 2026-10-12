@@ -18,7 +18,7 @@ export const COMPARISON_DISPOSITIONS: readonly ComparisonDispositionV1[] = [
   'insufficient_evidence',
 ];
 
-export interface DispositionPresentation {
+interface DispositionPresentation {
   disposition: ComparisonDispositionV1;
   label: string;
   state: DomainStateKind;
@@ -71,7 +71,7 @@ const NO_COMPARISON_PROJECTION =
 /** The subject evidence a comparison pins, one dimension each because the plan
  * requires the exact build on both sides and a single "subjects" row could not
  * say which of the two is missing. */
-export function subjectDimensions(model: ObservatoryReadModelV1): PlanDimension[] {
+function subjectDimensions(model: ObservatoryReadModelV1): PlanDimension[] {
   const subject = (
     id: string,
     label: string,
@@ -122,7 +122,7 @@ export function subjectDimensions(model: ObservatoryReadModelV1): PlanDimension[
  * dimension because Plan 26 keeps correctness, safety, latency, resources,
  * tokens, cost, autonomy, and effects as separate axes and refuses one reward
  * score. */
-export function resultDimensions(model: ObservatoryReadModelV1): PlanDimension[] {
+function resultDimensions(model: ObservatoryReadModelV1): PlanDimension[] {
   const result = (
     id: string,
     label: string,

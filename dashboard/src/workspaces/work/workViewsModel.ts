@@ -102,13 +102,13 @@ import type { WorkTaskView } from './workProductView.ts';
  * cycle, which must be drawn and captioned as an observation, it is a real
  * reading of the plan, not a rendering error.
  */
-export interface WorkDagComponent {
+interface WorkDagComponent {
   readonly index: number;
   readonly taskIds: readonly string[];
   readonly depth: number;
 }
 
-export interface WorkDagNode {
+interface WorkDagNode {
   readonly taskId: string;
   readonly title: string;
   readonly depth: number;
@@ -118,7 +118,7 @@ export interface WorkDagNode {
   readonly dependents: readonly string[];
 }
 
-export interface WorkDagEdge {
+interface WorkDagEdge {
   readonly dependency: string;
   readonly dependent: string;
   /** Both ends sit in one condensation component, so the edge runs backward
@@ -129,12 +129,12 @@ export interface WorkDagEdge {
 /** A declared dependency on a task the snapshot did not return. The edge is
  * real; the task at its far end is outside this page, so no stratum can hold
  * it and nothing about it may be assumed. */
-export interface WorkDagUnresolvedEdge {
+interface WorkDagUnresolvedEdge {
   readonly dependency: string;
   readonly dependent: string;
 }
 
-export interface WorkDagStratum {
+interface WorkDagStratum {
   readonly depth: number;
   readonly components: readonly WorkDagComponent[];
 }

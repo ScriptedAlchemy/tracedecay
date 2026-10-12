@@ -2,7 +2,7 @@ import { useMemo, useState, type KeyboardEvent } from 'react';
 import type { DeliveryInboxPullRequestV1, DeliveryInboxV1 } from '../../contracts/generated.ts';
 import { Corners } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn.ts';
-import { microsToIso } from './deliveryChrome.tsx';
+import { formatMicrosUtc } from '../../ui/format.ts';
 import { gradeDash, gradeLabel } from './evidence.ts';
 import { pullRequestNumberLabel } from './deliveryReading.ts';
 import { layoutLanes, threadPath, LANE_GUTTER, type LaneBar, type LaneBead, type LaneZoom } from './lanes.ts';
@@ -19,7 +19,7 @@ const ZOOMS: readonly (readonly [LaneZoom, string])[] = [
 export const LANE_FIELD_LABEL = 'Delivery lanes · repositories by observed time';
 
 function stamp(micros: number): string {
-  return microsToIso(micros).slice(5, 16).replace('T', ' ');
+  return formatMicrosUtc(micros).slice(5, 16).replace('T', ' ');
 }
 
 /** Luminance ramp for recency within the loaded page: older is dimmer, never hidden. */

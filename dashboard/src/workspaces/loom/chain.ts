@@ -10,7 +10,7 @@
 import type { LcmMessageV1 } from '../../contracts/generated.ts';
 import { orderMessages } from '../../viz/temporal/journey.ts';
 
-export interface ChainStep {
+interface ChainStep {
   id: string;
   /** `user` | `assistant` | `system` | whatever the store says. */
   role: string;
@@ -22,7 +22,7 @@ export interface ChainStep {
   excerpt: string;
 }
 
-export interface ChainSummary {
+interface ChainSummary {
   steps: ChainStep[];
   /** Turns per role, ordered by count. */
   roles: Array<{ role: string; count: number }>;
@@ -46,7 +46,7 @@ export interface ChainSummary {
  * drifting past a hand-written mirror. All but the id stay optional because
  * the chain reads what a row actually has, absent quantities stay absent.
  */
-export type ChainMessageInput = Pick<LcmMessageV1, 'message_id'> &
+type ChainMessageInput = Pick<LcmMessageV1, 'message_id'> &
   Partial<
     Pick<
       LcmMessageV1,

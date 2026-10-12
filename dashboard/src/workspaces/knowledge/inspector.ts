@@ -50,7 +50,7 @@ export function payloadAccessState(access: PayloadAccessState): {
   }
 }
 
-export interface LadderRung {
+interface LadderRung {
   readonly id:
     | 'canonical_detail'
     | 'payload_access'

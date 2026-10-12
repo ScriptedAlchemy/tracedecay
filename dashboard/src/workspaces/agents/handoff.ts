@@ -33,7 +33,7 @@ import type { WorkResult } from '../work/workApi.ts';
  */
 
 /** One handoff, flattened onto the task it belongs to. */
-export interface AgentHandoff {
+interface AgentHandoff {
   readonly handoffId: string;
   readonly taskId: string;
   readonly fromActor: string;
@@ -51,7 +51,7 @@ export interface AgentHandoff {
 }
 
 /** One actor's part in the frontier: what it handed on, and what it was given. */
-export interface AgentHandoffActor {
+interface AgentHandoffActor {
   readonly actor: string;
   readonly handedOff: number;
   readonly received: number;
@@ -130,7 +130,7 @@ function handoffsOf(item: WorkItemV1): readonly AgentHandoff[] {
 }
 
 /** Who handed what to whom, ranked by how much passed through each actor. */
-export function handoffActors(
+function handoffActors(
   handoffs: readonly AgentHandoff[],
 ): readonly AgentHandoffActor[] {
   const tally = new Map<string, { handedOff: number; received: number }>();

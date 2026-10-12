@@ -34,7 +34,7 @@ const NO_LATENESS_PROJECTION =
  * into a claim the source did not make, so only the wire's `known` state is
  * ready here. A missing metric is unknown rather than a clean zero.
  */
-export interface CoverageWindowTruth {
+interface CoverageWindowTruth {
   readonly metricState: CoverageStateV1 | 'missing';
   readonly presentation: DomainStateKind;
 }
@@ -66,7 +66,7 @@ export type DenominatorIntegrity =
   | { kind: 'independent'; eligible: number; observed: number }
   | { kind: 'missing'; reason: string };
 
-export function denominatorIntegrity(metric: MetricValueV1 | undefined): DenominatorIntegrity {
+function denominatorIntegrity(metric: MetricValueV1 | undefined): DenominatorIntegrity {
   if (metric === undefined) {
     return { kind: 'missing', reason: NO_ELIGIBLE_PROJECTION };
   }
@@ -126,10 +126,10 @@ export function adoptionCoverageReading(model: ObservatoryReadModelV1): Eligible
   return eligibleVersusObserved(observed.value, eligible.value);
 }
 
-export type CoverageBand = PlanDimensionBand;
+type CoverageBand = PlanDimensionBand;
 
 /** Eligible against observed, as dimension cards. */
-export function populationDimensions(model: ObservatoryReadModelV1): PlanDimension[] {
+function populationDimensions(model: ObservatoryReadModelV1): PlanDimension[] {
   return [
     {
       id: 'eligible_units',
@@ -147,7 +147,7 @@ export function populationDimensions(model: ObservatoryReadModelV1): PlanDimensi
 }
 
 /** Late, dropped, and the failure count that keeps the two apart. */
-export function arrivalDimensions(model: ObservatoryReadModelV1): PlanDimension[] {
+function arrivalDimensions(model: ObservatoryReadModelV1): PlanDimension[] {
   return [
     {
       id: 'late_arrivals',

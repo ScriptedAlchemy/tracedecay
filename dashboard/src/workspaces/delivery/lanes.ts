@@ -56,7 +56,7 @@ export interface LaneBead {
   readonly recency: number;
 }
 
-export interface LaneTrack {
+interface LaneTrack {
   readonly id: 'provider_read' | 'attention';
   readonly label: string;
   readonly y: number;
@@ -79,7 +79,7 @@ export interface LaneBar {
   readonly tracks: readonly LaneTrack[];
 }
 
-export interface LaneSummary {
+interface LaneSummary {
   readonly admitted: number;
   readonly drawn: number;
   readonly active: number;
@@ -98,13 +98,13 @@ export interface Lane {
   readonly absence: string | null;
 }
 
-export interface LaneThread {
+interface LaneThread {
   readonly link: EvidenceLink;
   readonly from: { readonly x: number; readonly y: number };
   readonly to: { readonly x: number; readonly y: number };
 }
 
-export interface LaneLayout {
+interface LaneLayout {
   readonly width: number;
   readonly height: number;
   readonly x0: number;
@@ -129,7 +129,7 @@ const RIBBON = 34;
 const TRACK = 20;
 /** Every PR row is a full-width interactive band at the 44px target floor;
  * the drawn bar inside it stays thin. */
-export const ROW_HEIGHT = 44;
+const ROW_HEIGHT = 44;
 /** Portfolio lanes with more PRs than this compress into a ribbon. */
 export const DENSE_LANE_LIMIT = 8;
 const BINS = 32;

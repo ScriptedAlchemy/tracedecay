@@ -140,7 +140,7 @@ export function runStatusTone(status: AutomationRunStatus): Tone {
 }
 
 /** Whether a status names a settled run. Mirrors `AutomationRunStatus::is_terminal`. */
-export function runIsTerminal(status: AutomationRunStatus): boolean {
+function runIsTerminal(status: AutomationRunStatus): boolean {
   return status === 'succeeded' || status === 'failed' || status === 'skipped';
 }
 
@@ -206,7 +206,7 @@ export function failureClassTone(classification: AgentTaskFailureClass): Tone {
  * alive; the route serves no heartbeat. The only runtime evidence on this
  * surface is the per-task `last_scheduler_run` ledger record, which
  * {@link observedSchedulerActivity} reads. */
-export interface SchedulerReading {
+interface SchedulerReading {
   readonly tone: Tone;
   readonly word: string;
   readonly sentence: string;
@@ -270,7 +270,7 @@ export function observedSchedulerActivity(
   return newest;
 }
 
-export interface DueSummary {
+interface DueSummary {
   readonly due: number;
   readonly skipped: number;
   readonly total: number;
@@ -320,7 +320,7 @@ export function formatDuration(secs: number): string {
 }
 
 /** A run's timing, measured from its own two stamps. */
-export type RunTiming =
+type RunTiming =
   /** Both stamps parsed and the run has settled: a real duration. */
   | { kind: 'measured'; startedAt: number; completedAt: number; durationSecs: number }
   /** Started, not settled: the ledger has no end to measure to. */
@@ -346,7 +346,7 @@ export function runTiming(run: Pick<AutomationRunRowV1, 'status' | 'started_at' 
 
 /* ---- ledger window ---------------------------------------------------- */
 
-export interface StatusTally {
+interface StatusTally {
   readonly queued: number;
   readonly running: number;
   readonly succeeded: number;

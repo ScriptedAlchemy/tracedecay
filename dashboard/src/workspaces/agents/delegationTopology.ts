@@ -62,7 +62,7 @@ export interface TopologySessionMark {
   readonly openedBundles: readonly OpenedBundle[];
 }
 
-export interface OpenedBundle {
+interface OpenedBundle {
   readonly id: string;
   readonly label: string;
   readonly sessions: number;
@@ -90,7 +90,7 @@ export interface TopologyBundleMark {
 export type TopologyMark = TopologySessionMark | TopologyBundleMark;
 
 /** A drawn delegation: parent session to child mark. */
-export interface TopologyEdge {
+interface TopologyEdge {
   readonly id: string;
   readonly from: string;
   readonly to: string;
@@ -101,14 +101,14 @@ export interface TopologyEdge {
 }
 
 /** An edge the reading names but cannot draw to a source. */
-export interface TopologyStub {
+interface TopologyStub {
   readonly id: string;
   readonly to: string;
   readonly kind: 'missing_parent' | 'cycle';
   readonly parentSessionId: string | null;
 }
 
-export interface TopologyGeneration {
+interface TopologyGeneration {
   readonly generation: number;
   readonly marks: number;
   /** Sessions drawn individually in this column. */
@@ -234,7 +234,7 @@ function compareText(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-export interface TopologyOptions {
+interface TopologyOptions {
   /** Bundle ids a reader opened, and session ids whose children a reader
    * asked to see past the depth limit. */
   readonly expanded?: ReadonlySet<string>;
@@ -466,7 +466,7 @@ export function layoutDelegationTopology(
  * rows at the row pitch is one tall screen; past that a reader is scrolling
  * a list drawn as a diagram, and the exact tree beneath the field is the
  * better instrument for it. */
-export const ROW_BUDGET = 40;
+const ROW_BUDGET = 40;
 
 export interface FittedTopology {
   readonly model: DelegationTopologyModel;

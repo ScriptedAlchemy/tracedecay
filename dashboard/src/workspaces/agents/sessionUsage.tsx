@@ -15,7 +15,7 @@ import type { TopologyMark } from './delegationTopology.ts';
  * session). Whether `absent` means "none recorded" or "the read failed" is the
  * tree's `usage_coverage`, printed once in the legend, never guessed per node.
  */
-export type SessionUsage =
+type SessionUsage =
   | { readonly state: 'absent' }
   | {
       readonly state: 'measured' | 'partial';
@@ -54,12 +54,12 @@ export function tokenCount(value: number | null): string {
 }
 
 /** The mark-level label: the total with its unit, or the typed gap. */
-export function usageTotalLabel(usage: SessionUsage): string {
+function usageTotalLabel(usage: SessionUsage): string {
   return usage.state === 'absent' ? 'tokens absent' : tokenCount(usage.total);
 }
 
 /** Sum of the measured members' totals across a bundle, with how many joined. */
-export function bundleUsage(members: readonly AnalyticsSubagentNodeV1[]): {
+function bundleUsage(members: readonly AnalyticsSubagentNodeV1[]): {
   readonly total: number;
   readonly measured: number;
   readonly partial: boolean;

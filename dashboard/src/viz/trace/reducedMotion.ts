@@ -9,7 +9,7 @@
  */
 import { useEffect, useState } from 'react';
 
-export type MotionPreference = 'system' | 'reduced' | 'full';
+type MotionPreference = 'system' | 'reduced' | 'full';
 
 const STORAGE_KEY = 'td.motion-preference';
 const QUERY = '(prefers-reduced-motion: reduce)';

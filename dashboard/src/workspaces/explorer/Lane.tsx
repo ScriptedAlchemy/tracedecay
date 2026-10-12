@@ -27,7 +27,7 @@ import {
 import type { Hit } from './model.ts';
 
 /** Fixed row height shared with the virtualizer: title, location, meta. */
-export const LANE_ROW_HEIGHT = 60;
+const LANE_ROW_HEIGHT = 60;
 
 /** A code-graph generation watermark is a long dotted digest; the footer
  * shows enough to tell two apart and carries the whole value as a title. */
@@ -37,7 +37,7 @@ function clipWatermark(watermark: string): string {
 
 /** Marks each lane's row region so the grid can traverse lanes with the
  * horizontal arrows without knowing how a lane lays itself out. */
-export const LANE_LIST_ATTR = 'data-lane-list';
+const LANE_LIST_ATTR = 'data-lane-list';
 
 export function Lane({
   read,

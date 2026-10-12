@@ -56,7 +56,7 @@ export type WorkGraphReading =
  * The channels are absent under them, but absent with `complete_zero_findings`,
  * never with a failure state.
  */
-export interface WorkGraphPage {
+interface WorkGraphPage {
   readonly mode: WorkGraphReadV1['mode'];
   readonly scope: AuthorizedWorkProductScopeV1;
   readonly entry: WorkGraphVersionEntryV1 | null;
@@ -268,7 +268,7 @@ export interface WorkEffortMassReading {
   readonly split: WorkChannel<WorkEffortSplitReading>;
 }
 
-export interface WorkEffortSplitReading {
+interface WorkEffortSplitReading {
   readonly ready: number;
   readonly running: number;
   readonly blocked: number;
@@ -289,7 +289,7 @@ export interface WorkTimelineInstantReading {
   readonly deadline: number | null;
 }
 
-export interface WorkChurnEntry {
+interface WorkChurnEntry {
   readonly taskId: string;
   readonly updatedAt: number;
   /** Microseconds between the recorded update and the instant this read was
@@ -315,7 +315,7 @@ export interface WorkChurnReading {
   readonly ahead: number;
 }
 
-export interface WorkRuntimeAttemptReading {
+interface WorkRuntimeAttemptReading {
   readonly attemptId: string;
   readonly taskId: string;
   readonly runId: string;

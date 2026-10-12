@@ -29,7 +29,7 @@ import type {
  */
 
 /** One delegation tree: a top and everything beneath it, in pre-order. */
-export interface SubagentTreeGroup {
+interface SubagentTreeGroup {
   readonly top: AnalyticsSubagentNodeV1;
   /** Includes `top` as its first entry. */
   readonly nodes: readonly AnalyticsSubagentNodeV1[];
@@ -83,7 +83,7 @@ export function subagentElapsedSeconds(node: AnalyticsSubagentNodeV1): number | 
 }
 
 /** A per-link-kind census, so the caption can state what it is standing on. */
-export interface SubagentTreeCensus {
+interface SubagentTreeCensus {
   readonly nodes: number;
   readonly sessionsRead: number;
   readonly roots: number;

@@ -5,7 +5,7 @@
  * derived from the recorded extent it is clamped against.
  */
 
-export interface LoomWindow {
+interface LoomWindow {
   start: number;
   end: number;
 }
@@ -58,7 +58,7 @@ function xFor(time: number, window: LoomWindow, width: number): number {
  * Axis
  * ---------------------------------------------------------------------- */
 
-export interface AxisTick {
+interface AxisTick {
   x: number;
   time: number;
   label: string;
