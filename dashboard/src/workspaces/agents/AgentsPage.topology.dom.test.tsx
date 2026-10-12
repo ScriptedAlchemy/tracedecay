@@ -1,4 +1,4 @@
-import { MemoryRouter } from 'react-router';
+import { MemoryRouter, useLocation } from 'react-router';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { http, HttpResponse, type JsonBodyType } from 'msw';
@@ -19,17 +19,36 @@ beforeAll(() => server.listen({ onUnhandledFrame: 'error' }));
 afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
 
-function renderAgents() {
+const address = { search: '' };
+function LocationProbe() {
+  address.search = useLocation().search;
+  return null;
+}
+
+function renderAgents(entry = '/agents') {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
   return render(
     <QueryClientProvider client={client}>
-      <MemoryRouter>
+      <MemoryRouter initialEntries={[entry]}>
         <AgentsPage />
+        <LocationProbe />
       </MemoryRouter>
     </QueryClientProvider>,
   );
+}
+
+function recordFrontierRequests(): string[] {
+  const asked: string[] = [];
+  server.use(
+    http.post('*/api/application/handoff/list-task', async ({ request }) => {
+      const body = (await request.json()) as { session_id: string };
+      asked.push(body.session_id);
+      return HttpResponse.json(resolveFixture('/api/application/handoff/list-task', '') as JsonBodyType);
+    }),
+  );
+  return asked;
 }
 
 const inspector = () => document.querySelector('[data-agent-inspector]')!;
@@ -236,6 +255,39 @@ describe('AgentsPage delegation topology', () => {
     expect(inspector().getAttribute('data-agent-inspector-id')).toBe('codex:session.codex.child');
     expect(inspector().getAttribute('data-agent-inspector-mode')).toBe('selected');
     expect(child.getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('opens on the session a link names and reads that session\'s token frontier', async () => {
+    const asked = recordFrontierRequests();
+    renderAgents('/agents?view=timeline&sessionId=session.codex.child&sessionProvider=codex');
+    await waitFor(() =>
+      expect(inspector().getAttribute('data-agent-inspector-id')).toBe('codex:session.codex.child'),
+    );
+    expect(inspector().getAttribute('data-agent-inspector-mode')).toBe('selected');
+    expect(document.querySelector('[data-agents-view]')?.getAttribute('data-agents-view')).toBe('timeline');
+    await waitFor(() => expect(asked).toEqual(['session.codex.child']));
+  });
+
+  it('writes a selection to the link and clears it on a second click, keeping the view', async () => {
+    renderAgents('/agents?view=timeline');
+    await settled();
+    fireEvent.click(mark('codex:session.codex.child'));
+    expect(new URLSearchParams(address.search)).toEqual(
+      new URLSearchParams({ view: 'timeline', sessionId: 'session.codex.child', sessionProvider: 'codex' }),
+    );
+    fireEvent.click(mark('codex:session.codex.child'));
+    expect(address.search).toBe('?view=timeline');
+    expect(inspector().getAttribute('data-agent-inspector-mode')).toBe('default');
+  });
+
+  it('says a linked session is not in the tree and keeps the newest root as the subject', async () => {
+    const asked = recordFrontierRequests();
+    renderAgents('/agents?sessionId=session.gone&sessionProvider=codex');
+    await settled();
+    expect(screen.getByText(/Linked session session\.gone is not in the delegation tree/)).toBeTruthy();
+    expect(document.querySelector('[data-topology-selected]')).toBeNull();
+    expect(inspector().getAttribute('data-agent-inspector-id')).toBe('cursor:session.cursor.solo');
+    await waitFor(() => expect(asked).toEqual(['session.cursor.solo']));
   });
 
   it('names every mark for a screen reader with its generation and link state', async () => {

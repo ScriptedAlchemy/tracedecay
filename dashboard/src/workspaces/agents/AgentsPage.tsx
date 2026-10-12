@@ -10,7 +10,6 @@ import {
   AnalyticsUnderusedPayloadV1Schema,
   AnalyticsUsageSummaryV1Schema,
   type AnalyticsAgentUsageV1,
-  type AnalyticsSubagentNodeV1,
   type AnalyticsSubagentTreePayloadV1,
 } from '../../contracts/generated.ts';
 import { useSubagentTree } from '../../data/query/sessionReads.ts';
@@ -39,7 +38,13 @@ import { readAttemptFailures } from './failure.ts';
 import { readHandoffFrontier } from './handoff.ts';
 import { newestTreeSession, useAgentHandoffTokens } from './handoffTokenQuery.ts';
 import { readHandoffTokens } from './handoffTokens.ts';
-import { AgentsViewSwitcher, agentsViewNote, useAgentsView, type AgentsView } from './agentsView.tsx';
+import {
+  AgentsViewSwitcher,
+  agentsViewNote,
+  useAgentsSelection,
+  useAgentsView,
+  type AgentsView,
+} from './agentsView.tsx';
 
 const BASE = '/api/plugins/analytics';
 
@@ -102,7 +107,6 @@ export function AgentsPage() {
   const subagentTree = useSubagentTree();
 
   const [inspectedId, setInspectedId] = useState<string | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const [view, setView] = useAgentsView();
   const toggleExpanded = useCallback((id: string) => {
@@ -112,9 +116,6 @@ export function AgentsPage() {
       else next.add(id);
       return next;
     });
-  }, []);
-  const select = useCallback((id: string) => {
-    setSelectedId((current) => (current === id ? null : id));
   }, []);
 
   const treePayload = envelopePayload(subagentTree.data) ?? null;
@@ -126,10 +127,13 @@ export function AgentsPage() {
   );
   // The selected session by identity, looked up in the reading rather than in
   // the drawing: a bundle closing over it or a depth fold must not unselect it.
-  const selectedNode = useMemo<AnalyticsSubagentNodeV1 | null>(() => {
-    if (selectedId === null || treeAvailable === null) return null;
-    return treeAvailable.nodes.find((node) => markId(node) === selectedId) ?? null;
-  }, [selectedId, treeAvailable]);
+  const [selection, setSelection] = useAgentsSelection(treeAvailable);
+  const selectedNode = selection.kind === 'node' ? selection.node : null;
+  const selectedId = selectedNode === null ? null : markId(selectedNode);
+  const select = (id: string) => {
+    const node = treeAvailable?.nodes.find((candidate) => markId(candidate) === id) ?? null;
+    setSelection(id === selectedId ? null : node);
+  };
 
   // The token frontier is read for a session this page can actually name: the
   // selected one, or, with nothing selected, the newest top of the tree, and
@@ -171,7 +175,7 @@ export function AgentsPage() {
               ? `the session store declared itself unavailable${treePayload.error ? `: ${treePayload.error}` : ''}`
               : 'the delegation tree could not be read',
         } as const)
-      : resolveSubject(fit.model, inspectedId, selectedId, newestSession, selectedNode !== null);
+      : resolveSubject(fit.model, inspectedId, selectedId, newestSession);
   // The frontier reading belongs to exactly one session. Any other subject is
   // being inspected without a read having been asked for it, and says so.
   const tokensForSubject =
@@ -223,6 +227,13 @@ export function AgentsPage() {
         * focus or selection in the field asked for. */}
       <section aria-label="Delegation topology" className="flex shrink-0 flex-col lg:flex-row">
         <div className="flex min-w-0 flex-1 flex-col gap-2 p-2">
+          {selection.kind === 'unresolved' && selection.reason !== 'pending' ? (
+            <UnresolvedLink
+              sessionId={selection.selection.sessionId}
+              reason={selection.reason}
+              truncated={treeAvailable?.truncated ?? false}
+            />
+          ) : null}
           <Panel
             legend={view === 'timeline' ? 'Delegation timeline · read-only' : 'Delegation topology · read-only'}
             // Withdrawn below `sm`: the register above already prints this
@@ -320,7 +331,7 @@ export function AgentsPage() {
             handoffs={handoffFrontier}
             failures={attemptFailures}
             diagnostics={diagnosticsForInspector}
-            onClearSelection={() => setSelectedId(null)}
+            onClearSelection={() => setSelection(null)}
             onToggleExpanded={toggleExpanded}
           />
         </aside>
@@ -415,6 +426,28 @@ function TopologyRenderer({
       return unhandled;
     }
   }
+}
+
+/** A linked session the tree does not answer for. The inspector keeps its
+ * default subject, and this says that it is not the linked one. */
+function UnresolvedLink({
+  sessionId,
+  reason,
+  truncated,
+}: {
+  sessionId: string;
+  reason: 'absent' | 'ambiguous';
+  truncated: boolean;
+}) {
+  const detail =
+    reason === 'absent'
+      ? `Linked session ${sessionId} is not in the delegation tree${truncated ? ' · tree truncated' : ''}; the inspector shows the newest root.`
+      : `Linked session ${sessionId} names more than one session in the delegation tree; choose one in the exact tree.`;
+  return (
+    <div className="flex flex-wrap items-center gap-2" data-agents-unresolved={reason}>
+      <StateChip kind={reason === 'absent' ? 'unavailable' : 'conflicting'} detail={detail} />
+    </div>
+  );
 }
 
 /** The model the inspector is handed before the tree has been read. */
