@@ -491,6 +491,19 @@ class CommandCoverage(unittest.TestCase):
                 self.assertIsNone(report["coverage"]["token_count_coverage"])
                 self.assertIn('"token_count_coverage": null', stdout.getvalue())
 
+    def test_unconsumed_loads_never_exceed_jobs(self) -> None:
+        pulled = []
+
+        def keys():
+            for key in range(10):
+                pulled.append(key)
+                yield key
+
+        loads = measure.in_order(lambda key: key * 10, keys(), 3)
+        self.assertEqual(next(loads), (0, 0))
+        self.assertEqual(pulled, [0, 1, 2])
+        self.assertEqual(list(loads), [(key, key * 10) for key in range(1, 10)])
+
     def test_sessions_load_concurrently_and_report_in_discovery_order(self) -> None:
         both_loading = threading.Barrier(2, timeout=30)
         used = [

@@ -70,10 +70,12 @@ import json
 import re
 import subprocess
 import sys
-from collections import Counter, defaultdict
-from concurrent.futures import ThreadPoolExecutor
+from collections import Counter, defaultdict, deque
+from collections.abc import Callable, Iterable, Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TypeVar
 
 TRACEDECAY_TOOL = re.compile(r"(?:^|__)(tracedecay(?:_[a-z0-9]+)+)$")
 PATH = re.compile(r"(?<![\w.@+-])/?(?:[\w.@+-]+/)+[\w@+-][\w.@+-]*\.[A-Za-z][A-Za-z0-9]{0,7}(?![\w/])")
@@ -81,6 +83,8 @@ SYMBOL = re.compile(r"(?<![\w:])[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]
 MIN_SYMBOL = 6
 MIN_QUOTE = 24
 PAGE_SIZES = (25, 10, 4, 1)
+T = TypeVar("T")
+R = TypeVar("R")
 
 
 # ---------------------------------------------------------------- matching --
@@ -434,6 +438,24 @@ def load_messages(client: TraceDecay, provider: str, session: str, scope: str) -
     raise last
 
 
+def in_order(load: Callable[[T], R], keys: Iterable[T], jobs: int) -> Iterator[tuple[T, R]]:
+    """(key, load(key)) in key order, at most `jobs` loads running or awaiting the consumer.
+
+    Executor.map would submit every key up front and hold each finished session
+    until a slow earlier one is consumed, so memory would grow with the run.
+    """
+    window: deque[tuple[T, Future[R]]] = deque()
+    with ThreadPoolExecutor(jobs) as pool:
+        for key in keys:
+            window.append((key, pool.submit(load, key)))
+            if len(window) >= jobs:
+                head, future = window.popleft()
+                yield head, future.result()
+        while window:
+            head, future = window.popleft()
+            yield head, future.result()
+
+
 def message_order(indexed: tuple[int, dict]) -> tuple:
     index, message = indexed
     metadata = json.loads(message.get("metadata_json") or "{}")
@@ -698,25 +720,23 @@ def main() -> int:
     coverage: Counter = Counter()
     by_provider: dict[str, Counter] = defaultdict(Counter)
     reports: list[CallReport] = []
-    with ThreadPoolExecutor(max(1, args.jobs)) as pool:
-        # map yields in discovery order while later sessions keep loading.
-        for number, ((provider, session), messages) in enumerate(zip(ordered, pool.map(load, ordered)), 1):
-            stats = by_provider[provider]
-            stats["discovered"] += 1
-            if isinstance(messages, ToolProblem):
-                stats["unreadable:" + messages.code.rsplit(".", 1)[-1]] += 1
-                continue
-            if not messages:
-                stats["empty"] += 1
-                continue
-            stats["loaded"] += 1
+    for number, ((provider, session), messages) in enumerate(in_order(load, ordered, max(1, args.jobs)), 1):
+        stats = by_provider[provider]
+        stats["discovered"] += 1
+        if isinstance(messages, ToolProblem):
+            stats["unreadable:" + messages.code.rsplit(".", 1)[-1]] += 1
+            continue
+        if not messages:
+            stats["empty"] += 1
+            continue
+        stats["loaded"] += 1
 
-            found, unpaired = analyze(events_from_messages(messages), session)
-            coverage["calls_without_result"] += unpaired
-            if found:
-                stats["with_tracedecay_calls"] += 1
-            reports += found
-            print(f"[{number}/{len(ordered)}] {provider} {len(messages)} messages, {len(found)} tracedecay calls", file=sys.stderr)
+        found, unpaired = analyze(events_from_messages(messages), session)
+        coverage["calls_without_result"] += unpaired
+        if found:
+            stats["with_tracedecay_calls"] += 1
+        reports += found
+        print(f"[{number}/{len(ordered)}] {provider} {len(messages)} messages, {len(found)} tracedecay calls", file=sys.stderr)
 
     rows = aggregate(reports)
     coverage["sessions_with_calls"] = len({report.session for report in reports})
