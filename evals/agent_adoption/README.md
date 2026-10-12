@@ -481,3 +481,10 @@ The report's learned-skill table gives, per variant and model:
 
 The table ranks nothing and prints no verdict. Read it with `n` and the invalid
 count beside every rate.
+
+Both live steps need current host logins. The runner copies the Claude
+credential read-only, so a copied login whose access token has already expired
+fails every run with `authentication_failed`; those runs land in the invalid
+count, not in the outcome columns. Refresh the login with an interactive
+`claude` session first. Generation stops with the backend's error when the
+codex account is over its usage limit.
