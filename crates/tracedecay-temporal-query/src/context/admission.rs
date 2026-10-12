@@ -281,22 +281,34 @@ pub fn choose_admission(
             None
         };
         if let Some(limit) = limit {
-            let final_measure = measure_candidate(
-                prepared,
-                bundle,
-                summary_omissions,
-                admitted - 1,
-                Some(limit),
-                policy,
-                control,
-            )?;
-            require_fit(&final_measure, max_bytes, budget.max_tokens)?;
-            return Ok(AdmissionDecision {
-                admitted: admitted - 1,
-                limit: Some(limit),
-                bytes: final_measure.bytes,
-                tokens: final_measure.tokens(),
-            });
+            // The budget omission costs wire bytes of its own, so the longest
+            // prefix that fit without it can overflow once it is recorded.
+            // Give back records until the prefix and the omission fit.
+            let mut kept = admitted - 1;
+            loop {
+                control.checkpoint()?;
+                let final_measure = measure_candidate(
+                    prepared,
+                    bundle,
+                    summary_omissions,
+                    kept,
+                    Some(limit),
+                    policy,
+                    control,
+                )?;
+                let fit = require_fit(&final_measure, max_bytes, budget.max_tokens);
+                if fit.is_err() && kept > 0 {
+                    kept -= 1;
+                    continue;
+                }
+                fit?;
+                return Ok(AdmissionDecision {
+                    admitted: kept,
+                    limit: Some(limit),
+                    bytes: final_measure.bytes,
+                    tokens: final_measure.tokens(),
+                });
+            }
         }
     }
     let final_measure = measure_candidate(
