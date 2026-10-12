@@ -337,7 +337,7 @@ pub(crate) mod tests {
         payload: serde_json::Value,
     ) -> serde_json::Value {
         let authority = AuthorityReceipt::from_context(
-            &context,
+            context,
             PolicyDecisionRef::new(
                 "policy.cli.fixture",
                 1,
