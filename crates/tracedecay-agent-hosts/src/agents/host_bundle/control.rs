@@ -1,7 +1,7 @@
 //! Layout of the `.tracedecay-host-bundle-v1` control directory: file names,
 //! path-rooted receipt readers, and receipt validators.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -90,6 +90,28 @@ pub fn latest_host_component_receipt_at(
     component: HostComponentV1,
 ) -> Result<Option<HostBundleInstallReceiptV1>, HostBundleError> {
     read_receipt_at(lifecycle_root, host, component)
+}
+
+/// Deploy paths that `component`'s receipt, or the receipt of any identity
+/// sharing its route, claims. `component`'s next transaction owns these paths
+/// rather than adopting them.
+pub fn host_component_owned_paths_at(
+    lifecycle_root: &Path,
+    host: HostKindV1,
+    component: HostComponentV1,
+) -> Result<BTreeSet<String>, HostBundleError> {
+    let mut paths = BTreeSet::new();
+    for identity in std::iter::once(component).chain(superseded_identities(component)) {
+        if let Some(receipt) = read_receipt_at(lifecycle_root, host, identity)? {
+            paths.extend(
+                receipt
+                    .artifacts
+                    .into_iter()
+                    .map(|artifact| artifact.relative_path),
+            );
+        }
+    }
+    Ok(paths)
 }
 
 pub(super) fn read_receipt_at(

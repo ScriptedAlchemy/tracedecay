@@ -5,7 +5,8 @@
 use std::path::{Path, PathBuf};
 
 use tracedecay_agent_hosts::agents::host_bundle::{
-    HostBundleLifecycleOpV1, HostComponentV1, HostKindV1, latest_host_component_receipt_at,
+    HostArtifactActionV1, HostBundleLifecycleOpV1, HostComponentV1, HostKindV1,
+    latest_host_component_receipt_at,
 };
 use tracedecay_runtime_core::config::ProfileRoot;
 
@@ -245,4 +246,23 @@ fn dual_claim_operator_uninstall_leaves_no_dangling_owner() {
     assert!(!home.path().join(CURSOR_MCP).exists());
     assert!(live_mcp_claims(home.path(), CURSOR_MCP).is_empty());
     assert!(home.path().join(CURSOR_CORE_MANIFEST).is_file());
+}
+
+/// The dry run of a plain update over a legacy install refreshes the route
+/// the legacy receipt owns; it never reports that as adopting a foreign file.
+#[test]
+fn dry_run_labels_a_legacy_owned_route_as_replaced() {
+    let home = tempfile::tempdir().unwrap();
+    install_legacy_operator_mcp(home.path());
+
+    let owned = super::receipt_owned_paths(
+        &resolved_lifecycle_root(&ProfileRoot::under_home(home.path())),
+        HostKindV1::CursorDesktop,
+        HostComponentV1::ContextMcp,
+    );
+
+    assert_eq!(
+        super::artifact_disposition(&HostArtifactActionV1::Replace, &owned, CURSOR_MCP),
+        "replace"
+    );
 }
