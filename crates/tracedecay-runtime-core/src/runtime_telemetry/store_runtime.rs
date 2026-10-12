@@ -25,7 +25,6 @@ pub struct RuntimeRegistryAggregateSnapshot {
     pub reopening: u32,
     pub faulted: u32,
     pub closed: u32,
-    pub healthy: u32,
     pub degraded: u32,
     pub unknown_health: u32,
     pub pinned_profiles: u32,
@@ -143,7 +142,6 @@ impl RuntimeRegistrySnapshot {
                 reopening: aggregate.states.reopening,
                 faulted: aggregate.states.faulted,
                 closed: aggregate.states.closed,
-                healthy: aggregate.health.healthy,
                 degraded: aggregate.health.degraded,
                 unknown_health: aggregate.health.unknown,
                 pinned_profiles: aggregate.pinned_profiles,
@@ -314,12 +312,13 @@ fn runtime_state_label(state: tracedecay_store::RuntimeMaintenanceStateV1) -> &'
     }
 }
 
-fn runtime_health_label(health: crate::shard_runtime::shard::ShardRuntimeHealth) -> &'static str {
+fn runtime_health_label(
+    health: crate::shard_runtime::telemetry::ShardRuntimeHealth,
+) -> &'static str {
     match health {
-        crate::shard_runtime::shard::ShardRuntimeHealth::Unknown => "unknown",
-        crate::shard_runtime::shard::ShardRuntimeHealth::Healthy => "healthy",
-        crate::shard_runtime::shard::ShardRuntimeHealth::Degraded => "degraded",
-        crate::shard_runtime::shard::ShardRuntimeHealth::Faulted => "faulted",
+        crate::shard_runtime::telemetry::ShardRuntimeHealth::Unknown => "unknown",
+        crate::shard_runtime::telemetry::ShardRuntimeHealth::Degraded => "degraded",
+        crate::shard_runtime::telemetry::ShardRuntimeHealth::Faulted => "faulted",
     }
 }
 
@@ -350,7 +349,7 @@ mod tests {
         let shard = RuntimeRegistryShardSnapshot {
             binding,
             state: "ready".to_owned(),
-            health: "healthy".to_owned(),
+            health: "unknown".to_owned(),
             writer_present: false,
             physical_reader_handles: 0,
             general_reader_waiters: 0,

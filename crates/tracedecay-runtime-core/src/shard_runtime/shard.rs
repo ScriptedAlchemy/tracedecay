@@ -2,7 +2,7 @@
 //!
 //! This is the runtime object published by [`super::registry::StoreRuntimeRegistry`].
 //! Physical attachments are owned by the registry; this value tracks their
-//! lifecycle and writer-presence guard.
+//! lifecycle and client/operation lifetime leases.
 
 use std::collections::BTreeSet;
 use std::sync::Mutex;
@@ -14,19 +14,8 @@ use tracedecay_store::{
     StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1,
 };
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ShardRuntimeHealth {
-    #[default]
-    Unknown,
-    Healthy,
-    Degraded,
-    Faulted,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ShardRuntimeResource {
-    Writer,
-    Queue,
     Client,
     Operation,
 }
@@ -48,16 +37,8 @@ pub enum ShardRuntimeError {
         resource: ShardRuntimeResource,
         state: RuntimeMaintenanceStateV1,
     },
-    #[error("the shard runtime already has a writer")]
-    WriterAlreadyPresent,
-    #[error("queued work must contain at least one operation")]
-    ZeroQueuedOperations,
     #[error("shard runtime counter overflowed: {counter}")]
     CounterOverflow { counter: &'static str },
-    #[error("a faulted health result requires an explicit fault transition")]
-    FaultedHealthRequiresTransition,
-    #[error("the shard runtime is terminally faulted")]
-    RuntimeFaulted,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -65,15 +46,9 @@ pub struct ShardRuntimeHealthSnapshot {
     pub binding: StoreRuntimeBindingV1,
     pub state: RuntimeMaintenanceStateV1,
     pub pinned_profile: bool,
-    pub writer_present: bool,
-    pub queued_operations: u32,
-    pub queued_bytes: u64,
     pub client_leases: u32,
     pub operation_leases: u32,
-    pub wal_bytes: u64,
-    pub memory_estimate_bytes: u64,
     pub idle_for: Duration,
-    pub health: ShardRuntimeHealth,
 }
 
 /// Exact lifetime-token census used only by registry retirement preflight.
@@ -89,11 +64,6 @@ pub enum ShardRuntimeEvictionBlocker {
         state: RuntimeMaintenanceStateV1,
     },
     PinnedProfile,
-    WriterPresent,
-    QueuedWork {
-        operations: u32,
-        bytes: u64,
-    },
     ClientLeases {
         count: u32,
     },
@@ -154,16 +124,10 @@ impl std::fmt::Debug for ShardRuntime {
 struct ShardRuntimeState {
     maintenance_state: RuntimeMaintenanceStateV1,
     pinned_profile: bool,
-    writer_present: bool,
-    queued_operations: u32,
-    queued_bytes: u64,
     client_lifetime_leases: BTreeSet<u64>,
     operation_lifetime_leases: BTreeSet<u64>,
     next_lifetime_lease_token: u64,
-    wal_bytes: u64,
-    memory_estimate_bytes: u64,
     last_activity: Instant,
-    health: ShardRuntimeHealth,
 }
 
 impl ShardRuntime {
@@ -176,16 +140,10 @@ impl ShardRuntime {
             state: Mutex::new(ShardRuntimeState {
                 maintenance_state: RuntimeMaintenanceStateV1::Closed,
                 pinned_profile,
-                writer_present: false,
-                queued_operations: 0,
-                queued_bytes: 0,
                 client_lifetime_leases: BTreeSet::new(),
                 operation_lifetime_leases: BTreeSet::new(),
                 next_lifetime_lease_token: 0,
-                wal_bytes: 0,
-                memory_estimate_bytes: 0,
                 last_activity: Instant::now(),
-                health: ShardRuntimeHealth::Unknown,
             }),
         }
     }
@@ -229,9 +187,6 @@ impl ShardRuntime {
             return Err(ShardRuntimeError::TransitionRequiresDrainedRuntime { from, to });
         }
         state.maintenance_state = to;
-        if to == RuntimeMaintenanceStateV1::Faulted {
-            state.health = ShardRuntimeHealth::Faulted;
-        }
         state.touch();
         Ok(())
     }
@@ -239,26 +194,6 @@ impl ShardRuntime {
     #[cfg(test)]
     pub(crate) fn set_pinned_profile(&self, pinned_profile: bool) {
         self.lock_state().pinned_profile = pinned_profile;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn record_storage_usage(&self, wal_bytes: u64, memory_estimate_bytes: u64) {
-        let mut state = self.lock_state();
-        state.wal_bytes = wal_bytes;
-        state.memory_estimate_bytes = memory_estimate_bytes;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_health(&self, health: ShardRuntimeHealth) -> Result<(), ShardRuntimeError> {
-        let mut state = self.lock_state();
-        if state.maintenance_state == RuntimeMaintenanceStateV1::Faulted {
-            return Err(ShardRuntimeError::RuntimeFaulted);
-        }
-        if health == ShardRuntimeHealth::Faulted {
-            return Err(ShardRuntimeError::FaultedHealthRequiresTransition);
-        }
-        state.health = health;
-        Ok(())
     }
 
     pub fn last_activity(&self) -> Instant {
@@ -313,33 +248,6 @@ impl ShardRuntime {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn acquire_writer_presence(
-        &self,
-    ) -> Result<ShardRuntimeWriterGuard<'_>, ShardRuntimeError> {
-        let mut state = self.lock_state();
-        if !matches!(
-            state.maintenance_state,
-            RuntimeMaintenanceStateV1::Opening
-                | RuntimeMaintenanceStateV1::Ready
-                | RuntimeMaintenanceStateV1::Reopening
-        ) {
-            return Err(ShardRuntimeError::ResourceUnavailable {
-                resource: ShardRuntimeResource::Writer,
-                state: state.maintenance_state,
-            });
-        }
-        if state.writer_present {
-            return Err(ShardRuntimeError::WriterAlreadyPresent);
-        }
-        state.writer_present = true;
-        state.touch();
-        Ok(ShardRuntimeWriterGuard {
-            runtime: self,
-            active: true,
-        })
-    }
-
     /// Registers one client lifetime token. Clones share this token and only
     /// its final drop releases the canonical counter.
     pub(crate) fn issue_client_lifetime_lease(
@@ -385,48 +293,10 @@ impl ShardRuntime {
         let tokens = match resource {
             ShardRuntimeResource::Client => &mut state.client_lifetime_leases,
             ShardRuntimeResource::Operation => &mut state.operation_lifetime_leases,
-            _ => {
-                return Err(ShardRuntimeError::ResourceUnavailable {
-                    resource,
-                    state: state.maintenance_state,
-                });
-            }
         };
         tokens.insert(token);
         state.touch();
         Ok(token)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn queue_work(
-        &self,
-        operations: u32,
-        bytes: u64,
-    ) -> Result<ShardRuntimeQueuedWork<'_>, ShardRuntimeError> {
-        if operations == 0 {
-            return Err(ShardRuntimeError::ZeroQueuedOperations);
-        }
-        let mut state = self.lock_state();
-        state.require_ready(ShardRuntimeResource::Queue)?;
-        state.add_queued_work(operations, bytes)?;
-        state.touch();
-        Ok(ShardRuntimeQueuedWork {
-            runtime: self,
-            operations,
-            bytes,
-            active: true,
-        })
-    }
-
-    #[cfg(test)]
-    fn release_writer_presence(&self) {
-        let mut state = self.lock_state();
-        debug_assert!(
-            state.writer_present,
-            "attempted to release an absent writer"
-        );
-        state.writer_present = false;
-        state.touch();
     }
 
     fn release_lifetime_lease(&self, resource: ShardRuntimeResource, token: u64) {
@@ -434,20 +304,12 @@ impl ShardRuntime {
         let released = match resource {
             ShardRuntimeResource::Client => state.client_lifetime_leases.remove(&token),
             ShardRuntimeResource::Operation => state.operation_lifetime_leases.remove(&token),
-            _ => false,
         };
         if released {
             state.touch();
         } else {
             debug_assert!(false, "lifetime token may only release once");
         }
-    }
-
-    #[cfg(test)]
-    fn release_queued_work(&self, operations: u32, bytes: u64) {
-        let mut state = self.lock_state();
-        state.release_queued_work(operations, bytes);
-        state.touch();
     }
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, ShardRuntimeState> {
@@ -471,11 +333,7 @@ impl ShardRuntimeState {
     }
 
     fn is_drained(&self) -> bool {
-        !self.writer_present
-            && self.queued_operations == 0
-            && self.queued_bytes == 0
-            && self.client_lifetime_leases.is_empty()
-            && self.operation_lifetime_leases.is_empty()
+        self.client_lifetime_leases.is_empty() && self.operation_lifetime_leases.is_empty()
     }
 
     fn require_ready(&self, resource: ShardRuntimeResource) -> Result<(), ShardRuntimeError> {
@@ -496,15 +354,9 @@ impl ShardRuntimeState {
             binding: binding.clone(),
             state: self.maintenance_state,
             pinned_profile: self.pinned_profile,
-            writer_present: self.writer_present,
-            queued_operations: self.queued_operations,
-            queued_bytes: self.queued_bytes,
             client_leases: self.client_leases(),
             operation_leases: self.operation_leases(),
-            wal_bytes: self.wal_bytes,
-            memory_estimate_bytes: self.memory_estimate_bytes,
             idle_for: now.saturating_duration_since(self.last_activity),
-            health: self.health,
         }
     }
 
@@ -522,15 +374,6 @@ impl ShardRuntimeState {
         }
         if self.pinned_profile {
             blockers.push(ShardRuntimeEvictionBlocker::PinnedProfile);
-        }
-        if self.writer_present {
-            blockers.push(ShardRuntimeEvictionBlocker::WriterPresent);
-        }
-        if self.queued_operations != 0 || self.queued_bytes != 0 {
-            blockers.push(ShardRuntimeEvictionBlocker::QueuedWork {
-                operations: self.queued_operations,
-                bytes: self.queued_bytes,
-            });
         }
         let client_leases = self.client_leases();
         if client_leases != 0 {
@@ -551,54 +394,6 @@ impl ShardRuntimeState {
             });
         }
         ShardRuntimeEvictionEligibility { idle_for, blockers }
-    }
-
-    #[cfg(test)]
-    fn add_queued_work(&mut self, operations: u32, bytes: u64) -> Result<(), ShardRuntimeError> {
-        let next_operations = self.queued_operations.checked_add(operations).ok_or(
-            ShardRuntimeError::CounterOverflow {
-                counter: "queued operations",
-            },
-        )?;
-        let next_bytes =
-            self.queued_bytes
-                .checked_add(bytes)
-                .ok_or(ShardRuntimeError::CounterOverflow {
-                    counter: "queued bytes",
-                })?;
-        self.queued_operations = next_operations;
-        self.queued_bytes = next_bytes;
-        Ok(())
-    }
-
-    #[cfg(test)]
-    fn release_queued_work(&mut self, operations: u32, bytes: u64) {
-        match (
-            self.queued_operations.checked_sub(operations),
-            self.queued_bytes.checked_sub(bytes),
-        ) {
-            (Some(operations), Some(bytes)) => {
-                self.queued_operations = operations;
-                self.queued_bytes = bytes;
-            }
-            _ => debug_assert!(false, "queued-work accounting underflow"),
-        }
-    }
-}
-
-#[must_use = "dropping the guard releases writer-presence accounting"]
-#[cfg(test)]
-pub(crate) struct ShardRuntimeWriterGuard<'a> {
-    runtime: &'a ShardRuntime,
-    active: bool,
-}
-
-#[cfg(test)]
-impl Drop for ShardRuntimeWriterGuard<'_> {
-    fn drop(&mut self) {
-        if self.active {
-            self.runtime.release_writer_presence();
-        }
     }
 }
 
@@ -687,39 +482,9 @@ impl std::fmt::Debug for ShardRuntimeOperationLifetimeLease {
     }
 }
 
-#[must_use = "dropping the guard releases queued-work accounting"]
-#[cfg(test)]
-pub(crate) struct ShardRuntimeQueuedWork<'a> {
-    runtime: &'a ShardRuntime,
-    operations: u32,
-    bytes: u64,
-    active: bool,
-}
-
-#[cfg(test)]
-impl ShardRuntimeQueuedWork<'_> {
-    pub fn release(mut self) {
-        if self.active {
-            self.runtime
-                .release_queued_work(self.operations, self.bytes);
-            self.active = false;
-        }
-    }
-}
-
-#[cfg(test)]
-impl Drop for ShardRuntimeQueuedWork<'_> {
-    fn drop(&mut self) {
-        if self.active {
-            self.runtime
-                .release_queued_work(self.operations, self.bytes);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Barrier};
+    use std::sync::Arc;
 
     use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
 
@@ -794,12 +559,6 @@ mod tests {
                     LEGAL.contains(&(from, to)),
                     "{from:?} -> {to:?}"
                 );
-                if to == Faulted && result.is_ok() {
-                    assert_eq!(
-                        runtime.health_snapshot().health,
-                        ShardRuntimeHealth::Faulted
-                    );
-                }
             }
         }
 
@@ -811,17 +570,15 @@ mod tests {
             ));
         }
         assert!(matches!(
-            faulted.queue_work(1, 1),
+            ShardRuntime::issue_client_lifetime_lease(Arc::new(faulted)),
             Err(ShardRuntimeError::ResourceUnavailable { state: Faulted, .. })
         ));
     }
 
     #[test]
-    fn every_writer_queue_and_lifetime_blocker_participates_in_drain_and_eviction() {
+    fn every_lifetime_blocker_participates_in_drain_and_eviction() {
         let runtime = Arc::new(drive_to(Ready));
         runtime.set_pinned_profile(true);
-        let writer = runtime.acquire_writer_presence().unwrap();
-        let queue = runtime.queue_work(2, 128).unwrap();
         let client = ShardRuntime::issue_client_lifetime_lease(Arc::clone(&runtime)).unwrap();
         let client_clone = client.clone();
         let operation = client.begin_operation().unwrap();
@@ -845,11 +602,6 @@ mod tests {
             vec![
                 ShardRuntimeEvictionBlocker::NotReady { state: Draining },
                 ShardRuntimeEvictionBlocker::PinnedProfile,
-                ShardRuntimeEvictionBlocker::WriterPresent,
-                ShardRuntimeEvictionBlocker::QueuedWork {
-                    operations: 2,
-                    bytes: 128,
-                },
                 ShardRuntimeEvictionBlocker::ClientLeases { count: 1 },
                 ShardRuntimeEvictionBlocker::OperationLeases { count: 1 },
             ]
@@ -863,8 +615,6 @@ mod tests {
         assert_eq!(runtime.health_snapshot().client_leases, 1);
         drop(client_clone);
         drop(operation);
-        drop(queue);
-        drop(writer);
         let released = runtime.health_snapshot();
         assert_eq!((released.client_leases, released.operation_leases), (0, 0));
         runtime.set_pinned_profile(false);
@@ -872,47 +622,12 @@ mod tests {
     }
 
     #[test]
-    fn queue_accounting_is_atomic_on_overflow_and_balances_under_concurrency() {
-        let runtime = drive_to(Ready);
-        let max = runtime.queue_work(u32::MAX, u64::MAX).unwrap();
-        assert!(matches!(
-            runtime.queue_work(1, 1),
-            Err(ShardRuntimeError::CounterOverflow { .. })
-        ));
-        assert_eq!(runtime.health_snapshot().queued_operations, u32::MAX);
-        drop(max);
-
-        const THREADS: usize = 8;
-        let barrier = Barrier::new(THREADS + 1);
-        std::thread::scope(|scope| {
-            for _ in 0..THREADS {
-                scope.spawn(|| {
-                    let guard = runtime.queue_work(3, 192).unwrap();
-                    barrier.wait();
-                    barrier.wait();
-                    drop(guard);
-                });
-            }
-            barrier.wait();
-            let held = runtime.health_snapshot();
-            assert_eq!(held.queued_operations, 24);
-            assert_eq!(held.queued_bytes, 1_536);
-            barrier.wait();
-        });
-        assert_eq!(runtime.health_snapshot().queued_operations, 0);
-    }
-
-    #[test]
     fn observation_is_consistent_and_idle_threshold_is_inclusive() {
         let runtime = drive_to(Ready);
-        runtime.record_storage_usage(4_096, 8_192);
-        runtime.set_health(ShardRuntimeHealth::Degraded).unwrap();
         let last = runtime.last_activity();
         let observation =
             runtime.observe_at(last + Duration::from_secs(30), Duration::from_secs(30));
         assert_eq!(observation.health.idle_for, Duration::from_secs(30));
-        assert_eq!(observation.health.wal_bytes, 4_096);
-        assert_eq!(observation.health.health, ShardRuntimeHealth::Degraded);
         assert!(observation.eviction.is_eligible());
         assert_eq!(observation.eviction.idle_for, observation.health.idle_for);
     }

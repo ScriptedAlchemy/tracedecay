@@ -206,13 +206,8 @@ async fn publication_and_aliases_share_and_retain_one_physical_attachment() {
         .iter()
         .find(|entry| entry.health.binding == *first.binding())
         .unwrap();
-    assert!(observed.health.writer_present);
     assert!(observed.physical.writer.is_some());
     assert_eq!(observed.physical.reader_handles, 2);
-    assert_eq!(observed.health.queued_operations, 3);
-    assert_eq!(observed.health.queued_bytes, 512);
-    assert_eq!(observed.health.wal_bytes, 4_096);
-    assert_eq!(observed.health.memory_estimate_bytes, 8_192);
     let projected = |inventory: &RuntimeRegistryInventory| {
         crate::shard_runtime::telemetry::project_runtime_telemetry(inventory)
             .shards
@@ -229,14 +224,14 @@ async fn publication_and_aliases_share_and_retain_one_physical_attachment() {
     );
     assert_eq!(
         shard.health,
-        crate::shard_runtime::shard::ShardRuntimeHealth::Unknown
+        crate::shard_runtime::telemetry::ShardRuntimeHealth::Unknown
     );
     publisher.control(1).snapshot.lock().unwrap().healthy = false;
     let shard =
         projected(&registry.inventory(tracedecay_store::AdmissionConfigV1::default(), None));
     assert_eq!(
         shard.health,
-        crate::shard_runtime::shard::ShardRuntimeHealth::Degraded
+        crate::shard_runtime::telemetry::ShardRuntimeHealth::Degraded
     );
     drop(first);
     drop(alias);
