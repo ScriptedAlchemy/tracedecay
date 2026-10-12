@@ -40,6 +40,7 @@ use tracedecay_store::{
     StoredObservationRowV1,
 };
 
+use tracedecay_runtime_core::db::engine::Error as EngineError;
 use tracedecay_runtime_core::db::{Database, DatabaseEngineReadSnapshot, DatabaseRuntimeClientV1};
 use tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRegistryFailure;
 use tracedecay_rusqlite_runtime::repository::observation_cursor_authority::{
@@ -1050,10 +1051,7 @@ async fn load_observation_preflight(
     writes: &[AnchoredObservationWrite],
 ) -> ObservationStoreResult<ObservationPreflightSnapshot> {
     const OPERATION: &str = "load observation batch preflight";
-    let snapshot = database
-        .begin_engine_read_snapshot(OPERATION)
-        .await
-        .map_err(|error| runtime_storage_error(OPERATION, error))?;
+    let snapshot = begin_observation_read_snapshot(database, OPERATION).await?;
     let admission_refusals =
         read_admission_refusals_from_snapshot(&snapshot, writes, OPERATION).await?;
     let mut seen_observation_ids = HashSet::new();
@@ -1875,12 +1873,19 @@ fn dispatch_runtime_observation_read(
         work = "runtime_command",
         "dispatch observation runtime read"
     );
-    let outcome = runtime.dispatch_read(request, &probe).map_err(|error| {
-        runtime_storage_error(
-            "dispatch observation runtime read",
-            format!("runtime read failed: {error:?}"),
-        )
-    })?;
+    let outcome = runtime
+        .dispatch_read(request, &probe)
+        .map_err(|error| match error {
+            StoreRuntimeRegistryFailure::ReaderSaturated => {
+                ObservationStoreError::ReaderSaturated {
+                    operation: "dispatch observation runtime read",
+                }
+            }
+            error => runtime_storage_error(
+                "dispatch observation runtime read",
+                format!("runtime read failed: {error:?}"),
+            ),
+        })?;
     if !matches!(
         outcome.coverage(),
         RuntimeReadCoverageV1::Latest { .. } | RuntimeReadCoverageV1::Complete { .. }
@@ -2178,10 +2183,7 @@ async fn submit_observation_write_batch(
         .chain(deferred_exact_duplicates.iter())
         .map(|(_, write)| write.observation().observation_id().clone())
         .collect::<Vec<_>>();
-    let snapshot = database
-        .begin_engine_read_snapshot(READBACK_OPERATION)
-        .await
-        .map_err(|error| runtime_storage_error(READBACK_OPERATION, error))?;
+    let snapshot = begin_observation_read_snapshot(database, READBACK_OPERATION).await?;
     let stored =
         read_stored_observations_from_snapshot(&snapshot, &observation_ids, READBACK_OPERATION)
             .await?;
@@ -2478,6 +2480,20 @@ fn runtime_digest_suffix(digest: &ManifestDigest) -> ObservationStoreResult<&str
             "canonical digest prefix is invalid",
         )
     })
+}
+
+async fn begin_observation_read_snapshot(
+    database: &Database,
+    operation: &'static str,
+) -> ObservationStoreResult<DatabaseEngineReadSnapshot> {
+    database
+        .read_connection()
+        .read_snapshot()
+        .await
+        .map_err(|error| match error {
+            EngineError::ReaderSaturated => ObservationStoreError::ReaderSaturated { operation },
+            error => runtime_storage_error(operation, error),
+        })
 }
 
 fn runtime_storage_error(

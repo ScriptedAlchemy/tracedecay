@@ -1440,7 +1440,9 @@ fn classify_store_error(error: &ObservationStoreError) -> HostAdmissionOutcome {
                 "observation_retrieval_anchor_alias_collision",
             );
         }
-        ObservationStoreError::CursorConflict { .. } | ObservationStoreError::Storage { .. } => {
+        ObservationStoreError::CursorConflict { .. }
+        | ObservationStoreError::ReaderSaturated { .. }
+        | ObservationStoreError::Storage { .. } => {
             unreachable!("retryable store failures are classified before static reason mapping")
         }
         ObservationStoreError::CursorObservationMismatch => "observation_cursor_mismatch",
@@ -1512,6 +1514,9 @@ fn classify_error(error: &ObservationApplicationError) -> HostAdmissionOutcome {
                 true,
                 Some("cursor_conflict"),
             )
+        }
+        ObservationApplicationError::Store(ObservationStoreError::ReaderSaturated { .. }) => {
+            HostAdmissionOutcome::retained_backpressured("reader_pool_saturated")
         }
         ObservationApplicationError::Store(ObservationStoreError::Storage {
             operation,

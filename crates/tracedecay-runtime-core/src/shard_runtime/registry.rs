@@ -1261,6 +1261,9 @@ pub enum StoreRuntimeRegistryFailure {
         operation: &'static str,
         message: String,
     },
+    /// Every reader was leased for the whole admission wait. Nothing failed;
+    /// the same read can succeed once a reader returns.
+    ReaderSaturated,
     SqliteFileIdentityInspectionFailed {
         operation: &'static str,
         source: crate::db::SqliteFileIdentityError,
