@@ -281,6 +281,38 @@ pub(crate) fn daemon_transcript_source_profile(
     }
 }
 
+/// Server shutdown does not reach the process-global owners a project open
+/// started for `cg`'s graph: the Context Scout owner, which holds the graph's
+/// `Database`, and the Hook V2 replay consumer, which holds a project-session
+/// lease and the graph while it sweeps. Either keeps its store runtime from
+/// closing, so the WAL is never truncated. A failed open and a route-bind
+/// eviction both drop the graph's last server without retiring them. Owners
+/// another published server over the same database still serves stay
+/// registered.
+async fn retire_unserved_process_owners(
+    store_administration: &StoreAdministration,
+    cg: &tracedecay_project::project::TraceDecay,
+) {
+    let graph_db_path = cg.db().canonical_database_path();
+    let served = store_administration
+        .project_servers()
+        .lock()
+        .await
+        .servers
+        .keys()
+        .any(|key| same_canonical_path(&key.owner.graph_db_path, graph_db_path));
+    if served {
+        return;
+    }
+    super::hook_v2_replay_consumer::shutdown_hook_v2_replay_consumer(
+        &cg.hook_store_layout().data_root,
+    )
+    .await;
+    if let Some(project_id) = hook_project_id_for_layout(cg.hook_store_layout()) {
+        unregister_registered_context_scout_owner(project_id, graph_db_path);
+    }
+}
+
 /// Borrowed handles every project-open phase reads. A phase future captures
 /// one pointer to this record instead of the handles themselves.
 struct ProjectOpenInputs<'a> {
@@ -404,7 +436,7 @@ pub(super) async fn production_project_server(
     let (resolved, inserted) = match composed {
         Ok(composed) => composed,
         Err(error) => {
-            inputs.retire_failed_open_process_owners(&opened.cg).await;
+            retire_unserved_process_owners(inputs.store_administration, &opened.cg).await;
             return Err(error);
         }
     };
@@ -639,38 +671,6 @@ impl ProjectOpenInputs<'_> {
         log_project_open_phase(self.canonical_project_path, phase, detail, since);
     }
 
-    /// A failed open leaves no server through which shutdown or retirement
-    /// could reach the process-global owners it started: the Context Scout
-    /// owner, which holds the graph's `Database`, and the Hook V2 replay
-    /// consumer, which holds a project-session lease and the graph while it
-    /// sweeps. Either keeps its store runtime from closing, so the WAL is never
-    /// truncated. Owners another published server over the same database still
-    /// serves stay registered.
-    async fn retire_failed_open_process_owners(
-        &self,
-        cg: &tracedecay_project::project::TraceDecay,
-    ) {
-        let graph_db_path = cg.db().canonical_database_path();
-        let served = self
-            .store_administration
-            .project_servers()
-            .lock()
-            .await
-            .servers
-            .keys()
-            .any(|key| same_canonical_path(&key.owner.graph_db_path, graph_db_path));
-        if served {
-            return;
-        }
-        super::hook_v2_replay_consumer::shutdown_hook_v2_replay_consumer(
-            &cg.hook_store_layout().data_root,
-        )
-        .await;
-        if let Some(project_id) = hook_project_id_for_layout(cg.hook_store_layout()) {
-            unregister_registered_context_scout_owner(project_id, graph_db_path);
-        }
-    }
-
     /// Route admission: registry enrollment, the published-server cache, the
     /// route's single-flight gate, the foreground-open marker, and one graph
     /// admission slot (releasing an idle server when the daemon is at capacity).
@@ -765,7 +765,7 @@ impl ProjectOpenInputs<'_> {
         );
         let opened = self.admit_opened_graph(route, Arc::clone(&cg)).await;
         if opened.is_err() {
-            self.retire_failed_open_process_owners(&cg).await;
+            retire_unserved_process_owners(self.store_administration, &cg).await;
         }
         opened
     }
@@ -1081,10 +1081,14 @@ impl ProjectOpenInputs<'_> {
                 .session_temporal_refresh_schedulers()
                 .retire_project(&owner)
                 .await;
-            retirement_admission.spawn_and_track(
-                owner,
-                super::project_server_lifecycle::retire_project_servers(vec![retired_server], None),
-            );
+            let store_administration = self.store_administration.clone();
+            retirement_admission.spawn_and_track(owner, async move {
+                let graph = retired_server.cg().await;
+                retire_unserved_process_owners(&store_administration, &graph).await;
+                drop(graph);
+                super::project_server_lifecycle::retire_project_servers(vec![retired_server], None)
+                    .await;
+            });
         }
         // The owner registry guard was dropped before the synchronous
         // retirement handoff. Release admission before the remaining
