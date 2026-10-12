@@ -792,13 +792,7 @@ export type CapabilityId = string;
 export type CatalogGenerationId = string;
 
 export type CodeCloneIndexBudgetsV1 = {
-  candidate_bodies: number;
-  hot_posting_rows: number;
   minimum_body_tokens: number;
-  minimum_directional_coverage_millionths: number;
-  posting_rows: number;
-  verification_bodies: number;
-  verification_token_work: number;
 };
 
 export type CodeCloneIndexCoverageV1 = {
@@ -808,10 +802,6 @@ export type CodeCloneIndexCoverageV1 = {
   excluded_incomplete_tokenization_bodies: number | null;
   excluded_too_large_bodies: number | null;
   excluded_too_small_bodies: number | null;
-  hot_posting_rows_skipped: number | null;
-  hot_postings_skipped: number | null;
-  near_fingerprint_bodies: number | null;
-  near_fingerprint_postings: number | null;
   payloads_reused: number | null;
   rename_normalized_bodies: number | null;
   rename_partial_bodies: number | null;

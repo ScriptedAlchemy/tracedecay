@@ -1038,8 +1038,7 @@ async fn registry_clone_freshness_reports_coverage_and_update_accounting() {
     assert_eq!(observation.coverage.source_bodies, Some(1));
     assert_eq!(observation.coverage.eligible_source_bodies, Some(0));
     assert_eq!(observation.coverage.conservative_normalized_bodies, Some(0));
-    assert_eq!(observation.coverage.near_fingerprint_bodies, Some(0));
-    assert_eq!(observation.budgets.posting_rows, 16_384);
+    assert_eq!(observation.budgets.minimum_body_tokens, 30);
     assert!(observation.resources.bytes_on_disk.is_some());
     assert!(observation.resources.peak_scratch_memory_bytes.is_some());
 

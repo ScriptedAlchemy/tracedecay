@@ -2841,9 +2841,9 @@ impl CodeIndexSchedulerRegistryV1 {
                     Self::note_worker_continuation(&worker_pending_wake, &worker_wake);
                 }
                 if let Some(outcome) = published_text_projection_outcome.take() {
-                    // A clone-fingerprint successor is still `Unfinished` work
-                    // after exact and lexical owners are ready. That must not
-                    // clear the prepared generation the way a missing owner does.
+                    // Text projection work can still be `Unfinished` after the
+                    // exact and lexical owners are ready. That must not clear
+                    // the prepared generation the way a missing owner does.
                     let owners_ready = exact_and_lexical_ready_for_graph(graph_text.as_ref());
                     let outcome = match outcome {
                         PublishedTextProjectionOutcomeV1::Unfinished
