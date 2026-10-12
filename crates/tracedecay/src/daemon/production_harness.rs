@@ -238,7 +238,9 @@ fn production_composition_admission_capacity() -> usize {
         || std::thread::available_parallelism().map_or(1, usize::from),
         |status| usize::from(status.effective_workers),
     );
-    (worker_width / PRODUCTION_COMPOSITION_CPU_DIVISOR).max(1)
+    // Narrower hosts admit the same measured four-wide load: composition cost
+    // is dominated by serialized store waits, not sustained CPU.
+    (worker_width / PRODUCTION_COMPOSITION_CPU_DIVISOR).max(4)
 }
 
 fn production_composition_admission_gate() -> &'static ProductionCompositionAdmissionGateV1 {
