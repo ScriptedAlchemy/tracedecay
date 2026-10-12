@@ -10,16 +10,17 @@ use serde_json::Value;
 use tracedecay_api::WorkOperation;
 use tracedecay_contracts::{
     AcceptWorkProposalRequestV1, AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1,
-    AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, ApplicationOutcome, ApplicationResult,
-    CancelWorkAttemptCommand, CreateWorkTaskRequestV1, ExecutionTopologyMetricsRequestV1,
-    GenerateProposalRequest, PauseWorkRunCommand, PrepareWorkDuplicateAdjudicationRequestV1,
-    PrepareWorkProductMutationRequestV1, ReleaseWorkPlacementCommand, ResultContractRef,
-    ResumeWorkAttemptsCommand, ResumeWorkRunCommand, RetryWorkAttemptCommandV1,
-    ReviewWorkProposalRequestV1, StartWorkAttemptCommand, WorkArtifactHydrationRequestV1,
-    WorkAttemptListRequestV1, WorkAttemptStatusRequestV1, WorkEvidenceRetrieveRequestV1,
-    WorkExperienceRequestV1, WorkGraphReadRequestV1, WorkPlacementPreflightRequestV1,
-    WorkPlacementStatusRequestV1, WorkProductMutationRequestV1, WorkProposalComparisonRequestV1,
-    WorkRunControlRequestV1, WorkTopologyViewRequestV1, work_executable_binding_registry,
+    AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, AdvanceWorkJobRequestV1,
+    ApplicationOutcome, ApplicationResult, CancelWorkAttemptCommand, CreateWorkTaskRequestV1,
+    ExecutionTopologyMetricsRequestV1, GenerateProposalRequest, PauseWorkRunCommand,
+    PrepareWorkDuplicateAdjudicationRequestV1, PrepareWorkProductMutationRequestV1,
+    ReleaseWorkPlacementCommand, ResultContractRef, ResumeWorkAttemptsCommand,
+    ResumeWorkRunCommand, RetryWorkAttemptCommandV1, ReviewWorkProposalRequestV1,
+    StartWorkAttemptCommand, WorkArtifactHydrationRequestV1, WorkAttemptListRequestV1,
+    WorkAttemptStatusRequestV1, WorkEvidenceRetrieveRequestV1, WorkExperienceRequestV1,
+    WorkGraphReadRequestV1, WorkPlacementPreflightRequestV1, WorkPlacementStatusRequestV1,
+    WorkProductMutationRequestV1, WorkProposalComparisonRequestV1, WorkRunControlRequestV1,
+    WorkTopologyViewRequestV1, work_executable_binding_registry,
 };
 use tracedecay_domain::WorkDuplicateAdjudicationCommandV1;
 use tracedecay_tool_catalog::OperationId;
@@ -199,6 +200,9 @@ pub(crate) fn decode_work_invocation(
             .map(WorkApplicationInvocationV1::AdmitPlacement),
         WorkOperation::PlacementStatus => decode::<WorkPlacementStatusRequestV1>(body)
             .map(WorkApplicationInvocationV1::PlacementStatus),
+        WorkOperation::AdvanceJob => {
+            decode::<AdvanceWorkJobRequestV1>(body).map(WorkApplicationInvocationV1::AdvanceJob)
+        }
         WorkOperation::ReleasePlacement => decode::<ReleaseWorkPlacementCommand>(body)
             .map(WorkApplicationInvocationV1::ReleasePlacement),
     }
@@ -331,6 +335,10 @@ pub(crate) fn work_outcome_matches(
                 WorkOperation::ReleasePlacement,
                 WorkApplicationOutcomeV1::ReleasePlacement(_)
             )
+            | (
+                WorkOperation::AdvanceJob,
+                WorkApplicationOutcomeV1::AdvanceJob(_)
+            )
     )
 }
 
@@ -396,6 +404,7 @@ pub(crate) fn erase_work_outcome(
         WorkApplicationOutcomeV1::AdmitPlacement(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::PlacementStatus(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::ReleasePlacement(outcome) => serde_json::to_value(outcome),
+        WorkApplicationOutcomeV1::AdvanceJob(outcome) => serde_json::to_value(outcome),
     }?;
     serde_json::from_value(outcome).map_err(Into::into)
 }

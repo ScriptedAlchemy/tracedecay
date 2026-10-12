@@ -998,5 +998,8 @@ pub(super) async fn dispatch_work_application(
                 )
             }
         }
+        WorkApplicationInvocationV1::AdvanceJob(_) => {
+            DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable)
+        }
     }
 }
