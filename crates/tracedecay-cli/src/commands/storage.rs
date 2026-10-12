@@ -538,7 +538,7 @@ fn handle_wipe_inner(
         )
         .await;
         let restore = profile_offline.finish();
-        join_outcome_and_restore("wipe", outcome, restore)
+        join_outcome_and_restore(RestoreWording::ManagedService, "wipe", outcome, restore)
     })
 }
 
@@ -581,31 +581,41 @@ pub(crate) fn process_error_text(error: tracedecay_domain::errors::TraceDecayErr
     annotate_reset_required(error, None).to_string()
 }
 
-/// Combines a destructive command's outcome with the daemon-restore outcome
-/// so neither failure can shadow the other.
-pub(crate) fn join_outcome_and_restore(
+/// How [`join_outcome_and_restore`] words a failed daemon restore.
+#[derive(Clone, Copy)]
+pub(crate) enum RestoreWording {
+    /// Destructive profile commands: always name the managed service state.
+    ManagedService,
+    /// Update and restart: a lone restore error passes through unchanged.
+    DaemonState,
+}
+
+/// Combines a command's outcome with the daemon-restore outcome so neither
+/// failure can shadow the other.
+pub(crate) fn join_outcome_and_restore<T>(
+    wording: RestoreWording,
     operation: &str,
-    outcome: tracedecay_domain::errors::Result<()>,
+    outcome: tracedecay_domain::errors::Result<T>,
     restore: tracedecay_domain::errors::Result<()>,
-) -> tracedecay_domain::errors::Result<()> {
-    match (outcome, restore) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Ok(()), Err(restore_error)) => Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!(
-                "{operation} completed, but the managed daemon service state could not be \
-                 restored: {restore_error}"
-            ),
-        }),
-        (Err(error), Ok(())) => Err(error),
-        (Err(error), Err(restore_error)) => {
-            Err(tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!(
-                    "{error}; additionally the managed daemon service state could not be \
-                     restored: {restore_error}"
-                ),
-            })
-        }
-    }
+) -> tracedecay_domain::errors::Result<T> {
+    let Err(restore_error) = restore else {
+        return outcome;
+    };
+    let message = match (wording, outcome) {
+        (RestoreWording::ManagedService, Ok(_)) => format!(
+            "{operation} completed, but the managed daemon service state could not be \
+             restored: {restore_error}"
+        ),
+        (RestoreWording::ManagedService, Err(error)) => format!(
+            "{error}; additionally the managed daemon service state could not be \
+             restored: {restore_error}"
+        ),
+        (RestoreWording::DaemonState, Ok(_)) => return Err(restore_error),
+        (RestoreWording::DaemonState, Err(operation_error)) => format!(
+            "{operation} failed: {operation_error}; daemon state restoration also failed: {restore_error}"
+        ),
+    };
+    Err(tracedecay_domain::errors::TraceDecayError::Config { message })
 }
 
 /// Non-terminal wipe must not read stdin. Irreversible deletion still requires
