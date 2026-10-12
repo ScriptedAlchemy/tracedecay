@@ -1484,6 +1484,25 @@ fn sixteen_gib_authority() -> Arc<ProcessResidentMemoryV1> {
     ))
 }
 
+/// A 16 GiB authority reading a fixed process size, so a held ledger refuses
+/// a refresh however much memory the tests beside it hold.
+fn fixed_reading_authority() -> Arc<ProcessResidentMemoryV1> {
+    let limit = NonZeroU64::new(16 * 1024 * 1024 * 1024).unwrap();
+    let process = ProcessResidentSampleV1 {
+        resident_bytes: 256 * 1024 * 1024,
+        unreclaimable_bytes: 256 * 1024 * 1024,
+        swapped_bytes: 0,
+        cgroup_committed_bytes: None,
+    };
+    Arc::new(ProcessResidentMemoryV1::with_pressure(
+        limit,
+        Arc::new(ResidentMemoryPressureV1::with_sampler(
+            limit,
+            Arc::new(move || Some(process)),
+        )),
+    ))
+}
+
 /// Issue #2707: the refresh stopped retrying and the idle release that later
 /// gave its memory back never woke it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1592,22 +1611,7 @@ async fn a_refused_refresh_waits_for_a_release_without_passive_reads_holding_its
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
     let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
-    // A fixed process reading, so the held ledger refuses the refresh however
-    // much memory the tests beside this one hold.
-    let limit = NonZeroU64::new(16 * 1024 * 1024 * 1024).unwrap();
-    let process = ProcessResidentSampleV1 {
-        resident_bytes: 256 * 1024 * 1024,
-        unreclaimable_bytes: 256 * 1024 * 1024,
-        swapped_bytes: 0,
-        cgroup_committed_bytes: None,
-    };
-    let resident_memory = Arc::new(ProcessResidentMemoryV1::with_pressure(
-        limit,
-        Arc::new(ResidentMemoryPressureV1::with_sampler(
-            limit,
-            Arc::new(move || Some(process)),
-        )),
-    ));
+    let resident_memory = fixed_reading_authority();
     let (registry, scope) = mounted_core_query_worktree_in(
         CodeIndexSchedulerRegistryV1::with_resident_memory(1, Arc::clone(&resident_memory))
             .with_resident_owners(Arc::clone(&owners)),
@@ -1703,7 +1707,7 @@ async fn a_refresh_refused_while_a_read_holds_the_graph_retries_when_the_read_en
     let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
     let store = TempDir::new().expect("store root");
     let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
-    let resident_memory = sixteen_gib_authority();
+    let resident_memory = fixed_reading_authority();
     let (registry, _) = mounted_core_query_worktree_in(
         CodeIndexSchedulerRegistryV1::with_resident_memory(1, Arc::clone(&resident_memory))
             .with_resident_owners(Arc::clone(&owners)),
@@ -1739,7 +1743,6 @@ async fn a_refresh_refused_while_a_read_holds_the_graph_retries_when_the_read_en
         .expect("an open graph read");
     let blocker = ledger_leaving_one_mib(&resident_memory, "test-other-worktree-build");
     refresh_refused_for_memory(&registry, &fixture).await;
-    wait_for_worker_phase(&registry, fixture.path(), CodeIndexWorkerPhaseV1::Parked).await;
     let refused_passes = || async {
         registry
             .dashboard_freshness(fixture.path())
@@ -1749,10 +1752,21 @@ async fn a_refresh_refused_while_a_read_holds_the_graph_retries_when_the_read_en
             .filter(|parked| {
                 parked.blocked_reason == Some(CodeIndexBuildBlockedReasonV1::ResidentMemory)
             })
-            .expect("the refresh is parked on resident memory")
-            .observed_passes
+            .map(|parked| parked.observed_passes)
     };
-    let before = refused_passes().await;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let before = loop {
+        if let Some(passes) = refused_passes().await {
+            break passes;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "the refresh parks on resident memory"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    // The worker gives back what it can before it reads as parked.
+    wait_for_worker_phase(&registry, fixture.path(), CodeIndexWorkerPhaseV1::Parked).await;
 
     // A read can end off the runtime (a catalog re-warm thread holds the
     // last lease) and while a pass runs.
@@ -1766,7 +1780,7 @@ async fn a_refresh_refused_while_a_read_holds_the_graph_retries_when_the_read_en
     drop(pass);
 
     let deadline = Instant::now() + Duration::from_secs(30);
-    while refused_passes().await == before {
+    while refused_passes().await == Some(before) {
         assert!(
             Instant::now() <= deadline,
             "the graph the ended read freed is the refused refresh's retry"
