@@ -1,8 +1,6 @@
 pub mod history;
 pub mod projector;
 pub mod registry;
-#[cfg(test)]
-mod registry_tests;
 pub mod wake;
 mod worker;
 #[cfg(test)]

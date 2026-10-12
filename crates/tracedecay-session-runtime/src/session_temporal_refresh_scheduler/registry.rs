@@ -21,6 +21,10 @@ use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_sessions::admission::session_ingest_disabled;
 
+#[cfg(test)]
+#[path = "registry_tests.rs"]
+mod registry_tests;
+
 macro_rules! define_pass_report {
     ($visibility:vis) => {
         #[derive(Default, Debug, Eq, PartialEq)]
@@ -207,6 +211,7 @@ impl Drop for SessionTemporalRefreshRetirement<'_> {
 struct SessionTemporalRefreshRekeyHandoff {
     route: SessionTemporalRefreshWake,
     staging: Arc<SessionTemporalRefreshWakeState>,
+    pending_states: Vec<Arc<SessionTemporalRefreshWakeState>>,
 }
 
 pub struct SessionTemporalRefreshSchedulerRegistry {
@@ -475,32 +480,41 @@ impl SessionTemporalRefreshSchedulerRegistry {
     }
 
     /// Resumes the handoff a dropped rekey retained for `old_owner`, or
-    /// stages a fresh one from `entry` before this attempt's first join
+    /// stages a fresh one from `entries` before this attempt's first join
     /// await, so a dropped rekey cannot strand the old route or the
     /// requests still queued on the retired worker's state.
     fn rekey_handoff(
         &self,
         old_owner: &StoreOwnerKey,
-        entry: Option<&SessionTemporalRefreshSchedulerEntry>,
+        entries: &[RetiredSessionTemporalRefreshEntry],
     ) -> Option<SessionTemporalRefreshRekeyHandoff> {
-        if let Some(stored) = self
+        let mut handoffs = self
             .rekey_handoffs
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(old_owner)
-        {
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(stored) = handoffs.get_mut(old_owner) {
+            for (_, entry) in entries {
+                if !stored
+                    .pending_states
+                    .iter()
+                    .any(|state| Arc::ptr_eq(state, &entry.state))
+                {
+                    stored.pending_states.push(Arc::clone(&entry.state));
+                }
+            }
             return Some(stored.clone());
         }
-        let entry = entry?;
+        let (_, entry) = entries.last()?;
         let handoff = SessionTemporalRefreshRekeyHandoff {
             route: entry.wake.clone(),
             staging: Arc::new(SessionTemporalRefreshWakeState::default()),
+            pending_states: entries
+                .iter()
+                .map(|(_, entry)| Arc::clone(&entry.state))
+                .collect(),
         };
         handoff.route.bind(&handoff.staging);
-        self.rekey_handoffs
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(old_owner.clone(), handoff.clone());
+        handoffs.insert(old_owner.clone(), handoff.clone());
         Some(handoff)
     }
 
@@ -715,23 +729,13 @@ impl SessionTemporalRefreshSchedulerRegistry {
         let mut entries = self.take_retired(&old_key);
         let mapped = project.remove(old_owner);
         drop(project);
-        let handoff = self.rekey_handoff(
-            old_owner,
-            mapped
-                .as_ref()
-                .or_else(|| entries.last().map(|(_, entry)| entry)),
-        );
         entries.extend(mapped.map(|entry| (old_key, entry)));
-        // Every joined state drains into staging: a retry may find a worker
-        // retired by another attempt whose queued requests were never
-        // transferred.
-        let joined_states: Vec<Arc<SessionTemporalRefreshWakeState>> = entries
-            .iter()
-            .map(|(_, entry)| Arc::clone(&entry.state))
-            .collect();
+        // A finished supervisor needs no further join, but its queued work
+        // remains owned by the handoff until transfer, including on drop.
+        let handoff = self.rekey_handoff(old_owner, &entries);
         self.retire(entries).join().await;
         if let Some(handoff) = &handoff {
-            for state in joined_states {
+            for state in &handoff.pending_states {
                 state.transfer_requests_to(&handoff.staging);
             }
         }
@@ -848,13 +852,6 @@ impl SessionTemporalRefreshSchedulerRegistry {
         let retirement = self.retire(entries);
         drop((project, profile));
         retirement.join().await;
-    }
-
-    /// Holds the project map so a test can drop a caller waiting on it
-    /// and prove no retired entry was detached from join authority.
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub async fn hold_project_map_for_test(&self) -> impl Send {
-        self.project.lock().await
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
