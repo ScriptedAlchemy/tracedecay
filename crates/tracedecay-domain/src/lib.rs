@@ -189,7 +189,6 @@ pub use feedback::{
     ProximityRelationStrengthV1, ProximityRiskInputsV1, ProximityTierV1, ProximityWarningClassV1,
     derive_feedback_finding_id, derive_overlay_feedback_finding_id,
 };
-pub use framed_log::{CHECKSUM_BYTES, checksum, partial_tail_matches_prefix};
 pub use git::{
     BranchGraphPublicationEpochV1, GIT_INDEX_PREVIEW_DIGEST_DOMAIN_V1,
     GIT_INDEX_RECEIPT_DIGEST_DOMAIN_V1, GIT_INDEX_SNAPSHOT_DIGEST_DOMAIN_V1,
