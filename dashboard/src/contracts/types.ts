@@ -914,6 +914,7 @@ export type CodeIndexFreshnessCoverageV1 = "complete" | "partial_artifact_restor
 export type CodeIndexFreshnessPayloadV1 = {
   mount_failure?: CodeIndexMountFailureV1 | null | undefined;
   note: string;
+  refusal?: CodeIndexRouteRefusalV1 | null | undefined;
   worktrees: Array<CodeIndexWorktreeFreshnessV1>;
 };
 
@@ -947,6 +948,11 @@ export type CodeIndexRestoreProgressV1 = {
   authenticated_remaining: number;
   authenticated_total: number;
   generation_id: string;
+};
+
+export type CodeIndexRouteRefusalV1 = {
+  reason: string;
+  remediation: string;
 };
 
 export type CodeIndexSourceOmissionReasonV1 = 

@@ -373,10 +373,6 @@ fn source_provenance_cargo_fixture() -> std::path::PathBuf {
     package_manifest_directory().join(SOURCE_PROVENANCE_CARGO_FIXTURE)
 }
 
-fn cargo_config_directory(path: &std::path::Path) -> String {
-    toml::Value::String(path.to_string_lossy().into_owned()).to_string()
-}
-
 fn workspace_rustup_toolchain() -> Option<String> {
     if let Ok(existing) = std::env::var("RUSTUP_TOOLCHAIN") {
         return Some(existing);
@@ -406,10 +402,6 @@ struct CargoFixture {
 
 impl CargoFixture {
     fn new() -> Self {
-        Self::with_vendor(&source_provenance_cargo_fixture().join("vendor"))
-    }
-
-    fn with_vendor(vendor: &std::path::Path) -> Self {
         let fixture = source_provenance_cargo_fixture();
         let directory = tempfile::tempdir().expect("fixture directory");
         let root = directory.path().join("repository");
@@ -419,53 +411,22 @@ impl CargoFixture {
         std::fs::create_dir_all(&cargo_home).expect("fixture cargo home");
         std::fs::write(&watched_input, ENV_SHA).expect("write watched input");
         std::fs::create_dir_all(root.join("src")).expect("fixture source directory");
+        std::fs::create_dir_all(root.join("provenance/src"))
+            .expect("fixture build dependency source directory");
 
-        for relative in ["Cargo.toml", "Cargo.lock", "README.md"] {
+        for relative in [
+            "Cargo.toml",
+            "Cargo.lock",
+            "build.rs",
+            "README.md",
+            "provenance/Cargo.toml",
+            "provenance/src/lib.rs",
+        ] {
             std::fs::copy(fixture.join(relative), root.join(relative))
                 .unwrap_or_else(|error| panic!("copy checked-in fixture {relative}: {error}"));
         }
         std::fs::copy(fixture.join("src/main.rs"), root.join("src/main.rs"))
             .expect("copy checked-in fixture src/main.rs");
-
-        let vendor_directory = cargo_config_directory(vendor);
-        std::fs::write(
-            cargo_home.join("config.toml"),
-            format!(
-                "[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n\
-                 [source.vendored-sources]\n\
-                 directory = {vendor_directory}\n"
-            ),
-        )
-        .expect("fixture cargo home config");
-
-        let shared_provenance =
-            package_manifest_directory().join("build-support/source_provenance.rs");
-        let watched_input_module =
-            package_manifest_directory().join("build-support/watched_input_file.rs");
-        std::fs::write(
-            root.join("build.rs"),
-            format!(
-                "#[path = {shared_provenance:?}]\n\
-                 mod source_provenance;\n\
-                 #[path = {watched_input_module:?}]\n\
-                 mod watched_input_file;\n\
-                 \n\
-                 fn main() {{\n\
-                     watched_input_file::WatchedInputFile::from_env(\"FIXTURE_WATCHED_INPUT\").emit();\n\
-                     let manifest_dir = std::env::var(\"CARGO_MANIFEST_DIR\").expect(\"manifest directory\");\n\
-                     let root = std::path::Path::new(&manifest_dir);\n\
-                     let resolved = source_provenance::resolve(root, root, None).expect(\"fixture provenance\");\n\
-                     for path in source_provenance::watch_paths(root) {{\n\
-                         println!(\"cargo::rerun-if-changed={{}}\", path.display());\n\
-                     }}\n\
-                     let counter = std::path::PathBuf::from(std::env::var(\"OUT_DIR\").expect(\"output directory\")).join(\"build-script-runs\");\n\
-                     let runs = std::fs::read_to_string(&counter).ok().and_then(|value| value.parse::<u32>().ok()).unwrap_or(0) + 1;\n\
-                     std::fs::write(counter, runs.to_string()).expect(\"write run count\");\n\
-                     println!(\"cargo::rustc-env=FIXTURE_IDENTITY={{}}\", if resolved.dirty {{ \"dirty\" }} else {{ \"clean\" }});\n\
-                 }}\n"
-            ),
-        )
-        .expect("fixture build script");
 
         Self {
             _directory: directory,
@@ -482,8 +443,6 @@ impl CargoFixture {
     }
 
     fn commit_sources(&self) {
-        self.dependency_preflight()
-            .unwrap_or_else(|error| panic!("{error}"));
         git(&self.root, &["init", "--quiet"]);
         for path in [
             "Cargo.toml",
@@ -491,6 +450,8 @@ impl CargoFixture {
             "build.rs",
             "src/main.rs",
             "README.md",
+            "provenance/Cargo.toml",
+            "provenance/src/lib.rs",
         ] {
             git(&self.root, &["add", path]);
         }
@@ -509,23 +470,6 @@ impl CargoFixture {
 
     fn build(&self) {
         self.cargo(&["build", "--locked", "--offline", "--quiet"]);
-    }
-
-    fn dependency_preflight(&self) -> Result<(), String> {
-        let output = self.cargo_output(&["fetch", "--locked", "--offline"]);
-        if output.status.success() {
-            return Ok(());
-        }
-        Err(format!(
-            "source-provenance dependency preflight failed\n\
-             command: cargo fetch --locked --offline\n\
-             status: {}\n\
-             stdout:\n{}\n\
-             stderr:\n{}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        ))
     }
 
     fn reported_identity(&self) -> String {
@@ -590,6 +534,14 @@ impl CargoFixture {
             .current_dir(&self.root)
             .env("CARGO_HOME", &self.cargo_home)
             .env("CARGO_TARGET_DIR", &self.target)
+            .env(
+                "FIXTURE_PROVENANCE_GIT_SOURCE",
+                package_manifest_directory().join("build-support/source_provenance_git.rs"),
+            )
+            .env(
+                "FIXTURE_WATCHED_INPUT_SOURCE",
+                package_manifest_directory().join("build-support/watched_input_file.rs"),
+            )
             .env("FIXTURE_WATCHED_INPUT", &self.watched_input);
         if let Some(toolchain) = &self.rustup_toolchain {
             command.env("RUSTUP_TOOLCHAIN", toolchain);

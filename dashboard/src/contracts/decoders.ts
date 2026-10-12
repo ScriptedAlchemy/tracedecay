@@ -131,6 +131,7 @@ import type {
   CodeIndexOmittedSourcesV1,
   CodeIndexOmittedSourceV1,
   CodeIndexRestoreProgressV1,
+  CodeIndexRouteRefusalV1,
   CodeIndexSourceOmissionReasonV1,
   CodeIndexStalenessStateV1,
   CodeIndexWorkerLimitingReasonV1,
@@ -2468,10 +2469,12 @@ export const CodeIndexFreshnessCoverageV1Schema: z.ZodType<"complete" | "partial
 export const CodeIndexFreshnessPayloadV1Schema: z.ZodObject<{
   mount_failure: z.ZodOptional<z.ZodType<CodeIndexMountFailureV1 | null, unknown>>;
   note: z.ZodType<string, unknown>;
+  refusal: z.ZodOptional<z.ZodType<CodeIndexRouteRefusalV1 | null, unknown>>;
   worktrees: z.ZodType<Array<CodeIndexWorktreeFreshnessV1>, unknown>;
 }> = z.object({
   mount_failure: z.union([z.lazy(() => CodeIndexMountFailureV1Schema), z.null()]).optional(),
   note: z.string(),
+  refusal: z.union([z.lazy(() => CodeIndexRouteRefusalV1Schema), z.null()]).optional(),
   worktrees: z.array(z.lazy(() => CodeIndexWorktreeFreshnessV1Schema)),
 });
 
@@ -2537,6 +2540,16 @@ export const CodeIndexRestoreProgressV1Schema: z.ZodObject<{
   authenticated_remaining: z.number().int().min(0),
   authenticated_total: z.number().int().min(0),
   generation_id: z.string(),
+});
+
+/** A policy that keeps the route from being indexed, with the operator step
+that lifts it. */
+export const CodeIndexRouteRefusalV1Schema: z.ZodObject<{
+  reason: z.ZodType<string, unknown>;
+  remediation: z.ZodType<string, unknown>;
+}> = z.object({
+  reason: z.string(),
+  remediation: z.string(),
 });
 
 export const CodeIndexSourceOmissionReasonV1Schema: z.ZodType<CodeIndexSourceOmissionReasonV1, unknown> = z.discriminatedUnion("kind", [z.object({

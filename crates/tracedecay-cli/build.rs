@@ -495,6 +495,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo::rerun-if-env-changed=TRACEDECAY_RELEASE_GIT_SHA");
     watched_input_file::WatchedInputFile::from_env("TRACEDECAY_RELEASE_GIT_SHA_FILE").emit();
     println!("cargo::rerun-if-changed=build-support/source_provenance.rs");
+    println!("cargo::rerun-if-changed=build-support/source_provenance_git.rs");
     println!("cargo::rerun-if-changed=build-support/watched_input_file.rs");
     let release_env_provenance = match std::env::var_os("TRACEDECAY_RELEASE_GIT_SHA") {
         None => match std::env::var_os("TRACEDECAY_RELEASE_GIT_SHA_FILE") {

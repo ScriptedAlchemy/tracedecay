@@ -838,6 +838,23 @@ impl<A: CodeIndexMcpReadAdmissionV1> tracedecay_query::retrieval::ports::Retriev
     }
 }
 
+/// Whether the linked-worktree watch policy refuses this read. The policy
+/// governs automatic indexing only: a generation an operator seated
+/// (`tracedecay sync`) serves search, similar, and clone reads as it serves
+/// graph reads and status, so the refusal holds only while nothing is seated.
+async fn linked_worktree_unindexed(
+    schedulers: &code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    scope: &tracedecay_contracts::ResolvedScope,
+    project_root: &std::path::Path,
+) -> bool {
+    schedulers.automatic_admission_for_scope(scope)
+        == Some(code_index_scheduler::CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled)
+        && schedulers
+            .latest_generation_id(project_root)
+            .await
+            .is_none()
+}
+
 pub fn code_index_search_executor<A, S>(
     schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_id: tracedecay_domain::ProjectId,
@@ -870,11 +887,7 @@ where
                     request.source_revision.as_ref(),
                     request.source_tree.as_ref(),
                 );
-                if schedulers.automatic_admission_for_scope(&scope)
-                    == Some(
-                        code_index_scheduler::CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled,
-                    )
-                {
+                if linked_worktree_unindexed(&schedulers, &scope, &request.project_root).await {
                     return code_index_search_unavailable(
                         code_search::CodeIndexSearchUnavailableReasonV1::LinkedWorktreeDisabled,
                         "linked_worktree_disabled",
@@ -1723,9 +1736,7 @@ where
                 Ok(scope) => scope,
                 Err(error) => return unavailable(error.search_reason()),
             };
-            if schedulers.automatic_admission_for_scope(&scope)
-                == Some(code_index_scheduler::CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled)
-            {
+            if linked_worktree_unindexed(&schedulers, &scope, &request.project_root).await {
                 return unavailable(
                     code_search::CodeIndexSearchUnavailableReasonV1::LinkedWorktreeDisabled,
                 );
@@ -1893,9 +1904,7 @@ where
                     code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
                 );
             }
-            if schedulers.automatic_admission_for_scope(&scope)
-                == Some(code_index_scheduler::CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled)
-            {
+            if linked_worktree_unindexed(&schedulers, &scope, &request.project_root).await {
                 return unavailable(
                     code_search::CodeIndexSearchUnavailableReasonV1::LinkedWorktreeDisabled,
                 );

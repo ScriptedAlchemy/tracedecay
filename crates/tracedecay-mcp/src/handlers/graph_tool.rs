@@ -814,6 +814,7 @@ mod tests {
                 exact_class: "exact_message".to_owned(),
                 rank,
                 utility_micros: if rank <= 3 { 2_000_000 } else { 1_000_000 },
+                anchors: Vec::new(),
             })
             .collect();
         let root = tempfile::tempdir().expect("response handles");
@@ -849,6 +850,119 @@ mod tests {
             0,
             "the markdown trim stores its tail here"
         );
+    }
+
+    /// A graph-selected page for `format_relative_time callers`: the
+    /// definition and two callers rank strong, then seven unrelated
+    /// `callers` members rank at half the best utility.
+    fn caller_tail_context() -> ContextResultV1 {
+        let names = [
+            ("format_relative_time", "src/text.rs"),
+            ("scalar_str_keyed", "src/render.rs"),
+            ("print_freshness_row", "src/display.rs"),
+        ]
+        .into_iter()
+        .chain((4..=10).map(|_| ("callers", "crates/tracedecay-graph/src/callers.rs")))
+        .collect::<Vec<_>>();
+        let mut context = plan_context();
+        context.task = "format_relative_time callers".to_owned();
+        context.symbols = names
+            .iter()
+            .enumerate()
+            .map(|(index, (name, file))| PrimitiveSymbolLocationV1 {
+                node_id: format!("symbol.v{index}"),
+                name: (*name).to_owned(),
+                qualified_name: format!("crate::{name}"),
+                kind: "function".to_owned(),
+                file: (*file).to_owned(),
+                start_line: u32::try_from(index).expect("line") + 1,
+                end_line: u32::try_from(index).expect("line") + 2,
+                unavailable_fields: Vec::new(),
+            })
+            .collect();
+        context.search_matches = names
+            .iter()
+            .enumerate()
+            .map(|(index, (name, file))| ContextSearchMatchV1 {
+                anchor_id: format!("code-symbol:symbol.v{index}"),
+                name: (*name).to_owned(),
+                qualified_name: format!("crate::{name}"),
+                kind: "function".to_owned(),
+                file: (*file).to_owned(),
+                exact_class: "approximate".to_owned(),
+                rank: u32::try_from(index).expect("rank") + 1,
+                utility_micros: if index < 3 { 2_000_000 } else { 1_000_000 },
+                anchors: Vec::new(),
+            })
+            .collect();
+        context
+    }
+
+    #[test]
+    fn context_code_rows_trim_their_weak_tail_behind_a_restoring_handle() {
+        let root = tempfile::tempdir().expect("response handles");
+        let render = || {
+            let completion = GraphToolCompletionV1 {
+                result: GraphToolResultV1::Context(Box::new(caller_tail_context())),
+                touched_files: Vec::new(),
+                code_graph: None,
+                analytics: None,
+                cost: None,
+            };
+            texts(&render_graph_tool(Some(root.path()), &json!({}), completion).expect("context"))
+                .join("")
+        };
+        let row = |rank: usize, name: &str, file: &str| {
+            format!("- **{name}** (function), {file}:{rank}\n")
+        };
+
+        let markdown = render();
+
+        let Some((_, code_section)) = markdown.split_once("### Code\n") else {
+            panic!("the page has a Code section: {markdown}");
+        };
+        let Some((code, _)) =
+            code_section.split_once("- _Trimmed 7 lower-ranked results (ranks 4-10, ")
+        else {
+            panic!("the weak Code tail is trimmed: {markdown}");
+        };
+        assert_eq!(
+            code,
+            format!(
+                "{}{}{}",
+                row(1, "format_relative_time", "src/text.rs"),
+                row(2, "scalar_str_keyed", "src/render.rs"),
+                row(3, "print_freshness_row", "src/display.rs"),
+            ),
+            "kept rows render byte-exact"
+        );
+        let handle = markdown
+            .split("with handle `")
+            .nth(1)
+            .and_then(|tail| tail.split('`').next())
+            .expect("marker names a handle");
+        let ResponseHandleLookup::Found(record) =
+            retrieve_response_handle(root.path(), handle, current_timestamp()).expect("lookup")
+        else {
+            panic!("the marker's handle restores the cut rows");
+        };
+        assert_eq!(
+            record.content,
+            (4..=10)
+                .map(|rank| row(rank, "callers", "crates/tracedecay-graph/src/callers.rs"))
+                .collect::<String>(),
+            "the handle restores the cut rows byte-exact"
+        );
+        assert!(
+            !markdown.contains("crates/tracedecay-graph/src/callers.rs")
+                && !markdown.contains("crate::callers"),
+            "no trimmed symbol leaks outside its handle: {markdown}"
+        );
+        assert!(
+            markdown.contains("seen_node_ids: [\"symbol.v0\",\"symbol.v1\",\"symbol.v2\"]\n"),
+            "{markdown}"
+        );
+        assert_eq!(render(), markdown, "identical calls render identical bytes");
     }
 
     fn fresh_worktree_seat() -> ServedCodeGraphGenerationV1 {

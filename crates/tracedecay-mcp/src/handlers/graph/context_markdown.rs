@@ -1,7 +1,7 @@
 //! Plan-context computation and the markdown every surface renders from a
 //! typed context result.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
@@ -48,12 +48,22 @@ pub(crate) fn render_context(
         return Ok(text_tool_result(&text, Vec::new()));
     }
     let mut output = freshness_lines(&result.freshness);
+    let (code_md, kept_symbols) = if result.code.is_empty() {
+        let rows = context_symbol_rows(&result.symbols, &result.search_matches);
+        let (rows_md, kept) = ranked_rows_md(response_handle_root, &result.task, &rows);
+        (rows_md, &result.symbols[..kept])
+    } else {
+        (
+            context_code_blocks_md(&result.code),
+            result.symbols.as_slice(),
+        )
+    };
     output.push_str(&context_markdown(
         &result.task,
-        &result.symbols,
+        &code_md,
+        kept_symbols,
         &result.related_symbols,
         result.related_omission.as_ref(),
-        &result.code,
         &result.oversized_symbols,
     ));
     if result.symbols.is_empty() {
@@ -62,7 +72,6 @@ pub(crate) fn render_context(
             response_handle_root,
             &result.task,
             &result.search_matches,
-            !result.lexical_anchors.is_empty(),
         );
     }
     append_context_lexical_anchors(&mut output, &result.lexical_anchors);
@@ -74,9 +83,8 @@ pub(crate) fn render_context(
     if let Some(plan) = &result.plan {
         append_plan_markdown(&mut output, plan);
     }
-    if !result.symbols.is_empty() {
-        let seen = result
-            .symbols
+    if !kept_symbols.is_empty() {
+        let seen = kept_symbols
             .iter()
             .map(|symbol| symbol.node_id.as_str())
             .collect::<Vec<_>>();
@@ -101,31 +109,76 @@ pub(crate) fn render_context(
     Ok(text_tool_result(&text, Vec::new()))
 }
 
+/// The selected symbols as ranked rows, in selection order, rendered as
+/// bare locations: a ranking column would cost more bytes than the trim
+/// saves. Selection follows search order, so each row ranks by its
+/// position and scores the utility of the search match that selected it.
+/// A symbol no search match selected has no utility, and the trim keeps it.
+fn context_symbol_rows(
+    symbols: &[PrimitiveSymbolLocationV1],
+    matches: &[ContextSearchMatchV1],
+) -> Vec<RankedRow> {
+    let by_anchor = matches
+        .iter()
+        .map(|search_match| (search_match.anchor_id.as_str(), search_match))
+        .collect::<HashMap<_, _>>();
+    symbols
+        .iter()
+        .zip(1_u64..)
+        .map(|(symbol, rank)| {
+            // A search-hydrated symbol's node id is its match's anchor; a
+            // graph-selected symbol's is the occurrence its anchor names.
+            let search_match = by_anchor
+                .get(symbol.node_id.as_str())
+                .or_else(|| by_anchor.get(format!("code-symbol:{}", symbol.node_id).as_str()));
+            RankedRow {
+                rank,
+                utility_micros: search_match.map(|search_match| search_match.utility_micros),
+                name: symbol.name.clone(),
+                anchored: search_match.is_some_and(|search_match| !search_match.anchors.is_empty()),
+                markdown: format!(
+                    "- **{}** ({}), {}:{}\n",
+                    symbol.name, symbol.kind, symbol.file, symbol.start_line,
+                ),
+            }
+        })
+        .collect()
+}
+
+/// The anchor routes that ranked a match, in the search row's `via` form.
+fn anchor_route_suffix(anchors: &[String]) -> String {
+    if anchors.is_empty() {
+        return String::new();
+    }
+    let routes = anchors
+        .iter()
+        .map(|anchor| format!("anchor:{anchor}"))
+        .collect::<Vec<_>>();
+    format!(" · via {}", routes.join(", "))
+}
+
+fn context_code_blocks_md(code: &[ContextCodeBlockV1]) -> String {
+    let mut output = String::new();
+    for block in code {
+        let _ = writeln!(output, "#### {}:{}", block.file, block.start_line);
+        let mut code = Md::new();
+        code.code("", &block.code);
+        output.push_str(&code.render());
+    }
+    output
+}
+
+/// `code_md` is the rendered Code section; `symbols` are the selected
+/// symbols it shows, which name the entry points.
 fn context_markdown(
     task: &str,
+    code_md: &str,
     symbols: &[PrimitiveSymbolLocationV1],
     related: &[PrimitiveSymbolLocationV1],
     related_omission: Option<&ContextRelatedOmissionV1>,
-    code: &[ContextCodeBlockV1],
     oversized: &[PrimitiveSymbolLocationV1],
 ) -> String {
-    let mut output = format!("# Context for {task}\n\n{CONTEXT_CODE_HEADING}\n");
-    if code.is_empty() {
-        for symbol in symbols {
-            let _ = writeln!(
-                output,
-                "- **{}** ({}), {}:{}",
-                symbol.name, symbol.kind, symbol.file, symbol.start_line,
-            );
-        }
-    } else {
-        for block in code {
-            let _ = writeln!(output, "#### {}:{}", block.file, block.start_line);
-            let mut code = Md::new();
-            code.code("", &block.code);
-            output.push_str(&code.render());
-        }
-    }
+    let mut output = format!("# Context for {task}\n\n{CONTEXT_CODE_HEADING}\n{code_md}");
     for symbol in oversized {
         let _ = writeln!(
             output,
@@ -165,14 +218,13 @@ fn context_markdown(
     output
 }
 
-/// Context matches carry no per-row routes, so a call with caller anchors
-/// keeps every match: the anchor receipt counts the sites this page returns.
+/// A match an anchor route ranked stays on the page: the anchor receipt
+/// counts it as returned.
 fn append_context_search_matches(
     output: &mut String,
     response_handle_root: Option<&Path>,
     task: &str,
     matches: &[ContextSearchMatchV1],
-    anchored: bool,
 ) {
     if matches.is_empty() {
         return;
@@ -182,20 +234,21 @@ fn append_context_search_matches(
         .iter()
         .map(|search_match| RankedRow {
             rank: u64::from(search_match.rank),
-            utility_micros: search_match.utility_micros,
+            utility_micros: Some(search_match.utility_micros),
             name: search_match.name.clone(),
-            anchored,
+            anchored: !search_match.anchors.is_empty(),
             markdown: format!(
-                "- **{}** ({}), `{}` · rank {} · utility {}\n",
+                "- **{}** ({}), `{}` · rank {} · utility {}{}\n",
                 search_match.name,
                 search_match.kind,
                 search_match.file,
                 search_match.rank,
                 search_match.utility_micros,
+                anchor_route_suffix(&search_match.anchors),
             ),
         })
         .collect::<Vec<_>>();
-    output.push_str(&ranked_rows_md(response_handle_root, task, &rows));
+    output.push_str(&ranked_rows_md(response_handle_root, task, &rows).0);
 }
 
 /// Every caller anchor's outcome, so an anchor that matched nothing is never
@@ -360,12 +413,13 @@ mod tests {
                 exact_class: "exact_message".to_owned(),
                 rank,
                 utility_micros: if rank <= 3 { 2_000_000 } else { 1_000_000 },
+                anchors: Vec::new(),
             })
             .collect()
     }
 
     #[test]
-    fn search_matches_trim_the_weak_tail_unless_caller_anchors_ran() {
+    fn search_matches_trim_the_weak_tail_after_the_last_anchored_match() {
         let root = tempfile::tempdir().expect("handle root");
         let mut trimmed = String::new();
         append_context_search_matches(
@@ -373,7 +427,6 @@ mod tests {
             Some(root.path()),
             "where is m1 defined",
             &search_matches(),
-            false,
         );
         let (kept, marker) = trimmed
             .split_once("- _Trimmed 7 lower-ranked results (ranks 4-10, ")
@@ -387,18 +440,99 @@ mod tests {
         );
         assert!(marker.contains("tracedecay_retrieve"), "{marker}");
 
+        let mut matches = search_matches();
+        matches[3].anchors = vec!["m4".to_owned()];
         let mut anchored = String::new();
         append_context_search_matches(
             &mut anchored,
             Some(root.path()),
             "where is m1 defined",
-            &search_matches(),
-            true,
+            &matches,
         );
-        assert!(!anchored.contains("Trimmed"), "{anchored}");
+        let (kept, _) = anchored
+            .split_once("- _Trimmed 6 lower-ranked results (ranks 5-10, ")
+            .expect("only the rows after the anchored match are trimmed");
         assert!(
-            anchored.contains("· rank 10 · utility 1000000\n"),
-            "{anchored}"
+            kept.ends_with(
+                "- **m4** (function), `src/lib.rs` · rank 4 · utility 1000000 · via anchor:m4\n"
+            ),
+            "{kept}"
+        );
+    }
+
+    /// Fourteen search-hydrated symbols: three strong, the rest weak.
+    fn hydrated_symbols() -> (Vec<PrimitiveSymbolLocationV1>, Vec<ContextSearchMatchV1>) {
+        let matches = (1..=14)
+            .map(|rank| ContextSearchMatchV1 {
+                anchor_id: format!("code-symbol:m{rank}"),
+                name: format!("m{rank}"),
+                qualified_name: format!("crate::m{rank}"),
+                kind: "function".to_owned(),
+                file: "crates/tracedecay-retrieval/src/ranked_symbols.rs".to_owned(),
+                exact_class: "approximate".to_owned(),
+                rank,
+                utility_micros: if rank <= 3 { 2_000_000 } else { 1_000_000 },
+                anchors: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let symbols = matches
+            .iter()
+            .map(|search_match| PrimitiveSymbolLocationV1 {
+                node_id: search_match.anchor_id.clone(),
+                name: search_match.name.clone(),
+                qualified_name: search_match.qualified_name.clone(),
+                kind: search_match.kind.clone(),
+                file: search_match.file.clone(),
+                start_line: search_match.rank,
+                end_line: search_match.rank,
+                unavailable_fields: Vec::new(),
+            })
+            .collect();
+        (symbols, matches)
+    }
+
+    fn kept_symbol_rows(
+        symbols: &[PrimitiveSymbolLocationV1],
+        matches: &[ContextSearchMatchV1],
+    ) -> (String, usize) {
+        let root = tempfile::tempdir().expect("handle root");
+        let rows = context_symbol_rows(symbols, matches);
+        let (rendered, kept) = ranked_rows_md(Some(root.path()), "unrelated task", &rows);
+        let kept_md = rendered
+            .split_once("- _Trimmed ")
+            .map_or(rendered.as_str(), |(kept, _)| kept)
+            .to_owned();
+        (kept_md, kept)
+    }
+
+    #[test]
+    fn symbol_rows_keep_every_symbol_through_the_last_anchored_or_unranked_one() {
+        let (symbols, matches) = hydrated_symbols();
+        assert_eq!(kept_symbol_rows(&symbols, &matches).1, 3);
+
+        let mut anchored = matches.clone();
+        anchored[5].anchors = vec!["m6".to_owned()];
+        let (kept_md, kept) = kept_symbol_rows(&symbols, &anchored);
+        assert_eq!(kept, 6);
+        assert!(
+            kept_md.ends_with(
+                "- **m6** (function), crates/tracedecay-retrieval/src/ranked_symbols.rs:6\n"
+            ),
+            "{kept_md}"
+        );
+
+        let unmatched = matches
+            .iter()
+            .filter(|search_match| search_match.rank != 6)
+            .cloned()
+            .collect::<Vec<_>>();
+        let (kept_md, kept) = kept_symbol_rows(&symbols, &unmatched);
+        assert_eq!(kept, 6, "a symbol no search match ranks is kept");
+        assert!(
+            kept_md.ends_with(
+                "- **m6** (function), crates/tracedecay-retrieval/src/ranked_symbols.rs:6\n"
+            ),
+            "{kept_md}"
         );
     }
 

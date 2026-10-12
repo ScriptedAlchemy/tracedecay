@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class CheckoutBytesTests(unittest.TestCase):
-    def test_autocrlf_preserves_text_binary_and_vendor_bytes(self):
+    def test_autocrlf_preserves_text_and_binary_bytes(self):
         samples = {
             "scripts/entrypoint.sh": b"#!/bin/sh\nprintf 'ready\\n'\n",
             "dashboard/src/contracts/generated.ts": b"export const version = 1;\n",
@@ -22,7 +22,6 @@ class CheckoutBytesTests(unittest.TestCase):
             "crates/example/src/template.rs": b'const TEMPLATE: &str = "hello";\n',
             "crates/example/schema.sql": b"CREATE TABLE example (id INTEGER);\n",
             "dashboard/public/image.png": b"\x89PNG\r\n\x1a\n\x00\x00\r\n",
-            "crates/tracedecay-cli/tests/fixtures/source-provenance-cargo/vendor/example/data.txt": b"upstream\r\nbytes\r\n",
         }
         with tempfile.TemporaryDirectory(prefix="checkout-bytes-") as directory:
             root = Path(directory)

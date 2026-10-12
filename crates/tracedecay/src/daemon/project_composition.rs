@@ -2120,10 +2120,14 @@ fn project_dashboard_freshness_reader(
             let schedulers = schedulers.clone();
             let activation = Arc::clone(&activation);
             Box::pin(async move {
+                let unindexed_by_policy = policy_keeps_route_unindexed(&activation);
                 match schedulers.dashboard_freshness_read(&project_root).await? {
                     Some(worktree) => Ok(Some(worktree)),
                     None if activation.mount_failed() => Err(
                         tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReadFailureV1::MountFailed,
+                    ),
+                    None if unindexed_by_policy => Err(
+                        tracedecay_contracts::code_index_freshness::CodeIndexFreshnessReadFailureV1::LinkedWorktreeDisabled,
                     ),
                     None => Ok(None),
                 }
@@ -2131,6 +2135,16 @@ fn project_dashboard_freshness_reader(
         },
     );
     reader
+}
+
+/// Whether the watch policy keeps this linked worktree out of automatic
+/// indexing and no operator mount is in flight, so an unmounted route will
+/// stay unmounted until an operator syncs it. Sample it before the scheduler
+/// read: a mount that settles after the sample shows up in that read.
+fn policy_keeps_route_unindexed(activation: &code_index_scheduler::CodeIndexActivationV1) -> bool {
+    activation.automatic_admission()
+        == code_index_scheduler::CodeIndexAutomaticAdmissionV1::LinkedWorktreeDisabled
+        && !activation.mount_in_progress()
 }
 
 /// `tracedecay_status` `wait_for` over this route's code-index schedulers.
@@ -2152,6 +2166,18 @@ fn project_readiness_waiter(
                 return Ok(
                     tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Unreachable {
                         reason: tracedecay_contracts::code_index_freshness::CODE_INDEX_MOUNT_FAILED.to_owned(),
+                    },
+                );
+            }
+            if policy_keeps_route_unindexed(&activation)
+                && schedulers
+                    .dashboard_freshness_read(&project_root)
+                    .await?
+                    .is_none()
+            {
+                return Ok(
+                    tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Unreachable {
+                        reason: tracedecay_contracts::code_index_freshness::CODE_INDEX_LINKED_WORKTREE_DISABLED.to_owned(),
                     },
                 );
             }

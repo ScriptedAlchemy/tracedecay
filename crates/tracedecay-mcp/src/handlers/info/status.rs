@@ -330,6 +330,17 @@ fn code_index_freshness_status(
                 }),
             );
         }
+        if let Some(refusal) = &payload.refusal {
+            return (
+                StatusCodeIndexFreshnessV1::Unavailable {
+                    reason: refusal.reason.clone(),
+                },
+                Some(refusal.remediation.clone()),
+                Some(StatusRetrievalServingV1::Unavailable {
+                    reason: refusal.reason.clone(),
+                }),
+            );
+        }
         return (
             StatusCodeIndexFreshnessV1::Unavailable {
                 reason: "code_index_scheduler_not_mounted".to_owned(),
@@ -1078,6 +1089,34 @@ mod tests {
     }
 
     #[test]
+    fn unindexed_disabled_linked_worktree_is_a_typed_status_with_operator_remediation() {
+        let payload = CodeIndexFreshnessPayloadV1::from_read_failure(
+            CodeIndexFreshnessReadFailureV1::LinkedWorktreeDisabled,
+        );
+
+        let (status, warning, retrieval) = code_index_freshness_status(Some(&payload));
+
+        assert_eq!(
+            status,
+            StatusCodeIndexFreshnessV1::Unavailable {
+                reason: "linked_worktree_disabled".to_owned(),
+            }
+        );
+        assert_eq!(
+            retrieval,
+            Some(StatusRetrievalServingV1::Unavailable {
+                reason: "linked_worktree_disabled".to_owned(),
+            })
+        );
+        let warning = warning.expect("a policy refusal carries an operator warning");
+        assert!(warning.contains("tracedecay sync"), "{warning}");
+        assert!(
+            warning.contains("sync.watch_linked_worktrees.v1"),
+            "{warning}"
+        );
+    }
+
+    #[test]
     fn session_git_evidence_reports_the_installed_generation_or_its_absence() {
         let recorded = session_git_evidence_state(CorrelationIndexHealth {
             projection_available: true,
@@ -1417,6 +1456,7 @@ mod tests {
                 ],
                 note: String::new(),
                 mount_failure: None,
+                refusal: None,
             }
         };
         let staleness = |payload| {

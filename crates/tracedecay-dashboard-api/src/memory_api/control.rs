@@ -94,12 +94,13 @@ mod tests {
 
     fn request_control(
         cancellation: tracedecay_contracts::CancellationSignal,
+        deadline_at: tracedecay_domain::UtcMicros,
     ) -> DashboardHttpRequestControlV1 {
         DashboardHttpRequestControlV1::test_fixture_with(
             "dashboard-memory-read-control-test",
             cancellation,
             tracedecay_domain::UtcMicros(1),
-            tracedecay_domain::UtcMicros(i64::MAX),
+            deadline_at,
         )
     }
 
@@ -109,7 +110,7 @@ mod tests {
             "cancel.dashboard-memory-read-control-test",
         )
         .expect("cancellation signal");
-        let control = request_control(cancellation.clone());
+        let control = request_control(cancellation.clone(), tracedecay_domain::UtcMicros(i64::MAX));
         let read_control = fact_read_control(&control);
 
         assert!(!read_control.interrupted());
@@ -123,9 +124,7 @@ mod tests {
             "cancel.dashboard-memory-read-deadline-test",
         )
         .expect("cancellation signal");
-        let mut control = request_control(cancellation);
-        control.deadline = tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(0))
-            .expect("elapsed deadline");
+        let control = request_control(cancellation, tracedecay_domain::UtcMicros(0));
 
         assert!(request_deadline_elapsed(&control));
         assert!(fact_read_control(&control).interrupted());
@@ -137,7 +136,7 @@ mod tests {
             "cancel.dashboard-memory-read-envelope-test",
         )
         .expect("cancellation signal");
-        let control = request_control(cancellation.clone());
+        let control = request_control(cancellation.clone(), tracedecay_domain::UtcMicros(i64::MAX));
         assert!(cancellation.cancel(tracedecay_domain::UtcMicros(2)));
         let cancelled = read_error_envelope(
             DashboardScopeV1 {
@@ -155,9 +154,7 @@ mod tests {
             "cancel.dashboard-memory-timeout-envelope-test",
         )
         .expect("cancellation signal");
-        let mut control = request_control(cancellation);
-        control.deadline = tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(0))
-            .expect("elapsed deadline");
+        let control = request_control(cancellation, tracedecay_domain::UtcMicros(0));
         let timed_out = read_error_envelope(
             DashboardScopeV1 {
                 project_id: None,
