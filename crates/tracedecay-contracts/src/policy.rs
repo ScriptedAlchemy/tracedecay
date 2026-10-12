@@ -6,6 +6,7 @@
 //! static availability into capability routing.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotV1};
@@ -230,11 +231,19 @@ impl PolicyEvaluatorCompositionV1 {
     /// Builds the routing projection from the canonical catalog and matching
     /// application handlers. Static unavailability remains a policy fact even
     /// though transport/profile composition keeps the operation inert.
+    ///
+    /// Every descriptor behind it is `const`, so the process composes it once,
+    /// like `application_catalog_snapshot`, instead of on every project open.
     pub fn from_application_catalog() -> Result<Self, ApplicationContractError> {
-        let contributions = application_catalog_contributions()?;
-        let handlers = application_handler_descriptors()?;
-        handlers.validate_against(&contributions)?;
-        Self::from_catalog(&handlers, &contributions)
+        static COMPOSITION: LazyLock<
+            Result<PolicyEvaluatorCompositionV1, ApplicationContractError>,
+        > = LazyLock::new(|| {
+            let contributions = application_catalog_contributions()?;
+            let handlers = application_handler_descriptors()?;
+            handlers.validate_against(&contributions)?;
+            PolicyEvaluatorCompositionV1::from_catalog(&handlers, &contributions)
+        });
+        COMPOSITION.clone()
     }
 
     pub fn from_catalog(
