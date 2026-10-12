@@ -363,25 +363,13 @@ pub(super) fn code_index_freshness_probe_sink(
 
 #[cfg(test)]
 mod tests {
-    use std::process::Command;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
 
     use super::*;
+    use crate::test_support::git::git;
     use tempfile::TempDir;
     use tracedecay_runtime_core::path_safety::canonical_existing_identity;
-
-    fn git(root: &Path, arguments: &[&str]) {
-        let status = Command::new(
-            tracedecay_runtime_core::git::try_git_program()
-                .expect("absolute git executable should resolve"),
-        )
-        .current_dir(root)
-        .args(arguments)
-        .status()
-        .expect("run git");
-        assert!(status.success(), "git {arguments:?}");
-    }
 
     fn repository() -> TempDir {
         let root = TempDir::new().expect("repository root");

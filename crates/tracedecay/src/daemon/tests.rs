@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::Arc;
 #[cfg(unix)]
 use std::sync::PoisonError;
@@ -27,6 +26,7 @@ use super::{
     ProjectServerKey, StoreAdministration, StoreOwnerKey, multi_root_family_allows,
     store_owner_key_from_paths,
 };
+use crate::test_support::git::git;
 use tracedecay_daemon_service::shutdown::DaemonLifecycle;
 
 mod bootstrap;
@@ -52,16 +52,6 @@ mod runtime_identity;
 mod scheduler_config;
 mod scheduler_shutdown;
 mod socket;
-
-fn git(root: &std::path::Path, args: &[&str]) {
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .status()
-        .expect("run Git fixture command");
-    assert!(status.success(), "git {args:?}");
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ObservedMcpRoute {
@@ -172,20 +162,10 @@ fn authenticated_first_request_preserves_raw_and_optional_parsed_view() {
 #[cfg(unix)]
 #[test]
 fn multi_root_git_generation_reads_each_explicit_root() {
-    fn init(root: &std::path::Path) {
-        let status = Command::new("git")
-            .arg("init")
-            .arg("--quiet")
-            .arg(root)
-            .status()
-            .expect("git init");
-        assert!(status.success());
-    }
-
     let first = TempDir::new().expect("first root");
     let second = TempDir::new().expect("second root");
-    init(first.path());
-    init(second.path());
+    git(first.path(), &["init", "--quiet"]);
+    git(second.path(), &["init", "--quiet"]);
     std::fs::write(first.path().join("first.txt"), "first").expect("first source");
     std::fs::write(second.path().join("second.txt"), "second").expect("second source");
 
@@ -372,7 +352,6 @@ fn test_handshake_defaults() -> DaemonHandshake {
 }
 
 /// Daemon credential the in-process socket fixtures serve and present.
-#[cfg(unix)]
 const TEST_AUTH_TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
 /// Serves one socket client through the production authenticated entry.
@@ -391,7 +370,6 @@ async fn serve_authenticated_test_client(
 }
 
 /// Writes the auth preface an authenticated client sends before its handshake.
-#[cfg(unix)]
 async fn write_test_auth_preface(writer: &mut (impl tokio::io::AsyncWrite + Unpin)) {
     let preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(TEST_AUTH_TOKEN)
         .to_line()
@@ -401,6 +379,39 @@ async fn write_test_auth_preface(writer: &mut (impl tokio::io::AsyncWrite + Unpi
         .await
         .expect("write auth preface");
     writer.write_all(b"\n").await.expect("auth preface newline");
+}
+
+/// One in-process client served by `engine`, past the auth preface.
+#[cfg(unix)]
+type AuthenticatedTestClient = (
+    tokio::net::unix::OwnedReadHalf,
+    tokio::net::unix::OwnedWriteHalf,
+    JoinHandle<tracedecay_domain::errors::Result<()>>,
+);
+
+/// Connects a socket client to `engine` and writes its auth preface.
+#[cfg(unix)]
+async fn connect_authenticated_test_client(engine: DaemonEngine) -> AuthenticatedTestClient {
+    let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
+    let server_task = tokio::spawn(Box::pin(serve_authenticated_test_client(server, engine)));
+    let (reader, mut writer) = client.into_split();
+    write_test_auth_preface(&mut writer).await;
+    (reader, writer, server_task)
+}
+
+/// Connects an authenticated socket client to `engine` and writes `handshake`.
+#[cfg(unix)]
+async fn handshake_authenticated_test_client(
+    engine: DaemonEngine,
+    handshake: &DaemonHandshake,
+) -> AuthenticatedTestClient {
+    let (reader, mut writer, server_task) = connect_authenticated_test_client(engine).await;
+    writer
+        .write_all(handshake.to_line().expect("handshake").as_bytes())
+        .await
+        .expect("write handshake");
+    writer.write_all(b"\n").await.expect("handshake newline");
+    (reader, writer, server_task)
 }
 
 /// Publishes the authority record beside `socket` that clients resolve it

@@ -227,6 +227,7 @@ mod tests {
     use tracedecay_runtime_core::cancellation::CancellationToken;
 
     use super::{McpServer, files_resource_reason, files_resource_unavailable};
+    use crate::test_support::git::git;
     use tracedecay_domain::errors::TraceDecayError;
 
     async fn ready_files_server() -> (
@@ -243,7 +244,6 @@ mod tests {
             "pub fn resource_value() -> u32 { 7 }\n",
         )
         .unwrap();
-        let git = super::super::writer_test_support::git;
         git(&root, &["init", "-q", "-b", "main"]);
         git(&root, &["config", "user.email", "files@test.invalid"]);
         git(&root, &["config", "user.name", "Files Test"]);

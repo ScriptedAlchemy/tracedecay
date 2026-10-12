@@ -46,17 +46,52 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for RetainedOwnerTestEx
             tracedecay_contracts::InvocationError,
         >,
     > {
-        Box::pin(async move {
-            let (context, request) = invocation.into_parts();
-            let tracedecay_contracts::ApplicationRequest::Surface { binding, payload } = request
-            else {
-                return Err(tracedecay_contracts::InvocationError::Unavailable);
-            };
-            tracedecay_daemon_protocol::invoke_application_surface(self, context, binding, payload)
-                .await
-        })
+        forward_application_surface(self, invocation)
     }
 }
+
+/// Routes an application surface invocation through `executor`'s daemon
+/// invocation port, as the daemon client does; any other request is
+/// unavailable.
+pub(crate) fn forward_application_surface(
+    executor: &impl tracedecay_daemon_protocol::DaemonInvocationExecutor,
+    invocation: tracedecay_contracts::ApplicationInvocation,
+) -> tracedecay_contracts::ApplicationInvocationFuture<
+    '_,
+    std::result::Result<
+        tracedecay_contracts::ApplicationResponse,
+        tracedecay_contracts::InvocationError,
+    >,
+> {
+    Box::pin(async move {
+        let (context, request) = invocation.into_parts();
+        let tracedecay_contracts::ApplicationRequest::Surface { binding, payload } = request else {
+            return Err(tracedecay_contracts::InvocationError::Unavailable);
+        };
+        tracedecay_daemon_protocol::invoke_application_surface(executor, context, binding, payload)
+            .await
+    })
+}
+
+/// A `DaemonInvocationExecutor::observe_feedback` that accepts and drops
+/// every observation, for test executors with no feedback ledger.
+macro_rules! ignore_feedback_observations {
+    () => {
+        fn observe_feedback(
+            &self,
+            _subject_digest: tracedecay_domain::ManifestDigest,
+            _observed_at: tracedecay_domain::UtcMicros,
+            _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
+        ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
+            '_,
+            tracedecay_domain::errors::Result<()>,
+        > {
+            Box::pin(async { Ok(()) })
+        }
+    };
+}
+#[cfg(test)]
+pub(crate) use ignore_feedback_observations;
 
 impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RetainedOwnerTestExecutor {
     fn invoke_controlled(
@@ -155,14 +190,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RetainedOwnerTestE
         })
     }
 
-    fn observe_feedback(
-        &self,
-        _subject_digest: tracedecay_domain::ManifestDigest,
-        _observed_at: tracedecay_domain::UtcMicros,
-        _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
-    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<'_, Result<()>> {
-        Box::pin(async { Ok(()) })
-    }
+    ignore_feedback_observations!();
 }
 
 /// In-process transport for the project retained owner: the invocation

@@ -20,8 +20,9 @@ use tracedecay_domain::configuration::{
 };
 use tracedecay_domain::{CapabilityId, LocatorDigest, ManifestDigest};
 
-use super::journey_test_support::{git, tool_answer};
+use super::journey_test_support::tool_answer;
 use super::*;
+use crate::test_support::git::git;
 
 const ACCESS_RULE_ID: &str = "access-rule.preview-cursor-deny";
 const DENIED_CAPABILITY: &str = "capability.work.generate_proposal";

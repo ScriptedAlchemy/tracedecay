@@ -504,7 +504,6 @@ fn project_route_identity_matches(
 mod tests {
     use std::fs;
     use std::path::PathBuf;
-    use std::process::Command;
     use std::sync::Arc;
 
     use serde_json::json;
@@ -516,6 +515,7 @@ mod tests {
     };
     use crate::daemon::ProductionProjectCompositionHarnessV1;
     use crate::mcp::server::McpServer;
+    use crate::test_support::git::git;
     use tracedecay_domain::HostIntegrationIdV1;
     use tracedecay_hooks::core_events::HookRouteMetadata;
     use tracedecay_mcp::hook_events::{HookEvent, HookEventKind};
@@ -537,32 +537,9 @@ mod tests {
         )
         .expect("route manifest");
         fs::write(project.join("src/lib.rs"), "pub fn route_marker() {}\n").expect("route source");
-        for args in [
-            &["init", "--quiet"][..],
-            &["add", "."][..],
-            &[
-                "-c",
-                "user.name=TraceDecay Tests",
-                "-c",
-                "user.email=tests@tracedecay.invalid",
-                "commit",
-                "--quiet",
-                "-m",
-                "fixture",
-            ][..],
-        ] {
-            assert!(
-                Command::new(
-                    tracedecay_runtime_core::git::try_git_program()
-                        .expect("absolute git executable should resolve"),
-                )
-                .args(args)
-                .current_dir(&project)
-                .status()
-                .expect("git route fixture")
-                .success()
-            );
-        }
+        git(&project, &["init", "--quiet"]);
+        git(&project, &["add", "."]);
+        git(&project, &["commit", "--quiet", "-m", "fixture"]);
         let harness =
             ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
                 .await

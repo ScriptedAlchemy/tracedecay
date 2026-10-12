@@ -21,26 +21,10 @@ async fn assert_fresh_project_open_owners(label: &str, git_state: ProjectGitStat
         .expect("project-open owners source");
     let client_identity = test_client_identity_for(profile_root.clone());
     initialize_test_project(&project, &client_identity).await;
-    let initialized = Command::new("git")
-        .args(["init", "--quiet", "--initial-branch=main"])
-        .current_dir(&project)
-        .status()
-        .expect("run git init");
-    assert!(initialized.success(), "git init must succeed");
+    git(&project, &["init", "--quiet", "--initial-branch=main"]);
     if matches!(git_state, ProjectGitState::Unborn) {
-        let symbolic_head = Command::new("git")
-            .args(["symbolic-ref", "--quiet", "HEAD"])
-            .current_dir(&project)
-            .output()
-            .expect("read unborn symbolic HEAD");
-        assert!(
-            symbolic_head.status.success(),
-            "unborn HEAD must be symbolic"
-        );
         assert_eq!(
-            String::from_utf8(symbolic_head.stdout)
-                .expect("unborn symbolic HEAD must be UTF-8")
-                .trim(),
+            git(&project, &["symbolic-ref", "--quiet", "HEAD"]),
             "refs/heads/main",
             "unborn fixture must use its explicit default branch"
         );
@@ -55,27 +39,8 @@ async fn assert_fresh_project_open_owners(label: &str, git_state: ProjectGitStat
         );
     }
     if matches!(git_state, ProjectGitState::Committed) {
-        let added = Command::new("git")
-            .args(["add", "--all"])
-            .current_dir(&project)
-            .status()
-            .expect("run git add");
-        assert!(added.success(), "git add must succeed");
-        let committed = Command::new("git")
-            .args([
-                "-c",
-                "user.name=TraceDecay Test",
-                "-c",
-                "user.email=tracedecay@example.invalid",
-                "commit",
-                "--quiet",
-                "-m",
-                "test: initial",
-            ])
-            .current_dir(&project)
-            .status()
-            .expect("run git commit");
-        assert!(committed.success(), "git commit must succeed");
+        git(&project, &["add", "--all"]);
+        git(&project, &["commit", "--quiet", "-m", "test: initial"]);
     }
     let handshake = DaemonHandshake {
         project_path: Some(project.clone()),
@@ -180,33 +145,9 @@ async fn cold_project_shutdown_joins_every_production_graph_holder() {
     std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("cold shutdown source");
     let client_identity = test_client_identity_for(profile_root.clone());
     initialize_test_project(&project, &client_identity).await;
-    let initialized = Command::new("git")
-        .args(["init", "--quiet", "--initial-branch=main"])
-        .current_dir(&project)
-        .status()
-        .expect("run git init");
-    assert!(initialized.success(), "git init must succeed");
-    let added = Command::new("git")
-        .args(["add", "--all"])
-        .current_dir(&project)
-        .status()
-        .expect("run git add");
-    assert!(added.success(), "git add must succeed");
-    let committed = Command::new("git")
-        .args([
-            "-c",
-            "user.name=TraceDecay Test",
-            "-c",
-            "user.email=tracedecay@example.invalid",
-            "commit",
-            "--quiet",
-            "-m",
-            "test: initial",
-        ])
-        .current_dir(&project)
-        .status()
-        .expect("run git commit");
-    assert!(committed.success(), "git commit must succeed");
+    git(&project, &["init", "--quiet", "--initial-branch=main"]);
+    git(&project, &["add", "--all"]);
+    git(&project, &["commit", "--quiet", "-m", "test: initial"]);
     let canonical_project = project.canonicalize().expect("canonical project root");
     let handshake = DaemonHandshake {
         project_path: Some(canonical_project.clone()),

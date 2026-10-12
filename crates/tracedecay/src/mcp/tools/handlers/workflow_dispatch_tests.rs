@@ -1,10 +1,10 @@
 //! Journey: a missing Workflow executor still returns the owner's envelope.
 
-use serde_json::Value;
 use tracedecay_contracts::{CancellationSignal, Deadline, RequestId};
 use tracedecay_domain::UtcMicros;
 use tracedecay_mcp::handle_workflow;
 
+use super::dispatch_test_support::tool_json;
 use super::invoke_admitted_workflow_operation;
 
 #[tokio::test]
@@ -24,10 +24,7 @@ async fn missing_executor_returns_the_registered_workflow_problem_envelope() {
     )
     .await
     .expect("MCP Workflow adapter response");
-    let text = result.value["content"][0]["text"]
-        .as_str()
-        .expect("MCP Workflow JSON content");
-    let payload: Value = serde_json::from_str(text).expect("Workflow envelope");
+    let payload = tool_json(&result);
     // The absent executor answers the owner's canonical unavailable problem,
     // not an MCP-specific transport error.
     assert_eq!(payload["kind"], "problem", "{payload}");

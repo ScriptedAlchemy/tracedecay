@@ -7,7 +7,6 @@ use tracedecay_code_index_retention::code_index_generations::{
 };
 use tracedecay_code_index_runtime::code_index_scheduler;
 
-use super::bootstrap::run_git;
 use super::*;
 
 async fn notify_workspace_open(
@@ -85,16 +84,16 @@ fn create_linked_worktree_fixture(root: &Path) -> (PathBuf, PathBuf) {
     let primary = root.join("primary");
     let linked = root.join("linked");
     std::fs::create_dir_all(&primary).expect("create primary repository");
-    run_git(&primary, &["init", "-b", "main", "--quiet"]);
+    git(&primary, &["init", "-b", "main", "--quiet"]);
     std::fs::write(primary.join("README.md"), "shared authority\n").expect("fixture");
     std::fs::write(
         primary.join("primary.rs"),
         "pub fn primary_snapshot_only() -> u8 { 1 }\n",
     )
     .expect("primary-only source");
-    run_git(&primary, &["add", "."]);
-    run_git(&primary, &["commit", "-m", "fixture", "--quiet"]);
-    run_git(
+    git(&primary, &["add", "."]);
+    git(&primary, &["commit", "-m", "fixture", "--quiet"]);
+    git(
         &primary,
         &[
             "worktree",
@@ -762,7 +761,7 @@ async fn maintenance_reclaims_a_removed_linked_worktree_and_the_text_artifact_on
     // Put a refresh in flight so the linked scheduler is writing when its
     // root disappears.
     std::fs::write(linked.join("late.rs"), "pub fn late() {}\n").expect("edit linked worktree");
-    run_git(
+    git(
         &primary,
         &[
             "worktree",

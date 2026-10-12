@@ -282,10 +282,6 @@ pub(super) fn authority_absent(error: &TraceDecayError) -> bool {
 }
 
 #[tracing::instrument(name = "daemon.core.call_tool", level = "trace", skip_all)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "A tool call and its liveness poll share one client deadline and must complete as one RPC."
-)]
 pub(crate) async fn call_tool_with_liveness_poll(
     socket_path: &Path,
     handshake: &DaemonHandshake,
@@ -304,28 +300,17 @@ pub(crate) async fn call_tool_with_liveness_poll(
         )?)?),
         None => None,
     };
-    let (connection, stream) = match client_deadline {
-        Some(deadline) => {
-            deadline
-                .run("connect", tool_name, async {
-                    connect_to_current_daemon_within(
-                        &handshake.client_identity.profile_root,
-                        socket_path,
-                        Some(deadline),
-                    )
-                    .await
-                })
-                .await?
-        }
-        None => {
-            connect_to_current_daemon_within(
-                &handshake.client_identity.profile_root,
-                socket_path,
-                None,
-            )
-            .await?
-        }
-    };
+    let (connection, stream) = DaemonClientDeadline::run_optional(
+        client_deadline,
+        "connect",
+        tool_name,
+        connect_to_current_daemon_within(
+            &handshake.client_identity.profile_root,
+            socket_path,
+            client_deadline,
+        ),
+    )
+    .await?;
     let (reader, mut writer) = stream.into_owned_split();
     let id = json!(1);
     let mut params = json!({
@@ -357,19 +342,14 @@ pub(crate) async fn call_tool_with_liveness_poll(
         writer.flush().await?;
         Ok(())
     };
-    match client_deadline {
-        Some(deadline) => deadline.run("write", tool_name, write).await?,
-        None => write.await?,
-    }
+    DaemonClientDeadline::run_optional(client_deadline, "write", tool_name, write).await?;
 
     let mut reader = tokio::io::BufReader::new(reader);
     loop {
         let read =
             next_daemon_response_line(&mut reader, &connection, tool_name, liveness_poll_interval);
-        let line = match client_deadline {
-            Some(deadline) => deadline.run("read", tool_name, read).await?,
-            None => read.await?,
-        };
+        let line =
+            DaemonClientDeadline::run_optional(client_deadline, "read", tool_name, read).await?;
         let Some(line) = line else {
             return Err(TraceDecayError::Config {
                 message: "daemon closed the connection after the tool request was sent but before returning a result; the outcome is unknown and the request was not retried"
@@ -386,40 +366,22 @@ pub(crate) async fn call_tool_with_liveness_poll(
                 &refusal, handshake,
             ));
         }
-        let response = if let Some(deadline) = client_deadline {
-            deadline
-                .run("decode", tool_name, async {
-                    let value: serde_json::Value =
-                        serde_json::from_str(&line).map_err(|error| TraceDecayError::Config {
-                            message: format!("daemon tool response JSON decode failed: {error}"),
-                        })?;
-                    if value.get("id") != Some(&id) {
-                        return Ok(None);
-                    }
-                    let response: JsonRpcResponse =
-                        serde_json::from_value(value).map_err(|error| TraceDecayError::Config {
-                            message: format!(
-                                "daemon tool response JSON-RPC decode failed: {error}"
-                            ),
-                        })?;
-                    Ok(Some(response))
-                })
-                .await?
-        } else {
-            let value: serde_json::Value =
-                serde_json::from_str(&line).map_err(|error| TraceDecayError::Config {
-                    message: format!("daemon tool response JSON decode failed: {error}"),
-                })?;
-            if value.get("id") == Some(&id) {
-                Some(
+        let response =
+            DaemonClientDeadline::run_optional(client_deadline, "decode", tool_name, async {
+                let value: serde_json::Value =
+                    serde_json::from_str(&line).map_err(|error| TraceDecayError::Config {
+                        message: format!("daemon tool response JSON decode failed: {error}"),
+                    })?;
+                if value.get("id") != Some(&id) {
+                    return Ok(None);
+                }
+                let response: JsonRpcResponse =
                     serde_json::from_value(value).map_err(|error| TraceDecayError::Config {
                         message: format!("daemon tool response JSON-RPC decode failed: {error}"),
-                    })?,
-                )
-            } else {
-                None
-            }
-        };
+                    })?;
+                Ok(Some(response))
+            })
+            .await?;
         let Some(response) = response else {
             continue;
         };
