@@ -13,7 +13,8 @@
 //! all test code out of its census. Dead code and health treat only actual
 //! tests as entrypoints, so an uncalled test helper is still dead code —
 //! including `test_helper`, a `test*` name in a Rust test file, which the
-//! Rust runner never invokes without `#[test]`.
+//! Rust runner never invokes without `#[test]`. The other runners' file and
+//! owner rules are pinned by unit tests in `test_classification`.
 
 #![cfg(feature = "test-transport")]
 

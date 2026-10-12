@@ -4,17 +4,17 @@
 //! Evidence is canonical: the logical path ([`is_test_file`]), parser-attested
 //! test annotations and `#[cfg(test)]` gates joined through `Annotates` edges,
 //! and the `Contains` edges that bind each gate to the items it encloses. A
-//! name alone never makes a symbol test code. Inside a test file, a runner
-//! prefix ([`name_discovered_test_prefix`]) marks only the unannotated test
-//! functions that pytest, Go's `testing`, JUnit 3, PHPUnit, and minitest
-//! discover by name.
+//! name alone never makes a symbol test code. Name discovery
+//! ([`name_discovered_test`]) marks only the unannotated items that pytest,
+//! Go's `testing`, JUnit 3, PHPUnit, and minitest invoke by name: the file
+//! and the owning type must satisfy that runner's discovery rules.
 
 use std::collections::{HashMap, HashSet};
 
 use tracedecay_code_index::graph_projection::CodeGraphSymbolSummaryV1;
 use tracedecay_code_index::lineage::LineageSymbolRecordV1;
 use tracedecay_code_index::{
-    is_test_file, is_test_gate_marker, is_test_marker, name_discovered_test_prefix,
+    is_test_file, is_test_gate_marker, is_test_marker, name_discovered_test,
 };
 use tracedecay_domain::{CanonicalRelationEdgeV1, RelationEdgeKindV1, SymbolOccurrenceId};
 
@@ -28,7 +28,34 @@ pub(crate) struct TestClassification {
     /// `dir` for each `#[cfg(test)]` module: `dir.rs` and every file below
     /// `dir/` hold that module's out-of-line code.
     gated_module_dirs: HashSet<String>,
+    /// Each symbol's owning type name, when its `Contains` parent is a class
+    /// or equivalent test-case container: name discovery only counts
+    /// runner-eligible methods.
+    owners: HashMap<String, String>,
 }
+
+/// `Contains` parent kinds that can hold a test-case class's methods.
+const OWNER_KINDS: &[&str] = &[
+    "class",
+    "inner_class",
+    "case_class",
+    "data_class",
+    "sealed_class",
+    "record",
+    "pascal_record",
+    "struct",
+    "union",
+    "enum",
+    "trait",
+    "impl",
+    "interface",
+    "object",
+    "kotlin_object",
+    "companion_object",
+    "mixin",
+    "extension",
+    "proto_message",
+];
 
 impl TestClassification {
     /// `symbols` pairs records with their logical paths. `edges` must hold the
@@ -47,6 +74,10 @@ impl TestClassification {
                 gate_markers.insert(&record.occurrence);
             }
         }
+        let by_occurrence: HashMap<&SymbolOccurrenceId, &LineageSymbolRecordV1> = symbols
+            .iter()
+            .map(|(_, record)| (&record.occurrence, *record))
+            .collect();
         let mut classification = Self::default();
         let mut gated = HashSet::new();
         let mut stack = Vec::new();
@@ -68,6 +99,15 @@ impl TestClassification {
                         .entry(&edge.from_occurrence)
                         .or_default()
                         .push(&edge.to_occurrence);
+                    if let Some(owner) = by_occurrence
+                        .get(&edge.from_occurrence)
+                        .filter(|owner| OWNER_KINDS.contains(&owner.kind.as_str()))
+                    {
+                        classification
+                            .owners
+                            .entry(edge.to_occurrence.as_str().to_owned())
+                            .or_insert_with(|| owner.simple_name.clone());
+                    }
                 }
                 _ => {}
             }
@@ -114,13 +154,19 @@ impl TestClassification {
     }
 
     /// A test a runner invokes itself, which is live with no caller: a test
-    /// annotation's target, or an unannotated `test*` function in a test file
-    /// whose language discovers tests by name.
+    /// annotation's target, or a name and owner satisfying the runner's
+    /// discovery rules (`test_*` functions and methods in pytest test files,
+    /// `Test*` functions in Go `_test.go` files, `test*` methods on test-case
+    /// classes).
     pub(crate) fn is_test_entrypoint(&self, file: &str, record: &LineageSymbolRecordV1) -> bool {
         self.is_test_annotated(record.occurrence.as_str())
-            || (is_test_file(file)
-                && name_discovered_test_prefix(file)
-                    .is_some_and(|prefix| record.simple_name.starts_with(prefix)))
+            || name_discovered_test(
+                file,
+                &record.simple_name,
+                self.owners
+                    .get(record.occurrence.as_str())
+                    .map(String::as_str),
+            )
     }
 
     pub(crate) fn is_test_annotated(&self, occurrence: &str) -> bool {
@@ -470,6 +516,158 @@ mod tests {
         assert!(!classification.is_test_entrypoint("tests/integration.rs", &rust_helper));
         assert!(!classification.is_test_entrypoint("tests/integration.rs", &rust_test));
         assert!(!classification.is_test_entrypoint("pkg/client_test.go", &go_helper));
+    }
+
+    #[test]
+    fn name_discovery_needs_the_runner_file_and_owner() {
+        // Go discovers only top-level `Test*` functions in `_test.go` files
+        // and testify `*Suite` methods.
+        let go_helper = record(
+            "symbol.go_helper",
+            "tests/helper.go::TestHelper",
+            "function",
+            (0, 1),
+            None,
+        );
+        let go_suite = record(
+            "symbol.go_suite",
+            "pkg/client_test.go::ClientSuite",
+            "struct",
+            (0, 5),
+            None,
+        );
+        let go_suite_method = record(
+            "symbol.go_suite_method",
+            "pkg/client_test.go::ClientSuite::TestConnect",
+            "struct_method",
+            (0, 1),
+            None,
+        );
+        // pytest discovers module-level `test_*` functions only in
+        // `test_*.py`/`*_test.py`, and `test_*` methods only on test-case
+        // classes.
+        let pytest_module = record(
+            "symbol.py_module",
+            "tests/test_mod.py::test_runs",
+            "function",
+            (0, 1),
+            None,
+        );
+        let pytest_helper = record(
+            "symbol.py_helper",
+            "tests/helper.py::test_helper",
+            "function",
+            (0, 1),
+            None,
+        );
+        let pytest_class = record(
+            "symbol.py_class",
+            "tests/test_mod.py::TestClient",
+            "class",
+            (0, 5),
+            None,
+        );
+        let pytest_method = record(
+            "symbol.py_method",
+            "tests/test_mod.py::TestClient::test_connects",
+            "method",
+            (0, 1),
+            None,
+        );
+        let ordinary_class = record(
+            "symbol.ordinary_class",
+            "tests/test_mod.py::Client",
+            "class",
+            (0, 5),
+            None,
+        );
+        let ordinary_method = record(
+            "symbol.ordinary_method",
+            "tests/test_mod.py::Client::test_connects",
+            "method",
+            (0, 1),
+            None,
+        );
+        // JUnit 3, PHPUnit, and minitest methods run only on test-case
+        // classes: a prefixed method on an ordinary class is not a test.
+        let junit_class = record(
+            "symbol.junit_class",
+            "src/test/FormatTest.java::FormatTest",
+            "class",
+            (0, 5),
+            None,
+        );
+        let junit_method = record(
+            "symbol.junit_method",
+            "src/test/FormatTest.java::FormatTest::testFormat",
+            "method",
+            (0, 1),
+            None,
+        );
+        let helper_class = record(
+            "symbol.helper_class",
+            "src/test/FormatHelper.java::FormatHelper",
+            "class",
+            (0, 5),
+            None,
+        );
+        let helper_method = record(
+            "symbol.helper_method",
+            "src/test/FormatHelper.java::FormatHelper::testFormat",
+            "method",
+            (0, 1),
+            None,
+        );
+        let minitest_class = record(
+            "symbol.minitest_class",
+            "test/save_test.rb::SaveTest",
+            "class",
+            (0, 5),
+            None,
+        );
+        let minitest_method = record(
+            "symbol.minitest_method",
+            "test/save_test.rb::SaveTest::test_saves",
+            "method",
+            (0, 1),
+            None,
+        );
+        let symbols: Vec<(&str, &LineageSymbolRecordV1)> = vec![
+            ("tests/helper.go", &go_helper),
+            ("pkg/client_test.go", &go_suite),
+            ("pkg/client_test.go", &go_suite_method),
+            ("tests/test_mod.py", &pytest_module),
+            ("tests/helper.py", &pytest_helper),
+            ("tests/test_mod.py", &pytest_class),
+            ("tests/test_mod.py", &pytest_method),
+            ("tests/test_mod.py", &ordinary_class),
+            ("tests/test_mod.py", &ordinary_method),
+            ("src/test/FormatTest.java", &junit_class),
+            ("src/test/FormatTest.java", &junit_method),
+            ("src/test/FormatHelper.java", &helper_class),
+            ("src/test/FormatHelper.java", &helper_method),
+            ("test/save_test.rb", &minitest_class),
+            ("test/save_test.rb", &minitest_method),
+        ];
+        let edges = [
+            contains(&go_suite, &go_suite_method),
+            contains(&pytest_class, &pytest_method),
+            contains(&ordinary_class, &ordinary_method),
+            contains(&junit_class, &junit_method),
+            contains(&helper_class, &helper_method),
+            contains(&minitest_class, &minitest_method),
+        ];
+        let classification = TestClassification::new(&symbols, &edges);
+
+        assert!(!classification.is_test_entrypoint("tests/helper.go", &go_helper));
+        assert!(classification.is_test_entrypoint("pkg/client_test.go", &go_suite_method));
+        assert!(classification.is_test_entrypoint("tests/test_mod.py", &pytest_module));
+        assert!(!classification.is_test_entrypoint("tests/helper.py", &pytest_helper));
+        assert!(classification.is_test_entrypoint("tests/test_mod.py", &pytest_method));
+        assert!(!classification.is_test_entrypoint("tests/test_mod.py", &ordinary_method));
+        assert!(classification.is_test_entrypoint("src/test/FormatTest.java", &junit_method));
+        assert!(!classification.is_test_entrypoint("src/test/FormatHelper.java", &helper_method));
+        assert!(classification.is_test_entrypoint("test/save_test.rb", &minitest_method));
     }
 
     #[test]

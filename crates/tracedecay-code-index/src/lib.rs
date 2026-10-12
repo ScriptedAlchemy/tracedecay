@@ -112,35 +112,67 @@ fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
         .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
-/// The test-name prefixes a runner discovers as runnable tests, by canonical
-/// language identity: pytest's `test_*` functions, Go's `Test*` functions,
-/// JUnit 3's and PHPUnit's `test*` methods, and minitest's `test_*` methods.
-const NAME_DISCOVERED_TEST_PREFIXES: [(&str, &str); 5] = [
-    ("go", "Test"),
-    ("java", "test"),
-    ("php", "test"),
-    ("python", "test_"),
-    ("ruby", "test_"),
-];
+/// Whether `simple_name` is a test the runner discovers by name alone in
+/// `path`, given the name of the type that owns it when the parser attested
+/// one (`None` for top-level items and owners outside the census).
+///
+/// Each runner's discovery rules decide: `go test` runs only top-level
+/// `Test*` functions in `_test.go` files; pytest runs `test_*` functions in
+/// `test_*.py`/`*_test.py` files and `test_*` methods on test-case classes;
+/// JUnit 3, PHPUnit, and minitest run `test*`/`test_*` methods only on
+/// test-case classes. The superclass that proves class eligibility usually
+/// sits outside the census, so it falls back to the conventional
+/// `Test*`/`*Test`/`TestCase`/`Suite` names, and an unattested owner declines
+/// rather than hide a helper on an ordinary class. Languages whose runners
+/// need annotations or explicit calls return `false`.
+pub fn name_discovered_test(path: &str, simple_name: &str, owner_name: Option<&str>) -> bool {
+    let language = std::path::Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_lowercase())
+        .and_then(|extension| {
+            language_descriptors()
+                .descriptor_for_extension(&extension)
+                .map(|descriptor| descriptor.language.as_str())
+        });
+    let basename = std::path::Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    match language {
+        Some("go") => {
+            basename.ends_with("_test.go")
+                && owner_name.is_none_or(is_test_case_name)
+                && simple_name.starts_with("Test")
+        }
+        Some("python") => {
+            (basename.starts_with("test_") || basename.ends_with("_test.py"))
+                && owner_name.is_none_or(is_test_case_name)
+                && simple_name.starts_with("test_")
+        }
+        Some("java") | Some("php") => {
+            is_test_file(path)
+                && owner_name.is_some_and(is_test_case_name)
+                && simple_name.starts_with("test")
+        }
+        Some("ruby") => {
+            is_test_file(path)
+                && owner_name.is_some_and(is_test_case_name)
+                && simple_name.starts_with("test_")
+        }
+        _ => false,
+    }
+}
 
-/// The name prefix whose matching functions a runner invokes itself in
-/// `path`'s language, or `None` when that language only runs annotated or
-/// explicitly called tests: a `test`-prefixed Rust function needs `#[test]`,
-/// and Jest a `test(...)` call, so a prefixed name in those files is still
-/// ordinary code.
-pub fn name_discovered_test_prefix(path: &str) -> Option<&'static str> {
-    let extension = std::path::Path::new(path)
-        .extension()?
-        .to_str()?
-        .to_lowercase();
-    let language = language_descriptors()
-        .descriptor_for_extension(&extension)?
-        .language
-        .as_str();
-    NAME_DISCOVERED_TEST_PREFIXES
-        .iter()
-        .find(|(known, _)| *known == language)
-        .map(|(_, prefix)| *prefix)
+/// A class name that conventionally holds runner-discovered tests: the
+/// `Test*` and `*Test`/`*Tests`/`*TestCase` names JUnit, PHPUnit, minitest,
+/// pytest, and unittest derive test cases from, plus testify's `*Suite`.
+fn is_test_case_name(name: &str) -> bool {
+    name.starts_with("Test")
+        || name.ends_with("Test")
+        || name.ends_with("Tests")
+        || name.ends_with("TestCase")
+        || name.ends_with("Suite")
 }
 
 fn language_descriptors() -> &'static languages::StaticLanguageRegistry {
