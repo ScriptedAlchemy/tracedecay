@@ -13,7 +13,6 @@ mod prune;
 mod schema;
 mod sqlite;
 
-#[cfg(test)]
 pub(crate) use checkpoint::current_watermark;
 #[cfg(test)]
 pub(crate) use commit::record_commit;
