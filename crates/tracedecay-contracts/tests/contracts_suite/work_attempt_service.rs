@@ -207,7 +207,13 @@ fn registered_topology_saturates_parallel_attempt_admission() {
         .start_against_registered_topology(&context, &topology, start_command(task, "attempt.1"))
         .unwrap();
     let capacity = attempts
-        .admission_capacity_against_registered_topology(&context, &id::<TaskId>(task), &topology)
+        .admission_capacities_against_registered_topology(
+            &context,
+            &[id::<TaskId>(task)],
+            &topology,
+        )
+        .unwrap()
+        .remove(&id::<TaskId>(task))
         .unwrap();
     assert_eq!(capacity.global_active(), 1);
     assert_eq!(capacity.repository_active(), 1);
