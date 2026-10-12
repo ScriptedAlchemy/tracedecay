@@ -162,13 +162,13 @@ impl AutomationSkipReasonV1 {
             | Self::SimilarityAuthorityUnavailable
             | Self::PartialCoverageNoCandidates
             | Self::NothingToReview => task == AutomationTaskV1::MemoryCurator,
-            Self::SessionReflectorDisabled | Self::NoNewSessionActivity => {
-                task == AutomationTaskV1::SessionReflector
-            }
+            Self::SessionReflectorDisabled => task == AutomationTaskV1::SessionReflector,
             // Skill writer and combined review retrieve the same session
-            // evidence surface as the reflector. A typed evidence skip must
+            // evidence surface as the reflector, and their schedule check
+            // gates on the same session activity. A typed evidence skip must
             // remain a skip for those tasks instead of failing settlement.
-            Self::SessionEvidenceFilterUnavailable
+            Self::NoNewSessionActivity
+            | Self::SessionEvidenceFilterUnavailable
             | Self::SessionEvidenceRetrievalUnavailable
             | Self::SessionEvidenceUnavailable
             | Self::SessionEvidencePartial
