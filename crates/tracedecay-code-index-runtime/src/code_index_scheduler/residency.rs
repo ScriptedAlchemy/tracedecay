@@ -75,7 +75,10 @@ pub(super) struct WorktreeResidencyV1 {
 /// again, so its own release cannot help it (issue #3588). Waiters subtract
 /// these epochs from the shared epoch and wake only on what other owners gave
 /// back. Coalesced epochs stay countable: another owner's release that lands
-/// beside this worktree's own still leaves the difference ahead.
+/// beside this worktree's own still leaves the difference ahead. A serving
+/// graph freed while `refresh_waits_for_memory` holds is announced as shared
+/// headroom instead: a refused refresh replaces that graph rather than
+/// re-decoding it, so the release is its retry.
 #[derive(Default)]
 pub(super) struct ParkHeadroomV1(AtomicU64);
 
@@ -145,6 +148,8 @@ impl WorktreeResidencyV1 {
     /// waiting on. An engine a graph read holds answers busy and stays, so
     /// only the gaps between requests are taken; graph reads meanwhile answer
     /// warming, as after an idle release. A release is announced as headroom.
+    /// An owner still busy here but freed by the parked worker later is
+    /// announced as this refresh's headroom by `release_decode_when_parked`.
     pub(super) fn yield_serving_graph_to_refresh(self: &Arc<Self>, owners: &ResidentOwnersV1) {
         let released = [
             (
@@ -193,7 +198,11 @@ impl WorktreeResidencyV1 {
     /// `code_graph_serving` reports `warming` while they are absent and the
     /// next graph read reseats them. Do not clear `complete_generation_requested`: a demand that
     /// arrives during the take must still wake a successor pass to
-    /// re-decode.
+    /// re-decode. The decode is announced as this worktree's own park
+    /// release: a retry re-decodes it (issue #3588). The serving graph is
+    /// announced the same way unless a refresh waits on memory; that pass
+    /// replaces the graph rather than re-decoding it, so its release is the
+    /// refresh's headroom.
     pub(super) fn release_decode_when_parked(self: &Arc<Self>, owners: &Arc<ResidentOwnersV1>) {
         if self.busy() {
             self.arm_park_release_after_pass_settles(owners);
@@ -205,7 +214,7 @@ impl WorktreeResidencyV1 {
         {
             return;
         }
-        let mut released = Vec::new();
+        let mut decode_released = Vec::new();
         if !self.complete_generation_requested.load(Ordering::Acquire) {
             let seated = {
                 let mut slot = self
@@ -231,16 +240,16 @@ impl WorktreeResidencyV1 {
                     .collect(),
             );
             let superseded = HeldDecodesV1::release(self.publication.release_superseded_decodes());
-            released.extend([serving, superseded].into_iter().filter_map(
-                |release| match release {
+            decode_released.extend([serving, superseded].into_iter().filter_map(|release| {
+                match release {
                     ResidentOwnerReleaseV1::Released { bytes } => Some(bytes),
                     ResidentOwnerReleaseV1::Busy | ResidentOwnerReleaseV1::Empty => None,
-                },
-            ));
-            if !released.is_empty() {
+                }
+            }));
+            if !decode_released.is_empty() {
                 tracing::info!(
                     event = "code_index_serving_decode_released_on_park",
-                    bytes = released
+                    bytes = decode_released
                         .iter()
                         .map(|bytes| bytes.measured().unwrap_or(0))
                         .sum::<u64>(),
@@ -257,7 +266,7 @@ impl WorktreeResidencyV1 {
             }) {
                 self.arm_park_release_after_first_catalog_warm(owners);
             }
-            if !released.is_empty() {
+            if !decode_released.is_empty() {
                 self.park_headroom.note(owners);
             }
             return;
@@ -274,12 +283,13 @@ impl WorktreeResidencyV1 {
             if !self.serving_text().is_some_and(|text| {
                 text.code_graph_serving_readiness() == CodeGraphServingReadinessV1::Ready
             }) {
-                if !released.is_empty() {
+                if !decode_released.is_empty() {
                     self.park_headroom.note(owners);
                 }
                 return;
             }
         }
+        let mut graph_released = Vec::new();
         for (kind, release) in [
             (
                 ResidentOwnerKindV1::GraphCatalog,
@@ -301,13 +311,24 @@ impl WorktreeResidencyV1 {
                     bytes = bytes.measured(),
                     "a parked worktree gave back its catalog or engine; the next graph read reseats it"
                 );
-                released.push(bytes);
+                graph_released.push(bytes);
             }
         }
-        if released.is_empty() {
+        if !decode_released.is_empty() {
+            self.park_headroom.note(owners);
+        }
+        if graph_released.is_empty() {
             return;
         }
-        self.park_headroom.note(owners);
+        // A refresh waiting on memory replaces this serving graph instead of
+        // re-decoding it, so its park release is headroom like any other
+        // owner's. A graph-only retry warms these owners back and its own
+        // release cannot help it.
+        if self.refresh_waits_for_memory() {
+            owners.note_headroom();
+        } else {
+            self.park_headroom.note(owners);
+        }
     }
 
     fn arm_park_release_after_pass_settles(self: &Arc<Self>, owners: &Arc<ResidentOwnersV1>) {

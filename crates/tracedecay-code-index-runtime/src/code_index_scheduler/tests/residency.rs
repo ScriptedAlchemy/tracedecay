@@ -1684,6 +1684,100 @@ async fn a_refused_refresh_waits_for_a_release_without_passive_reads_holding_its
     registry.shutdown().await;
 }
 
+/// A serving graph an open read held Busy while a refresh waits on resident
+/// memory is freed by the park release instead, and that release announces
+/// as headroom other owners gave back, so the parked headroom reader counts
+/// it as the waiting refresh's retry rather than the worktree's own release
+/// (issue #3588 follow-up: the decode the retry reloads stays the
+/// worktree's own).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_parked_serving_graph_release_retries_the_refresh_waiting_on_it() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let owners = Arc::new(ResidentOwnersV1::new(IDLE_WINDOW));
+    let resident_memory = sixteen_gib_authority();
+    let (registry, _) = mounted_core_query_worktree_in(
+        CodeIndexSchedulerRegistryV1::with_resident_memory(1, Arc::clone(&resident_memory))
+            .with_resident_owners(Arc::clone(&owners)),
+        &fixture,
+        &store,
+    )
+    .await;
+    wait_for_settled_owner(&registry, fixture.path()).await;
+    let seated = wait_for_live_complete_generation(&registry, fixture.path()).await;
+    let text = wait_for_queryable_text_generation(&registry, fixture.path()).await;
+    install_verified_graph_store_on_text(&text, &seated);
+    drop(seated);
+    let graph_store = text
+        .interactive_graph_store()
+        .expect("installed graph store");
+    graph_store
+        .warm_serving_engine()
+        .expect("pin the serving engine so park has it to release");
+    let deadline = Instant::now() + SERVING_SEAT_FAILURE_CEILING;
+    while text.code_graph_serving_readiness() != CodeGraphServingReadinessV1::Ready {
+        assert!(
+            Instant::now() <= deadline,
+            "the installed graph must report ready"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    // An open interactive reader holds the serving catalog the way a graph
+    // read holds it Busy to the refused refresh's yield.
+    let generation = text.metadata().manifest().generation_id.clone();
+    let reader = graph_store
+        .interactive_reader(
+            &generation,
+            &tracedecay_contracts::CancellationSignal::active("cancel.test.graph-reader")
+                .expect("graph cancellation"),
+        )
+        .expect("an interactive reader holds the serving catalog");
+
+    // A reconcile pass owns the refused-refresh flag; hold the pass
+    // authority and pin it so the release announces under the waiting
+    // refresh's bookkeeping while the serving text stays ready.
+    let pass = registry
+        .hold_reconcile_pass_for_test(fixture.path())
+        .await
+        .expect("mounted worktree");
+    registry
+        .set_refresh_waits_for_memory_for_test(fixture.path(), true)
+        .await;
+
+    // The read finishing lets the park release free the whole serving
+    // graph. Its headroom is the refused refresh's retry.
+    let released_by_others = registry
+        .park_headroom_released_by_others_for_test(fixture.path())
+        .await;
+    drop(reader);
+    drop(pass);
+    // A release claimed busy still announces once the pass settles.
+    let announce_deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        registry
+            .release_decode_when_parked_for_test(fixture.path())
+            .await;
+        let seen = registry
+            .park_headroom_released_by_others_for_test(fixture.path())
+            .await;
+        if seen > released_by_others {
+            assert_eq!(
+                seen,
+                released_by_others + 1,
+                "the serving graph's park release is headroom other owners gave back"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() <= announce_deadline,
+            "the serving graph's park release is headroom other owners gave back"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    registry.shutdown().await;
+}
+
 /// A mounted worktree whose native graph activation is refused for resident
 /// memory until the returned guard drops, read once the refusal is parked and
 /// the worker has gone idle on it.
