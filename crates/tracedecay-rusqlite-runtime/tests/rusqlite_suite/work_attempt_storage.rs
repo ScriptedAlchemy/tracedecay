@@ -252,6 +252,78 @@ fn bounded_insert_and_read_only_verdict_share_project_global_capacity() {
 }
 
 #[test]
+fn bounded_insert_refuses_a_route_at_its_snapshot_concurrency_limit() {
+    let store = RegisteredWorkStore::start("attempt-route-capacity");
+    let first_authority = authority_in_scope(
+        "project.attempt.route",
+        "repository.attempt.route.first",
+        "actor.attempt.route.first",
+        "worktree.attempt.route.first",
+    );
+    let peer_authority = authority_in_scope(
+        "project.attempt.route",
+        "repository.attempt.route.peer",
+        "actor.attempt.route.peer",
+        "worktree.attempt.route.peer",
+    );
+    let policy = concurrency(2, 2, 1);
+    let limited = route("route.attempt.limited.v1");
+    let on_route = |task: &str, route: &WorkProviderRouteV1| {
+        attempt_on_route(
+            WorkAttemptIdentityV1::new(
+                id::<TaskId>(task),
+                id::<RunId>(&format!("run.{task}")),
+                id::<AttemptId>(&format!("attempt.{task}")),
+            )
+            .unwrap(),
+            1,
+            WorkEffectStateV1::Observational,
+            route.clone(),
+            1,
+        )
+    };
+    let first = on_route("task.attempt.route.first", &limited);
+    let second = on_route("task.attempt.route.second", &limited);
+    let other_route = on_route("task.attempt.route.other", &route("route.attempt.other.v1"));
+
+    assert_eq!(
+        store
+            .storage()
+            .insert_bounded(&first_authority, &first, &policy)
+            .unwrap(),
+        WorkAttemptInsertOutcome::Inserted
+    );
+    let capacities = store
+        .storage()
+        .admission_capacities(
+            &peer_authority,
+            std::slice::from_ref(second.identity().task_id()),
+            &policy,
+        )
+        .unwrap();
+    assert_eq!(
+        capacities[second.identity().task_id()].verdict(),
+        WorkAttemptCapacityVerdictV1::Available,
+        "the topology caps alone admit a second attempt"
+    );
+    assert_eq!(
+        store
+            .storage()
+            .insert_bounded(&peer_authority, &second, &policy),
+        Err(WorkAttemptStorageError::CapacityExceeded),
+        "a route limit of one refuses a second concurrent attempt on that route"
+    );
+    assert_eq!(
+        store
+            .storage()
+            .insert_bounded(&peer_authority, &other_route, &policy)
+            .unwrap(),
+        WorkAttemptInsertOutcome::Inserted
+    );
+    assert_eq!(store.count("work_attempts_v1"), 2);
+}
+
+#[test]
 fn bounded_insert_counts_open_attempts_across_repository_worktrees() {
     let store = RegisteredWorkStore::start("attempt-bounded-insert");
     let root = authority_in_worktree("actor.attempt.bounded", "worktree.attempt.root");
@@ -831,20 +903,34 @@ fn lease(epoch: u64) -> WorkLeaseFenceV1 {
 }
 
 fn requested_route() -> WorkProviderRouteV1 {
+    route("route.attempt.claude-code.v1")
+}
+
+fn route(route_id: &str) -> WorkProviderRouteV1 {
     WorkProviderRouteV1::new(
         id::<ProviderId>("provider.work.claude-code-cli"),
-        id::<WorkProviderRouteId>("route.attempt.claude-code.v1"),
+        id::<WorkProviderRouteId>(route_id),
     )
     .unwrap()
 }
 
+/// Generous enough that topology-focused tests never meet the route limit.
+const FIXTURE_ROUTE_CONCURRENCY: u32 = 64;
+
 fn execution_snapshot() -> WorkExecutionSnapshot {
+    execution_snapshot_on(requested_route(), FIXTURE_ROUTE_CONCURRENCY)
+}
+
+fn execution_snapshot_on(
+    route: WorkProviderRouteV1,
+    max_concurrency: u32,
+) -> WorkExecutionSnapshot {
     WorkExecutionSnapshot::new(WorkExecutionSnapshotInput {
         configuration_revision_id: id::<ConfigurationRevisionId>("configuration-revision.att.1"),
         configuration_snapshot_id: id::<ConfigurationSnapshotId>("configuration-snapshot.att.1"),
         effective_behavior_digest: digest('c'),
         resolution_provenance_digest: digest('d'),
-        route: requested_route(),
+        route,
         backend: WorkProviderBackendV1::ClaudeCodeCli,
         protocol: WorkProviderProtocol::ClaudeStreamJson,
         model: "claude-test".to_owned(),
@@ -859,7 +945,8 @@ fn execution_snapshot() -> WorkExecutionSnapshot {
         egress: WorkEgressPolicy::Deny,
         environment_allowlist: BTreeSet::new(),
         credential_references: BTreeSet::new(),
-        limits: WorkExecutionLimits::new(128_000, 8_192, 16_384, 16_384, 65_536, 1).unwrap(),
+        limits: WorkExecutionLimits::new(128_000, 8_192, 16_384, 16_384, 65_536, max_concurrency)
+            .unwrap(),
         deadline: UtcMicros(1_000_000),
         fallback: WorkFallbackTopology::Disabled,
         topology: tracedecay_domain::safe_work_topology_policy_v1(),
@@ -892,6 +979,22 @@ fn attempt_with_effect(
     epoch: u64,
     effect_state: WorkEffectStateV1,
 ) -> WorkAttemptV1 {
+    attempt_on_route(
+        identity,
+        epoch,
+        effect_state,
+        requested_route(),
+        FIXTURE_ROUTE_CONCURRENCY,
+    )
+}
+
+fn attempt_on_route(
+    identity: WorkAttemptIdentityV1,
+    epoch: u64,
+    effect_state: WorkEffectStateV1,
+    route: WorkProviderRouteV1,
+    max_concurrency: u32,
+) -> WorkAttemptV1 {
     let binding = WorkAttemptProjectionBindingV1::new(
         WorkGraphVersionV1::new(3).unwrap(),
         WorkProductEventSequenceV1::new(7).unwrap(),
@@ -904,7 +1007,7 @@ fn attempt_with_effect(
         identity.clone(),
         binding.clone(),
         id::<WorkflowOperationRef>("operation.attempt.execute-provider"),
-        execution_snapshot(),
+        execution_snapshot_on(route.clone(), max_concurrency),
         id::<ProjectId>("project.attempt.storage"),
         id::<RepositoryId>("repository.attempt.storage"),
         id::<WorktreeId>("worktree.attempt.storage"),
@@ -926,7 +1029,7 @@ fn attempt_with_effect(
         Vec::new(),
         WorkCancellationStateV1::None,
         WorkRecoveryStateV1::Fresh,
-        requested_route(),
+        route,
         None,
         None,
     )
