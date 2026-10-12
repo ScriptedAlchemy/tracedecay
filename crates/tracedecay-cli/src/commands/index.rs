@@ -706,7 +706,7 @@ pub(crate) async fn handle_sync(
     )
     .await?;
     let handshake = super::daemon::client_handshake(profile, Some(&resolved.project_path))?;
-    let deadline = tokio::time::Instant::now() + crate::tool_command::tool_command_deadline()?;
+    let deadline = crate::tool_command::tool_command_deadline()?;
     let result = admin_sync(profile, handshake, deadline).await?;
     if verbose {
         eprintln!("{}", serde_json::to_string_pretty(&result)?);
