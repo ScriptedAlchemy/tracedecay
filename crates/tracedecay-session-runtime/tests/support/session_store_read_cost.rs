@@ -314,15 +314,17 @@ impl DrainFixture {
     /// The fixture lives on tmpfs when the host has one. These relations
     /// count reads and VM steps, which are the same on any filesystem, while
     /// a disk's per-commit fsync would set the run's wall time; production
-    /// stores keep their full sync.
+    /// stores keep their full sync. Test store authority admits only paths
+    /// under the system temporary directory, so tmpfs becomes that
+    /// directory for this process.
     pub async fn open() -> Self {
         let shm = Path::new("/dev/shm");
-        let tmp = if shm.is_dir() {
-            TempDir::new_in(shm)
-        } else {
-            TempDir::new()
+        if shm.is_dir() {
+            // SAFETY: each cost probe owns its process and opens its fixture
+            // before it starts any work that reads the environment.
+            unsafe { std::env::set_var("TMPDIR", shm) };
         }
-        .unwrap();
+        let tmp = TempDir::new().unwrap();
         let project = tmp.path().join("drain-read-cost");
         std::fs::create_dir_all(&project).unwrap();
         run_git(&project, &["init", "-b", "main"]);
