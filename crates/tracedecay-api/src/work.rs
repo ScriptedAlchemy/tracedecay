@@ -3,8 +3,8 @@
 //! Every Work adapter, the daemon's application router, the dashboard's public
 //! `/api/work` mount, the catalog registry, and the generated SDKs, is derived
 //! from the single [`WorkOperation`] descriptor in this module. Adding an
-//! operation is one enum variant plus one row in the `work_operations!` table,
-//! which derives every key, id, segment, and path; there is no second route
+//! operation is one row in the `work_operations!` table, which derives the
+//! variant and every key, id, segment, and path; there is no second route
 //! table to keep in step, and no adapter that can drift from the catalog
 //! without failing to compile.
 //!
@@ -58,84 +58,28 @@ fn schema_name<T: JsonSchema>() -> Cow<'static, str> {
     T::schema_name()
 }
 
-/// One canonical Work operation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum WorkOperation {
-    GenerateProposal,
-    Create,
-    ReviewProposal,
-    AcceptProposal,
-    AdmitExecution,
-    StartAttempt,
-    Synthesize,
-    AttemptStatus,
-    CancelAttempt,
-    ResumeAttempts,
-    RetryAttempt,
-    ListAttempts,
-    ExecutionHistory,
-    HydrateArtifacts,
-    RetrieveEvidence,
-    Views,
-    Experience,
-    CompareProposal,
-    PrepareGraphMutation,
-    MutateGraph,
-    Topology,
-    TopologyMetrics,
-    PrepareDuplicateAdjudication,
-    AdjudicateDuplicate,
-    AdjudicateLeak,
-    PauseRun,
-    ResumeRun,
-    RunControl,
-    PlacementPreflight,
-    AdmitPlacement,
-    PlacementStatus,
-    ReleasePlacement,
-}
-
-/// Derive every Work operation projection from one `(variant, key, segment)`
-/// table.
+/// Derive the Work operation enum and every projection from one
+/// `(variant, key, segment, description)` table.
 ///
 /// The catalog id, router path, catalog path, and dashboard path are all
 /// mechanical compositions of the key and segment, so the table is the single
 /// place an operation is described. A row cannot disagree with itself.
 macro_rules! work_operations {
     ($($variant:ident: $key:literal, $segment:literal, $description:literal;)+) => {
+        mounted_operations! {
+            /// One canonical Work operation.
+            pub enum WorkOperation;
+            with_key,
+            id_prefix = "operation.work.",
+            route_prefix = "work",
+            $($variant: $key, $segment;)+
+        }
+
         impl WorkOperation {
-            /// The catalog operation key, as it appears in `operation.work.{key}`.
-            pub const fn operation_key(self) -> &'static str {
-                match self { $(Self::$variant => $key,)+ }
-            }
-
-            /// The catalog operation id, as a literal the route documents can hold.
-            pub const fn operation_id_str(self) -> &'static str {
-                match self { $(Self::$variant => concat!("operation.work.", $key),)+ }
-            }
-
-            /// The final path segment that names this operation on its router.
-            pub const fn route_segment(self) -> &'static str {
-                match self { $(Self::$variant => $segment,)+ }
-            }
-
             /// Concise discovery text that distinguishes this operation from
             /// the other Work lifecycle controls.
             pub const fn description(self) -> &'static str {
                 match self { $(Self::$variant => $description,)+ }
-            }
-
-            /// The path this operation answers on the application router.
-            pub const fn route_path(self) -> &'static str {
-                match self { $(Self::$variant => concat!("/work/", $segment),)+ }
-            }
-
-            /// The path the catalog advertises, which the executable nests
-            /// under its `/application` prefix.
-            pub const fn application_route_path(self) -> &'static str {
-                match self {
-                    $(Self::$variant => concat!("/application/work/", $segment),)+
-                }
             }
 
             /// The public dashboard path where the dashboard mounts this
@@ -215,42 +159,6 @@ work_operations! {
 }
 
 impl WorkOperation {
-    /// Every mounted Work operation, in mounted order.
-    pub const ALL: [Self; 32] = [
-        Self::GenerateProposal,
-        Self::Create,
-        Self::ReviewProposal,
-        Self::AcceptProposal,
-        Self::AdmitExecution,
-        Self::StartAttempt,
-        Self::Synthesize,
-        Self::AttemptStatus,
-        Self::CancelAttempt,
-        Self::ResumeAttempts,
-        Self::RetryAttempt,
-        Self::ListAttempts,
-        Self::ExecutionHistory,
-        Self::HydrateArtifacts,
-        Self::RetrieveEvidence,
-        Self::Views,
-        Self::Experience,
-        Self::CompareProposal,
-        Self::PrepareGraphMutation,
-        Self::MutateGraph,
-        Self::Topology,
-        Self::TopologyMetrics,
-        Self::PrepareDuplicateAdjudication,
-        Self::AdjudicateDuplicate,
-        Self::AdjudicateLeak,
-        Self::PauseRun,
-        Self::ResumeRun,
-        Self::RunControl,
-        Self::PlacementPreflight,
-        Self::AdmitPlacement,
-        Self::PlacementStatus,
-        Self::ReleasePlacement,
-    ];
-
     /// The catalog operation id.
     pub fn operation_id(self) -> String {
         self.operation_id_str().to_owned()
@@ -355,18 +263,6 @@ impl WorkOperation {
             Self::AdmitPlacement | Self::ReleasePlacement => schema_name::<WorkPlacementV1>(),
             Self::PlacementStatus => schema_name::<WorkPlacementReadingV1>(),
         }
-    }
-
-    /// Resolve an operation from the final path segment that names it.
-    ///
-    /// The route segment is the one public name a Work operation has, so every
-    /// adapter that accepts an operation by name, the router, the CLI, the
-    /// catalog, resolves it here rather than keeping a second name table.
-    pub fn from_route_segment(segment: &str) -> Option<Self> {
-        Self::ALL
-            .iter()
-            .copied()
-            .find(|operation| operation.route_segment() == segment)
     }
 
     /// Whether the embedded dashboard has a real operator journey for this

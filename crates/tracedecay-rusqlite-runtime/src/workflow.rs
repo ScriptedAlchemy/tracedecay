@@ -6,11 +6,10 @@ use tracedecay_contracts::{
     TaskHandoffAuthorityError, TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome,
     TaskHandoffGrant, TaskHandoffScope, WorkHandoffFrontierV1, WorkflowDefinitionAuthorityError,
     WorkflowDefinitionAuthorityPort, WorkflowDefinitionDisposition,
-    WorkflowDefinitionLifecycleCommand, WorkflowDefinitionTransitionEntry,
-    WorkflowDefinitionTransitionOutcome, WorkflowEffectAuthorityErrorV1,
-    WorkflowEffectAuthorityPortV1, WorkflowEffectIdentityV1, WorkflowEffectJournalRecordV1,
-    WorkflowEffectJournalStateV1, WorkflowEffectOutcomeV1, WorkflowEffectPreparedV1,
-    WorkflowEffectProblemV1, WorkflowEffectTerminalV1,
+    WorkflowDefinitionLifecycleCommand, WorkflowDefinitionTransitionOutcome,
+    WorkflowEffectAuthorityErrorV1, WorkflowEffectAuthorityPortV1, WorkflowEffectIdentityV1,
+    WorkflowEffectJournalRecordV1, WorkflowEffectJournalStateV1, WorkflowEffectOutcomeV1,
+    WorkflowEffectPreparedV1, WorkflowEffectProblemV1, WorkflowEffectTerminalV1,
 };
 use tracedecay_domain::{
     ManifestDigest, UtcMicros, WorkflowDefinition, WorkflowDefinitionId, canonical_sha256,
@@ -249,24 +248,6 @@ impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
             .commit()
             .map_err(|_| definition_authority_unavailable())?;
         Ok(outcome)
-    }
-
-    fn transition_history(
-        &self,
-        definition_id: &WorkflowDefinitionId,
-        definition_version: u64,
-    ) -> Result<Vec<WorkflowDefinitionTransitionEntry>, WorkflowDefinitionAuthorityError> {
-        let transaction = self
-            .handle()
-            .begin_immediate()
-            .map_err(|_| definition_authority_unavailable())?;
-        let entries =
-            disposition::transition_history_tx(&transaction, definition_id, definition_version)
-                .map_err(|_| definition_authority_unavailable())?;
-        transaction
-            .commit()
-            .map_err(|_| definition_authority_unavailable())?;
-        Ok(entries)
     }
 }
 
