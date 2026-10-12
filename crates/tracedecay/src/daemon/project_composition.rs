@@ -289,6 +289,11 @@ pub(crate) fn daemon_transcript_source_profile(
 /// eviction both drop the graph's last server without retiring them. Owners
 /// another published server over the same database still serves stay
 /// registered.
+///
+/// Callers run this only while the project-open capacity admission excludes
+/// every in-flight open: a reopen registers its owners before its route
+/// publishes, and without that exclusion the served check cannot tell the
+/// retiring graph's owners from the live replacement's.
 async fn retire_unserved_process_owners(
     store_administration: &StoreAdministration,
     cg: &tracedecay_project::project::TraceDecay,
@@ -304,6 +309,10 @@ async fn retire_unserved_process_owners(
     if served {
         return;
     }
+    #[cfg(any(test, feature = "test-helpers"))]
+    {
+        let _ = crate::test_support::hold_after_unserved_owner_check_for_test().await;
+    }
     super::hook_v2_replay_consumer::shutdown_hook_v2_replay_consumer(
         &cg.hook_store_layout().data_root,
     )
@@ -311,6 +320,28 @@ async fn retire_unserved_process_owners(
     if let Some(project_id) = hook_project_id_for_layout(cg.hook_store_layout()) {
         unregister_registered_context_scout_owner(project_id, graph_db_path);
     }
+}
+
+/// Retire the process-global owners and drain of one server a route-bind
+/// eviction detached. The task waits out every in-flight project open on the
+/// capacity admission — held from graph construction through route
+/// publication — so its served check cannot race a reopen that registered the
+/// same graph's owners moments before publishing its replacement route.
+async fn retire_bind_evicted_project_server(
+    store_administration: StoreAdministration,
+    capacity_gate: Arc<ProjectOpenGate>,
+    retired_server: Arc<crate::mcp::McpServer>,
+) {
+    #[cfg(any(test, feature = "test-helpers"))]
+    {
+        let _ = crate::test_support::hold_before_evicted_owner_retire_for_test().await;
+    }
+    let open_admission = capacity_gate.lock_owned().await;
+    let graph = retired_server.cg().await;
+    retire_unserved_process_owners(&store_administration, &graph).await;
+    drop(open_admission);
+    drop(graph);
+    super::project_server_lifecycle::retire_project_servers(vec![retired_server], None).await;
 }
 
 /// Borrowed handles every project-open phase reads. A phase future captures
@@ -1075,6 +1106,8 @@ impl ProjectOpenInputs<'_> {
             route_registered.store(false, Ordering::Release);
             return Err(project_server_capacity_error());
         };
+        let capacity_gate =
+            super::project_routing::project_open_capacity_gate(self.project_open_gates).await;
         for (retired_key, retired_server) in retired {
             let owner = retired_key.owner;
             self.store_administration
@@ -1082,12 +1115,14 @@ impl ProjectOpenInputs<'_> {
                 .retire_project(&owner)
                 .await;
             let store_administration = self.store_administration.clone();
+            let capacity_gate = Arc::clone(&capacity_gate);
             retirement_admission.spawn_and_track(owner, async move {
-                let graph = retired_server.cg().await;
-                retire_unserved_process_owners(&store_administration, &graph).await;
-                drop(graph);
-                super::project_server_lifecycle::retire_project_servers(vec![retired_server], None)
-                    .await;
+                retire_bind_evicted_project_server(
+                    store_administration,
+                    capacity_gate,
+                    retired_server,
+                )
+                .await;
             });
         }
         // The owner registry guard was dropped before the synchronous

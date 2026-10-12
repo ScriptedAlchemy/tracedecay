@@ -423,6 +423,175 @@ async fn route_bind_eviction_releases_the_evicted_project_stores() {
     }
 }
 
+/// A route-bind eviction detaches the idle server, but its process-owner
+/// cleanup runs in a detached task. A reopen of the evicted project registers
+/// its owners before its route publishes, so the cleanup must wait out that
+/// open — otherwise it retires the owners the live reopen just adopted. The
+/// evicting open is parked at its bind until the cleanup parks ahead of its
+/// retire, the reopen is parked at its own bind, and then the reopened
+/// project's replay consumer must still be owned after it publishes.
+#[tokio::test]
+async fn route_bind_eviction_cannot_retire_a_reopened_projects_owners() {
+    let (environment, first) = IsolatedHome::new();
+    let mut projects = vec![first];
+    projects.extend((1..=8).map(|ordinal| environment.scratch().join(format!("p{ordinal}"))));
+    let projects = projects
+        .into_iter()
+        .map(|project| {
+            initialize_repository(&project);
+            project.canonicalize().expect("canonical fixture project")
+        })
+        .collect::<Vec<_>>();
+    let (incoming, cached) = projects.split_last().expect("nine projects");
+    let log_path = environment.scratch().join("route-bind-eviction-reopen.log");
+    let bind_hold = environment.scratch().join("hold-before-route-bind");
+    let bind_entered = PathBuf::from(format!("{}.entered", bind_hold.display()));
+    let retire_hold = environment
+        .scratch()
+        .join("hold-before-evicted-owner-retire");
+    let retire_entered = PathBuf::from(format!("{}.entered", retire_hold.display()));
+    let check_hold = environment
+        .scratch()
+        .join("hold-after-unserved-owner-check");
+    let check_entered = PathBuf::from(format!("{}.entered", check_hold.display()));
+    let socket = daemon_socket_path(environment.home());
+    let mut daemon = spawn_tracedecay_daemon_logged(environment.home(), &log_path, |command| {
+        command
+            .env("TRACEDECAY_TEST_HOLD_BEFORE_ROUTE_BIND", &bind_hold)
+            .env(
+                "TRACEDECAY_TEST_HOLD_BEFORE_EVICTED_OWNER_RETIRE",
+                &retire_hold,
+            )
+            .env(
+                "TRACEDECAY_TEST_HOLD_AFTER_UNSERVED_OWNER_CHECK",
+                &check_hold,
+            );
+    });
+    tracedecay_project::product_runtime::register_fixture_product_runtime();
+    let mut sessions = Vec::new();
+    for project in cached {
+        initialize_tracedecay(environment.home(), project);
+        let handshake = tracedecay::daemon::handshake_for_current_client(
+            environment.profile(),
+            Some(project.clone()),
+            None,
+            false,
+            false,
+        )
+        .expect("project handshake");
+        wait_for_readiness(&socket, &handshake, "ready", RECEIPT_TIMEOUT).await;
+        sessions.push(LiveMcpSession::open(environment.home(), &handshake).await);
+    }
+
+    // Park the incoming open at its route bind, then idle the first cached
+    // project so that bind evicts it.
+    let _ = fs::remove_file(&bind_entered);
+    fs::write(&bind_hold, b"hold").expect("hold file");
+    let home = environment.home().to_path_buf();
+    let incoming_project = incoming.clone();
+    let init = std::thread::spawn(move || initialize_tracedecay(&home, &incoming_project));
+    poll_until(
+        Instant::now() + RECEIPT_TIMEOUT,
+        Duration::from_millis(20),
+        || bind_entered.is_file().then_some(()),
+        || "the ninth open never reached its route bind".to_owned(),
+    );
+    sessions.remove(0).close().await;
+
+    // The eviction's detached cleanup parks ahead of its retire; the reopen
+    // then parks at its own bind with its Scout owner already adopted.
+    let _ = fs::remove_file(&retire_entered);
+    fs::write(&retire_hold, b"hold").expect("hold file");
+    fs::remove_file(&bind_hold).expect("release the held bind");
+    poll_until(
+        Instant::now() + RECEIPT_TIMEOUT,
+        Duration::from_millis(20),
+        || retire_entered.is_file().then_some(()),
+        || "the eviction cleanup never reached its retire".to_owned(),
+    );
+    init.join().expect("the ninth project initializes");
+
+    let _ = fs::remove_file(&bind_entered);
+    fs::write(&bind_hold, b"hold").expect("hold file");
+    let evicted = cached[0].clone();
+    let reopen_handshake = tracedecay::daemon::handshake_for_current_client(
+        environment.profile(),
+        Some(evicted.clone()),
+        None,
+        false,
+        false,
+    )
+    .expect("reopen handshake");
+    let reopen_home = environment.home().to_path_buf();
+    let session_handshake = reopen_handshake.clone();
+    let reopen =
+        tokio::spawn(async move { LiveMcpSession::open(&reopen_home, &session_handshake).await });
+    // The wait must yield: `poll_until` sleeps the thread and would starve the
+    // spawned open on this runtime before it ever connected to the daemon.
+    // `open` may return early on the daemon's warming answer while its open
+    // task keeps running toward the held bind in the background.
+    let reopen_deadline = Instant::now() + RECEIPT_TIMEOUT;
+    while !bind_entered.is_file() {
+        assert!(
+            Instant::now() < reopen_deadline,
+            "the reopened open never reached its route bind"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // Arm the check hold only now: the reopen's own admission may capacity-
+    // release the evicting project, and that release runs the same unserved-
+    // owner check — parking it here would deadlock the open before its bind.
+    fs::write(&check_hold, b"hold").expect("hold file");
+
+    // Release the cleanup while the reopen still parks before publishing with
+    // its capacity admission held. On the unguarded build it runs the served
+    // check against the not-yet-bound route and parks inside the retire
+    // section; the guarded build queues behind the open's admission until the
+    // route publishes.
+    fs::remove_file(&retire_hold).expect("release the held retire");
+    // Releasing the bind now would race the cleanup's served check against
+    // the reopen's publish at file-poll granularity. The unguarded build
+    // reaches the held check only once it has already found the route
+    // unserved; the guarded build queues on the reopen's capacity admission
+    // and never reaches that hold, so bound the wait.
+    let check_deadline = Instant::now() + Duration::from_secs(2);
+    while !check_entered.is_file() && Instant::now() < check_deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    fs::remove_file(&bind_hold).expect("release the held reopen bind");
+    let reopened = reopen
+        .await
+        .expect("the reopened session finishes its initialize");
+
+    // The unguarded cleanup removes the consumer the reopen relies on only
+    // after that open publishes; its served check already passed.
+    fs::remove_file(&check_hold).expect("release the held owner check");
+
+    let observed = wait_for_readiness(&socket, &reopen_handshake, "ready", RECEIPT_TIMEOUT).await;
+    // The unguarded cleanup's kill lands asynchronously: it detaches the
+    // reopened project's replay consumer, whose own task then removes the
+    // registry entry the status surface reads. Poll through the settle window
+    // so the retired state cannot hide behind the first readiness read.
+    let mut observed = observed;
+    let settle = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < settle && observed["hook_replay"]["status"].as_str() != Some("unowned") {
+        observed = wait_for_readiness(&socket, &reopen_handshake, "ready", RECEIPT_TIMEOUT).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_ne!(
+        observed["hook_replay"]["status"].as_str(),
+        Some("unowned"),
+        "the reopened project's replay consumer was retired by the eviction; {observed}"
+    );
+
+    reopened.close().await;
+    for session in sessions {
+        session.close().await;
+    }
+    stop_daemon_gracefully(&mut daemon);
+    assert_clean_shutdown_log(&fs::read_to_string(&log_path).expect("daemon log"));
+}
+
 #[tokio::test]
 async fn stop_cancels_an_admitted_project_open() {
     let (environment, project) = IsolatedHome::new();

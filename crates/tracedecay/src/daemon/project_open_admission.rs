@@ -599,7 +599,13 @@ impl ProjectOpenTasks {
             ));
         }
         if let Some(entry) = registry.retiring.get(&route) {
-            return ProjectOpenTaskClaim::InFlight(entry.state.clone());
+            if entry.task.is_finished() {
+                // A finished retiring task published its outcome before it
+                // ended; joining its watch can never produce another state.
+                registry.retiring.remove(&route);
+            } else {
+                return ProjectOpenTaskClaim::InFlight(entry.state.clone());
+            }
         }
         if let Some(entry) = registry.routes.get(&route) {
             let state = entry.state.borrow().clone();
@@ -616,6 +622,14 @@ impl ProjectOpenTasks {
                 }
                 ProjectOpenTaskState::Failed(failure) => {
                     return ProjectOpenTaskClaim::Failed(failure);
+                }
+                // A Ready state from a finished task only records that the
+                // task once published a server; a later eviction unpublished
+                // it, and rejoining the dead task's watch can never produce
+                // another publication. The entry stays for status and failure
+                // reads until a fresh claim replaces it here.
+                ProjectOpenTaskState::Ready if finished => {
+                    registry.routes.remove(&route);
                 }
                 ProjectOpenTaskState::Opening | ProjectOpenTaskState::Ready => {
                     return ProjectOpenTaskClaim::InFlight(receiver);

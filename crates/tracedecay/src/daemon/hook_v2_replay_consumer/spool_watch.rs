@@ -188,8 +188,10 @@ pub(super) fn attach_consumer(data_root: &Path, project_root: &Path, consumer: A
     );
 }
 
-/// Once its consumer stops, a project's next append opens it again.
-pub(super) fn detach_consumer(data_root: &Path) {
+/// Once its consumer stops, a project's next append opens it again. The
+/// detach is by identity: a stopping consumer may only remove its own wake,
+/// never the wake a replacement consumer attached while it was draining.
+pub(super) fn detach_consumer(data_root: &Path, consumer: &Arc<Notify>) {
     let Ok(watch) = spool_watch().lock() else {
         return;
     };
@@ -198,6 +200,10 @@ pub(super) fn detach_consumer(data_root: &Path) {
     };
     if let Ok(mut targets) = watch.targets.lock()
         && let Some(watched) = targets.spools.get_mut(data_root)
+        && watched
+            .consumer
+            .as_ref()
+            .is_some_and(|attached| Arc::ptr_eq(attached, consumer))
     {
         watched.consumer = None;
     }

@@ -407,6 +407,10 @@ struct RegisteredReplayConsumer {
     delivery_settlements:
         Weak<tracedecay_application::observability::DeliverySettlementAuthorityV1>,
     task: Option<tokio::task::JoinHandle<()>>,
+    /// The wake this consumer attached to its project's spool watch. Shutdown
+    /// and exit detach by this identity, so a retired consumer can never
+    /// strip the wake a replacement attached.
+    wake: Arc<tokio::sync::Notify>,
     /// The failures of the last finished sweep; `None` before the first.
     last_sweep: Option<Vec<StatusHookReplayFailureV1>>,
 }
@@ -456,8 +460,10 @@ pub(crate) fn hook_v2_replay_consumer_registered(data_root: &Path) -> bool {
     })
 }
 
-/// Start the per-project replay consumer exactly once per hook data root.
-/// Returns `false` when one is already running for this root.
+/// Start the per-project replay consumer exactly once per hook data root and
+/// project open. Returns `false` when the running consumer already belongs to
+/// this open; an incumbent bound to a different open is displaced instead —
+/// relying on it would lose the drain the moment that open's graph drops.
 pub(crate) fn register_hook_v2_replay_consumer(
     graph: Arc<tracedecay_project::project::TraceDecay>,
     delivery_settlements: Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>,
@@ -468,23 +474,30 @@ pub(crate) fn register_hook_v2_replay_consumer(
     let project_root = graph.project_root().to_path_buf();
     let graph = Arc::downgrade(&graph);
     let delivery_settlements = Arc::downgrade(&delivery_settlements);
+    let wake = Arc::new(tokio::sync::Notify::new());
     match registered_replay_roots().lock() {
         Ok(mut roots) => {
             if roots.get(&data_root).is_some_and(|consumer| {
-                consumer.graph.upgrade().is_some()
+                Weak::ptr_eq(&consumer.graph, &graph)
                     && consumer.delivery_settlements.upgrade().is_some()
             }) {
                 return false;
             }
-            roots.insert(
-                data_root.clone(),
-                RegisteredReplayConsumer {
-                    graph: graph.clone(),
-                    delivery_settlements: delivery_settlements.clone(),
-                    task: None,
-                    last_sweep: None,
-                },
-            );
+            if let Some(displaced_task) = roots
+                .insert(
+                    data_root.clone(),
+                    RegisteredReplayConsumer {
+                        graph: graph.clone(),
+                        delivery_settlements: delivery_settlements.clone(),
+                        task: None,
+                        wake: Arc::clone(&wake),
+                        last_sweep: None,
+                    },
+                )
+                .and_then(|displaced| displaced.task)
+            {
+                displaced_task.abort();
+            }
         }
         Err(_) => return false,
     }
@@ -493,7 +506,6 @@ pub(crate) fn register_hook_v2_replay_consumer(
     let task_delivery_settlements = delivery_settlements.clone();
     let task_project_sessions = project_sessions;
     let task_background_cpu = background_cpu;
-    let wake = Arc::new(tokio::sync::Notify::new());
     spool_watch::attach_consumer(&data_root, &project_root, Arc::clone(&wake));
     let task = tokio::spawn(async move {
         loop {
@@ -535,7 +547,7 @@ pub(crate) fn register_hook_v2_replay_consumer(
             )
             .await;
         }
-        spool_watch::detach_consumer(&task_data_root);
+        spool_watch::detach_consumer(&task_data_root, &wake);
         if let Ok(mut roots) = registered_replay_roots().lock()
             && roots
                 .get(&task_data_root)
@@ -558,16 +570,18 @@ pub(crate) fn register_hook_v2_replay_consumer(
 
 /// Stop and join the exact project replay consumer before releasing its graph.
 pub(crate) async fn shutdown_hook_v2_replay_consumer(data_root: &Path) {
-    let task = registered_replay_roots()
+    let consumer = registered_replay_roots()
         .lock()
         .ok()
-        .and_then(|mut roots| roots.remove(data_root))
-        .and_then(|consumer| consumer.task);
-    if let Some(task) = task {
+        .and_then(|mut roots| roots.remove(data_root));
+    let Some(consumer) = consumer else {
+        return;
+    };
+    if let Some(task) = consumer.task {
         task.abort();
         let _ = task.await;
     }
-    spool_watch::detach_consumer(data_root);
+    spool_watch::detach_consumer(data_root, &consumer.wake);
 }
 
 #[cfg(test)]
