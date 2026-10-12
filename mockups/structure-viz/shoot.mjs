@@ -1,9 +1,9 @@
 /**
  * Minimal file:// screenshooter for the structure-viz mockups.
  *
- * Deliberately NOT the product's stories/shot.ts: these are standalone concept
- * pages with no daemon, no dev server and no #td-main to wait for. Each page
- * reads ?theme=… itself, so one pass per theme is all this needs.
+ * These are standalone concept pages with no daemon, no dev server and no
+ * #td-main to wait for. Each page reads ?theme=… itself, so one pass per theme
+ * is all this needs.
  *
  *   node mockups/structure-viz/shoot.mjs            # all pages, both themes
  *   node mockups/structure-viz/shoot.mjs anatomy    # one page
