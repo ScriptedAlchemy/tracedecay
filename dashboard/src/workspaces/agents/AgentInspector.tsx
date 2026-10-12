@@ -3,6 +3,7 @@ import type { AnalyticsRecentHookV1, AnalyticsSubagentNodeV1 } from '../../contr
 import { EvidenceGrade } from '../../ui/EvidenceGrade.tsx';
 import { StateChip } from '../../ui/StateChip.tsx';
 import { cn } from '../../ui/cn';
+import { SessionPivots } from '../sessions/SessionPivots.tsx';
 import { formatMicrosUtc, formatStamp } from '../../ui/format.ts';
 import {
   incomingDelegation,
@@ -180,6 +181,10 @@ export function AgentInspector({
           </button>
         ) : null}
       </header>
+      {/* A hovered subject vanishes when the pointer leaves for a link. */}
+      {mode === 'inspecting' ? null : (
+        <SessionPivots session={{ provider: node.provider, sessionId: node.session_id }} from="agents" />
+      )}
 
       <Section legend="Source authority" grade={<EvidenceGrade grade="EXACT" source="RETAINED" />}>
         <Facts

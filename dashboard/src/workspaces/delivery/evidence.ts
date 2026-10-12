@@ -4,8 +4,10 @@ import type {
   DeliveryMembershipBasisV1,
   DeliveryProviderStateV1,
 } from '../../contracts/generated.ts';
+import type { DashboardScope } from '../../data/scope/store.ts';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
 import { gradeDashArray } from '../../viz/temporal/palette.ts';
+import { sessionHref } from '../sessions/SessionPivots.tsx';
 
 /**
  * The evidence-grade ladder Delivery renders beside every relation, identity,
@@ -223,10 +225,14 @@ export function membershipBasisDetail(basis: DeliveryMembershipBasisV1): string 
 /** A real destination the basis identity can pivot to, or `null` when no
  * shipping route honours that identity. Nothing here links to a route that
  * would ignore the parameter. */
-export function membershipHref(basis: DeliveryMembershipBasisV1): string | null {
+export function membershipHref(
+  basis: DeliveryMembershipBasisV1,
+  scope: DashboardScope,
+): string | null {
   switch (basis.kind) {
     case 'session_git_relation':
-      return `/loom?loomSession=${encodeURIComponent(basis.session_id)}`;
+      // The basis names no provider, so Loom resolves the bare id.
+      return sessionHref('loom', { provider: null, sessionId: basis.session_id }, scope);
     case 'shared_work_objective':
     case 'explicit_handoff':
     case 'shared_agent':

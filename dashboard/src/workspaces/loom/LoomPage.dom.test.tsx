@@ -1,6 +1,6 @@
 import { MemoryRouter, useLocation } from 'react-router';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LoomPage } from './LoomPage.tsx';
@@ -764,6 +764,29 @@ describe('LoomPage', () => {
     expect(await screen.findByText(/names 2 sessions on this loaded page/)).toBeTruthy();
     expect(screen.queryByRole('region', { name: 'Loaded execution' })).toBeNull();
     expect(screen.queryByText(/outside this loaded page/)).toBeNull();
+  });
+
+  it('offers the session\'s transcript and delegation when a link names one outside the loaded page', async () => {
+    renderLoom(HAPPY, '/loom?loomSession=session.old');
+    expect(await screen.findByText(/outside this loaded page/)).toBeTruthy();
+    const links = screen.getByRole('navigation', { name: 'Open this session in' });
+    const href = (name: RegExp) => {
+      const url = new URL(within(links).getByRole('link', { name }).getAttribute('href')!, 'http://dashboard.test');
+      return [url.pathname, Object.fromEntries(url.searchParams)];
+    };
+    const scoped = { scope: 'project-loom', scopeLabel: 'project loom', sessionId: 'session.old' };
+    expect(href(/Open in Sessions/)).toEqual(['/sessions', scoped]);
+    expect(href(/Open in Agents/)).toEqual(['/agents', scoped]);
+    expect(within(links).queryByRole('link', { name: /Open in Loom/ })).toBeNull();
+  });
+
+  it('opens the selected thread elsewhere by its recorded provider', async () => {
+    renderLoom(HAPPY, `/loom?loomSession=${encodeURIComponent(LANE('cursor', 'sess-open'))}`);
+    const thread = await screen.findByRole('region', { name: 'Loaded execution' });
+    const links = within(thread.parentElement!).getByRole('navigation', { name: 'Open this session in' });
+    const agents = new URL(within(links).getByRole('link', { name: /Open in Agents/ }).getAttribute('href')!, 'http://dashboard.test');
+    expect(agents.searchParams.get('sessionId')).toBe('sess-open');
+    expect(agents.searchParams.get('sessionProvider')).toBe('cursor');
   });
 
   it('selects a session whose provider was never recorded through the link Loom writes for it', async () => {

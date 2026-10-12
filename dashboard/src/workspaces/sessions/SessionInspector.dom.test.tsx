@@ -236,6 +236,7 @@ describe('Session transcript drill-down', () => {
 describe('Session provenance inspector', () => {
   it('joins the selection to its index row and grades every relation from the daemon evidence', async () => {
     stubTranscript();
+    useScope.getState().selectProject('proj-1', 'Proj', 'active');
     renderWith(
       <SessionInspector
         selection={{ provider: 'claude', sessionId: 'claude:035c8f3c' }}
@@ -317,6 +318,9 @@ describe('Session provenance inspector', () => {
     expect(identity.querySelector('[data-identity="ambiguous"]')).not.toBeNull();
     expect(identity.querySelector('[data-evidence-grade="AMBIGUOUS"]')).not.toBeNull();
     expect(screen.queryByRole('link', { name: /Open in Loom/ })).toBeNull();
+    expect(screen.getByRole('link', { name: /Open in Agents/ }).getAttribute('href')).toBe(
+      '/agents?sessionId=claude%3A035c8f3c',
+    );
     await userEvent.click(within(identity).getByRole('button', { name: /codex/ }));
     expect(onSelectProvider).toHaveBeenCalledWith('codex');
   });

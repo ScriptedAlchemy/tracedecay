@@ -7,6 +7,7 @@ import { useLcmTimeline, useSubagentTree } from '../../data/query/sessionReads.t
 import { envelopePayload, useEnvelope } from '../../data/query/useEnvelope.ts';
 import type { DashboardEnvelopeV1 } from '../../contracts/generated.ts';
 import { DEFAULT_TIMELINE_WINDOW } from '../sessions/model.ts';
+import { SessionPivots } from '../sessions/SessionPivots.tsx';
 import { StateChip, type DomainStateKind } from '../../ui/StateChip';
 import { Legend, Panel, ReadoutBar, WorkspaceHeader } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn';
@@ -401,17 +402,21 @@ function TemporalBody({
         tabIndex={0}
         className={cn('flex min-h-0 flex-1 flex-col gap-2 overflow-auto px-3 py-1 [scrollbar-gutter:stable]')}
       >
-        {selection.kind === 'outside_page' ? (
-          <StateChip
-            kind="unavailable"
-            detail="Selected session is outside this loaded page; choose a retained session."
-          />
-        ) : null}
-        {selection.kind === 'ambiguous' ? (
-          <StateChip
-            kind="conflicting"
-            detail={`Linked session ${selection.selection.sessionId} names ${selection.count} sessions on this loaded page; choose one in the field.`}
-          />
+        {selection.kind === 'outside_page' || selection.kind === 'ambiguous' ? (
+          <div className="flex flex-wrap items-center gap-2">
+            {selection.kind === 'outside_page' ? (
+              <StateChip
+                kind="unavailable"
+                detail="Selected session is outside this loaded page; choose a retained session."
+              />
+            ) : (
+              <StateChip
+                kind="conflicting"
+                detail={`Linked session ${selection.selection.sessionId} names ${selection.count} sessions on this loaded page; choose one in the field.`}
+              />
+            )}
+            <SessionPivots session={selection.selection} from="loom" />
+          </div>
         ) : null}
 
         {projection.lanes.length === 0 ? (
@@ -460,6 +465,12 @@ function TemporalBody({
               is drawn.
             </p>
 
+            {selection.kind === 'lane' ? (
+              <SessionPivots
+                session={{ provider: selection.row.provider, sessionId: selection.row.session_id }}
+                from="loom"
+              />
+            ) : null}
             {selectedJourneyLane ? (
               <ThreadChain
                 thread={selectedJourneyLane}

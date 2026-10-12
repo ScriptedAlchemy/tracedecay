@@ -266,6 +266,21 @@ describe('AgentsPage delegation topology', () => {
     expect(inspector().getAttribute('data-agent-inspector-mode')).toBe('selected');
     expect(document.querySelector('[data-agents-view]')?.getAttribute('data-agents-view')).toBe('timeline');
     await waitFor(() => expect(asked).toEqual(['session.codex.child']));
+    const links = within(inspector() as HTMLElement).getByRole('navigation', { name: 'Open this session in' });
+    const loom = new URL(within(links).getByRole('link', { name: /Open in Loom/ }).getAttribute('href')!, 'http://dashboard.test');
+    expect(loom.pathname).toBe('/loom');
+    expect(loom.searchParams.get('loomSession')).toBe('["codex","session.codex.child"]');
+    expect(within(links).getByRole('link', { name: /Open in Sessions/ }).getAttribute('href')).toBe(
+      '/sessions?sessionId=session.codex.child&sessionProvider=codex',
+    );
+  });
+
+  it('offers no links for a session only hovered, which the pointer cannot reach', async () => {
+    renderAgents();
+    await settled();
+    fireEvent.mouseEnter(mark('codex:session.codex.child'));
+    expect(inspector().getAttribute('data-agent-inspector-mode')).toBe('inspecting');
+    expect(within(inspector() as HTMLElement).queryByRole('navigation', { name: 'Open this session in' })).toBeNull();
   });
 
   it('writes a selection to the link and clears it on a second click, keeping the view', async () => {
@@ -285,6 +300,10 @@ describe('AgentsPage delegation topology', () => {
     renderAgents('/agents?sessionId=session.gone&sessionProvider=codex');
     await settled();
     expect(screen.getByText(/Linked session session\.gone is not in the delegation tree/)).toBeTruthy();
+    const unresolved = document.querySelector<HTMLElement>('[data-agents-unresolved="absent"]')!;
+    expect(
+      within(unresolved).getByRole('link', { name: /Open in Sessions/ }).getAttribute('href'),
+    ).toBe('/sessions?sessionId=session.gone&sessionProvider=codex');
     expect(document.querySelector('[data-topology-selected]')).toBeNull();
     expect(inspector().getAttribute('data-agent-inspector-id')).toBe('cursor:session.cursor.solo');
     await waitFor(() => expect(asked).toEqual(['session.cursor.solo']));

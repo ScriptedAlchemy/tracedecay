@@ -13,6 +13,8 @@ import {
   type AnalyticsSubagentTreePayloadV1,
 } from '../../contracts/generated.ts';
 import { useSubagentTree } from '../../data/query/sessionReads.ts';
+import type { SessionSelection } from '../sessions/model.ts';
+import { SessionPivots } from '../sessions/SessionPivots.tsx';
 import { envelopePayload, useEnvelope } from '../../data/query/useEnvelope.ts';
 import { logFraction } from '../../viz/scale.ts';
 import { AgentAuthorityRegister } from './AgentAuthorityRegister.tsx';
@@ -229,7 +231,7 @@ export function AgentsPage() {
         <div className="flex min-w-0 flex-1 flex-col gap-2 p-2">
           {selection.kind === 'unresolved' && selection.reason !== 'pending' ? (
             <UnresolvedLink
-              sessionId={selection.selection.sessionId}
+              selection={selection.selection}
               reason={selection.reason}
               truncated={treeAvailable?.truncated ?? false}
             />
@@ -431,21 +433,22 @@ function TopologyRenderer({
 /** A linked session the tree does not answer for. The inspector keeps its
  * default subject, and this says that it is not the linked one. */
 function UnresolvedLink({
-  sessionId,
+  selection,
   reason,
   truncated,
 }: {
-  sessionId: string;
+  selection: SessionSelection;
   reason: 'absent' | 'ambiguous';
   truncated: boolean;
 }) {
   const detail =
     reason === 'absent'
-      ? `Linked session ${sessionId} is not in the delegation tree${truncated ? ' · tree truncated' : ''}; the inspector shows the newest root.`
-      : `Linked session ${sessionId} names more than one session in the delegation tree; choose one in the exact tree.`;
+      ? `Linked session ${selection.sessionId} is not in the delegation tree${truncated ? ' · tree truncated' : ''}; the inspector shows the newest root.`
+      : `Linked session ${selection.sessionId} names more than one session in the delegation tree; choose one in the exact tree.`;
   return (
     <div className="flex flex-wrap items-center gap-2" data-agents-unresolved={reason}>
       <StateChip kind={reason === 'absent' ? 'unavailable' : 'conflicting'} detail={detail} />
+      <SessionPivots session={selection} from="agents" />
     </div>
   );
 }
