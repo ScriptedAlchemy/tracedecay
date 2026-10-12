@@ -1624,7 +1624,7 @@ impl GraphDb {
     /// Returns [`GraphDbError::Closed`] when the database is already closed and
     /// [`GraphDbError::Unavailable`] when grafeo refuses the conversion (for
     /// example more than 32,767 distinct labels or edge types).
-    #[cfg(all(feature = "test-helpers", feature = "graph-disk-tier"))]
+    #[cfg(feature = "test-helpers")]
     pub fn compact_snapshot_for_bench(&self) -> Result<(), GraphDbError> {
         let mut guard = self.write_guard()?;
         let database = guard.as_mut().ok_or(GraphDbError::Closed)?;

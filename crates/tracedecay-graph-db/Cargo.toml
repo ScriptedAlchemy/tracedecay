@@ -12,39 +12,6 @@ include = ["/src/**"]
 test-helpers = []
 eval-helpers = []
 
-# Opt-in tiered graph storage (never in `default`).
-#
-# Split in two on purpose, because grafeo bundles two unrelated
-# things under the "tiered" name and only one of them is usable here.
-#
-# `graph-disk-tier` is the half that *could* be disk-backed:
-#   * `grafeo-engine/mmap` + `compact-store` (always on, see the
-#     dependency block below) compile in `database/compact_tiered.rs`,
-#     which serializes a `CompactStore`, mmaps it, and serves reads from
-#     the mapping.
-#   * `grafeo-engine/spill` enables the buffer manager's spill loop so
-#     `Config::with_spill_path` has any effect at all.
-# It also makes `GraphDbOpen` hand grafeo a spill directory and a bounded
-# memory budget; see `crates/tracedecay-graph-db/src/location.rs`.
-#
-# Compiling it in is not enough, and today it buys nothing. Reaching the
-# mmap tier takes an explicit `GrafeoDB::compact()` (grafeo-engine
-# `database/mod.rs`), which nothing in this crate calls, so the feature is
-# inert: measured against baseline at 100k/500k rows it moves peak RSS by
-# under 1%, inside run-to-run noise. Leave it off until something calls
-# `compact()`.
-#
-# Even then it would not tier the live graph. `SectionType::LpgStore` is
-# `mmap_able: false` (grafeo-common `storage/section.rs`), and
-# `SectionConsumer::can_spill()` returns exactly that flag, so every live
-# node and edge record is heap-resident by construction -- `TierOverride::
-# ForceDisk` on the LPG section is a silent no-op that frees zero bytes.
-# `compact()` freezes a columnar snapshot into the disk-eligible
-# `CompactStore`; all writes still land in a RAM-only `LpgStore` overlay.
-# Spilling covers the vector/text/ring index buffers and query scratch,
-# never LPG data.
-graph-disk-tier = ["grafeo-engine/spill"]
-
 [dependencies]
 grafeo-adapters.workspace = true
 grafeo-common.workspace = true
@@ -54,8 +21,8 @@ grafeo-common.workspace = true
 # their own single-generation container (`GrafeoDB::write_compact_container`),
 # then served read-only after a recovered-digest proof. `compact-store`
 # supplies the builder and the columnar section, `mmap` the mmap-backed base
-# on reopen. `spill` stays opt-in (`graph-disk-tier`) so the staging
-# database's memory behavior is untouched. `TRACEDECAY_GRAPH_SEALED_STORE=off`
+# on reopen. Grafeo's `spill` feature stays off: no section TraceDecay
+# registers is spillable. `TRACEDECAY_GRAPH_SEALED_STORE=off`
 # is the runtime kill-switch that keeps reads on the staging database.
 grafeo-core = { workspace = true, features = ["compact-store"] }
 grafeo-engine = { workspace = true, features = ["mmap", "compact-store"] }
@@ -116,23 +83,16 @@ required-features = ["test-helpers"]
 name = "graph_db_suite"
 required-features = ["test-helpers"]
 
-# Peak-RSS measurement harness for the tiered storage features. Every test in
-# it is `#[ignore]`d, so it costs a compile and nothing else in a normal run.
-[[test]]
-name = "tiered_storage_rss"
-required-features = ["test-helpers"]
-
 # Residency probe for consecutive generation cycles (stage, retire, repeat)
-# on one incarnation, the issue #762 cross-cycle retention journey. Also
-# `#[ignore]`d.
+# on one incarnation, the issue #762 cross-cycle retention journey. Every test
+# in it is `#[ignore]`d, so it costs a compile and nothing else in a normal run.
 [[test]]
 name = "generation_cycle_rss"
 required-features = ["test-helpers"]
 
 # At-rest snapshot probe: reopen cost of a sealed generation, full LPG replay
-# vs a columnar CompactStore base. Also `#[ignore]`d. The `compact` half needs
-# `graph-disk-tier` for `GrafeoDB::compact()`; the `replay` baseline runs under
-# either feature state. See `docs/graph-at-rest/README.md`.
+# vs a columnar CompactStore base. Also `#[ignore]`d. See
+# `docs/graph-at-rest/README.md`.
 [[test]]
 name = "at_rest_snapshot"
 required-features = ["test-helpers"]
