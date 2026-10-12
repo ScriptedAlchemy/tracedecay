@@ -16,7 +16,8 @@ import type {
 import { StateChip } from '../../ui/StateChip.tsx';
 import { Panel } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn.ts';
-import { ControlLink, GradeMark, IdentityRow, microsToIso, shortSha } from './deliveryChrome.tsx';
+import { ControlLink, GradeMark, IdentityRow, shortSha } from './deliveryChrome.tsx';
+import { formatMicrosUtc } from '../../ui/format.ts';
 import type { DeliveryLocation, DeliveryLocationPatch } from './deliveryLocation.ts';
 import { providerOutcomeKind } from './evidence.ts';
 import { pullRequestNumberLabel } from './deliveryReading.ts';
@@ -175,7 +176,7 @@ export function IdentityPanel({ model, row }: { model: ReviewModel; row: Deliver
       <IdentityRow label="merge-base" value={notServed(identity.mergeBase)} />
       <IdentityRow
         label="fetched (UTC)"
-        value={identity.fetchedAtMicros === null ? '— not served' : microsToIso(identity.fetchedAtMicros)}
+        value={identity.fetchedAtMicros === null ? '— not served' : formatMicrosUtc(identity.fetchedAtMicros)}
       />
       {pullRequestItem !== null ? null : pullRequests.value === null ? (
         <ProjectionGap state={pullRequests.state} className="mt-2" />
@@ -214,7 +215,7 @@ export function CommitsPanel({ commits }: { commits: Served<DeliveryCommitTimeli
                 <span className="min-w-0 flex-1 truncate text-xs text-text-primary">{commit.subject}</span>
               </div>
               <p className="mt-0.5 font-mono text-3xs text-text-muted">
-                {commit.author_name} · {microsToIso(commit.committer_at_micros)}
+                {commit.author_name} · {formatMicrosUtc(commit.committer_at_micros)}
               </p>
             </li>
           ))}
@@ -447,7 +448,7 @@ export function CheckMatrixPanel({
                       <StateChip kind={row.status} detail={check.check_conclusion ?? check.check_status} />
                     </td>
                     <td className={cn(cell, 'text-text-secondary')}>{check.check_conclusion ?? '—'}</td>
-                    <td className={cn(cell, 'text-text-muted')}>{microsToIso(check.observed_at_micros)}</td>
+                    <td className={cn(cell, 'text-text-muted')}>{formatMicrosUtc(check.observed_at_micros)}</td>
                     <td className={cn(cell, 'text-text-secondary')}>{failureCell(row)}</td>
                     <td className="px-3 py-2">
                       {row.compareHref === null ? (

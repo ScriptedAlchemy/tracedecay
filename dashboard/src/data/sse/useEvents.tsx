@@ -12,11 +12,11 @@ import { useQueryClient } from '@tanstack/react-query';
 import {
   connectEvents,
   eventProjectId,
-  isRecord,
   type LiveActivityPulse,
   type SseConnection,
   type SseConnectionState,
 } from './connect.ts';
+import { isRecord } from '../query/responseBody.ts';
 import type { SseBatch, SseReducerStats } from './types.ts';
 import {
   projectRegistryInvalidationKey,

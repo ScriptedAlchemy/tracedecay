@@ -38,6 +38,7 @@ import {
   type SettingsPayloadV1,
   type UserSettingsPatch,
 } from '../../contracts/generated.ts';
+import { isRecord } from '../../data/query/responseBody.ts';
 
 export type ConfigRowKind =
   | 'group'
@@ -1016,6 +1017,3 @@ function humanize(key: string): string {
   return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}

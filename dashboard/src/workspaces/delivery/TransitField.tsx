@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import type { DeliveryInboxV1 } from '../../contracts/generated.ts';
 import { cn } from '../../ui/cn.ts';
-import { GradeMark, microsToIso } from './deliveryChrome.tsx';
+import { GradeMark } from './deliveryChrome.tsx';
+import { formatMicrosUtc } from '../../ui/format.ts';
 import { gradeDash, gradeLabel } from './evidence.ts';
 import { pullRequestNumberLabel } from './deliveryReading.ts';
 import { projectFor } from './inboxFilter.ts';
@@ -18,7 +19,7 @@ import {
 const ITEM_LIMIT = 6;
 
 function utc(micros: number): string {
-  return microsToIso(micros).slice(5, 16).replace('T', ' ');
+  return formatMicrosUtc(micros).slice(5, 16).replace('T', ' ');
 }
 
 function Beacon({ label }: { label: string }) {
