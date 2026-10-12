@@ -47,6 +47,8 @@ mod layered_refresh_tests;
 #[cfg(test)]
 mod sealed_publication_tests;
 mod seals;
+#[cfg(test)]
+mod shard_owner_retirement_tests;
 use seals::{
     finalize_project_graph_replay_unlink, lock_project_graph_replay_pool,
     prove_stable_sealed_source, revalidate_stable_sealed_source,
