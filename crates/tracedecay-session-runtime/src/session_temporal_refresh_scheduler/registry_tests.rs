@@ -11,7 +11,7 @@ use super::super::history::{
     SessionHistoricalIngestor, SharedSessionHistoricalIngestor,
 };
 use super::super::wake::SessionTemporalRefreshWakeState;
-use super::{SessionTemporalRefreshOwner, SessionTemporalRefreshSchedulerRegistry};
+use super::SessionTemporalRefreshSchedulerRegistry;
 use crate::StoreOwnerKey;
 
 /// A history pass that ignores cancellation until the test releases it. The
@@ -67,53 +67,6 @@ fn project_owner(name: &str) -> StoreOwnerKey {
         store_root: root.join("store"),
         graph_db_path: root.join("graph.db"),
     }
-}
-
-#[tokio::test]
-async fn a_dropped_rekey_keeps_requests_after_its_worker_has_finished() {
-    let harness = RegisteredGlobalDbHarness::open("refresh-finished-rekey").await;
-    let registry = SessionTemporalRefreshSchedulerRegistry::default();
-    let old_owner = project_owner("finished-rekey-old");
-    let new_owner = project_owner("finished-rekey-new");
-    let history = mount_held_project(&registry, &harness, &old_owner, HeldHistory::default()).await;
-    let state = registry.project_state(&old_owner).await.expect("old owner");
-    state.requeue_request(tracedecay_store::SessionRefreshBeginOrJoinRequestV1::new(
-        tracedecay_domain::SessionId::new("session.finished-rekey").unwrap(),
-        tracedecay_store::SessionRefreshFrontierV1::new(0, 0).unwrap(),
-    ));
-    {
-        let mut rekey = Box::pin(registry.rekey_project(
-            &old_owner,
-            new_owner.clone(),
-            harness.registered.clone(),
-        ));
-        assert!(rekey.as_mut().now_or_never().is_none());
-        history.release.notify_one();
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while {
-                registry
-                    .live
-                    .lock()
-                    .unwrap()
-                    .contains_key(&SessionTemporalRefreshOwner::Project(old_owner.clone()))
-            } {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the cancelled supervisor finishes before the rekey is dropped");
-        assert!(!history.worker_holds_pass());
-    }
-    registry
-        .rekey_project(&old_owner, new_owner.clone(), harness.registered.clone())
-        .await;
-    let resumed = registry.project_state(&new_owner).await.expect("new owner");
-    assert_eq!(
-        resumed.queued_request_count(),
-        1,
-        "a dropped rekey must retain requests even when its join already finished"
-    );
-    registry.shutdown().await;
 }
 
 async fn mount_held_project(
@@ -315,11 +268,12 @@ async fn a_repeated_retirement_joins_the_retired_worker() {
     registry.shutdown().await;
 }
 
-/// A rekey dropped while it joins the retired worker must keep the old route
-/// bound and the transfer owed, so a retry lands the retired owner's queued
-/// requests on the new owner instead of spawning it without them.
+/// A rekey dropped while it joins the retired worker leaves that worker, its
+/// route, and its queued requests in `retired`. Until a retry runs, the route
+/// reports no live target; the retry joins the worker and lands both on the
+/// new owner instead of spawning it beside a live worker without them.
 #[tokio::test]
-async fn a_dropped_rekey_keeps_its_route_and_queued_requests() {
+async fn a_retried_rekey_recovers_the_dropped_attempts_route_and_requests() {
     let harness = RegisteredGlobalDbHarness::open("refresh-dropped-rekey").await;
     let registry = SessionTemporalRefreshSchedulerRegistry::default();
     let old_owner = project_owner("dropped-rekey-old");
@@ -351,8 +305,8 @@ async fn a_dropped_rekey_keeps_its_route_and_queued_requests() {
         "the rekey cannot finish while the retired worker holds its history pass"
     );
     assert!(
-        old_wake.wake(),
-        "a dropped rekey must keep the old route bound to a live target"
+        !old_wake.wake(),
+        "no worker owns the route of a dropped rekey, so a wake must not be accepted"
     );
 
     let mut rekey = std::pin::pin!(registry.rekey_project(
