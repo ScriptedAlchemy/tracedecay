@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::cell::Cell;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -368,9 +370,24 @@ fn park_until_retry(
     if Instant::now() >= deadline {
         return Err(CodeGenerationRetentionErrorV1::GenerationStoreBusy);
     }
+    #[cfg(test)]
+    STORE_LOCK_PARKS.with(|parks| parks.set(parks.get() + 1));
     let remaining = deadline.saturating_duration_since(Instant::now());
     std::thread::park_timeout(remaining.min(GRAPH_REPLAY_POOL_ACQUIRE_POLL));
     Ok(())
+}
+
+// Per-thread for the same reason as the replay-pool acquire observation:
+// parallel tests park on their own threads.
+#[cfg(test)]
+thread_local! {
+    static STORE_LOCK_PARKS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Park slices [`park_until_retry`] has taken on this thread.
+#[cfg(test)]
+pub(super) fn store_lock_park_count() -> usize {
+    STORE_LOCK_PARKS.with(Cell::get)
 }
 
 fn canonical_store_root(store_root: &Path) -> Result<PathBuf, CodeGenerationRetentionErrorV1> {
