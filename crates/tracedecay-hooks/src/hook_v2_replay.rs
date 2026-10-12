@@ -918,9 +918,9 @@ mod tests {
 
         // The owned record admits; the sibling's stays pending rather than
         // being judged against a binding it was never authorized under.
-        assert!(report.binding_unavailable);
-        assert_eq!(report.committed, 1);
         assert_eq!(pending_records(root.path(), now), 1);
+        assert_eq!(report.committed, 1);
+        assert!(report.binding_unavailable);
 
         publish_binding(root.path(), &sibling, now);
         let report = drain_host_spool_once(
