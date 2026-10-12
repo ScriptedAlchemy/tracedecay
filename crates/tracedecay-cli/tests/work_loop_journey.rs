@@ -1671,6 +1671,24 @@ exit 0
     );
     assert_eq!(resumed["state"], "running", "{resumed}");
 
+    let mut misplaced_synthesis = synthesis.clone();
+    misplaced_synthesis["start"] = start_attempt_body(
+        &fixture.project,
+        &attempt_identity(TASK_ID, PARALLEL_RUN_A, MISPLACED_ATTEMPT_ID),
+        admitted["execution_snapshot"].clone(),
+        SYNTHESIS_INSTRUCTIONS,
+        now_micros(),
+    );
+    let misplaced_synthesis = fixture.problem(
+        "synthesize a placed run outside its placement",
+        "/application/work/synthesize",
+        &misplaced_synthesis,
+    );
+    assert_eq!(
+        misplaced_synthesis["code"], "application.work-attempt.placement-root-conflict",
+        "a synthesis outside the admitted placement root must be refused: {misplaced_synthesis}"
+    );
+
     let synthesized = fixture.payload(
         "synthesize the parallel sources",
         "/application/work/synthesize",

@@ -705,9 +705,9 @@ fn require_first_run_admission(
     Err(WorkAttemptStorageError::RunAdmissionConflict)
 }
 
-/// An admitted managed placement binds where its run's attempts execute: an
+/// An admitted managed placement binds where its run's attempts execute. An
 /// attempt naming any other worktree root would write a tree the placement
-/// authority records as someone else's, or as untouched.
+/// authority does not record for this run.
 pub(crate) fn require_placement_root(
     transaction: &crate::exact_sql::ExactSqlTransaction,
     authority: &WorkAuthority,
