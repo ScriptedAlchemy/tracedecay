@@ -288,6 +288,40 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_first_creation_converges_on_one_identity() {
+        const CALLERS: usize = 8;
+        let temporary = tempfile::tempdir().unwrap();
+        for round in 0..32 {
+            let profile_root = temporary.path().join(format!("profile-{round}"));
+            let barrier = std::sync::Barrier::new(CALLERS);
+            let results = std::thread::scope(|scope| {
+                let callers = (0..CALLERS)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            barrier.wait();
+                            load_or_create(&profile_root).map_err(|error| error.to_string())
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                callers
+                    .into_iter()
+                    .map(|caller| caller.join().unwrap())
+                    .collect::<Vec<_>>()
+            });
+
+            let persisted = load_existing(&profile_root).unwrap();
+            for result in results {
+                assert_eq!(result, Ok(persisted.clone()), "round {round}");
+            }
+            assert_eq!(
+                std::fs::read_dir(&profile_root).unwrap().count(),
+                1,
+                "round {round} left a temporary file"
+            );
+        }
+    }
+
+    #[test]
     fn corrupt_identity_fails_closed_without_regeneration() {
         let temporary = tempfile::tempdir().unwrap();
         let profile_root = temporary.path().join("profile");
