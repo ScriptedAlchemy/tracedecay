@@ -10,21 +10,10 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use super::ProductionProjectCompositionHarnessV1;
-use super::journey_test_support::tool_answer;
+use super::journey_test_support::{initialize_project, tool_answer};
 
 const SETTING_KEY: &str = "telemetry.timings.v1";
 const ACCEPTED_KEY: &str = "configuration.idempotency.mcp-configuration-set";
-
-fn initialize_project(project: &Path) {
-    std::fs::create_dir_all(project.join("src")).expect("project source");
-    std::fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").expect("project source file");
-    let status = std::process::Command::new("git")
-        .current_dir(project)
-        .args(["init", "--quiet"])
-        .status()
-        .expect("initialize Git project");
-    assert!(status.success(), "Git project initialization failed");
-}
 
 struct McpAnswer {
     refused: bool,
