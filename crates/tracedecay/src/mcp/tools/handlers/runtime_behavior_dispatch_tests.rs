@@ -125,9 +125,13 @@ async fn runtime_reports_this_process_and_the_admitted_store_files() {
         observed_file_len(&with_suffix(&graph_db, "-shm"))
     );
     assert_eq!(database["journal_mode"], "wal");
-    // The telemetry query reads the admitted connection, whose SQLite default
-    // is FULL (2). That is not the writer lane's NORMAL (1).
-    assert_eq!(database["synchronous"], 2);
+    // The SQLite engine policy runs every connection at NORMAL (1); the native
+    // driver fixes FULL (2).
+    let engine_synchronous = match tracedecay_sql::ENGINE {
+        tracedecay_sql::Engine::Sqlite => 1,
+        tracedecay_sql::Engine::Native => 2,
+    };
+    assert_eq!(database["synchronous"], engine_synchronous);
     assert_eq!(database["quick_check_ok"], Value::Null);
     assert_eq!(database["quick_check_error"], Value::Null);
     assert_eq!(
