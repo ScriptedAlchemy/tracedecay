@@ -770,6 +770,43 @@ fn unresolvable_active_tree_falls_back_to_full_capture() {
     );
 }
 
+/// A checkout cannot read a symlink that loops or runs through a file, the
+/// same as a dangling one. Disk capture records it as absent instead of
+/// failing the capture of every other path in the repository.
+#[cfg(unix)]
+#[test]
+fn unfollowable_committed_source_links_are_absent_from_disk_capture() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn kept() -> u32 { 1 }\n")]);
+    for (target, link) in [
+        ("loop_b.rs", "src/loop_a.rs"),
+        ("loop_a.rs", "src/loop_b.rs"),
+        ("lib.rs/inner.rs", "src/through_file.rs"),
+    ] {
+        std::os::unix::fs::symlink(target, fixture.path().join(link)).expect("source symlink");
+    }
+    fixture.commit_all("unfollowable links");
+    let store = TempDir::new().expect("store root");
+    let scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+
+    let captured = scheduler
+        .capture_authoritative_snapshot_without_active_generation_reuse(None)
+        .expect("capture a checkout holding unfollowable links");
+
+    assert_eq!(
+        captured
+            .snapshot
+            .files
+            .iter()
+            .map(|file| file.logical_path.as_str())
+            .collect::<Vec<_>>(),
+        ["src/lib.rs"]
+    );
+}
+
 /// Git stores a committed source symlink as its target path, while the
 /// worktree reads through it. Sealing the link text from HEAD's tree left the
 /// first post-publication sweep disproving an unchanged checkout, so every

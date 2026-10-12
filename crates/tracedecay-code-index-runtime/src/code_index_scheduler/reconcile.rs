@@ -3824,7 +3824,9 @@ impl CodeIndexWorktreeSchedulerV1 {
         match absolute.metadata() {
             Ok(metadata) if !metadata.is_file() => return Ok(CapturedFileOutcomeV1::Absent),
             Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // A symlink the checkout cannot follow (dangling, looping, or
+            // through a file) has no bytes to capture, like a missing path.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound || absolute.is_symlink() => {
                 return Ok(CapturedFileOutcomeV1::Absent);
             }
             Err(error) => return Err(error.into()),

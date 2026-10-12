@@ -1364,10 +1364,6 @@ mod tests {
             ],
             "only source links that name a file in the tree are captured"
         );
-        // Disk capture still fails outright on a symlink loop (#3609).
-        for looping in ["src/loop_a.rs", "src/loop_b.rs"] {
-            std::fs::remove_file(root.join(looping)).expect("drop the loop from the checkout");
-        }
         assert_eq!(
             branch,
             present(
