@@ -74,6 +74,9 @@ pub enum HostBundleComponentArg {
     Core,
     Agent,
     ContextMcp,
+    /// Retired name of `context-mcp`, still accepted on the hosts that
+    /// offered it.
+    #[value(hide = true)]
     OperatorMcp,
 }
 
