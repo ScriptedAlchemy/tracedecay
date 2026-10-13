@@ -7,7 +7,7 @@ use asupersync::channel::watch;
 
 use tracedecay_store::{RuntimeMaintenanceStateV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
 
-use super::capacity::drain_and_close_physical;
+use super::capacity::{EvictionReservation, drain_and_close_physical};
 use super::{
     EvictingRuntime, RegistryEntry, StoreRuntimeKey, StoreRuntimeOwnerAttachment,
     StoreRuntimeRegistry, StoreRuntimeRegistryFailure,
@@ -85,6 +85,34 @@ impl Drop for CloseAttemptGuard {
     }
 }
 
+/// Completes one reserved shutdown eviction exactly once, inline when its
+/// settlement task never runs.
+struct ShutdownEviction {
+    registry: StoreRuntimeRegistry,
+    reservation: Option<EvictionReservation>,
+    outcomes: std::sync::mpsc::Sender<Result<(), StoreRuntimeRegistryFailure>>,
+}
+
+impl ShutdownEviction {
+    fn complete(&mut self) {
+        if let Some(reservation) = self.reservation.take() {
+            let outcome = self.registry.complete_eviction(reservation);
+            if let Err(std::sync::mpsc::SendError(Err(failure))) = self.outcomes.send(outcome) {
+                tracing::warn!(
+                    ?failure,
+                    "shutdown close failed after its waiter stopped waiting"
+                );
+            }
+        }
+    }
+}
+
+impl Drop for ShutdownEviction {
+    fn drop(&mut self) {
+        self.complete();
+    }
+}
+
 impl StoreRuntimeRegistry {
     /// Closes every mounted runtime that no lease, queued work, profile pin,
     /// or graph lease still holds, so each writer runs its shutdown TRUNCATE
@@ -152,46 +180,33 @@ impl StoreRuntimeRegistry {
             }
             (reservations, reserve_failure)
         };
-        let closes = reservations
-            .into_iter()
-            .map(|reservation| {
-                let registry = self.clone();
-                let (completion, receiver) = watch::channel(None);
-                let spawned = self.inner.operations.retain_blocking(move || {
-                    let result = registry.complete_eviction(reservation);
-                    if let Err(error) = completion.send(Some(result)) {
-                        tracing::error!(%error, "failed to publish registered runtime shutdown close");
-                    }
-                });
-                (spawned, receiver)
-            })
-            .collect::<Vec<_>>();
-        let closed = closes.len();
+        let closed = reservations.len();
         let mut first_failure = reserve_failure;
-        for (spawned, mut completion) in closes {
-            if let Err(error) = spawned {
+        let (outcomes, results) = std::sync::mpsc::channel();
+        for reservation in reservations {
+            let mut eviction = ShutdownEviction {
+                registry: self.clone(),
+                reservation: Some(reservation),
+                outcomes: outcomes.clone(),
+            };
+            // A refused closure is dropped unrun, and its eviction completes inline.
+            if let Err(error) = self
+                .inner
+                .operations
+                .retain_blocking(move || eviction.complete())
+            {
                 first_failure.get_or_insert(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
                     operation: "spawn shutdown close of idle registered runtimes",
                     message: error.to_string(),
                 });
-                continue;
             }
-            loop {
-                if let Some(result) = completion.borrow().clone() {
-                    if let Err(failure) = result {
-                        first_failure.get_or_insert(failure);
-                    }
-                    break;
-                }
-                if let Err(error) = completion.changed(&cx).await {
-                    first_failure.get_or_insert(
-                        StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                            operation: "join shutdown close of idle registered runtimes",
-                            message: error.to_string(),
-                        },
-                    );
-                    break;
-                }
+        }
+        drop(outcomes);
+        // Exact closes admitted before the idle scan settle on the same owner.
+        self.inner.operations.settled().await;
+        for outcome in results.try_iter() {
+            if let Err(failure) = outcome {
+                first_failure.get_or_insert(failure);
             }
         }
         first_failure.map_or(Ok(closed), Err)
@@ -874,6 +889,29 @@ mod tests {
 
         let proof = registry.close_exact(&binding, &authority).await.unwrap();
         assert_eq!(proof.binding(), &binding);
+        assert!(matches!(
+            registry.lookup(&binding),
+            StoreRuntimeLookup::Missing { .. }
+        ));
+        drop(profile);
+    }
+
+    #[asupersync::test]
+    async fn refused_shutdown_close_still_settles_its_reserved_runtime() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("runtime.db");
+        let (registry, profile, code, _authority) = mount_code_runtime(path.clone()).await;
+        let binding = code.binding().clone();
+        drop(code);
+
+        registry.inner.operations.begin_shutdown();
+        assert!(matches!(
+            registry.close_idle_for_shutdown().await,
+            Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "spawn shutdown close of idle registered runtimes",
+                ..
+            })
+        ));
         assert!(matches!(
             registry.lookup(&binding),
             StoreRuntimeLookup::Missing { .. }
