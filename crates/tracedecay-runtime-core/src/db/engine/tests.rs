@@ -451,6 +451,24 @@ async fn default_transaction_is_deferred_and_does_not_take_the_write_lock() {
 }
 
 #[asupersync::test]
+async fn health_snapshot_admits_once_a_concurrent_health_probe_releases_the_lane() {
+    let fixture = runtime_fixture();
+    let sibling = fixture.connection.health_read_snapshot().await.unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        drop(sibling);
+    });
+
+    let admitted = fixture.connection.health_read_snapshot().await;
+
+    release.join().unwrap();
+    assert!(
+        admitted.is_ok(),
+        "a health probe must wait out a bounded sibling probe on the reserved lane"
+    );
+}
+
+#[asupersync::test]
 async fn transaction_statement_batch_reports_the_exact_failed_statement() {
     let fixture = runtime_fixture();
     fixture
