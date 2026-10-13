@@ -743,6 +743,13 @@ fn node_revocation_keeps_replay_receipts_and_repeats_its_receipts() {
         .unwrap();
     let replayed = storage.state(&captured.event_id).unwrap();
     assert!(replayed.receipt.is_some());
+    let brain_id = BrainId::new("brain.remote").unwrap();
+    assert!(
+        storage
+            .status_at(&brain_id, UtcMicros(30))
+            .unwrap()
+            .has_active_enrollment
+    );
 
     let revoked = storage
         .revoke_node_enrollments(&enrollment.node_id, UtcMicros(30))
@@ -772,6 +779,13 @@ fn node_revocation_keeps_replay_receipts_and_repeats_its_receipts() {
         "a repeat keeps the first revocation"
     );
     assert_eq!(storage.state(&captured.event_id).unwrap(), replayed);
+    assert!(
+        !storage
+            .status_at(&brain_id, UtcMicros(40))
+            .unwrap()
+            .has_active_enrollment,
+        "a revoked enrollment no longer counts as configured"
+    );
 }
 
 #[test]

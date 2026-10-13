@@ -192,7 +192,7 @@ impl DaemonRemoteCredentialAuthorityV1 {
         {
             return RemoteOperationalStatusReadV1::Unconfigured;
         }
-        let enrollment_configured = !state.enrollments.is_empty();
+        let mut enrollment_configured = false;
         let mut pending_count = 0_u64;
         let mut quarantined_count = 0_u64;
         let mut has_sequence_gap = false;
@@ -207,6 +207,7 @@ impl DaemonRemoteCredentialAuthorityV1 {
                     quarantined_count =
                         quarantined_count.saturating_add(snapshot.quarantined_spool_items);
                     has_sequence_gap |= snapshot.has_sequence_gap;
+                    enrollment_configured |= snapshot.has_active_enrollment;
                     authorities.push(snapshot.authority);
                 }
                 Err(_) => coverage_complete = false,
