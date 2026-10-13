@@ -1480,7 +1480,9 @@ fn abandoning_an_attempt_a_terminal_transition_already_released_succeeds() {
             state: RemoteReplayStateV1::Rejected,
             receipt: None,
             last_attempt: attempt,
-        }
+            finding: Some(RemoteReplayFindingV1::EnrollmentRevoked),
+        },
+        "the spool reports the finding that settled the frame"
     );
 }
 
@@ -1646,6 +1648,7 @@ fn startup_releases_only_interrupted_attempt_markers_for_idempotent_retry() {
             state: RemoteReplayStateV1::Pending,
             receipt: None,
             last_attempt: 1,
+            finding: None,
         }
     );
     assert_eq!(

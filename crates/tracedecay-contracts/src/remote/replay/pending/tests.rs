@@ -254,6 +254,7 @@ impl Row {
             state: self.state,
             receipt: self.receipt.clone(),
             last_attempt: self.last_attempt,
+            finding: self.finding,
         }
     }
 }
@@ -922,5 +923,136 @@ fn a_single_replay_of_an_acknowledged_frame_still_checks_the_fence_and_credentia
     assert_eq!(
         authority.state(&frames[0].event_id),
         RemoteReplayStateV1::Acknowledged
+    );
+}
+
+#[test]
+fn a_single_replay_of_a_refused_frame_reports_its_stored_finding() {
+    let frames = frames(2);
+    let authority =
+        FakeAuthority::new(frames.clone(), BTreeSet::from([frames[0].event_id.clone()]));
+    let credential = OpaqueRemoteCredential::new(SECRET.to_vec()).unwrap();
+    replay_pending(&authority, "request.remote-replay-pending").unwrap();
+    {
+        let mut rows = authority.rows.lock().unwrap();
+        let row = rows.get_mut(&frames[1].event_id).unwrap();
+        row.state = RemoteReplayStateV1::Quarantined;
+        row.finding = Some(RemoteReplayFindingV1::PolicyChanged);
+    }
+    let row = |event_id: &str| {
+        let rows = authority.rows.lock().unwrap();
+        let row = &rows[event_id];
+        (row.state, row.finding, row.last_attempt, row.attempt_open)
+    };
+    let before = [row(&frames[0].event_id), row(&frames[1].event_id)];
+
+    for (frame, expected) in [
+        (
+            &frames[0],
+            json!({"outcome": "already_refused", "refusal": "rejected", "finding": "store_refused"}),
+        ),
+        (
+            &frames[1],
+            json!({"outcome": "already_refused", "refusal": "quarantined", "finding": "policy_changed"}),
+        ),
+    ] {
+        for request_id in [
+            "request.remote-replay-single",
+            "request.remote-replay-single-again",
+        ] {
+            let outcome = authority
+                .service()
+                .replay(
+                    &single_request(request_id, Some(fence(1)), &frame.event_id),
+                    &credential,
+                )
+                .expect("a single replay of a refused frame answers with its finding")
+                .outcome;
+            assert_eq!(
+                serde_json::to_value(&outcome).unwrap(),
+                expected,
+                "{request_id}"
+            );
+        }
+        let response = RemoteReplayProtocolAdapterV1::new(authority.service())
+            .execute(
+                single_request(
+                    "request.remote-replay-single-protocol",
+                    Some(fence(1)),
+                    &frame.event_id,
+                ),
+                OpaqueRemoteCredential::new(SECRET.to_vec()).unwrap(),
+            )
+            .unwrap();
+        let envelope = response
+            .result
+            .expect("the protocol answers a refused frame with a terminal outcome");
+        let ApplicationOutcome::Effect(effect) = envelope.outcome else {
+            panic!("a replay answers with an effect");
+        };
+        assert_eq!(
+            serde_json::to_value(effect.payload.as_ref().unwrap()).unwrap(),
+            expected
+        );
+        assert_eq!(
+            effect.receipt.committed_state.as_ref(),
+            Some(&effect.receipt.expected_state),
+            "a replay of a refused frame changes no state"
+        );
+    }
+
+    assert_eq!(authority.commits(), 1, "a refused frame never commits");
+    assert_eq!(
+        [row(&frames[0].event_id), row(&frames[1].event_id)],
+        before,
+        "a replay of a refused frame opens no attempt and leaves the row as it was"
+    );
+}
+
+#[test]
+fn a_single_replay_of_a_refused_frame_authenticates_before_it_reports_the_finding() {
+    let frames = frames(1);
+    let authority =
+        FakeAuthority::new(frames.clone(), BTreeSet::from([frames[0].event_id.clone()]));
+    replay_pending(&authority, "request.remote-replay-pending").unwrap();
+
+    let impostor = authority
+        .service()
+        .replay(
+            &single_request(
+                "request.remote-replay-single-impostor",
+                Some(fence(1)),
+                &frames[0].event_id,
+            ),
+            &OpaqueRemoteCredential::new([b'x'; 32].to_vec()).unwrap(),
+        )
+        .expect_err("an unauthenticated caller never reads the stored finding");
+    assert_eq!(
+        impostor,
+        RemoteReplayServiceErrorV1::Replay(RemoteReplayApplicationErrorV1::Authentication(
+            RemoteAuthenticationError::InvalidCredential
+        ))
+    );
+    let stale = authority
+        .service()
+        .replay(
+            &single_request(
+                "request.remote-replay-single-stale",
+                Some(fence(2)),
+                &frames[0].event_id,
+            ),
+            &OpaqueRemoteCredential::new(SECRET.to_vec()).unwrap(),
+        )
+        .expect_err("a stale fence refuses before the stored finding is reported");
+    assert!(
+        matches!(
+            stale,
+            RemoteReplayServiceErrorV1::ExpectedAuthorityMismatch(_)
+        ),
+        "{stale:?}"
+    );
+    assert_eq!(
+        authority.state(&frames[0].event_id),
+        RemoteReplayStateV1::Rejected
     );
 }

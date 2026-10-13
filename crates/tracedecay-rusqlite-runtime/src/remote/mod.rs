@@ -1025,7 +1025,7 @@ impl RemoteReplaySpoolPortV1 for RemoteSqliteStorageV1 {
     ) -> Result<RemoteReplaySpoolStateV1, RemoteCapturePersistenceErrorV1> {
         let rows = query(
             self.handle(),
-            "SELECT state, receipt_json, last_attempt
+            "SELECT state, receipt_json, last_attempt, finding
              FROM remote_spool_frames WHERE event_id = ?1",
             vec![text(event_id)],
         )
@@ -1049,7 +1049,7 @@ impl RemoteReplaySpoolPortV1 for RemoteSqliteStorageV1 {
                     .map_err(map_persistence_error)?;
                 let rows = transaction
                     .query(statement(
-                        "SELECT state, receipt_json, last_attempt, attempt_started_at
+                        "SELECT state, receipt_json, last_attempt, finding, attempt_started_at
                  FROM remote_spool_frames WHERE event_id = ?1",
                         vec![text(&transition.event_id)],
                     )?)
@@ -1058,7 +1058,7 @@ impl RemoteReplaySpoolPortV1 for RemoteSqliteStorageV1 {
                 let pre_state = decode_spool_state(row.clone())?;
                 if pre_state.state != transition.from
                     || pre_state.last_attempt != transition.replay_attempt
-                    || !matches!(row.values.get(3), Some(ExactSqlValue::Integer(_)))
+                    || !matches!(row.values.get(4), Some(ExactSqlValue::Integer(_)))
                 {
                     return Err(RemoteCapturePersistenceErrorV1::Corruption);
                 }
@@ -1068,6 +1068,7 @@ impl RemoteReplaySpoolPortV1 for RemoteSqliteStorageV1 {
                     state: transition.to,
                     receipt: transition.receipt.clone(),
                     last_attempt: transition.replay_attempt,
+                    finding: transition.finding,
                 };
                 let terminal_state_digest = canonical_sha256(&terminal_state)
                     .map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)?;

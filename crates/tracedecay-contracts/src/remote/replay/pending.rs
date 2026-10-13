@@ -80,7 +80,7 @@ pub enum RemoteReplayRefusalV1 {
 }
 
 impl RemoteReplayRefusalV1 {
-    const fn of(state: RemoteReplayStateV1) -> Option<Self> {
+    pub(super) const fn of(state: RemoteReplayStateV1) -> Option<Self> {
         match state {
             RemoteReplayStateV1::Rejected => Some(Self::Rejected),
             RemoteReplayStateV1::Quarantined => Some(Self::Quarantined),
