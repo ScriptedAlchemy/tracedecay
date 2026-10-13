@@ -649,6 +649,10 @@ impl MaintenanceCoordinator {
             Vec::new()
         };
         let project_graphs = administration.mounted_project_graphs().await;
+        #[cfg(any(test, feature = "test-helpers"))]
+        {
+            let _ = crate::test_support::hold_after_maintenance_listing_for_test().await;
+        }
         let (registered_projects, registry_listed) =
             match registered_project_stores(profile_root, profile_database).await {
                 Ok(stores) => (stores, true),
