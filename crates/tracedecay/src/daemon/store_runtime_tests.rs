@@ -729,6 +729,7 @@ impl ProvisionedWriterFixture {
                 &self.node_id,
                 self.writer.clone(),
                 crate::daemon::remote_protocol_tests::replay_policy(&self.writer.scope),
+                crate::daemon::remote_protocol_tests::query_policy(&self.writer.scope),
             )
             .await
     }

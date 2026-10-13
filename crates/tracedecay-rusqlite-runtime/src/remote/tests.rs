@@ -25,7 +25,10 @@ use tracedecay_contracts::remote::{
         RemoteCredentialUseV1,
     },
     protocol::RemoteProtocolRequestV1,
-    query::RemoteExactObservationQueryErrorV1,
+    query::{
+        RemoteExactObservationQueryErrorV1, RemoteQueryAuthorizationDecisionV1,
+        RemoteQueryAuthorizationPortV1, RemoteQueryPolicyRecordV1,
+    },
     replay::{
         RemoteReplayApplicationErrorV1, RemoteReplayCommitReceiptV1, RemoteReplayFindingV1,
         RemoteReplayFrameLookupPortV1, RemoteReplayPolicyDecisionV1,
@@ -338,11 +341,16 @@ fn enrollment_grant(secret: &[u8]) -> EnrollmentGrantV1 {
 }
 
 /// Provisions the writer's scope on this node, then publishes the writer
-/// with the replay policy that admits its frames.
+/// with the replay and query policies that admit its frames and their reads.
 fn publish_writer(storage: &RemoteSqliteStorageV1, writer: &RemoteWriterAuthorityV1) {
     provision_scope(storage, &writer.scope);
     storage
-        .publish_authority(writer, &replay_policy(&writer.scope), UtcMicros(10))
+        .publish_authority(
+            writer,
+            &replay_policy(&writer.scope),
+            &query_policy(&writer.scope),
+            UtcMicros(10),
+        )
         .unwrap();
 }
 
@@ -366,6 +374,39 @@ fn replay_policy(scope: &RemoteRepositoryScopeV1) -> RemoteReplayPolicyEvidenceV
     .unwrap();
     policy.repository_scope = scope.clone();
     policy
+}
+
+fn query_policy(scope: &RemoteRepositoryScopeV1) -> RemoteQueryPolicyRecordV1 {
+    let resolved = ResolvedScope::new(
+        scope.project_id.clone(),
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
+        scope.reference.clone(),
+    )
+    .unwrap();
+    let digest = ManifestDigest::new(format!("sha256:{}", "e".repeat(64))).unwrap();
+    RemoteQueryPolicyRecordV1 {
+        repository_scope: scope.clone(),
+        authority: AuthorityReceipt {
+            grant_id: CapabilityGrantId::new("grant.remote.query").unwrap(),
+            grant_revision: 1,
+            grant_digest: digest.clone(),
+            authorized_scope_digest: resolved.scope_digest.clone(),
+            disclosure: DisclosureClass::Evidence,
+            policy: PolicyDecisionRef::new(
+                "policy.remote.query",
+                1,
+                digest,
+                ComponentVersion::new("policy.remote.query.v1").unwrap(),
+            )
+            .unwrap(),
+            revalidated_at: UtcMicros(10),
+        },
+        scope: resolved,
+        policy_revision: 1,
+        decision: RemoteQueryAuthorizationDecisionV1::Allow,
+        revalidated_at: UtcMicros(10),
+    }
 }
 
 fn enrollment_admission(grant: &EnrollmentGrantV1) -> RemoteEnrollmentAdmissionEvidenceV1 {
@@ -1073,6 +1114,7 @@ fn writer_publication_seeds_one_provisioned_writer_and_refuses_rivals() {
     let storage = storage(&fixture);
     let writer = writer();
     let policy = replay_policy(&writer.scope);
+    let reads = query_policy(&writer.scope);
     let fence = &writer.authority.fence;
     let expected = tracedecay_contracts::remote::recovery::RecoveryAuthorityExpectationV1 {
         brain_id: fence.brain_id.as_str().to_owned(),
@@ -1084,7 +1126,7 @@ fn writer_publication_seeds_one_provisioned_writer_and_refuses_rivals() {
     };
 
     assert_eq!(
-        storage.publish_authority(&writer, &policy, UtcMicros(10)),
+        storage.publish_authority(&writer, &policy, &reads, UtcMicros(10)),
         Err(RemoteWriterPublicationErrorV1::ScopeNotProvisioned)
     );
     provision_scope(&storage, &writer.scope);
@@ -1093,13 +1135,17 @@ fn writer_publication_seeds_one_provisioned_writer_and_refuses_rivals() {
     let mut foreign_policy = policy.clone();
     foreign_policy.repository_scope.snapshot_id =
         tracedecay_domain::RepositoryStateSnapshotId::new("snapshot.foreign").unwrap();
+    let mut foreign_reads = reads.clone();
+    foreign_reads.repository_scope = foreign_policy.repository_scope.clone();
     assert_eq!(
         (
-            storage.publish_authority(&foreign_brain, &policy, UtcMicros(10)),
-            storage.publish_authority(&writer, &foreign_policy, UtcMicros(10)),
-            storage.publish_authority(&writer, &policy, UtcMicros(9)),
+            storage.publish_authority(&foreign_brain, &policy, &reads, UtcMicros(10)),
+            storage.publish_authority(&writer, &foreign_policy, &reads, UtcMicros(10)),
+            storage.publish_authority(&writer, &policy, &foreign_reads, UtcMicros(10)),
+            storage.publish_authority(&writer, &policy, &reads, UtcMicros(9)),
         ),
         (
+            Err(RemoteWriterPublicationErrorV1::InvalidWriter),
             Err(RemoteWriterPublicationErrorV1::InvalidWriter),
             Err(RemoteWriterPublicationErrorV1::InvalidWriter),
             Err(RemoteWriterPublicationErrorV1::InvalidWriter),
@@ -1110,28 +1156,55 @@ fn writer_publication_seeds_one_provisioned_writer_and_refuses_rivals() {
         Err(RemoteSqliteStorageErrorV1::WriterAuthorityUnpublished)
     ));
     assert_eq!(
-        storage.writer_publication_state(&writer, &policy, UtcMicros(10)),
+        storage.writer_publication_state(&writer, &policy, &reads, UtcMicros(10)),
         Ok(RemoteWriterPublicationStateV1::Unpublished)
+    );
+    let observation_id = admitted().observation.observation_id().clone();
+    let authorize = || {
+        storage.authorize(
+            &reads.scope,
+            &writer.scope,
+            &observation_id,
+            fence,
+            UtcMicros(12),
+        )
+    };
+    assert_eq!(
+        authorize().unwrap_err(),
+        RemoteExactObservationQueryErrorV1::PolicyUnavailable,
+        "an unpublished writer's reads have no policy"
     );
 
     storage
-        .publish_authority(&writer, &policy, UtcMicros(10))
+        .publish_authority(&writer, &policy, &reads, UtcMicros(10))
         .unwrap();
     storage
-        .publish_authority(&writer, &policy, UtcMicros(12))
+        .publish_authority(&writer, &policy, &reads, UtcMicros(12))
         .unwrap();
+    assert_eq!(
+        authorize().map(|evidence| (evidence.decision, evidence.authority)),
+        Ok((
+            RemoteQueryAuthorizationDecisionV1::Allow,
+            reads.authority.clone()
+        )),
+        "publication installs the query policy that admits reads of the writer's frames"
+    );
     let mut rival = writer.clone();
     rival.authority.fence.authority_node_id = BrainNodeId::new("node.rival").unwrap();
     let mut rival_policy = policy.clone();
     rival_policy.decision = RemoteReplayPolicyDecisionV1::Quarantine;
+    let mut rival_reads = reads.clone();
+    rival_reads.decision = RemoteQueryAuthorizationDecisionV1::Deny;
     assert_eq!(
         (
-            storage.writer_publication_state(&writer, &policy, UtcMicros(12)),
-            storage.publish_authority(&rival, &policy, UtcMicros(12)),
-            storage.publish_authority(&writer, &rival_policy, UtcMicros(12)),
+            storage.writer_publication_state(&writer, &policy, &reads, UtcMicros(12)),
+            storage.publish_authority(&rival, &policy, &reads, UtcMicros(12)),
+            storage.publish_authority(&writer, &rival_policy, &reads, UtcMicros(12)),
+            storage.publish_authority(&writer, &policy, &rival_reads, UtcMicros(12)),
         ),
         (
             Ok(RemoteWriterPublicationStateV1::Published),
+            Err(RemoteWriterPublicationErrorV1::Conflict),
             Err(RemoteWriterPublicationErrorV1::Conflict),
             Err(RemoteWriterPublicationErrorV1::Conflict),
         )

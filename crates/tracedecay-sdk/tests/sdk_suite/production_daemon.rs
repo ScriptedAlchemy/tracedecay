@@ -19,6 +19,9 @@ use tracedecay_contracts::remote::capture_protocol::RemoteCaptureRequestV1;
 use tracedecay_contracts::remote::protocol::{
     CurrentAuthorityRequestV1, EnrollmentRequestV1, RemoteProtocolRequestV1,
 };
+use tracedecay_contracts::remote::query::{
+    RemoteQueryAuthorizationDecisionV1, RemoteQueryPolicyRecordV1,
+};
 use tracedecay_contracts::remote::recovery::PromotionConfirmationV1;
 use tracedecay_contracts::remote::replay::{
     RemoteReplayPolicyDecisionV1, RemoteReplayPolicyEvidenceV1,
@@ -721,6 +724,7 @@ fn enrolled_node_fails_over_after_the_operator_publishes_the_first_writer() {
         "node_id": node_id,
         "writer": writer,
         "replay_policy": replay_policy(&grant.scope),
+        "query_policy": query_policy(&grant.scope),
     });
 
     let mut unregistered = publication.clone();
@@ -737,6 +741,7 @@ fn enrolled_node_fails_over_after_the_operator_publishes_the_first_writer() {
     let mut unprovisioned = publication.clone();
     unprovisioned["writer"]["scope"] = json!(unprovisioned_scope);
     unprovisioned["replay_policy"] = json!(replay_policy(&unprovisioned_scope));
+    unprovisioned["query_policy"] = json!(query_policy(&unprovisioned_scope));
     assert_eq!(
         local_post("/remote-nodes/writer-authority", &unprovisioned),
         (
@@ -958,6 +963,7 @@ fn a_laptop_profile_joins_a_desktop_brain_and_holds_its_exact_enrollment() {
             "node_id": node_id,
             "writer": writer,
             "replay_policy": replay_policy(&grant.scope),
+            "query_policy": query_policy(&grant.scope),
         }),
     );
     assert_eq!(status, reqwest::StatusCode::NO_CONTENT, "{body}");
@@ -1314,6 +1320,40 @@ pub(super) fn replay_policy(scope: &RemoteRepositoryScopeV1) -> RemoteReplayPoli
         catalog_digest: digest.clone(),
         privacy_digest: digest,
         revalidated_at: now_micros(),
+    }
+}
+
+pub(super) fn query_policy(scope: &RemoteRepositoryScopeV1) -> RemoteQueryPolicyRecordV1 {
+    let resolved = ResolvedScope::new(
+        scope.project_id.clone(),
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
+        scope.reference.clone(),
+    )
+    .unwrap();
+    let digest = ManifestDigest::new(format!("sha256:{}", "e".repeat(64))).unwrap();
+    let now = now_micros();
+    RemoteQueryPolicyRecordV1 {
+        repository_scope: scope.clone(),
+        authority: AuthorityReceipt {
+            grant_id: CapabilityGrantId::new("grant.remote-sdk-production.query").unwrap(),
+            grant_revision: 1,
+            grant_digest: digest.clone(),
+            authorized_scope_digest: resolved.scope_digest.clone(),
+            disclosure: DisclosureClass::Evidence,
+            policy: PolicyDecisionRef::new(
+                "policy.remote-sdk-production.query",
+                1,
+                digest,
+                ComponentVersion::new("policy.remote-sdk-production.query.v1").unwrap(),
+            )
+            .unwrap(),
+            revalidated_at: now,
+        },
+        scope: resolved,
+        policy_revision: 1,
+        decision: RemoteQueryAuthorizationDecisionV1::Allow,
+        revalidated_at: now,
     }
 }
 

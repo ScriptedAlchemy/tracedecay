@@ -31,7 +31,7 @@ use tracedecay_sdk::remote_client::EnrolledRemoteClient;
 
 use super::production_daemon::{
     Daemon, REMOTE_TLS_CERTIFICATE, REMOTE_TLS_PRIVATE_KEY, REMOTE_TLS_ROOT_CERTIFICATE,
-    enrollment_request, now_micros, remote_admission, remote_grant, replay_policy,
+    enrollment_request, now_micros, query_policy, remote_admission, remote_grant, replay_policy,
     spawn_remote_daemon, stop_daemon,
 };
 use crate::isolated_profile::apply_isolated_profile_env as isolated;
@@ -314,6 +314,7 @@ impl RemoteDaemonFixture {
                 "node_id": node_id,
                 "writer": writer,
                 "replay_policy": replay_policy(&writer.scope),
+                "query_policy": query_policy(&writer.scope),
             }),
         );
         assert_eq!(status, reqwest::StatusCode::NO_CONTENT, "{body}");
