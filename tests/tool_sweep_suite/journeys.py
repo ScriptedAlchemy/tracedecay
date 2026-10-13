@@ -305,6 +305,7 @@ _WORK_LIFECYCLE_EFFECTS = frozenset(
         "tracedecay_work_resume_run",
         "tracedecay_work_admit_placement",
         "tracedecay_work_release_placement",
+        "tracedecay_work_advance_job",
     }
 )
 
@@ -1457,6 +1458,14 @@ def _work_status_identity(
     return status
 
 
+def _work_job_payload(response: dict[str, Any]) -> dict[str, Any]:
+    """The one `advance_job` result, out of the MCP envelope around it."""
+    for value in objects(response):
+        if {"job", "performed", "state"} <= value.keys():
+            return value
+    raise JourneyError("advance_job omitted its job result")
+
+
 _WORK_ATTEMPT_TERMINAL_STATES = frozenset(
     {"succeeded", "failed", "timed_out", "cancelled"}
 )
@@ -2131,6 +2140,86 @@ def _prepare_work_effect_journey(
             if first_value(replacement, {"state"}) != "recovery_required":
                 raise JourneyError("retry replacement did not retain its recovery fence")
             return "runtime failure evidence/retry/recovery fence/replay verified"
+
+        return PreparedJourney(arguments, cleanup, "contained")
+
+    if name == "tracedecay_work_advance_job":
+        arguments = {
+            "job": f"sweep-{time.monotonic_ns()}",
+            "title": "Tool sweep guided job",
+            "base": {"reference": None, "commit": fixture["commit"]},
+            "effect_state": "observational",
+            "tasks": [
+                {
+                    "key": "source",
+                    "title": "Tool sweep guided source",
+                    "instructions": (
+                        "Read Cargo.toml with Bash built-ins only, then report its package name "
+                        "in one sentence. External commands are unavailable; make no changes."
+                    ),
+                    "placement": {
+                        "kind": "no_managed_placement",
+                        "root": None,
+                        "network_free": True,
+                        "in_place_acknowledged": False,
+                    },
+                }
+            ],
+            "synthesis": {
+                "task": "source",
+                "output_name": "inspection",
+                "instructions": "Synthesize the exact source evidence.",
+            },
+        }
+
+        def cleanup(response: dict[str, Any]) -> str:
+            job = _work_job_payload(response)
+            performed = [record["step"] for record in job["performed"]]
+            ends_at = time.monotonic() + 180
+            while job["state"]["state"] in {"advancing", "waiting"}:
+                if time.monotonic() >= ends_at:
+                    raise JourneyError(f"guided job did not settle: {job['state']!r}"[:2_000])
+                if job["state"]["state"] == "waiting":
+                    time.sleep(1)
+                job = _work_job_payload(call(name, arguments, deadline(name)))
+                performed.extend(record["step"] for record in job["performed"])
+            if job["state"]["state"] != "completed":
+                sources = [
+                    {
+                        key: attempt.get(key)
+                        for attempt in objects(
+                            call(
+                                "tracedecay_work_attempt_status",
+                                task["source"],
+                                deadline("tracedecay_work_attempt_status"),
+                            )
+                        )
+                        if "terminal" in attempt and "execution" in attempt
+                        for key in ("identity", "state", "terminal", "artifacts")
+                    }
+                    for task in job["job"]["tasks"]
+                ]
+                raise JourneyError(
+                    f"guided job did not complete: {job['state']!r}; sources: {sources!r}"[:6_000]
+                )
+            expected = [
+                {"step": step, "task": "source"}
+                for step in (
+                    "create_task",
+                    "accept_proposal",
+                    "admit_execution",
+                    "admit_placement",
+                    "start_source",
+                )
+            ] + [{"step": "synthesize"}, {"step": "release_placement", "task": "source"}]
+            if performed != expected:
+                raise JourneyError(f"guided job ran other steps: {performed!r}"[:2_000])
+            if job["state"]["synthesis"]["identity"] != job["job"]["synthesis"]:
+                raise JourneyError("guided job completed a different synthesis attempt")
+            replay = _work_job_payload(call(name, arguments, deadline(name)))
+            if replay["performed"] or replay["state"] != job["state"]:
+                raise JourneyError("a settled guided job did not converge on replay")
+            return "guided create/accept/admit/place/start/synthesize/release and replay verified"
 
         return PreparedJourney(arguments, cleanup, "contained")
 
