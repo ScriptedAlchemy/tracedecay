@@ -302,6 +302,18 @@ pub enum Commands {
         /// repository away from `.git/hooks`. Never prompts.
         #[arg(long)]
         git_hook: bool,
+        /// List only this catalog profile's tools in the agent's MCP server
+        /// (`default`, `compact`, `administrative`, `host-limited`). Saved for the
+        /// agent; later installs, reinstalls, and updates keep it until
+        /// `--catalog-profile default` resets it.
+        #[arg(
+            long,
+            value_name = "NAME",
+            requires = "agent",
+            conflicts_with = "local",
+            value_parser = crate::serve_cmd::parse_catalog_profile
+        )]
+        catalog_profile: Option<tracedecay_contracts::catalog_composition::CatalogProfileName>,
     },
     /// Refresh settings for all already-installed agents
     #[command(long_about = REINSTALL_LONG_ABOUT, after_help = REINSTALL_AFTER_HELP)]

@@ -314,6 +314,7 @@ fn explicit_agent_config_commands_skip_startup_maintenance() {
         no_dashboard: false,
         automation: false,
         git_hook: false,
+        catalog_profile: None,
     }));
     assert!(should_skip_startup_maintenance(&Commands::Reinstall {
         local: false,
@@ -533,6 +534,7 @@ fn agent_install_health_check_is_selective() {
         no_dashboard: false,
         automation: false,
         git_hook: false,
+        catalog_profile: None,
     }));
     assert!(should_skip_agent_install_check(&Commands::Reinstall {
         local: false,

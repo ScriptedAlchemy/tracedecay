@@ -32,6 +32,22 @@ impl From<CatalogProfileName> for ServeArgs {
 }
 
 impl ServeArgs {
+    /// Parses one agent's saved short name against the catalog's own MCP
+    /// profiles. A name the catalog no longer has is an error naming the reset
+    /// command, never a silent default.
+    pub fn parse_saved(
+        agent: &str,
+        name: &str,
+        catalog: &CatalogSnapshotV1,
+    ) -> std::result::Result<Self, HostCatalogProfileError> {
+        CatalogProfileName::parse(catalog, name)
+            .map(Self::from)
+            .map_err(|source| HostCatalogProfileError {
+                agent: agent.to_owned(),
+                source,
+            })
+    }
+
     pub fn catalog_profile(&self) -> Option<&CatalogProfileName> {
         self.catalog_profile.as_ref()
     }
@@ -140,9 +156,7 @@ pub struct HostCatalogProfileError {
 }
 
 impl HostCatalogProfiles {
-    /// Parses saved short names against the catalog's own MCP profiles. A
-    /// name the catalog no longer has is an error naming the reset command,
-    /// never a silent default.
+    /// Parses every saved entry with [`ServeArgs::parse_saved`].
     pub fn parse(
         saved: &BTreeMap<String, String>,
         catalog: &CatalogSnapshotV1,
@@ -150,12 +164,7 @@ impl HostCatalogProfiles {
         saved
             .iter()
             .map(|(agent, name)| {
-                CatalogProfileName::parse(catalog, name)
-                    .map(|name| (agent.clone(), ServeArgs::from(name)))
-                    .map_err(|source| HostCatalogProfileError {
-                        agent: agent.clone(),
-                        source,
-                    })
+                ServeArgs::parse_saved(agent, name, catalog).map(|args| (agent.clone(), args))
             })
             .collect::<std::result::Result<_, _>>()
             .map(Self)
