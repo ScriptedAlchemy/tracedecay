@@ -19,7 +19,7 @@ export const DELIVERY_MODES = ['inbox', 'umbrella', 'journey', 'review'] as cons
 export type DeliveryMode = (typeof DELIVERY_MODES)[number];
 
 export const DELIVERY_LAYOUTS = ['field', 'table'] as const;
-export type DeliveryLayout = (typeof DELIVERY_LAYOUTS)[number];
+type DeliveryLayout = (typeof DELIVERY_LAYOUTS)[number];
 
 export interface DeliveryLocation {
   readonly mode: DeliveryMode;
@@ -129,13 +129,6 @@ export function writeDeliveryLocation(
   if (patch.check !== undefined) set(PARAMS.check, patch.check);
   if (patch.lane !== undefined) set(PARAMS.lane, patch.lane);
   return next;
-}
-
-/** A full `/delivery?…` href for a patch over the current location, the
- * anchor form of `writeDeliveryLocation`, for links rather than handlers. */
-export function deliveryHref(current: URLSearchParams, patch: DeliveryLocationPatch): string {
-  const query = writeDeliveryLocation(current, patch).toString();
-  return query === '' ? '/delivery' : `/delivery?${query}`;
 }
 
 export function modeLabel(mode: DeliveryMode): string {

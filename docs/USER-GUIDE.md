@@ -1012,7 +1012,8 @@ counter payload. The counter service still receives ordinary transport metadata
 such as the source IP and may derive aggregate geography from it; submitting an
 aggregate count is not an anonymity guarantee.
 
-This powers the "Worldwide" counter shown in `tracedecay status` only when the counter is enabled.
+`tracedecay status` does not display the counter. When you opt in, `tracedecay doctor`
+reads the public total only to report whether the counter service is reachable.
 
 **To opt in:**
 
@@ -1249,7 +1250,7 @@ tracedecay memory status --path /path/to/project --json
 
 Created in your home directory. Contains:
 
-- `config.toml`, user preferences (upload opt-in/out, cached version info, pending upload count)
+- `config.toml`, user preferences (cached version info, pending upload count)
 - `global.db`, daemon-owned registry/usage metadata for enrolled projects; it is
   not a fact authority and clients never open it directly
 - `projects/<project_id>/`, daemon-owned project authority data when profile storage is enabled
@@ -1257,12 +1258,12 @@ Created in your home directory. Contains:
 The `config.toml` is plain TOML and fully transparent:
 
 ```toml
-upload_enabled = false      # set to true to opt in to counter upload/read
 pending_upload = 4823       # tokens waiting to be uploaded
 last_upload_at = 1711375200 # last successful upload timestamp
-last_worldwide_total = 1000000
-last_worldwide_fetch_at = 1711375200
 ```
+
+The upload opt-in is the `user.upload_enabled.v1` setting, not a key in this
+file.
 
 #### Mandatory structured sanitization of ingested transcripts
 

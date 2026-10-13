@@ -1,5 +1,6 @@
 import type { SseEventEnvelope } from './types.ts';
 import { createSseReducer, type SseReducer } from './reducer.ts';
+import { isRecord } from '../query/responseBody.ts';
 
 const DASHBOARD_EVENT_NAMES = [
   'heartbeat',
@@ -260,10 +261,6 @@ function parseScopeProjectId(scope: string): string | null {
 function streamGeneration(runId: string): number {
   const epoch = Number(runId.split('-').at(-1));
   return Number.isSafeInteger(epoch) && epoch >= 0 ? epoch : 0;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function isRevision(value: unknown): value is number {

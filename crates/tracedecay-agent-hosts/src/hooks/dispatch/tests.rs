@@ -965,7 +965,7 @@ async fn events_spooled_before_a_binding_republication_replay_after_it() {
         &tracedecay_hooks::hook_v2_spool_root(&layout.data_root, host),
         HookSpoolConfigV1::stock(host),
         project_id,
-        Some(&binding),
+        &mut |_| Some(binding.clone()),
         now,
         |_, _| std::future::ready(tracedecay_hooks::HookReplayAdmissionOutcomeV1::Admitted),
     )

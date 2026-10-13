@@ -15,8 +15,8 @@ export type CostsRange = 'today' | '7d' | '30d' | 'all';
 
 export const COSTS_RANGES: readonly CostsRange[] = ['today', '7d', '30d', 'all'];
 
-export const COSTS_RANGE_PARAM = 'range';
-export const COSTS_PROVIDER_PARAM = 'provider';
+const COSTS_RANGE_PARAM = 'range';
+const COSTS_PROVIDER_PARAM = 'provider';
 
 export function costsRangeLabel(range: CostsRange): string {
   switch (range) {
@@ -54,7 +54,7 @@ export function costsRangeNote(range: CostsRange): string {
   }
 }
 
-export function asCostsRange(value: string | null): CostsRange {
+function asCostsRange(value: string | null): CostsRange {
   switch (value) {
     case 'today':
     case '7d':
@@ -67,7 +67,7 @@ export function asCostsRange(value: string | null): CostsRange {
   }
 }
 
-export interface CostsQuery {
+interface CostsQuery {
   range: CostsRange;
   /** The scoped provider, or `null` for every provider. */
   provider: string | null;

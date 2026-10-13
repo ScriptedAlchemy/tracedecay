@@ -27,7 +27,7 @@ export type EvidenceGrade =
   | 'unavailable';
 
 /** Where a record was persisted or observed. Orthogonal to the grade. */
-export type SourceClass =
+type SourceClass =
   | 'session'
   | 'transcript'
   | 'parentage'
@@ -124,7 +124,7 @@ export interface JourneyEvent {
   readonly linkedEventId?: string;
 }
 
-export type JourneyRelationKind = 'spawn' | 'handoff' | 'rejoin' | 'result';
+type JourneyRelationKind = 'spawn' | 'handoff' | 'rejoin' | 'result';
 
 /** A named directed relation between two lanes. */
 export interface JourneyRelation {
@@ -142,7 +142,7 @@ export interface JourneyRelation {
   readonly fromEventId?: string;
 }
 
-export type JourneyGapKind =
+type JourneyGapKind =
   | 'parent_outside_page'
   | 'parent_cycle'
   | 'parentage_conflict'
@@ -162,7 +162,7 @@ export interface JourneyGap {
   readonly detail: string;
 }
 
-export type JourneyIntervalKind = 'git_span' | 'proximity';
+type JourneyIntervalKind = 'git_span' | 'proximity';
 
 /** A timed segment on a lane: a branch/worktree activity span, or a proximity
  * encounter interval on one participant. */
@@ -242,7 +242,7 @@ export interface RevealBoundary {
   readonly sequence: number;
 }
 
-export interface BranchState {
+interface BranchState {
   /** Lanes the reader explicitly collapsed. */
   readonly collapsed: ReadonlySet<string>;
   /** Lanes the reader explicitly expanded on a dense page. */
@@ -323,7 +323,7 @@ export interface SceneNode {
   readonly halfHit: number;
 }
 
-export type ScenePathKind =
+type ScenePathKind =
   | 'lane'
   | 'spawn'
   | 'handoff'
@@ -440,7 +440,7 @@ export interface SceneCursor {
   readonly xBasis: XBasis;
 }
 
-export interface SceneCounts {
+interface SceneCounts {
   readonly lanesTotal: number;
   readonly lanesVisible: number;
   readonly lanesCollapsed: number;

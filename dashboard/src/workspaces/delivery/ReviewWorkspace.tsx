@@ -15,9 +15,9 @@ import {
   IdentityRow,
   ReadOnlyProviderBadge,
   UnavailableControl,
-  microsToIso,
   shortSha,
 } from './deliveryChrome.tsx';
+import { formatMicrosUtc } from '../../ui/format.ts';
 import { projectFor } from './inboxFilter.ts';
 import { ProjectionLedger, overviewReadState } from './ProjectionLedger.tsx';
 import {
@@ -289,7 +289,7 @@ function SelectedThread({ thread }: { thread: ReviewThread }) {
         <IdentityRow label="review" value={latest.review_id ?? '—'} />
         <IdentityRow label="author class" value={latest.author_class.replaceAll('_', ' ')} />
         <IdentityRow label="review state" value={latest.review_state.replaceAll('_', ' ')} />
-        <IdentityRow label="observed (UTC)" value={microsToIso(latest.observed_at_micros)} />
+        <IdentityRow label="observed (UTC)" value={formatMicrosUtc(latest.observed_at_micros)} />
         <IdentityRow label="anchor" value={threadAnchor(latest)} />
         <IdentityRow label="original line" value={latest.original_line === null ? '—' : String(latest.original_line)} />
         <IdentityRow label="version digest" value={latest.version_digest} />
@@ -344,7 +344,7 @@ function SelectedCheck({ row, head }: { row: CheckRow; head: ReviewHead }) {
         <IdentityRow label="job status" value={`${check.job_status} · ${check.job_conclusion ?? '—'}`} />
         <IdentityRow label="check status" value={`${check.check_status} · ${check.check_conclusion ?? '—'}`} />
         <IdentityRow label="failure" value={`${check.failure_kind.replaceAll('_', ' ')}${check.failed_step === null ? '' : ` · ${check.failed_step}`}`} />
-        <IdentityRow label="observed (UTC)" value={microsToIso(check.observed_at_micros)} />
+        <IdentityRow label="observed (UTC)" value={formatMicrosUtc(check.observed_at_micros)} />
         <IdentityRow label="provider head" value={shortSha(check.provider_head_commit)} />
       </div>
       <div>
@@ -419,7 +419,7 @@ function ThreadsTable({ model }: { model: ReviewModel }) {
                     <GradeMark grade={thread.grade} source="review" />
                   </td>
                   <td className="px-3 py-2 font-mono text-3xs text-text-muted">
-                    {microsToIso(thread.latest.observed_at_micros)}
+                    {formatMicrosUtc(thread.latest.observed_at_micros)}
                   </td>
                   <td className="px-3 py-2">
                     {thread.latest.source_url === null ? (

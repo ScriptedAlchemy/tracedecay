@@ -21,32 +21,20 @@
 //! chunks as ordinary edits.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    ChunkerRevision, CodeGenerationId, CodeGenerationManifestV1, CodeSearchChunkId,
-    CodeSearchChunkV1, ComponentVersion, ContentDigest, ExtractorRevision, FileOccurrenceId,
-    GenerationSealV1, GrammarRevision, LanguageId, LanguageRegistryRevision, ManifestDigest,
-    PrivacyDomainId, ProjectId, RepositoryId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
-    SnapshotFileDispositionV1, UtcMicros, canonical_sha256, sha256_hex_suffix,
+    ChunkerRevision, CodeGenerationId, CodeGenerationManifestV1, ComponentVersion, ContentDigest,
+    ExtractorRevision, FileOccurrenceId, GenerationSealV1, GrammarRevision, LanguageId,
+    LanguageRegistryRevision, ManifestDigest, PrivacyDomainId, ProjectId, RepositoryId,
+    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SnapshotFileDispositionV1, UtcMicros,
+    canonical_sha256, sha256_hex_suffix,
 };
 
 use super::capabilities::expected_seal_digest;
 use super::intake::{INTAKE_DIGEST_SEPARATOR, ValidatedCodeSnapshotV1};
 use super::languages::LanguageRegistry;
-use crate::chunks::CodeSearchDocumentV1;
-
-/// A chunk-to-generation binding asserted by the index. Every eligible
-/// chunk names exactly one code generation and file occurrence.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(deny_unknown_fields)]
-pub struct ChunkGenerationBindingV1 {
-    pub chunk_id: CodeSearchChunkId,
-    pub generation_id: CodeGenerationId,
-    pub file_occurrence_id: FileOccurrenceId,
-}
 
 /// Identity of this deterministic generation planner, recorded on every seal.
 pub const GENERATION_PLANNER_ID: &str = "code-index-generation-planner.v1";
@@ -667,81 +655,9 @@ pub(crate) fn placeholder_digest() -> ManifestDigest {
         .expect("a zeroed sha256 digest is canonical")
 }
 
-/// Generation-aware join failures (Plan 25: consumers reject mixed-generation
-/// inputs before candidate production).
-#[derive(Clone, Debug, Error, PartialEq, Eq)]
-pub enum GenerationJoinErrorV1 {
-    #[error("the generation manifest is not sealed")]
-    UnsealedGeneration,
-    #[error("a document or chunk belongs to a different generation or file occurrence")]
-    CrossGeneration,
-    #[error("chunk {0} is not declared by the generation document")]
-    UndeclaredChunk(CodeSearchChunkId),
-    #[error("chunk {0} is joined more than once")]
-    DuplicateChunk(CodeSearchChunkId),
-}
-
-/// Join one generation-bound document's chunks to a sealed generation
-/// manifest, producing the canonical chunk-to-generation bindings (Plan 25:
-/// every eligible chunk names exactly one code generation and file
-/// occurrence). Cross-generation documents or chunks, undeclared chunks, and
-/// duplicates are typed rejections, never silently joined.
-#[tracing::instrument(name = "code_index.build.generation_join", level = "trace", skip_all)]
-pub fn join_chunks_to_generation(
-    generation: &CodeGenerationManifestV1,
-    document: &CodeSearchDocumentV1,
-    chunks: &[Arc<CodeSearchChunkV1>],
-) -> Result<Vec<ChunkGenerationBindingV1>, GenerationJoinErrorV1> {
-    generation
-        .validate()
-        .map_err(|_| GenerationJoinErrorV1::UnsealedGeneration)?;
-    let expected =
-        expected_seal_digest(generation).map_err(|_| GenerationJoinErrorV1::UnsealedGeneration)?;
-    if generation.seal.expected_digest != expected {
-        return Err(GenerationJoinErrorV1::UnsealedGeneration);
-    }
-    // Document generation_id is extraction provenance. The join binds chunks to
-    // the sealed serving generation named by `generation`.
-    document
-        .generation_id
-        .validate()
-        .map_err(|_| GenerationJoinErrorV1::CrossGeneration)?;
-
-    let declared: BTreeSet<&CodeSearchChunkId> = document.chunk_ids.iter().collect();
-    let mut seen = BTreeSet::new();
-    let mut bindings = Vec::with_capacity(chunks.len());
-    for chunk in chunks {
-        if chunk.anchor.file_occurrence_id != document.file_occurrence_id
-            || chunk.anchor.generation_id != document.generation_id
-        {
-            return Err(GenerationJoinErrorV1::CrossGeneration);
-        }
-        if !declared.contains(&chunk.id) {
-            return Err(GenerationJoinErrorV1::UndeclaredChunk(chunk.id.clone()));
-        }
-        if !seen.insert(chunk.id.clone()) {
-            return Err(GenerationJoinErrorV1::DuplicateChunk(chunk.id.clone()));
-        }
-        bindings.push(ChunkGenerationBindingV1 {
-            chunk_id: chunk.id.clone(),
-            generation_id: generation.generation_id.clone(),
-            file_occurrence_id: document.file_occurrence_id.clone(),
-        });
-    }
-    bindings.sort();
-    Ok(bindings)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay_domain::{
-        BoundedSanitizedText, CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1,
-        LanguageDescriptorRevision, PolicyRevisionId, SensitivityDecision, SensitivityLevelV1,
-        SourceSpan,
-    };
-
-    use crate::chunks::CodeSearchEligibilityV1;
     use crate::languages::StaticLanguageRegistry;
     use tracedecay_domain::LanguageDescriptorV1;
 
@@ -1055,102 +971,6 @@ mod tests {
         assert_eq!(
             plan.rebuild_triggers,
             vec![RebuildTriggerV1::PrivacyKeyEpoch]
-        );
-    }
-
-    fn chunk(id_str: &str, generation: &CodeGenerationId, file: &str) -> Arc<CodeSearchChunkV1> {
-        Arc::new(CodeSearchChunkV1 {
-            id: id(id_str),
-            anchor: CodeSearchChunkAnchorV1 {
-                generation_id: generation.clone(),
-                file_occurrence_id: id(file),
-                symbol_occurrence_id: None,
-                parent_chunk_id: None,
-                source_span: SourceSpan {
-                    start_byte: 0,
-                    end_byte: 4,
-                },
-                grain: CodeSearchChunkGrainV1::FileWindow,
-                ordinal: 0,
-            },
-            content_digest: digest('a'),
-            language_descriptor_revision: LanguageDescriptorRevision::new("descriptor.rust.v1")
-                .expect("valid id"),
-            chunker_revision: id("chunker.v1"),
-            sanitizer_revision: id("sanitizer.v1"),
-            sensitivity: SensitivityDecision {
-                level: SensitivityLevelV1::Public,
-                policy_revision: PolicyRevisionId::new("policy.v1").expect("valid id"),
-            },
-            exact_terms: vec![],
-            subtokens: vec![],
-            sanitized_text: BoundedSanitizedText::new("text").expect("bounded text"),
-        })
-    }
-
-    #[test]
-    fn generation_aware_join_rejects_cross_generation_undeclared_and_duplicate() {
-        let planner = planner();
-        let snapshot = validated(two_file_snapshot());
-        let generation = planner
-            .plan_generation(&snapshot, None, UtcMicros(3_000))
-            .expect("sealed generation");
-        let other_generation = planner
-            .plan_generation(&snapshot, Some(&generation), UtcMicros(4_000))
-            .expect("other sealed generation");
-        let document = CodeSearchDocumentV1 {
-            generation_id: generation.generation_id.clone(),
-            file_occurrence_id: id("file.a"),
-            content_digest: digest('a'),
-            eligibility: CodeSearchEligibilityV1::Eligible,
-            chunk_ids: vec![id("chunk.v1.one")],
-        };
-        let matching = chunk("chunk.v1.one", &generation.generation_id, "file.a");
-
-        // A chunk anchored to another generation never joins.
-        let foreign_chunk = chunk("chunk.v1.one", &other_generation.generation_id, "file.a");
-        assert_eq!(
-            join_chunks_to_generation(&generation, &document, &[foreign_chunk]),
-            Err(GenerationJoinErrorV1::CrossGeneration)
-        );
-
-        // A document from another generation never joins.
-        let foreign_document = CodeSearchDocumentV1 {
-            generation_id: other_generation.generation_id.clone(),
-            ..document.clone()
-        };
-        assert_eq!(
-            join_chunks_to_generation(
-                &generation,
-                &foreign_document,
-                std::slice::from_ref(&matching)
-            ),
-            Err(GenerationJoinErrorV1::CrossGeneration)
-        );
-
-        // A chunk the document does not declare never joins.
-        let undeclared = chunk("chunk.v1.two", &generation.generation_id, "file.a");
-        assert_eq!(
-            join_chunks_to_generation(&generation, &document, &[undeclared]),
-            Err(GenerationJoinErrorV1::UndeclaredChunk(id("chunk.v1.two")))
-        );
-
-        // A chunk joined twice is a duplicate.
-        assert_eq!(
-            join_chunks_to_generation(
-                &generation,
-                &document,
-                &[matching.clone(), matching.clone()]
-            ),
-            Err(GenerationJoinErrorV1::DuplicateChunk(id("chunk.v1.one")))
-        );
-
-        // An unsealed generation never joins.
-        let mut unsealed = generation.clone();
-        unsealed.seal.expected_digest = manifest_digest('9');
-        assert_eq!(
-            join_chunks_to_generation(&unsealed, &document, &[matching]),
-            Err(GenerationJoinErrorV1::UnsealedGeneration)
         );
     }
 }

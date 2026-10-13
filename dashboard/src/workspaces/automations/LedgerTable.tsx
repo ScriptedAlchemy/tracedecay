@@ -200,7 +200,7 @@ export function ToneWord({
   );
 }
 
-export function ToneLamp({ tone, className }: { tone: Tone; className?: string }) {
+function ToneLamp({ tone, className }: { tone: Tone; className?: string }) {
   switch (tone.pattern) {
     case 'hatched':
       return (

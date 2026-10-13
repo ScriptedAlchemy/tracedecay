@@ -352,6 +352,36 @@ fn reader_startup_recovers_a_retained_wal_before_reporting_ready() {
     );
 }
 
+#[test]
+fn reader_startup_defers_schema_parsing_to_the_first_read() {
+    let store = TestStore::new();
+    // A schema entry SQLite cannot parse makes every schema load fail, so it
+    // shows exactly when a reader parses the schema.
+    Connection::open(&store.path)
+        .unwrap()
+        .execute_batch(
+            "PRAGMA writable_schema = ON;
+             UPDATE sqlite_schema SET sql = 'CREATE TABLE markers(' WHERE name = 'markers';",
+        )
+        .unwrap();
+
+    let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor)
+        .expect("starting a reader must not parse the schema");
+
+    let read = request(&store.binding, OperationPriorityV1::Foreground);
+    let probe = Probe::for_request(&read);
+    let mut lease = pool
+        .acquire(&read, &probe, Duration::from_millis(20))
+        .unwrap();
+    let error = lease
+        .begin_snapshot()
+        .unwrap()
+        .execute(read.clone(), &probe)
+        .expect_err("the first read parses the schema");
+    let error = format!("{error:?}");
+    assert!(error.contains("malformed database schema"), "{error}");
+}
+
 #[cfg(unix)]
 #[test]
 fn pinned_reader_accepts_an_equivalent_hard_link_spelling() {

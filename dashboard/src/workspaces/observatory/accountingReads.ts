@@ -12,7 +12,7 @@ import type { EnvelopeResult } from '../../data/query/envelope.ts';
  * prevents one panel from calling a later watermark its own while another is
  * still explaining an earlier one.
  */
-export interface AccountingRead<T> {
+interface AccountingRead<T> {
   readonly result: EnvelopeResult<T> | undefined;
   readonly pending: boolean;
   readonly refreshing: boolean;

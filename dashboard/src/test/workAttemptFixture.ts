@@ -123,7 +123,7 @@ const EXECUTION_SNAPSHOT = {
   topology: TOPOLOGY,
 };
 
-export interface WorkAttemptSpec {
+interface WorkAttemptSpec {
   readonly taskId: string;
   readonly runId: string;
   readonly attemptId: string;

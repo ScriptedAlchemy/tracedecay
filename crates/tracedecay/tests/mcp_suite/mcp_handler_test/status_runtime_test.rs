@@ -9,8 +9,6 @@ use std::process::Command;
 #[cfg(feature = "test-transport")]
 use tempfile::TempDir;
 #[cfg(feature = "test-transport")]
-use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
-#[cfg(feature = "test-transport")]
 use tracedecay_sessions::admission::HostAdmissionScope;
 #[cfg(feature = "test-transport")]
 use tracedecay_sessions::runtime::SessionRecord;
@@ -372,7 +370,7 @@ async fn test_runtime_snapshot_runs_authority_audit_only_when_requested() {
                 .success()
         );
     }
-    let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
+    let harness = crate::support::seeded_composition::open(isolation.path(), [project.clone()])
         .await
         .unwrap();
     let response = harness

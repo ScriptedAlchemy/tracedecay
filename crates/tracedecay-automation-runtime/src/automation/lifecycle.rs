@@ -5,13 +5,14 @@ use std::{
 };
 
 use serde_json::{Value, json};
+use tracedecay_automation::backend::extract_json_object_prefix;
 use tracedecay_contracts::retained_surfaces::AutomationSkipReasonV1;
 
 use super::artifacts::{sha256_json, write_improvement_artifacts};
 use super::backend::{
     AgentTaskError, AgentTaskFailureClass, AgentTaskKind, AgentTaskRequest, AgentTaskResponse,
-    AgentTaskRetryReport, BackendRetryPolicy, agent_task_contract, extract_json_object_prefix,
-    prompt_version, run_agent_task_with_retry_report, task_key,
+    AgentTaskRetryReport, BackendRetryPolicy, agent_task_contract, prompt_version,
+    run_agent_task_with_retry_report, task_key,
 };
 use super::config::{AutomationBackend, AutomationConfig, AutomationHostMode};
 use super::config_error;
@@ -1152,6 +1153,7 @@ impl<'a> AgentRunFinalizer<'a> {
             .output_json
             .clone()
             .map_or_else(|| extract_json_object_prefix(&response.output_text), Ok)
+            .map_err(TraceDecayError::from)
         {
             Ok(output) => Ok(output),
             Err(err) => {

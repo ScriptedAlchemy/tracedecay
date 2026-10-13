@@ -6,20 +6,14 @@
 //! presented as a clean result. All list lanes are bounded by a limit
 //! plus an opaque cursor and are deterministic: records page in ascending
 //! anchor order.
-//!
-//! The overlay merge composes a session-only [`DirtyDiagnosticOverlay`] with
-//! the durable current set into one deterministic view; the overlay wins on
-//! the same logical finding key and every entry is marked with its
-//! provenance (persisted vs overlay). Overlay state is never persisted.
 
-use std::collections::BTreeMap;
 use std::fmt;
 
 use tracedecay_domain::{
     CodeGenerationId, FileOccurrenceId, GenerationDiagnosticV1, RetrievalAnchorId,
 };
 
-use crate::diagnostics_store::{DiagnosticsStore, DirtyDiagnosticOverlay};
+use crate::diagnostics_store::DiagnosticsStore;
 use tracedecay_runtime_core::db::Database;
 #[cfg(test)]
 use tracedecay_runtime_core::db::engine::Connection;
@@ -118,65 +112,11 @@ impl DiagnosticPage {
     }
 }
 
-/// Point lookup of one record by its retrieval anchor.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DiagnosticAnchorLookup {
-    pub record: Option<GenerationDiagnosticV1>,
-    pub coverage: DiagnosticQueryCoverage,
-}
-
 /// Exact clean generation currently eligible for active diagnostic reads.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CurrentDiagnosticGeneration {
     pub generation: Option<CodeGenerationId>,
     pub coverage: DiagnosticQueryCoverage,
-}
-
-/// Where one entry of the merged current view came from. The durable lane
-/// and the session-only overlay lane stay typed and separate even after
-/// merging; overlay findings are never published as durable LSP
-/// diagnostics.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum MergedDiagnosticProvenance {
-    /// A durable record persisted in the store for the clean generation.
-    Persisted,
-    /// A session-only overlay entry for one client document version.
-    Overlay {
-        client_id: String,
-        document_uri: String,
-        document_version: i64,
-    },
-}
-
-/// One entry of the merged current view: a domain record plus its lane.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MergedDiagnostic {
-    pub record: GenerationDiagnosticV1,
-    pub provenance: MergedDiagnosticProvenance,
-}
-
-/// The deterministic merged view of durable current records and overlay
-/// records for one generation. On the same logical finding key the overlay
-/// entry wins; ordering is ascending anchor of the winning record with
-/// provenance as tie-break.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MergedDiagnosticView {
-    pub entries: Vec<MergedDiagnostic>,
-    pub coverage: DiagnosticQueryCoverage,
-    pub next_cursor: Option<DiagnosticQueryCursor>,
-}
-
-impl MergedDiagnosticView {
-    fn unavailable(operation: &'static str, error: impl fmt::Display) -> Self {
-        Self {
-            entries: Vec::new(),
-            coverage: DiagnosticQueryCoverage::StoreUnavailable {
-                operation,
-                reason: error.to_string(),
-            },
-            next_cursor: None,
-        }
-    }
 }
 
 /// Caller-side query errors. Store failures are never reported through this
@@ -185,11 +125,6 @@ impl MergedDiagnosticView {
 pub enum DiagnosticQueryError {
     /// The cursor is malformed.
     InvalidCursor { cursor: String },
-    /// The overlay is bound to a different clean generation than the query.
-    OverlayGenerationMismatch {
-        overlay_generation: CodeGenerationId,
-        query_generation: CodeGenerationId,
-    },
 }
 
 impl fmt::Display for DiagnosticQueryError {
@@ -198,46 +133,11 @@ impl fmt::Display for DiagnosticQueryError {
             Self::InvalidCursor { cursor } => {
                 write!(formatter, "invalid diagnostic query cursor: {cursor}")
             }
-            Self::OverlayGenerationMismatch {
-                overlay_generation,
-                query_generation,
-            } => write!(
-                formatter,
-                "overlay targets generation {overlay_generation} but the query targets {query_generation}"
-            ),
         }
     }
 }
 
 impl std::error::Error for DiagnosticQueryError {}
-
-/// The logical finding key: (repository, producer, code, file occurrence,
-/// span, message digest). A durable record and an overlay entry sharing a
-/// key are the same logical finding.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct LogicalFindingKey {
-    repository: String,
-    producer: String,
-    code: String,
-    file_occurrence_id: String,
-    span_start: u64,
-    span_end: u64,
-    message_digest: String,
-}
-
-impl LogicalFindingKey {
-    fn of(record: &GenerationDiagnosticV1) -> Self {
-        Self {
-            repository: record.repository.as_str().to_owned(),
-            producer: record.provenance.producer.as_str().to_owned(),
-            code: record.code.clone(),
-            file_occurrence_id: record.file_occurrence_id.as_str().to_owned(),
-            span_start: record.span.start_byte,
-            span_end: record.span.end_byte,
-            message_digest: record.message_digest.as_str().to_owned(),
-        }
-    }
-}
 
 /// Typed, bounded, read-only query surface over [`DiagnosticsStore`].
 ///
@@ -348,106 +248,6 @@ impl<'a> DiagnosticsQuery<'a> {
             Err(error) => Ok(DiagnosticPage::unavailable(operation, error)),
         }
     }
-
-    /// Fetches one record by its retrieval anchor. A miss is `Complete` with
-    /// no record; a store failure is typed `StoreUnavailable`.
-    #[tracing::instrument(
-        name = "usecases.diagnostics_query.by_anchor",
-        level = "trace",
-        skip_all
-    )]
-    pub async fn by_anchor(
-        &self,
-        anchor: &RetrievalAnchorId,
-    ) -> Result<DiagnosticAnchorLookup, DiagnosticQueryError> {
-        let operation = "diagnostics query by_anchor";
-        match self.store.record_by_anchor(anchor).await {
-            Ok(record) => Ok(DiagnosticAnchorLookup {
-                record,
-                coverage: DiagnosticQueryCoverage::Complete,
-            }),
-            Err(error) => Ok(DiagnosticAnchorLookup {
-                record: None,
-                coverage: DiagnosticQueryCoverage::StoreUnavailable {
-                    operation,
-                    reason: error.to_string(),
-                },
-            }),
-        }
-    }
-
-    /// Composes the durable current set for `generation` with a dirty
-    /// overlay into one deterministic merged view. On the same logical
-    /// finding key the overlay entry wins; every entry carries typed
-    /// provenance (persisted vs overlay). The overlay lane is session-only
-    /// and is never written back.
-    #[tracing::instrument(
-        name = "usecases.diagnostics_query.merged_current_with_overlay",
-        level = "trace",
-        skip_all
-    )]
-    pub async fn merged_current_with_overlay(
-        &self,
-        generation: &CodeGenerationId,
-        overlay: &DirtyDiagnosticOverlay,
-        request: &DiagnosticPageRequest,
-    ) -> Result<MergedDiagnosticView, DiagnosticQueryError> {
-        let operation = "diagnostics query merged_current_with_overlay";
-        if overlay.clean_generation() != generation {
-            return Err(DiagnosticQueryError::OverlayGenerationMismatch {
-                overlay_generation: overlay.clean_generation().clone(),
-                query_generation: generation.clone(),
-            });
-        }
-        let durable = match self.store.current_records(generation).await {
-            Ok(records) => records,
-            Err(error) => return Ok(MergedDiagnosticView::unavailable(operation, error)),
-        };
-        let mut merged: BTreeMap<LogicalFindingKey, MergedDiagnostic> = BTreeMap::new();
-        for record in durable {
-            merged.insert(
-                LogicalFindingKey::of(&record),
-                MergedDiagnostic {
-                    record,
-                    provenance: MergedDiagnosticProvenance::Persisted,
-                },
-            );
-        }
-        for entry in overlay.records() {
-            merged.insert(
-                LogicalFindingKey::of(&entry.record),
-                MergedDiagnostic {
-                    record: entry.record,
-                    provenance: MergedDiagnosticProvenance::Overlay {
-                        client_id: entry.client_id,
-                        document_uri: entry.document_uri,
-                        document_version: entry.document_version,
-                    },
-                },
-            );
-        }
-        let mut entries: Vec<MergedDiagnostic> = merged.into_values().collect();
-        entries.sort_by(|left, right| {
-            anchor_cmp(&left.record, &right.record).then_with(|| {
-                // Total order on anchor ties: persisted before overlay.
-                let rank = |entry: &MergedDiagnostic| match &entry.provenance {
-                    MergedDiagnosticProvenance::Persisted => 0u8,
-                    MergedDiagnosticProvenance::Overlay { .. } => 1u8,
-                };
-                rank(left).cmp(&rank(right))
-            })
-        });
-        let (entries, coverage, next_cursor) = paginate_items(
-            entries,
-            |entry| entry.record.diagnostic_anchor.as_str(),
-            request,
-        );
-        Ok(MergedDiagnosticView {
-            entries,
-            coverage,
-            next_cursor,
-        })
-    }
 }
 
 fn normalize_limit(limit: usize) -> usize {
@@ -456,42 +256,6 @@ fn normalize_limit(limit: usize) -> usize {
     } else {
         limit.min(MAX_DIAGNOSTIC_PAGE_LIMIT)
     }
-}
-
-fn anchor_cmp(left: &GenerationDiagnosticV1, right: &GenerationDiagnosticV1) -> std::cmp::Ordering {
-    left.diagnostic_anchor
-        .as_str()
-        .cmp(right.diagnostic_anchor.as_str())
-}
-
-/// Pages a set of items ordered by ascending anchor. The cursor resumes
-/// strictly after the anchor it encodes; an anchor that no longer exists
-/// still resumes at the first greater anchor, so sorted lanes are total.
-fn paginate_items<T: Clone>(
-    items: Vec<T>,
-    anchor: impl Fn(&T) -> &str,
-    request: &DiagnosticPageRequest,
-) -> (
-    Vec<T>,
-    DiagnosticQueryCoverage,
-    Option<DiagnosticQueryCursor>,
-) {
-    let limit = normalize_limit(request.limit);
-    let start = match &request.cursor {
-        Some(cursor) => items.partition_point(|item| anchor(item) <= cursor.anchor()),
-        None => 0,
-    };
-    let end = (start + limit).min(items.len());
-    let page: Vec<T> = items[start..end].to_vec();
-    let (coverage, next_cursor) = if end < items.len() {
-        let cursor = page
-            .last()
-            .map(|item| DiagnosticQueryCursor(format!("{CURSOR_PREFIX}{}", anchor(item))));
-        (DiagnosticQueryCoverage::Truncated, cursor)
-    } else {
-        (DiagnosticQueryCoverage::Complete, None)
-    };
-    (page, coverage, next_cursor)
 }
 
 fn page_from_bounded_records(
@@ -754,129 +518,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn anchor_lookup_hit_and_miss() {
-        let temp = tempfile::tempdir().unwrap();
-        let conn = open_store(&temp.path().join("diagnostics.db")).await;
-        seed_two_generations(&conn).await;
-        let query = DiagnosticsQuery::new_runtime(&conn);
-
-        let hit = query.by_anchor(&id("anchor.diagnostic.1")).await.unwrap();
-        assert_eq!(hit.coverage, DiagnosticQueryCoverage::Complete);
-        let record = hit.record.expect("anchor.1 is persisted");
-        assert!(matches!(
-            &record.state,
-            DiagnosticRecordStateV1::Cleared {
-                cleared_in_generation
-            } if cleared_in_generation.as_str() == GEN2
-        ));
-
-        let miss = query
-            .by_anchor(&id("anchor.diagnostic.missing"))
-            .await
-            .unwrap();
-        assert_eq!(miss.coverage, DiagnosticQueryCoverage::Complete);
-        assert!(miss.record.is_none());
-    }
-
-    #[tokio::test]
-    async fn overlay_merge_prefers_overlay_and_marks_provenance() {
-        let temp = tempfile::tempdir().unwrap();
-        let conn = open_store(&temp.path().join("diagnostics.db")).await;
-        seed_two_generations(&conn).await;
-        let query = DiagnosticsQuery::new_runtime(&conn);
-
-        let mut overlay = DirtyDiagnosticOverlay::new(id(GEN2));
-        // Same logical finding key as the durable gen2 record anchor.3, under
-        // a new overlay anchor: the overlay must win the merge.
-        let overlay_override = fixture_record(GEN2, "anchor.overlay.1");
-        // A finding with no durable counterpart.
-        let overlay_only = with_message(
-            fixture_record(GEN2, "anchor.overlay.2"),
-            "unused_mut",
-            "variable does not need to be mutable",
-        );
-        overlay
-            .replace_document(
-                "client.a",
-                "file:///src/main.rs",
-                3,
-                vec![overlay_override.clone(), overlay_only.clone()],
-            )
-            .expect("overlay accepts current gen2 records");
-
-        let merged = query
-            .merged_current_with_overlay(&id(GEN2), &overlay, &DiagnosticPageRequest::default())
-            .await
-            .unwrap();
-        assert_eq!(merged.coverage, DiagnosticQueryCoverage::Complete);
-        let by_anchor: BTreeMap<&str, &MergedDiagnostic> = merged
-            .entries
-            .iter()
-            .map(|entry| (entry.record.diagnostic_anchor.as_str(), entry))
-            .collect();
-        // The durable anchor.3 is displaced by the overlay override.
-        assert!(!by_anchor.contains_key("anchor.diagnostic.3"));
-        assert_eq!(by_anchor.len(), 3);
-        assert!(matches!(
-            by_anchor["anchor.diagnostic.4"].provenance,
-            MergedDiagnosticProvenance::Persisted
-        ));
-        assert!(matches!(
-            &by_anchor["anchor.overlay.1"].provenance,
-            MergedDiagnosticProvenance::Overlay {
-                client_id,
-                document_version,
-                ..
-            } if client_id == "client.a" && *document_version == 3
-        ));
-        assert!(matches!(
-            by_anchor["anchor.overlay.2"].provenance,
-            MergedDiagnosticProvenance::Overlay { .. }
-        ));
-
-        // Deterministic ordering: ascending anchor of the winning record.
-        let anchors: Vec<&str> = merged
-            .entries
-            .iter()
-            .map(|entry| entry.record.diagnostic_anchor.as_str())
-            .collect();
-        assert_eq!(
-            anchors,
-            vec![
-                "anchor.diagnostic.4",
-                "anchor.overlay.1",
-                "anchor.overlay.2"
-            ]
-        );
-
-        // Dropping the overlay reverts to the durable set: nothing persisted.
-        let durable_only = query
-            .merged_current_with_overlay(
-                &id(GEN2),
-                &DirtyDiagnosticOverlay::new(id(GEN2)),
-                &DiagnosticPageRequest::default(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(durable_only.entries.len(), 2);
-        assert!(
-            durable_only
-                .entries
-                .iter()
-                .all(|entry| entry.provenance == MergedDiagnosticProvenance::Persisted)
-        );
-
-        // An overlay bound to another generation is a caller error.
-        let foreign = DirtyDiagnosticOverlay::new(id(GEN1));
-        assert!(matches!(
-            query
-                .merged_current_with_overlay(&id(GEN2), &foreign, &DiagnosticPageRequest::default())
-                .await,
-            Err(DiagnosticQueryError::OverlayGenerationMismatch { .. })
-        ));
-    }
-
-    #[tokio::test]
     async fn store_unavailable_is_typed_never_silent() {
         let temp = tempfile::tempdir().unwrap();
         let conn = open_store(&temp.path().join("diagnostics.db")).await;
@@ -911,17 +552,6 @@ mod tests {
             .await
             .unwrap();
         assert!(is_unavailable(&page.coverage));
-
-        let lookup = query.by_anchor(&id("anchor.diagnostic.1")).await.unwrap();
-        assert!(lookup.record.is_none());
-        assert!(is_unavailable(&lookup.coverage));
-
-        let overlay = DirtyDiagnosticOverlay::new(id(GEN2));
-        let merged = query
-            .merged_current_with_overlay(&id(GEN2), &overlay, &DiagnosticPageRequest::default())
-            .await
-            .unwrap();
-        assert!(is_unavailable(&merged.coverage));
     }
 
     #[test]

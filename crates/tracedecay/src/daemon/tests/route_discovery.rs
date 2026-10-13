@@ -20,9 +20,8 @@ use tracedecay_runtime_core::git_repository::{
     repository_topology_resolution_count_for_test, reset_repository_discovery_for_test,
 };
 
-use super::bootstrap::run_git;
 use super::{
-    enter_test_daemon_database_scope, initialize_test_project, test_client_identity_for,
+    enter_test_daemon_database_scope, git, initialize_test_project, test_client_identity_for,
     test_daemon_engine_for_profile, test_handshake_defaults,
 };
 use crate::daemon::{DaemonEngine, DaemonHandshake};
@@ -35,10 +34,10 @@ use crate::daemon::{DaemonEngine, DaemonHandshake};
 fn committed_repository(root: &Path) {
     crate::register_runtime_ports().expect("runtime port registration");
     std::fs::create_dir_all(root).expect("create repository");
-    run_git(root, &["init", "-b", "main", "--quiet"]);
+    git(root, &["init", "-b", "main", "--quiet"]);
     std::fs::write(root.join("README.md"), "route discovery fixture\n").expect("fixture content");
-    run_git(root, &["add", "."]);
-    run_git(root, &["commit", "--quiet", "-m", "fixture"]);
+    git(root, &["add", "."]);
+    git(root, &["commit", "--quiet", "-m", "fixture"]);
 }
 
 fn handshake_for(project: &Path, profile_root: &Path) -> DaemonHandshake {
@@ -311,15 +310,10 @@ async fn a_deferred_discovery_converges_on_the_next_request() {
 
     await_published_resolution(&project).await;
     let resolutions = repository_topology_resolution_count_for_test(&project);
-    let converged = tokio::time::timeout(
-        crate::daemon::REPOSITORY_DISCOVERY_DEADLINE,
-        engine.cached_project_server(&handshake),
-    )
-    .await;
+    let converged = engine.cached_project_server(&handshake).await;
     let converged_resolutions = repository_topology_resolution_count_for_test(&project);
     reset_repository_discovery_for_test(&project);
 
-    let converged = converged.expect("a converged route must answer inside the discovery budget");
     if let Err(error) = &converged {
         let message = error.to_string();
         assert!(

@@ -33,7 +33,7 @@ async fn scoped_dependency_hint_fixture(
     fs::create_dir_all(&project_root).unwrap();
     write_sources(&project_root);
     commit_worktree(&project_root, "dependency hint fixture");
-    let harness = ProductionProjectCompositionHarnessV1::open_with_scope_prefix(
+    let harness = crate::support::seeded_composition::open_with_scope_prefix(
         isolation.path(),
         [project_root.clone()],
         scope_prefix,

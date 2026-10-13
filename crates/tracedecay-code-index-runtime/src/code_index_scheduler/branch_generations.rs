@@ -178,10 +178,10 @@ enum ExactGenerationPairV1 {
 
 impl DaemonCodeIndexPublicationStoreV1 {
     pub fn exact_read_error(
-        error: crate::code_index::production::CodeIndexPublicationStoreErrorV1,
+        error: tracedecay_code_index::production::CodeIndexPublicationStoreErrorV1,
     ) -> CodeIndexSearchUnavailableReasonV1 {
         match error {
-            crate::code_index::production::CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(
+            tracedecay_code_index::production::CodeIndexPublicationStoreErrorV1::CorruptionResetRequired(
                 _,
             ) => CodeIndexSearchUnavailableReasonV1::CorruptionResetRequired,
             _ => CodeIndexSearchUnavailableReasonV1::Internal,

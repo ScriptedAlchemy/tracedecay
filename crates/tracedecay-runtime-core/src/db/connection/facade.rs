@@ -1,7 +1,7 @@
 use super::{
     DatabaseEngineLongLeaseTransaction, DatabaseEngineReadConnection, DatabaseEngineReadSnapshot,
     DatabaseEngineWriteConnection, DatabaseMemoryTransaction, DatabaseWriteTransaction,
-    DatabaseWriterConnection, Path, Result, TraceDecayError,
+    DatabaseWriterConnection, Result, TraceDecayError,
 };
 
 impl DatabaseWriterConnection<'_> {
@@ -361,26 +361,6 @@ impl crate::db::engine::Executor for DatabaseMemoryTransaction<'_> {
     }
 }
 
-impl crate::db::engine::DatabaseAttachmentExecutor for DatabaseMemoryTransaction<'_> {
-    async fn attach_database(
-        &self,
-        path: &Path,
-        database_name: &str,
-    ) -> crate::db::engine::Result<()> {
-        match self {
-            Self::Read(_) => Err(crate::db::engine::Error::invalid_operation(
-                "cannot attach a database to a memory read snapshot",
-            )),
-            Self::Write(transaction) => {
-                transaction
-                    .transaction
-                    .attach_database(path, database_name)
-                    .await
-            }
-        }
-    }
-}
-
 impl DatabaseWriteTransaction<'_> {
     pub async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
     where
@@ -556,15 +536,5 @@ impl crate::db::engine::Executor for DatabaseWriteTransaction<'_> {
 
     async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
         self.execute_batch_engine(sql).await
-    }
-}
-
-impl crate::db::engine::DatabaseAttachmentExecutor for DatabaseWriteTransaction<'_> {
-    async fn attach_database(
-        &self,
-        path: &Path,
-        database_name: &str,
-    ) -> crate::db::engine::Result<()> {
-        self.transaction.attach_database(path, database_name).await
     }
 }

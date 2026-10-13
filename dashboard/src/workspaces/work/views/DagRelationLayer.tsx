@@ -13,7 +13,7 @@ import type { Emphasis } from './dagField.ts';
  * Hidden from the accessibility tree; the exact table restates every relation.
  */
 
-export type RelationMarker = 'arrowhead' | 'bar' | 'diamond';
+type RelationMarker = 'arrowhead' | 'bar' | 'diamond';
 
 export function relationMarker(kind: WorkDagRelationKind): RelationMarker {
   switch (kind) {

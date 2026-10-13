@@ -8,7 +8,7 @@ use tracedecay_contracts::{
 use tracedecay_domain::{CoverageStateV1, ObservabilityEnvelopeV1};
 use tracedecay_global_db::{
     AnalyticsEventInsert, AnalyticsEventQuery, ObservabilityRollupFragmentQueryV1,
-    RegisteredGlobalDb,
+    RegisteredGlobalDb, merge_coverage,
 };
 
 /// Hard cap on eligible envelopes served per observability query.
@@ -266,10 +266,10 @@ impl ObservabilityQueryPort for RegisteredObservabilityPortV1<'_> {
                 CoverageStateV1::Known
             };
             for (_, event) in &eligible {
-                coverage = merge_coverage_state(coverage, event.coverage);
+                coverage = merge_coverage(coverage, event.coverage);
             }
             if invalid_in_page {
-                coverage = merge_coverage_state(coverage, CoverageStateV1::Partial);
+                coverage = merge_coverage(coverage, CoverageStateV1::Partial);
             }
             eligible.sort_by(|(_, left), (_, right)| {
                 (
@@ -340,23 +340,5 @@ impl ExecutionTopologyRollupQueryPort for RegisteredObservabilityPortV1<'_> {
                     .collect(),
             })
         })
-    }
-}
-
-fn merge_coverage_state(left: CoverageStateV1, right: CoverageStateV1) -> CoverageStateV1 {
-    const fn rank(state: CoverageStateV1) -> u8 {
-        match state {
-            CoverageStateV1::Known => 0,
-            CoverageStateV1::Capped => 1,
-            CoverageStateV1::Sampled => 2,
-            CoverageStateV1::Partial => 3,
-            CoverageStateV1::Stale => 4,
-            CoverageStateV1::Unknown => 5,
-        }
-    }
-    if rank(left) >= rank(right) {
-        left
-    } else {
-        right
     }
 }

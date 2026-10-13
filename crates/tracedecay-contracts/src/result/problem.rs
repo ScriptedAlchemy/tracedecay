@@ -161,7 +161,13 @@ pub enum ApplicationExecutionFailureClassV1 {
 
 /// Application failure or admitted terminal. Resource-addressed denial
 /// intentionally shares one shape with absence and hidden policy outcomes.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    remote = "Self",
+    rename_all = "snake_case",
+    tag = "kind",
+    deny_unknown_fields
+)]
 pub enum ApplicationProblem {
     InvalidRequest {
         diagnostic: SafeDiagnostic,
@@ -176,6 +182,7 @@ pub enum ApplicationProblem {
         diagnostic: SafeDiagnostic,
         retry: RetryDirective,
         legal_actions: Vec<LegalAction>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<Box<ApplicationProblemDetailV1>>,
     },
     /// The primary effect committed, but a required post-commit step failed.
@@ -190,80 +197,6 @@ pub enum ApplicationProblem {
         diagnostic: SafeDiagnostic,
         retry: RetryDirective,
         legal_actions: Vec<LegalAction>,
-        detail: Option<Box<ApplicationProblemDetailV1>>,
-    },
-    Unsupported {
-        diagnostic: SafeDiagnostic,
-        retry: RetryDirective,
-        legal_actions: Vec<LegalAction>,
-        detail: Option<Box<ApplicationProblemDetailV1>>,
-    },
-    Unavailable {
-        classification: ApplicationUnavailableClassV1,
-        diagnostic: SafeDiagnostic,
-        retry: RetryDirective,
-        legal_actions: Vec<LegalAction>,
-        detail: Option<Box<ApplicationProblemDetailV1>>,
-    },
-    ExecutionFailed {
-        classification: ApplicationExecutionFailureClassV1,
-        diagnostic: SafeDiagnostic,
-        retry: RetryDirective,
-        legal_actions: Vec<LegalAction>,
-    },
-    ResetRequired {
-        diagnostic: SafeDiagnostic,
-        retry: RetryDirective,
-        legal_actions: Vec<LegalAction>,
-        detail: Option<Box<ApplicationProblemDetailV1>>,
-    },
-    Saturated {
-        diagnostic: SafeDiagnostic,
-        retry: RetryDirective,
-        legal_actions: Vec<LegalAction>,
-        detail: Option<Box<ApplicationProblemDetailV1>>,
-    },
-    Cancelled {
-        stage: CancellationStage,
-        retry: RetryDirective,
-        legal_actions: Vec<LegalAction>,
-    },
-    TimedOut {
-        stage: CancellationStage,
-        retry: RetryDirective,
-        legal_actions: Vec<LegalAction>,
-    },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "kind", deny_unknown_fields)]
-enum ApplicationProblemWire {
-    InvalidRequest {
-        diagnostic: SafeDiagnostic,
-        retry: RetryDirective,
-        legal_actions: Vec<LegalAction>,
-    },
-    NotFoundOrNotAuthorized {
-        retry: RetryDirective,
-        legal_actions: Vec<LegalAction>,
-    },
-    Conflict {
-        diagnostic: SafeDiagnostic,
-        retry: RetryDirective,
-        legal_actions: Vec<LegalAction>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        detail: Option<Box<ApplicationProblemDetailV1>>,
-    },
-    PartialEffect {
-        diagnostic: SafeDiagnostic,
-        committed_receipt: Box<EffectReceipt>,
-        retry: RetryDirective,
-        legal_actions: Vec<LegalAction>,
-    },
-    Stale {
-        diagnostic: SafeDiagnostic,
-        retry: RetryDirective,
-        legal_actions: Vec<LegalAction>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<Box<ApplicationProblemDetailV1>>,
     },
@@ -314,144 +247,16 @@ enum ApplicationProblemWire {
     },
 }
 
-impl From<ApplicationProblem> for ApplicationProblemWire {
-    fn from(problem: ApplicationProblem) -> Self {
-        match problem {
-            ApplicationProblem::InvalidRequest {
-                diagnostic,
-                retry,
-                legal_actions,
-            } => Self::InvalidRequest {
-                diagnostic,
-                retry,
-                legal_actions,
-            },
-            ApplicationProblem::NotFoundOrNotAuthorized {
-                retry,
-                legal_actions,
-            } => Self::NotFoundOrNotAuthorized {
-                retry,
-                legal_actions,
-            },
-            ApplicationProblem::Conflict {
-                diagnostic,
-                retry,
-                legal_actions,
-                detail,
-            } => Self::Conflict {
-                diagnostic,
-                retry,
-                legal_actions,
-                detail,
-            },
-            ApplicationProblem::PartialEffect {
-                diagnostic,
-                committed_receipt,
-                retry,
-                legal_actions,
-            } => Self::PartialEffect {
-                diagnostic,
-                committed_receipt,
-                retry,
-                legal_actions,
-            },
-            ApplicationProblem::Stale {
-                diagnostic,
-                retry,
-                legal_actions,
-                detail,
-            } => Self::Stale {
-                diagnostic,
-                retry,
-                legal_actions,
-                detail,
-            },
-            ApplicationProblem::Unsupported {
-                diagnostic,
-                retry,
-                legal_actions,
-                detail,
-            } => Self::Unsupported {
-                diagnostic,
-                retry,
-                legal_actions,
-                detail,
-            },
-            ApplicationProblem::Unavailable {
-                classification,
-                diagnostic,
-                retry,
-                legal_actions,
-                detail,
-            } => Self::Unavailable {
-                classification,
-                diagnostic,
-                retry,
-                legal_actions,
-                detail,
-            },
-            ApplicationProblem::ExecutionFailed {
-                classification,
-                diagnostic,
-                retry,
-                legal_actions,
-            } => Self::ExecutionFailed {
-                classification,
-                diagnostic,
-                retry,
-                legal_actions,
-            },
-            ApplicationProblem::ResetRequired {
-                diagnostic,
-                retry,
-                legal_actions,
-                detail,
-            } => Self::ResetRequired {
-                diagnostic,
-                retry,
-                legal_actions,
-                detail,
-            },
-            ApplicationProblem::Saturated {
-                diagnostic,
-                retry,
-                legal_actions,
-                detail,
-            } => Self::Saturated {
-                diagnostic,
-                retry,
-                legal_actions,
-                detail,
-            },
-            ApplicationProblem::Cancelled {
-                stage,
-                retry,
-                legal_actions,
-            } => Self::Cancelled {
-                stage,
-                retry,
-                legal_actions,
-            },
-            ApplicationProblem::TimedOut {
-                stage,
-                retry,
-                legal_actions,
-            } => Self::TimedOut {
-                stage,
-                retry,
-                legal_actions,
-            },
-        }
-    }
-}
-
+// The derive above uses `remote = "Self"`, so it emits the unvalidated wire
+// codec as inherent `ApplicationProblem::{serialize, deserialize}`. These trait
+// impls are the only public codec and validate on both directions.
 impl Serialize for ApplicationProblem {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
         self.validate().map_err(serde::ser::Error::custom)?;
-        ApplicationProblemWire::from(self.clone()).serialize(serializer)
+        Self::serialize(self, serializer)
     }
 }
 
@@ -460,143 +265,13 @@ impl<'de> Deserialize<'de> for ApplicationProblem {
     where
         D: serde::Deserializer<'de>,
     {
-        let wire = ApplicationProblemWire::deserialize(deserializer)?;
-        Self::from_wire(wire).map_err(serde::de::Error::custom)
+        let problem = Self::deserialize(deserializer)?;
+        problem.validate().map_err(serde::de::Error::custom)?;
+        Ok(problem)
     }
 }
 
 impl ApplicationProblem {
-    fn from_wire(wire: ApplicationProblemWire) -> Result<Self, ApplicationContractError> {
-        let problem = match wire {
-            ApplicationProblemWire::InvalidRequest {
-                diagnostic,
-                retry,
-                legal_actions,
-            } => Self::InvalidRequest {
-                diagnostic,
-                retry,
-                legal_actions,
-            },
-            ApplicationProblemWire::NotFoundOrNotAuthorized {
-                retry,
-                legal_actions,
-            } => Self::NotFoundOrNotAuthorized {
-                retry,
-                legal_actions,
-            },
-            ApplicationProblemWire::Conflict {
-                diagnostic,
-                retry,
-                legal_actions,
-                detail,
-            } => Self::Conflict {
-                diagnostic,
-                retry,
-                legal_actions,
-                detail,
-            },
-            ApplicationProblemWire::PartialEffect {
-                diagnostic,
-                committed_receipt,
-                retry,
-                legal_actions,
-            } => Self::PartialEffect {
-                diagnostic,
-                committed_receipt,
-                retry,
-                legal_actions,
-            },
-            ApplicationProblemWire::Stale {
-                diagnostic,
-                retry,
-                legal_actions,
-                detail,
-            } => Self::Stale {
-                diagnostic,
-                retry,
-                legal_actions,
-                detail,
-            },
-            ApplicationProblemWire::Unsupported {
-                diagnostic,
-                retry,
-                legal_actions,
-                detail,
-            } => Self::Unsupported {
-                diagnostic,
-                retry,
-                legal_actions,
-                detail,
-            },
-            ApplicationProblemWire::Unavailable {
-                classification,
-                diagnostic,
-                retry,
-                legal_actions,
-                detail,
-            } => Self::Unavailable {
-                classification,
-                diagnostic,
-                retry,
-                legal_actions,
-                detail,
-            },
-            ApplicationProblemWire::ExecutionFailed {
-                classification,
-                diagnostic,
-                retry,
-                legal_actions,
-            } => Self::ExecutionFailed {
-                classification,
-                diagnostic,
-                retry,
-                legal_actions,
-            },
-            ApplicationProblemWire::ResetRequired {
-                diagnostic,
-                retry,
-                legal_actions,
-                detail,
-            } => Self::ResetRequired {
-                diagnostic,
-                retry,
-                legal_actions,
-                detail,
-            },
-            ApplicationProblemWire::Saturated {
-                diagnostic,
-                retry,
-                legal_actions,
-                detail,
-            } => Self::Saturated {
-                diagnostic,
-                retry,
-                legal_actions,
-                detail,
-            },
-            ApplicationProblemWire::Cancelled {
-                stage,
-                retry,
-                legal_actions,
-            } => Self::Cancelled {
-                stage,
-                retry,
-                legal_actions,
-            },
-            ApplicationProblemWire::TimedOut {
-                stage,
-                retry,
-                legal_actions,
-            } => Self::TimedOut {
-                stage,
-                retry,
-                legal_actions,
-            },
-        };
-        problem.validate()?;
-        Ok(problem)
-    }
-
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         if let Some(diagnostic) = self.diagnostic() {
             diagnostic.validate()?;

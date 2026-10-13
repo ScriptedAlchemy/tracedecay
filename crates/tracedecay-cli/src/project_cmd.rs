@@ -8,14 +8,12 @@ use tracedecay_contracts::retrieval::{
 };
 use tracedecay_contracts::{ProjectRegistryView, PublicCodeProject, render_project_registry_view};
 use tracedecay_domain::errors::{Result, TraceDecayError};
-#[cfg(test)]
-use tracedecay_global_db::ProjectRegistryContext;
 use tracedecay_global_db::RegisteredGlobalDb;
 
 use crate::cli::ProjectsAction;
 use crate::commands::{
-    ProfileOfflineAuthority, admin_cli_result, admin_cli_result_mismatch, join_outcome_and_restore,
-    take_profile_offline, try_admit_profile_registry,
+    ProfileOfflineAuthority, RestoreWording, admin_cli_result, admin_cli_result_mismatch,
+    join_outcome_and_restore, registry_context, take_profile_offline, try_admit_profile_registry,
 };
 
 const MAX_LIMIT: usize = 1_000;
@@ -115,7 +113,12 @@ async fn handle_projects_forget(
     )
     .await;
     let restore = profile_offline.finish();
-    join_outcome_and_restore("projects forget", outcome, restore)
+    join_outcome_and_restore(
+        RestoreWording::ManagedService,
+        "projects forget",
+        outcome,
+        restore,
+    )
 }
 
 /// The destructive forget body, run inside the profile-offline window. The
@@ -266,6 +269,9 @@ fn print_registry_list(
     Ok(())
 }
 
+/// Renders the plain-text `projects context` view. It never prints a git
+/// remote URL, which can embed credentials (`https://user:token@host/...`);
+/// `PublicCodeProject` carries none.
 fn render_project_context(
     project: &PublicCodeProject,
     aliases: &[Value],
@@ -354,85 +360,13 @@ async fn registry_list(
     }
 }
 
-#[tracing::instrument(name = "cli.projects.request", level = "trace", skip_all)]
-async fn registry_context(
-    profile: &ProfileRoot,
-    selector: PathBuf,
-) -> Result<AdminCliRegistryContextV1> {
-    let request = AdminCliSurfaceRequestV1::RegistryContext {
-        project_arg: Some(selector),
-    };
-    match admin_cli_result(profile, None, request).await? {
-        AdminCliResultV1::RegistryContext(context) => Ok(context),
-        _ => Err(admin_cli_result_mismatch("registry_context")),
-    }
-}
-
-/// Renders the plain-text `projects context` view. Deliberately omits
-/// `project.git_remote_url`, a git remote URL can embed credentials
-/// (`https://user:token@host/...`), so it must never be printed here or
-/// serialized into the JSON view (see `PublicCodeProject`).
-#[cfg(test)]
-fn render_project_context_text(context: &ProjectRegistryContext) -> String {
-    let mut out = String::new();
-    let project = &context.project;
-    let _ = writeln!(out, "Project: {}", project.project_id);
-    let _ = writeln!(out, "root: {}", project.display_root);
-    if let Some(branch) = &project.default_branch {
-        let _ = writeln!(out, "default branch: {branch}");
-    }
-    if let Some(git_common_dir) = &project.git_common_dir {
-        let _ = writeln!(out, "git common dir: {git_common_dir}");
-    }
-    let _ = writeln!(out, "last seen: {}", project.last_seen_at);
-
-    if !context.aliases.is_empty() {
-        out.push('\n');
-        out.push_str("Aliases:\n");
-        for alias in &context.aliases {
-            let _ = writeln!(out, "  {}", alias.alias_path);
-        }
-    }
-
-    if !context.stores.is_empty() {
-        out.push('\n');
-        out.push_str("Stores:\n");
-        for store_context in &context.stores {
-            let store = &store_context.store;
-            let _ = writeln!(
-                out,
-                "  {} [{} / {}] {}",
-                store.store_id, store.store_kind, store.storage_mode, store.store_relpath
-            );
-            for scope in &store_context.graph_scopes {
-                let _ = writeln!(
-                    out,
-                    "    scope {} branch={} writable={}",
-                    scope.graph_scope_id, scope.branch_name, scope.writable
-                );
-            }
-            for artifact in &store_context.artifacts {
-                let size = artifact
-                    .size_bytes
-                    .map_or_else(|| "-".to_string(), |bytes| bytes.to_string());
-                let _ = writeln!(
-                    out,
-                    "    artifact {} path={} size={}",
-                    artifact.artifact_kind, artifact.relpath, size
-                );
-            }
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use tracedecay_dashboard_api::project_registry::PublicProjectRegistryContext;
     use tracedecay_global_db::{
-        CodeProjectRecord, GraphScopeRecord, ProjectAliasRecord, ProjectStoreContext,
-        StoreArtifactRecord, StoreInstanceRecord,
+        CodeProjectRecord, GraphScopeRecord, ProjectAliasRecord, ProjectRegistryContext,
+        ProjectStoreContext, StoreArtifactRecord, StoreInstanceRecord,
     };
 
     const CREDENTIAL_REMOTE_URL: &str =
@@ -491,7 +425,10 @@ mod tests {
     #[test]
     fn plain_text_context_omits_credential_bearing_remote_url() {
         let context = context_with_credential_remote();
-        let text = render_project_context_text(&context);
+        let public = PublicProjectRegistryContext::new(&context, None);
+        let aliases = vec![serde_json::to_value(&context.aliases[0]).unwrap()];
+        let stores = vec![serde_json::to_value(&context.stores[0]).unwrap()];
+        let text = render_project_context(&public.project, &aliases, &stores);
 
         assert!(
             !text.contains("sekret-token"),

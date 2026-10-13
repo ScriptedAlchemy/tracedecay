@@ -243,7 +243,7 @@ async fn in_place_edit_supersedes_every_read_path(shape: UserRecordShape) {
     let mut records = rollout_records(&project, shape);
     write_rollout(&rollout, &records);
 
-    let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+    let harness = crate::support::seeded_composition::open_for_session_retrieval(
         &isolation,
         [project.clone()],
     )

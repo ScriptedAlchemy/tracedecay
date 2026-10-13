@@ -6,53 +6,42 @@
 //! CLI is one more caller of the same daemon invocation the HTTP mount, the
 //! dashboard, and the generated SDKs already use.
 
-use std::path::PathBuf;
-use tracedecay_runtime_core::config::ProfileRoot;
-
 use serde_json::Value;
 use tracedecay_api::WorkOperation;
 use tracedecay_contracts::{
     AcceptWorkProposalRequestV1, AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1,
-    AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, ApplicationEnvelope, ApplicationOutcome,
-    ApplicationProblem, ApplicationResult, CancelWorkAttemptCommand, CancellationSignal,
-    CreateWorkTaskRequestV1, Deadline, ExecutionTopologyMetricsRequestV1, GenerateProposalRequest,
-    PauseWorkRunCommand, PrepareWorkDuplicateAdjudicationRequestV1,
+    AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, ApplicationOutcome, ApplicationResult,
+    CancelWorkAttemptCommand, CreateWorkTaskRequestV1, ExecutionTopologyMetricsRequestV1,
+    GenerateProposalRequest, PauseWorkRunCommand, PrepareWorkDuplicateAdjudicationRequestV1,
     PrepareWorkProductMutationRequestV1, ReleaseWorkPlacementCommand, ResultContractRef,
     ResumeWorkAttemptsCommand, ResumeWorkRunCommand, RetryWorkAttemptCommandV1,
-    ReviewWorkProposalRequestV1, SafeDiagnostic, StartWorkAttemptCommand,
-    WorkArtifactHydrationRequestV1, WorkAttemptListRequestV1, WorkAttemptStatusRequestV1,
-    WorkEvidenceRetrieveRequestV1, WorkExperienceRequestV1, WorkGraphReadRequestV1,
-    WorkPlacementPreflightRequestV1, WorkPlacementStatusRequestV1, WorkProductMutationRequestV1,
-    WorkProposalComparisonRequestV1, WorkRunControlRequestV1, WorkTopologyViewRequestV1,
-    work_executable_binding_registry,
+    ReviewWorkProposalRequestV1, StartWorkAttemptCommand, WorkArtifactHydrationRequestV1,
+    WorkAttemptListRequestV1, WorkAttemptStatusRequestV1, WorkEvidenceRetrieveRequestV1,
+    WorkExperienceRequestV1, WorkGraphReadRequestV1, WorkPlacementPreflightRequestV1,
+    WorkPlacementStatusRequestV1, WorkProductMutationRequestV1, WorkProposalComparisonRequestV1,
+    WorkRunControlRequestV1, WorkTopologyViewRequestV1, work_executable_binding_registry,
 };
-use tracedecay_domain::UtcMicros;
 use tracedecay_domain::WorkDuplicateAdjudicationCommandV1;
 use tracedecay_tool_catalog::OperationId;
 
-use tracedecay_contracts::now_micros;
-use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use tracedecay_daemon_protocol::{DaemonInvocationDelivery, InvocationCancellationPolicy};
-use tracedecay_daemon_protocol::{
-    DaemonInvocationOutcome, DaemonInvocationRequest, WorkApplicationInvocationV1,
-    WorkApplicationOutcomeV1,
-};
+use tracedecay_daemon_protocol::DaemonInvocationDelivery;
+use tracedecay_daemon_protocol::{WorkApplicationInvocationV1, WorkApplicationOutcomeV1};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use crate::application_cli::{WORK, config_error};
 
-const WORK_CLI_DEADLINE_MICROS: i64 = 120_000_000;
+pub(crate) const WORK_CLI_DEADLINE_MILLIS: u64 = 120_000;
 
 /// A Work response plus the authenticated connection on which its terminal
 /// delivery acknowledgement must be sent. The handle is intentionally kept
 /// alive until the presentation layer has written and flushed stdout.
 pub struct WorkCliResponse {
     pub outcome: ApplicationResult<Value>,
-    delivery: Option<WorkCliDelivery>,
+    pub(crate) delivery: Option<WorkCliDelivery>,
 }
 
 impl WorkCliResponse {
-    fn without_delivery(outcome: ApplicationResult<Value>) -> Self {
+    pub(crate) fn without_delivery(outcome: ApplicationResult<Value>) -> Self {
         Self {
             outcome,
             delivery: None,
@@ -108,7 +97,7 @@ pub fn work_operation_segments() -> Vec<&'static str> {
         .collect()
 }
 
-fn work_result_contract(operation: WorkOperation) -> Result<ResultContractRef> {
+pub(crate) fn work_result_contract(operation: WorkOperation) -> Result<ResultContractRef> {
     let operation_id =
         OperationId::new(operation.operation_id_str().to_owned()).map_err(config_error)?;
     let registry = work_executable_binding_registry().map_err(config_error)?;
@@ -129,7 +118,7 @@ fn work_result_contract(operation: WorkOperation) -> Result<ResultContractRef> {
     ))
 }
 
-fn decode_work_invocation(
+pub(crate) fn decode_work_invocation(
     operation: WorkOperation,
     body: Value,
 ) -> Result<WorkApplicationInvocationV1> {
@@ -215,7 +204,10 @@ fn decode_work_invocation(
     }
 }
 
-fn work_outcome_matches(operation: WorkOperation, outcome: &WorkApplicationOutcomeV1) -> bool {
+pub(crate) fn work_outcome_matches(
+    operation: WorkOperation,
+    outcome: &WorkApplicationOutcomeV1,
+) -> bool {
     matches!(
         (operation, outcome),
         (
@@ -342,125 +334,6 @@ fn work_outcome_matches(operation: WorkOperation, outcome: &WorkApplicationOutco
     )
 }
 
-/// Invokes Work while retaining the daemon connection until the presentation
-/// layer explicitly acknowledges the terminal output boundary.
-#[tracing::instrument(name = "work_cli.invoke", level = "trace", skip_all)]
-pub async fn invoke_work_cli_with_delivery(
-    profile: &ProfileRoot,
-    project_root: PathBuf,
-    operation: WorkOperation,
-    body: Value,
-) -> Result<WorkCliResponse> {
-    let result_contract = work_result_contract(operation)?;
-    let request_id =
-        mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
-            message: "could not allocate a Work CLI request id".to_owned(),
-        })?;
-    let observed_at = now_micros();
-    let deadline = Deadline::new(UtcMicros(
-        observed_at.0.saturating_add(WORK_CLI_DEADLINE_MICROS),
-    ))
-    .map_err(config_error)?;
-    let cancellation =
-        CancellationSignal::active(format!("cancellation.cli.{}", request_id.as_str()))
-            .map_err(config_error)?;
-    let invocation = match decode_work_invocation(operation, body) {
-        Ok(invocation) => invocation,
-        Err(_) => {
-            return Ok(WorkCliResponse::without_delivery(Err(
-                crate::application_cli::problem_envelope(
-                    result_contract,
-                    request_id,
-                    WORK.invalid_request(),
-                )?,
-            )));
-        }
-    };
-    let request = DaemonInvocationRequest::work_application(
-        request_id.as_str(),
-        invocation,
-        observed_at,
-        deadline.clone(),
-        cancellation.context(),
-    );
-    let handshake = crate::commands::client_handshake(profile, Some(&project_root))?;
-    let client = tracedecay::daemon::invocation_client_for_current(profile, handshake)?;
-    let result = match client
-        .invoke_controlled_with_delivery(
-            request,
-            deadline,
-            cancellation,
-            InvocationCancellationPolicy::AuthoritativeEffect,
-        )
-        .await
-    {
-        Ok(result) => result,
-        Err(error) => {
-            return Ok(WorkCliResponse::without_delivery(Err(
-                crate::application_cli::problem_envelope(
-                    result_contract,
-                    request_id,
-                    error.into_application_problem(),
-                )?,
-            )));
-        }
-    };
-    let (response, delivery) = result.into_parts();
-    let delivery_eligible = match &response.outcome {
-        DaemonInvocationOutcome::WorkApplication { outcome, .. }
-            if work_outcome_matches(operation, outcome) =>
-        {
-            work_delivery_is_eligible(operation, outcome)
-        }
-        _ => false,
-    };
-    let outcome = match response.outcome {
-        DaemonInvocationOutcome::WorkApplication { scope, outcome }
-            if work_outcome_matches(operation, &outcome) =>
-        {
-            Ok(ApplicationEnvelope {
-                contract: result_contract,
-                request_id: request_id.clone(),
-                scope,
-                outcome: erase_work_outcome(outcome)?,
-                touched_files: Vec::new(),
-                code_graph: None,
-                analytics: None,
-                cost: None,
-            })
-        }
-        DaemonInvocationOutcome::ApplicationProblem { problem } => Err(
-            crate::application_cli::problem_envelope(result_contract, request_id.clone(), problem)?,
-        ),
-        DaemonInvocationOutcome::Problem { problem } => {
-            Err(crate::application_cli::problem_envelope(
-                result_contract,
-                request_id.clone(),
-                WORK.daemon_problem(problem),
-            )?)
-        }
-        _ => Err(crate::application_cli::problem_envelope(
-            result_contract,
-            request_id.clone(),
-            ApplicationProblem::unavailable(SafeDiagnostic {
-                code: "work_response_unavailable".to_owned(),
-                message: "The daemon returned no canonical Work result".to_owned(),
-            }),
-        )?),
-    };
-    let delivery = if delivery_eligible {
-        Some(WorkCliDelivery::new(delivery.ok_or_else(|| {
-            TraceDecayError::Config {
-                message: "daemon Work response omitted its connection-bound delivery authority"
-                    .to_owned(),
-            }
-        })?))
-    } else {
-        None
-    };
-    Ok(WorkCliResponse { outcome, delivery })
-}
-
 /// Whether the daemon holds this Work terminal open for a delivery ACK.
 pub(crate) fn work_delivery_is_eligible(
     operation: WorkOperation,
@@ -485,7 +358,9 @@ pub(crate) fn work_delivery_is_eligible(
     }
 }
 
-fn erase_work_outcome(outcome: WorkApplicationOutcomeV1) -> Result<ApplicationOutcome<Value>> {
+pub(crate) fn erase_work_outcome(
+    outcome: WorkApplicationOutcomeV1,
+) -> Result<ApplicationOutcome<Value>> {
     let outcome = match outcome {
         WorkApplicationOutcomeV1::GenerateProposal(outcome) => serde_json::to_value(outcome),
         WorkApplicationOutcomeV1::Create(outcome) => serde_json::to_value(outcome),

@@ -36,7 +36,7 @@ import { assertNever } from '../contracts/generated.ts';
 import type { EvidenceQuality } from './EvidencePattern.tsx';
 
 /** One measurement, reduced to the strings a plate renders. */
-export interface MetricPresentation {
+interface MetricPresentation {
   /** Underscored wire identifier turned into words. The identifier itself
    * stays available to callers as `metric.metric`. */
   label: string;
@@ -205,7 +205,7 @@ function calibrationSentence(metric: MetricValueV1): string | null {
 
 /** Maps the wire's evidence class onto the shared pattern axis. Severity is a
  * separate axis and never borrows this one. */
-export function evidenceQuality(evidenceClass: MetricEvidenceClassV1): EvidenceQuality {
+function evidenceQuality(evidenceClass: MetricEvidenceClassV1): EvidenceQuality {
   switch (evidenceClass) {
     case 'measurement':
       return 'measured';

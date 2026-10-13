@@ -583,7 +583,7 @@ pub use workflow_coordination::{
     WorkflowDefinitionHistoryRequest, WorkflowDefinitionLifecycleCommand,
     WorkflowDefinitionLifecycleState, WorkflowDefinitionListRequest,
     WorkflowDefinitionRegisterRequest, WorkflowDefinitionRejectRequest,
-    WorkflowDefinitionRetireRequest, WorkflowDefinitionService, WorkflowDefinitionTransitionEntry,
+    WorkflowDefinitionRetireRequest, WorkflowDefinitionService,
     WorkflowDefinitionTransitionOutcome, WorkflowDefinitionValidateRequest,
     WorkflowDefinitionValidation, WorkflowLifecycleOperation, prepare_task_handoff_issue,
     prepare_task_handoff_redeem, prepare_workflow_definition_registration,

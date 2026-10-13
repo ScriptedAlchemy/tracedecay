@@ -1,11 +1,9 @@
-use std::{path::Path, sync::Arc};
+use std::sync::Arc;
 
 use asupersync::sync::Mutex;
 use asupersync::{Budget, Cx, runtime::Runtime};
 
-use tracedecay_rusqlite_runtime::exact_sql::{
-    ExactSqlAttachment, ExactSqlTransaction as RuntimeTransaction,
-};
+use tracedecay_rusqlite_runtime::exact_sql::ExactSqlTransaction as RuntimeTransaction;
 
 use super::{Error, IntoParams, Result, Rows, WriteStatement, connection::statement};
 
@@ -94,37 +92,6 @@ impl Transaction {
                     results.push(result.changed_rows as u64);
                 }
                 Ok(results)
-            })
-            .map_err(|error| Error::Runtime(format!("failed to spawn SQL settlement: {error}")))?;
-        std::future::poll_fn(|context| task.poll_join(context))
-            .await
-            .map_err(join_error)?
-    }
-
-    pub async fn attach_database(&self, path: &Path, database_name: &str) -> Result<()> {
-        let runtime = Arc::clone(&self.runtime);
-        let filename = path.to_str().ok_or_else(|| {
-            super::Error::invalid_operation("SQLite attachment path is not valid UTF-8")
-        })?;
-        let attachment = ExactSqlAttachment::new(filename.to_owned(), database_name.to_owned())?;
-        let _caller = Cx::current().ok_or(Error::RuntimeContextUnavailable)?;
-        let settlement = Runtime::current_handle()
-            .ok_or(Error::RuntimeContextUnavailable)?
-            .try_request_cx_with_budget(Budget::INFINITE)
-            .map_err(|error| Error::Runtime(format!("failed to admit SQL settlement: {error}")))?;
-        let mut task = settlement
-            .spawn(move |cx| async move {
-                runtime
-                    .lock(&cx)
-                    .await
-                    .map_err(|error| {
-                        Error::Runtime(format!("SQL transaction gate failed: {error}"))
-                    })?
-                    .as_ref()
-                    .ok_or(super::Error::TransactionClosed)?
-                    .attach_database_async(attachment)
-                    .await
-                    .map_err(super::Error::from)
             })
             .map_err(|error| Error::Runtime(format!("failed to spawn SQL settlement: {error}")))?;
         std::future::poll_fn(|context| task.poll_join(context))

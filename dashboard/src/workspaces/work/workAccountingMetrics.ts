@@ -27,7 +27,7 @@ import {
  */
 
 /** The Plan 26 descriptor the integration-outcome cells carry. */
-export const MERGE_ATTEMPTS_METRIC = 'work_merge_attempts_total';
+const MERGE_ATTEMPTS_METRIC = 'work_merge_attempts_total';
 
 /** The metrics read's own reason, phrased for a channel. */
 function metricsAbsence(

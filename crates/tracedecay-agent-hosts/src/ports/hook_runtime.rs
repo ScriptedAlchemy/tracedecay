@@ -33,7 +33,6 @@ use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::ProjectId;
 use tracedecay_hooks::DaemonHookEvent;
 use tracedecay_runtime_core::config::ProfileRoot;
-use tracedecay_runtime_core::storage::StoreLayout;
 
 use tracedecay_domain::errors::Result;
 
@@ -78,14 +77,6 @@ pub type HookTimingGate = fn(&ProfileRoot, &Path) -> Option<bool>;
 /// profile.
 pub type ProjectInitializationGate = fn(&ProfileRoot, &Path) -> bool;
 
-/// Resolves the canonical store layout in a profile through registered
-/// project identity.
-pub type StoreLayoutResolver =
-    for<'a> fn(
-        &'a ProfileRoot,
-        &'a Path,
-    ) -> Pin<Box<dyn Future<Output = Result<StoreLayout>> + Send + 'a>>;
-
 /// The root-owned capabilities every hook path needs, as one value: the
 /// profile the hook process serves and plain function pointers into the root.
 ///
@@ -100,7 +91,6 @@ pub struct HookRuntimeV1 {
     pub event_notifier: HookEventNotifier,
     pub timing_gate: HookTimingGate,
     pub project_initialization_gate: ProjectInitializationGate,
-    pub store_layout_resolver: StoreLayoutResolver,
 }
 
 #[cfg(test)]
@@ -108,7 +98,7 @@ pub(crate) use test_runtime::crate_test_runtime;
 
 #[cfg(test)]
 mod test_runtime {
-    use super::{HookRuntimeV1, ProfileRoot, Result, StoreLayout, Value};
+    use super::{HookRuntimeV1, ProfileRoot, Result, Value};
     use std::future::Future;
     use std::path::{Path, PathBuf};
     use std::pin::Pin;
@@ -163,15 +153,8 @@ mod test_runtime {
         tracedecay_runtime_core::storage::has_repository_identity_marker(project_root)
     }
 
-    fn layout<'a>(
-        _: &'a ProfileRoot,
-        _: &'a Path,
-    ) -> Pin<Box<dyn Future<Output = Result<StoreLayout>> + Send + 'a>> {
-        Box::pin(async { Err(unavailable("store layout resolver")) })
-    }
-
     /// This crate's explicit test handle for `profile`: no daemon, no
-    /// registry, no layout.
+    /// registry.
     ///
     /// Tests that reach a hook-runtime reader pass this in, so their
     /// dependency is stated at the call rather than inferred from a global
@@ -185,7 +168,6 @@ mod test_runtime {
             event_notifier: notify,
             timing_gate: timings,
             project_initialization_gate: initialized,
-            store_layout_resolver: layout,
         }
     }
 }

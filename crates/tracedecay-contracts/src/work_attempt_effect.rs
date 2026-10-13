@@ -41,14 +41,6 @@ pub enum WorkAttemptEffectDispatchOutcomeV1 {
     Replayed(WorkAttemptEffectHolderV1),
 }
 
-impl WorkAttemptEffectDispatchOutcomeV1 {
-    pub const fn holder(&self) -> &WorkAttemptEffectHolderV1 {
-        match self {
-            Self::Recorded(holder) | Self::Replayed(holder) => holder,
-        }
-    }
-}
-
 /// Durable source receipt for a single exact Work-attempt dispatch lifecycle.
 ///
 /// `dispatched_at` is written before the provider reaches its external effect

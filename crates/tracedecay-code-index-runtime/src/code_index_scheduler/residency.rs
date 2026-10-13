@@ -65,6 +65,7 @@ pub(super) struct WorktreeResidencyV1 {
     last_used: Mutex<Instant>,
     refresh_waits_for_memory: AtomicBool,
     park_release_after_pass_armed: AtomicBool,
+    park_release_after_reads_drain_retrying: AtomicBool,
     pub(super) park_headroom: ParkHeadroomV1,
 }
 
@@ -126,6 +127,7 @@ impl WorktreeResidencyV1 {
             last_used: Mutex::new(Instant::now()),
             refresh_waits_for_memory: AtomicBool::new(false),
             park_release_after_pass_armed: AtomicBool::new(false),
+            park_release_after_reads_drain_retrying: AtomicBool::new(false),
             park_headroom: ParkHeadroomV1::default(),
         }
     }
@@ -193,7 +195,8 @@ impl WorktreeResidencyV1 {
     /// `code_graph_serving` reports `warming` while they are absent and the
     /// next graph read reseats them. Do not clear `complete_generation_requested`: a demand that
     /// arrives during the take must still wake a successor pass to
-    /// re-decode.
+    /// re-decode. The decode is announced as this worktree's own park
+    /// release: a retry re-decodes it (issue #3588).
     pub(super) fn release_decode_when_parked(self: &Arc<Self>, owners: &Arc<ResidentOwnersV1>) {
         if self.busy() {
             self.arm_park_release_after_pass_settles(owners);
@@ -205,7 +208,7 @@ impl WorktreeResidencyV1 {
         {
             return;
         }
-        let mut released = Vec::new();
+        let mut decode_released = Vec::new();
         if !self.complete_generation_requested.load(Ordering::Acquire) {
             let seated = {
                 let mut slot = self
@@ -231,16 +234,16 @@ impl WorktreeResidencyV1 {
                     .collect(),
             );
             let superseded = HeldDecodesV1::release(self.publication.release_superseded_decodes());
-            released.extend([serving, superseded].into_iter().filter_map(
-                |release| match release {
+            decode_released.extend([serving, superseded].into_iter().filter_map(|release| {
+                match release {
                     ResidentOwnerReleaseV1::Released { bytes } => Some(bytes),
                     ResidentOwnerReleaseV1::Busy | ResidentOwnerReleaseV1::Empty => None,
-                },
-            ));
-            if !released.is_empty() {
+                }
+            }));
+            if !decode_released.is_empty() {
                 tracing::info!(
                     event = "code_index_serving_decode_released_on_park",
-                    bytes = released
+                    bytes = decode_released
                         .iter()
                         .map(|bytes| bytes.measured().unwrap_or(0))
                         .sum::<u64>(),
@@ -257,7 +260,7 @@ impl WorktreeResidencyV1 {
             }) {
                 self.arm_park_release_after_first_catalog_warm(owners);
             }
-            if !released.is_empty() {
+            if !decode_released.is_empty() {
                 self.park_headroom.note(owners);
             }
             return;
@@ -274,12 +277,14 @@ impl WorktreeResidencyV1 {
             if !self.serving_text().is_some_and(|text| {
                 text.code_graph_serving_readiness() == CodeGraphServingReadinessV1::Ready
             }) {
-                if !released.is_empty() {
+                if !decode_released.is_empty() {
                     self.park_headroom.note(owners);
                 }
                 return;
             }
         }
+        let mut graph_released = false;
+        let mut graph_busy = false;
         for (kind, release) in [
             (
                 ResidentOwnerKindV1::GraphCatalog,
@@ -294,20 +299,79 @@ impl WorktreeResidencyV1 {
                 OutgoingGraphOwnerV1(Arc::clone(self)).release(),
             ),
         ] {
-            if let ResidentOwnerReleaseV1::Released { bytes } = release {
-                tracing::info!(
-                    event = "code_index_serving_graph_released_on_park",
-                    kind = kind.as_str(),
-                    bytes = bytes.measured(),
-                    "a parked worktree gave back its catalog or engine; the next graph read reseats it"
-                );
-                released.push(bytes);
+            match release {
+                ResidentOwnerReleaseV1::Released { bytes } => {
+                    tracing::info!(
+                        event = "code_index_serving_graph_released_on_park",
+                        kind = kind.as_str(),
+                        bytes = bytes.measured(),
+                        "a parked worktree gave back its catalog or engine; the next graph read reseats it"
+                    );
+                    graph_released = true;
+                }
+                ResidentOwnerReleaseV1::Busy => {
+                    graph_busy = true;
+                }
+                ResidentOwnerReleaseV1::Empty => {}
             }
         }
-        if released.is_empty() {
+        if !decode_released.is_empty() {
+            self.park_headroom.note(owners);
+        }
+        if graph_busy {
+            self.arm_park_release_after_graph_reads_drain(owners);
+        }
+        if !graph_released {
             return;
         }
-        self.park_headroom.note(owners);
+        // A refresh waiting on memory replaces this serving graph instead of
+        // re-decoding it, so its park release is headroom like any other
+        // owner's. A graph-only retry warms these owners back and its own
+        // release cannot help it.
+        if self.refresh_waits_for_memory() {
+            owners.note_headroom();
+        } else {
+            self.park_headroom.note(owners);
+        }
+    }
+
+    /// A graph owner a live read holds Busy is freed only when that read
+    /// ends, and nothing else would retry the release then. The read's last
+    /// lease drops on whatever thread ends it, possibly off the runtime, so
+    /// the armed retry is spawned rather than run there. With no read live
+    /// the Busy already drained and the release runs again now; the
+    /// `retrying` flag stops a hold that is not a read from recursing.
+    fn arm_park_release_after_graph_reads_drain(self: &Arc<Self>, owners: &Arc<ResidentOwnersV1>) {
+        let Some(store) = self
+            .serving_text()
+            .and_then(|text| text.interactive_graph_store().ok())
+        else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        if self
+            .park_release_after_reads_drain_retrying
+            .swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        let residency = Arc::downgrade(self);
+        let weak_owners = Arc::downgrade(owners);
+        let armed = store.park_release_after_reads_drain(Arc::new(move || {
+            let (residency, owners) = (Weak::clone(&residency), Weak::clone(&weak_owners));
+            drop(runtime.spawn(async move {
+                if let (Some(residency), Some(owners)) = (residency.upgrade(), owners.upgrade()) {
+                    residency.release_decode_when_parked(&owners);
+                }
+            }));
+        }));
+        if !armed {
+            self.release_decode_when_parked(owners);
+        }
+        self.park_release_after_reads_drain_retrying
+            .store(false, Ordering::Release);
     }
 
     fn arm_park_release_after_pass_settles(self: &Arc<Self>, owners: &Arc<ResidentOwnersV1>) {

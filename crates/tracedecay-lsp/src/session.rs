@@ -219,7 +219,6 @@ pub trait LspSessionAdmissionPort {
 pub enum LspEndpointError {
     InvalidSessionId,
     InvalidCredential,
-    MultipleRootsUnsupported,
     AdmissionRejected,
     DuplicateSession,
     Saturated,

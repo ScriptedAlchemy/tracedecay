@@ -433,7 +433,7 @@ fn task_session_service(
             relations: graph
                 .relations()
                 .into_iter()
-                .filter(|relation| relation_touches_task(relation, &id("task.work-evidence")))
+                .filter(|relation| relation.touches_task(&id("task.work-evidence")))
                 .collect(),
             proposal_decisions: Vec::new(),
             relation_replan_decisions: Vec::new(),

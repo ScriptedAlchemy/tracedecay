@@ -26,9 +26,9 @@ use super::{
     file_occurrence_id, id, identity, omitted_file_occurrence_id, privacy, projection_key,
     snapshot_content_identity,
 };
-use crate::code_index::chunks::content_digest;
-use crate::code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
-use crate::code_index::production::{
+use tracedecay_code_index::chunks::content_digest;
+use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
+use tracedecay_code_index::production::{
     CodeIndexBuildRequestV1, CodeIndexCapturedFileV1, CodeIndexGenerationScopeV1,
     CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
     CodeIndexRepositoryParseIdentityV1,
@@ -716,10 +716,10 @@ impl CodeIndexWorktreeSchedulerV1 {
             )
             .map_err(|error| match error {
                 CodeIndexProductionErrorV1::Interrupted(
-                    crate::code_index::production::CodeIndexInterruptionV1::Cancelled,
+                    tracedecay_code_index::production::CodeIndexInterruptionV1::Cancelled,
                 ) => CodeIndexSearchUnavailableReasonV1::Cancelled,
                 CodeIndexProductionErrorV1::Interrupted(
-                    crate::code_index::production::CodeIndexInterruptionV1::DeadlineExceeded,
+                    tracedecay_code_index::production::CodeIndexInterruptionV1::DeadlineExceeded,
                 ) => CodeIndexSearchUnavailableReasonV1::TimedOut,
                 CodeIndexProductionErrorV1::Publication(error) => {
                     DaemonCodeIndexPublicationStoreV1::exact_read_error(error)
@@ -896,8 +896,7 @@ impl CodeIndexWorktreeSchedulerV1 {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-    use std::process::Command;
+    use super::super::tests::{git, git_stdout};
     use std::sync::Arc;
 
     use tempfile::TempDir;
@@ -914,41 +913,6 @@ mod tests {
         NativeCandidateGenerationSourcesV1, branch_generations,
     };
     use crate::code_index_scheduler::SharedCodeIndexBytePoolV1;
-
-    fn git(root: &Path, arguments: &[&str]) {
-        let status = Command::new(
-            tracedecay_runtime_core::git::try_git_program()
-                .expect("absolute git executable should resolve"),
-        )
-        .current_dir(root)
-        .args(arguments)
-        .status()
-        .expect("run git fixture command");
-        assert!(
-            status.success(),
-            "git fixture command failed: {arguments:?}"
-        );
-    }
-
-    fn git_output(root: &Path, arguments: &[&str]) -> String {
-        let output = Command::new(
-            tracedecay_runtime_core::git::try_git_program()
-                .expect("absolute git executable should resolve"),
-        )
-        .current_dir(root)
-        .args(arguments)
-        .output()
-        .expect("run git fixture command");
-        assert!(
-            output.status.success(),
-            "git fixture command failed: {arguments:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout)
-            .expect("git output")
-            .trim()
-            .to_owned()
-    }
 
     fn generated_source_fixture() -> (TempDir, TempDir, CodeIndexWorktreeSchedulerV1) {
         let project = TempDir::new().expect("project root");
@@ -1071,8 +1035,8 @@ mod tests {
         .expect("superseded source");
         git(project.path(), &["add", "."]);
         git(project.path(), &["commit", "-qm", "superseded"]);
-        let superseded_revision = git_output(project.path(), &["rev-parse", "HEAD"]);
-        let superseded_tree = git_output(project.path(), &["rev-parse", "HEAD^{tree}"]);
+        let superseded_revision = git_stdout(project.path(), &["rev-parse", "HEAD"]);
+        let superseded_tree = git_stdout(project.path(), &["rev-parse", "HEAD^{tree}"]);
         std::fs::write(
             project.path().join("src/lib.rs"),
             "pub fn current_tip_value() -> usize { 2 }\n",
@@ -1081,7 +1045,7 @@ mod tests {
         git(project.path(), &["add", "."]);
         git(project.path(), &["commit", "-qm", "current"]);
         assert_ne!(
-            git_output(project.path(), &["rev-parse", "HEAD"]),
+            git_stdout(project.path(), &["rev-parse", "HEAD"]),
             superseded_revision,
             "the fixture must request a commit the reference no longer points at"
         );
@@ -1147,12 +1111,12 @@ mod tests {
         scheduler.reconcile_now().expect("publish immutable tree");
         let source = ExactGitTreeSourceV1 {
             reference: tracedecay_domain::RefId::new("refs/heads/main").expect("reference"),
-            revision: tracedecay_domain::CommitId::new(git_output(
+            revision: tracedecay_domain::CommitId::new(git_stdout(
                 project.path(),
                 &["rev-parse", "HEAD"],
             ))
             .expect("revision"),
-            tree: tracedecay_domain::TreeId::new(git_output(
+            tree: tracedecay_domain::TreeId::new(git_stdout(
                 project.path(),
                 &["rev-parse", "HEAD^{tree}"],
             ))
@@ -1219,12 +1183,12 @@ mod tests {
         .expect("open code-index scheduler");
         let source = ExactGitTreeSourceV1 {
             reference: tracedecay_domain::RefId::new("refs/heads/main").expect("reference"),
-            revision: tracedecay_domain::CommitId::new(git_output(
+            revision: tracedecay_domain::CommitId::new(git_stdout(
                 project.path(),
                 &["rev-parse", "HEAD"],
             ))
             .expect("revision"),
-            tree: tracedecay_domain::TreeId::new(git_output(
+            tree: tracedecay_domain::TreeId::new(git_stdout(
                 project.path(),
                 &["rev-parse", "HEAD^{tree}"],
             ))
@@ -1320,12 +1284,12 @@ mod tests {
             .capture_exact_git_tree_snapshot(
                 &ExactGitTreeSourceV1 {
                     reference: tracedecay_domain::RefId::new("refs/heads/main").expect("reference"),
-                    revision: tracedecay_domain::CommitId::new(git_output(
+                    revision: tracedecay_domain::CommitId::new(git_stdout(
                         root,
                         &["rev-parse", "HEAD"],
                     ))
                     .expect("revision"),
-                    tree: tracedecay_domain::TreeId::new(git_output(
+                    tree: tracedecay_domain::TreeId::new(git_stdout(
                         root,
                         &["rev-parse", "HEAD^{tree}"],
                     ))
@@ -1386,7 +1350,7 @@ mod tests {
         );
         assert_eq!(
             notes.content_digest,
-            crate::code_index::chunks::content_digest(b"AGENTS.md"),
+            tracedecay_code_index::chunks::content_digest(b"AGENTS.md"),
             "a non-source link is recorded from its committed blob, as before"
         );
     }
@@ -1394,8 +1358,8 @@ mod tests {
     #[test]
     fn exact_git_capture_reuses_one_byte_owner_for_snapshot_and_production() {
         let (project, _store, scheduler) = generated_source_fixture();
-        let revision = git_output(project.path(), &["rev-parse", "HEAD"]);
-        let tree = git_output(project.path(), &["rev-parse", "HEAD^{tree}"]);
+        let revision = git_stdout(project.path(), &["rev-parse", "HEAD"]);
+        let tree = git_stdout(project.path(), &["rev-parse", "HEAD^{tree}"]);
 
         let captured = scheduler
             .capture_exact_git_tree_snapshot(
@@ -1456,7 +1420,7 @@ mod tests {
         .expect("destination source");
         git(project.path(), &["add", "."]);
         git(project.path(), &["commit", "-qm", "main"]);
-        let destination = git_output(project.path(), &["rev-parse", "HEAD"]);
+        let destination = git_stdout(project.path(), &["rev-parse", "HEAD"]);
         git(project.path(), &["switch", "-q", "feature"]);
         std::fs::write(
             project.path().join("src/feature.rs"),
@@ -1465,7 +1429,7 @@ mod tests {
         .expect("source source");
         git(project.path(), &["add", "."]);
         git(project.path(), &["commit", "-qm", "feature"]);
-        let source = git_output(project.path(), &["rev-parse", "HEAD"]);
+        let source = git_stdout(project.path(), &["rev-parse", "HEAD"]);
 
         let project_id = ProjectId::new("project.native-candidate").expect("project id");
         let store = TempDir::new().expect("code-index store");
@@ -1659,8 +1623,8 @@ mod tests {
     #[test]
     fn a_capture_still_refuses_a_reference_the_repository_does_not_have() {
         let (project, _store, scheduler) = generated_source_fixture();
-        let revision = git_output(project.path(), &["rev-parse", "HEAD"]);
-        let tree = git_output(project.path(), &["rev-parse", "HEAD^{tree}"]);
+        let revision = git_stdout(project.path(), &["rev-parse", "HEAD"]);
+        let tree = git_stdout(project.path(), &["rev-parse", "HEAD^{tree}"]);
 
         let captured = scheduler.capture_exact_git_tree_snapshot(
             &ExactGitTreeSourceV1 {
@@ -1696,12 +1660,12 @@ mod tests {
         );
         let source = ExactGitTreeSourceV1 {
             reference: tracedecay_domain::RefId::new("refs/heads/main").expect("reference"),
-            revision: tracedecay_domain::CommitId::new(git_output(
+            revision: tracedecay_domain::CommitId::new(git_stdout(
                 project.path(),
                 &["rev-parse", "HEAD"],
             ))
             .expect("revision"),
-            tree: tracedecay_domain::TreeId::new(git_output(
+            tree: tracedecay_domain::TreeId::new(git_stdout(
                 project.path(),
                 &["rev-parse", "HEAD^{tree}"],
             ))

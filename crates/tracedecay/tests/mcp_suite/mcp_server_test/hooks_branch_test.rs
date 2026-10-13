@@ -86,7 +86,7 @@ async fn production_routed_projects_ready_for_first_read() -> ProductionRoutedPr
         init_git_repo(root);
     }
 
-    let harness = tracedecay::daemon::ProductionProjectCompositionHarnessV1::open(
+    let harness = crate::support::seeded_composition::open(
         isolation.path(),
         [active_root.clone(), target_root.clone()],
     )

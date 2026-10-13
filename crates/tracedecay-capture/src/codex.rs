@@ -3,6 +3,7 @@ use std::path::Path;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_domain::{
     CanonicalBoundaryKindV1, CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1,
     CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1, CanonicalObservationFactV1,
@@ -14,7 +15,7 @@ use tracedecay_domain::{
 };
 
 use crate::{
-    ObservationRecordParseErrorV1, parse::canonical_u64_i64 as canonical_u64, parse::sha256_hex,
+    ObservationRecordParseErrorV1, parse::canonical_u64_i64 as canonical_u64,
     parse_rfc3339_timestamp,
 };
 
@@ -970,7 +971,7 @@ pub fn codex_native_record_id(
     );
     ObservationId::new(format!(
         "codex.native.sha256:{}",
-        sha256_hex(&hasher.finalize())
+        encode_lowercase_hex(&hasher.finalize())
     ))
     .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
 }
@@ -997,7 +998,7 @@ fn response_item_tool_arguments(payload: &Value, item_kind: &str) -> Value {
     }
 }
 
-fn string_field(payload: &Value, key: &str) -> Option<String> {
+pub fn string_field(payload: &Value, key: &str) -> Option<String> {
     payload
         .get(key)
         .and_then(Value::as_str)
@@ -1005,7 +1006,7 @@ fn string_field(payload: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn nested_string_field(payload: &Value, pointer: &str) -> Option<String> {
+pub fn nested_string_field(payload: &Value, pointer: &str) -> Option<String> {
     payload
         .pointer(pointer)
         .and_then(Value::as_str)

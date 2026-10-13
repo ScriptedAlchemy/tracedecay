@@ -76,7 +76,7 @@ function subjectFor(mark: TopologyMark, mode: 'inspecting'): InspectorSubject {
 
 /** The delegation that brought a session into being, graded by what the
  * store could establish about it. */
-export type IncomingDelegation =
+type IncomingDelegation =
   | {
       readonly kind: 'root';
       readonly grade: EvidenceGradeKind;
@@ -157,7 +157,7 @@ export function incomingDelegation(
 }
 
 /** One delegation out of the subject, to a drawn child or a drawn bundle. */
-export interface OutgoingDelegation {
+interface OutgoingDelegation {
   readonly to: TopologyMark;
   readonly toolUseId: string | null;
 }
@@ -182,7 +182,7 @@ export function outgoingDelegations(
  * hooks names this session" is a statement about twenty hooks and not about
  * the session's history. The join is on identity and nothing else.
  */
-export interface SessionHooks {
+interface SessionHooks {
   readonly matched: readonly AnalyticsRecentHookV1[];
   readonly served: number;
   readonly truncated: boolean;

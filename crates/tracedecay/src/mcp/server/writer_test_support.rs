@@ -1,28 +1,19 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use serde_json::Value;
 use tempfile::TempDir;
-use tracedecay_runtime_core::path_safety::{plain_git_args, plain_host_path};
+use tracedecay_domain::HostIntegrationIdV1;
+use tracedecay_hooks::core_events::DaemonHookEvent;
+use tracedecay_host_admission::{
+    HostAdmissionBroker, HostAdmissionRuntime, SharedHostAdmissionBroker, SpoolBounds,
+};
 
-use crate::mcp::server::McpServerConstructionContext;
+use crate::mcp::server::{CodeIndexReconcileSink, McpServer, McpServerConstructionContext};
+use crate::test_support::git::git;
 use tracedecay_project::project::TraceDecay;
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
-
-pub(super) fn git(root: &Path, args: &[&str]) {
-    let output = std::process::Command::new(
-        tracedecay_runtime_core::git::try_git_program()
-            .expect("absolute git executable should resolve"),
-    )
-    .current_dir(plain_host_path(root))
-    .args(plain_git_args(args))
-    .output()
-    .expect("git runs");
-    assert!(
-        output.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
 
 pub(crate) struct WriterTestFixtureAuthority {
     profile: TempDir,
@@ -114,4 +105,47 @@ pub(crate) async fn init_indexed_repo() -> (TraceDecay, TempDir, WriterTestFixtu
     .await
     .expect("init");
     (cg, dir, WriterTestFixtureAuthority { profile, runtime })
+}
+
+/// A host-admission broker over `spool` with default bounds.
+pub(super) fn default_spool_broker(spool: &Path) -> Arc<HostAdmissionBroker> {
+    let runtime = HostAdmissionRuntime::open(spool, SpoolBounds::default())
+        .unwrap()
+        .0;
+    Arc::new(HostAdmissionBroker::new(runtime))
+}
+
+/// The wire `sessionStart` hook event a Codex host sends from `root`.
+pub(super) fn session_start(root: PathBuf) -> Value {
+    serde_json::to_value(DaemonHookEvent::session_start(
+        HostIntegrationIdV1::Codex,
+        root,
+    ))
+    .unwrap()
+}
+
+/// A registered test server for `cg` that admits hooks through `broker`.
+pub(super) async fn server_with_broker(
+    cg: TraceDecay,
+    authority: &WriterTestFixtureAuthority,
+    broker: SharedHostAdmissionBroker,
+    reconcile_sink: CodeIndexReconcileSink,
+) -> Arc<McpServer> {
+    let mut context =
+        registered_context(cg, authority).with_code_index_reconcile_sink(reconcile_sink);
+    context.host_admission_broker = Some(broker);
+    McpServer::new_with_registered_test_context(context, Vec::new())
+        .await
+        .expect("registered test server")
+}
+
+/// A reconcile sink that queues every demand and counts the attempts.
+pub(super) fn counting_reconcile_sink(attempts: Arc<AtomicUsize>) -> CodeIndexReconcileSink {
+    Arc::new(move |_request, _demand| {
+        let attempts = Arc::clone(&attempts);
+        Box::pin(async move {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            super::CodeIndexDemandAdmissionV1::Queued
+        })
+    })
 }

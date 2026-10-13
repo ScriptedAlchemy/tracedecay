@@ -11,7 +11,7 @@ import type { WorkTaskLane } from './workProductView.ts';
  * activity or attention, gray for disconnected or unknown, hollow for a
  * typed absence, and never carries the state alone.
  */
-export interface WorkLaneReading {
+interface WorkLaneReading {
   /** Uppercase engraved label, exactly the authority's word. */
   readonly label: string;
   /** Utility class for the swatch fill; `null` draws a hollow dashed swatch. */

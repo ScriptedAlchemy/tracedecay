@@ -17,7 +17,7 @@ import {
   type SseReseedPhase,
 } from "./types.ts";
 
-export interface SseReducerOptions<TPayload> {
+interface SseReducerOptions<TPayload> {
   /** Max queued events before overflow. Defaults to 5,000. */
   maxEvents?: number;
   /** Max queued bytes before overflow. Defaults to 10 MiB. */

@@ -362,6 +362,35 @@ impl SelectorProfile {
     }
 }
 
+/// The JSON document a `format: json` tool result carries as its text.
+pub(super) fn tool_json(result: &ToolResult) -> Value {
+    let text = result.value["content"][0]["text"]
+        .as_str()
+        .expect("tool result text");
+    serde_json::from_str(text).expect("tool result JSON")
+}
+
+/// Registers `<root>/<name>`, whose only source is `src/lib.rs` holding
+/// `source`, as `project_id` in the isolated profile under `root`. The caller
+/// owns `root` and must hold the returned runtime while it uses the graph.
+pub(super) async fn registered_lib_fixture(
+    root: &Path,
+    name: &str,
+    source: &str,
+    project_id: &str,
+) -> (
+    TraceDecay,
+    Arc<tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1>,
+) {
+    let profile = SelectorProfile::new(root);
+    let project = root.join(name);
+    std::fs::create_dir_all(project.join("src")).expect("fixture source directory");
+    std::fs::write(project.join("src/lib.rs"), source).expect("fixture source");
+    TraceDecay::init_test_fixture_with_registered_runtime(profile.data_dir(), &project, project_id)
+        .await
+        .expect("registered fixture")
+}
+
 pub(super) async fn concrete_dispatch_group_accepts(
     group: McpToolDispatchGroup,
     tool_name: &str,

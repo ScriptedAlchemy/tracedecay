@@ -220,10 +220,6 @@ pub struct CapabilityRoutingDecisionV1 {
     pub ordered_reason_codes: Vec<CapabilityRoutingReasonV1>,
 }
 
-pub trait CapabilityRoutingEvaluator {
-    fn evaluate(&self, request: &CapabilityRoutingRequestV1) -> CapabilityRoutingDecisionV1;
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CapabilityRoutingEvaluatorV1 {
     evaluator_id: PolicyIdentifierV1,
@@ -269,11 +265,9 @@ impl CapabilityRoutingEvaluatorV1 {
             ordered_reason_codes,
         }
     }
-}
 
-impl CapabilityRoutingEvaluator for CapabilityRoutingEvaluatorV1 {
     #[tracing::instrument(name = "policy.routing.evaluate", level = "trace", skip_all)]
-    fn evaluate(&self, request: &CapabilityRoutingRequestV1) -> CapabilityRoutingDecisionV1 {
+    pub fn evaluate(&self, request: &CapabilityRoutingRequestV1) -> CapabilityRoutingDecisionV1 {
         let mut declared = BTreeSet::new();
         if !request.requested_use_case_id.is_valid()
             || request.declared_capability_order.is_empty()

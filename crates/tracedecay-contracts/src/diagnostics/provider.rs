@@ -343,10 +343,6 @@ impl AnalyzerAdmittedDiagnosticProviderV1 {
         &self.admission_input
     }
 
-    pub fn admission_snapshot(&self) -> &AnalyzerAdmissionSnapshotV1 {
-        &self.admission_snapshot
-    }
-
     /// True when the same immutable analyzer-policy admission covers a
     /// generation/document-exact provider identity for a later request.
     ///

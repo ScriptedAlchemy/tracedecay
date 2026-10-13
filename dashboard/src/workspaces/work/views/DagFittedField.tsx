@@ -59,7 +59,7 @@ export function DagFittedField({
   );
 }
 
-export function FittedCard({
+function FittedCard({
   node,
   task,
   reading,

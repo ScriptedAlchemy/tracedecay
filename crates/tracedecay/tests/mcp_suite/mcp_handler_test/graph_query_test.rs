@@ -16,7 +16,6 @@ use std::fs;
 use std::process::Command;
 use std::time::Duration;
 use tempfile::TempDir;
-use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_mcp::ToolResult;
 
@@ -985,7 +984,7 @@ async fn affected_central_daemon_fixture_preserves_set_and_ranks_near_tests_over
                 .success()
         );
     }
-    let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
+    let harness = crate::support::seeded_composition::open(isolation.path(), [project.clone()])
         .await
         .unwrap();
     let server = harness.server(&project).expect("production project server");
@@ -1130,7 +1129,7 @@ async fn affected_follows_public_wrapper_to_nested_unit_test_file() {
                 .success()
         );
     }
-    let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
+    let harness = crate::support::seeded_composition::open(isolation.path(), [project.clone()])
         .await
         .unwrap();
     let server = harness.server(&project).expect("production project server");

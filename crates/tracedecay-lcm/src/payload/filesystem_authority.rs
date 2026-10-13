@@ -230,25 +230,14 @@ pub(super) fn verify_payload_file_authority(
     expected_bytes: u64,
     expected_chars: u64,
 ) -> Result<Option<VerifiedPayloadAuthority>, LcmError> {
-    Ok(
-        read_verified_payload_file(path, expected_hash, expected_bytes, expected_chars)?
-            .map(|(_content, authority)| authority),
-    )
-}
-
-pub(super) fn read_verified_payload_file(
-    path: &Path,
-    expected_hash: &str,
-    expected_bytes: u64,
-    expected_chars: u64,
-) -> Result<Option<(Vec<u8>, VerifiedPayloadAuthority)>, LcmError> {
-    read_verified_payload_file_with_checkpoint(
+    Ok(read_verified_payload_file_with_checkpoint(
         path,
         expected_hash,
         expected_bytes,
         expected_chars,
         &mut || Ok(()),
-    )
+    )?
+    .map(|(_content, authority)| authority))
 }
 
 pub(super) fn read_verified_payload_file_with_checkpoint(
@@ -607,7 +596,7 @@ fn classify_directory_path_error(path: &Path, error: std::io::Error) -> LcmError
     skip_all
 )]
 pub(super) fn prepare_payload_dir(storage_root: &Path) -> Result<PathBuf, LcmError> {
-    let root = super::canonical_storage_root(storage_root)?;
+    let root = canonical_storage_root(storage_root)?;
     #[cfg(windows)]
     let _root_guard = open_verified_directory(&root)?;
     let dir = root.join("lcm-payloads");
@@ -659,7 +648,7 @@ pub fn existing_payload_dir(storage_root: &Path) -> Result<PathBuf, LcmError> {
     skip_all
 )]
 pub fn existing_payload_dir_opt(storage_root: &Path) -> Result<Option<PathBuf>, LcmError> {
-    let root = super::canonical_storage_root(storage_root)?;
+    let root = canonical_storage_root(storage_root)?;
     #[cfg(windows)]
     let _root_guard = open_verified_directory(&root)?;
     let dir = root.join("lcm-payloads");

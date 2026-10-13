@@ -12,7 +12,7 @@ use tracedecay_lcm::LCM_SCHEMA_VERSION;
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_sessions::SessionProvider;
 use tracedecay_sessions::admission::HostAdmissionScope;
-use tracedecay_sessions::runtime::hosts::cursor::ingest_cursor_transcript_event;
+use tracedecay_sessions::runtime::hosts::cursor::try_ingest_cursor_transcript_event_capped_with_admission;
 use tracedecay_sessions::runtime::with_transcript_source_profile;
 use tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION;
 
@@ -46,13 +46,15 @@ async fn ingest_both(db: &ProjectSessionTestRuntime, home: &Path, project: &Path
     });
     with_transcript_source_profile(
         db.transcript_source_profile(),
-        ingest_cursor_transcript_event(
+        try_ingest_cursor_transcript_event_capped_with_admission(
             &event.to_string(),
-            &db.runtime().facade(),
             db.project_id().clone(),
+            &db.runtime().facade(),
+            None,
         ),
     )
-    .await;
+    .await
+    .unwrap();
     ingest_global_sources_for_provider(home, db, project, Some(SessionProvider::Claude)).await;
 }
 

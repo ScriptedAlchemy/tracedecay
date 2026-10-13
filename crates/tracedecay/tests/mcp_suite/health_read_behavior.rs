@@ -130,7 +130,7 @@ async fn open_health_project() -> HealthProject {
     let isolation = test_temp_dir();
     let project_root = isolation.path().join("project");
     seed_project(&project_root);
-    let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+    let harness = crate::support::seeded_composition::open_for_session_retrieval(
         isolation.path(),
         [project_root.clone()],
     )
@@ -172,7 +172,7 @@ async fn seal_serving_database(fixture: HealthProject) -> HealthProject {
         .permissions();
     permissions.set_mode(0o444);
     fs::set_permissions(&database, permissions).expect("seal serving database");
-    let harness = ProductionProjectCompositionHarnessV1::open_for_session_retrieval(
+    let harness = crate::support::seeded_composition::open_for_session_retrieval(
         isolation.path(),
         [project_root.clone()],
     )

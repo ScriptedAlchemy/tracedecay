@@ -10,21 +10,13 @@ pub const LONG_RUNNING_CEILING_MILLIS: u64 = 600_000;
 /// The ceiling for an interactive owner call.
 pub const INTERACTIVE_CEILING_MILLIS: u64 = 120_000;
 
-/// How the server treats identical calls that are in flight together.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IdenticalCallPolicyV1 {
-    /// Every call runs its own effect; a second identical call is never
-    /// answered from the first one's result.
-    RunEach,
-}
-
-/// One side-effecting owner entry: what the call does, how long it may run,
-/// and how identical concurrent calls are treated.
+/// One side-effecting owner entry: what the call does and how long it may
+/// run. Every such call runs its own effect; a second identical call is never
+/// answered from the first one's result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OwnerSideEffectEntryV1 {
     pub effect: EffectClass,
     pub ceiling_millis: u64,
-    pub identical_calls: IdenticalCallPolicyV1,
 }
 
 impl ApplicationSurfaceOperation {
@@ -35,36 +27,30 @@ impl ApplicationSurfaceOperation {
             Self::RunAffectedTests => Some(OwnerSideEffectEntryV1 {
                 effect: EffectClass::SpawnsProcess,
                 ceiling_millis: LONG_RUNNING_CEILING_MILLIS,
-                identical_calls: IdenticalCallPolicyV1::RunEach,
             }),
             Self::Dashboard => Some(OwnerSideEffectEntryV1 {
                 effect: EffectClass::BindsServer,
                 ceiling_millis: INTERACTIVE_CEILING_MILLIS,
-                identical_calls: IdenticalCallPolicyV1::RunEach,
             }),
             // Admission can wait out the scheduler's cold mount.
             Self::AdminSync => Some(OwnerSideEffectEntryV1 {
                 effect: EffectClass::SchedulesWork,
                 ceiling_millis: LONG_RUNNING_CEILING_MILLIS,
-                identical_calls: IdenticalCallPolicyV1::RunEach,
             }),
             // A transcript import or registry collection is the operator's
             // own long job.
             Self::AdminCli => Some(OwnerSideEffectEntryV1 {
                 effect: EffectClass::MaintainsProfileState,
                 ceiling_millis: LONG_RUNNING_CEILING_MILLIS,
-                identical_calls: IdenticalCallPolicyV1::RunEach,
             }),
             // A project automation reconcile waits on that project's scheduler.
             Self::AdminProject => Some(OwnerSideEffectEntryV1 {
                 effect: EffectClass::MaintainsOwnerState,
                 ceiling_millis: LONG_RUNNING_CEILING_MILLIS,
-                identical_calls: IdenticalCallPolicyV1::RunEach,
             }),
             Self::HookRuntime => Some(OwnerSideEffectEntryV1 {
                 effect: EffectClass::RecordsHostEvidence,
                 ceiling_millis: INTERACTIVE_CEILING_MILLIS,
-                identical_calls: IdenticalCallPolicyV1::RunEach,
             }),
             _ => None,
         }
@@ -76,7 +62,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_owner_side_effects_carry_an_entry_and_none_merges_identical_calls() {
+    fn only_owner_side_effects_carry_an_entry() {
         let entries = ApplicationSurfaceOperation::ALL
             .into_iter()
             .filter_map(|operation| {
@@ -93,7 +79,6 @@ mod tests {
                     OwnerSideEffectEntryV1 {
                         effect: EffectClass::SpawnsProcess,
                         ceiling_millis: 600_000,
-                        identical_calls: IdenticalCallPolicyV1::RunEach,
                     }
                 ),
                 (
@@ -101,7 +86,6 @@ mod tests {
                     OwnerSideEffectEntryV1 {
                         effect: EffectClass::BindsServer,
                         ceiling_millis: 120_000,
-                        identical_calls: IdenticalCallPolicyV1::RunEach,
                     }
                 ),
                 (
@@ -109,7 +93,6 @@ mod tests {
                     OwnerSideEffectEntryV1 {
                         effect: EffectClass::SchedulesWork,
                         ceiling_millis: 600_000,
-                        identical_calls: IdenticalCallPolicyV1::RunEach,
                     }
                 ),
                 (
@@ -117,7 +100,6 @@ mod tests {
                     OwnerSideEffectEntryV1 {
                         effect: EffectClass::MaintainsProfileState,
                         ceiling_millis: 600_000,
-                        identical_calls: IdenticalCallPolicyV1::RunEach,
                     }
                 ),
                 (
@@ -125,7 +107,6 @@ mod tests {
                     OwnerSideEffectEntryV1 {
                         effect: EffectClass::MaintainsOwnerState,
                         ceiling_millis: 600_000,
-                        identical_calls: IdenticalCallPolicyV1::RunEach,
                     }
                 ),
                 (
@@ -133,7 +114,6 @@ mod tests {
                     OwnerSideEffectEntryV1 {
                         effect: EffectClass::RecordsHostEvidence,
                         ceiling_millis: 120_000,
-                        identical_calls: IdenticalCallPolicyV1::RunEach,
                     }
                 ),
             ]

@@ -79,9 +79,9 @@ impl OcamlExtractor {
     fn visit_node(state: &mut ExtractionState, node: TsNode<'_>) {
         match node.kind() {
             "value_definition" => Self::visit_value_definition(state, node),
-            "type_definition" => Self::visit_type_definition(state, node),
+            "type_definition" => Self::visit_class_bindings(state, node, "type_binding"),
             "module_definition" => Self::visit_module_definition(state, node),
-            "class_definition" => Self::visit_class_definition(state, node),
+            "class_definition" => Self::visit_class_bindings(state, node, "class_binding"),
             "open_module" => Self::visit_open(state, node),
             // structure/signature items. Recurse to find definitions inside
             "structure_item" | "signature_item" | "structure" | "signature" => {
@@ -180,13 +180,14 @@ impl OcamlExtractor {
         }
     }
 
-    fn visit_type_definition(state: &mut ExtractionState, node: TsNode<'_>) {
-        // type_definition contains type_binding nodes.
+    /// Emit a Class node for each `binding_kind` child: `type_binding` under a
+    /// `type_definition`, `class_binding` under a `class_definition`.
+    fn visit_class_bindings(state: &mut ExtractionState, node: TsNode<'_>, binding_kind: &str) {
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {
                 let child = cursor.node();
-                if child.kind() == "type_binding"
+                if child.kind() == binding_kind
                     && let Some(name_node) = child.child_by_field_name("name")
                 {
                     let name = state.node_text(name_node);
@@ -307,70 +308,6 @@ impl OcamlExtractor {
                         Self::visit_children(state, body);
                     }
                     state.node_stack.pop();
-                }
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-    }
-
-    fn visit_class_definition(state: &mut ExtractionState, node: TsNode<'_>) {
-        let mut cursor = node.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                if child.kind() == "class_binding"
-                    && let Some(name_node) = child.child_by_field_name("name")
-                {
-                    let name = state.node_text(name_node);
-                    let start_line = child.start_position().row as u32;
-                    let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-                    let id = local_node_id(
-                        &state.file_path,
-                        state.source,
-                        &NodeKind::Class,
-                        name,
-                        child,
-                    );
-                    let sig = Self::first_line(state, child);
-
-                    let graph_node = Node {
-                        id: id.clone(),
-                        kind: NodeKind::Class,
-                        name: name.to_string(),
-                        qualified_name,
-                        file_path: state.file_path.clone(),
-                        start_line,
-                        attrs_start_line: start_line,
-                        end_line: child.end_position().row as u32,
-                        start_column: child.start_position().column as u32,
-                        end_column: child.end_position().column as u32,
-                        signature: sig,
-                        docstring: None,
-                        visibility: Visibility::Pub,
-                        is_async: false,
-                        branches: 0,
-                        loops: 0,
-                        returns: 0,
-                        max_nesting: 0,
-                        unsafe_blocks: 0,
-                        unchecked_calls: 0,
-                        assertions: 0,
-                        complexity_analysis: ComplexityAnalysisV1::Complete,
-                        updated_at: state.timestamp,
-                        parent_id: None,
-                    };
-                    state.nodes.push(graph_node);
-
-                    if let Some(parent_id) = state.parent_node_id() {
-                        state.edges.push(Edge {
-                            source: parent_id.to_string(),
-                            target: id,
-                            kind: EdgeKind::Contains,
-                            line: Some(start_line),
-                        });
-                    }
                 }
                 if !cursor.goto_next_sibling() {
                     break;

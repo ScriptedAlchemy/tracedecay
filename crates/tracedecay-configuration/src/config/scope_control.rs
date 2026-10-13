@@ -7,8 +7,8 @@ use thiserror::Error;
 use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, AuthorityRef, ChangePlanId, ConfigurationRevisionId,
     ProtectedApplyRequest, ProtectedChange, ProtectedChangePlan, RedactedConfigurationChangeV1,
-    RollbackModeV1, SOURCE_BINDINGS_SETTING_KEY, ScopeSourceBinding, SettingKey, SourceBindingId,
-    SourceKindV1, WORK_TOPOLOGY_POLICY_SETTING_KEY,
+    SOURCE_BINDINGS_SETTING_KEY, ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1,
+    WORK_TOPOLOGY_POLICY_SETTING_KEY,
 };
 use tracedecay_domain::{
     AccessPolicyDigest, ActorId, DomainError, LocatorDigest, ManifestDigest, ProjectId, UtcMicros,
@@ -107,21 +107,6 @@ pub fn plan_protected_change(
     };
     plan.validate()?;
     Ok(plan)
-}
-
-/// A rollback is always forward-only: the application evaluates historical
-/// typed values against current schema, scope, policy, and base revision, then
-/// uses this same plan/apply shape to create a new child revision.
-#[derive(Clone, Debug)]
-pub struct RollbackPlanRequestV1 {
-    pub target_revision_id: ConfigurationRevisionId,
-    pub mode: RollbackModeV1,
-}
-
-impl RollbackPlanRequestV1 {
-    pub fn validate(&self) -> Result<(), DomainError> {
-        self.target_revision_id.validate()
-    }
 }
 
 /// Verify only immutable dry-run/request binding. Expiry, current revision,

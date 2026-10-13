@@ -17,7 +17,7 @@ import {
 import type { WorkResult } from './workApi.ts';
 import type { WorkChannel } from './workChannel.ts';
 import { workGraphReading, type WorkGraphReading } from './workGraphModel.ts';
-import { WORK_ACCOUNTING_FACETS, type WorkAccountingCard, type WorkAccountingDimension } from './workAccountingModel.ts';
+import type { WorkAccountingCard, WorkAccountingDimension } from './workAccountingModel.ts';
 import { workTopologyAccounting } from './workTopologyAccounting.ts';
 
 /**
@@ -199,8 +199,8 @@ describe('the concurrency ladder', () => {
     const stated = absence(card.reading);
     expect(stated.state).toBe('denied');
     expect(stated.detail).toContain('no authorized work-product scope');
-    for (const facet of WORK_ACCOUNTING_FACETS) {
-      expect(card.provenance[facet].available, facet).toBe(false);
+    for (const [facet, channel] of Object.entries(card.provenance)) {
+      expect(channel.available, facet).toBe(false);
     }
   });
 
@@ -644,8 +644,8 @@ describe('observed integration outcomes', () => {
     const stated = absence(card.reading);
     expect(stated.state).toBe('unavailable');
     expect(stated.detail).toContain('the observation store is unavailable');
-    for (const facet of WORK_ACCOUNTING_FACETS) {
-      expect(card.provenance[facet].available, facet).toBe(false);
+    for (const [facet, channel] of Object.entries(card.provenance)) {
+      expect(channel.available, facet).toBe(false);
     }
   });
 });

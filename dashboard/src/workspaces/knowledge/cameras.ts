@@ -23,14 +23,14 @@
 import { disputesOf, type FactScene, type SceneFact, type SceneRelation } from './factScene.ts';
 
 export const CAMERA_ROW_H = 20;
-export const CAMERA_HEADER_H = 22;
-export const CAMERA_AGGREGATE_H = 54;
+const CAMERA_HEADER_H = 22;
+const CAMERA_AGGREGATE_H = 54;
 /** The aggregate grid and an opened frame fill a budgeted box, so they
  * spend less on vertical margins than the free-standing rows grid. */
 const TIGHT_PAD_Y = 6;
 /** Space under a frame's last row. */
 const FRAME_FOOT = 4;
-export const CAMERA_ROW_CAP = 8;
+const CAMERA_ROW_CAP = 8;
 const FRAME_GAP = 18;
 const PAD = 12;
 const MIN_FRAME_W = 260;
@@ -39,12 +39,12 @@ const VALUE_W = 40;
 const GLYPH_X = 12;
 export const LABEL_X = 24;
 
-export type CameraMode = 'rows' | 'aggregate' | 'open';
+type CameraMode = 'rows' | 'aggregate' | 'open';
 
 /** A frame's identity: its category, `null` for facts that carry none. */
 export type FrameKey = string | null;
 
-export interface CameraRow {
+interface CameraRow {
   readonly fact: SceneFact;
   /** Row box, absolute. */
   readonly x: number;
@@ -55,7 +55,7 @@ export interface CameraRow {
   readonly gy: number;
 }
 
-export interface CameraTick {
+interface CameraTick {
   readonly fact: SceneFact;
   /** Tick position on the frame's rail; `null` when trust is absent. */
   readonly x: number | null;
@@ -88,7 +88,7 @@ export interface CameraFrame {
   readonly cites: readonly { label: string; count: number }[];
 }
 
-export interface CameraRelation {
+interface CameraRelation {
   readonly relation: SceneRelation;
   readonly d: string;
   readonly midX: number;
@@ -98,7 +98,7 @@ export interface CameraRelation {
 }
 
 /** A relation with only one end drawn as a row in this mode. */
-export interface CameraStub {
+interface CameraStub {
   readonly relation: SceneRelation;
   /** The drawn end. */
   readonly node: string;

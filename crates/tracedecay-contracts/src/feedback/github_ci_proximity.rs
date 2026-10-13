@@ -10,8 +10,7 @@ use tracedecay_domain::feedback::{
     CiFailureLocalizationResultV1, CiFailureRateLimitCheckpointV1, CiFailureRunIdentityV1,
     CiFailureSourceFailureV1, FeedbackScopeV1, GitHubPullRequestIdV1,
     GitHubReviewIngressProviderOutcomeV1, GitHubReviewIngressResultV1,
-    GitHubReviewReadCheckpointV1, GitHubReviewReadOperationV1, ProximityContributionV1,
-    ProximityInclusionV1,
+    GitHubReviewReadCheckpointV1, GitHubReviewReadOperationV1,
 };
 
 use crate::context::RequestContext;
@@ -188,50 +187,4 @@ impl ProximityEvaluationRequestV1 {
         self.scope.validate()?;
         Ok(())
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ProximityCandidatesPortOutcomeV1 {
-    Candidates(Vec<ProximityContributionV1>),
-    Denied,
-    Unavailable,
-}
-
-impl ProximityCandidatesPortOutcomeV1 {
-    pub fn validate_for(
-        &self,
-        request: &ProximityEvaluationRequestV1,
-    ) -> Result<(), ApplicationContractError> {
-        request.validate()?;
-        let Self::Candidates(candidates) = self else {
-            return Ok(());
-        };
-        for contribution in candidates {
-            contribution.validate()?;
-            if contribution.inclusion != ProximityInclusionV1::Included
-                || contribution.is_expired_at(request.observed_at)
-            {
-                return Err(ApplicationContractError::Inconsistent {
-                    field: "proximity candidate inclusion or expiry",
-                });
-            }
-            if contribution
-                .address
-                .as_ref()
-                .is_none_or(|address| address.scope != request.scope)
-            {
-                return Err(ApplicationContractError::Inconsistent {
-                    field: "proximity candidate scope",
-                });
-            }
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProximityDedupeOutcomeV1 {
-    Unique,
-    Duplicate,
-    Unavailable,
 }

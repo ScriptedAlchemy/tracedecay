@@ -113,10 +113,10 @@ impl CExtractor {
             "function_definition" => Self::visit_function_definition(state, node),
             "declaration" => Self::visit_declaration(state, node),
             "type_definition" => Self::visit_type_definition(state, node),
-            "struct_specifier" => Self::visit_standalone_struct(state, node),
-            "union_specifier" => Self::visit_standalone_union(state, node),
-            "enum_specifier" => Self::visit_standalone_enum(state, node),
-            "preproc_def" => Self::visit_preproc_def(state, node),
+            "struct_specifier" | "union_specifier" | "enum_specifier" => {
+                Self::visit_standalone_aggregate(state, node);
+            }
+            "preproc_def" => Self::visit_identifier_leaf(state, node, NodeKind::PreprocessorDef),
             "preproc_include" => Self::visit_preproc_include(state, node),
             _ => {
                 // For other node types, skip. Comments are picked up as docstrings.
@@ -415,22 +415,12 @@ impl CExtractor {
 
     /// Visit a `type_definition` node (typedef).
     fn visit_type_definition(state: &mut ExtractionState, node: TsNode<'_>) {
-        // Check for typedef struct { ... } Name;
-        if let Some(struct_spec) = find_direct_child_by_kind(node, "struct_specifier") {
-            Self::visit_typedef_struct(state, node, struct_spec);
-            return;
-        }
-
-        // Check for typedef union { ... } Name;
-        if let Some(union_spec) = find_direct_child_by_kind(node, "union_specifier") {
-            Self::visit_typedef_union(state, node, union_spec);
-            return;
-        }
-
-        // Check for typedef enum { ... } Name;
-        if let Some(enum_spec) = find_direct_child_by_kind(node, "enum_specifier") {
-            Self::visit_typedef_enum(state, node, enum_spec);
-            return;
+        // Check for typedef struct/union/enum { ... } Name;
+        for spec_kind in ["struct_specifier", "union_specifier", "enum_specifier"] {
+            if let Some(spec) = find_direct_child_by_kind(node, spec_kind) {
+                Self::visit_typedef_aggregate(state, node, spec);
+                return;
+            }
         }
 
         // Check for function pointer typedef: typedef int (*name)(args);
@@ -443,11 +433,11 @@ impl CExtractor {
         Self::visit_simple_typedef(state, node);
     }
 
-    /// Extract a typedef for a struct.
-    fn visit_typedef_struct(
+    /// Extract a typedef for a struct, union, or enum.
+    fn visit_typedef_aggregate(
         state: &mut ExtractionState,
         typedef_node: TsNode<'_>,
-        struct_spec: TsNode<'_>,
+        spec: TsNode<'_>,
     ) {
         let typedef_name = Self::find_typedef_name(state, typedef_node)
             .unwrap_or_else(|| "<anonymous>".to_string());
@@ -504,149 +494,11 @@ impl CExtractor {
             });
         }
 
-        if find_direct_child_by_kind(struct_spec, "field_declaration_list").is_some() {
-            let struct_name = find_direct_child_by_kind(struct_spec, "type_identifier")
+        if find_direct_child_by_kind(spec, Self::aggregate_shape(spec).1).is_some() {
+            let name = find_direct_child_by_kind(spec, "type_identifier")
                 .map_or_else(|| typedef_name.clone(), |n| state.node_text(n).to_string());
 
-            Self::create_struct_node(state, &struct_name, struct_spec, docstring);
-        }
-    }
-
-    /// Extract a typedef for a union.
-    fn visit_typedef_union(
-        state: &mut ExtractionState,
-        typedef_node: TsNode<'_>,
-        union_spec: TsNode<'_>,
-    ) {
-        let typedef_name = Self::find_typedef_name(state, typedef_node)
-            .unwrap_or_else(|| "<anonymous>".to_string());
-
-        let start_line = typedef_node.start_position().row as u32;
-        let end_line = typedef_node.end_position().row as u32;
-        let start_column = typedef_node.start_position().column as u32;
-        let end_column = typedef_node.end_position().column as u32;
-        let text = state.node_text(typedef_node);
-        let docstring = Self::extract_docstring(state, typedef_node);
-
-        let typedef_qualified = format!("{}::{}", state.qualified_prefix(), typedef_name);
-        let typedef_id = local_node_id(
-            &state.file_path,
-            state.source,
-            &NodeKind::Typedef,
-            &typedef_name,
-            typedef_node,
-        );
-        let typedef_graph_node = Node {
-            id: typedef_id.clone(),
-            kind: NodeKind::Typedef,
-            name: typedef_name.clone(),
-            qualified_name: typedef_qualified,
-            file_path: state.file_path.clone(),
-            start_line,
-            attrs_start_line: start_line,
-            end_line,
-            start_column,
-            end_column,
-            signature: Some(text.trim().trim_end_matches(';').trim().to_string()),
-            docstring: docstring.clone(),
-            visibility: Visibility::Pub,
-            is_async: false,
-            branches: 0,
-            loops: 0,
-            returns: 0,
-            max_nesting: 0,
-            unsafe_blocks: 0,
-            unchecked_calls: 0,
-            assertions: 0,
-            complexity_analysis: ComplexityAnalysisV1::Complete,
-            updated_at: state.timestamp,
-            parent_id: None,
-        };
-        state.nodes.push(typedef_graph_node);
-
-        if let Some(parent_id) = state.parent_node_id() {
-            state.edges.push(Edge {
-                source: parent_id.to_string(),
-                target: typedef_id.clone(),
-                kind: EdgeKind::Contains,
-                line: Some(start_line),
-            });
-        }
-
-        if find_direct_child_by_kind(union_spec, "field_declaration_list").is_some() {
-            let union_name = find_direct_child_by_kind(union_spec, "type_identifier")
-                .map_or_else(|| typedef_name.clone(), |n| state.node_text(n).to_string());
-
-            Self::create_union_node(state, &union_name, union_spec, docstring);
-        }
-    }
-
-    /// Extract a typedef for an enum.
-    fn visit_typedef_enum(
-        state: &mut ExtractionState,
-        typedef_node: TsNode<'_>,
-        enum_spec: TsNode<'_>,
-    ) {
-        let typedef_name = Self::find_typedef_name(state, typedef_node)
-            .unwrap_or_else(|| "<anonymous>".to_string());
-
-        let start_line = typedef_node.start_position().row as u32;
-        let end_line = typedef_node.end_position().row as u32;
-        let start_column = typedef_node.start_position().column as u32;
-        let end_column = typedef_node.end_position().column as u32;
-        let text = state.node_text(typedef_node);
-        let docstring = Self::extract_docstring(state, typedef_node);
-
-        let typedef_qualified = format!("{}::{}", state.qualified_prefix(), typedef_name);
-        let typedef_id = local_node_id(
-            &state.file_path,
-            state.source,
-            &NodeKind::Typedef,
-            &typedef_name,
-            typedef_node,
-        );
-        let typedef_graph_node = Node {
-            id: typedef_id.clone(),
-            kind: NodeKind::Typedef,
-            name: typedef_name.clone(),
-            qualified_name: typedef_qualified,
-            file_path: state.file_path.clone(),
-            start_line,
-            attrs_start_line: start_line,
-            end_line,
-            start_column,
-            end_column,
-            signature: Some(text.trim().trim_end_matches(';').trim().to_string()),
-            docstring: docstring.clone(),
-            visibility: Visibility::Pub,
-            is_async: false,
-            branches: 0,
-            loops: 0,
-            returns: 0,
-            max_nesting: 0,
-            unsafe_blocks: 0,
-            unchecked_calls: 0,
-            assertions: 0,
-            complexity_analysis: ComplexityAnalysisV1::Complete,
-            updated_at: state.timestamp,
-            parent_id: None,
-        };
-        state.nodes.push(typedef_graph_node);
-
-        if let Some(parent_id) = state.parent_node_id() {
-            state.edges.push(Edge {
-                source: parent_id.to_string(),
-                target: typedef_id.clone(),
-                kind: EdgeKind::Contains,
-                line: Some(start_line),
-            });
-        }
-
-        if find_direct_child_by_kind(enum_spec, "enumerator_list").is_some() {
-            let enum_name = find_direct_child_by_kind(enum_spec, "type_identifier")
-                .map_or_else(|| typedef_name.clone(), |n| state.node_text(n).to_string());
-
-            Self::create_enum_node(state, &enum_name, enum_spec, docstring);
+            Self::create_aggregate_node(state, &name, spec, docstring);
         }
     }
 
@@ -812,10 +664,20 @@ impl CExtractor {
         last_type_id
     }
 
-    /// Visit a standalone struct specifier (e.g., `struct Point { int x; int y; };`).
-    fn visit_standalone_struct(state: &mut ExtractionState, node: TsNode<'_>) {
-        // Only handle if it has a body (field_declaration_list)
-        if find_direct_child_by_kind(node, "field_declaration_list").is_none() {
+    /// Node kind and body child kind of a `struct`/`union`/`enum` specifier.
+    fn aggregate_shape(spec: TsNode<'_>) -> (NodeKind, &'static str) {
+        match spec.kind() {
+            "struct_specifier" => (NodeKind::Struct, "field_declaration_list"),
+            "union_specifier" => (NodeKind::Union, "field_declaration_list"),
+            _ => (NodeKind::Enum, "enumerator_list"),
+        }
+    }
+
+    /// Visit a standalone struct, union, or enum specifier
+    /// (e.g., `struct Point { int x; int y; };`).
+    fn visit_standalone_aggregate(state: &mut ExtractionState, node: TsNode<'_>) {
+        // Only handle if it has a body
+        if find_direct_child_by_kind(node, Self::aggregate_shape(node).1).is_none() {
             return;
         }
         let name = find_direct_child_by_kind(node, "type_identifier").map_or_else(
@@ -823,209 +685,31 @@ impl CExtractor {
             |n| state.node_text(n).to_string(),
         );
 
-        // Skip anonymous structs that are not inside a typedef
+        // Skip anonymous aggregates that are not inside a typedef
         if name == "<anonymous>" {
             return;
         }
 
         let docstring = Self::extract_docstring(state, node);
-        Self::create_struct_node(state, &name, node, docstring);
+        Self::create_aggregate_node(state, &name, node, docstring);
     }
 
-    /// Visit a standalone union specifier.
-    fn visit_standalone_union(state: &mut ExtractionState, node: TsNode<'_>) {
-        if find_direct_child_by_kind(node, "field_declaration_list").is_none() {
-            return;
-        }
-        let name = find_direct_child_by_kind(node, "type_identifier").map_or_else(
-            || "<anonymous>".to_string(),
-            |n| state.node_text(n).to_string(),
-        );
-
-        if name == "<anonymous>" {
-            return;
-        }
-
-        let docstring = Self::extract_docstring(state, node);
-        Self::create_union_node(state, &name, node, docstring);
-    }
-
-    /// Visit a standalone enum specifier.
-    fn visit_standalone_enum(state: &mut ExtractionState, node: TsNode<'_>) {
-        if find_direct_child_by_kind(node, "enumerator_list").is_none() {
-            return;
-        }
-        let name = find_direct_child_by_kind(node, "type_identifier").map_or_else(
-            || "<anonymous>".to_string(),
-            |n| state.node_text(n).to_string(),
-        );
-
-        if name == "<anonymous>" {
-            return;
-        }
-
-        let docstring = Self::extract_docstring(state, node);
-        Self::create_enum_node(state, &name, node, docstring);
-    }
-
-    /// Create a Struct node and its field children.
-    fn create_struct_node(
+    /// Create a Struct/Union node with field children, or an Enum node with
+    /// `EnumVariant` children.
+    fn create_aggregate_node(
         state: &mut ExtractionState,
         name: &str,
         spec_node: TsNode<'_>,
         docstring: Option<String>,
     ) {
+        let (kind, body_kind) = Self::aggregate_shape(spec_node);
         let start_line = spec_node.start_position().row as u32;
         let end_line = spec_node.end_position().row as u32;
         let start_column = spec_node.start_position().column as u32;
         let end_column = spec_node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = local_node_id(
-            &state.file_path,
-            state.source,
-            &NodeKind::Struct,
-            name,
-            spec_node,
-        );
-        let signature =
-            find_direct_child_by_kind(spec_node, "field_declaration_list").map(|body| {
-                state
-                    .text_before(spec_node, body.start_byte())
-                    .trim()
-                    .to_string()
-            });
-
-        let graph_node = Node {
-            id: id.clone(),
-            kind: NodeKind::Struct,
-            name: name.to_string(),
-            qualified_name,
-            file_path: state.file_path.clone(),
-            start_line,
-            attrs_start_line: start_line,
-            end_line,
-            start_column,
-            end_column,
-            signature,
-            docstring,
-            visibility: Visibility::Pub,
-            is_async: false,
-            branches: 0,
-            loops: 0,
-            returns: 0,
-            max_nesting: 0,
-            unsafe_blocks: 0,
-            unchecked_calls: 0,
-            assertions: 0,
-            complexity_analysis: ComplexityAnalysisV1::Complete,
-            updated_at: state.timestamp,
-            parent_id: None,
-        };
-        state.nodes.push(graph_node);
-
-        if let Some(parent_id) = state.parent_node_id() {
-            state.edges.push(Edge {
-                source: parent_id.to_string(),
-                target: id.clone(),
-                kind: EdgeKind::Contains,
-                line: Some(start_line),
-            });
-        }
-
-        state.node_stack.push((name.to_string(), id.clone()));
-        Self::extract_struct_fields(state, spec_node);
-        state.node_stack.pop();
-    }
-
-    /// Create a Union node.
-    fn create_union_node(
-        state: &mut ExtractionState,
-        name: &str,
-        spec_node: TsNode<'_>,
-        docstring: Option<String>,
-    ) {
-        let start_line = spec_node.start_position().row as u32;
-        let end_line = spec_node.end_position().row as u32;
-        let start_column = spec_node.start_position().column as u32;
-        let end_column = spec_node.end_position().column as u32;
-        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = local_node_id(
-            &state.file_path,
-            state.source,
-            &NodeKind::Union,
-            name,
-            spec_node,
-        );
-        let signature =
-            find_direct_child_by_kind(spec_node, "field_declaration_list").map(|body| {
-                state
-                    .text_before(spec_node, body.start_byte())
-                    .trim()
-                    .to_string()
-            });
-
-        let graph_node = Node {
-            id: id.clone(),
-            kind: NodeKind::Union,
-            name: name.to_string(),
-            qualified_name,
-            file_path: state.file_path.clone(),
-            start_line,
-            attrs_start_line: start_line,
-            end_line,
-            start_column,
-            end_column,
-            signature,
-            docstring,
-            visibility: Visibility::Pub,
-            is_async: false,
-            branches: 0,
-            loops: 0,
-            returns: 0,
-            max_nesting: 0,
-            unsafe_blocks: 0,
-            unchecked_calls: 0,
-            assertions: 0,
-            complexity_analysis: ComplexityAnalysisV1::Complete,
-            updated_at: state.timestamp,
-            parent_id: None,
-        };
-        state.nodes.push(graph_node);
-
-        if let Some(parent_id) = state.parent_node_id() {
-            state.edges.push(Edge {
-                source: parent_id.to_string(),
-                target: id.clone(),
-                kind: EdgeKind::Contains,
-                line: Some(start_line),
-            });
-        }
-
-        state.node_stack.push((name.to_string(), id.clone()));
-        Self::extract_struct_fields(state, spec_node);
-        state.node_stack.pop();
-    }
-
-    /// Create an Enum node with `EnumVariant` children.
-    fn create_enum_node(
-        state: &mut ExtractionState,
-        name: &str,
-        spec_node: TsNode<'_>,
-        docstring: Option<String>,
-    ) {
-        let start_line = spec_node.start_position().row as u32;
-        let end_line = spec_node.end_position().row as u32;
-        let start_column = spec_node.start_position().column as u32;
-        let end_column = spec_node.end_position().column as u32;
-        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = local_node_id(
-            &state.file_path,
-            state.source,
-            &NodeKind::Enum,
-            name,
-            spec_node,
-        );
-        let signature = find_direct_child_by_kind(spec_node, "enumerator_list").map(|body| {
+        let id = local_node_id(&state.file_path, state.source, &kind, name, spec_node);
+        let signature = find_direct_child_by_kind(spec_node, body_kind).map(|body| {
             state
                 .text_before(spec_node, body.start_byte())
                 .trim()
@@ -1034,7 +718,7 @@ impl CExtractor {
 
         let graph_node = Node {
             id: id.clone(),
-            kind: NodeKind::Enum,
+            kind: kind.clone(),
             name: name.to_string(),
             qualified_name,
             file_path: state.file_path.clone(),
@@ -1070,12 +754,17 @@ impl CExtractor {
         }
 
         state.node_stack.push((name.to_string(), id.clone()));
-        Self::extract_enum_variants(state, spec_node);
+        if kind == NodeKind::Enum {
+            Self::extract_enum_variants(state, spec_node);
+        } else {
+            Self::extract_struct_fields(state, spec_node);
+        }
         state.node_stack.pop();
     }
 
-    /// Extract a preprocessor #define.
-    fn visit_preproc_def(state: &mut ExtractionState, node: TsNode<'_>) {
+    /// Extract a preprocessor #define (`PreprocessorDef`) or a single enumerator
+    /// (`EnumVariant`), named by its `identifier` child.
+    fn visit_identifier_leaf(state: &mut ExtractionState, node: TsNode<'_>, kind: NodeKind) {
         let name = find_direct_child_by_kind(node, "identifier").map_or_else(
             || "<anonymous>".to_string(),
             |n| state.node_text(n).to_string(),
@@ -1087,17 +776,11 @@ impl CExtractor {
         let start_column = node.start_position().column as u32;
         let end_column = node.end_position().column as u32;
         let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = local_node_id(
-            &state.file_path,
-            state.source,
-            &NodeKind::PreprocessorDef,
-            &name,
-            node,
-        );
+        let id = local_node_id(&state.file_path, state.source, &kind, &name, node);
 
         let graph_node = Node {
             id: id.clone(),
-            kind: NodeKind::PreprocessorDef,
+            kind,
             name,
             qualified_name,
             file_path: state.file_path.clone(),
@@ -1287,72 +970,13 @@ impl CExtractor {
                 loop {
                     let child = cursor.node();
                     if child.kind() == "enumerator" {
-                        Self::extract_single_enumerator(state, child);
+                        Self::visit_identifier_leaf(state, child, NodeKind::EnumVariant);
                     }
                     if !cursor.goto_next_sibling() {
                         break;
                     }
                 }
             }
-        }
-    }
-
-    /// Extract a single enumerator as an `EnumVariant` node.
-    fn extract_single_enumerator(state: &mut ExtractionState, node: TsNode<'_>) {
-        let name = find_direct_child_by_kind(node, "identifier").map_or_else(
-            || "<anonymous>".to_string(),
-            |n| state.node_text(n).to_string(),
-        );
-
-        let text = state.node_text(node);
-        let start_line = node.start_position().row as u32;
-        let end_line = node.end_position().row as u32;
-        let start_column = node.start_position().column as u32;
-        let end_column = node.end_position().column as u32;
-        let qualified_name = format!("{}::{}", state.qualified_prefix(), name);
-        let id = local_node_id(
-            &state.file_path,
-            state.source,
-            &NodeKind::EnumVariant,
-            &name,
-            node,
-        );
-
-        let graph_node = Node {
-            id: id.clone(),
-            kind: NodeKind::EnumVariant,
-            name,
-            qualified_name,
-            file_path: state.file_path.clone(),
-            start_line,
-            attrs_start_line: start_line,
-            end_line,
-            start_column,
-            end_column,
-            signature: Some(text.trim().to_string()),
-            docstring: None,
-            visibility: Visibility::Pub,
-            is_async: false,
-            branches: 0,
-            loops: 0,
-            returns: 0,
-            max_nesting: 0,
-            unsafe_blocks: 0,
-            unchecked_calls: 0,
-            assertions: 0,
-            complexity_analysis: ComplexityAnalysisV1::Complete,
-            updated_at: state.timestamp,
-            parent_id: None,
-        };
-        state.nodes.push(graph_node);
-
-        if let Some(parent_id) = state.parent_node_id() {
-            state.edges.push(Edge {
-                source: parent_id.to_string(),
-                target: id,
-                kind: EdgeKind::Contains,
-                line: Some(start_line),
-            });
         }
     }
 

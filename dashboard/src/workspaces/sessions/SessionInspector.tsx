@@ -64,7 +64,7 @@ const PAGE_SIZE = 100;
 const PAGER_BEZEL =
   'inline-flex items-center gap-1 border border-edge-subtle bg-surface-2 px-2 py-1 text-sm text-text-secondary group-hover:text-text-primary';
 
-export interface SessionInspectorProps {
+interface SessionInspectorProps {
   selection: SessionSelection;
   /** The loaded index page: identity facts and Git relations are read from it. */
   index: ReadState<DashboardEnvelopeV1<LoomTemporalPayloadV1>>;

@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 
 import type { RevisionPairUnionLayoutV1 } from '../../contracts/generated.ts';
 import {
-  EMPTY_COMPARE_SELECTION,
   branchFromReference,
   compareUnionLayoutUrl,
   countChanges,
@@ -34,7 +33,12 @@ describe('Compare selection in the URL', () => {
     );
     expect(params.has('compare_file')).toBe(false);
     expect(params.has('compare_kind')).toBe(false);
-    expect(readCompareSelection(new URLSearchParams())).toEqual(EMPTY_COMPARE_SELECTION);
+    expect(readCompareSelection(new URLSearchParams())).toEqual({
+      base: { branch: '', revision: '' },
+      head: { branch: '', revision: '' },
+      file: '',
+      kind: '',
+    });
   });
 
   it('is complete only when both branches and both revisions are named', () => {
@@ -43,7 +47,7 @@ describe('Compare selection in the URL', () => {
     expect(
       isCompareSelectionComplete({ ...SELECTION, head: { branch: 'feature/x', revision: '' } }),
     ).toBe(false);
-    expect(isCompareSelectionComplete(EMPTY_COMPARE_SELECTION)).toBe(false);
+    expect(isCompareSelectionComplete(readCompareSelection(new URLSearchParams()))).toBe(false);
   });
 
   it('addresses the route with the branch names and exact revisions, filters only when set', () => {

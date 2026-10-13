@@ -4,10 +4,10 @@ use tracedecay_automation_runtime::automation::managed_skills::{
     ManagedSupportFile, ManagedSupportFileExt, SkillInstallTarget, apply_managed_skill_update,
     archive_managed_skill, create_managed_skill, disable_managed_skill, list_managed_skills,
     load_managed_skill, managed_skill_dir, restore_managed_skill, save_managed_skill,
-    set_managed_skill_pinned, set_managed_skill_state, update_managed_skill,
+    set_managed_skill_pinned, set_managed_skill_state,
 };
 use tracedecay_automation_runtime::automation::skill_usage::{
-    SkillUsageAction, SkillUsageEvent, ingest_analytics_events, load_skill_usage_records,
+    SkillUsageAction, SkillUsageEvent, ingest_analytics_events, list_skill_usage_records,
     record_skill_usage, record_skill_usage_event, skill_usage_record_path, summarize_skill_usage,
     summarize_skill_usage_for,
 };
@@ -262,9 +262,10 @@ async fn managed_skill_updates_reject_invalid_metadata_without_mutating_active_r
     let profile_root = temp.path().join("profile");
     let active = create_managed_skill(&profile_root, draft()).await.unwrap();
 
-    let err = update_managed_skill(
+    let err = apply_managed_skill_update(
         &profile_root,
         "repo-hygiene",
+        &active.metadata.checksum,
         ManagedSkillUpdate {
             summary: Some("Bad\nsummary".to_string()),
             ..ManagedSkillUpdate::default()
@@ -305,9 +306,10 @@ async fn managed_skill_updates_reject_invalid_metadata_without_mutating_active_r
     assert_eq!(reloaded.metadata.state, ManagedSkillState::Active);
     assert_eq!(reloaded.metadata.checksum, active.metadata.checksum);
 
-    let err = update_managed_skill(
+    let err = apply_managed_skill_update(
         &profile_root,
         "repo-hygiene",
+        &active.metadata.checksum,
         ManagedSkillUpdate {
             body_markdown: Some("x".repeat(MAX_MANAGED_SKILL_BODY_BYTES + 1)),
             ..ManagedSkillUpdate::default()
@@ -573,9 +575,10 @@ async fn managed_skill_update_activates_content_changes_immediately() {
     let before_update = create_managed_skill(&profile_root, draft()).await.unwrap();
     let created_at = before_update.metadata.created_at;
 
-    let updated = update_managed_skill(
+    let updated = apply_managed_skill_update(
         &profile_root,
         "repo-hygiene",
+        &before_update.metadata.checksum,
         ManagedSkillUpdate {
             summary: Some("Updated summary from review evidence.".to_string()),
             body_markdown: Some(
@@ -700,9 +703,7 @@ async fn released_monolithic_skill_usage_ledger_is_a_typed_reset() {
         let record_before = std::fs::read(&record_path).ok();
 
         for error in [
-            load_skill_usage_records(&profile_root, None)
-                .await
-                .unwrap_err(),
+            list_skill_usage_records(&profile_root).await.unwrap_err(),
             record_skill_usage(
                 &profile_root,
                 &skill,
@@ -772,7 +773,7 @@ async fn managed_skill_usage_ledger_records_views_uses_and_patches() {
         skill_usage_record_path(&profile_root, "repo-hygiene").is_file(),
         "each skill owns its usage file; writers must not share skill_usage.json"
     );
-    let records = load_skill_usage_records(&profile_root, None).await.unwrap();
+    let records = list_skill_usage_records(&profile_root).await.unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].skill_id, "repo-hygiene");
     assert_eq!(records[0].state, Some(ManagedSkillState::Active));

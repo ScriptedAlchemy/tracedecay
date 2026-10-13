@@ -234,29 +234,25 @@ where
     }
 
     /// Reads the durable placement relation for one run.
+    #[tracing::instrument(name = "application.work.placement.status", level = "trace", skip_all)]
     pub fn status(
         &self,
         context: &RequestContext,
         request: &WorkPlacementStatusRequestV1,
     ) -> Result<WorkPlacementReadingV1, ApplicationProblem> {
-        {
-            let _span = tracing::trace_span!("application.work.placement.status").entered();
+        let authority = work_authority(context)?;
+        let identity =
+            WorkPlacementIdentityV1::new(request.task_id.clone(), request.run_id.clone());
+        Ok(
+            match self
+                .storage
+                .load_placement(&authority, &identity)
+                .map_err(storage_problem)?
             {
-                let authority = work_authority(context)?;
-                let identity =
-                    WorkPlacementIdentityV1::new(request.task_id.clone(), request.run_id.clone());
-                Ok(
-                    match self
-                        .storage
-                        .load_placement(&authority, &identity)
-                        .map_err(storage_problem)?
-                    {
-                        Some(placement) => WorkPlacementReadingV1::Placed { placement },
-                        None => WorkPlacementReadingV1::Absent,
-                    },
-                )
-            }
-        }
+                Some(placement) => WorkPlacementReadingV1::Placed { placement },
+                None => WorkPlacementReadingV1::Absent,
+            },
+        )
     }
 
     /// Gives the target up, or quarantines it when removal is blocked.

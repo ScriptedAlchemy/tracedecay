@@ -12,7 +12,6 @@ import {
   placeLabels,
   project,
   sceneFromSlice,
-  unproject,
   zoomAt,
 } from './cortexScene.ts';
 
@@ -84,7 +83,8 @@ describe('camera', () => {
 
   it('zooms about the pointer: the world point under it stays under it', () => {
     const camera = { k: 2, tx: 30, ty: -12 };
-    const before = unproject(camera, 140, 90);
+    const before = { x: 55, y: 51 };
+    expect(project(camera, before.x, before.y)).toEqual({ x: 140, y: 90 });
     const zoomed = zoomAt(camera, 140, 90, 1.5, { min: 0.1, max: 10 });
     expect(zoomed.k).toBe(3);
     const after = project(zoomed, before.x, before.y);

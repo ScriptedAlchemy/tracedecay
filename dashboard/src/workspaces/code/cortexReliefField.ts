@@ -44,10 +44,10 @@ import {
 const S = 24;
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 /** Gaussian kernel of the relief, in world units. */
-export const RELIEF_SIGMA = S * 1.1;
+const RELIEF_SIGMA = S * 1.1;
 const CELL = S / 3;
 
-export interface ReliefModule {
+interface ReliefModule {
   readonly module: string;
   readonly count: number;
   readonly cx: number;
@@ -57,14 +57,14 @@ export interface ReliefModule {
   readonly hull: readonly { x: number; y: number }[];
 }
 
-export interface ContourLevel {
+interface ContourLevel {
   readonly level: number;
   readonly index: boolean;
   /** Flat x0,y0,x1,y1 segments in world units. */
   readonly segments: Float32Array;
 }
 
-export interface ReliefSurface {
+interface ReliefSurface {
   readonly cols: number;
   readonly rows: number;
   readonly x0: number;
@@ -76,13 +76,13 @@ export interface ReliefSurface {
 }
 
 /** Relations between one pair of directories, drawn as one trunk. */
-export interface ReliefTrunk {
+interface ReliefTrunk {
   readonly a: ReliefModule;
   readonly b: ReliefModule;
   readonly count: number;
 }
 
-export interface ReliefLayout {
+interface ReliefLayout {
   readonly positions: ReadonlyMap<string, { x: number; y: number }>;
   readonly moduleOf: ReadonlyMap<string, ReliefModule>;
   readonly modules: readonly ReliefModule[];

@@ -9,19 +9,49 @@ use tracedecay_daemon_service::{DaemonInvocationService, *};
 use tracedecay_domain::{ActorId, ConfigurationRevisionId, canonical_sha256};
 use tracedecay_hooks::HookBoundaryV1;
 
-#[test]
-fn hook_orchestration_admits_only_saved_edit_stop_and_explicit() {
-    let saved = HookOrchestrationRequestV1::from_envelope(
+/// The orchestration request for the fixture saved-edit hook.
+fn saved_edit_request(
+    lifecycle: Option<ContextScoutLifecycleAddressV1>,
+) -> HookOrchestrationRequestV1 {
+    HookOrchestrationRequestV1::from_envelope(
         hook_envelope(HookEventV2::SavedEdit {
             file_id: [7; 16],
             changed_range_count: 1,
         }),
         &hook_binding(),
-        Some(hook_lifecycle()),
+        lifecycle,
         1,
         false,
     )
-    .unwrap();
+    .unwrap()
+}
+
+/// Hook work that never completes and records when it is dropped.
+struct PendingWork {
+    dropped: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl std::future::Future for PendingWork {
+    type Output = ();
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        _context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::task::Poll::Pending
+    }
+}
+
+impl Drop for PendingWork {
+    fn drop(&mut self) {
+        self.dropped
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+#[test]
+fn hook_orchestration_admits_only_saved_edit_stop_and_explicit() {
+    let saved = saved_edit_request(Some(hook_lifecycle()));
     assert_eq!(saved.trigger, HookOrchestrationTriggerV1::SavedEdit);
 
     let stop = HookOrchestrationRequestV1::from_envelope(
@@ -36,17 +66,7 @@ fn hook_orchestration_admits_only_saved_edit_stop_and_explicit() {
     .unwrap();
     assert_eq!(stop.trigger, HookOrchestrationTriggerV1::Stop);
 
-    let without_scout_lifecycle = HookOrchestrationRequestV1::from_envelope(
-        hook_envelope(HookEventV2::SavedEdit {
-            file_id: [7; 16],
-            changed_range_count: 1,
-        }),
-        &hook_binding(),
-        None,
-        1,
-        false,
-    )
-    .unwrap();
+    let without_scout_lifecycle = saved_edit_request(None);
     assert_eq!(
         without_scout_lifecycle.trigger,
         HookOrchestrationTriggerV1::SavedEdit
@@ -97,17 +117,7 @@ async fn hook_orchestration_backpressures_without_waiting() {
     let observed_completions = Arc::clone(&completions);
     let completed = Arc::new(tokio::sync::Notify::new());
     let completion_notification = Arc::clone(&completed);
-    let mut request = HookOrchestrationRequestV1::from_envelope(
-        hook_envelope(HookEventV2::SavedEdit {
-            file_id: [7; 16],
-            changed_range_count: 1,
-        }),
-        &hook_binding(),
-        None,
-        1,
-        false,
-    )
-    .unwrap();
+    let mut request = saved_edit_request(None);
     request.completion = Some(Arc::new(move || {
         observed_completions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         completion_notification.notify_one();
@@ -232,17 +242,7 @@ async fn hook_orchestration_coalesces_duplicate_work_and_completes_every_admissi
     .unwrap();
     let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let completed = Arc::new(tokio::sync::Notify::new());
-    let mut request = HookOrchestrationRequestV1::from_envelope(
-        hook_envelope(HookEventV2::SavedEdit {
-            file_id: [7; 16],
-            changed_range_count: 1,
-        }),
-        &hook_binding(),
-        Some(hook_lifecycle()),
-        1,
-        false,
-    )
-    .unwrap();
+    let mut request = saved_edit_request(Some(hook_lifecycle()));
     let first_completions = Arc::clone(&completions);
     let first_completed = Arc::clone(&completed);
     request.completion = Some(Arc::new(move || {
@@ -312,17 +312,7 @@ async fn hook_orchestration_supersedes_same_address_without_replay_delay() {
     .unwrap();
     let first_completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed_first_completions = Arc::clone(&first_completions);
-    let mut first = HookOrchestrationRequestV1::from_envelope(
-        hook_envelope(HookEventV2::SavedEdit {
-            file_id: [7; 16],
-            changed_range_count: 1,
-        }),
-        &hook_binding(),
-        Some(hook_lifecycle()),
-        1,
-        false,
-    )
-    .unwrap();
+    let mut first = saved_edit_request(Some(hook_lifecycle()));
     first.completion = Some(Arc::new(move || {
         observed_first_completions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }));
@@ -412,17 +402,7 @@ async fn no_identity_successor_retains_exact_lifecycle_without_overwriting_expli
     .unwrap();
 
     let original_lifecycle = hook_lifecycle();
-    let first = HookOrchestrationRequestV1::from_envelope(
-        hook_envelope(HookEventV2::SavedEdit {
-            file_id: [7; 16],
-            changed_range_count: 1,
-        }),
-        &hook_binding(),
-        Some(original_lifecycle.clone()),
-        1,
-        false,
-    )
-    .unwrap();
+    let first = saved_edit_request(Some(original_lifecycle.clone()));
     assert_eq!(runtime.admit(first), HookOrchestrationAdmissionV1::Enqueued);
     first_started.notified().await;
 
@@ -480,17 +460,7 @@ async fn retryable_hook_work_does_not_acknowledge_the_durable_admission() {
     .unwrap();
     let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed_completions = Arc::clone(&completions);
-    let mut request = HookOrchestrationRequestV1::from_envelope(
-        hook_envelope(HookEventV2::SavedEdit {
-            file_id: [7; 16],
-            changed_range_count: 1,
-        }),
-        &hook_binding(),
-        Some(hook_lifecycle()),
-        1,
-        false,
-    )
-    .unwrap();
+    let mut request = saved_edit_request(Some(hook_lifecycle()));
     request.completion = Some(Arc::new(move || {
         observed_completions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }));
@@ -650,17 +620,7 @@ async fn superseded_blocking_work_is_joined_before_its_receipt_terminal() {
     let nested_finished_at_terminal = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let observed_nested_finished = Arc::clone(&nested_finished_at_terminal);
     let completion_finished = Arc::clone(&blocking_finished);
-    let mut first = HookOrchestrationRequestV1::from_envelope(
-        hook_envelope(HookEventV2::SavedEdit {
-            file_id: [7; 16],
-            changed_range_count: 1,
-        }),
-        &hook_binding(),
-        Some(hook_lifecycle()),
-        1,
-        false,
-    )
-    .unwrap();
+    let mut first = saved_edit_request(Some(hook_lifecycle()));
     first.completion = Some(Arc::new(move || {
         observed_nested_finished.store(
             completion_finished.load(std::sync::atomic::Ordering::Acquire),
@@ -789,17 +749,7 @@ async fn hook_orchestration_bounds_coalesced_completion_waiters() {
     .unwrap();
     let completion = Arc::new(|| {}) as Arc<dyn Fn() + Send + Sync>;
     let request = |completion| {
-        let mut request = HookOrchestrationRequestV1::from_envelope(
-            hook_envelope(HookEventV2::SavedEdit {
-                file_id: [7; 16],
-                changed_range_count: 1,
-            }),
-            &hook_binding(),
-            Some(hook_lifecycle()),
-            1,
-            false,
-        )
-        .unwrap();
+        let mut request = saved_edit_request(Some(hook_lifecycle()));
         request.completion = Some(completion);
         request
     };
@@ -822,28 +772,6 @@ async fn hook_orchestration_bounds_coalesced_completion_waiters() {
 
 #[tokio::test]
 async fn dropping_hook_orchestrator_cancels_daemon_owned_work_without_false_completion() {
-    struct PendingWork {
-        dropped: Arc<std::sync::atomic::AtomicBool>,
-    }
-
-    impl std::future::Future for PendingWork {
-        type Output = ();
-
-        fn poll(
-            self: std::pin::Pin<&mut Self>,
-            _context: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<Self::Output> {
-            std::task::Poll::Pending
-        }
-    }
-
-    impl Drop for PendingWork {
-        fn drop(&mut self) {
-            self.dropped
-                .store(true, std::sync::atomic::Ordering::Release);
-        }
-    }
-
     let work_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let observed_work_drop = Arc::clone(&work_dropped);
     let runtime = BoundedHookOrchestratorV1::new(1, move |_, _| PendingWork {
@@ -852,17 +780,7 @@ async fn dropping_hook_orchestrator_cancels_daemon_owned_work_without_false_comp
     .unwrap();
     let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed_completions = Arc::clone(&completions);
-    let mut request = HookOrchestrationRequestV1::from_envelope(
-        hook_envelope(HookEventV2::SavedEdit {
-            file_id: [7; 16],
-            changed_range_count: 1,
-        }),
-        &hook_binding(),
-        Some(hook_lifecycle()),
-        1,
-        false,
-    )
-    .unwrap();
+    let mut request = saved_edit_request(Some(hook_lifecycle()));
     request.completion = Some(Arc::new(move || {
         observed_completions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }));
@@ -888,45 +806,13 @@ async fn dropping_hook_orchestrator_cancels_daemon_owned_work_without_false_comp
 
 #[tokio::test]
 async fn hook_orchestrator_shutdown_fences_and_joins_pending_work() {
-    struct PendingWork {
-        dropped: Arc<std::sync::atomic::AtomicBool>,
-    }
-
-    impl std::future::Future for PendingWork {
-        type Output = ();
-
-        fn poll(
-            self: std::pin::Pin<&mut Self>,
-            _context: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<Self::Output> {
-            std::task::Poll::Pending
-        }
-    }
-
-    impl Drop for PendingWork {
-        fn drop(&mut self) {
-            self.dropped
-                .store(true, std::sync::atomic::Ordering::Release);
-        }
-    }
-
     let work_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let observed_work_drop = Arc::clone(&work_dropped);
     let runtime = BoundedHookOrchestratorV1::new(1, move |_, _| PendingWork {
         dropped: Arc::clone(&observed_work_drop),
     })
     .unwrap();
-    let request = HookOrchestrationRequestV1::from_envelope(
-        hook_envelope(HookEventV2::SavedEdit {
-            file_id: [7; 16],
-            changed_range_count: 1,
-        }),
-        &hook_binding(),
-        Some(hook_lifecycle()),
-        1,
-        false,
-    )
-    .unwrap();
+    let request = saved_edit_request(Some(hook_lifecycle()));
     assert_eq!(
         runtime.admit(request.clone()),
         HookOrchestrationAdmissionV1::Enqueued
@@ -962,17 +848,7 @@ async fn hook_orchestrator_shutdown_reports_a_failed_worker() {
     }
 
     let runtime = BoundedHookOrchestratorV1::new(1, move |_, _| PanickingWork).unwrap();
-    let request = HookOrchestrationRequestV1::from_envelope(
-        hook_envelope(HookEventV2::SavedEdit {
-            file_id: [7; 16],
-            changed_range_count: 1,
-        }),
-        &hook_binding(),
-        Some(hook_lifecycle()),
-        1,
-        false,
-    )
-    .unwrap();
+    let request = saved_edit_request(Some(hook_lifecycle()));
     assert_eq!(
         runtime.admit(request),
         HookOrchestrationAdmissionV1::Enqueued

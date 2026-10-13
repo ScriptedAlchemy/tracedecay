@@ -23,7 +23,7 @@ import type { MultiRootCapabilityV1 } from '../../contracts/generated.ts';
 import { fetchPayload, type PayloadResult } from './payload.ts';
 
 /** The route, named once. */
-export const CAPABILITIES_URL = '/api/capabilities';
+const CAPABILITIES_URL = '/api/capabilities';
 
 /**
  * Only the members this dashboard reads, and `multi_root` is optional.
@@ -34,7 +34,7 @@ export const CAPABILITIES_URL = '/api/capabilities';
  * flattened into it. `passthrough` keeps the rest of the bundle intact for the
  * fixture gate, which parses the same body against `CapabilitiesSchema`.
  */
-export const CapabilitiesReadSchema = z
+const CapabilitiesReadSchema = z
   .object({ multi_root: MultiRootCapabilityV1Schema.optional() })
   .passthrough();
 

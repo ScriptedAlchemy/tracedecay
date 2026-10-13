@@ -17,13 +17,6 @@ export interface GraphPalette {
   light: boolean;
 }
 
-/** A palette that outlives any single sample, so the reducers and the glow
- * pass can be handed one object at construction and still see the tokens a
- * later theme flip re-sampled. */
-export interface ThemeBox {
-  colors: GraphPalette;
-}
-
 /** Samples the resolved theme tokens Sigma needs; canvas renderers cannot
  * consume CSS variables directly, so we re-sample on every theme flip. */
 export function palette(element: HTMLElement): GraphPalette {
@@ -57,12 +50,4 @@ export function palette(element: HTMLElement): GraphPalette {
     dim: token('--raw-graph-dim', '#26374c'),
     light,
   };
-}
-
-export function rgb([r, g, b]: [number, number, number]): string {
-  return `rgb(${r}, ${g}, ${b})`;
-}
-
-export function rgba([r, g, b]: [number, number, number], alpha: number): string {
-  return `rgba(${r}, ${g}, ${b}, ${Math.max(0, Math.min(1, alpha)).toFixed(3)})`;
 }

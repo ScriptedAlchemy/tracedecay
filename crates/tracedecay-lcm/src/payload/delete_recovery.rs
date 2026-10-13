@@ -112,7 +112,7 @@ pub fn reconcile_committed_payload_drain(
     }
 }
 
-pub(super) async fn delete_external_payload_in_transaction(
+pub async fn delete_external_payload_in_transaction(
     conn: &(impl Executor + ?Sized),
     storage_root: &Path,
     payload_ref: &str,
@@ -126,7 +126,10 @@ pub(super) async fn delete_external_payload_in_transaction(
     Ok(prepared)
 }
 
-pub(super) async fn prepare_external_payload_delete_in_transaction(
+/// Prepares one member of a caller-owned deletion batch. The caller deletes
+/// GC marks only for successful preparations, in one bounded statement after
+/// the batch.
+pub(crate) async fn prepare_external_payload_delete_in_transaction(
     conn: &(impl Executor + ?Sized),
     storage_root: &Path,
     payload_ref: &str,

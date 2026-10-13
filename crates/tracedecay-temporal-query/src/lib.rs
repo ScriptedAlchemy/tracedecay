@@ -254,6 +254,9 @@ pub struct TemporalCandidateExport {
     summaries: Vec<SessionSummaryRecordV1>,
     summary_eligibility: SummaryLineageEligibility,
     strict_population: Option<snapshot::TemporalCandidatePopulationCount>,
+    /// The candidate window this page was ranked in. A page that ends early
+    /// at its hydration byte budget continues inside the same window.
+    window_keyset: Option<String>,
 }
 
 impl TemporalCandidateExport {
@@ -307,7 +310,14 @@ pub async fn execute_temporal_kernel(
     token_estimator: &impl VersionedTokenEstimator,
 ) -> Result<TemporalKernelResult, TemporalKernelError> {
     let export = execute_temporal_candidate_export(request, read_port, authenticator).await?;
-    hydrate_temporal_candidate_export(request, export, hydration_port, token_estimator).await
+    hydrate_temporal_candidate_export(
+        request,
+        export,
+        hydration_port,
+        token_estimator,
+        Some(authenticator),
+    )
+    .await
 }
 
 /// Execute the canonical Plan-23 candidate, temporal-resolution, fusion,
@@ -609,6 +619,7 @@ pub async fn execute_temporal_candidate_export(
         summaries: records.summaries,
         summary_eligibility,
         strict_population,
+        window_keyset: resume.candidate_keyset,
     })
 }
 

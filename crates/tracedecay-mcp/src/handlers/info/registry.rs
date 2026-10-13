@@ -15,6 +15,7 @@ use tracedecay_contracts::{
     ProjectRegistrySelector, ProjectRegistryView, render_project_registry_view,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use crate::handlers::graph::graph_tool_completion;
@@ -28,20 +29,6 @@ fn display_path(path: &Path) -> String {
 
 fn bounded_limit(limit: Option<usize>, default: usize, max: usize) -> usize {
     limit.map_or(default, |value| value.clamp(1, max))
-}
-
-/// Whether a selector names a path rather than a bare project name. Pure
-/// syntax: it decides whether a selector may fall back to Git identity.
-/// Must stay aligned with
-/// `RegisteredGlobalDb::is_explicit_project_path_selector`.
-fn is_explicit_project_path_selector(selector: &str) -> bool {
-    let selector = selector.trim();
-    !selector.is_empty()
-        && (Path::new(selector).is_absolute()
-            || selector == "."
-            || selector == ".."
-            || selector.contains('/')
-            || selector.contains('\\'))
 }
 
 /// Computes one profile registry read. `active_project_root` is the project
@@ -191,8 +178,8 @@ fn project_context_selector(
         });
     };
     let path = Path::new(&path);
-    let allow_git_identity =
-        path.is_absolute() && is_explicit_project_path_selector(path.to_string_lossy().as_ref());
+    let allow_git_identity = path.is_absolute()
+        && RegisteredGlobalDb::is_explicit_project_path_selector(path.to_string_lossy().as_ref());
     Ok(ProjectRegistrySelector::Path {
         path: path.to_path_buf(),
         allow_git_identity,

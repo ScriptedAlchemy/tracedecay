@@ -8,8 +8,8 @@ use super::{
     replace_scheduler_chunker_revision, rewrite_active_rust_extractor_revision, scheduler,
     test_project_id, wait_for_queryable_text_generation_change, wait_for_quiescent_owner_pass,
 };
-use crate::code_index::production::DAEMON_CODE_INDEX_CHUNKER_REVISION;
 use crate::code_index_scheduler::scoped_code_index_store_root;
+use tracedecay_code_index::production::DAEMON_CODE_INDEX_CHUNKER_REVISION;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

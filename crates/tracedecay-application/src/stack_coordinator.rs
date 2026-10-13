@@ -20,8 +20,6 @@ use tracedecay_domain::{
 mod transition;
 pub use transition::*;
 
-pub const MAX_GITHUB_STACK_ROOTS_PER_FANOUT_V1: usize = 64;
-pub const MAX_GITHUB_STACK_SIGNALS_PER_FANOUT_V1: usize = 128;
 pub const MAX_GITHUB_STACK_LAYERS_V1: usize = 100;
 const PREFLIGHT_JOIN_WAIT_SLICE: Duration = Duration::from_millis(25);
 const PREFLIGHT_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -317,29 +315,6 @@ impl DaemonGitHubStackCoordinatorV1 {
             },
             observed_at,
         )
-    }
-
-    pub fn fanout_authorized<F>(
-        &self,
-        mut roots: Vec<ResolvedScope>,
-        mut authorize: F,
-    ) -> Result<Vec<GitHubStackObservationV1>, GitHubStackCoordinatorErrorV1>
-    where
-        F: FnMut(&ResolvedScope) -> bool,
-    {
-        roots.sort_by(|left, right| left.scope_digest.cmp(&right.scope_digest));
-        roots.dedup_by(|left, right| left.scope_digest == right.scope_digest);
-        roots.truncate(MAX_GITHUB_STACK_ROOTS_PER_FANOUT_V1);
-        let observations = self
-            .observations
-            .lock()
-            .map_err(|_| GitHubStackCoordinatorErrorV1::Poisoned)?;
-        Ok(roots
-            .into_iter()
-            .filter(|root| authorize(root))
-            .filter_map(|root| observations.get(&root.scope_digest).cloned())
-            .take(MAX_GITHUB_STACK_SIGNALS_PER_FANOUT_V1)
-            .collect())
     }
 
     pub fn register_circuit_policy(

@@ -22,6 +22,7 @@ use tracedecay_runtime_core::branch::BranchMemo;
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, OwnerStoresV1};
 
 use super::McpServer;
+use crate::mcp::tools::handlers::ServedCodeGraphSlot;
 use crate::mcp::tools::{
     ToolCallRegistryOptions, compute_graph_tool_for_owner, graph_tool_error_problem,
 };
@@ -59,6 +60,80 @@ impl ProjectGraphToolPortV1 for McpGraphToolPort {
 }
 
 impl McpServer {
+    /// Registry options carrying every owner this server composes; each
+    /// dispatch overrides only its per-call fields.
+    pub(super) fn tool_call_registry_options<'a>(
+        &'a self,
+        session_sync_service: Option<
+            &'a dyn tracedecay_contracts::session_sync::SessionSyncServicePort,
+        >,
+    ) -> ToolCallRegistryOptions<'a> {
+        ToolCallRegistryOptions {
+            global_db: self.registry_db.as_ref(),
+            server_stats: None,
+            accounting_db: self.accounting_db.as_deref(),
+            registered_project_session_db: self.project_session_db.clone(),
+            registered_profile_session_db: self.profile_session_db.clone(),
+            registered_savings_db: self.accounting_db.clone(),
+            dashboard_session_retrieval_service: self
+                .project_application_retrieval
+                .as_ref()
+                .map(|mounted| Arc::clone(&mounted.service)),
+            dashboard_session_retrieval_identity: self
+                .project_application_retrieval
+                .as_ref()
+                .map(|mounted| mounted.identity.clone()),
+            daemon_user_profile_id: self
+                .profile_identity
+                .as_ref()
+                .map(|identity| identity.profile_id().clone()),
+            profile: self.profile.as_ref(),
+            resolved_project_route: None,
+            automation_scheduler_reconciler: self.automation_scheduler_reconciler.clone(),
+            automation_writer: self.dashboard_automation_writer.clone(),
+            doctor_report_reader: self.dashboard_doctor_report_reader.get().cloned(),
+            remote_operational_status: self.remote_operational_status.clone(),
+            code_index_freshness_reader: self.dashboard_code_index_freshness_reader.clone(),
+            code_index_readiness_waiter: self.code_index_readiness_waiter.clone(),
+            feedback_status_reader: self.dashboard_feedback_status_reader.clone(),
+            pr_autotrack_reader: self.dashboard_pr_autotrack_reader.clone(),
+            diagnostics_lsp: Some(Arc::clone(&self.diagnostics_lsp)),
+            application_invocation_executor: None,
+            application_invocation_target: tracedecay_contracts::InvocationTarget::CurrentProject,
+            dashboard_application_invocation_executor: self.application_invocation_executor.clone(),
+            daemon_invocation_service: self.daemon_invocation_service.as_ref(),
+            dashboard_delivery_settlement_authority: self.delivery_settlement_authority.clone(),
+            application_request_id: None,
+            application_deadline: None,
+            application_cancellation: None,
+            code_index_publication_identity: self.code_index_publication_identity.clone(),
+            code_index_reconcile_sink: self.code_index_reconcile_sink.clone(),
+            code_index_search_executor: self.code_index_search_executor.clone(),
+            code_index_similar_executor: self.code_index_similar_executor.clone(),
+            code_index_redundancy_executor: self.code_index_redundancy_executor.clone(),
+            code_index_branch_diff_executor: self.code_index_branch_diff_executor.clone(),
+            code_index_search_authority: self.code_index_search_authority.clone(),
+            admitted_project_scope: self.admitted_project_scope.clone(),
+            code_graph_projection_read_port: self.code_graph_projection_read_port.clone(),
+            code_graph_read_admission_port: self.code_graph_read_admission_port.clone(),
+            verified_graph_query_port: self.verified_graph_query_port.clone(),
+            code_index_ignored_dependency_admission: self
+                .code_index_ignored_dependency_admission
+                .clone(),
+            generation_census_reader: self.generation_census_reader(),
+            retained_project_server_resolver: self.retained_project_server_resolver.clone(),
+            session_sync_service,
+            served_code_graph: ServedCodeGraphSlot::default(),
+            session_authorities: tracedecay_mcp::handlers::SessionAuthorities::new(
+                self.project_session_db.as_ref(),
+                self.profile_session_db.as_ref(),
+            )
+            .with_profile_identity(self.profile_identity.clone())
+            .with_background_cpu(self.background_cpu.clone())
+            .with_project_lcm_authority(self.project_lcm_authority.as_deref()),
+        }
+    }
+
     /// Raw worktree writes and renames carry no hook hint or Git metadata
     /// move, so a read is their witness: it serves now and the cooled-down
     /// probe reconciles them for the next read.
@@ -88,67 +163,11 @@ impl McpServer {
             .as_ref()
             .and_then(std::sync::Weak::upgrade);
         let options = ToolCallRegistryOptions {
-            global_db: self.registry_db.as_ref(),
-            accounting_db: self.accounting_db.as_deref(),
-            profile: self.profile.as_ref(),
-            session_authorities: tracedecay_mcp::handlers::SessionAuthorities::new(
-                self.project_session_db.as_ref(),
-                self.profile_session_db.as_ref(),
-            )
-            .with_profile_identity(self.profile_identity.clone())
-            .with_background_cpu(self.background_cpu.clone())
-            .with_project_lcm_authority(self.project_lcm_authority.as_deref()),
-            session_sync_service: session_sync_service.as_deref(),
             server_stats,
-            code_index_readiness_waiter: self.code_index_readiness_waiter.clone(),
-            generation_census_reader: self.generation_census_reader(),
-            registered_project_session_db: self.project_session_db.clone(),
             application_request_id: Some(invocation.request_id),
             application_deadline: Some(invocation.deadline),
             application_cancellation: Some(invocation.cancellation),
-            code_index_search_executor: self.code_index_search_executor.clone(),
-            code_index_similar_executor: self.code_index_similar_executor.clone(),
-            code_index_redundancy_executor: self.code_index_redundancy_executor.clone(),
-            code_index_branch_diff_executor: self.code_index_branch_diff_executor.clone(),
-            code_index_search_authority: self.code_index_search_authority.clone(),
-            admitted_project_scope: self.admitted_project_scope.clone(),
-            verified_graph_query_port: self.verified_graph_query_port.clone(),
-            code_index_freshness_reader: self.dashboard_code_index_freshness_reader.clone(),
-            code_index_publication_identity: self.code_index_publication_identity.clone(),
-            code_index_reconcile_sink: self.code_index_reconcile_sink.clone(),
-            code_index_ignored_dependency_admission: self
-                .code_index_ignored_dependency_admission
-                .clone(),
-            // The dashboard the owner binds composes these daemon-owned
-            // readers, writers, and session authorities.
-            registered_profile_session_db: self.profile_session_db.clone(),
-            registered_savings_db: self.accounting_db.clone(),
-            dashboard_session_retrieval_service: self
-                .project_application_retrieval
-                .as_ref()
-                .map(|mounted| Arc::clone(&mounted.service)),
-            dashboard_session_retrieval_identity: self
-                .project_application_retrieval
-                .as_ref()
-                .map(|mounted| mounted.identity.clone()),
-            daemon_user_profile_id: self
-                .profile_identity
-                .as_ref()
-                .map(|identity| identity.profile_id().clone()),
-            automation_scheduler_reconciler: self.automation_scheduler_reconciler.clone(),
-            automation_writer: self.dashboard_automation_writer.clone(),
-            doctor_report_reader: self.dashboard_doctor_report_reader.get().cloned(),
-            remote_operational_status: self.remote_operational_status.clone(),
-            feedback_status_reader: self.dashboard_feedback_status_reader.clone(),
-            pr_autotrack_reader: self.dashboard_pr_autotrack_reader.clone(),
-            diagnostics_lsp: Some(Arc::clone(&self.diagnostics_lsp)),
-            dashboard_application_invocation_executor: self.application_invocation_executor.clone(),
-            daemon_invocation_service: self.daemon_invocation_service.as_ref(),
-            dashboard_delivery_settlement_authority: self.delivery_settlement_authority.clone(),
-            code_graph_projection_read_port: self.code_graph_projection_read_port.clone(),
-            code_graph_read_admission_port: self.code_graph_read_admission_port.clone(),
-            retained_project_server_resolver: self.retained_project_server_resolver.clone(),
-            ..ToolCallRegistryOptions::default()
+            ..self.tool_call_registry_options(session_sync_service.as_deref())
         };
         let computed = compute_graph_tool_for_owner(
             cg.as_ref(),

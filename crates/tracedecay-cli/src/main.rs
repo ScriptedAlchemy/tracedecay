@@ -55,16 +55,11 @@ mod workflow_command;
 
 use cli::*;
 use tracedecay_contracts::retrieval::{
-    AdminCliRegistryContextV1, AdminCliResultV1, AdminCliSurfaceRequestV1,
+    AdminCliRegistryContextV1, AdminProjectResultV1, AdminProjectSurfaceRequestV1,
 };
-use tracedecay_contracts::retrieval::{AdminProjectResultV1, AdminProjectSurfaceRequestV1};
 use tracedecay_daemon_service::logging::StderrTracingDefault;
 use tracedecay_domain::process_heap::collect_idle_thread_heap_v1;
 use tracedecay_runtime_core::config::{ProfileRoot, admit_process_host_program_search_path};
-
-pub(crate) fn current_unix_timestamp() -> i64 {
-    tracedecay_runtime_core::tracedecay::current_timestamp()
-}
 
 /// A self-animating spinner that ticks on a background thread.
 /// Call `set_message` to update what is displayed; the background thread
@@ -822,21 +817,15 @@ async fn resolve_registered_project_root(
         (None, Some(project_path)) => registered_project_path_selector(&project_path)?,
         (None, None) => return Ok(None),
     };
-    let request = AdminCliSurfaceRequestV1::RegistryContext {
-        project_arg: Some(PathBuf::from(&selector)),
-    };
-    match commands::admin_cli_result(profile, None, request).await? {
-        AdminCliResultV1::RegistryContext(AdminCliRegistryContextV1::Ok { project, .. }) => {
+    match commands::registry_context(profile, PathBuf::from(&selector)).await? {
+        AdminCliRegistryContextV1::Ok { project, .. } => {
             Ok(Some(PathBuf::from(project.display_root)))
         }
-        AdminCliResultV1::RegistryContext(_) => {
-            Err(tracedecay_domain::errors::TraceDecayError::project_route(
-                "project_route_not_found",
-                false,
-                format!("registered project not found for '{selector}'"),
-            ))
-        }
-        _ => Err(commands::admin_cli_result_mismatch("registry_context")),
+        _ => Err(tracedecay_domain::errors::TraceDecayError::project_route(
+            "project_route_not_found",
+            false,
+            format!("registered project not found for '{selector}'"),
+        )),
     }
 }
 

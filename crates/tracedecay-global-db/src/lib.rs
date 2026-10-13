@@ -58,7 +58,7 @@ pub use observability_rollup::{
     ObservabilityRollupFragmentPageV1, ObservabilityRollupFragmentQueryV1,
     ObservabilityRollupFragmentRecordV1, ObservabilityRollupFrontierV1,
     ObservabilityRollupRebuildReceiptV1, ObservabilityRollupRebuildV1,
-    ObservabilityRollupRetentionReceiptV1,
+    ObservabilityRollupRetentionReceiptV1, merge_coverage,
 };
 pub use observation_adapter::GlobalDbObservationStore;
 pub use observation_projection::{
@@ -156,10 +156,10 @@ pub use api_types::{
     ObservabilityEmissionClaimV1, ObservabilityEmissionOutboxRecordV1,
     ObservabilityOwnerEmissionWriteOutcomeV1, ObservabilityOwnerEmissionWriteV1,
     PreparedObservabilityEmissionV1, ProjectAliasRecord, ProjectRegistryContext,
-    ProjectStoreContext, ProjectStoreResolution, RegisteredProjectRootInventoryV1, SavingsDay,
-    SavingsTotal, SessionActivityRow, SessionIngestHealth, SessionProviderCoverage,
-    SessionProviderCoverageState, StoreArtifactRecord, StoreArtifactUpsert, StoreInstanceRecord,
-    StoreInstanceUpsert, registry_context_candidate_roots,
+    ProjectStoreContext, ProjectStoreResolution, SavingsDay, SavingsTotal, SessionActivityRow,
+    SessionIngestHealth, SessionProviderCoverage, SessionProviderCoverageState,
+    StoreArtifactRecord, StoreArtifactUpsert, StoreInstanceRecord, StoreInstanceUpsert,
+    registry_context_candidate_roots,
 };
 pub use support::{
     AccountingMode, env_flag, env_value_truthy, global_accounting_enabled, global_accounting_mode,

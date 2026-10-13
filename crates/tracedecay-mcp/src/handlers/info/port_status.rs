@@ -10,11 +10,10 @@ use tracedecay_contracts::retrieval::{
     PortMatchedSymbolV1, PortStatusResultV1, PortStatusSurfaceRequestV1, PortTargetOnlySymbolV1,
     PortUnmatchedSymbolV1,
 };
-use tracedecay_domain::code_intelligence::NodeKind;
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::Result;
 use tracedecay_graph_query::VerifiedGraphQuery;
 
-use super::PORT_DEFAULT_KINDS;
+use super::port_kinds;
 use super::verified::{
     required_file_path, required_metadata, required_symbol_parts, symbols_in_dir,
 };
@@ -92,27 +91,7 @@ pub async fn compute_port_status(
 ) -> Result<GraphToolCompletionV1> {
     let request: PortStatusSurfaceRequestV1 =
         decode_primitive_request(&args, "tracedecay_port_status")?;
-    let kind_strs = request.kinds.as_ref().map_or_else(
-        || {
-            PORT_DEFAULT_KINDS
-                .iter()
-                .map(std::string::ToString::to_string)
-                .collect()
-        },
-        Clone::clone,
-    );
-
-    let kinds: Vec<NodeKind> = kind_strs
-        .iter()
-        .filter_map(|s| NodeKind::from_str(s))
-        .collect();
-
-    if kinds.is_empty() {
-        return Err(TraceDecayError::Config {
-            message: "invalid parameter: kinds must contain at least one supported node kind"
-                .to_owned(),
-        });
-    }
+    let kinds = port_kinds(request.kinds.as_deref())?;
 
     let (source_nodes, target_nodes) = {
         let _span = tracing::trace_span!("mcp.info.port_status.symbols").entered();

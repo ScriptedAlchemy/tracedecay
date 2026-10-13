@@ -4,8 +4,8 @@
 //! adoption, latency, resource, storage, and index observations. This module is
 //! the production side of that contract: it builds the canonical
 //! [`ObservabilityEnvelopeV1`] for each family and persists it through the one
-//! registered observation authority, exactly as
-//! [`tracedecay_session_memory::event_lane::record_mcp_dispatch`] does for MCP dispatch receipts.
+//! registered observation authority through
+//! [`tracedecay_session_memory::event_lane::record_observability`].
 //!
 //! Two disciplines are load-bearing and deliberately repeated per family:
 //!

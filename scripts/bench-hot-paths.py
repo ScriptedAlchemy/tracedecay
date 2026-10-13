@@ -59,7 +59,6 @@ from portable_process import dies_with_this_process  # noqa: E402
 
 LINUX = sys.platform.startswith("linux")
 CLOCK_TICKS = os.sysconf("SC_CLK_TCK") if LINUX else None
-PAGE_KB = os.sysconf("SC_PAGE_SIZE") // 1024 if LINUX else None
 
 SEED_SYMBOLS = ["DaemonHandshake", "default_socket_path", "call_default_tool", "TraceDecay"]
 CONTEXT_TASK = "how does the daemon serve tool calls"

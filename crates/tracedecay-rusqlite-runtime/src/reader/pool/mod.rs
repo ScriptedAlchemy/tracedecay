@@ -819,9 +819,10 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         }
     }
 
-    /// Acquire within a caller-selected bound. The caller-owned probe remains
-    /// the sole cancellation/deadline authority and is checked before every
-    /// capacity decision and bounded condvar wait.
+    /// Acquire within a caller-selected bound on the time spent waiting for
+    /// capacity, counted from when the lane is first found blocked. The
+    /// caller-owned probe remains the sole cancellation/deadline authority and
+    /// is checked before every capacity decision and bounded condvar wait.
     pub fn acquire(
         &self,
         request: &RuntimeReadRequestV1,
@@ -886,6 +887,11 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         let lease_ceiling = self.lease_ceiling(admission);
         let mut waiting = WaitingGuard::new(&self.inner, lane);
         let started = Instant::now();
+        // `max_wait` bounds the time spent waiting for capacity, so it starts
+        // when the lane is first found blocked. Measured from entry, a
+        // scheduler stall before the first capacity check would spend the
+        // whole bound and report saturation without ever waiting for a release.
+        let mut blocked_since: Option<Instant> = None;
         // Retiring burst workers walks and rebuilds the idle deque under the
         // state lock; it only has anything to do when the idle set has actually
         // changed. Run it on entry and after a notified wake, never on every
@@ -923,16 +929,16 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                         matches!(&*pressure.borrow(), CheckpointPressure::BlockGeneral { .. })
                     })
             {
-                let elapsed = started.elapsed();
-                if elapsed >= max_wait {
+                let blocked = blocked_since.get_or_insert_with(Instant::now).elapsed();
+                if blocked >= max_wait {
                     self.inner
                         .admission
-                        .saturated(elapsed, waiting.was_counted());
+                        .saturated(started.elapsed(), waiting.was_counted());
                     return Err(ReaderAcquireError::Saturated {
                         scope: SaturationScopeV1::ReaderPool,
                     });
                 }
-                let wait = (max_wait - elapsed).min(ACQUISITION_POLL_QUANTUM);
+                let wait = (max_wait - blocked).min(ACQUISITION_POLL_QUANTUM);
                 waiting.arm(&mut state);
                 let (_state, wait_result) = self
                     .inner
@@ -1036,16 +1042,16 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
                     ));
                 }
             }
-            let elapsed = started.elapsed();
-            if elapsed >= max_wait {
+            let blocked = blocked_since.get_or_insert_with(Instant::now).elapsed();
+            if blocked >= max_wait {
                 self.inner
                     .admission
-                    .saturated(elapsed, waiting.was_counted());
+                    .saturated(started.elapsed(), waiting.was_counted());
                 return Err(ReaderAcquireError::Saturated {
                     scope: SaturationScopeV1::ReaderPool,
                 });
             }
-            let wait = (max_wait - elapsed).min(ACQUISITION_POLL_QUANTUM);
+            let wait = (max_wait - blocked).min(ACQUISITION_POLL_QUANTUM);
             waiting.arm(&mut state);
             let (_state, wait_result) = self
                 .inner

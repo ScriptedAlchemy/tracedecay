@@ -1,6 +1,5 @@
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 
 use serde_json::json;
@@ -19,6 +18,8 @@ use tracedecay_sessions::admission::HostAdmissionStatus;
 use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext;
 use tracedecay_store::{ObservationPersistOutcome, ObservationReplayRequest, ObservationStore};
 
+use crate::test_support::git::git;
+
 use tracedecay_host_admission::*;
 use tracedecay_sessions::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ExternalSourceProjectionStateV1,
@@ -27,19 +28,7 @@ use tracedecay_sessions::observation::{
 
 fn initialize_repository(path: &Path) {
     fs::create_dir_all(path).unwrap();
-    let output = Command::new(
-        tracedecay_runtime_core::git::try_git_program()
-            .expect("absolute git executable should resolve"),
-    )
-    .args(["init", "-q", "-b", "main"])
-    .current_dir(path)
-    .output()
-    .unwrap();
-    assert!(
-        output.status.success(),
-        "git init failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    git(path, &["init", "-q", "-b", "main"]);
 }
 
 fn enroll_project(path: &Path, project_id: &ProjectId) {
@@ -259,20 +248,15 @@ async fn host_ingress_binds_provenance_to_authoritative_project_and_replays_stab
     assert_eq!(initial_provenance.capture().project_id(), Some(&project_id));
     assert_eq!(initial_provenance.generation_id(), &initial_generation);
 
-    let remote = Command::new(
-        tracedecay_runtime_core::git::try_git_program()
-            .expect("absolute git executable should resolve"),
-    )
-    .args([
-        "remote",
-        "add",
-        "origin",
-        "https://example.invalid/changed.git",
-    ])
-    .current_dir(&repository_root)
-    .output()
-    .unwrap();
-    assert!(remote.status.success());
+    git(
+        &repository_root,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.invalid/changed.git",
+        ],
+    );
     let replay = facade
         .capture_observation(host_capture_request(
             project_scope.clone(),

@@ -387,18 +387,8 @@ async fn assert_initialized_route_is_rmcp<R, W>(
 async fn unix_production_route_serves_initialize_and_stateless_requests_over_rmcp() {
     let fixture = rmcp_route_fixture("unix-rmcp-production-route").await;
 
-    let (server_stream, client_stream) =
-        tokio::net::UnixStream::pair().expect("production route socket pair");
-    let engine = fixture.engine.clone();
-    let initialized_task = tokio::spawn(async move {
-        Box::pin(super::serve_authenticated_test_client(
-            server_stream,
-            engine,
-        ))
-        .await
-    });
-    let (reader, mut writer) = client_stream.into_split();
-    super::write_test_auth_preface(&mut writer).await;
+    let (reader, writer, initialized_task) =
+        super::connect_authenticated_test_client(fixture.engine.clone()).await;
     assert_initialized_route_is_rmcp(
         tokio::io::BufReader::new(reader),
         writer,
@@ -617,18 +607,8 @@ where
 
 #[cfg(unix)]
 async fn unix_one_request(fixture: &RmcpRouteFixture, request: &Value) -> Vec<Value> {
-    let (server_stream, client_stream) =
-        tokio::net::UnixStream::pair().expect("one-request socket pair");
-    let engine = fixture.engine.clone();
-    let task = tokio::spawn(async move {
-        Box::pin(super::serve_authenticated_test_client(
-            server_stream,
-            engine,
-        ))
-        .await
-    });
-    let (reader, mut writer) = client_stream.into_split();
-    super::write_test_auth_preface(&mut writer).await;
+    let (reader, writer, task) =
+        super::connect_authenticated_test_client(fixture.engine.clone()).await;
     let responses = one_request_responses(
         tokio::io::BufReader::new(reader),
         writer,
@@ -652,23 +632,9 @@ async fn unix_fire_and_forget_hook(fixture: &RmcpRouteFixture, event: DaemonHook
         "method": tracedecay_hooks::core_events::HOOK_EVENT_METHOD,
         "params": event,
     }));
-    let (server_stream, client_stream) =
-        tokio::net::UnixStream::pair().expect("fire-and-forget socket pair");
-    let engine = fixture.engine.clone();
-    let served = tokio::spawn(async move {
-        Box::pin(super::serve_authenticated_test_client(
-            server_stream,
-            engine,
-        ))
-        .await
-    });
-    let (reader, mut writer) = client_stream.into_split();
-    super::write_test_auth_preface(&mut writer).await;
-    writer
-        .write_all(fixture.handshake.to_line().expect("handshake").as_bytes())
-        .await
-        .expect("write handshake");
-    writer.write_all(b"\n").await.expect("handshake newline");
+    let (reader, mut writer, served) =
+        super::handshake_authenticated_test_client(fixture.engine.clone(), &fixture.handshake)
+            .await;
     write_line(&mut writer, &request).await;
     writer.shutdown().await.expect("shutdown hook client");
     drop((reader, writer));
@@ -1037,30 +1003,10 @@ async fn selected_target_rmcp_flushes_response_and_disconnect_cancels_selector_o
             .expect("mounted target server")
     };
 
-    let (server_stream, client_stream) =
-        tokio::net::UnixStream::pair().expect("selected target socket pair");
-    let engine = fixture.engine.clone();
-    let server_task = tokio::spawn(async move {
-        Box::pin(super::serve_authenticated_test_client(
-            server_stream,
-            engine,
-        ))
-        .await
-    });
-    let (reader, mut writer) = client_stream.into_split();
-    super::write_test_auth_preface(&mut writer).await;
+    let (reader, mut writer, server_task) =
+        super::handshake_authenticated_test_client(fixture.engine.clone(), &fixture.handshake)
+            .await;
     let mut reader = tokio::io::BufReader::new(reader);
-    writer
-        .write_all(
-            fixture
-                .handshake
-                .to_line()
-                .expect("selected target handshake")
-                .as_bytes(),
-        )
-        .await
-        .expect("write selected target handshake");
-    writer.write_all(b"\n").await.expect("handshake newline");
     write_line(&mut writer, &initialize_request()).await;
     assert_eq!(
         read_value(&mut reader, "initialize selected target route").await["id"],
@@ -1136,30 +1082,10 @@ async fn selected_target_rmcp_flushes_response_and_disconnect_cancels_selector_o
         );
     }
 
-    let (server_stream, client_stream) =
-        tokio::net::UnixStream::pair().expect("selector-owner cancellation socket pair");
-    let engine = fixture.engine.clone();
-    let server_task = tokio::spawn(async move {
-        Box::pin(super::serve_authenticated_test_client(
-            server_stream,
-            engine,
-        ))
-        .await
-    });
-    let (reader, mut writer) = client_stream.into_split();
-    super::write_test_auth_preface(&mut writer).await;
+    let (reader, mut writer, server_task) =
+        super::handshake_authenticated_test_client(fixture.engine.clone(), &fixture.handshake)
+            .await;
     let mut reader = tokio::io::BufReader::new(reader);
-    writer
-        .write_all(
-            fixture
-                .handshake
-                .to_line()
-                .expect("selector-owner cancellation handshake")
-                .as_bytes(),
-        )
-        .await
-        .expect("write selector-owner cancellation handshake");
-    writer.write_all(b"\n").await.expect("handshake newline");
     write_line(&mut writer, &initialize_request()).await;
     assert_eq!(
         read_value(&mut reader, "initialize selector-owner cancellation").await["id"],
@@ -1245,30 +1171,10 @@ async fn production_rmcp_cancels_concurrent_requests_before_or_after_registratio
     let fixture = rmcp_route_fixture("rmcp-live-cancellation").await;
     let (executor, key, controlled_server) = mount_cancellation_executor(&fixture).await;
 
-    let (server_stream, client_stream) =
-        tokio::net::UnixStream::pair().expect("cancellation socket pair");
-    let engine = fixture.engine.clone();
-    let server_task = tokio::spawn(async move {
-        Box::pin(super::serve_authenticated_test_client(
-            server_stream,
-            engine,
-        ))
-        .await
-    });
-    let (reader, mut writer) = client_stream.into_split();
-    super::write_test_auth_preface(&mut writer).await;
+    let (reader, mut writer, server_task) =
+        super::handshake_authenticated_test_client(fixture.engine.clone(), &fixture.handshake)
+            .await;
     let mut reader = tokio::io::BufReader::new(reader);
-    writer
-        .write_all(
-            fixture
-                .handshake
-                .to_line()
-                .expect("cancellation handshake")
-                .as_bytes(),
-        )
-        .await
-        .expect("write cancellation handshake");
-    writer.write_all(b"\n").await.expect("handshake newline");
     write_line(&mut writer, &initialize_request()).await;
     assert_eq!(
         read_value(&mut reader, "initialize cancellation route").await["id"],
@@ -1509,30 +1415,10 @@ async fn serve_proxy_cancels_running_and_queued_requests_without_host_disconnect
 async fn deadline_reply_does_not_wait_for_a_worker_that_ignores_cancellation() {
     let fixture = rmcp_route_fixture("rmcp-deadline-uncooperative").await;
     let (executor, key, controlled_server) = mount_cancellation_executor(&fixture).await;
-    let (server_stream, client_stream) =
-        tokio::net::UnixStream::pair().expect("deadline socket pair");
-    let engine = fixture.engine.clone();
-    let server_task = tokio::spawn(async move {
-        Box::pin(super::serve_authenticated_test_client(
-            server_stream,
-            engine,
-        ))
-        .await
-    });
-    let (reader, mut writer) = client_stream.into_split();
-    super::write_test_auth_preface(&mut writer).await;
+    let (reader, mut writer, server_task) =
+        super::handshake_authenticated_test_client(fixture.engine.clone(), &fixture.handshake)
+            .await;
     let mut reader = tokio::io::BufReader::new(reader);
-    writer
-        .write_all(
-            fixture
-                .handshake
-                .to_line()
-                .expect("deadline handshake")
-                .as_bytes(),
-        )
-        .await
-        .expect("write deadline handshake");
-    writer.write_all(b"\n").await.expect("handshake newline");
     write_line(&mut writer, &initialize_request()).await;
     assert_eq!(
         read_value(&mut reader, "initialize deadline route").await["id"],

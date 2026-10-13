@@ -451,7 +451,6 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
     use std::path::{Path, PathBuf};
-    use std::process::Command;
 
     use serde_json::json;
     use tempfile::TempDir;
@@ -461,22 +460,10 @@ mod tests {
         resolve_initialize_roots_project_path, resolve_initialize_roots_project_route,
         select_initialize_project_path,
     };
+    use crate::test_support::git::git;
     use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;
     use tracedecay_runtime_core::path_safety::canonical_existing_identity;
     use tracedecay_sessions::admission::HostAdmissionScope;
-
-    fn run_git(root: &Path, args: &[&str]) {
-        let status = Command::new("git")
-            .args(args)
-            .current_dir(root)
-            .status()
-            .expect("git must be available for routing tests");
-        assert!(
-            status.success(),
-            "git {args:?} failed in {}",
-            root.display()
-        );
-    }
 
     /// Builds the root URI the way an MCP host does (`file:///D:/...` on
     /// Windows, `file:///tmp/...` elsewhere); a hand-formatted `file://` +
@@ -499,7 +486,7 @@ mod tests {
         let old_root = projects.path().join("old");
         let new_root = projects.path().join("new");
         fs::create_dir_all(&old_root).expect("create original project root");
-        run_git(&old_root, &["init", "--quiet"]);
+        git(&old_root, &["init", "--quiet"]);
 
         let runtime = HostAdmissionTestRuntimeV1::profile(profile.path())
             .await
@@ -544,23 +531,11 @@ mod tests {
         let primary_root = projects.path().join("primary");
         let linked_root = projects.path().join("linked");
         fs::create_dir_all(&primary_root).expect("create primary checkout");
-        run_git(&primary_root, &["init", "--quiet"]);
+        git(&primary_root, &["init", "--quiet"]);
         fs::write(primary_root.join("README.md"), "fixture").expect("write initial file");
-        run_git(&primary_root, &["add", "README.md"]);
-        run_git(
-            &primary_root,
-            &[
-                "-c",
-                "user.name=TraceDecay Test",
-                "-c",
-                "user.email=test@tracedecay.invalid",
-                "commit",
-                "--quiet",
-                "-m",
-                "initial",
-            ],
-        );
-        run_git(
+        git(&primary_root, &["add", "README.md"]);
+        git(&primary_root, &["commit", "--quiet", "-m", "initial"]);
+        git(
             &primary_root,
             &[
                 "worktree",
@@ -653,7 +628,7 @@ mod tests {
         for index in 0..3 {
             let root = projects.path().join(format!("slow-{index}"));
             fs::create_dir_all(&root).expect("create slow root");
-            run_git(&root, &["init", "--quiet"]);
+            git(&root, &["init", "--quiet"]);
             tracedecay_runtime_core::git_repository::delay_repository_discovery_for_test(
                 &root, probe,
             );
@@ -686,7 +661,7 @@ mod tests {
         let projects = TempDir::new().expect("projects");
         let root = projects.path().join("repo");
         fs::create_dir_all(&root).expect("create repo");
-        run_git(&root, &["init", "--quiet"]);
+        git(&root, &["init", "--quiet"]);
 
         let runtime = HostAdmissionTestRuntimeV1::profile(profile.path())
             .await

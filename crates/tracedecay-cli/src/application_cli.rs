@@ -5,12 +5,23 @@ use std::path::Path;
 
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use tracedecay_api::{WorkOperation, WorkflowOperation};
+use tracedecay_contracts::now_micros;
+use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_contracts::{
-    ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult, LegalAction,
-    ResultContractRef, RetryDirective, SafeDiagnostic,
+    ApplicationEnvelope, ApplicationProblem, ApplicationProblemEnvelope, ApplicationResult,
+    CancellationSignal, Deadline, LegalAction, ResultContractRef, RetryDirective, SafeDiagnostic,
 };
-use tracedecay_daemon_protocol::DaemonInvocationProblem;
+use tracedecay_daemon_protocol::{
+    DaemonInvocationOutcome, DaemonInvocationProblem, DaemonInvocationRequest,
+    InvocationCancellationPolicy,
+};
+use tracedecay_domain::UtcMicros;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::config::ProfileRoot;
+
+use crate::work_cli::{self, WorkCliDelivery, WorkCliResponse};
+use crate::workflow_cli;
 
 #[derive(Clone, Copy)]
 pub(crate) struct ApplicationKind(pub &'static str, &'static str);
@@ -109,7 +120,9 @@ pub(crate) fn render(
     json: bool,
 ) -> Result<String> {
     if json {
-        return Ok(crate::cli::output::json::json_line(outcome)?);
+        return Ok(tracedecay_mcp::application_output::json::json_line(
+            outcome,
+        )?);
     }
     let outcome = outcome
         .as_ref()
@@ -154,6 +167,156 @@ pub(crate) fn config_error(error: impl std::fmt::Display) -> TraceDecayError {
     }
 }
 
+/// One closed-family operation a CLI invocation sends to the daemon.
+#[derive(Clone, Copy)]
+pub(crate) enum ApplicationOperation {
+    Work(WorkOperation),
+    Workflow(WorkflowOperation),
+}
+
+pub(crate) fn deadline_after(
+    kind: ApplicationKind,
+    maximum_millis: u64,
+    observed_at: UtcMicros,
+) -> Result<Deadline> {
+    let maximum_micros = i64::try_from(
+        std::time::Duration::from_millis(maximum_millis).as_micros(),
+    )
+    .map_err(|_| TraceDecayError::Config {
+        message: format!("The canonical {} deadline exceeds the domain clock", kind.0),
+    })?;
+    Deadline::new(UtcMicros(observed_at.0.saturating_add(maximum_micros))).map_err(config_error)
+}
+
+/// Invokes one Work or Workflow operation on the project daemon. An eligible
+/// Work terminal keeps its connection until the presentation layer explicitly
+/// acknowledges the output boundary; Workflow responses never carry one.
+#[tracing::instrument(name = "application_cli.invoke", level = "trace", skip_all)]
+pub(crate) async fn invoke(
+    profile: &ProfileRoot,
+    project_root: &Path,
+    operation: ApplicationOperation,
+    body: Value,
+) -> Result<WorkCliResponse> {
+    let (kind, result_contract, maximum_millis) = match operation {
+        ApplicationOperation::Work(operation) => (
+            WORK,
+            work_cli::work_result_contract(operation)?,
+            work_cli::WORK_CLI_DEADLINE_MILLIS,
+        ),
+        ApplicationOperation::Workflow(operation) => {
+            let (result_contract, maximum_millis) = workflow_cli::workflow_catalog(operation)?;
+            (WORKFLOW, result_contract, maximum_millis)
+        }
+    };
+    let request_id =
+        mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
+            message: format!("could not allocate a {} CLI request id", kind.0),
+        })?;
+    let observed_at = now_micros();
+    let deadline = deadline_after(kind, maximum_millis, observed_at)?;
+    let cancellation =
+        CancellationSignal::active(format!("cancellation.cli.{}", request_id.as_str()))
+            .map_err(config_error)?;
+    let request = match operation {
+        ApplicationOperation::Work(operation) => work_cli::decode_work_invocation(operation, body)
+            .map(|invocation| {
+                DaemonInvocationRequest::work_application(
+                    request_id.as_str(),
+                    invocation,
+                    observed_at,
+                    deadline.clone(),
+                    cancellation.context(),
+                )
+            }),
+        ApplicationOperation::Workflow(operation) => {
+            workflow_cli::decode_workflow_invocation(operation, body).map(|invocation| {
+                DaemonInvocationRequest::workflow_application(
+                    request_id.as_str(),
+                    invocation,
+                    observed_at,
+                    deadline.clone(),
+                    cancellation.context(),
+                )
+            })
+        }
+    };
+    let Ok(request) = request else {
+        return Ok(WorkCliResponse::without_delivery(Err(problem_envelope(
+            result_contract,
+            request_id,
+            kind.invalid_request(),
+        )?)));
+    };
+    let handshake = crate::commands::client_handshake(profile, Some(project_root))?;
+    let client = tracedecay::daemon::invocation_client_for_current(profile, handshake)?;
+    let result = match client
+        .invoke_controlled_with_delivery(
+            request,
+            deadline,
+            cancellation,
+            InvocationCancellationPolicy::AuthoritativeEffect,
+        )
+        .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            return Ok(WorkCliResponse::without_delivery(Err(problem_envelope(
+                result_contract,
+                request_id,
+                error.into_application_problem(),
+            )?)));
+        }
+    };
+    let (response, delivery) = result.into_parts();
+    let mut delivery_eligible = false;
+    let erased = match (operation, response.outcome) {
+        (
+            ApplicationOperation::Work(operation),
+            DaemonInvocationOutcome::WorkApplication { scope, outcome },
+        ) if work_cli::work_outcome_matches(operation, &outcome) => {
+            delivery_eligible = work_cli::work_delivery_is_eligible(operation, &outcome);
+            Ok((scope, work_cli::erase_work_outcome(outcome)?))
+        }
+        (
+            ApplicationOperation::Workflow(operation),
+            DaemonInvocationOutcome::WorkflowApplication { scope, outcome },
+        ) if workflow_cli::workflow_outcome_matches(operation, &outcome) => {
+            Ok((scope, workflow_cli::erase_workflow_outcome(outcome)?))
+        }
+        (_, DaemonInvocationOutcome::ApplicationProblem { problem }) => Err(problem),
+        (_, DaemonInvocationOutcome::Problem { problem }) => Err(kind.daemon_problem(problem)),
+        _ => Err(ApplicationProblem::unavailable(SafeDiagnostic {
+            code: format!("{}_response_unavailable", kind.1),
+            message: format!("The daemon returned no canonical {} result", kind.0),
+        })),
+    };
+    let outcome = match erased {
+        Ok((scope, outcome)) => Ok(ApplicationEnvelope {
+            contract: result_contract,
+            request_id,
+            scope,
+            outcome,
+            touched_files: Vec::new(),
+            code_graph: None,
+            analytics: None,
+            cost: None,
+        }),
+        Err(problem) => Err(problem_envelope(result_contract, request_id, problem)?),
+    };
+    let delivery = if delivery_eligible {
+        Some(WorkCliDelivery::new(delivery.ok_or_else(|| {
+            TraceDecayError::Config {
+                message: "daemon Work response omitted its connection-bound delivery authority"
+                    .to_owned(),
+            }
+        })?))
+    } else {
+        None
+    };
+    Ok(WorkCliResponse { outcome, delivery })
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use serde_json::Value;
@@ -172,8 +335,8 @@ pub(crate) mod tests {
         )
         .expect("construct canonical application problem fixture"));
 
-        let rendered =
-            crate::cli::output::json::json_line(&outcome).expect("application JSON line");
+        let rendered = tracedecay_mcp::application_output::json::json_line(&outcome)
+            .expect("application JSON line");
         let problem: Value =
             serde_json::from_str(rendered.trim_end()).expect("typed application problem JSON");
         assert_eq!(problem["contract"]["schema_id"], schema_id);

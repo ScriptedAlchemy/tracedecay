@@ -9,12 +9,12 @@ use super::projector::{
     CanonicalSessionTemporalProjector, SessionTemporalRefreshPolicy,
     SessionTemporalRefreshProjector,
 };
-#[cfg(any(test, feature = "test-helpers"))]
-use super::wake::SessionTemporalRefreshWorkerStatus;
 use super::wake::{
     SessionTemporalRefreshBlocker, SessionTemporalRefreshRetryClass, SessionTemporalRefreshWake,
     SessionTemporalRefreshWakeState,
 };
+#[cfg(any(test, feature = "test-helpers"))]
+use super::wake::{SessionTemporalRefreshWorkerStatus, enabled_idle_notification};
 use super::worker::run_session_temporal_refresh_scheduler;
 use crate::StoreOwnerKey;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
@@ -233,7 +233,6 @@ pub struct SessionTemporalRefreshSchedulerRegistry {
     projector: Arc<dyn SessionTemporalRefreshProjector>,
     policy: SessionTemporalRefreshPolicy,
     shutting_down: AtomicBool,
-    #[cfg_attr(not(unix), allow(dead_code))] // held by the unix-only daemon shutdown path
     shutdown_guard: tokio::sync::Mutex<()>,
     project_lifecycle: tokio::sync::Mutex<()>,
     retired_project_owners: std::sync::Mutex<HashSet<StoreOwnerKey>>,
@@ -858,7 +857,6 @@ impl SessionTemporalRefreshSchedulerRegistry {
         }
     }
 
-    #[cfg_attr(not(unix), allow(dead_code))] // invoked by the unix-only daemon shutdown path
     pub async fn shutdown(&self) {
         self.shutting_down.store(true, Ordering::Release);
         // Cancellation must not wait on the locks below: a readmission or
@@ -942,11 +940,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    pub async fn wait_profile_idle(
-        &self,
-        database_path: &std::path::Path,
-        timeout: Duration,
-    ) -> bool {
+    pub async fn wait_profile_idle(&self, database_path: &std::path::Path) {
         let state = self
             .profile
             .lock()
@@ -954,21 +948,14 @@ impl SessionTemporalRefreshSchedulerRegistry {
             .get(database_path)
             .map(|entry| Arc::clone(&entry.state));
         let Some(state) = state else {
-            return true;
+            return;
         };
-        let deadline = tokio::time::Instant::now() + timeout;
         loop {
+            let idle = enabled_idle_notification(&state);
             if state.is_idle() {
-                return true;
+                return;
             }
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                return false;
-            }
-            tokio::select! {
-                () = state.idle.notified() => {}
-                () = tokio::time::sleep(remaining) => return state.is_idle(),
-            }
+            idle.await;
         }
     }
 }

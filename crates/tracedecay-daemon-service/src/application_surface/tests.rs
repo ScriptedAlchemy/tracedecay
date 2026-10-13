@@ -291,7 +291,7 @@ fn every_configuration_operation_enters_the_canonical_dispatch_catalog() {
             tracedecay_tool_catalog::BindingSurface::Http,
         ] {
             assert!(
-                tracedecay_daemon_protocol::BindingResolver::resolve_binding(
+                tracedecay_daemon_protocol::CatalogBindingResolver::resolve_binding(
                     &resolver,
                     surface,
                     &tracedecay_daemon_protocol::BindingResolution {
@@ -388,7 +388,7 @@ fn cli_mcp_and_http_resolve_every_operation_through_the_current_catalog_gate() {
                 operation.name_for_surface(surface),
             )
             .expect("operation name");
-            let binding = tracedecay_daemon_protocol::BindingResolver::resolve_binding(
+            let binding = tracedecay_daemon_protocol::CatalogBindingResolver::resolve_binding(
                 &resolver,
                 surface,
                 &tracedecay_daemon_protocol::BindingResolution {
@@ -427,7 +427,7 @@ fn health_delta_has_cli_mcp_http_parity_and_one_typed_request() {
         (tracedecay_tool_catalog::BindingSurface::Mcp, "mcp"),
         (tracedecay_tool_catalog::BindingSurface::Http, "http"),
     ] {
-        let binding = tracedecay_daemon_protocol::BindingResolver::resolve_binding(
+        let binding = tracedecay_daemon_protocol::CatalogBindingResolver::resolve_binding(
             &resolver,
             surface,
             &tracedecay_daemon_protocol::BindingResolution {

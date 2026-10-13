@@ -20,11 +20,12 @@ pub(crate) struct RankedRow {
     /// One-based display rank.
     pub rank: u64,
     /// The retrieval kernel's fixed-point utility; integer, so the cut is
-    /// exact and repeated calls return identical bytes.
-    pub utility_micros: u64,
+    /// exact and repeated calls return identical bytes. `None` when no
+    /// ranked match backs the row, which the cut always keeps.
+    pub utility_micros: Option<u64>,
     /// The row's display name, matched against the query words.
     pub name: String,
-    /// A caller `lexical_anchors` route ranked this row, and the anchor
+    /// A lexical anchor route ranked this row, and the anchor
     /// receipt promises its sites are on the page.
     pub anchored: bool,
     /// The exact bytes the untrimmed page emits for this row.
@@ -52,17 +53,19 @@ fn names_every_query_word(name: &str, query: &str) -> bool {
 }
 
 /// Start of the longest suffix of rows that each score at most half the
-/// page's best utility and neither carry a caller anchor nor name every
+/// page's best utility and neither carry an anchor nor name every
 /// query word, or `None` when no worthwhile cut exists.
 fn low_value_tail_start(query: &str, rows: &[RankedRow]) -> Option<(usize, u64)> {
     let best = rows
         .iter()
-        .map(|row| row.utility_micros)
+        .filter_map(|row| row.utility_micros)
         .max()
         .filter(|best| *best > 0)?;
     let weak = |row: &RankedRow| {
         !row.anchored
-            && u128::from(row.utility_micros) * 2 <= u128::from(best)
+            && row
+                .utility_micros
+                .is_some_and(|utility| u128::from(utility) * 2 <= u128::from(best))
             && !names_every_query_word(&row.name, query)
     };
     // Ordering ranks exact tier and source role ahead of utility, so a strong
@@ -77,30 +80,31 @@ fn low_value_tail_start(query: &str, rows: &[RankedRow]) -> Option<(usize, u64)>
 }
 
 /// The rows as the page renders them, with the low-value tail replaced by
-/// one marker line naming its retrieval handle. Fails open to every row when
-/// the handle cannot be stored.
+/// one marker line naming its retrieval handle, and how many leading rows
+/// the page kept. Fails open to every row when the handle cannot be stored.
 pub(crate) fn ranked_rows_md(
     response_handle_root: Option<&Path>,
     query: &str,
     rows: &[RankedRow],
-) -> String {
+) -> (String, usize) {
     let concat =
         |rows: &[RankedRow]| -> String { rows.iter().map(|row| row.markdown.as_str()).collect() };
+    let untrimmed = || (concat(rows), rows.len());
     let Some((start, best)) = low_value_tail_start(query, rows) else {
-        return concat(rows);
+        return untrimmed();
     };
     let started = Instant::now();
     let (kept, cut) = rows.split_at(start);
     let cut_md = concat(cut);
     let marker = trimmed_tail_marker(cut, best, &response_handle_for(&cut_md));
     if marker.len() >= cut_md.len() {
-        return concat(rows);
+        return untrimmed();
     }
     if prepare_truncated_response_handle(response_handle_root, &cut_md)
         .record
         .is_none()
     {
-        return concat(rows);
+        return untrimmed();
     }
     let mut rendered = concat(kept);
     let untrimmed_bytes = rendered.len() + cut_md.len();
@@ -113,7 +117,7 @@ pub(crate) fn ranked_rows_md(
         "stored",
         started.elapsed(),
     );
-    rendered
+    (rendered, start)
 }
 
 /// Carries no timestamp: the handle is a content digest, so the marker is a
@@ -139,7 +143,7 @@ mod tests {
         store_response_handle,
     };
 
-    fn row(rank: u64, utility_micros: u64, anchored: bool, name: &str) -> RankedRow {
+    fn row(rank: u64, utility_micros: Option<u64>, anchored: bool, name: &str) -> RankedRow {
         RankedRow {
             rank,
             utility_micros,
@@ -153,15 +157,22 @@ mod tests {
         utilities
             .iter()
             .enumerate()
-            .map(|(index, utility)| row(index as u64 + 1, *utility, false, &format!("r{index}")))
+            .map(|(index, utility)| {
+                row(
+                    index as u64 + 1,
+                    Some(*utility),
+                    false,
+                    &format!("r{index}"),
+                )
+            })
             .collect()
     }
 
     /// Two strong rows (one named in non-ASCII) ahead of eight weak ones.
     fn weak_tail_page() -> Vec<RankedRow> {
         let mut rows = page(&[2_000_000, 2_000_000, 2_000_000]);
-        rows[1] = row(2, 2_000_000, false, "größe_überprüfen");
-        rows.extend((4..=10).map(|rank| row(rank, 1_000_000, false, &format!("weak{rank}"))));
+        rows[1] = row(2, Some(2_000_000), false, "größe_überprüfen");
+        rows.extend((4..=10).map(|rank| row(rank, Some(1_000_000), false, &format!("weak{rank}"))));
         rows
     }
 
@@ -195,7 +206,7 @@ mod tests {
 
     #[derive(serde::Deserialize)]
     struct CaseRow {
-        utility: u64,
+        utility: Option<u64>,
         name: Option<String>,
         #[serde(default)]
         anchored: bool,
@@ -252,7 +263,10 @@ mod tests {
         let rows = page(&[2_000_000, 2_000_000, 2_000_000, 1_000_000, 1_000_000]);
         let untrimmed = concat(&rows);
 
-        assert_eq!(ranked_rows_md(Some(root.path()), "store", &rows), untrimmed);
+        assert_eq!(
+            ranked_rows_md(Some(root.path()), "store", &rows).0,
+            untrimmed
+        );
         assert_eq!(
             std::fs::read_dir(root.path()).expect("handle root").count(),
             0,
@@ -267,7 +281,8 @@ mod tests {
         let kept = concat(&rows[..3]);
         let cut = concat(&rows[3..]);
 
-        let rendered = ranked_rows_md(Some(root.path()), "store", &weak_tail_page());
+        let (rendered, kept_rows) = ranked_rows_md(Some(root.path()), "store", &weak_tail_page());
+        assert_eq!(kept_rows, 3);
 
         let marker = rendered
             .strip_prefix(kept.as_str())
@@ -311,8 +326,8 @@ mod tests {
         )
         .expect("seed expiring record");
 
-        let fresh = ranked_rows_md(Some(fresh_root.path()), "store", &weak_tail_page());
-        let renewed = ranked_rows_md(Some(renewed_root.path()), "store", &weak_tail_page());
+        let fresh = ranked_rows_md(Some(fresh_root.path()), "store", &weak_tail_page()).0;
+        let renewed = ranked_rows_md(Some(renewed_root.path()), "store", &weak_tail_page()).0;
 
         let expires_at =
             |root: &Path| match retrieve_response_handle(root, &handle, current_timestamp())
@@ -336,9 +351,12 @@ mod tests {
         let untrimmed = concat(&weak_tail_page());
 
         assert_eq!(
-            ranked_rows_md(Some(&file_root), "store", &weak_tail_page()),
+            ranked_rows_md(Some(&file_root), "store", &weak_tail_page()).0,
             untrimmed
         );
-        assert_eq!(ranked_rows_md(None, "store", &weak_tail_page()), untrimmed);
+        assert_eq!(
+            ranked_rows_md(None, "store", &weak_tail_page()).0,
+            untrimmed
+        );
     }
 }

@@ -16,9 +16,9 @@ import {
   IdentityRow,
   ProviderStateChip,
   ReadOnlyProviderBadge,
-  microsToIso,
   shortSha,
 } from './deliveryChrome.tsx';
+import { formatMicrosUtc } from '../../ui/format.ts';
 import {
   coverageKind,
   membershipBasisDetail,
@@ -128,7 +128,7 @@ export function PullRequestInspector({
                     ) : (
                       <StateChip
                         kind={providerOutcomeKind(snapshot.outcome)}
-                        detail={`${operation.last_complete === null ? 'attempt' : 'complete'} · ${microsToIso(snapshot.fetched_at_micros).slice(0, 16)}Z`}
+                        detail={`${operation.last_complete === null ? 'attempt' : 'complete'} · ${formatMicrosUtc(snapshot.fetched_at_micros).slice(0, 16)}Z`}
                       />
                     )}
                   </li>
@@ -147,7 +147,7 @@ export function PullRequestInspector({
               <span className="flex items-center gap-2">
                 <StateChip kind={coverageKind(item.coverage)} />
                 <span className="font-mono text-3xs text-text-muted">
-                  {microsToIso(item.observed_at_micros)}
+                  {formatMicrosUtc(item.observed_at_micros, { nullAs: 'not observed' })}
                 </span>
               </span>
             </div>
@@ -305,7 +305,7 @@ export function attentionSourceLabel(source: DeliveryAttentionSourceV1): string 
   }
 }
 
-export function attentionStateKind(state: DeliveryAttentionStateV1): DomainStateKind {
+function attentionStateKind(state: DeliveryAttentionStateV1): DomainStateKind {
   switch (state) {
     case 'active':
       return 'partial';

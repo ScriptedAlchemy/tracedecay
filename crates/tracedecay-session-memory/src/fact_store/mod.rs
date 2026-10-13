@@ -117,17 +117,6 @@ pub enum ProjectMemoryGraphReconciliationScheduleV1 {
     RuntimeUnavailable,
 }
 
-/// Internal daemon mount/write hook for derived verified-graph catch-up.
-///
-/// Product callers mutate canonical facts through [`ProjectMemoryFactStore`];
-/// they never reconcile topology directly.
-#[doc(hidden)]
-pub fn schedule_project_memory_graph_reconciliation(
-    db: Database,
-) -> ProjectMemoryGraphReconciliationScheduleV1 {
-    graph::schedule_project_memory_graph_reconciliation(db)
-}
-
 impl<'a> DatabaseFactStore<'a> {
     pub const fn new(db: &'a Database) -> Self {
         Self { db }

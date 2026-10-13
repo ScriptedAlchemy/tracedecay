@@ -18,7 +18,7 @@ import { accessWord, relationStyle, type SceneCoverage, type SceneFact, type Sce
 
 /** Pixel sizes of the tiers, for the layout's text budgets. */
 export const TIER_PX = { body: 14, legend: 10, value: 12 } as const;
-export type TextTier = keyof typeof TIER_PX;
+type TextTier = keyof typeof TIER_PX;
 
 const TIER_CLASS: Record<TextTier, string> = {
   body: 'text-body',

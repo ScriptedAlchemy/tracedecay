@@ -174,7 +174,7 @@ export function ExplorerSplit({
 
 /** The engraved legend that names an instrument bay, sitting on its own
  * hairline at the top of the column. */
-export function BayLegend({ children }: { children: ReactNode }) {
+function BayLegend({ children }: { children: ReactNode }) {
   return (
     <div className="flex h-8 shrink-0 items-center gap-2.5 border-b border-edge-subtle px-2.5">
       <span className="td-title">{children}</span>
@@ -249,7 +249,7 @@ export function DataRow({
         'relative flex w-full gap-3 border-b border-edge-subtle pl-3 pr-3 text-left text-sm',
         align === 'start' ? 'items-start pt-2' : 'items-center',
         'hover:bg-surface-1 focus-visible:bg-surface-1',
-        // Lists in this archetype pin a `ListCaption` at `top-0`, so a row
+        // Lists in this archetype pin a sticky caption at `top-0`, so a row
         // brought into view by the roving arrow keys landed underneath it,
         // focused but hidden, and unclickable at the same coordinates. The
         // scroll margin parks the row below the caption instead.
@@ -269,28 +269,6 @@ export function DataRow({
       />
       {children}
     </button>
-  );
-}
-
-/** Fixed height shared by two-line result rows and their virtualizer. */
-export const RESULT_ROW_HEIGHT = 56;
-
-export function ListCaption({
-  children,
-  className,
-}: {
-  children: ReactNode;
-  className?: string;
-}) {
-  return (
-    <p
-      className={cn(
-        'sticky top-0 z-10 flex items-center gap-2 border-b border-edge-subtle bg-surface-0/95 px-4 py-2 text-sm text-text-muted backdrop-blur',
-        className,
-      )}
-    >
-      {children}
-    </p>
   );
 }
 

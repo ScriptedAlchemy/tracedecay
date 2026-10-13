@@ -26,6 +26,8 @@ import {
   planCodeIndexWorkerChangeAgainst,
   planProjectChangeAgainst,
   planUserChangeAgainst,
+  sameCodeIndexWorkerSelection,
+  sameStrings,
   type CodeIndexWorkerSettingsChangeSet,
   type CodeIndexWorkerSettingsValues,
   settingsRevisionId,
@@ -56,7 +58,7 @@ export interface SettingsDraft {
  * a moved authority, produces a different id, which is how a confirmation
  * given for one review is refused for another.
  */
-export interface SettingsReview {
+interface SettingsReview {
   readonly scope: SettingsScope;
   readonly expectedRevisionId: string;
   readonly patch:
@@ -68,7 +70,7 @@ export interface SettingsReview {
 }
 
 /** A write the authority confirmed, as the authority reported it. */
-export interface SettingsAppliedRecord {
+interface SettingsAppliedRecord {
   readonly scope: SettingsScope;
   readonly message: string;
   /** The revision the PATCH response named, the authority's own statement of
@@ -79,7 +81,7 @@ export interface SettingsAppliedRecord {
 }
 
 /** Field-level refusals, kept with the authority that issued them. */
-export type SettingsRejection =
+type SettingsRejection =
   | {
       readonly origin: 'client';
       readonly scope: SettingsScope;
@@ -98,13 +100,13 @@ export type SettingsRejection =
  * old pair of slices could hold "Project settings saved" above a field still
  * marked invalid by an earlier attempt.
  */
-export type SettingsResting =
+type SettingsResting =
   | { readonly rest: 'clean' }
   | { readonly rest: 'applied'; readonly applied: SettingsAppliedRecord }
   | { readonly rest: 'rejected'; readonly rejection: SettingsRejection };
 
 /** A write that did not reach a verdict. Distinct from a refusal, which did. */
-export type SettingsSubmitFailure =
+type SettingsSubmitFailure =
   | { readonly kind: 'offline'; readonly detail: string }
   | { readonly kind: 'error'; readonly detail: string }
   | { readonly kind: 'protocol_error'; readonly authority: string; readonly detail: string };
@@ -611,7 +613,7 @@ function draftOf(authority: SettingsEditor): SettingsDraft {
   };
 }
 
-export type SettingsPlan = SettingsChangePlan<
+type SettingsPlan = SettingsChangePlan<
   ProjectSettingsChangeSet | UserSettingsChangeSet | CodeIndexWorkerSettingsChangeSet
 >;
 
@@ -712,8 +714,8 @@ function sameProjectValues(
   right: ProjectSettingsValues,
 ): boolean {
   return (
-    sameStringList(left.include, right.include) &&
-    sameStringList(left.exclude, right.exclude) &&
+    sameStrings(left.include, right.include) &&
+    sameStrings(left.exclude, right.exclude) &&
     left.max_file_size === right.max_file_size &&
     left.extract_docstrings === right.extract_docstrings &&
     left.track_call_sites === right.track_call_sites &&
@@ -742,16 +744,6 @@ function sameCodeIndexWorkerValues(
   );
 }
 
-function sameCodeIndexWorkerSelection(
-  left: CodeIndexWorkerSettingsValues['code_index_workers'],
-  right: CodeIndexWorkerSettingsValues['code_index_workers'],
-): boolean {
-  return (
-    left.mode === right.mode &&
-    (left.mode !== 'exact' || (right.mode === 'exact' && left.workers === right.workers))
-  );
-}
-
 function sameCodeIndexWorkerStatus(
   left: CodeIndexWorkerSettingsValues['code_index_worker_status'],
   right: CodeIndexWorkerSettingsValues['code_index_worker_status'],
@@ -765,8 +757,4 @@ function sameCodeIndexWorkerStatus(
     left.memory_safe_workers === right.memory_safe_workers &&
     left.limiting_reason === right.limiting_reason
   );
-}
-
-function sameStringList(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
 }

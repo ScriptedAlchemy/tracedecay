@@ -186,10 +186,10 @@ fn patch_context_description_in_payload(
     Ok(())
 }
 
-/// Build the live MCP discovery result from the application catalog rather
-/// than publishing the static compatibility registry as an unfiltered
-/// superset.
-pub fn get_catalog_filtered_tool_definitions_with_budget(
+/// Decodes the live `tools/list` discovery payload into tool definitions for
+/// assertions.
+#[cfg(test)]
+pub(crate) fn get_catalog_filtered_tool_definitions_with_budget(
     node_count: u64,
     budget: u8,
     profile_id: &ProfileId,

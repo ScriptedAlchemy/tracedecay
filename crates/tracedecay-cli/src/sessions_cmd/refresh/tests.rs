@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -11,18 +11,12 @@ use tracedecay_contracts::retained_surfaces::{
     SessionRefreshStatusResultV1,
 };
 use tracedecay_contracts::{
-    ApplicationEnvelope, AuthorityReceipt, CancellationContext, CancellationSignal,
-    CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass, EvidenceCoverage,
-    EvidenceDomain, EvidencePacket, OperationReceipt, PageState, PolicyDecisionRef, RequestContext,
-    RequestId, ResolvedScope, RetainedSurfaceExecutionContextV1, RetrievalEvidence, TemporalState,
-    retained_receipts, retained_surface_application_operation,
+    ApplicationEnvelope, CancellationSignal, RequestContext, RequestId,
+    RetainedSurfaceExecutionContextV1, retained_receipts, retained_surface_application_operation,
 };
 use tracedecay_daemon_protocol::decode_retained_request;
 use tracedecay_daemon_protocol::{RequestedOutputFormat, separate_application_tool_request};
-use tracedecay_domain::{
-    ActorId, ComponentVersion, ProjectId, RepositoryId, UtcMicros, WorktreeId,
-};
-use tracedecay_tool_catalog::SortContractId;
+use tracedecay_domain::UtcMicros;
 
 use super::{
     SessionRefreshDaemonFuture, SessionRefreshDaemonTransport, SessionRefreshOperation,
@@ -30,45 +24,21 @@ use super::{
     execute_session_refresh, session_refresh_human_outcome,
 };
 use crate::cli::{Cli, Commands, SessionsAction, SessionsRefreshAction};
+use crate::commands::daemon_fixtures::{
+    evidence_reply as evidence_envelope, request_context, scope,
+};
+use tracedecay_domain::test_fixtures::digest;
 
 const PROFILE_ID: &str = "profile.0f2f1c3d4e5f60718293a4b5c6d7e8f9";
 
-use tracedecay_domain::test_fixtures::digest;
-
-fn scope() -> ResolvedScope {
-    ResolvedScope::new(
-        ProjectId::new("project.cli.refresh").unwrap(),
-        RepositoryId::new("repository.cli.refresh").unwrap(),
-        WorktreeId::new("worktree.cli.refresh").unwrap(),
-        None,
-    )
-    .unwrap()
-}
-
 fn context(operation: RetainedSurfaceOperation) -> RequestContext {
     let operation = retained_surface_application_operation(operation).unwrap();
-    let grant = CapabilityGrantSnapshot::new(
-        CapabilityGrantId::new("grant.cli.refresh").unwrap(),
-        1,
-        digest('a'),
-        ActorId::new("actor.cli.issuer").unwrap(),
-        UtcMicros(1),
+    request_context(
+        operation.capability_id().clone(),
+        operation.use_case_id().clone(),
         UtcMicros(i64::MAX - 1),
-        scope(),
-        BTreeSet::from([operation.capability_id().clone()]),
-        BTreeSet::from([operation.use_case_id().clone()]),
-        DisclosureClass::Evidence,
+        UtcMicros(i64::MAX),
     )
-    .unwrap();
-    RequestContext::new(
-        ActorId::new("actor.cli.caller").unwrap(),
-        scope(),
-        grant,
-        RequestId::new("request.cli.refresh").unwrap(),
-        Deadline::new(UtcMicros(i64::MAX)).unwrap(),
-        CancellationContext::active("cancel.cli.refresh").unwrap(),
-    )
-    .unwrap()
 }
 
 /// A daemon reply as the retained effect routes actually send it: the typed
@@ -76,7 +46,7 @@ fn context(operation: RetainedSurfaceOperation) -> RequestContext {
 fn effect_reply(operation: RetainedSurfaceOperation, result: RetainedSurfaceResultV1) -> Value {
     let application_operation = retained_surface_application_operation(operation).unwrap();
     let context = context(operation);
-    let cancellation = CancellationSignal::active("cancel.cli.refresh").unwrap();
+    let cancellation = CancellationSignal::active("cancel.cli.fixture").unwrap();
     let execution = RetainedSurfaceExecutionContextV1 {
         request_context: &context,
         cancellation_signal: &cancellation,
@@ -110,54 +80,11 @@ fn effect_reply(operation: RetainedSurfaceOperation, result: RetainedSurfaceResu
 fn evidence_reply(result: RetainedSurfaceResultV1) -> Value {
     let operation = RetainedSurfaceOperation::SessionRefreshStatus;
     let application_operation = retained_surface_application_operation(operation).unwrap();
-    let context = context(operation);
-    let authority = AuthorityReceipt::from_context(
-        &context,
-        PolicyDecisionRef::new(
-            "policy.cli.refresh",
-            1,
-            digest('b'),
-            ComponentVersion::new("policy.evaluator.v1").unwrap(),
-        )
-        .unwrap(),
-        UtcMicros(2),
-    )
-    .unwrap();
-    let receipt = OperationReceipt::completed(
-        UtcMicros(2),
-        UtcMicros(3),
-        context.deadline().clone(),
-        Default::default(),
-    )
-    .unwrap();
-    let evidence = RetrievalEvidence {
-        payload: Some(serde_json::to_value(result).unwrap()),
-        temporal: TemporalState::current(UtcMicros(2)),
-        evidence_authorities: Vec::new(),
-        coverage: EvidenceCoverage::complete(vec![EvidenceDomain::Symbol], 1, 1, 1).unwrap(),
-        omissions: Vec::new(),
-        scores: Vec::new(),
-        contributions: Vec::new(),
-        page: PageState::first_page(
-            SortContractId::new("sort.cli.refresh.v1").unwrap(),
-            1,
-            Some(1),
-            1,
-        )
-        .unwrap(),
-        finished_at: UtcMicros(3),
-        budget: Default::default(),
-        cancellation: None,
-        cost: None,
-    };
-    let packet = EvidencePacket::from_retrieval(evidence, authority, receipt).unwrap();
-    serde_json::to_value(ApplicationEnvelope::evidence(
+    evidence_envelope(
+        &context(operation),
         application_operation.result_contract().clone(),
-        context.request_id().clone(),
-        scope(),
-        packet,
-    ))
-    .unwrap()
+        serde_json::to_value(result).unwrap(),
+    )
 }
 
 fn begin_result(outcome: RetainedOutcomeStatusV1, handle: &str) -> RetainedSurfaceResultV1 {

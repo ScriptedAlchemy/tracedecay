@@ -163,27 +163,23 @@ where
 {
     type Rejection = RemoteHttpRejection;
 
+    #[tracing::instrument(name = "api.http.admission", level = "trace", skip_all)]
     async fn from_request_parts(
         parts: &mut Parts,
         state: &RemoteProtocolRouterStateV1<Port>,
     ) -> Result<Self, Self::Rejection> {
-        {
-            let _span = tracing::trace_span!("api.http.admission").entered();
-            {
-                let authorization = authorization_header(&parts.headers)
-                    .map_err(|_| concealed_authentication_rejection())?;
-                let credential = authorization.into_credential();
-                let session = state
-                    .credential_admission
-                    .admit_before_body(&credential, Request::CREDENTIAL_USE, (state.clock)())
-                    .map_err(|_| concealed_authentication_rejection())?;
-                Ok(Self {
-                    session,
-                    credential,
-                    request: PhantomData,
-                })
-            }
-        }
+        let authorization = authorization_header(&parts.headers)
+            .map_err(|_| concealed_authentication_rejection())?;
+        let credential = authorization.into_credential();
+        let session = state
+            .credential_admission
+            .admit_before_body(&credential, Request::CREDENTIAL_USE, (state.clock)())
+            .map_err(|_| concealed_authentication_rejection())?;
+        Ok(Self {
+            session,
+            credential,
+            request: PhantomData,
+        })
     }
 }
 
@@ -220,33 +216,29 @@ where
 {
     type Rejection = RemoteHttpRejection;
 
+    #[tracing::instrument(name = "api.http.admission", level = "trace", skip_all)]
     async fn from_request_parts(
         parts: &mut Parts,
         state: &RemoteProtocolRouterStateV1<Port>,
     ) -> Result<Self, Self::Rejection> {
-        {
-            let _span = tracing::trace_span!("api.http.admission").entered();
-            {
-                let authorization = authorization_header(&parts.headers)
-                    .map_err(|_| concealed_authentication_rejection())?;
-                let grant_credential = authorization.into_credential();
-                let session = state
-                    .credential_admission
-                    .admit_before_body(
-                        &grant_credential,
-                        <EnrollmentRequestV1 as RemoteSessionBoundProtocolBodyV1>::CREDENTIAL_USE,
-                        (state.clock)(),
-                    )
-                    .map_err(|_| concealed_authentication_rejection())?;
-                let enrollment_credential = enrollment_credential(&parts.headers)
-                    .map_err(|_| concealed_authentication_rejection())?;
-                Ok(Self {
-                    session,
-                    grant_credential,
-                    enrollment_credential,
-                })
-            }
-        }
+        let authorization = authorization_header(&parts.headers)
+            .map_err(|_| concealed_authentication_rejection())?;
+        let grant_credential = authorization.into_credential();
+        let session = state
+            .credential_admission
+            .admit_before_body(
+                &grant_credential,
+                <EnrollmentRequestV1 as RemoteSessionBoundProtocolBodyV1>::CREDENTIAL_USE,
+                (state.clock)(),
+            )
+            .map_err(|_| concealed_authentication_rejection())?;
+        let enrollment_credential = enrollment_credential(&parts.headers)
+            .map_err(|_| concealed_authentication_rejection())?;
+        Ok(Self {
+            session,
+            grant_credential,
+            enrollment_credential,
+        })
     }
 }
 

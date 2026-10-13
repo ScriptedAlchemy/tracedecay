@@ -205,17 +205,6 @@ pub async fn record_skill_usage(
     .await
 }
 
-pub async fn load_skill_usage_records(
-    profile_root: &Path,
-    limit: Option<usize>,
-) -> Result<Vec<SkillUsageRecord>> {
-    let mut records = list_skill_usage_records(profile_root).await?;
-    if let Some(limit) = limit {
-        records.truncate(limit);
-    }
-    Ok(records)
-}
-
 pub async fn list_skill_usage_records(profile_root: &Path) -> Result<Vec<SkillUsageRecord>> {
     let mut records = load_skill_usage_ledger(profile_root)
         .await?

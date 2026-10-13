@@ -27,7 +27,7 @@ use tracedecay_store::{
     GraphPublicationReplayRecordV1, GraphPublicationStoreV1, GraphReplayAppendOutcomeV1,
     GraphVerifiedHeadV1, ProjectId, RetainedGraphStoreLeaseV1, RuntimeCancellationIdV1,
     RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1,
-    RuntimeRequestControlV1, RuntimeRequestProbeV1, StoreShardIdV1,
+    RuntimeRequestControlV1, RuntimeRequestProbeV1, StoreShardIdV1, StoreShardScopeV1,
 };
 
 use super::{DaemonSessionRuntimeRegistryV1, Result, session_registry_error};
@@ -47,6 +47,8 @@ mod layered_refresh_tests;
 #[cfg(test)]
 mod sealed_publication_tests;
 mod seals;
+#[cfg(test)]
+mod shard_owner_retirement_tests;
 use seals::{
     finalize_project_graph_replay_unlink, lock_project_graph_replay_pool,
     prove_stable_sealed_source, revalidate_stable_sealed_source,
@@ -2493,6 +2495,13 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// to a concurrent attacher (or any other failure here) is swallowed:
     /// the ordinary lease path still runs and surfaces its own, more precise
     /// error if the shard is genuinely unavailable.
+    ///
+    /// A shard whose project runtime is mounted here belongs to that mount
+    /// alone: this waits for the mount's own background graph open instead.
+    /// An unretained attachment there would make the mount's open fail with
+    /// `GraphOwnerAttachmentAlreadyRegistered` and leave a map owner that no
+    /// project retirement target covers, so the idle project could never be
+    /// retired for capacity reuse.
     #[tracing::instrument(
         name = "daemon.session_registry.ensure_graph_shard_attached",
         level = "trace",
@@ -2510,6 +2519,24 @@ impl DaemonSessionRuntimeRegistryV1 {
                     "could not check whether the shared code graph shard is registered"
                 );
                 return;
+            }
+        }
+        if let StoreShardScopeV1::Project { project_id } = &project_shard.scope
+            && project_shard.brain_id == *self.identity.brain_id()
+            && project_shard.profile_id == *self.identity.profile_id()
+        {
+            match self.project_owners.wait_for_memory_graph(project_id).await {
+                Ok(false) => {}
+                Ok(true) => return,
+                Err(error) => {
+                    tracing::warn!(
+                        event = "code_graph_shard_owner_wait_failed",
+                        shard = ?project_shard,
+                        error = %error,
+                        "could not await the mounted project graph owner"
+                    );
+                    return;
+                }
             }
         }
         match graph_attachment::open_session_relation_owner(

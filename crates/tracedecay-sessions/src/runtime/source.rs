@@ -31,7 +31,7 @@ pub use tracedecay_domain::canonical_text::canonical_framed_sha256;
 
 pub use super::host_coverage::HostCoverageReason;
 use crate::admission::{HostAdmission, HostAdmissionOutcome};
-pub use crate::runtime::shared::{NewRows, StoredCursor, TranscriptIngestStats};
+pub use crate::runtime::shared::{StoredCursor, TranscriptIngestStats};
 use tracedecay_framing::{WireReadOutcome, read_bounded_to_string};
 
 pub type TranscriptIngestResult<T> = Result<T, TranscriptIngestError>;

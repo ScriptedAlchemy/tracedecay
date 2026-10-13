@@ -1,4 +1,3 @@
-use std::fs;
 use std::sync::{
     Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -10,7 +9,9 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use super::dispatch_test_support::*;
 use super::*;
-use tracedecay_project::project::TraceDecay;
+use crate::daemon::retained_test_support::{
+    forward_application_surface, ignore_feedback_observations,
+};
 
 #[derive(Default)]
 struct UnavailableEffectExecutor {
@@ -46,15 +47,7 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for UnavailableEffectEx
                 .unwrap()
                 .push((binding.operation().as_str().to_owned(), payload.clone()));
         }
-        Box::pin(async move {
-            let (context, request) = invocation.into_parts();
-            let tracedecay_contracts::ApplicationRequest::Surface { binding, payload } = request
-            else {
-                return Err(tracedecay_contracts::InvocationError::Unavailable);
-            };
-            tracedecay_daemon_protocol::invoke_application_surface(self, context, binding, payload)
-                .await
-        })
+        forward_application_surface(self, invocation)
     }
 }
 
@@ -87,33 +80,19 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for UnavailableEffectE
         Box::pin(async { Err(tracedecay_daemon_protocol::DaemonInvocationError::Unavailable) })
     }
 
-    fn observe_feedback(
-        &self,
-        _subject_digest: tracedecay_domain::ManifestDigest,
-        _observed_at: tracedecay_domain::UtcMicros,
-        _event: tracedecay_contracts::feedback::observations::FeedbackSourceEventV1,
-    ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
-        '_,
-        tracedecay_domain::errors::Result<()>,
-    > {
-        Box::pin(async { Ok(()) })
-    }
+    ignore_feedback_observations!();
 }
 
 #[tokio::test]
 async fn available_configuration_effect_reaches_canonical_executor() {
     let dir = TempDir::new().unwrap();
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("unavailable-application-effect");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "unavailable-application-effect",
+        "pub fn probe() {}\n",
         "project.mcp-unavailable-application-effect",
     )
-    .await
-    .unwrap();
+    .await;
     let executor = UnavailableEffectExecutor::default();
     let request = serde_json::to_value(tracedecay_contracts::ConfigurationSetRequestV1 {
         layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Default,
@@ -170,17 +149,13 @@ async fn available_configuration_effect_reaches_canonical_executor() {
 #[tokio::test]
 async fn every_other_configuration_effect_reaches_the_authoritative_daemon_executor() {
     let dir = TempDir::new().unwrap();
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("configuration-effect-dispatch");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "configuration-effect-dispatch",
+        "pub fn probe() {}\n",
         "project.mcp-configuration-effect-dispatch",
     )
-    .await
-    .unwrap();
+    .await;
     let executor = UnavailableEffectExecutor::default();
     let revision = "revision.mcp-configuration-effect-dispatch";
     let digest = format!("sha256:{}", "a".repeat(64));
@@ -294,17 +269,13 @@ async fn every_other_configuration_effect_reaches_the_authoritative_daemon_execu
 #[tokio::test]
 async fn every_configuration_read_and_preview_reaches_its_canonical_daemon_handler() {
     let dir = TempDir::new().unwrap();
-    let profile = SelectorProfile::new(dir.path());
-    let project = dir.path().join("configuration-read-dispatch");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-        profile.data_dir(),
-        &project,
+    let (cg, _runtime) = registered_lib_fixture(
+        dir.path(),
+        "configuration-read-dispatch",
+        "pub fn probe() {}\n",
         "project.mcp-configuration-read-dispatch",
     )
-    .await
-    .unwrap();
+    .await;
     let executor = UnavailableEffectExecutor::default();
     let revision = "revision.mcp-configuration-read-dispatch";
     let reads = [

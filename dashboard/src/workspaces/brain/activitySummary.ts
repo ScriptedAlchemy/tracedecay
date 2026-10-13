@@ -18,13 +18,13 @@ import type { LiveActivityPulse } from '../../data/sse/connect.ts';
  * the present is what lets the figure fall to zero when activity stops. */
 export const RATE_WINDOW_MS = 60_000;
 
-export interface ActivityFamilyCount {
+interface ActivityFamilyCount {
   family: string;
   label: string;
   count: number;
 }
 
-export interface ActivitySummary {
+interface ActivitySummary {
   /** Pulses held in the ring right now. */
   total: number;
   /** Families ranked by count over the whole ring, busiest first; ties break
@@ -71,7 +71,7 @@ export function summarizeActivity(
 /** Human label for an event family. Falls back to de-slugging an unknown
  * family rather than hiding it, a family the dashboard has never been taught
  * to name is still real activity and must stay legible. */
-export function familyLabel(family: string): string {
+function familyLabel(family: string): string {
   if (family === 'heartbeat') return 'heartbeat';
   if (family === 'project_registry_changed') return 'project registry';
   if (family === 'storage_telemetry_invalidated') return 'storage telemetry';

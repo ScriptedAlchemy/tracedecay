@@ -18,7 +18,6 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::process::Command;
 use std::time::Duration;
 
 use tempfile::TempDir;
@@ -42,7 +41,9 @@ use super::super::graph_activation::{
     install_injected_activation_gate, set_injected_activation_failures,
     set_injected_publication_deadline,
 };
-use super::super::tests::{OwnerSignals, application_context, query_authority};
+use super::super::tests::{
+    OwnerSignals, application_context, commit_fixture_checkout, query_authority,
+};
 use super::{CodeIndexSchedulerRegistryV1, CodeIndexSeatParkV1, CodeIndexSeatWaitV1};
 use crate::project_reads::project_code_graph_projection_read_port;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
@@ -98,9 +99,7 @@ impl Fixture {
         let project = root.path().join("project");
         fs::create_dir_all(project.join("src")).expect("create source root");
         fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("write source");
-        run_git_in(&project, &["init", "-q", "-b", "main"]);
-        run_git_in(&project, &["add", "."]);
-        run_git_in(&project, &["commit", "-qm", "fixture"]);
+        commit_fixture_checkout(&project);
 
         // Pre-create the scoped store hierarchy owner-private, exactly as the
         // daemon would have on an earlier run, so the only violation in play
@@ -912,21 +911,4 @@ async fn a_readiness_wait_ends_when_the_registry_is_cancelled() {
     };
     assert_eq!(reason, "code_index_scheduler_registry_closed");
     fixture.registry.shutdown().await;
-}
-
-fn run_git_in(root: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .env("GIT_AUTHOR_NAME", "TraceDecay Test")
-        .env("GIT_AUTHOR_EMAIL", "test@tracedecay.invalid")
-        .env("GIT_COMMITTER_NAME", "TraceDecay Test")
-        .env("GIT_COMMITTER_EMAIL", "test@tracedecay.invalid")
-        .output()
-        .expect("git command should run");
-    assert!(
-        output.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
 }

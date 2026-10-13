@@ -590,25 +590,6 @@ impl HostAdmissionTestRuntimeV1 {
         Self::open(profile_root.as_ref(), None).await
     }
 
-    /// Wraps databases whose authority is retained by a higher composition
-    /// runtime. This constructor grants no authority and owns no runtime scope.
-    #[doc(hidden)]
-    pub fn from_registered_databases_for_test(
-        profile_registry: RegisteredGlobalDbLeaseV1,
-        profile_registered: RegisteredGlobalDbLeaseV1,
-        project_registered: Option<RegisteredGlobalDbLeaseV1>,
-    ) -> Self {
-        Self {
-            profile_registry,
-            _profile_registry_owner: None,
-            profile_registered,
-            _profile_registered_owner: None,
-            project_registered,
-            _project_registered_owner: None,
-            _scope: None,
-        }
-    }
-
     pub fn registered_database(&self, scope: HostAdmissionScope) -> Option<&RegisteredGlobalDb> {
         match scope {
             HostAdmissionScope::Project => self.project_registered.as_deref(),
@@ -817,26 +798,6 @@ impl HostAdmissionTestRuntimeV1 {
             row.get(4)?,
             row.get(5)?,
         ))
-    }
-
-    pub async fn delete_session_message_for_test(
-        &self,
-        scope: HostAdmissionScope,
-        provider: &str,
-        message_id: &str,
-    ) -> tracedecay_domain::errors::Result<u64> {
-        let transaction = self
-            .session_database_for_test(scope)?
-            .begin_write_transaction()
-            .await?;
-        let deleted = transaction
-            .execute(
-                "DELETE FROM lcm_raw_messages WHERE provider = ?1 AND message_id = ?2",
-                tracedecay_runtime_core::db::engine::params![provider, message_id],
-            )
-            .await?;
-        transaction.commit().await?;
-        Ok(deleted)
     }
 
     pub async fn project_session_message_count_for_test(

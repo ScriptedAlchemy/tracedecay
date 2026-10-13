@@ -38,8 +38,9 @@ import {
   type SettingsPayloadV1,
   type UserSettingsPatch,
 } from '../../contracts/generated.ts';
+import { isRecord } from '../../data/query/responseBody.ts';
 
-export type ConfigRowKind =
+type ConfigRowKind =
   | 'group'
   | 'boolean'
   | 'number'
@@ -114,7 +115,7 @@ export interface ConfigSection {
  * variable is set in the daemon's environment (an override in force) or unset
  * (so whatever default applies, applies).
  */
-export interface EnvOverride {
+interface EnvOverride {
   readonly name: string;
   /** Payload `active`: true when the variable is set in the process env. */
   readonly active: boolean;
@@ -265,7 +266,7 @@ export interface SettingsRevisionConflict {
   readonly actualRevisionId: string | null;
 }
 
-export const MIN_AUTO_TRACK_PR_POLL_SECS = 60;
+const MIN_AUTO_TRACK_PR_POLL_SECS = 60;
 
 /**
  * Recognized top-level groups and how to describe them. `origin` records where
@@ -337,7 +338,7 @@ const SPECIALIZED: Readonly<Record<string, ReadonlySet<string>>> = {
  * is not an envelope at all, and an envelope whose payload the generated
  * contract refuses.
  */
-export type SettingsPayloadRead =
+type SettingsPayloadRead =
   | { readonly outcome: 'settings'; readonly payload: SettingsPayloadV1 }
   | { readonly outcome: 'not_an_envelope' }
   | { readonly outcome: 'unsupported_payload' };
@@ -671,7 +672,7 @@ function validateCodeIndexWorkerValues(
   return errors;
 }
 
-function sameCodeIndexWorkerSelection(
+export function sameCodeIndexWorkerSelection(
   left: CodeIndexWorkerSelectionV1,
   right: CodeIndexWorkerSelectionV1,
 ): boolean {
@@ -754,7 +755,7 @@ function unsignedIntegerString(value: number): string | null {
   return Number.isSafeInteger(value) && value >= 0 ? String(value) : null;
 }
 
-function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+export function sameStrings(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
@@ -1016,6 +1017,3 @@ function humanize(key: string): string {
   return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}

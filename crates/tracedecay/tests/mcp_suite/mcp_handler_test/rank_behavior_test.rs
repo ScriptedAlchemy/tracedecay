@@ -429,7 +429,7 @@ async fn rank_orders_relationship_counts_for_calls_and_implements() {
 }
 
 #[tokio::test]
-async fn rank_refuses_missing_invalid_and_unpublished_relationships() {
+async fn rank_refuses_missing_and_unsupported_relationships() {
     let session = open_rank_session().await;
     let server = &session.server;
 
@@ -455,7 +455,7 @@ async fn rank_refuses_missing_invalid_and_unpublished_relationships() {
     );
     assert_eq!(
         invalid_kind["message"],
-        "invalid arguments for tracedecay_rank: unknown variant `inherits`, expected one of `implements`, `extends`, `calls`, `uses`, `contains`, `annotates`, `derives_macro`, `type_of`, `returns`, `receives`",
+        "invalid arguments for tracedecay_rank: unknown variant `inherits`, expected one of `implements`, `extends`, `calls`, `uses`, `contains`, `annotates`, `type_of`, `returns`, `receives`",
         "{invalid_kind}"
     );
 
@@ -479,20 +479,24 @@ async fn rank_refuses_missing_invalid_and_unpublished_relationships() {
         "{invalid_direction}"
     );
 
+    // Released clients could send `derives_macro`; it never produced a
+    // ranking, and now it is refused as an unsupported selector.
     let derives_response = call_rank(
         server,
         json!({"edge_kind": "derives_macro", "format": "json"}),
     )
     .await;
     let derives = refusal_problem(&derives_response["result"]);
-    assert_eq!(derives["kind"], "unavailable", "{derives}");
-    assert_eq!(derives["code"], "verified-rank-unavailable", "{derives}");
+    assert_eq!(derives["kind"], "invalid_request", "{derives}");
     assert_eq!(
-        derives["message"],
-        "the admitted graph generation does not publish derives_macro relations",
+        derives["code"], "application.surface.invalid_request",
         "{derives}"
     );
-    assert_eq!(derives["retryable"], false, "{derives}");
+    assert_eq!(
+        derives["message"],
+        "invalid arguments for tracedecay_rank: unknown variant `derives_macro`, expected one of `implements`, `extends`, `calls`, `uses`, `contains`, `annotates`, `type_of`, `returns`, `receives`",
+        "{derives}"
+    );
 
     shutdown(session).await;
 }

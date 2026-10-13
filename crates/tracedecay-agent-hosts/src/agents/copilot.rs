@@ -29,7 +29,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, load_json_file,
-    load_jsonc_file,
+    load_jsonc_file, read_optional_config_bytes,
 };
 
 /// Name of GitHub Copilot's own CLI, which owns `~/.copilot/mcp-config.json`.
@@ -314,16 +314,6 @@ fn copilot_context_mcp_registration_state(
 /// what the host-capability doctrine forbids.
 fn require_copilot_cli() -> Result<PathBuf> {
     super::host_cli::require_host_cli(COPILOT_CLI, COPILOT_CLI_LIFECYCLE)
-}
-
-fn read_optional_config_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
-    match std::fs::read(path) {
-        Ok(bytes) => Ok(Some(bytes)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(TraceDecayError::Config {
-            message: format!("failed to read {}: {error}", path.display()),
-        }),
-    }
 }
 
 /// Drive Copilot's own registry to add the tracedecay MCP server.

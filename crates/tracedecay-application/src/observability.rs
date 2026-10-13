@@ -27,8 +27,7 @@ mod workflow_emit;
 
 pub use cost_latency::{provider_latency_read_model, unavailable_provider_latency};
 pub use costs::{
-    costs_read_model, costs_read_model_with_provider_usage,
-    costs_read_model_with_provider_usage_and_observability, costs_unavailable_read_model,
+    costs_read_model, costs_read_model_with_provider_usage, costs_unavailable_read_model,
 };
 pub use delivery_recorder::{
     BoundedDeliverySettlementRecorderV1, DeliverySettlementRecordOutcomeV1,
@@ -45,8 +44,8 @@ pub use export::RegisteredAggregateShareExporterV1;
 pub use github_stack_emit::{
     GitHubStackCapabilityObservationResultV1, GitHubStackCapabilityObservationUnavailableV1,
     GitHubStackDriftObservationResultV1, GitHubStackDriftObservationUnavailableV1,
-    GitHubStackDriftRecoveryErrorV1, GitHubStackProbeOwnerMountErrorV1, GitHubStackProbeOwnerV1,
-    record_github_stack_capability, record_github_stack_drifts, recover_open_github_stack_drifts,
+    GitHubStackProbeOwnerMountErrorV1, GitHubStackProbeOwnerV1, record_github_stack_capability,
+    record_github_stack_drifts,
 };
 pub use no_progress_emit::{WorkNoProgressObservationV1, record_no_progress_observation};
 pub use producer::{

@@ -43,7 +43,7 @@ export function initialPlaybackState(frameCount: number): LoomPlaybackState {
 }
 
 /** The loaded tail is the only honest "live" point when no stream exists. */
-export function latestCursor(frameCount: number): number {
+function latestCursor(frameCount: number): number {
   return Math.max(frameCount - 1, 0);
 }
 

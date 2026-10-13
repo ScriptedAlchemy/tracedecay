@@ -84,11 +84,11 @@ export interface WorkExecutorReading {
   readonly unobserved: number;
 }
 
-export type WorkAttemptOrigin = 'fresh' | 'restarted' | 'resumed' | 'recovery_required';
+type WorkAttemptOrigin = 'fresh' | 'restarted' | 'resumed' | 'recovery_required';
 
-export type WorkTerminalOutcome = WorkTerminalEvidenceV1['outcome'];
+type WorkTerminalOutcome = WorkTerminalEvidenceV1['outcome'];
 
-export interface WorkAttemptOutcomeReading {
+interface WorkAttemptOutcomeReading {
   readonly outcome: WorkTerminalOutcome;
   readonly observedAt: number;
 }

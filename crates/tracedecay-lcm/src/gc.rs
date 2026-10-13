@@ -405,14 +405,6 @@ fn tombstone_placeholder(placeholder: &str) -> String {
     placeholder.to_string()
 }
 
-pub async fn payload_metadata_refs_for_scope(
-    conn: &(impl QueryExecutor + ?Sized),
-    provider: &str,
-    session_id: Option<&str>,
-) -> Result<BTreeSet<String>, LcmError> {
-    maintenance::payload_metadata_refs_for_scope(conn, provider, session_id).await
-}
-
 /// Read-only payload GC preview. Mutation runs through
 /// [`run_payload_gc_in_transaction`]; this entry point never writes.
 #[tracing::instrument(name = "sessions.lcm.gc.preview", level = "trace", skip_all)]
@@ -870,7 +862,7 @@ pub async fn read_payload_gc_snapshot(
     let scoped_metadata_refs = if provider == "all" && session_id.is_none() {
         all_metadata_refs.clone()
     } else {
-        payload_metadata_refs_for_scope(conn, provider, session_id).await?
+        maintenance::payload_metadata_refs_for_scope(conn, provider, session_id).await?
     };
     let dir = payload::existing_payload_dir_opt(storage_root)?;
     let dangling = plan_dangling(conn, dir.as_deref(), provider, session_id).await?;
