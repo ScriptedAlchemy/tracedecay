@@ -618,13 +618,11 @@ fn prepare_request(
         projection_generation,
     )
     .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?;
-    let authority_key = canonical_sha256(&(
-        "tracedecay.remote-recovery-authority.v1",
-        &current_writer.authority.fence.brain_id,
-        &current_writer.authority.fence.shard_id,
-        &current_writer.authority.fence.generation_id,
-    ))
-    .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?;
+    let authority_key = current_writer
+        .authority
+        .fence
+        .recovery_authority_key()
+        .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?;
     let frame_digest = canonical_sha256(&(&frame.event_id, &frame.capture))
         .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?;
     let command_value = serde_json::json!({

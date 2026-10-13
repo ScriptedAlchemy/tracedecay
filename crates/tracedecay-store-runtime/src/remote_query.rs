@@ -28,9 +28,7 @@ use tracedecay_contracts::{
     RetrievalEvidence, TemporalState,
 };
 use tracedecay_domain::canonical_text::sha256_hex;
-use tracedecay_domain::{
-    CurrentRemoteAuthorityStateV1, RemoteWriterFenceV1, UtcMicros, canonical_sha256,
-};
+use tracedecay_domain::{CurrentRemoteAuthorityStateV1, RemoteWriterFenceV1, UtcMicros};
 use tracedecay_rusqlite_runtime::remote::{RemoteQueryAuthoritySnapshotV1, RemoteSqliteStorageV1};
 use tracedecay_store::{
     CommitSequenceV1, ConsistencyModeV1, ObservationReadOperationV1, ObservationReadResultV1,
@@ -332,14 +330,10 @@ impl DaemonRemoteExactObservationQueryPortV1 {
         &self,
         command: &RemoteExactObservationQueryCommandV1,
     ) -> Result<RemoteWriterFenceV1, RemoteExactObservationQueryErrorV1> {
-        let fence = &command.expected_authority;
-        let authority_key = canonical_sha256(&(
-            "tracedecay.remote-recovery-authority.v1",
-            &fence.brain_id,
-            &fence.shard_id,
-            &fence.generation_id,
-        ))
-        .map_err(|_| RemoteExactObservationQueryErrorV1::AuthorityUnavailable)?;
+        let authority_key = command
+            .expected_authority
+            .recovery_authority_key()
+            .map_err(|_| RemoteExactObservationQueryErrorV1::AuthorityUnavailable)?;
         match self
             .targets
             .current_writer_fence(command.repository_scope.project_id.clone(), authority_key)

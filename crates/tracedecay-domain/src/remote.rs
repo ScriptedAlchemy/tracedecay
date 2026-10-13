@@ -121,6 +121,29 @@ impl RemoteWriterFenceV1 {
     pub fn fences(&self, older: &Self) -> bool {
         self.same_mutable_shard(older) && self.authority_epoch > older.authority_epoch
     }
+
+    pub fn recovery_authority_key(&self) -> Result<ManifestDigest, DomainError> {
+        remote_recovery_authority_key(
+            self.brain_id.as_str(),
+            self.shard_id.as_str(),
+            self.generation_id.as_str(),
+        )
+    }
+}
+
+/// The key every remote recovery table joins a writer lineage on. It names
+/// the mutable shard only, so it stays the same across failover.
+pub fn remote_recovery_authority_key(
+    brain_id: &str,
+    shard_id: &str,
+    generation_id: &str,
+) -> Result<ManifestDigest, DomainError> {
+    canonical_sha256(&(
+        "tracedecay.remote-recovery-authority.v1",
+        brain_id,
+        shard_id,
+        generation_id,
+    ))
 }
 
 /// Remote operation capability retained with an enrollment credential.
@@ -644,5 +667,37 @@ mod tests {
             state.validate().unwrap_err().to_string(),
             "partial authority evidence must not be empty"
         );
+    }
+
+    #[test]
+    fn recovery_authority_key_names_the_lineage_and_survives_failover() {
+        let fence = RemoteWriterFenceV1 {
+            brain_id: id(BrainId::new, "brain.remote"),
+            shard_id: id(ShardId::new, "shard.remote"),
+            generation_id: id(ProjectionGenerationId::new, "generation.remote"),
+            placement_revision: RemotePlacementRevisionV1::new(1).unwrap(),
+            authority_epoch: AuthorityEpoch(1),
+            authority_node_id: id(BrainNodeId::new, "node.remote"),
+        };
+        let promoted = RemoteWriterFenceV1 {
+            placement_revision: RemotePlacementRevisionV1::new(2).unwrap(),
+            authority_epoch: AuthorityEpoch(2),
+            authority_node_id: id(BrainNodeId::new, "node.promoted"),
+            ..fence.clone()
+        };
+        let other_generation = RemoteWriterFenceV1 {
+            generation_id: id(ProjectionGenerationId::new, "generation.other"),
+            ..fence.clone()
+        };
+
+        let key = fence.recovery_authority_key().unwrap();
+        assert_eq!(
+            key,
+            remote_recovery_authority_key("brain.remote", "shard.remote", "generation.remote")
+                .unwrap(),
+            "typed fences and stored lineage text derive one key"
+        );
+        assert_eq!(promoted.recovery_authority_key().unwrap(), key);
+        assert_ne!(other_generation.recovery_authority_key().unwrap(), key);
     }
 }

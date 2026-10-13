@@ -19,7 +19,7 @@ use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{
     BrainNodeId, Confidence, EntityId, FactCategoryV1, FactCurationActionV1,
-    FactLineageEventKindV1, FactOwnerV1, FactRelationKindV1, UtcMicros, canonical_sha256,
+    FactLineageEventKindV1, FactOwnerV1, FactRelationKindV1, UtcMicros,
 };
 use tracedecay_global_db::register_registered_schema_installer;
 use tracedecay_graph_db::{
@@ -836,14 +836,11 @@ async fn provisioned_writer_fixture() -> ProvisionedWriterFixture {
         .remote_recovery_authority(&node_id)
         .await
         .expect("mounted remote recovery authority");
-    let fence = writer.authority.fence.clone();
-    let authority_key = canonical_sha256(&(
-        "tracedecay.remote-recovery-authority.v1",
-        &fence.brain_id,
-        &fence.shard_id,
-        &fence.generation_id,
-    ))
-    .expect("recovery authority key");
+    let authority_key = writer
+        .authority
+        .fence
+        .recovery_authority_key()
+        .expect("recovery authority key");
     let caller = RemoteRecoveryCallerV1 {
         node_id: node_id.clone(),
         enrollment_id: EntityId::new("enrollment.cancel-test").expect("enrollment identity"),

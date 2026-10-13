@@ -1242,14 +1242,12 @@ fn capture_and_promotion_gate_share_one_write_transaction() {
     let storage = storage(&fixture);
     let capture = admitted();
     publish_writer(&storage, &capture.writer);
-    let fence = &capture.writer.authority.fence;
-    let authority_key = canonical_sha256(&(
-        "tracedecay.remote-recovery-authority.v1",
-        &fence.brain_id,
-        &fence.shard_id,
-        &fence.generation_id,
-    ))
-    .unwrap();
+    let authority_key = capture
+        .writer
+        .authority
+        .fence
+        .recovery_authority_key()
+        .unwrap();
     fixture
         .handle
         .execute(
