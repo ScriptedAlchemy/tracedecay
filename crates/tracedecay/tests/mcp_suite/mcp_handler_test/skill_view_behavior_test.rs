@@ -265,7 +265,7 @@ async fn skill_view_returns_the_requested_package_and_withholds_support_bytes() 
     assert_eq!(summary["stale_recommendation"]["recommendation"], "keep");
     assert_eq!(
         summary["stale_recommendation"]["reason"],
-        "recent or meaningful activity is present"
+        "skill use is not measured, so absent activity is unknown, not stale"
     );
     assert_eq!(
         stable_evidence(&summary["stale_recommendation"]),
@@ -274,6 +274,7 @@ async fn skill_view_returns_the_requested_package_and_withholds_support_bytes() 
             "pinned=false".to_string(),
             "views=1".to_string(),
             "uses=0".to_string(),
+            "use_telemetry=unobserved".to_string(),
             "patches=0".to_string(),
             "created_by=probe-author".to_string(),
             "provenance_source=automation_run".to_string(),
