@@ -7,6 +7,9 @@ use tracedecay_contracts::remote::credential_admission::{
     RemoteCredentialAdmissionErrorV1, RemoteCredentialAdmissionPortV1,
     RemoteCredentialAdmissionServiceV1, RemoteCredentialUseV1,
 };
+use tracedecay_contracts::remote::query::{
+    RemoteQueryAuthorizationDecisionV1, RemoteQueryPolicyRecordV1,
+};
 use tracedecay_contracts::remote::replay::{
     RemoteReplayPolicyDecisionV1, RemoteReplayPolicyEvidenceV1,
 };
@@ -132,6 +135,40 @@ pub(crate) fn replay_policy(scope: &RemoteRepositoryScopeV1) -> RemoteReplayPoli
         configuration_digest: digest.clone(),
         catalog_digest: digest.clone(),
         privacy_digest: digest,
+        revalidated_at: UtcMicros(1),
+    }
+}
+
+pub(crate) fn query_policy(scope: &RemoteRepositoryScopeV1) -> RemoteQueryPolicyRecordV1 {
+    let resolved = ResolvedScope::new(
+        scope.project_id.clone(),
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
+        scope.reference.clone(),
+    )
+    .expect("resolved scope");
+    let digest = ManifestDigest::new(format!("sha256:{}", "e".repeat(64))).expect("policy digest");
+    RemoteQueryPolicyRecordV1 {
+        repository_scope: scope.clone(),
+        authority: AuthorityReceipt {
+            grant_id: CapabilityGrantId::new("grant.remote-registry.query")
+                .expect("capability grant identity"),
+            grant_revision: 1,
+            grant_digest: digest.clone(),
+            authorized_scope_digest: resolved.scope_digest.clone(),
+            disclosure: DisclosureClass::Evidence,
+            policy: PolicyDecisionRef::new(
+                "policy.remote-registry.query",
+                1,
+                digest,
+                ComponentVersion::new("policy.remote-registry.query.v1").expect("policy component"),
+            )
+            .expect("policy decision"),
+            revalidated_at: UtcMicros(1),
+        },
+        scope: resolved,
+        policy_revision: 1,
+        decision: RemoteQueryAuthorizationDecisionV1::Allow,
         revalidated_at: UtcMicros(1),
     }
 }

@@ -28,15 +28,18 @@ use tracedecay_contracts::{
     RetrievalEvidence, TemporalState,
 };
 use tracedecay_domain::canonical_text::sha256_hex;
-use tracedecay_domain::{CurrentRemoteAuthorityStateV1, UtcMicros};
+use tracedecay_domain::{
+    CurrentRemoteAuthorityStateV1, RemoteWriterFenceV1, UtcMicros, canonical_sha256,
+};
 use tracedecay_rusqlite_runtime::remote::{RemoteQueryAuthoritySnapshotV1, RemoteSqliteStorageV1};
 use tracedecay_store::{
-    ConsistencyModeV1, ObservationReadOperationV1, ObservationReadResultV1, OperationPriorityV1,
-    ProjectReadOperationV1, ProjectReadResultV1, RepositoryReadOperationV1, RepositoryReadResultV1,
-    RuntimeCancellationIdV1, RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1,
-    RuntimeInterruptionV1, RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadRequestV1,
-    RuntimeReadResultV1, RuntimeRequestControlV1, RuntimeRequestProbeV1, ShardWatermarkV1,
-    StoreShardScopeV1, UnavailableReasonV1,
+    CommitSequenceV1, ConsistencyModeV1, ObservationReadOperationV1, ObservationReadResultV1,
+    OperationPriorityV1, ProjectReadOperationV1, ProjectReadResultV1, RepositoryReadOperationV1,
+    RepositoryReadResultV1, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
+    RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeReadCoverageV1,
+    RuntimeReadOperationV1, RuntimeReadRequestV1, RuntimeReadResultV1, RuntimeRequestControlV1,
+    RuntimeRequestProbeV1, ShardWatermarkV1, StoreShardIdV1, StoreShardScopeV1,
+    UnavailableReasonV1,
 };
 use tracedecay_tool_catalog::SortContractId;
 
@@ -77,7 +80,12 @@ impl RemoteExactObservationQueryReadPortV1 for DaemonRemoteExactObservationQuery
             .targets
             .registered_query_target(&command.repository_scope.project_id)
             .map_err(|_| RemoteExactObservationQueryErrorV1::AuthorityUnavailable)?;
-        validate_snapshot(command, &snapshot, &target)?;
+        validate_snapshot(
+            command,
+            &snapshot,
+            &target,
+            &self.installed_writer_fence(command)?,
+        )?;
         let publication = target.publication();
 
         let operation = ObservationReadOperationV1::Observation {
@@ -89,7 +97,11 @@ impl RemoteExactObservationQueryReadPortV1 for DaemonRemoteExactObservationQuery
         let control = runtime_control(command)?;
         let request = RuntimeReadRequestV1::new(
             target.binding().clone(),
-            ConsistencyModeV1::LatestAvailable,
+            // The manifest names the commit frontier the answer was read at,
+            // which only a bounded read observes.
+            ConsistencyModeV1::AtLeast {
+                commit_sequence: CommitSequenceV1(1),
+            },
             RuntimeReadOperationV1::Repository {
                 op: RepositoryReadOperationV1::Project(ProjectReadOperationV1::Observation(
                     operation,
@@ -134,7 +146,7 @@ impl RemoteExactObservationQueryReadPortV1 for DaemonRemoteExactObservationQuery
         if elapsed > command.budget.maximum_elapsed_micros {
             return Err(RemoteExactObservationQueryErrorV1::BudgetExceeded);
         }
-        let frontier = current_frontier(outcome.coverage())?;
+        let frontier = current_frontier(outcome.coverage(), &target.binding().shard_id)?;
 
         let current_snapshot = self
             .authority
@@ -143,7 +155,12 @@ impl RemoteExactObservationQueryReadPortV1 for DaemonRemoteExactObservationQuery
             .targets
             .registered_query_target(&command.repository_scope.project_id)
             .map_err(|_| RemoteExactObservationQueryErrorV1::StaleFence)?;
-        validate_snapshot(command, &current_snapshot, &current_target)?;
+        validate_snapshot(
+            command,
+            &current_snapshot,
+            &current_target,
+            &self.installed_writer_fence(command)?,
+        )?;
         if current_snapshot != snapshot || current_target.publication() != publication {
             return Err(RemoteExactObservationQueryErrorV1::StaleFence);
         }
@@ -308,10 +325,36 @@ impl RemoteExactObservationQueryReadPortV1 for DaemonRemoteExactObservationQuery
     }
 }
 
+impl DaemonRemoteExactObservationQueryPortV1 {
+    /// The writer fence the project store itself holds for the expected
+    /// authority lineage: the fence replay commits under.
+    fn installed_writer_fence(
+        &self,
+        command: &RemoteExactObservationQueryCommandV1,
+    ) -> Result<RemoteWriterFenceV1, RemoteExactObservationQueryErrorV1> {
+        let fence = &command.expected_authority;
+        let authority_key = canonical_sha256(&(
+            "tracedecay.remote-recovery-authority.v1",
+            &fence.brain_id,
+            &fence.shard_id,
+            &fence.generation_id,
+        ))
+        .map_err(|_| RemoteExactObservationQueryErrorV1::AuthorityUnavailable)?;
+        match self
+            .targets
+            .current_writer_fence(command.repository_scope.project_id.clone(), authority_key)
+        {
+            Ok(Some((installed, _))) => Ok(installed),
+            Ok(None) | Err(_) => Err(RemoteExactObservationQueryErrorV1::AuthorityUnavailable),
+        }
+    }
+}
+
 fn validate_snapshot(
     command: &RemoteExactObservationQueryCommandV1,
     snapshot: &RemoteQueryAuthoritySnapshotV1,
     target: &tracedecay_runtime_core::db::DatabaseRuntimeClientV1,
+    installed_fence: &RemoteWriterFenceV1,
 ) -> Result<(), RemoteExactObservationQueryErrorV1> {
     let CurrentRemoteAuthorityStateV1::Available(current) = &snapshot.authority else {
         return Err(RemoteExactObservationQueryErrorV1::AuthorityUnavailable);
@@ -321,7 +364,7 @@ fn validate_snapshot(
         || snapshot.writer.project_id != command.repository_scope.project_id
         || snapshot.writer.scope != command.repository_scope
         || target.binding().shard_id.brain_id != command.expected_authority.brain_id
-        || target.binding().authority_epoch.get() != command.expected_authority.authority_epoch.0
+        || installed_fence != &command.expected_authority
         || !matches!(
             &target.binding().shard_id.scope,
             StoreShardScopeV1::ProjectSessions { project_id }
@@ -335,17 +378,18 @@ fn validate_snapshot(
 
 fn current_frontier(
     coverage: &RuntimeReadCoverageV1,
+    shard_id: &StoreShardIdV1,
 ) -> Result<ShardWatermarkV1, RemoteExactObservationQueryErrorV1> {
     match coverage {
-        RuntimeReadCoverageV1::Latest {
-            observed: Some(frontier),
-        } if frontier.commit_sequence.0 > 0 => Ok(frontier.clone()),
+        RuntimeReadCoverageV1::Complete { coverage } => coverage
+            .observed(shard_id)
+            .cloned()
+            .ok_or(RemoteExactObservationQueryErrorV1::AuthorityUnavailable),
         RuntimeReadCoverageV1::Unavailable {
             reason: UnavailableReasonV1::DeadlineExceeded,
             ..
         } => Err(RemoteExactObservationQueryErrorV1::DeadlineElapsed),
         RuntimeReadCoverageV1::Latest { .. }
-        | RuntimeReadCoverageV1::Complete { .. }
         | RuntimeReadCoverageV1::Stale { .. }
         | RuntimeReadCoverageV1::Unavailable { .. } => {
             Err(RemoteExactObservationQueryErrorV1::AuthorityUnavailable)
@@ -426,10 +470,19 @@ mod tests {
     #[test]
     fn deadline_coverage_remains_a_typed_deadline_error() {
         assert_eq!(
-            current_frontier(&RuntimeReadCoverageV1::Unavailable {
-                coverage: None,
-                reason: UnavailableReasonV1::DeadlineExceeded,
-            }),
+            current_frontier(
+                &RuntimeReadCoverageV1::Unavailable {
+                    coverage: None,
+                    reason: UnavailableReasonV1::DeadlineExceeded,
+                },
+                &StoreShardIdV1 {
+                    brain_id: tracedecay_domain::BrainId::new("brain.remote-query.test")
+                        .expect("brain identity"),
+                    profile_id: tracedecay_domain::UserProfileId::new("profile.remote-query.test")
+                        .expect("profile identity"),
+                    scope: StoreShardScopeV1::Profile,
+                },
+            ),
             Err(RemoteExactObservationQueryErrorV1::DeadlineElapsed)
         );
     }
