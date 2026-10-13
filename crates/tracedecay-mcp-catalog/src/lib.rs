@@ -30,10 +30,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 mod catalog_error;
+mod category;
 mod definitions;
 mod project_access;
 
 pub use catalog_error::McpCatalogError;
+pub use category::ToolCategory;
 pub use definitions::{
     ALWAYS_LOAD_META, RESPONSE_RETRIEVE_TOOL, cli_tool_definition, context_description,
     context_warming_description, explore_call_budget, format_capable_tool_names,

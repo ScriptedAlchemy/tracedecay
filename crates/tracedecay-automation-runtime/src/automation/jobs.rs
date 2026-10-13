@@ -452,28 +452,8 @@ fn latest_terminal_job_record<'a>(
 }
 
 /// Executes one user job through the automation backend, delivering its
-/// output and recording the run in the shared ledger under
-/// `user_job:<job_id>`.
-#[tracing::instrument(name = "automation.run.user_job", level = "trace", skip_all)]
-pub async fn run_user_job_with_backend(
-    dashboard_root: &Path,
-    config: &AutomationConfig,
-    backend: &dyn AgentTaskBackend,
-    job: &AutomationJob,
-    options: UserJobRunOptions,
-) -> super::AutomationRunResult<UserJobAutomationRun> {
-    run_user_job_with_backend_publication(
-        dashboard_root,
-        config,
-        backend,
-        job,
-        options,
-        AutomationRunLedgerPublication::Immediate,
-        None,
-    )
-    .await
-}
-
+/// output. Its `user_job:<job_id>` ledger terminal is published by the
+/// caller's application settlement.
 pub async fn run_user_job_with_backend_for_retained_settlement(
     dashboard_root: &Path,
     config: &AutomationConfig,
@@ -482,27 +462,25 @@ pub async fn run_user_job_with_backend_for_retained_settlement(
     options: UserJobRunOptions,
 ) -> RetainedAutomationRun<UserJobAutomationRun> {
     let settlement_guard = AutomationRunSettlementGuard::new();
-    let result = run_user_job_with_backend_publication(
+    let result = run_retained_user_job(
         dashboard_root,
         config,
         backend,
         job,
         options,
-        AutomationRunLedgerPublication::DeferredUntilApplicationSettlement,
-        Some(&settlement_guard),
+        &settlement_guard,
     )
     .await;
     RetainedAutomationRun::new(result, settlement_guard)
 }
 
-async fn run_user_job_with_backend_publication(
+async fn run_retained_user_job(
     dashboard_root: &Path,
     config: &AutomationConfig,
     backend: &dyn AgentTaskBackend,
     job: &AutomationJob,
     options: UserJobRunOptions,
-    ledger_publication: AutomationRunLedgerPublication,
-    settlement_guard: Option<&AutomationRunSettlementGuard>,
+    settlement_guard: &AutomationRunSettlementGuard,
 ) -> super::AutomationRunResult<UserJobAutomationRun> {
     validate_job(job)?;
     let UserJobRunOptions {
@@ -523,10 +501,10 @@ async fn run_user_job_with_backend_publication(
         run_id: &run_id,
         trigger,
         started_at: &started_at,
-        ledger_publication,
+        ledger_publication: AutomationRunLedgerPublication::DeferredUntilApplicationSettlement,
     };
     if let Some(reason) = config_skip_reason(config) {
-        return ctx.skipped(reason, None).await.map_err(Into::into);
+        return ctx.skipped(reason).await.map_err(Into::into);
     }
 
     let now_secs = current_timestamp();
@@ -555,14 +533,9 @@ async fn run_user_job_with_backend_publication(
             .await
             .map_err(Into::into);
         }
-        return ctx.skipped(reason, None).await.map_err(Into::into);
+        return ctx.skipped(reason).await.map_err(Into::into);
     };
-    let _run_lock = if let Some(settlement_guard) = settlement_guard {
-        settlement_guard.retain_task_lock(task_lock)?;
-        None
-    } else {
-        Some(task_lock)
-    };
+    settlement_guard.retain_task_lock(task_lock)?;
 
     let scheduler_summary = if trigger == AutomationTrigger::Scheduler {
         Some(
@@ -580,24 +553,18 @@ async fn run_user_job_with_backend_publication(
         let now_secs = current_timestamp();
         let decision = job_schedule_decision(job, scheduler_summary.records(), now_secs);
         if let Some(reason) = decision {
-            return ctx
-                .skipped(reason, Some(scheduler_summary))
-                .await
-                .map_err(Into::into);
+            return ctx.skipped(reason).await.map_err(Into::into);
         }
     } else if !job.enabled {
         return ctx
-            .skipped(AutomationSkipReasonV1::UserJobDisabled, None)
+            .skipped(AutomationSkipReasonV1::UserJobDisabled)
             .await
             .map_err(Into::into);
     }
 
     if job.pre_run_command.is_some() && !config.allow_job_commands {
         return ctx
-            .skipped(
-                AutomationSkipReasonV1::JobCommandsDisabled,
-                scheduler_summary.as_ref(),
-            )
+            .skipped(AutomationSkipReasonV1::JobCommandsDisabled)
             .await
             .map_err(Into::into);
     }
@@ -833,32 +800,10 @@ impl JobRunContext<'_> {
         }
     }
 
-    async fn skipped(
-        &self,
-        reason: AutomationSkipReasonV1,
-        summary: Option<&AutomationRunLedgerTaskSummary>,
-    ) -> Result<UserJobAutomationRun> {
+    async fn skipped(&self, reason: AutomationSkipReasonV1) -> Result<UserJobAutomationRun> {
         let token = reason.as_str();
-        let candidate = self.base_record(AutomationRunStatus::Skipped, Some(token.to_string()))?;
-        // Mirror the fixed-task ledger dedup: scheduler ticks re-evaluate
-        // every job, so a standing skip is persisted only once.
-        let repeated = (self.ledger_publication == AutomationRunLedgerPublication::Immediate
-            && self.trigger == AutomationTrigger::Scheduler)
-            .then(|| {
-                summary?.latest_logical_activity().filter(|prior| {
-                    prior.task_key.as_deref() == Some(&job_task_key(&self.job.id))
-                        && prior.trigger == AutomationTrigger::Scheduler
-                        && prior.status == AutomationRunStatus::Skipped
-                        && prior.error.as_deref() == Some(token)
-                })
-            })
-            .flatten();
-        let record = if let Some(repeated) = repeated {
-            repeated.clone()
-        } else {
-            self.publish_terminal(&candidate).await?;
-            candidate
-        };
+        let record = self.base_record(AutomationRunStatus::Skipped, Some(token.to_string()))?;
+        self.publish_terminal(&record).await?;
         let report = json!({
             "status": "skipped",
             "reason": token,

@@ -26,7 +26,7 @@ use tracedecay_domain::{
 use tracedecay_rusqlite_runtime::remote::{
     CredentialDerivedSpoolKeyringV1, RemoteCredentialInventoryErrorV1,
     RemoteCredentialRegistrationV1, RemoteRecoverySqliteAuthorityV1, RemoteSpoolKeyringV1,
-    RemoteSqliteStorageV1,
+    RemoteSqliteStorageErrorV1, RemoteSqliteStorageV1,
 };
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardScopeV1};
 
@@ -60,6 +60,22 @@ pub enum DaemonRemoteCredentialRegistryErrorV1 {
     Unavailable,
     #[error("remote credential registry store requires explicit reset")]
     ResetRequired,
+}
+
+/// Typed refusal of a local Remote Brain node operator request.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteNodeOperatorErrorV1 {
+    #[error("remote node operator request is invalid")]
+    InvalidRequest,
+    #[error("grant Brain identity does not match this profile's Brain")]
+    BrainIdentityConflict,
+    #[error("a different grant or credential is already provisioned for this identity")]
+    Conflict,
+    #[error("remote node provisioning capacity is exhausted")]
+    CapacityExceeded,
+    #[error("remote node store is unavailable")]
+    Unavailable,
 }
 
 const REMOTE_LISTENER_STOPPED: u8 = 0;
@@ -231,6 +247,17 @@ impl DaemonRemoteCredentialAuthorityV1 {
             },
             Err(_) => RemoteOperationalStatusReadV1::Unavailable,
         }
+    }
+
+    /// Current writer authority of one registered node store: the per-node
+    /// read [`Self::operational_status`] aggregates, so a protocol envelope
+    /// and `/remote-status` report one truth.
+    pub fn current_authority(
+        &self,
+        node: &RegisteredRemoteNodeStoreV1,
+        observed_at: UtcMicros,
+    ) -> Result<CurrentRemoteAuthorityStateV1, RemoteSqliteStorageErrorV1> {
+        node.storage.authority_at(&self.brain_id, observed_at)
     }
 
     #[tracing::instrument(name = "daemon.remote.register_storage", level = "trace", skip_all)]

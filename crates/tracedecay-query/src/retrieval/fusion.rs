@@ -1090,16 +1090,34 @@ impl DeterministicFixedPointFusion {
 /// many chunks a candidate was split into: an oversized generated symbol whose
 /// thirteen fallback windows each saturated the lexical calibration outranked
 /// a two-chunk symbol thirteen to two on chunk count alone.
+///
+/// An exact candidate's calibrated exact feature is the share of the query's
+/// literal specificity it matched, and it scales the other lanes too: their
+/// evidence describes only the part of the query the candidate matched. A
+/// row matching only the common word of `format_relative_time callers`
+/// saturates the lexical lane exactly as the definition does, so an additive
+/// exact share alone would leave it within a lane of the definition.
 fn lane_saturated_utility_micros(
     contributions: &[CandidateContribution],
 ) -> Result<u64, FusionStageError> {
     let mut strongest_by_lane = BTreeMap::<RetrieverKind, u64>::new();
+    let mut exact_share_micros = None::<u32>;
     for contribution in contributions {
         let strongest = strongest_by_lane.entry(contribution.retriever).or_default();
         *strongest = (*strongest).max(contribution.weighted_contribution_micros);
+        if contribution.retriever == RetrieverKind::ExactLiteral {
+            exact_share_micros =
+                exact_share_micros.max(Some(contribution.calibrated_feature_micros));
+        }
     }
     strongest_by_lane
-        .into_values()
+        .into_iter()
+        .map(|(lane, strongest)| match exact_share_micros {
+            Some(share) if lane != RetrieverKind::ExactLiteral => {
+                (u128::from(strongest) * u128::from(share) / 1_000_000) as u64
+            }
+            _ => strongest,
+        })
         .try_fold(0_u64, |utility, lane| utility.checked_add(lane))
         .ok_or(FusionStageError::FixedPointOverflow)
 }

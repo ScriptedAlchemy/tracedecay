@@ -218,16 +218,6 @@ impl DaemonSessionRuntimeRegistryV1 {
                     format!("{error:?}"),
                 )
             })?;
-        for closed in reservation.closed() {
-            self.resolver
-                .retire_code_authority(&closed.binding().shard_id, closed.path())
-                .map_err(|error| {
-                    session_registry_error(
-                        "retire destructively closed code-shard authority",
-                        format!("{error:?}"),
-                    )
-                })?;
-        }
         Ok(reservation)
     }
 

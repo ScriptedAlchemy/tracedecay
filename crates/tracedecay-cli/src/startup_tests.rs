@@ -150,6 +150,22 @@ fn default_component_set_adoption_requires_confirmation() {
     }
 }
 
+/// Help offers one MCP component; scripts that spell the retired one still
+/// parse.
+#[test]
+fn component_help_lists_one_mcp_choice_and_keeps_the_retired_spelling() {
+    let help = Cli::command().render_long_help().to_string();
+    assert!(help.contains("context-mcp"), "{help}");
+    assert!(!help.contains("operator-mcp"), "{help}");
+
+    let cli = Cli::try_parse_from(["tracedecay", "update-plugin", "--component", "operator-mcp"])
+        .expect("the retired component spelling still parses");
+    assert_eq!(
+        cli.component,
+        Some(super::HostBundleComponentArg::OperatorMcp)
+    );
+}
+
 #[test]
 fn adoption_without_confirmation_is_refused() {
     let cli = Cli::try_parse_from(["tracedecay", "update-plugin", "--adopt"])

@@ -10,6 +10,7 @@ import type {
   LoomTemporalPayloadV1,
 } from '../../contracts/generated.ts';
 import { resolveFixture } from '../../../stories/fixtures/data.ts';
+import { commitEvidence } from '../../workspaces/sessions/model.ts';
 import { laneIdOf, orderMessages, projectJourney, type JourneySources } from './journey.ts';
 
 /**
@@ -80,7 +81,7 @@ function commit(over: Partial<LoomCommitV1> = {}): LoomCommitV1 {
     commit_sha: 'abcdef1234567890',
     committed_at: T0 + 600,
     confidence: 0.83,
-    evidence: 'transcript',
+    evidence: 'tool_result',
     provider: 'cursor',
     relation: 'authored',
     session_id: 'root',
@@ -875,10 +876,10 @@ describe('projectJourney events', () => {
       sources({
         temporal: temporal({
           commits: [
-            commit({ commit_sha: 'aaaaaaa111', evidence: 'transcript', confidence: 0.83 }),
+            commit({ commit_sha: 'aaaaaaa111', evidence: 'tool_result', confidence: 0.83 }),
             commit({
               commit_sha: 'bbbbbbb222',
-              evidence: 'time_window',
+              evidence: 'time_overlap',
               confidence: 0.41,
               span_overlap_kind: 'branch_span',
               relation: 'overlapping',
@@ -892,15 +893,44 @@ describe('projectJourney events', () => {
     expect(commits).toHaveLength(2);
     const exact = commits.find((event) => event.label === 'aaaaaaa');
     const inferred = commits.find((event) => event.label === 'bbbbbbb');
-    expect(exact).toMatchObject({ grade: 'exact', detail: 'authored · transcript', ref: 'aaaaaaa111' });
+    expect(exact).toMatchObject({ grade: 'exact', detail: 'authored · tool_result', ref: 'aaaaaaa111' });
     expect(inferred).toMatchObject({
       grade: 'inferred',
-      detail: 'overlapping · time_window · branch_span',
+      detail: 'overlapping · time_overlap · branch_span',
     });
     for (const event of commits) {
       expect(event.detail).not.toMatch(/0\.\d/);
       expect(event.label).not.toMatch(/0\.\d/);
     }
+  });
+
+  it('grades every daemon commit class as Sessions does and an unknown class unavailable', () => {
+    const classes = {
+      tool_result: 'exact',
+      host_event: 'exact',
+      head_observation: 'exact',
+      reflog_overlap: 'inferred',
+      time_overlap: 'inferred',
+      vibes: 'unavailable',
+    } as const;
+    const projection = projectJourney(
+      sources({
+        temporal: temporal({
+          commits: Object.keys(classes).map((evidence) => commit({ commit_sha: evidence, evidence })),
+        }),
+      }),
+    );
+    const graded = Object.fromEntries(
+      projection.events
+        .filter((event) => event.kind === 'commit')
+        .map((event) => [event.ref, event.grade]),
+    );
+    expect(graded).toEqual(classes);
+    for (const [evidence, grade] of Object.entries(classes)) {
+      const sessions = commitEvidence({ evidence })?.grade ?? 'UNAVAILABLE';
+      expect(sessions.toLowerCase()).toBe(grade);
+    }
+    expect(projection.events.find((event) => event.ref === 'vibes')?.detail).toContain('vibes');
   });
 
   it('sequences recorded events per lane by time then id', () => {

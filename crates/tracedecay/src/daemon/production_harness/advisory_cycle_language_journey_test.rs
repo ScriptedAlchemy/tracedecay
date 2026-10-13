@@ -285,3 +285,167 @@ async fn checkout_without_indexable_source_names_why_the_advisory_cycle_cannot_r
     assert_eq!(problem["legal_actions"], json!(["reconcile"]), "{answer}");
     harness.shutdown().await;
 }
+
+/// A checkout with one Rust file and one file no analyzer supports, opened
+/// and settled until the advisory owner has mounted over its generation.
+async fn settled_checkout_with_language_less_file(
+    isolation: &Path,
+) -> (ProductionProjectCompositionHarnessV1, std::path::PathBuf) {
+    let project = isolation.join("project");
+    std::fs::create_dir_all(project.join("src")).expect("project source dir");
+    std::fs::write(
+        project.join("src/lib.rs"),
+        "pub fn analyzable(value: u32) -> u32 {\n    value + 3\n}\n",
+    )
+    .expect("rust source");
+    std::fs::write(project.join("deploy.conf"), "listen = 8080\n").expect("config file");
+    git(&project, &["init", "--quiet", "-b", "main"]);
+    git(&project, &["add", "."]);
+    git(
+        &project,
+        &["commit", "--quiet", "-m", "seed mixed checkout"],
+    );
+    let harness = ProductionProjectCompositionHarnessV1::open(isolation, [project.clone()])
+        .await
+        .expect("production composition");
+    let (refused, settled) = settled_advisory_cycle(&harness, &project, "src/lib.rs").await;
+    assert!(
+        !refused,
+        "the Rust document must mount the cycle: {settled}"
+    );
+    (harness, project)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn language_less_document_is_a_terminal_advisory_request() {
+    let isolation = tempfile::TempDir::new().expect("production harness isolation");
+    let (harness, project) = settled_checkout_with_language_less_file(isolation.path()).await;
+
+    let (refused, answer) = settled_advisory_cycle(&harness, &project, "deploy.conf").await;
+    assert!(refused, "no analyzer can run over deploy.conf: {answer}");
+    let problem = &answer["problem"];
+    assert_eq!(problem["kind"], json!("invalid_request"), "{answer}");
+    assert_eq!(
+        problem["code"],
+        json!("feedback.advisory-cycle.invalid-request"),
+        "{answer}"
+    );
+    assert_eq!(problem["retryable"], json!(false), "{answer}");
+    harness.shutdown().await;
+}
+
+/// Admits one native hook boundary for `project` through the production hook
+/// orchestrator and reports whether its producer work reached a terminal state.
+/// The completion is what clears the durable pending-work entry; work that
+/// never completes is redriven by the replay sweep until it expires.
+async fn hook_work_completes(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    saved_document: Option<&str>,
+) -> bool {
+    let project_id = tracedecay_domain::ProjectId::new(
+        harness
+            .project_id(project)
+            .await
+            .expect("registered project id"),
+    )
+    .expect("project id");
+    let canonical_project = std::fs::canonicalize(project).expect("canonical project");
+    let scope =
+        tracedecay_code_index_runtime::resolved_scope_for_project(&canonical_project, &project_id)
+            .expect("resolved scope");
+    let (hook_project, hook_worktree) = tracedecay_agent_hosts::hooks::hook_scope_locators(&scope);
+    let host = tracedecay_domain::NativeHostIdentityV1::Codex;
+    let binding = tracedecay_hooks::HookScopeBindingV1 {
+        host,
+        project_id: hook_project,
+        repository_id: [4; 16],
+        worktree_id: hook_worktree,
+        worktree_epoch: 1,
+        binding_token: [6; 32],
+        capabilities: [
+            tracedecay_hooks::HookEventFamily::SessionBoundary,
+            tracedecay_hooks::HookEventFamily::SavedEdit,
+        ]
+        .into_iter()
+        .map(|family| tracedecay_hooks::HookCapabilityV1 {
+            family,
+            support: tracedecay_hooks::stock_event_support(host, family),
+        })
+        .collect(),
+    };
+    let mut envelope = tracedecay_hooks::HookEventEnvelopeV2 {
+        schema_version: tracedecay_hooks::HOOK_EVENT_SCHEMA_VERSION,
+        event_id: [1; 16],
+        producer: host,
+        protected_session_id: [2; 32],
+        project_id: hook_project,
+        repository_id: [4; 16],
+        worktree_id: hook_worktree,
+        worktree_epoch: 1,
+        binding_token: [6; 32],
+        ordering: tracedecay_hooks::HookOrderingV1::Unknown,
+        observed_at: tracedecay_contracts::now_micros(),
+        event: tracedecay_hooks::HookEventV2::SessionBoundary {
+            boundary: tracedecay_hooks::HookBoundaryV1::TurnComplete,
+        },
+    };
+    if let Some(document) = saved_document {
+        let digest = <sha2::Sha256 as sha2::Digest>::digest(document.as_bytes());
+        let mut native_file_id = [0_u8; 16];
+        native_file_id.copy_from_slice(&digest[..16]);
+        envelope.event = tracedecay_hooks::HookEventV2::SavedEdit {
+            file_id: tracedecay_mcp::handlers::hook_runtime::daemon_mint_hook_v2_file_id(
+                &envelope,
+                native_file_id,
+            ),
+            changed_range_count: 1,
+        };
+    }
+    let (completed, completion) = tokio::sync::oneshot::channel();
+    let completed = std::sync::Mutex::new(Some(completed));
+    assert_eq!(
+        tracedecay_daemon_service::admit_registered_hook_orchestration(
+            envelope,
+            binding,
+            None,
+            1,
+            false,
+            Some(std::sync::Arc::new(move || {
+                if let Some(completed) = completed.lock().expect("completion").take() {
+                    let _ = completed.send(());
+                }
+            })),
+        ),
+        tracedecay_daemon_service::HookOrchestrationAdmissionV1::Enqueued,
+    );
+    tokio::time::timeout(Duration::from_secs(60), completion)
+        .await
+        .is_ok_and(|completed| completed.is_ok())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn saved_edit_of_a_language_less_file_completes_its_hook_work() {
+    let isolation = tempfile::TempDir::new().expect("production harness isolation");
+    let (harness, project) = settled_checkout_with_language_less_file(isolation.path()).await;
+
+    assert!(
+        hook_work_completes(&harness, &project, Some("deploy.conf")).await,
+        "a deterministic language-unavailable cycle must settle its hook work instead of \
+         leaving it owed for redrive"
+    );
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn disabled_context_scout_ends_the_hook_cycle_after_its_advisory_half() {
+    let isolation = tempfile::TempDir::new().expect("production harness isolation");
+    let (harness, project) = settled_checkout_with_language_less_file(isolation.path()).await;
+
+    assert!(
+        hook_work_completes(&harness, &project, Some("src/lib.rs")).await,
+        "with Context Scout disabled the cycle owes no Scout work, so a saved edit \
+         without a Scout lifecycle must still complete"
+    );
+    harness.shutdown().await;
+}

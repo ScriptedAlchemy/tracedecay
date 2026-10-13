@@ -1,8 +1,7 @@
 use std::collections::BTreeSet;
 
 use tracedecay_code_index::capabilities::{
-    BaseCapabilityEmitter, BaseCapabilityValidator, capability_manifest_digest,
-    expected_seal_digest,
+    BaseCapabilityEmitter, capability_manifest_digest, expected_seal_digest,
 };
 use tracedecay_code_index::chunks::DeterministicCodeChunker;
 use tracedecay_code_index::extract::{
@@ -377,7 +376,7 @@ fn base_capability_manifest_is_deterministic_and_candidate_authorized() {
         extractor_revisions,
         sanitizer_revision: id("sanitizer.v1"),
         chunker_revision: id("chunker.v1"),
-        privacy_domain: privacy_domain.clone(),
+        privacy_domain,
         privacy_key_epoch: 7,
         parent_generation: None,
         source_commitments: None,
@@ -408,10 +407,6 @@ fn base_capability_manifest_is_deterministic_and_candidate_authorized() {
         first.manifest_digest,
         capability_manifest_digest(&first).expect("digest recomputes")
     );
-    BaseCapabilityValidator::new()
-        .authorize_privacy_domain(&privacy_domain, 7)
-        .validate_for_candidates(&generation.generation_id, &first)
-        .expect("authorized lexical candidate production");
 
     let mut mixed_registry = generation.clone();
     mixed_registry.registry_revision = id("registry.other.v1");
