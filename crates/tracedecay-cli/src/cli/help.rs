@@ -720,12 +720,14 @@ status (one project's statistics).";
 pub(crate) const REMOTE_LONG_ABOUT: &str = "\
 Operates the Remote Brain production journey from the shell: live mounted \
 status from the running daemon, plus enrolled enroll/capture/query/\
-transfer-frame/replay/failover against an authenticated \
+transfer-frame/replay/replay-pending/failover against an authenticated \
 authority endpoint. `status` never probes local stores; it reads the \
 daemon's in-memory remote mount. `capture` spools one observation on a node \
 whose authority is unreachable, `transfer-frame` moves one encrypted spool \
 frame to an enrolled node, `drain` has the running daemon send a joined \
-node's pending frames to its authority in sequence order, and `query` reads \
+node's pending frames to its authority in sequence order, `replay-pending` \
+replays every frame the authority holds for the caller in sequence order \
+until the first refusal, and `query` reads \
 one exact observation and \
 renders the honest remote shard coverage next to the caller's own pending \
 local spool. `revoke` asks the running daemon to revoke every enrollment of \
@@ -752,6 +754,8 @@ Examples:
       --request-file discovery.json
   tracedecay remote replay --endpoint https://brain.example/remote/ \\
       --credential-file cred.bin --request-file replay.json
+  tracedecay remote replay-pending --endpoint https://brain.example/remote/ \\
+      --credential-file cred.bin --request-file replay-pending.json
   tracedecay remote failover --endpoint https://brain.example/remote/ \\
       --credential-file cred.bin --request-file failover.json
   tracedecay remote revoke --node-id node.lost   Revoke a lost machine's node

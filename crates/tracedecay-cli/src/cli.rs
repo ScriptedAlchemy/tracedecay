@@ -809,8 +809,16 @@ pub enum RemoteAction {
         #[command(flatten)]
         authority: RemoteAuthorityArgs,
     },
-    /// Replay pending offline-capture frames through the current authority
+    /// Replay one transferred frame, named by event id, through the current
+    /// authority
     Replay {
+        #[command(flatten)]
+        authority: RemoteAuthorityArgs,
+    },
+    /// Replay every frame the authority holds for the caller's enrollment,
+    /// lowest sequence first, stopping at the first refusal. A resend reports
+    /// the same receipts and commits nothing.
+    ReplayPending {
         #[command(flatten)]
         authority: RemoteAuthorityArgs,
     },
