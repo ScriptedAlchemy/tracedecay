@@ -25,10 +25,10 @@ import { useSearchParams } from 'react-router';
 import {
   LcmOverviewPayloadV1Schema,
   LcmSearchPayloadV1Schema,
-  LcmTimelinePayloadV1Schema,
   LoomTemporalPayloadV1Schema,
   type LoomSessionRowV1,
 } from '../../contracts/generated.ts';
+import { useLcmTimeline } from '../../data/query/sessionReads.ts';
 import { useEnvelope } from '../../data/query/useEnvelope.ts';
 import { envelopeReadState } from '../../ui/ReadSection.tsx';
 import { SearchField } from '../../ui/search/SearchField.tsx';
@@ -57,11 +57,7 @@ export function SessionsPage() {
   const update = (patch: Partial<SessionsViewState>) =>
     setParams(writeViewState(params, { ...view, ...patch }));
 
-  const timeline = useEnvelope(
-    ['lcm', 'timeline', view.bucket, view.window],
-    `${LCM}/timeline?bucket=${view.bucket}&limit=${view.window}`,
-    LcmTimelinePayloadV1Schema,
-  );
+  const timeline = useLcmTimeline(view.bucket, view.window);
   const overview = useEnvelope(['lcm', 'overview'], `${LCM}/overview`, LcmOverviewPayloadV1Schema);
   const index = useEnvelope(
     ['sessions', 'index', view.rows, view.page],
