@@ -32,7 +32,7 @@ mod code_shape;
 const PLACEHOLDER: &str = "unit-test-placeholder-value";
 
 fn raw_sweep(text: &str) -> String {
-    redact_sensitive_values(Value::String(text.to_owned()), &BTreeSet::new())
+    redact_sensitive_values(Value::String(text.to_owned()), &BTreeSet::new(), &[])
         .expect("raw sweep runs")
         .payload
         .as_str()

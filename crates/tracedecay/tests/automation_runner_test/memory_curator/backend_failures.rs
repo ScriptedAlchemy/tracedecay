@@ -3,7 +3,7 @@ use crate::support::{
     AutomationHostMode, AutomationRunStatus, AutomationTaskConfig, AutomationTaskSet,
     AutomationTrigger, FailingBackend, MalformedTextBackend, MemoryCuratorAutomationOptions,
     assert_noop_fallback_record, fact_exists, init_project, json, load_run_records,
-    run_memory_curator_with_backend, seed_duplicate_facts, tempdir, test_automation_run_control,
+    run_memory_curator, seed_duplicate_facts, tempdir, test_automation_run_control,
 };
 use std::sync::Arc;
 
@@ -29,7 +29,7 @@ async fn memory_curator_runner_ledgers_malformed_backend_output() {
         ..AutomationConfig::default()
     };
 
-    let err = run_memory_curator_with_backend(
+    let err = run_memory_curator(
         &cg,
         &config,
         &run_control,
@@ -95,7 +95,7 @@ async fn memory_curator_runner_records_noop_fallback_when_backend_run_task_fails
         ..AutomationConfig::default()
     };
 
-    let run = run_memory_curator_with_backend(
+    let run = run_memory_curator(
         &cg,
         &config,
         &run_control,

@@ -2,18 +2,19 @@ import { useCallback, useMemo, useState } from 'react';
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
 import { ReadFailure } from '../../ui/ReadFailure.tsx';
 import { ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
-import { StateChip } from '../../ui/StateChip.tsx';
+import { StateChip, type DomainStateKind } from '../../ui/StateChip.tsx';
 import { MeterRow, Panel, WorkspaceHeader } from '../../ui/instrument.tsx';
 import {
   AnalyticsAgentsPayloadV1Schema,
   AnalyticsDiagnosticsPayloadV1Schema,
-  AnalyticsSubagentTreePayloadV1Schema,
   AnalyticsUnderusedPayloadV1Schema,
   AnalyticsUsageSummaryV1Schema,
   type AnalyticsAgentUsageV1,
-  type AnalyticsSubagentNodeV1,
   type AnalyticsSubagentTreePayloadV1,
 } from '../../contracts/generated.ts';
+import { useSubagentTree } from '../../data/query/sessionReads.ts';
+import type { SessionSelection } from '../sessions/model.ts';
+import { SessionPivots } from '../sessions/SessionPivots.tsx';
 import { envelopePayload, useEnvelope } from '../../data/query/useEnvelope.ts';
 import { logFraction } from '../../viz/scale.ts';
 import { AgentAuthorityRegister } from './AgentAuthorityRegister.tsx';
@@ -39,7 +40,13 @@ import { readAttemptFailures } from './failure.ts';
 import { readHandoffFrontier } from './handoff.ts';
 import { newestTreeSession, useAgentHandoffTokens } from './handoffTokenQuery.ts';
 import { readHandoffTokens } from './handoffTokens.ts';
-import { AgentsViewSwitcher, agentsViewNote, useAgentsView, type AgentsView } from './agentsView.tsx';
+import {
+  AgentsViewSwitcher,
+  agentsViewNote,
+  useAgentsSelection,
+  useAgentsView,
+  type AgentsView,
+} from './agentsView.tsx';
 
 const BASE = '/api/plugins/analytics';
 
@@ -99,14 +106,9 @@ export function AgentsPage() {
   // The delegation EDGES, which the rollup above cannot carry: it counts
   // sessions per agent, and a count of two islands never recovers the arrow
   // between them. Served on its own route for the same reason.
-  const subagentTree = useEnvelope(
-    ['analytics', 'subagent-tree'],
-    `${BASE}/subagent-tree`,
-    AnalyticsSubagentTreePayloadV1Schema,
-  );
+  const subagentTree = useSubagentTree();
 
   const [inspectedId, setInspectedId] = useState<string | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
   const [view, setView] = useAgentsView();
   const toggleExpanded = useCallback((id: string) => {
@@ -116,9 +118,6 @@ export function AgentsPage() {
       else next.add(id);
       return next;
     });
-  }, []);
-  const select = useCallback((id: string) => {
-    setSelectedId((current) => (current === id ? null : id));
   }, []);
 
   const treePayload = envelopePayload(subagentTree.data) ?? null;
@@ -130,10 +129,15 @@ export function AgentsPage() {
   );
   // The selected session by identity, looked up in the reading rather than in
   // the drawing: a bundle closing over it or a depth fold must not unselect it.
-  const selectedNode = useMemo<AnalyticsSubagentNodeV1 | null>(() => {
-    if (selectedId === null || treeAvailable === null) return null;
-    return treeAvailable.nodes.find((node) => markId(node) === selectedId) ?? null;
-  }, [selectedId, treeAvailable]);
+  const [selection, setSelection] = useAgentsSelection(
+    treeAvailable ?? (subagentTree.isPending ? 'pending' : 'unavailable'),
+  );
+  const selectedNode = selection.kind === 'node' ? selection.node : null;
+  const selectedId = selectedNode === null ? null : markId(selectedNode);
+  const select = (id: string) => {
+    const node = treeAvailable?.nodes.find((candidate) => markId(candidate) === id) ?? null;
+    setSelection(id === selectedId ? null : node);
+  };
 
   // The token frontier is read for a session this page can actually name: the
   // selected one, or, with nothing selected, the newest top of the tree, and
@@ -175,7 +179,7 @@ export function AgentsPage() {
               ? `the session store declared itself unavailable${treePayload.error ? `: ${treePayload.error}` : ''}`
               : 'the delegation tree could not be read',
         } as const)
-      : resolveSubject(fit.model, inspectedId, selectedId, newestSession, selectedNode !== null);
+      : resolveSubject(fit.model, inspectedId, selectedId, newestSession);
   // The frontier reading belongs to exactly one session. Any other subject is
   // being inspected without a read having been asked for it, and says so.
   const tokensForSubject =
@@ -227,6 +231,13 @@ export function AgentsPage() {
         * focus or selection in the field asked for. */}
       <section aria-label="Delegation topology" className="flex shrink-0 flex-col lg:flex-row">
         <div className="flex min-w-0 flex-1 flex-col gap-2 p-2">
+          {selection.kind === 'unresolved' && selection.reason !== 'pending' ? (
+            <UnresolvedLink
+              selection={selection.selection}
+              reason={selection.reason}
+              truncated={treeAvailable?.truncated ?? false}
+            />
+          ) : null}
           <Panel
             legend={view === 'timeline' ? 'Delegation timeline · read-only' : 'Delegation topology · read-only'}
             // Withdrawn below `sm`: the register above already prints this
@@ -324,7 +335,7 @@ export function AgentsPage() {
             handoffs={handoffFrontier}
             failures={attemptFailures}
             diagnostics={diagnosticsForInspector}
-            onClearSelection={() => setSelectedId(null)}
+            onClearSelection={() => setSelection(null)}
             onToggleExpanded={toggleExpanded}
           />
         </aside>
@@ -420,6 +431,44 @@ function TopologyRenderer({
     }
   }
 }
+
+function UnresolvedLink({
+  selection,
+  reason,
+  truncated,
+}: {
+  selection: SessionSelection;
+  reason: UnresolvedReason;
+  truncated: boolean;
+}) {
+  const { kind, detail } = UNRESOLVED[reason](selection.sessionId, truncated);
+  return (
+    <div className="flex flex-wrap items-center gap-2" data-agents-unresolved={reason}>
+      <StateChip kind={kind} detail={detail} />
+      <SessionPivots session={selection} from="agents" />
+    </div>
+  );
+}
+
+type UnresolvedReason = 'unavailable' | 'absent' | 'ambiguous';
+
+const UNRESOLVED: Record<
+  UnresolvedReason,
+  (sessionId: string, truncated: boolean) => { kind: DomainStateKind; detail: string }
+> = {
+  unavailable: (sessionId) => ({
+    kind: 'unavailable',
+    detail: `Linked session ${sessionId} cannot be placed: the delegation tree is unavailable.`,
+  }),
+  absent: (sessionId, truncated) => ({
+    kind: 'unavailable',
+    detail: `Linked session ${sessionId} is not in the delegation tree${truncated ? ' · tree truncated' : ''}; the inspector shows the newest root.`,
+  }),
+  ambiguous: (sessionId) => ({
+    kind: 'conflicting',
+    detail: `Linked session ${sessionId} names more than one session in the delegation tree; choose one in the exact tree.`,
+  }),
+};
 
 /** The model the inspector is handed before the tree has been read. */
 const EMPTY_MODEL = fitDelegationTopology({

@@ -17,6 +17,8 @@ use automation::{
 };
 mod feedback_component;
 mod feedback_rollback;
+#[cfg(test)]
+mod mcp_identity_tests;
 pub(crate) use feedback_rollback::handle_feedback_rollback_command;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -802,28 +804,19 @@ fn dry_run_canonical_component_set(
     Ok(())
 }
 
-/// Deploy paths the durable receipt for this component already claims. A path
-/// missing from this set is one no receipt records, so replacing an existing
-/// file there is an adoption rather than an ordinary refresh.
+/// Deploy paths a durable receipt for this component's route already claims. A
+/// path missing from this set is one no receipt records, so replacing an
+/// existing file there is an adoption rather than an ordinary refresh.
 fn receipt_owned_paths(
     lifecycle_root: &Path,
     host: tracedecay_agent_hosts::agents::host_bundle::HostKindV1,
     component: tracedecay_agent_hosts::agents::host_bundle::HostComponentV1,
 ) -> std::collections::BTreeSet<String> {
-    tracedecay_agent_hosts::agents::host_bundle::latest_host_component_receipt_at(
+    tracedecay_agent_hosts::agents::host_bundle::host_component_owned_paths_at(
         lifecycle_root,
         host,
         component,
     )
-    .ok()
-    .flatten()
-    .map(|receipt| {
-        receipt
-            .artifacts
-            .into_iter()
-            .map(|artifact| artifact.relative_path)
-            .collect()
-    })
     .unwrap_or_default()
 }
 

@@ -319,6 +319,52 @@ fn authority_honors_repository_included_ignore_configuration() {
 }
 
 #[test]
+fn authority_reads_a_separate_git_dir_checkout_as_its_worktree() {
+    let store = tempfile::tempdir().expect("separate Git directory");
+    let git_dir = store.path().join("checkout.git");
+    let fixture = Fixture {
+        directory: tempfile::tempdir().expect("checkout"),
+    };
+    fixture.git(&[
+        "init",
+        "--quiet",
+        "-b",
+        "main",
+        "--separate-git-dir",
+        git_dir.to_str().expect("UTF-8 Git directory"),
+    ]);
+    fixture.write("tracked.txt", "before\n");
+    fixture.commit("initial");
+    fixture.write("tracked.txt", "after\n");
+    fixture.write("untracked.txt", "untracked\n");
+
+    for attempt in ["cold", "retained"] {
+        let authority = GitRepositoryAuthority::discover(fixture.path()).unwrap();
+        assert_eq!(
+            authority.worktree_root(),
+            Some(fixture.path().canonicalize().unwrap().as_path()),
+            "{attempt} discovery"
+        );
+        assert_eq!(authority.git_dir(), git_dir.canonicalize().unwrap());
+        let status = authority.status().unwrap();
+        assert!(
+            status.entries.iter().any(|entry| matches!(
+                entry,
+                GitStatusEntryV1::Tracked(tracked)
+                    if tracked.path == "tracked.txt"
+                        && tracked.worktree == GitChangeKindV1::Modified
+            )),
+            "{attempt} status: {:?}",
+            status.entries
+        );
+        assert!(status.entries.iter().any(|entry| matches!(
+            entry,
+            GitStatusEntryV1::Untracked { path } if path == "untracked.txt"
+        )));
+    }
+}
+
+#[test]
 fn authority_keeps_linked_worktree_common_identity_and_exact_head() {
     let fixture = Fixture::init("sha1");
     fixture.write("README.md", "main\n");

@@ -47,7 +47,6 @@ use evidence::{
     SkillWriterEvidenceOutcome, build_session_reflector_evidence, build_skill_writer_evidence,
     canonical_evidence_hash,
 };
-use retrieval::unavailable_automation_retrieval;
 use session_reflector::{
     ProposedAgentOutput, SessionReflectorFinalization, build_session_reflector_prompt,
     finalize_session_reflector_success, validate_session_fact_candidates,
@@ -63,7 +62,7 @@ pub use super::lifecycle::{
 };
 pub use super::memory_curator::{
     CURATION_DEFAULT_FACT_REVIEW_LIMIT, CURATION_DEFAULT_MIN_CONFIDENCE,
-    MemoryCuratorAutomationOptions, MemoryCuratorAutomationRun, run_memory_curator_with_backend,
+    MemoryCuratorAutomationOptions, MemoryCuratorAutomationRun,
     run_memory_curator_with_backend_for_retained_settlement,
 };
 pub use evidence::{AutomationTemporalEvidence, AutomationTemporalEvidenceItem};
@@ -73,13 +72,11 @@ pub use retrieval::{
 };
 pub use session_reflector::{
     SessionFactCurationOutcome, SessionFactCurationReceipt, SessionReflectorAutomationOptions,
-    SessionReflectorAutomationRun, run_session_reflector_with_backend,
-    run_session_reflector_with_backend_and_retrieval,
+    SessionReflectorAutomationRun,
     run_session_reflector_with_backend_and_retrieval_for_retained_settlement,
 };
 pub use skill_writer::{
-    SkillWriterAutomationOptions, SkillWriterAutomationRun, run_skill_writer_with_backend,
-    run_skill_writer_with_backend_and_retrieval,
+    SkillWriterAutomationOptions, SkillWriterAutomationRun,
     run_skill_writer_with_backend_and_retrieval_for_retained_settlement,
 };
 
@@ -287,60 +284,6 @@ impl RetainedCombinedReviewRun {
 /// dashboard scheduler status stay coherent, sharing the combined request's
 /// `input_hash` and a `combined_run_id` correlation in `report_ref`, with
 /// `prompt_version` set to the combined contract's version.
-#[tracing::instrument(name = "automation.run.combined_review", level = "trace", skip_all)]
-pub async fn run_combined_review_with_backend(
-    cg: &AutomationProjectContext,
-    config: &AutomationConfig,
-    configuration_revision_id: &ConfigurationRevisionId,
-    backend: &dyn AgentTaskBackend,
-    options: CombinedReviewAutomationOptions,
-    run_control: &AutomationRunControl,
-) -> Result<CombinedReviewDispatch> {
-    let retrieval = unavailable_automation_retrieval("session_evidence_retrieval_unavailable");
-    run_combined_review_for_retrieval(
-        cg,
-        config,
-        configuration_revision_id,
-        AutomationTaskIo {
-            backend,
-            retrieval: retrieval.as_ref(),
-        },
-        options,
-        run_control,
-        CombinedReviewPublication {
-            ledger: AutomationRunLedgerPublication::Immediate,
-            reflector_guard: None,
-            skill_guard: None,
-        },
-    )
-    .await
-}
-
-pub async fn run_combined_review_with_backend_and_retrieval(
-    cg: &AutomationProjectContext,
-    config: &AutomationConfig,
-    configuration_revision_id: &ConfigurationRevisionId,
-    backend: &dyn AgentTaskBackend,
-    retrieval: &dyn AutomationSessionRetrieval,
-    options: CombinedReviewAutomationOptions,
-    run_control: &AutomationRunControl,
-) -> Result<CombinedReviewDispatch> {
-    run_combined_review_for_retrieval(
-        cg,
-        config,
-        configuration_revision_id,
-        AutomationTaskIo { backend, retrieval },
-        options,
-        run_control,
-        CombinedReviewPublication {
-            ledger: AutomationRunLedgerPublication::Immediate,
-            reflector_guard: None,
-            skill_guard: None,
-        },
-    )
-    .await
-}
-
 #[allow(clippy::too_many_arguments)]
 pub async fn run_combined_review_with_backend_and_retrieval_for_retained_settlement(
     cg: &AutomationProjectContext,
@@ -595,6 +538,15 @@ fn run_combined_review_for_retrieval_inner<'a>(
                 return Err(err);
             }
             tracing::warn!(error = %err, "failed to refresh fact outcomes");
+        }
+        if let Err(err) = super::outcomes::refresh_skill_outcomes(
+            &skill_bundle.profile_root,
+            &dashboard_root,
+            current_timestamp(),
+        )
+        .await
+        {
+            tracing::warn!(error = %err, "failed to refresh skill outcomes");
         }
 
         let run_id = options

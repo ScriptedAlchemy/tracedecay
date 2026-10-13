@@ -65,7 +65,7 @@ export type RowsPerPage = (typeof ROWS_PER_PAGE_OPTIONS)[number];
 export const TIMELINE_WINDOW_OPTIONS = [30, 90, 400, 2000] as const;
 export type TimelineWindow = (typeof TIMELINE_WINDOW_OPTIONS)[number];
 /** The route's own default when no `limit` is sent. */
-const DEFAULT_TIMELINE_WINDOW: TimelineWindow = 400;
+export const DEFAULT_TIMELINE_WINDOW: TimelineWindow = 400;
 
 export interface SessionsViewState {
   readonly selection: SessionSelection | null;
@@ -99,16 +99,31 @@ function oneOf<T extends number>(raw: string | null, options: readonly T[], fall
   return (options as readonly number[]).includes(parsed) ? (parsed as T) : fallback;
 }
 
-export function readViewState(params: URLSearchParams): SessionsViewState {
+export function readSessionSelection(params: URLSearchParams): SessionSelection | null {
   const sessionId = params.get(PARAM.sessionId);
   const provider = params.get(PARAM.provider);
+  return sessionId !== null && sessionId !== ''
+    ? { sessionId, provider: provider === null || provider === '' ? null : provider }
+    : null;
+}
+
+export function writeSessionSelection(
+  params: URLSearchParams,
+  selection: SessionSelection | null,
+): URLSearchParams {
+  const next = new URLSearchParams(params);
+  if (selection === null) next.delete(PARAM.sessionId);
+  else next.set(PARAM.sessionId, selection.sessionId);
+  if (selection?.provider) next.set(PARAM.provider, selection.provider);
+  else next.delete(PARAM.provider);
+  return next;
+}
+
+export function readViewState(params: URLSearchParams): SessionsViewState {
   const rawPage = Number(params.get(PARAM.page) ?? '1');
   const rawBucket = params.get(PARAM.bucket);
   return {
-    selection:
-      sessionId !== null && sessionId !== ''
-        ? { sessionId, provider: provider === null || provider === '' ? null : provider }
-        : null,
+    selection: readSessionSelection(params),
     page: Number.isInteger(rawPage) && rawPage >= 1 ? rawPage : 1,
     rows: oneOf(params.get(PARAM.rows), ROWS_PER_PAGE_OPTIONS, DEFAULT_VIEW_STATE.rows),
     bucket: rawBucket === 'hour' ? 'hour' : 'day',
@@ -125,13 +140,11 @@ export function writeViewState(
   params: URLSearchParams,
   state: SessionsViewState,
 ): URLSearchParams {
-  const next = new URLSearchParams(params);
+  const next = writeSessionSelection(params, state.selection);
   const set = (key: string, value: string | null) => {
     if (value === null) next.delete(key);
     else next.set(key, value);
   };
-  set(PARAM.sessionId, state.selection?.sessionId ?? null);
-  set(PARAM.provider, state.selection?.provider ?? null);
   set(PARAM.page, state.page === 1 ? null : String(state.page));
   set(PARAM.rows, state.rows === DEFAULT_VIEW_STATE.rows ? null : String(state.rows));
   set(PARAM.bucket, state.bucket === 'day' ? null : state.bucket);
@@ -203,19 +216,19 @@ export function recordedModels(row: LoomSessionRowV1): { models: string[]; unrec
  * Selection → index row join
  * ------------------------------------------------------------------------ */
 
-type IndexJoin =
-  | { kind: 'exact'; row: LoomSessionRowV1 }
+type IndexJoin<R> =
+  | { kind: 'exact'; row: R }
   /** More than one loaded row answers to the id; a selection without a
    * provider cannot pick between providers and does not. */
-  | { kind: 'ambiguous'; rows: readonly LoomSessionRowV1[] }
+  | { kind: 'ambiguous'; rows: readonly R[] }
   /** The loaded index page holds no such row. Not "the session does not
    * exist", the page is one window over the store. */
   | { kind: 'absent' };
 
-export function joinIndexRow(
-  rows: readonly LoomSessionRowV1[],
+export function joinIndexRow<R extends { provider: string; session_id: string }>(
+  rows: readonly R[],
   selection: SessionSelection,
-): IndexJoin {
+): IndexJoin<R> {
   const candidates = rows.filter(
     (row) =>
       row.session_id === selection.sessionId &&

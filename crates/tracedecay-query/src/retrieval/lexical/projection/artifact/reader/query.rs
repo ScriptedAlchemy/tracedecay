@@ -1,11 +1,12 @@
 //! Bounded posting traversal, candidate selection, and lexical/exact scoring.
 
 use super::super::super::{
-    ExactMatchRowViewV1, ExactOccurrenceOwnersV1, ExactRowMatchV1, FuzzyExpansionsV1,
-    FuzzyQueryGroupV1, LexicalFieldTextV1, LexicalRowScoreV1, LiteralProofCacheV1,
-    PreparedLexicalQueryV1, bm25_score_micros, exact_matches, field_weight_millis,
-    fuzzy_distance_bound, lexical_lane_binding, lexical_lane_candidate, normalize_lexical,
-    proximity_count_tokens, proximity_tokens, row_field_texts, score_lexical_row, substring_count,
+    ExactLiteralSpecificityV1, ExactMatchRowViewV1, ExactOccurrenceOwnersV1, ExactRowMatchV1,
+    FuzzyExpansionsV1, FuzzyQueryGroupV1, LexicalFieldTextV1, LexicalRowScoreV1,
+    LiteralProofCacheV1, PreparedLexicalQueryV1, bm25_score_micros, exact_matches,
+    field_weight_millis, fuzzy_distance_bound, lexical_lane_binding, lexical_lane_candidate,
+    normalize_lexical, proximity_count_tokens, proximity_tokens, row_field_texts,
+    score_lexical_row, substring_count,
 };
 use super::super::format::{
     ArtifactRowV1, PostingListDecoderV1, VerifiedCodeLexicalArtifactV1, decode_document_set,
@@ -688,9 +689,9 @@ impl<'a> ArtifactQueryV1<'a> {
         retrieval_checkpoint(request.control)?;
         let documents = self.exact_documents(request)?;
         // Same bounded selection as the lexical lane: keys mirror the exact
-        // lane's canonical order (production-definition rank, then admitted
-        // literal count, then occurrence), and only the selected winners are
-        // rehydrated into evidence.
+        // lane's canonical order (production-definition rank, then
+        // matched-literal specificity, then occurrence), and only the
+        // selected winners are rehydrated into evidence.
         // Central admission runs BEFORE heap eligibility: a document whose
         // matched literals are all denied is excluded, never selected, so a
         // denied best match can never displace an admitted candidate or
@@ -723,10 +724,9 @@ impl<'a> ArtifactQueryV1<'a> {
             }
             Ok(())
         })?;
-        let mut excluded = self.document_count as u64;
-        let mut eligible = 0u64;
-        let mut ranked = BinaryHeap::new();
         let mut proofs = LiteralProofCacheV1::new(request.literals.len());
+        let mut admitted_rows = Vec::new();
+        let mut document_frequencies = vec![0usize; request.literals.len()];
         for (visited, (document, row_id, file, source_role, matches)) in
             matched_rows.into_iter().enumerate()
         {
@@ -742,15 +742,41 @@ impl<'a> ArtifactQueryV1<'a> {
             else {
                 continue;
             };
-            eligible += 1;
-            excluded = excluded.saturating_sub(1);
+            for &literal in &matched_literals {
+                document_frequencies[literal] += 1;
+            }
+            admitted_rows.push((
+                document,
+                row_id,
+                source_role,
+                admitted_ordinal,
+                matched_literals,
+                matched_kinds,
+            ));
+        }
+        // Specificity needs every admitted row's literals first. It keys the
+        // cap, so a common query word's matches cannot crowd out the rare
+        // identifier the query names.
+        let specificity = ExactLiteralSpecificityV1::new(&document_frequencies);
+        let eligible = admitted_rows.len() as u64;
+        let excluded = (self.document_count as u64).saturating_sub(eligible);
+        let mut ranked = BinaryHeap::new();
+        for (
+            visited,
+            (document, row_id, source_role, admitted_ordinal, matched_literals, matched_kinds),
+        ) in admitted_rows.into_iter().enumerate()
+        {
+            if visited.is_multiple_of(RETRIEVAL_CANDIDATE_BATCH_SIZE) {
+                retrieval_checkpoint(request.control)?;
+            }
+            let specificity_micros = specificity.share_micros(&matched_literals);
             retain_bounded(
                 &mut ranked,
                 cap,
                 Keyed {
                     key: (
                         source_role.admission_rank(),
-                        Reverse(matched_literals.len()),
+                        Reverse(specificity_micros),
                         row_id,
                         document,
                     ),
@@ -780,7 +806,7 @@ impl<'a> ArtifactQueryV1<'a> {
                 retrieval_checkpoint(request.control)?;
             }
             let Keyed {
-                key: (_, _, _, document),
+                key: (_, Reverse(specificity_micros), _, document),
                 value: (admitted_ordinal, matched_literals, matched_kinds, source_role),
             } = entry;
             let proof = proofs.admitted_proof(admitted_ordinal)?;
@@ -806,6 +832,7 @@ impl<'a> ArtifactQueryV1<'a> {
                 matched_literals,
                 admission_proof: proof,
                 source_role,
+                specificity_micros,
             };
             evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
             candidates.push(candidate);

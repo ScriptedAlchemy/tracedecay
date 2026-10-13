@@ -406,19 +406,12 @@ async fn handle_status_command_within(
                 print!("{}", include_str!("resources/logo.ansi"));
             }
             let branch_info = status_branch_info(&project_path, &daemon_status);
-            if short {
-                crate::display::print_status_header(
-                    &census,
-                    freshness.as_ref(),
-                    branch_info.as_ref(),
-                );
-            } else {
-                crate::display::print_status_table_with(crate::display::StatusTable {
-                    census: &census,
-                    freshness: freshness.as_ref(),
-                    branch_info: branch_info.as_ref(),
-                });
-            }
+            crate::display::print_status_table(
+                &census,
+                freshness.as_ref(),
+                branch_info.as_ref(),
+                short,
+            );
             for finding in &schema_convergences {
                 match finding.state {
                     SchemaConvergenceStateV1::PendingSchemaMigration

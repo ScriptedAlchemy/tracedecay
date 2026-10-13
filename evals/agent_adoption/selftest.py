@@ -511,9 +511,11 @@ def test_repeated_query_hints_and_usage():
     check("hints: next step is the next meaningful tool, then the answer",
           grade.repeated_query_hint_next_steps(tr) == ["Read", "answer"],
           str(grade.repeated_query_hint_next_steps(tr)))
-    check("usage: Claude result cost, turns, and tokens captured",
-          tr.usage == {"total_cost_usd": 0.0421, "num_turns": 5, "input_tokens": 12, "output_tokens": 340,
-                       "cache_creation_input_tokens": 900, "cache_read_input_tokens": 15000}, str(tr.usage))
+    check("cost: Claude result cost, turns, and tokens captured",
+          {k: tr.cost[k] for k in ("total_cost_usd", "num_turns", "input_tokens", "output_tokens",
+                                   "cache_creation_input_tokens", "cache_read_input_tokens")}
+          == {"total_cost_usd": 0.0421, "num_turns": 5, "input_tokens": 12, "output_tokens": 340,
+              "cache_creation_input_tokens": 900, "cache_read_input_tokens": 15000}, str(tr.cost))
 
     # The prefix inside other text (a grep hit on the source, the agent's own
     # prose) is not a hint block.
@@ -525,8 +527,8 @@ def test_repeated_query_hints_and_usage():
         claude_result("done"),
     ])
     check("hints: quoted prefix is not a hint", grade.repeated_query_hint_next_steps(quoted) == [])
-    check("usage: absent result usage stays null",
-          all(v is None for v in quoted.usage.values()), str(quoted.usage))
+    check("cost: absent result usage stays null",
+          all(v is None for v in quoted.cost.values()), str(quoted.cost))
     unanswered = transcript([claude_tool(SEARCH, {"query": "x"}), claude_tool_result(QUERY_HINT)])
     check("hints: a hint with nothing after it ends the run",
           grade.repeated_query_hint_next_steps(unanswered) == ["end"])
@@ -546,9 +548,9 @@ def test_repeated_query_hints_and_usage():
     ], "codex")
     check("hints: Codex MCP result hint is attributed",
           grade.repeated_query_hint_next_steps(codex) == ["answer"])
-    check("usage: Codex turns summed with cached input split out, no cost",
-          codex.usage["input_tokens"] == 700 and codex.usage["cache_read_input_tokens"] == 800
-          and codex.usage["output_tokens"] == 60 and codex.usage["total_cost_usd"] is None)
+    check("cost: Codex turns summed, no spend reported",
+          codex.cost["input_tokens"] == 1500 and codex.cost["cache_read_input_tokens"] == 800
+          and codex.cost["output_tokens"] == 60 and codex.cost["total_cost_usd"] is None, str(codex.cost))
 
     scn = {"id": "s", "category": "repeated_query", "ground_truth": ["reserve_stock"]}
     on = grade.score_scenario(scn, tr, {}, {"model": "sonnet", "repeated_query_hints": "on"})
@@ -582,6 +584,180 @@ def test_transcript_base_repetitions():
     check("reps: legacy id__host keeps a trailing r-like host untouched",
           grade.parse_transcript_base("routing_r1__claude")
           == ("routing_r1", "claude", "full", ""))
+
+
+def test_cost_and_corrections():
+    usage = {"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 100,
+             "cache_creation_input_tokens": 20}
+    tr = transcript([json.dumps({"type": "result", "result": "ok", "usage": usage,
+                                 "total_cost_usd": 0.25, "num_turns": 3, "duration_ms": 900})])
+    check("cost: Claude result usage parsed",
+          tr.cost["total_tokens"] == 135 and tr.cost["total_cost_usd"] == 0.25
+          and tr.cost["num_turns"] == 3 and tr.cost["duration_ms"] == 900, str(tr.cost))
+    missing = transcript([claude_result("ok")])
+    check("cost: missing Claude usage is unknown, not zero",
+          all(v is None for v in missing.cost.values()), str(missing.cost))
+    codex = grade.load_transcript_lines([
+        json.dumps({"type": "item.completed", "item": {"id": "c1", "type": "command_execution",
+                                                       "command": "false", "exit_code": 1,
+                                                       "status": "failed"}}),
+        json.dumps({"type": "turn.completed", "usage": {"input_tokens": 40, "cached_input_tokens": 30,
+                                                        "output_tokens": 2}}),
+    ], "codex")
+    check("cost: Codex turn usage parsed, cached input not double counted",
+          codex.cost["total_tokens"] == 42 and codex.cost["cache_read_input_tokens"] == 30
+          and codex.cost["total_cost_usd"] is None, str(codex.cost))
+    check("cost: Codex failed command is a tool error", codex.tool_errors == 1)
+    no_usage = grade.load_transcript_lines([json.dumps({"type": "turn.completed"})], "codex")
+    check("cost: missing Codex usage is unknown", no_usage.cost["total_tokens"] is None)
+
+    read = claude_tool("Read", {"file_path": "src/pricing.rs"})
+    tr = transcript([
+        read,
+        json.dumps({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "x", "is_error": True, "content": "denied"}]}}),
+        read,
+        claude_tool("Read", {"file_path": "src/discount.rs"}),
+        claude_result("one two three"),
+    ])
+    scored = grade.score_scenario({"id": "c", "category": "c"}, tr, {}, {})
+    d = scored["details"]
+    check("corrections: tool error and identical retry counted",
+          (d["tool_errors"], d["repeated_calls"], d["corrections"]) == (1, 1, 2), str(d))
+    check("corrections: review words counted", d["review_words"] == 3)
+    check("cost: scored result carries cost", scored["cost"] == tr.cost)
+
+
+LEARNED_SKILL = "pricing-change-review"
+
+
+def learned_score(expected: bool, invoked: bool, variant: str = "manual", host: str = "claude",
+                  outcome_text: str = "compute_grand_total") -> dict:
+    scn = {"id": "learned", "category": "learned_skill", "ground_truth": ["compute_grand_total"],
+           "learned_skill": {"workflow": "wf", "expected": expected}}
+    lines = [claude_tool("Skill", {"skill": LEARNED_SKILL})] if invoked else []
+    tr = grade.load_transcript_lines(lines + [claude_result(outcome_text)], host)
+    meta = {"learned_skill_variant": variant, "learned_skill_id": LEARNED_SKILL, "model": "opus"}
+    return grade.score_scenario(scn, tr, {}, meta)
+
+
+def test_learned_skill_routing():
+    def outcome(r):
+        return r["details"]["learned_skill_routing"]["outcome"]
+    check("learned: expected and invoked is tp", outcome(learned_score(True, True)) == "tp")
+    check("learned: expected and absent is fn", outcome(learned_score(True, False)) == "fn")
+    check("learned: unexpected invocation is fp", outcome(learned_score(False, True)) == "fp")
+    check("learned: neighbor without invocation is tn", outcome(learned_score(False, False)) == "tn")
+    check("learned: no-skill variant routing unknown",
+          outcome(learned_score(True, True, variant="none")) == "unknown")
+    namespaced = grade.score_scenario(
+        {"id": "learned", "category": "learned_skill",
+         "learned_skill": {"workflow": "wf", "expected": True}},
+        transcript([claude_tool("Skill", {"skill": "tracedecay:" + LEARNED_SKILL}), claude_result("x")]),
+        {}, {"learned_skill_variant": "manual", "learned_skill_id": LEARNED_SKILL})
+    check("learned: namespaced plugin skill is not the learned skill", outcome(namespaced) == "fn")
+    codex = grade.load_transcript_lines([json.dumps({"type": "item.completed", "item": {
+        "id": "m", "type": "agent_message", "text": "compute_grand_total"}})], "codex")
+    codex_scored = grade.score_scenario(
+        {"id": "learned", "category": "learned_skill", "ground_truth": ["compute_grand_total"],
+         "learned_skill": {"workflow": "wf", "expected": True}},
+        codex, {}, {"learned_skill_variant": "manual", "learned_skill_id": LEARNED_SKILL})
+    check("learned: Codex routing unknown, outcome still measured",
+          outcome(codex_scored) == "unknown" and codex_scored["subscores"]["outcome"] == 1)
+    check("learned: outcome independent of invocation",
+          learned_score(True, True, outcome_text="no idea")["subscores"]["outcome"] == 0
+          and learned_score(True, False)["subscores"]["outcome"] == 1)
+
+    check("learned: variant parsed from basename",
+          grade.split_learned_variant("learned_x__claude__opus__v-generated__r2")
+          == ("learned_x__claude__opus__r2", "generated"))
+    check("learned: basename without variant untouched",
+          grade.split_learned_variant("trace_callers__claude__opus__bare")
+          == ("trace_callers__claude__opus__bare", None))
+
+    rows = grade.learned_skill_aggregate(
+        [learned_score(True, True), learned_score(True, False), learned_score(False, False),
+         learned_score(True, True, variant="none")],
+        [{"id": "learned", "host": "claude", "model": "opus", "learned_skill_workflow": "wf",
+          "learned_skill_variant": "manual"}])
+    by_variant = {r["variant"]: r for r in rows}
+    manual, none = by_variant.get("manual", {}), by_variant.get("none", {})
+    check("learned: aggregate counts routing per variant",
+          manual.get("routing") == {"tp": 1, "fn": 1, "fp": 0, "tn": 1, "unknown": 0}
+          and manual.get("n") == 3 and manual.get("invalid") == 1, str(manual))
+    check("learned: unknown routing stays out of tp/fn/fp/tn",
+          none.get("routing") == {"tp": 0, "fn": 0, "fp": 0, "tn": 0, "unknown": 1}, str(none))
+    check("learned: unknown cost excluded from means, counted",
+          manual.get("tokens_mean") is None and manual.get("tokens_unknown") == 3
+          and manual.get("tokens_total") == 0)
+    report = grade.render_report({"meta": {}, "aggregate": {}, "results": [], "learned_skill": rows})
+    check("learned: report table rendered without a verdict",
+          "## Learned-skill qualification" in report
+          and not any(w in report.lower() for w in ("winner", "verdict:", "pass/fail:")))
+
+
+def test_learned_skill_lint():
+    with tempfile.TemporaryDirectory() as root:
+        os.makedirs(os.path.join(root, "wf", "sessions"))
+        with open(os.path.join(root, "wf", "sessions", "a.jsonl"), "w") as f:
+            f.write(json.dumps({"type": "user", "message": {"role": "user",
+                                "content": "Review my pricing change, please."}}) + "\n")
+        ok = {"h": {"prompt": "What should I check before changing totals?",
+                    "learned_skill": {"workflow": "wf", "expected": True}}}
+        leak = {"h": {"prompt": "review my  pricing change, please.",
+                      "learned_skill": {"workflow": "wf", "expected": True}}}
+        unknown = {"h": {"prompt": "x", "learned_skill": {"workflow": "../wf", "expected": True}}}
+        check("learned lint: held-out prompt distinct from sessions passes",
+              grade.lint_learned_skills(ok, root) == [])
+        check("learned lint: generation prompt reused as held-out fails",
+              len(grade.lint_learned_skills(leak, root)) == 1)
+        check("learned lint: unknown workflow fails",
+              len(grade.lint_learned_skills(unknown, root)) == 1)
+        check("learned lint: scenarios without learned_skill ignored",
+              grade.lint_learned_skills({"p": {"prompt": "Review my pricing change, please."}}, root) == [])
+
+
+def test_learned_skill_end_to_end():
+    with open(os.path.join(HERE, "scenarios", "learned_pricing_line_item_tax.json")) as f:
+        scn = json.load(f)
+    usage = {"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 0,
+             "cache_creation_input_tokens": 0}
+    answer = json.dumps({"type": "result", "result": "compute_grand_total, pricing_test, cents",
+                         "usage": usage, "total_cost_usd": 0.1, "num_turns": 2, "duration_ms": 500})
+    with tempfile.TemporaryDirectory() as work:
+        sdir, rdir = os.path.join(work, "scenarios"), os.path.join(work, "run")
+        os.makedirs(sdir)
+        os.makedirs(rdir)
+        with open(os.path.join(sdir, scn["id"] + ".json"), "w") as f:
+            json.dump(scn, f)
+        runs = {
+            "manual": ([claude_tool("Skill", {"skill": LEARNED_SKILL}), answer], LEARNED_SKILL, 0),
+            "none": ([answer], "", 0),
+            "generated": ([], "generated-skill", 124),
+        }
+        for variant, (lines, skill, rc) in runs.items():
+            base = f"{scn['id']}__claude__opus__v-{variant}__r1"
+            with open(os.path.join(rdir, base + ".stdout.jsonl"), "w") as f:
+                f.write("\n".join(lines) + "\n")
+            with open(os.path.join(rdir, base + ".meta.json"), "w") as f:
+                json.dump({"exit_code": rc, "timed_out": rc == 124, "model": "opus",
+                           "learned_skill_variant": variant, "learned_skill_id": skill}, f)
+        rc = subprocess.run(
+            [sys.executable, os.path.join(HERE, "grade.py"), "--run-dir", rdir, "--scenarios", sdir],
+            capture_output=True, text=True)
+        check("learned e2e: grade.py exit 0", rc.returncode == 0, rc.stderr[-400:])
+        sb = json.load(open(os.path.join(rdir, "scoreboard.json")))
+        rows = {r["variant"]: r for r in sb.get("learned_skill", [])}
+        check("learned e2e: manual row counts tp",
+              rows.get("manual", {}).get("routing", {}).get("tp") == 1
+              and rows["manual"]["tokens_total"] == 15 and rows["manual"]["outcome_mean"] == 1.0,
+              str(rows.get("manual")))
+        check("learned e2e: none row routing unknown",
+              rows.get("none", {}).get("routing", {}).get("unknown") == 1)
+        check("learned e2e: timed-out variant counted invalid",
+              rows.get("generated", {}).get("invalid") == 1 and rows["generated"]["n"] == 0)
+        check("learned e2e: report section present",
+              "Learned-skill qualification" in open(os.path.join(rdir, "report.md")).read())
 
 
 def test_carry_claude_profile():
@@ -618,6 +794,10 @@ def main() -> int:
     test_transcript_base_repetitions()
     test_repeated_query_hints_and_usage()
     test_skill_routing()
+    test_cost_and_corrections()
+    test_learned_skill_routing()
+    test_learned_skill_lint()
+    test_learned_skill_end_to_end()
     check("lint: generated scenario id cannot escape artifacts",
           bool(grade.lint_scenarios({"../escape": {"prompt": "Explain this function."}})))
     test_lint()

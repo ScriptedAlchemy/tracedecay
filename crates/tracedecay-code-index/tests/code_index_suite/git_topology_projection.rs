@@ -172,23 +172,6 @@ fn truncated_history_keeps_missing_parent_as_truthful_boundary_node() {
 }
 
 #[test]
-fn verified_store_rejects_a_rewritten_ref_watermark_as_stale() {
-    let original = projection('d');
-    let store = store(&original);
-    let rewritten = projection('b');
-
-    assert_eq!(
-        store.verify_ref_watermark(&rewritten.ref_watermark),
-        Err(
-            tracedecay_code_index::git_projection::GitTopologyProjectionError::Stale {
-                projected: original.ref_watermark,
-                current: rewritten.ref_watermark,
-            }
-        )
-    );
-}
-
-#[test]
 fn verified_store_rejects_a_stale_generation_binding() {
     let original = projection('d');
     let rewritten = projection('b');

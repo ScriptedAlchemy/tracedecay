@@ -16,6 +16,8 @@ evals/agent_adoption/
   run.sh               # runner: build+index fixtures, seed facts, drive agents, grade
   grade.py             # deterministic grader + normalizer + neutrality lint + channels + hint-drift guard
   selftest.py          # offline grader self-tests (no agents, no tokens)
+  learned_skills/<workflow>/  # generation sessions, manual skill, generated skill (see below)
+  generate_learned_skill.sh   # runs the production skill writer on a workflow's sessions
   README.md
 ```
 
@@ -83,6 +85,8 @@ paths, so do **not** commit run artifacts.
 | `REPEATED_QUERY_HINTS` | `off` | `on` turns on the profile setting `user.repeated_query_hints.v1` for the eval's isolated profile before any agent launches, and suffixes transcripts with `__qhints`; see "Repeated-query hints on vs off" |
 | `TRACEDECAY_BIN` | candidate branch (live) | explicit tracedecay binary override |
 | `EVAL_OUT` | unset | dir to copy scoreboard + report into |
+| `LEARNED_SKILL_WORKFLOW` | unset | run only that workflow's held-out scenarios, once per variant, on `full` |
+| `LEARNED_SKILL_VARIANTS` | `none generated manual` | learned-skill variants to compare |
 
 ### Cost expectations
 
@@ -364,7 +368,7 @@ cp <off-run-dir>/*__*.stdout.jsonl <off-run-dir>/*__*.meta.json \
 python3 evals/agent_adoption/grade.py --run-dir "$merged"
 ```
 
-Each scoreboard result carries `repeated_query_hints`, `usage` (Claude
+Each scoreboard result carries `repeated_query_hints`, `cost` (Claude
 `total_cost_usd`, `num_turns`, and input/output/cache tokens; Codex tokens
 only; unreported fields stay `null`), and `repeated_query_hint_next_steps`:
 one entry per hint block, naming the next tool call or `answer`.
@@ -465,3 +469,72 @@ before scheduling the existing runner with that directory and a pinned candidate
 binary. Use bounded host/model/condition selections. Validation of proposed
 cases is not a live routing result; retain the resulting transcripts and task
 outcomes before claiming effectiveness.
+
+## Learned-skill qualification
+
+This mode asks whether a skill learned from repeated corrections helps on new
+prompts. Each workflow pack under `learned_skills/<workflow>/` holds:
+
+* `sessions/*.jsonl`, synthetic Claude Code sessions in which the user corrects
+  the agent the same way several times. They are the skill writer's evidence.
+* `manual/<slug>/SKILL.md`, a hand-written skill for the same workflow.
+* `generated/`, the skill writer's output: `skill.json`, `<slug>/SKILL.md`, and
+  `PROVENANCE.json` (run id, writer prompt version, backend, model, date,
+  validation decisions, artifact kinds). It exists only after a real generation
+  run. Never write it by hand.
+
+Held-out scenarios carry `"status": "learned"` and
+`"learned_skill": {"workflow": ..., "expected": true|false}`. The default run
+skips them. The lint fails when a held-out prompt overlaps a generation session
+prompt, so the evaluation never scores a skill on its own evidence.
+
+Generate the skill once, then compare the variants:
+
+```sh
+# Dry run: configures automation (left disabled), imports the sessions, prints the plan.
+TRACEDECAY_BIN=<binary> evals/agent_adoption/generate_learned_skill.sh pricing_change_review
+# Live: one codex writer turn, plus at most one repair turn.
+TRACEDECAY_AGENT_EVALS=1 TRACEDECAY_BIN=<binary> \
+  evals/agent_adoption/generate_learned_skill.sh pricing_change_review
+
+TRACEDECAY_AGENT_EVALS=1 TRACEDECAY_BIN=<binary> LEARNED_SKILL_WORKFLOW=pricing_change_review \
+  CLAUDE_MODELS=opus REPS=5 PARALLEL=4 evals/agent_adoption/run.sh
+```
+
+Generation reuses `run.sh`'s isolated daemon. It binds the codex executable
+through `configuration_set`, enables only the skill writer, and copies codex
+`auth.json` read-only into the throwaway profile. Automation is enabled only
+after the writer's evidence query finds the imported sessions. The query needs
+all of its terms in one message, which is why each session ends with the user
+naming the repeated correction pattern.
+
+The variant run makes `scenarios x variants x CLAUDE_MODELS x REPS` Claude
+runs. `none` installs nothing. `generated` and `manual` install their
+`SKILL.md` into a per-variant `$HOME/.claude/skills/<slug>/`, the directory
+production materialization writes to. A variant without a `SKILL.md` is skipped
+with a notice. Transcripts end in `__v-<variant>`.
+
+The report's learned-skill table gives, per variant and model:
+
+* `outcome`, the ground-truth fragment check. It does not depend on the skill or
+  on the agent's claims.
+* Routing as tp/fn/fp/tn. A hit is a Skill call naming the variant's slug. A
+  `none` variant, or a host without normalized Skill events (Codex), counts as
+  `unknown` and stays out of those four counts. Invocation is a proxy for
+  adoption, not proof the skill helped.
+* Tokens, USD, and duration as the host reported them. Means exclude a value
+  the host did not report, and the `tokens unknown` column counts those runs.
+  `scoreboard.json` also keeps per-run turns and cache token splits.
+* Tool calls, corrections (tool errors plus repeated identical calls inside one
+  headless turn, since no human turns exist), and review cost (final-answer
+  words).
+
+The table ranks nothing and prints no verdict. Read it with `n` and the invalid
+count beside every rate.
+
+Both live steps need current host logins. The runner copies the Claude
+credential read-only, so a copied login whose access token has already expired
+fails every run with `authentication_failed`; those runs land in the invalid
+count, not in the outcome columns. Refresh the login with an interactive
+`claude` session first. Generation stops with the backend's error when the
+codex account is over its usage limit.
