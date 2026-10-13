@@ -777,6 +777,13 @@ pub enum RemoteAction {
         #[command(flatten)]
         authority: RemoteAuthorityArgs,
     },
+    /// Send this joined node's pending offline-capture frames, in sequence
+    /// order, to the owning authority. Takes the same arguments as `join`;
+    /// each frame is released only after the authority's receipt.
+    Drain {
+        #[command(flatten)]
+        authority: RemoteAuthorityArgs,
+    },
     /// Capture one observation into a node's offline spool while the
     /// authority is unreachable
     Capture {
@@ -817,6 +824,9 @@ impl From<RemoteAction> for crate::remote_command::RemoteCommand {
                 enrollment_credential_file,
             },
             RemoteAction::Join { authority } => Self::Join {
+                args: authority.into(),
+            },
+            RemoteAction::Drain { authority } => Self::Drain {
                 args: authority.into(),
             },
             RemoteAction::Capture { authority } => Self::Capture {

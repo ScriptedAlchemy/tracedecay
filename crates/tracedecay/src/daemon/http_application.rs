@@ -320,6 +320,10 @@ impl DaemonHttpApplicationRegistry {
                 post(super::remote_join::join_remote_node),
             )
             .route(
+                "/remote-nodes/drain",
+                post(super::remote_drain::drain_remote_node),
+            )
+            .route(
                 "/remote-nodes/writer-authority",
                 post(publish_remote_writer_authority),
             )
