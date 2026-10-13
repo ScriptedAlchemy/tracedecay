@@ -89,6 +89,19 @@ pub fn run(profile: &ProfileRoot, action: RemoteAction) -> Result<()> {
                 args.json,
             )
         }
+        RemoteAction::ReplayPending { authority: args } => {
+            let request = read_protocol_request(&args.request_file)?;
+            let client = build_client(&args)?;
+            emit_protocol_response(
+                &{
+                    let _span = tracing::trace_span!("serve.remote.replay_pending").entered();
+                    client
+                        .replay_pending(&request)
+                        .map_err(map_remote_client_error)?
+                },
+                args.json,
+            )
+        }
         RemoteAction::Failover { authority: args } => {
             let request = read_protocol_request(&args.request_file)?;
             let client = build_client(&args)?;
