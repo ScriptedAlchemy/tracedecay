@@ -27,9 +27,9 @@ use tracedecay_contracts::remote::{
     protocol::RemoteProtocolRequestV1,
     query::RemoteExactObservationQueryErrorV1,
     replay::{
-        RemoteReplayApplicationErrorV1, RemoteReplayFindingV1, RemoteReplayFrameLookupPortV1,
-        RemoteReplayPolicyDecisionV1, RemoteReplayPolicyEvidencePortV1,
-        RemoteReplayPolicyEvidenceV1, RemoteReplaySpoolPortV1,
+        RemoteReplayApplicationErrorV1, RemoteReplayCommitReceiptV1, RemoteReplayFindingV1,
+        RemoteReplayFrameLookupPortV1, RemoteReplayPolicyDecisionV1,
+        RemoteReplayPolicyEvidencePortV1, RemoteReplayPolicyEvidenceV1, RemoteReplaySpoolPortV1,
     },
     transfer::{
         RemoteFrameTransferDispositionV1, RemoteFrameTransferErrorV1, RemoteFrameTransferPortV1,
@@ -40,9 +40,9 @@ use tracedecay_contracts::{
     PolicyDecisionRef, RequestId, ResolvedScope,
 };
 use tracedecay_domain::{
-    ActorId, BrainId, BrainNodeId, ComponentVersion, DurableObservationV1,
-    EnrollmentCredentialRecordV1, EnrollmentGrantV1, EntityId, LocatorDigest, ObservationId,
-    ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
+    ActorId, BrainId, BrainNodeId, ComponentVersion, CredentialRevocationReceiptV1,
+    DurableObservationV1, EnrollmentCredentialRecordV1, EnrollmentGrantV1, EntityId, LocatorDigest,
+    ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
     ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
     PayloadReferenceV1, ProviderId, RemoteCapabilityV1, RemoteCredentialFingerprintV1,
     RemoteRepositoryScopeV1, RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1,
@@ -708,6 +708,70 @@ fn durable_revocation_wins_publication_reauthorization() {
         service.reauthorize_publication(&session, UtcMicros(21)),
         Err(RemoteCredentialAdmissionErrorV1::Revoked)
     );
+}
+
+#[test]
+fn node_revocation_keeps_replay_receipts_and_repeats_its_receipts() {
+    let fixture = fixture();
+    let storage = storage(&fixture);
+    let (enrollment, receipt) = enrollment_record(&[9_u8; 32]);
+    insert_enrollment(&fixture, &enrollment, &receipt);
+    let captured = storage.capture_pending(&admitted()).unwrap();
+    let attempt = storage
+        .begin_replay_attempt(&captured.event_id, UtcMicros(20))
+        .unwrap();
+    storage
+        .transition(RemoteReplayTransitionV1 {
+            event_id: captured.event_id.clone(),
+            from: RemoteReplayStateV1::Pending,
+            to: RemoteReplayStateV1::Admitted,
+            replay_attempt: attempt,
+            observed_at: UtcMicros(21),
+            finding: None,
+            receipt: Some(RemoteReplayCommitReceiptV1 {
+                event_id: captured.event_id.clone(),
+                writer_fence: writer().authority.fence,
+                commit_sequence: 1,
+                committed_at: UtcMicros(21),
+                budget: OperationBudgetUsage {
+                    units_consumed: 1,
+                    bytes_consumed: 1,
+                    elapsed_micros: 0,
+                },
+            }),
+        })
+        .unwrap();
+    let replayed = storage.state(&captured.event_id).unwrap();
+    assert!(replayed.receipt.is_some());
+
+    let revoked = storage
+        .revoke_node_enrollments(&enrollment.node_id, UtcMicros(30))
+        .unwrap();
+    assert_eq!(
+        revoked,
+        vec![CredentialRevocationReceiptV1 {
+            enrollment_id: enrollment.enrollment_id.clone(),
+            node_id: enrollment.node_id.clone(),
+            prior_revision: 1,
+            current_revision: 2,
+            revoked_at: UtcMicros(30),
+        }]
+    );
+    assert_eq!(
+        storage
+            .enrollment_by_id(&enrollment.enrollment_id)
+            .unwrap()
+            .revoked_at,
+        Some(UtcMicros(30))
+    );
+    assert_eq!(
+        storage
+            .revoke_node_enrollments(&enrollment.node_id, UtcMicros(40))
+            .unwrap(),
+        revoked,
+        "a repeat keeps the first revocation"
+    );
+    assert_eq!(storage.state(&captured.event_id).unwrap(), replayed);
 }
 
 #[test]

@@ -11,17 +11,25 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay_contracts::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
+use tracedecay_contracts::remote::capture::{RemoteCaptureSequenceV1, RemoteWriterAuthorityV1};
+use tracedecay_contracts::remote::capture_protocol::RemoteCaptureRequestV1;
 use tracedecay_contracts::remote::protocol::{EnrollmentRequestV1, RemoteProtocolRequestV1};
 use tracedecay_contracts::remote::recovery::PromotionConfirmationV1;
+use tracedecay_contracts::remote::replay::RemoteReplayRequestV1;
+use tracedecay_contracts::remote::transfer::RemoteFrameTransferRequestV1;
 use tracedecay_contracts::{
     AuthorityReceipt, CapabilityGrantId, Deadline, DisclosureClass, PolicyDecisionRef, RequestId,
     ResolvedScope,
 };
 use tracedecay_domain::{
-    ActorId, BrainId, BrainNodeId, ComponentVersion, EnrollmentGrantV1, EntityId, ManifestDigest,
-    ProjectId, RefId, RemoteCapabilityV1, RemoteCredentialFingerprintV1, RemoteRepositoryScopeV1,
-    RemoteWriterFenceV1, RepositoryId, RepositoryStateSnapshotId, UtcMicros, WorktreeId,
-    canonical_sha256,
+    ActorId, BrainId, BrainNodeId, ComponentVersion, DurableObservationV1, EnrollmentGrantV1,
+    EntityId, ManifestDigest, ObservationId, ObservationIdentityMaterialV1,
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceGenerationV1,
+    ObservationSourceIdentityV1, ObservationSourceRangeV1, PayloadReferenceV1, ProjectId,
+    ProviderId, RefId, RemoteCapabilityV1, RemoteCredentialFingerprintV1, RemoteRepositoryScopeV1,
+    RemoteWriterFenceV1, RepositoryId, RepositoryStateSnapshotId, RetentionClass,
+    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
+    SensitivityV1, SessionId, UtcMicros, WorktreeId, canonical_sha256,
 };
 
 use crate::common::{
@@ -69,6 +77,275 @@ struct RemoteCliFixture {
     remote_endpoint: std::net::SocketAddr,
     authority: Value,
     trust_root_path: PathBuf,
+}
+
+#[test]
+fn remote_revoke_refuses_the_revoked_nodes_capture_transfer_and_replay() {
+    let fixture = remote_cli_fixture();
+    let context = fixture_project_context(&fixture);
+    let project_id = context["project"]["project_id"]
+        .as_str()
+        .expect("project id");
+
+    let grant_credential = *b"0123456789abcdef0123456789abcdef";
+    let enrollment_credential = *b"fedcba9876543210fedcba9876543210";
+    let brain_id = BrainId::new(fixture.authority["brain_id"].as_str().expect("brain id")).unwrap();
+    let node_id = BrainNodeId::new("node.remote-cli-revoke").unwrap();
+    let mut grant = remote_grant(
+        brain_id.clone(),
+        node_id.clone(),
+        project_id,
+        &grant_credential,
+    );
+    grant.capabilities = [
+        RemoteCapabilityV1::CaptureOffline,
+        RemoteCapabilityV1::TransferFrame,
+        RemoteCapabilityV1::Replay,
+    ]
+    .into_iter()
+    .collect();
+    provision_remote_node(&fixture, &grant);
+    let enroll_request = write_json_fixture(
+        &fixture.home_path,
+        "enroll-request.json",
+        &enrollment_request(&grant),
+    );
+    let grant_path = write_bytes_fixture(&fixture.home_path, "grant.bin", &grant_credential);
+    let enroll_path = write_bytes_fixture(&fixture.home_path, "enroll.bin", &enrollment_credential);
+    let enrolled = run_remote_enroll(&fixture, &grant_path, &enroll_path, &enroll_request);
+    assert_eq!(enrolled.status.code(), Some(0), "{enrolled:?}");
+
+    let writer = revocation_writer(&brain_id, &grant.scope);
+    let sent_at = now_micros();
+    let capture = RemoteProtocolRequestV1::new(
+        RequestId::new("request.remote-cli-revoked-capture").unwrap(),
+        brain_id.clone(),
+        node_id.clone(),
+        1,
+        None,
+        sent_at,
+        RemoteCaptureRequestV1 {
+            writer: writer.clone(),
+            policy_revision: 1,
+            sequence: RemoteCaptureSequenceV1 {
+                sequence: 1,
+                previous_event_id: None,
+            },
+            observation: revocation_observation(project_id),
+        },
+    )
+    .unwrap();
+    let transfer = RemoteProtocolRequestV1::new(
+        RequestId::new("request.remote-cli-revoked-transfer").unwrap(),
+        brain_id.clone(),
+        node_id.clone(),
+        1,
+        None,
+        sent_at,
+        RemoteFrameTransferRequestV1 {
+            event_id: "remote.event.revoked-transfer".to_owned(),
+            enrollment_id: EntityId::new("enrollment.remote-cli-enroll").unwrap(),
+            enrollment_revision: 1,
+            node_id: node_id.clone(),
+            writer: writer.clone(),
+            policy_revision: 1,
+            sequence: RemoteCaptureSequenceV1 {
+                sequence: 1,
+                previous_event_id: None,
+            },
+            frame_digest: ManifestDigest::new(format!("sha256:{}", "e".repeat(64))).unwrap(),
+            key_revision: 1,
+            nonce: [7; 12],
+            ciphertext: vec![1, 2, 3],
+            observed_authority_epoch: 1,
+            expires_at_micros: sent_at.0.saturating_add(60_000_000),
+        },
+    )
+    .unwrap();
+    let replay = RemoteProtocolRequestV1::new(
+        RequestId::new("request.remote-cli-revoked-replay").unwrap(),
+        brain_id,
+        node_id.clone(),
+        1,
+        Some(writer.authority.fence.clone()),
+        sent_at,
+        RemoteReplayRequestV1 {
+            event_id: "remote.event.revoked-replay".to_owned(),
+        },
+    )
+    .unwrap();
+    let operations = [
+        (
+            "capture",
+            "request.remote-cli-revoked-capture",
+            write_json_fixture(&fixture.home_path, "capture.json", &capture),
+        ),
+        (
+            "transfer-frame",
+            "request.remote-cli-revoked-transfer",
+            write_json_fixture(&fixture.home_path, "transfer.json", &transfer),
+        ),
+        (
+            "replay",
+            "request.remote-cli-revoked-replay",
+            write_json_fixture(&fixture.home_path, "replay.json", &replay),
+        ),
+    ];
+    for (operation, _, request_path) in &operations {
+        let admitted = run_remote_operation(&fixture, operation, &enroll_path, request_path);
+        assert!(
+            !refused_as_enrollment_revoked(&admitted.stdout),
+            "the enrolled node's {operation} must not be refused as revoked before revocation"
+        );
+    }
+
+    let first = run_remote_revoke(&fixture, node_id.as_str());
+    assert_eq!(first.status.code(), Some(0), "{first:?}");
+    let receipts: Value = serde_json::from_slice(&first.stdout).expect("revocation JSON");
+    assert_eq!(
+        receipts["revocations"],
+        json!([{
+            "enrollment_id": "enrollment.remote-cli-enroll",
+            "node_id": "node.remote-cli-revoke",
+            "prior_revision": 1,
+            "current_revision": 2,
+            "revoked_at": receipts["revocations"][0]["revoked_at"],
+        }])
+    );
+    let repeat = run_remote_revoke(&fixture, node_id.as_str());
+    assert_eq!(repeat.status.code(), Some(0), "{repeat:?}");
+    assert_eq!(
+        repeat.stdout, first.stdout,
+        "revoking an already revoked node returns the original receipts"
+    );
+    let unknown = run_remote_revoke(&fixture, "node.remote-cli-unknown");
+    assert_ne!(unknown.status.code(), Some(0), "{unknown:?}");
+
+    for (operation, request_id, request_path) in &operations {
+        let refused = run_remote_operation(&fixture, operation, &enroll_path, request_path);
+        assert_eq!(refused.status.code(), Some(1), "{operation}: {refused:?}");
+        let document: Value = serde_json::from_slice(&refused.stdout).unwrap_or_else(|error| {
+            panic!(
+                "{operation} refusal must be one protocol document ({error}): {}",
+                String::from_utf8_lossy(&refused.stderr)
+            )
+        });
+        assert_eq!(document["request_id"], json!(request_id), "{document}");
+        assert!(
+            refused_as_enrollment_revoked(&refused.stdout),
+            "{operation} must be refused with EnrollmentRevoked: {document}"
+        );
+    }
+
+    let stranger = write_bytes_fixture(
+        &fixture.home_path,
+        "stranger.bin",
+        b"00000000000000000000000000000000",
+    );
+    let concealed = run_remote_operation(&fixture, "replay", &stranger, &operations[2].2);
+    assert!(
+        !refused_as_enrollment_revoked(&concealed.stdout),
+        "a credential that matches no enrollment stays concealed"
+    );
+}
+
+fn refused_as_enrollment_revoked(stdout: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(stdout).is_ok_and(|document| {
+        document["authority"]["value"]["reason"] == json!("enrollment_revoked")
+            && document["result"]["Err"]["problem"]["legal_actions"] == json!(["reauthorize"])
+    })
+}
+
+fn run_remote_revoke(fixture: &RemoteCliFixture, node_id: &str) -> std::process::Output {
+    tracedecay_command_with_home(&fixture.home_path)
+        .current_dir(&fixture.project_path)
+        .args(["remote", "revoke", "--node-id", node_id, "--json"])
+        .output()
+        .expect("tracedecay remote revoke")
+}
+
+fn run_remote_operation(
+    fixture: &RemoteCliFixture,
+    operation: &str,
+    credential_path: &Path,
+    request_path: &Path,
+) -> std::process::Output {
+    tracedecay_command_with_home(&fixture.home_path)
+        .current_dir(&fixture.project_path)
+        .args([
+            "remote",
+            operation,
+            "--endpoint",
+            &format!("https://{}/remote/", fixture.remote_endpoint),
+            "--trust-root-file",
+            &fixture.trust_root_path.to_string_lossy(),
+            "--credential-file",
+            &credential_path.to_string_lossy(),
+            "--request-file",
+            &request_path.to_string_lossy(),
+            "--json",
+        ])
+        .output()
+        .expect("tracedecay remote operation")
+}
+
+fn revocation_writer(
+    brain_id: &BrainId,
+    scope: &RemoteRepositoryScopeV1,
+) -> RemoteWriterAuthorityV1 {
+    serde_json::from_value(json!({
+        "project_id": scope.project_id,
+        "scope": scope,
+        "authority": {
+            "fence": {
+                "brain_id": brain_id,
+                "shard_id": "shard.remote-cli-revoke",
+                "generation_id": "generation.remote-cli-revoke",
+                "placement_revision": 1,
+                "authority_epoch": 1,
+                "authority_node_id": "node.remote-cli-revoke-writer"
+            },
+            "credential_revision": 1,
+            "observed_at": now_micros()
+        }
+    }))
+    .unwrap()
+}
+
+fn revocation_observation(project_id: &str) -> DurableObservationV1 {
+    let payload = json!({ "kind": "assistant_message", "body": "revoked node capture" });
+    let receipt = SanitizationReceiptV1::new(
+        SanitizationReceiptRefV1::new(
+            SanitizationReceiptId::new("receipt.remote-cli-revoke").unwrap(),
+            ComponentVersion::new("sanitizer.remote-cli-revoke.v1").unwrap(),
+        )
+        .unwrap(),
+        SanitizerDispositionV1::Accepted,
+        SensitivityV1::NonSensitive,
+        Some(PayloadReferenceV1::for_payload(&payload).unwrap()),
+    )
+    .unwrap();
+    DurableObservationV1::new(
+        ObservationIdentityMaterialV1::for_native_record(
+            ObservationSourceIdentityV1::for_provider(
+                ProviderId::new("provider.remote-cli-revoke").unwrap(),
+                SessionId::new("session.remote-cli-revoke").unwrap(),
+            )
+            .unwrap(),
+            ObservationScopeV1::Project {
+                project_id: ProjectId::new(project_id).unwrap(),
+            },
+            ObservationSourceGenerationV1::new(1).unwrap(),
+            ObservationSourceRangeV1::new(0, 1).unwrap(),
+            ObservationOrderingDomainV1::SqliteRowId,
+            ObservationId::new("observation.remote-cli-revoke").unwrap(),
+        )
+        .unwrap(),
+        receipt,
+        RetentionClass::new("retention.remote-cli-revoke").unwrap(),
+        payload,
+    )
+    .unwrap()
 }
 
 fn remote_cli_fixture() -> RemoteCliFixture {
