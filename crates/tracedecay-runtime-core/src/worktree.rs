@@ -559,7 +559,7 @@ mod tests {
     /// still get the repository answer, not "not a repository": a linked
     /// worktree otherwise mints a path-derived identity of its own. Only the
     /// non-waiting probe reports the walk as blocked.
-    #[asupersync::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_walk_in_flight_on_another_thread_does_not_hide_the_repository() {
         let temporary = tempdir().unwrap();
         let primary = temporary.path().join("primary");

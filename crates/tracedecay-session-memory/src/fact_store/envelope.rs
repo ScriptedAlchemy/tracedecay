@@ -385,18 +385,17 @@ mod write_control_tests {
     }
 
     #[test]
-    fn settlement_without_runtime_refuses_before_running_work() {
-        use std::task::{Context, Poll, Waker};
-        let mut future = std::pin::pin!(settle_fact_write(
-            PROJECT_MEMORY_WRITE_OPERATION,
-            |_cx| async { panic!("work must not run without a runtime") },
-        ));
-        let mut task = Context::from_waker(Waker::noop());
-        let outcome: Poll<FactStoreResult<()>> = future.as_mut().poll(&mut task);
-        assert!(matches!(
-            outcome,
-            Poll::Ready(Err(FactStoreError::Storage { .. }))
-        ));
+    fn settlement_from_a_foreign_executor_runs_on_a_native_worker() {
+        let foreign = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("foreign executor");
+        let on_native_worker = foreign
+            .block_on(settle_fact_write(
+                PROJECT_MEMORY_WRITE_OPERATION,
+                |_cx| async { Ok(Cx::current().is_some()) },
+            ))
+            .expect("settlement through the process runtime");
+        assert!(on_native_worker);
     }
 
     #[asupersync::test]

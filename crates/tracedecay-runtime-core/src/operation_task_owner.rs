@@ -280,6 +280,9 @@ mod tests {
             let (release, blocked) = std::sync::mpsc::channel();
             let (started, mut entered) = oneshot::channel();
             let (accepted, mut admission) = oneshot::channel();
+            // Cancellation is cooperative, so the request parks on a receive
+            // that observes it rather than on a future that never wakes.
+            let (_parked_sender, mut parked) = oneshot::channel::<()>();
             let observed = Arc::clone(&settled);
             let mut requester = request_region
                 .cx()
@@ -299,7 +302,7 @@ mod tests {
                             .send(&request_cx, (owner, request_cx.clone()))
                             .is_ok()
                     );
-                    std::future::pending::<()>().await;
+                    parked.recv(&request_cx).await
                 })
                 .unwrap();
             let (owner, cancelled_request_cx) = admission.recv(&cx).await.unwrap();
@@ -309,7 +312,7 @@ mod tests {
                 .unwrap();
             assert!(matches!(
                 requester.join(&cx).await,
-                Err(JoinError::Cancelled(_))
+                Ok(Err(oneshot::RecvError::Cancelled)) | Err(JoinError::Cancelled(_))
             ));
             request_region.close().await.unwrap();
             assert!(matches!(

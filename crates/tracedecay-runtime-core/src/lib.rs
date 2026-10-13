@@ -126,7 +126,6 @@ pub mod timeutil;
 pub mod tracedecay;
 pub mod weak_registry;
 pub use asupersync::Cx;
-pub use asupersync::runtime::Runtime;
 pub use operation_task_owner::RuntimeOperationTaskOwnerV1;
 #[cfg(windows)]
 pub use tracedecay_private_fs::windows as windows_security;

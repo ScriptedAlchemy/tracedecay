@@ -1671,7 +1671,7 @@ mod tests {
     }
 
     #[test]
-    fn dropping_an_undriven_runtime_records_a_typed_retirement_terminal() {
+    fn dropping_an_undriven_runtime_settles_its_retained_retirement() {
         let coordinator = MemoryGraphReconciliationCoordinatorV1::default();
         let (owner, _) = task_owner(&coordinator);
         let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
@@ -1689,9 +1689,11 @@ mod tests {
             .build()
             .expect("build terminal observer runtime");
 
+        // A native runtime drains its tasks when it drops, so the retained
+        // retirement still cancels and joins the reconcilers it fenced.
         assert_eq!(
             observer.block_on(receipt.wait()),
-            MemoryGraphReconciliationRetirementTerminalV1::RetainedTaskAborted
+            MemoryGraphReconciliationRetirementTerminalV1::CancelledAndJoined
         );
     }
 }

@@ -475,7 +475,7 @@ mod branch_memo_tests {
     /// that walk. Reading it as "no repository" made branch tracking refuse a
     /// checkout on `main` as detached; walking again repaid the discovery the
     /// topology memo exists to avoid.
-    #[asupersync::test(flavor = "multi_thread")]
+    #[tokio::test(flavor = "multi_thread")]
     async fn branch_reads_share_the_discovery_walk_another_thread_owns() {
         let temp = tempfile::tempdir().expect("temporary directory");
         let root = temp.path().join("repo");

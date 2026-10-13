@@ -3018,6 +3018,14 @@ fn off_thread_staging_release_retains_its_permit_and_leases_until_terminal_drain
         .enable_platform_reactor(true)
         .build()
         .expect("isolated blocking-pool runtime");
+    // The registry's remote replay authority binds the daemon's Tokio
+    // runtime, so the fixture provides one beside the native executor.
+    let daemon_runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("daemon Tokio runtime");
+    let _daemon_context = daemon_runtime.enter();
     executor.block_on(async {
         let cx = asupersync::Cx::current().expect("native fixture execution context");
         let temporary = tempfile::tempdir().expect("temporary fixture parent");

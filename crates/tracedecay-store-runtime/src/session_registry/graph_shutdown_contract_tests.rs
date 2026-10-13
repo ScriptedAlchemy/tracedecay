@@ -215,7 +215,8 @@ async fn terminal_shutdown_truncates_every_released_session_store_wal() {
     // tasks, then drain the owners and close.
     registry
         .shutdown_terminal_tasks(
-            &tracedecay_runtime_core::Cx::current().expect("native fixture execution context"),
+            &tracedecay_runtime_core::native_runtime::cx()
+                .expect("native fixture execution context"),
         )
         .await
         .expect("terminal tasks join");

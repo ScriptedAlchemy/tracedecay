@@ -69,8 +69,8 @@ impl TestConnection {
             LocatorDigest::new(format!("sha256:{digest}"))
                 .expect("valid engine test locator digest"),
         );
-        let runtime = asupersync::runtime::Runtime::current_handle()
-            .expect("engine fixture requires an Asupersync runtime");
+        let runtime =
+            crate::native_runtime::handle().expect("engine fixture requires an Asupersync runtime");
         let writer = PersistentWriter::start(
             &runtime,
             ExistingWriterLocator::new(binding.clone(), locator.clone(), path.clone())

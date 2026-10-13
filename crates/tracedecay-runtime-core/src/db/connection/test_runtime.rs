@@ -671,11 +671,8 @@ impl Database {
         locators.insert(profile_key, profile_locator);
         locators.insert(target_key, target_locator);
         let resolver = Arc::new(ExactTestRuntimeResolver { locators });
-        let runtime = asupersync::runtime::Runtime::current_handle().ok_or_else(|| {
-            TraceDecayError::Config {
-                message: "test database runtime publication requires an Asupersync runtime"
-                    .to_owned(),
-            }
+        let runtime = crate::native_runtime::handle().ok_or_else(|| TraceDecayError::Config {
+            message: "test database runtime publication requires an Asupersync runtime".to_owned(),
         })?;
         let registry =
             StoreRuntimeRegistry::new(runtime, resolver, Arc::new(LifecycleShardRuntimePublisher))

@@ -280,12 +280,18 @@ mod single_flight_tests {
     }
 
     #[test]
-    fn open_without_native_context_is_a_configuration_failure() {
+    fn open_from_a_foreign_executor_joins_through_the_process_runtime() {
         let registry = SingleFlightWeakRegistry::<&str, usize>::new();
-        let mut opened = pin!(registry.get_or_open("a", || async { Ok::<_, TraceDecayError>(1) }));
-        assert!(matches!(
-            poll_once(opened.as_mut()),
-            Poll::Ready(Err(TraceDecayError::Config { .. }))
-        ));
+        let foreign = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("foreign executor");
+        let first = foreign
+            .block_on(registry.get_or_open("a", || async { Ok::<_, TraceDecayError>(1) }))
+            .expect("open without an ambient native context");
+        let joined = foreign
+            .block_on(registry.get_or_open("a", || async { Ok::<_, TraceDecayError>(2) }))
+            .expect("join the live value");
+        assert!(Arc::ptr_eq(&first, &joined));
+        assert_eq!(*joined, 1);
     }
 }
