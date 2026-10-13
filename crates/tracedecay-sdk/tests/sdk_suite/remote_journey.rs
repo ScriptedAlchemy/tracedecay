@@ -2,7 +2,7 @@ use std::fs;
 use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -19,7 +19,7 @@ use tracedecay_domain::{
     RemoteWriterFenceV1, RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1,
     SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId,
 };
-use tracedecay_sdk::client::{Client, ConnectionMode};
+use tracedecay_sdk::client::{Client, ClientError, ConnectionMode};
 use tracedecay_sdk::operations::{TypedOperation, WorkflowListDefinitions};
 use tracedecay_sdk::remote_client::EnrolledRemoteClient;
 
@@ -101,20 +101,34 @@ impl RemoteDaemonFixture {
             authority["http_application_endpoint"].as_str().unwrap()
         );
         let local_token = authority["auth_token"].as_str().unwrap().to_owned();
-        Client::builder(ConnectionMode::local(
+        let client = Client::builder(ConnectionMode::local(
             &local_base,
             &project_id,
             &local_token,
         ))
         .build()
-        .unwrap()
-        .execute::<WorkflowListDefinitions>(
-            &serde_json::from_value::<<WorkflowListDefinitions as TypedOperation>::Request>(json!(
-                {}
-            ))
-            .unwrap(),
+        .unwrap();
+        let list = serde_json::from_value::<<WorkflowListDefinitions as TypedOperation>::Request>(
+            json!({}),
         )
-        .expect("the daemon serves the project before any remote node exists");
+        .unwrap();
+        // The daemon mounts the new project in the background and answers the
+        // typed retryable `runtime_mounting` problem until it serves.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            match client.execute::<WorkflowListDefinitions>(&list) {
+                Err(ClientError::Problem(problem))
+                    if problem.code == tracedecay_contracts::RUNTIME_MOUNTING_REASON_CODE
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                outcome => {
+                    outcome.expect("the daemon serves the project before any remote node exists");
+                    break;
+                }
+            }
+        }
         Self {
             daemon,
             brain_id: BrainId::new(authority["brain_id"].as_str().unwrap()).unwrap(),
