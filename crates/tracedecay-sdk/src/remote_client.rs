@@ -37,6 +37,8 @@ use tracedecay_domain::{
     CurrentRemoteAuthorityStateV1, EnrollmentCredentialRecordV1, validate_remote_secret_length,
 };
 
+use crate::client::{ClientError, ProblemError, problem_error};
+
 pub struct EnrolledRemoteClient {
     http: HttpClient,
     endpoint: reqwest::Url,
@@ -58,6 +60,10 @@ pub enum RemoteClientError {
     Configuration(String),
     Transport(String),
     Protocol(String),
+    /// A canonical application problem the daemon's transport boundary
+    /// returned before any protocol response existed, such as the concealed
+    /// `not_found_or_not_authorized` refusal of an unauthenticated request.
+    Problem(Box<ProblemError>),
 }
 
 impl fmt::Display for RemoteClientError {
@@ -77,6 +83,9 @@ impl fmt::Display for RemoteClientError {
                     formatter,
                     "Remote Brain protocol response was invalid: {message}"
                 )
+            }
+            Self::Problem(problem) => {
+                write!(formatter, "Remote Brain request was refused: {problem}")
             }
         }
     }
@@ -410,6 +419,11 @@ fn decode_typed_response<T: Clone + DeserializeOwned>(
     let value = response
         .json::<serde_json::Value>()
         .map_err(protocol_error)?;
+    if !status.is_success()
+        && value.get("kind").and_then(serde_json::Value::as_str) == Some("problem")
+    {
+        return Err(transport_boundary_problem(status, &value));
+    }
     let payload = canonical_response_payload(value)?;
     let serde_json::Value::Object(mut fields) = payload else {
         return Err(RemoteClientError::Protocol(
@@ -447,6 +461,23 @@ fn decode_typed_response<T: Clone + DeserializeOwned>(
         }
     }
     RemoteProtocolResponseV1::new(request_id, authority, result).map_err(protocol_error)
+}
+
+/// The daemon's transport boundary answers before any protocol response
+/// exists with the plain HTTP problem envelope; it is accepted only as a
+/// canonical application problem whose kind matches the HTTP status.
+fn transport_boundary_problem(
+    status: reqwest::StatusCode,
+    value: &serde_json::Value,
+) -> RemoteClientError {
+    match problem_error(
+        value,
+        status.as_u16(),
+        "remote problem response carried no value",
+    ) {
+        ClientError::Problem(problem) => RemoteClientError::Problem(problem),
+        error => RemoteClientError::Protocol(error.to_string()),
+    }
 }
 
 fn canonical_success_valid<T: Clone>(

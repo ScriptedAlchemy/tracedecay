@@ -1,0 +1,21 @@
+{
+  "id": "learned_pricing_line_item_tax",
+  "category": "learned_skill",
+  "hosts": [
+    "claude"
+  ],
+  "fixture": "main",
+  "status": "learned",
+  "prompt": "I'm about to change how line item totals are computed to add per-item tax. What do I need to check before I start?",
+  "ground_truth": [
+    "compute_grand_total",
+    "pricing_test",
+    "cents"
+  ],
+  "max_tool_calls": 10,
+  "learned_skill": {
+    "workflow": "pricing_change_review",
+    "expected": true
+  },
+  "notes": "Held-out positive for the pricing-change-review workflow; the duplicate total, the compute_total-only test, and the cents unit are the repeated corrections in the generation sessions."
+}

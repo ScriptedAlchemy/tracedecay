@@ -49,7 +49,10 @@ mod writer;
 
 pub use capability_admission::{require_capability, require_component_capabilities};
 pub use component_set::HostComponentSetTransactionV1;
-pub use control::{latest_host_component_receipt_at, latest_host_component_set_receipt_at};
+pub use control::{
+    host_component_owned_paths_at, latest_host_component_receipt_at,
+    latest_host_component_set_receipt_at,
+};
 pub use doctor::{
     HostBundleArtifactDoctorResultV1, HostBundleComponentDoctorResultV1,
     HostBundleComponentDoctorStateV1, HostBundleDoctorReportV1, HostBundleRegistrationInspectorV1,

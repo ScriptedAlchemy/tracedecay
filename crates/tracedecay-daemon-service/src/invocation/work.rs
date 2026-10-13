@@ -221,13 +221,18 @@ fn observe_placement_target(
             None => return Ok(unreadable),
         },
     };
-    let Ok(repository) =
-        tracedecay_runtime_core::git_repository::GitRepositoryAuthority::discover(&root)
-    else {
-        return Ok(unreadable);
-    };
-    let Ok(status) = repository.status() else {
-        return Ok(unreadable);
+    let status = tracedecay_runtime_core::git_repository::GitRepositoryAuthority::discover(&root)
+        .and_then(|repository| repository.status().map(|status| (repository, status)));
+    let (repository, status) = match status {
+        Ok(read) => read,
+        Err(error) => {
+            tracing::warn!(
+                root = %root.display(),
+                %error,
+                "work placement target is unreadable"
+            );
+            return Ok(unreadable);
+        }
     };
     let unique_commits = placement_unique_commits(&repository, &root);
     let mut dirty_tracked_paths = 0u32;

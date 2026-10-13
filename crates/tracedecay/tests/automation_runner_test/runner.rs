@@ -18,7 +18,7 @@ async fn scheduler_memory_curator_respects_failure_cooldown() {
     .unwrap();
     let backend = JsonBackend::new(json!({"ops": []}));
 
-    let run = run_memory_curator_with_backend(
+    let run = run_memory_curator(
         &cg,
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
@@ -59,7 +59,7 @@ async fn scheduler_memory_curator_respects_interval_gate() {
     .unwrap();
     let backend = JsonBackend::new(json!({"ops": []}));
 
-    let run = run_memory_curator_with_backend(
+    let run = run_memory_curator(
         &cg,
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
@@ -106,7 +106,7 @@ async fn scheduler_session_reflector_respects_interval_gate() {
     .unwrap();
     let backend = SessionJsonBackend::new(json!({"facts": []}));
 
-    let run = run_session_reflector_with_backend(
+    let run = run_session_reflector(
         &cg,
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
@@ -141,7 +141,7 @@ async fn scheduler_skill_writer_respects_idle_window_after_recent_session_activi
         "no_action",
     ));
 
-    let run = run_skill_writer_with_backend(
+    let run = run_skill_writer(
         &cg,
         &config,
         &backend,
@@ -187,29 +187,37 @@ async fn scheduler_skill_writer_skips_without_new_session_activity_since_last_su
         "insufficient_repeated_evidence",
     ));
 
-    let run = run_skill_writer_with_backend(
-        &cg,
+    // The daemon decides due-ness before admission, so a not-due skill
+    // writer never reaches its runner.
+    let summary =
+        tracedecay_automation_runtime::automation::run_ledger::load_run_ledger_task_summary(
+            &cg.store_layout().dashboard_root,
+            AgentTaskKind::SkillWriter,
+            "skill_writer",
+        )
+        .await
+        .unwrap();
+    let decision = tracedecay_automation_runtime::automation::scheduler::schedule_decision(
         &config,
-        &backend,
-        SkillWriterAutomationOptions {
-            trigger: AutomationTrigger::Scheduler,
-            profile_root: Some(cg.profile_root().unwrap()),
-            ..SkillWriterAutomationOptions::default()
-        },
-    )
-    .await
-    .unwrap();
+        None,
+        AgentTaskKind::SkillWriter,
+        summary.records(),
+        tracedecay_automation_runtime::automation::scheduler::load_session_activity(
+            automation_project_context(&cg).project_sessions.as_ref(),
+        )
+        .await,
+        current_timestamp(),
+    );
 
     assert_eq!(backend.calls(), 0);
-    assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
     assert_eq!(
-        run.ledger_record.error.as_deref(),
+        decision.skip_reason().map(|reason| reason.as_str()),
         Some("no_new_session_activity")
     );
 
     // New activity after the run: the very next tick is due again.
     seed_session_activity(&cg, now - 30).await;
-    let run = run_skill_writer_with_backend(
+    let run = run_skill_writer(
         &cg,
         &config,
         &backend,
@@ -238,7 +246,7 @@ async fn memory_curator_runner_recovers_stale_scheduler_lock_file() {
     let mut config = scheduler_config(None, None);
     config.tasks.memory_curator.stale_lock_secs = Some(1);
 
-    let run = run_memory_curator_with_backend(
+    let run = run_memory_curator(
         &cg,
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
@@ -282,7 +290,7 @@ async fn scheduler_memory_curator_ledgers_active_lock_skip() {
     let backend = JsonBackend::new(json!({"ops": []}));
     let config = scheduler_config(None, None);
 
-    let run = run_memory_curator_with_backend(
+    let run = run_memory_curator(
         &cg,
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),

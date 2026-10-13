@@ -317,8 +317,7 @@ pub(super) fn validate_retained_declared_topology(
 
 fn topology_read_failure(error: GitTopologyProjectionError) -> GitTopologySyncFailure {
     match error {
-        GitTopologyProjectionError::Stale { .. }
-        | GitTopologyProjectionError::StaleBinding { .. } => GitTopologySyncFailure::Stale,
+        GitTopologyProjectionError::StaleBinding { .. } => GitTopologySyncFailure::Stale,
         GitTopologyProjectionError::RepositoryMismatch => GitTopologySyncFailure::Denied,
         _ => GitTopologySyncFailure::Unavailable,
     }
