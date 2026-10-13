@@ -189,6 +189,7 @@ impl ToolCategory {
             | "context_scout_resume"
             | "context_scout_status" => Self::Sessions,
             "work_accept_proposal"
+            | "work_advance_job"
             | "work_adjudicate_duplicate"
             | "work_adjudicate_leak"
             | "work_admit_execution"

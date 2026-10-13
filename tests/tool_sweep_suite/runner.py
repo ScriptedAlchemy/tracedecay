@@ -252,7 +252,7 @@ class McpClient:
     def __init__(self, binary: Path, project: Path, log: Path) -> None:
         self._stderr = log.open("wb")
         self._process = subprocess.Popen(
-            [str(binary), "serve", "--timings", "--path", str(project)],
+            [str(binary), "serve", "--timings", "--full-tool-list", "--path", str(project)],
             cwd=project,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,

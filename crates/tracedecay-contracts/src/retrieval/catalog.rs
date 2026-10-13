@@ -483,7 +483,7 @@ fn primitive_read_description(operation: &str) -> &'static str {
             "Read the admitted project's serving status: ok, read_only, or degraded. Use storage_status for database size and page telemetry, or health_delta for generation-bound code-health changes."
         }
         "health_delta" => {
-            "Compare the current generation's code-health score and dimensions with a prior after_cursor, optionally within a path prefix. Save the returned after_cursor for a later comparison; omit before_cursor to establish a baseline."
+            "Compare the current generation's code-health score and dimensions with a prior after_cursor, optionally within a path prefix. Save the returned after_cursor for a later comparison; omit before_cursor to establish a baseline. pass needs files in both points; a dimension whose scope gave it nothing to measure reads no_evidence. A before_cursor from another health definition is refused; omit it to re-baseline."
         }
         "storage_status" => {
             "Inspect the admitted project's graph-store status, read-only state, database size, page telemetry, and bounded size history. Use health_read when only serving availability matters."

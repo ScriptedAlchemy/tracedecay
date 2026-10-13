@@ -16,11 +16,16 @@ use super::auth::{
     OpaqueRemoteCredential, RemoteEnrollmentAdmissionEvidenceV1, RemoteEnrollmentCommitReceiptV1,
 };
 use super::capture_protocol::RemoteCaptureRequestV1;
-use super::protocol::{EnrollmentRequestV1, RemoteProtocolBodyV1, RemoteProtocolRequestV1};
-use super::query::RemoteQueryRequestV1;
-use super::recovery::PromotionConfirmationV1;
+use super::protocol::{
+    EnrollmentRequestV1, RemoteProtocolBodyV1, RemoteProtocolRequestV1,
+    remote_capture_result_contract_v1, remote_enrollment_result_contract_v1,
+    remote_replay_result_contract_v1,
+};
+use super::query::{RemoteQueryRequestV1, remote_exact_observation_query_result_contract_v1};
+use super::recovery::{PromotionConfirmationV1, remote_promotion_result_contract_v1};
 use super::replay::RemoteReplayRequestV1;
-use super::transfer::RemoteFrameTransferRequestV1;
+use super::transfer::{RemoteFrameTransferRequestV1, remote_frame_transfer_result_contract_v1};
+use crate::{ApplicationContractError, ResultContractRef};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RemoteCredentialClassV1 {
@@ -373,6 +378,10 @@ pub trait RemoteSessionBoundProtocolBodyV1: RemoteProtocolBodyV1 {
     const CREDENTIAL_USE: RemoteCredentialUseV1;
     const REAUTHORIZE_BEFORE_EXECUTION: bool = false;
 
+    /// Result contract of the route's responses, including a refusal the
+    /// transport answers before any operation port runs.
+    fn result_contract() -> Result<ResultContractRef, ApplicationContractError>;
+
     fn execution_expires_at(&self) -> Option<UtcMicros> {
         None
     }
@@ -388,6 +397,10 @@ pub trait RemoteSessionBoundProtocolBodyV1: RemoteProtocolBodyV1 {
 impl RemoteSessionBoundProtocolBodyV1 for EnrollmentRequestV1 {
     const CREDENTIAL_USE: RemoteCredentialUseV1 = RemoteCredentialUseV1::InitialEnrollment;
 
+    fn result_contract() -> Result<ResultContractRef, ApplicationContractError> {
+        Ok(remote_enrollment_result_contract_v1())
+    }
+
     fn bind_authenticated_session(
         session: &RemoteAuthenticatedSessionV1,
         request: &RemoteProtocolRequestV1<Self>,
@@ -398,6 +411,10 @@ impl RemoteSessionBoundProtocolBodyV1 for EnrollmentRequestV1 {
 
 impl RemoteSessionBoundProtocolBodyV1 for RemoteCaptureRequestV1 {
     const CREDENTIAL_USE: RemoteCredentialUseV1 = RemoteCredentialUseV1::CaptureOffline;
+
+    fn result_contract() -> Result<ResultContractRef, ApplicationContractError> {
+        Ok(remote_capture_result_contract_v1())
+    }
 
     fn bind_authenticated_session(
         session: &RemoteAuthenticatedSessionV1,
@@ -411,6 +428,10 @@ impl RemoteSessionBoundProtocolBodyV1 for RemoteCaptureRequestV1 {
 impl RemoteSessionBoundProtocolBodyV1 for RemoteReplayRequestV1 {
     const CREDENTIAL_USE: RemoteCredentialUseV1 = RemoteCredentialUseV1::Replay;
 
+    fn result_contract() -> Result<ResultContractRef, ApplicationContractError> {
+        Ok(remote_replay_result_contract_v1())
+    }
+
     fn bind_authenticated_session(
         session: &RemoteAuthenticatedSessionV1,
         request: &RemoteProtocolRequestV1<Self>,
@@ -422,6 +443,10 @@ impl RemoteSessionBoundProtocolBodyV1 for RemoteReplayRequestV1 {
 impl RemoteSessionBoundProtocolBodyV1 for RemoteFrameTransferRequestV1 {
     const CREDENTIAL_USE: RemoteCredentialUseV1 = RemoteCredentialUseV1::TransferFrame;
     const REAUTHORIZE_BEFORE_EXECUTION: bool = true;
+
+    fn result_contract() -> Result<ResultContractRef, ApplicationContractError> {
+        remote_frame_transfer_result_contract_v1()
+    }
 
     fn execution_expires_at(&self) -> Option<UtcMicros> {
         Some(UtcMicros(self.expires_at_micros))
@@ -437,6 +462,10 @@ impl RemoteSessionBoundProtocolBodyV1 for RemoteFrameTransferRequestV1 {
 
 impl RemoteSessionBoundProtocolBodyV1 for RemoteQueryRequestV1 {
     const CREDENTIAL_USE: RemoteCredentialUseV1 = RemoteCredentialUseV1::Query;
+
+    fn result_contract() -> Result<ResultContractRef, ApplicationContractError> {
+        Ok(remote_exact_observation_query_result_contract_v1())
+    }
 
     fn bind_authenticated_session(
         session: &RemoteAuthenticatedSessionV1,
@@ -454,6 +483,10 @@ impl RemoteSessionBoundProtocolBodyV1 for RemoteQueryRequestV1 {
 impl RemoteSessionBoundProtocolBodyV1 for PromotionConfirmationV1 {
     const CREDENTIAL_USE: RemoteCredentialUseV1 = RemoteCredentialUseV1::Promote;
     const REAUTHORIZE_BEFORE_EXECUTION: bool = true;
+
+    fn result_contract() -> Result<ResultContractRef, ApplicationContractError> {
+        remote_promotion_result_contract_v1()
+    }
 
     fn execution_expires_at(&self) -> Option<UtcMicros> {
         Some(UtcMicros(self.expires_at_micros))

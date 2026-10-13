@@ -3,7 +3,7 @@
  *
  * Two routes that inspect the same query-time encoding method over their own
  * admitted fact sets. `/projection` may filter and cap facts before deriving
- * FHRR phase encodings and decomposing `[cos(p), sin(p)]` coordinates into two
+ * MAP-C encodings and decomposing their `[cos(p), sin(p)]` coordinates into two
  * principal components. `/similarity` derives encodings for its own bounded
  * fact set and scores them by phase cosine. They are drawn together because
  * both expose relationships in the canonical fact store without persisting a
@@ -192,7 +192,7 @@ function ProjectionBody({ data }: { data: MemoryProjectionPayloadV1 }) {
       {reading.projected ? (
         <>
           <Chart
-            ariaLabel={`Principal-component scatter of ${reading.points.length.toLocaleString()} facts by query-time-derived FHRR phase encoding. The axes are unitless directions of greatest variance; the accessible reading of this projection is the category census and extents printed beneath it.`}
+            ariaLabel={`Principal-component scatter of ${reading.points.length.toLocaleString()} facts by query-time-derived MAP-C phase encoding. The axes are unitless directions of greatest variance; the accessible reading of this projection is the category census and extents printed beneath it.`}
             height={260}
             option={option}
           />

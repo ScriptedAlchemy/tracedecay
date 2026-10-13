@@ -2004,6 +2004,332 @@ exit 0
         Value::Null,
         "a denied proposal recommends nothing: {closed}"
     );
+
+    // =====================================================================
+    // 8. The same parallel job through the guided path.
+    // =====================================================================
+    // One request names both sources, their placements, and the synthesis.
+    // The provider holds each source again until released, and prints the
+    // same bytes for the same tag, so every digest must equal the
+    // step-by-step one.
+    fs::remove_file(&hold_marker).expect("hold the guided sources");
+    let home = fixture._home.path().to_path_buf();
+    let guided_root = |tag: &str| home.join(format!("guided-placement-{tag}"));
+    for tag in ["alpha", "beta"] {
+        fs::remove_file(scripts.path().join(format!("started-{tag}")))
+            .expect("clear the step-by-step start marker");
+        run_ok(
+            Command::new("git")
+                .args(["worktree", "add", "--detach", "--quiet"])
+                .arg(guided_root(tag))
+                .arg("HEAD")
+                .current_dir(&fixture.project),
+            "git worktree add guided placement",
+        );
+    }
+    let guided_source = |tag: &str| {
+        json!({
+            "key": tag,
+            "title": format!("Guided source {tag}"),
+            "instructions": format!("Execute the guided Work job parallel source {tag}"),
+            "placement": {
+                "kind": "linked_worktree",
+                "root": guided_root(tag).to_string_lossy(),
+                "network_free": true,
+                "in_place_acknowledged": false,
+            },
+        })
+    };
+    let job = json!({
+        "job": "guided-journey",
+        "title": "Guided Work journey",
+        "base": {
+            "reference": "refs/heads/work-loop-journey",
+            "commit": "0123456789abcdef0123456789abcdef01234567",
+        },
+        "effect_state": "observational",
+        "tasks": [guided_source("alpha"), guided_source("beta")],
+        "synthesis": {
+            "task": "alpha",
+            "output_name": "output.work-loop-journey.synthesis",
+            "instructions": SYNTHESIS_INSTRUCTIONS,
+        },
+    });
+    let guided_alpha = attempt_identity(
+        "task.guided-journey.alpha",
+        "run.guided-journey.alpha",
+        "attempt.guided-journey.alpha.source",
+    );
+    let guided_beta = attempt_identity(
+        "task.guided-journey.beta",
+        "run.guided-journey.beta",
+        "attempt.guided-journey.beta.source",
+    );
+    let guided_synthesis = attempt_identity(
+        "task.guided-journey.alpha",
+        "run.guided-journey.alpha",
+        "attempt.guided-journey.alpha.synthesis",
+    );
+
+    // The first call runs every per-task step stage by stage, then stops at
+    // the held sources. Each step is that operation's own effect receipt.
+    let (started, waiting) = advance_job(&fixture, &job);
+    let step = |step: &str, task: &str| json!({ "step": step, "task": task });
+    assert_eq!(
+        started
+            .iter()
+            .map(|record| record["step"].clone())
+            .collect::<Vec<_>>(),
+        [
+            "create_task",
+            "accept_proposal",
+            "admit_execution",
+            "admit_placement",
+            "start_source"
+        ]
+        .into_iter()
+        .flat_map(|name| [step(name, "alpha"), step(name, "beta")])
+        .collect::<Vec<_>>(),
+        "the guided path runs each existing operation once per task: {waiting}"
+    );
+    for record in &started {
+        assert_eq!(
+            record["request_id"],
+            format!(
+                "guided.guided-journey.{}.{}",
+                record["step"]["step"].as_str().expect("step name"),
+                record["step"]["task"].as_str().expect("step task"),
+            ),
+            "{record}"
+        );
+        let operation = match record["step"]["step"].as_str() {
+            Some("create_task" | "accept_proposal") => "use-case.work.mutate_graph",
+            Some("admit_execution") => "use-case.work.admit_execution",
+            Some("admit_placement") => "use-case.work.admit_placement",
+            _ => "use-case.work.start_attempt",
+        };
+        assert_eq!(record["receipt"]["operation"], operation, "{record}");
+        assert_eq!(record["receipt"]["outcome"], "completed", "{record}");
+        assert_eq!(
+            record["receipt"]["request_id"], record["request_id"],
+            "{record}"
+        );
+    }
+    let admitted_snapshot = |task: &str| {
+        started
+            .iter()
+            .find(|record| record["step"] == step("admit_execution", task))
+            .map(|record| record["result"]["value"]["execution_snapshot"].clone())
+            .expect("admission record")
+    };
+    for (task, identity) in [("alpha", &guided_alpha), ("beta", &guided_beta)] {
+        let leased = started
+            .iter()
+            .find(|record| record["step"] == step("start_source", task))
+            .map(|record| record["result"]["value"].clone())
+            .expect("start record");
+        assert_eq!(&leased["identity"], identity, "{leased}");
+        assert_eq!(
+            leased["execution"]["execution_snapshot"],
+            admitted_snapshot(task),
+            "a guided start carries the snapshot its admission returned: {leased}"
+        );
+        assert_eq!(
+            leased["execution"]["worktree_root"],
+            json!(guided_root(task).to_string_lossy()),
+            "a guided source runs in its own admitted placement root: {leased}"
+        );
+    }
+    poll_until("both guided sources running at once", || {
+        let running = [&guided_alpha, &guided_beta].iter().all(|identity| {
+            fixture.payload(
+                "guided source status",
+                "/application/work/attempt-status",
+                identity,
+            )["state"]
+                == "running"
+        });
+        if running
+            && scripts.path().join("started-alpha").exists()
+            && scripts.path().join("started-beta").exists()
+        {
+            Ok(())
+        } else {
+            Err("sources not yet running together".to_owned())
+        }
+    });
+
+    // Pause is an advanced operation on the guided run. The job keeps
+    // waiting on its in-flight sources, then survives a restart.
+    let guided_paused = fixture.payload(
+        "pause the guided run",
+        "/application/work/pause-run",
+        &json!({
+            "task_id": "task.guided-journey.alpha",
+            "run_id": "run.guided-journey.alpha",
+            "reason": "operator_request",
+            "occurred_at": now_micros(),
+        }),
+    );
+    assert_eq!(
+        guided_paused["fenced_attempts"],
+        json!(["attempt.guided-journey.alpha.source"]),
+        "{guided_paused}"
+    );
+    let (none, still_waiting) = advance_job(&fixture, &job);
+    assert_eq!(none, Vec::<Value>::new(), "{still_waiting}");
+    assert_eq!(still_waiting["state"], "waiting", "{still_waiting}");
+    fs::write(&hold_marker, b"").expect("release the guided sources");
+    let guided_alpha_settled = settled_attempt(&fixture, &guided_alpha);
+    let guided_beta_settled = settled_attempt(&fixture, &guided_beta);
+    assert_eq!(
+        guided_alpha_settled["artifacts"], alpha_settled["artifacts"],
+        "{guided_alpha_settled}"
+    );
+    assert_eq!(
+        guided_beta_settled["artifacts"], beta_settled["artifacts"],
+        "{guided_beta_settled}"
+    );
+    fixture.restart();
+
+    // The paused run refuses synthesis with the problem the step-by-step
+    // path got, and the job stops there.
+    let (none, refused) = advance_job(&fixture, &job);
+    assert_eq!(none, Vec::<Value>::new(), "{refused}");
+    assert_eq!(refused["state"], "refused", "{refused}");
+    assert_eq!(
+        refused["step"],
+        json!({ "step": "synthesize" }),
+        "{refused}"
+    );
+    for field in ["kind", "code", "message", "retry"] {
+        assert_eq!(
+            refused["problem"][field], refused_synthesis[field],
+            "the guided refusal must be the operation's own: {refused}"
+        );
+    }
+    fixture.payload(
+        "resume the guided run",
+        "/application/work/resume-run",
+        &json!({
+            "task_id": "task.guided-journey.alpha",
+            "run_id": "run.guided-journey.alpha",
+            "reason": "operator_request",
+            "expected_authority_version": guided_paused["authority"],
+            "occurred_at": now_micros(),
+        }),
+    );
+
+    // The CLI drives the rest to completion with one command.
+    let request_file = scripts.path().join("guided-job.json");
+    fs::write(&request_file, job.to_string()).expect("guided job request file");
+    let output = run_ok(
+        isolated(&home, &home.join(".tracedecay"))
+            .args([
+                "work",
+                "advance-job",
+                "--until-settled",
+                "--json",
+                "--request-file",
+            ])
+            .arg(&request_file)
+            .current_dir(&fixture.project),
+        "tracedecay work advance-job --until-settled",
+    );
+    let calls = String::from_utf8(output)
+        .expect("UTF-8 CLI output")
+        .lines()
+        .map(|line| {
+            let answer: Value = serde_json::from_str(line).expect("one JSON result per call");
+            assert_eq!(answer["outcome"]["outcome"], "effect", "{answer}");
+            answer["outcome"]["value"]["payload"].clone()
+        })
+        .collect::<Vec<_>>();
+    let finished = calls
+        .iter()
+        .flat_map(|call| call["performed"].as_array().cloned().unwrap_or_default());
+    let finished = finished.collect::<Vec<_>>();
+    assert_eq!(
+        finished
+            .iter()
+            .map(|record| record["step"].clone())
+            .collect::<Vec<_>>(),
+        [
+            json!({ "step": "synthesize" }),
+            step("release_placement", "alpha"),
+            step("release_placement", "beta"),
+        ],
+        "{calls:?}"
+    );
+    for (record, operation) in finished.iter().zip([
+        "use-case.work.synthesize",
+        "use-case.work.release_placement",
+        "use-case.work.release_placement",
+    ]) {
+        assert_eq!(record["receipt"]["operation"], operation, "{record}");
+        assert_eq!(record["receipt"]["outcome"], "completed", "{record}");
+    }
+    let synthesized = &finished[0]["result"]["value"];
+    assert_eq!(synthesized["synthesis"], "admitted", "{synthesized}");
+    assert_eq!(
+        synthesized["draft"]["cited_source_digests"],
+        json!(cited),
+        "guided synthesis must cite the step-by-step source digests: {synthesized}"
+    );
+    assert_eq!(synthesized["uncited"], json!([]), "{synthesized}");
+    for released in &finished[1..] {
+        assert_eq!(
+            released["result"]["value"]["state"], "released",
+            "{released}"
+        );
+        assert_eq!(
+            released["result"]["value"]["authority_version"], 2,
+            "{released}"
+        );
+    }
+    let completed = &calls.last().expect("a settled call")["state"];
+    assert_eq!(completed["state"], "completed", "{completed}");
+    assert_eq!(
+        completed["sources"],
+        json!([guided_alpha_settled, guided_beta_settled]),
+        "the guided sources are the attempts' own receipts: {completed}"
+    );
+    let guided_synthesis_settled = settled_attempt(&fixture, &guided_synthesis);
+    assert_eq!(
+        completed["synthesis"], guided_synthesis_settled,
+        "{completed}"
+    );
+    assert_eq!(
+        guided_synthesis_settled["execution"]["worktree_root"],
+        json!(guided_root("alpha").to_string_lossy()),
+        "the guided synthesis runs in its task's admitted placement root: {guided_synthesis_settled}"
+    );
+    assert_eq!(
+        guided_synthesis_settled["artifacts"], synthesis_settled["artifacts"],
+        "{guided_synthesis_settled}"
+    );
+
+    // A settled job converges: calling again performs nothing.
+    let (none, again) = advance_job(&fixture, &job);
+    assert_eq!(none, Vec::<Value>::new(), "{again}");
+    assert_eq!(&again, completed, "{again}");
+}
+
+/// Calls `advance-job` until it stops advancing, returning every performed
+/// step record and the final job state.
+fn advance_job(fixture: &ProductionDaemon, job: &Value) -> (Vec<Value>, Value) {
+    let mut performed = Vec::new();
+    loop {
+        let answer = fixture.payload(
+            "advance the guided job",
+            "/application/work/advance-job",
+            job,
+        );
+        performed.extend(answer["performed"].as_array().cloned().unwrap_or_default());
+        if answer["state"]["state"] != "advancing" {
+            return (performed, answer["state"].clone());
+        }
+    }
 }
 
 /// The journey's task, out of the current product graph payload.
