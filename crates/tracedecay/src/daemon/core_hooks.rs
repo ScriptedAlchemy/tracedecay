@@ -158,4 +158,45 @@ mod tests {
             "a missing socket must not consume the outer hook timeout"
         );
     }
+
+    #[tokio::test]
+    async fn delivery_reports_an_acknowledgement_that_outlasts_the_host_hook_bound() {
+        tracedecay_project::product_runtime::register_fixture_product_runtime();
+        let profile_dir = tempfile::tempdir().unwrap();
+        let profile = tracedecay_runtime_core::config::ProfileRoot::new(profile_dir.path());
+        let socket = profile.data_dir().join("daemon.sock");
+        let _authority = super::super::tests::seed_socket_authority(&socket);
+        let listener = tokio::net::UnixListener::bind(&socket).expect("fake daemon socket");
+        let admission = Duration::from_secs(2);
+        let daemon = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept hook client");
+            let (reader, mut writer) = stream.into_split();
+            let mut lines = BufReader::new(reader).lines();
+            while let Some(line) = lines.next_line().await.expect("read hook client") {
+                let request = serde_json::from_str::<serde_json::Value>(&line).ok();
+                if request.is_some_and(|request| request["method"] == HOOK_EVENT_METHOD) {
+                    break;
+                }
+            }
+            tokio::time::sleep(admission).await;
+            writer
+                .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n")
+                .await
+                .expect("acknowledge hook event");
+        });
+
+        let outcome = notify_hook_event(
+            &profile,
+            profile_dir.path(),
+            DaemonHookEvent::cursor_after_shell_execution(profile_dir.path().to_path_buf()),
+        )
+        .await;
+
+        assert_eq!(
+            outcome,
+            HookEventNotifyOutcomeV1::Delivered,
+            "a slow admission is still a delivered event"
+        );
+        daemon.await.expect("fake daemon");
+    }
 }
