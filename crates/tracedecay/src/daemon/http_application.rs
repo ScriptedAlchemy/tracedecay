@@ -327,6 +327,10 @@ impl DaemonHttpApplicationRegistry {
                 "/remote-nodes/writer-authority",
                 post(publish_remote_writer_authority),
             )
+            .route(
+                "/remote-nodes/revoke",
+                post(super::remote_revocation::revoke_remote_node),
+            )
             .route("/remote-status", get(remote_operational_status))
             // Deletion lifecycle intake. The upstream lanes mounted this at
             // `/remote/deletions`; at this tip `/remote` is a nest point for the
@@ -504,27 +508,14 @@ const REMOTE_STATUS_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 pub fn live_remote_operational_status(
     profile: &tracedecay_runtime_core::config::ProfileRoot,
 ) -> Result<RemoteOperationalStatusReadV1> {
-    let connection = super::current_profile_daemon_connection(profile)?;
-    let Some(endpoint) = connection.http_application_endpoint() else {
-        return Err(TraceDecayError::Config {
-            message: "TraceDecay daemon HTTP application endpoint is not published. Start or restart the daemon.".to_owned(),
-        });
-    };
-    let auth_token = connection.auth_token();
-    let origin = format!("http://{endpoint}");
-    let url = format!("http://{endpoint}/remote-status");
-    let agent = http_agent(
-        ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .timeout_global(Some(REMOTE_STATUS_HTTP_TIMEOUT))
-            .build(),
-    );
+    let (origin, auth_token, agent) = live_local_http(profile)?;
+    let url = format!("{origin}/remote-status");
     let mut response = agent
         .get(&url)
         .header("Authorization", format!("Bearer {auth_token}"))
         .header("Origin", origin)
         .call()
-        .map_err(|_| remote_status_daemon_unavailable(profile))?;
+        .map_err(|_| live_daemon_unavailable(profile))?;
     if response.status().as_u16() != 200 {
         return Err(TraceDecayError::Config {
             message: format!(
@@ -548,7 +539,31 @@ pub fn live_remote_operational_status(
     }
 }
 
-fn remote_status_daemon_unavailable(
+/// Origin, bearer token and agent for an operator call to the running
+/// daemon's authenticated loopback HTTP application.
+pub(super) fn live_local_http(
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
+) -> Result<(String, String, ureq::Agent)> {
+    let connection = super::current_profile_daemon_connection(profile)?;
+    let Some(endpoint) = connection.http_application_endpoint() else {
+        return Err(TraceDecayError::Config {
+            message: "TraceDecay daemon HTTP application endpoint is not published. Start or restart the daemon.".to_owned(),
+        });
+    };
+    let agent = http_agent(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(REMOTE_STATUS_HTTP_TIMEOUT))
+            .build(),
+    );
+    Ok((
+        format!("http://{endpoint}"),
+        connection.auth_token().to_owned(),
+        agent,
+    ))
+}
+
+pub(super) fn live_daemon_unavailable(
     profile: &tracedecay_runtime_core::config::ProfileRoot,
 ) -> TraceDecayError {
     match tracedecay_daemon_control::default_socket_path(profile.data_dir()) {

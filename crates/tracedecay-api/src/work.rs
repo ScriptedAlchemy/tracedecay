@@ -28,9 +28,9 @@ use serde_json::Value;
 use tracedecay_contracts::{
     AcceptWorkProposalRequestV1, AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1,
     AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, AdmittedWorkExecutionV1,
-    ApplicationProblem, CancelWorkAttemptCommand, CreateWorkTaskRequestV1,
-    ExecutionTopologyMetricsRequestV1, ExecutionTopologyMetricsV1, ExecutionTopologyViewV1,
-    GenerateProposalRequest, GeneratedWorkProposal, PauseWorkRunCommand,
+    AdvanceWorkJobRequestV1, AdvanceWorkJobResultV1, ApplicationProblem, CancelWorkAttemptCommand,
+    CreateWorkTaskRequestV1, ExecutionTopologyMetricsRequestV1, ExecutionTopologyMetricsV1,
+    ExecutionTopologyViewV1, GenerateProposalRequest, GeneratedWorkProposal, PauseWorkRunCommand,
     PrepareWorkDuplicateAdjudicationRequestV1, PrepareWorkProductMutationRequestV1,
     ReleaseWorkPlacementCommand, RequestId, ResumeWorkAttemptsCommand, ResumeWorkRunCommand,
     RetryDirective, RetryWorkAttemptCommandV1, ReviewWorkProposalRequestV1,
@@ -156,6 +156,8 @@ work_operations! {
         "Read the durable or absent placement state for one exact task and run.";
     ReleasePlacement: "release_placement", "release-placement",
         "Release or quarantine one run's placement at the expected authority version without deleting bytes.";
+    AdvanceJob: "advance_job", "advance-job",
+        "Advance a named parallel job with reviewed synthesis through the next Work steps; call again until it settles.";
 }
 
 impl WorkOperation {
@@ -224,6 +226,7 @@ impl WorkOperation {
             Self::AdmitPlacement => schema_name::<AdmitWorkPlacementCommand>(),
             Self::PlacementStatus => schema_name::<WorkPlacementStatusRequestV1>(),
             Self::ReleasePlacement => schema_name::<ReleaseWorkPlacementCommand>(),
+            Self::AdvanceJob => schema_name::<AdvanceWorkJobRequestV1>(),
         }
     }
 
@@ -262,14 +265,15 @@ impl WorkOperation {
             Self::PlacementPreflight => schema_name::<WorkPlacementPreflightV1>(),
             Self::AdmitPlacement | Self::ReleasePlacement => schema_name::<WorkPlacementV1>(),
             Self::PlacementStatus => schema_name::<WorkPlacementReadingV1>(),
+            Self::AdvanceJob => schema_name::<AdvanceWorkJobResultV1>(),
         }
     }
 
     /// Whether the embedded dashboard has a real operator journey for this
-    /// operation. Scheduler-owned attempt start remains available to its owning
-    /// surface but is not a dashboard API.
+    /// operation. Scheduler-owned attempt start and the guided job, which the
+    /// CLI and agents drive, are not dashboard APIs.
     pub const fn is_dashboard_operation(self) -> bool {
-        !matches!(self, Self::StartAttempt)
+        !matches!(self, Self::StartAttempt | Self::AdvanceJob)
     }
 }
 

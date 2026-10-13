@@ -5816,7 +5816,7 @@ function memoryStatusPayload(): Record<string, unknown> {
     path: '/fast/projects/tracedecay/.tracedecay/memory.db',
     memory: {
       algebra: {
-        name: 'amari_fhrr',
+        name: 'map_c',
         hrr_dim: 2048,
         estimated_capacity: 354_304,
       },

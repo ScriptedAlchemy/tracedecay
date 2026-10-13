@@ -27,8 +27,7 @@ struct StatusCounts {
     rated_fact_count: u64,
 }
 
-/// The FHRR superposition capacity estimate D / ln(D), not a fact-store limit.
-fn estimated_holographic_capacity() -> u64 {
+fn superposition_estimate_per_vector() -> u64 {
     let dimensions = HolographicEncoder::DIMENSIONS as f64;
     (dimensions / dimensions.ln()) as u64
 }
@@ -161,9 +160,9 @@ pub(super) async fn project_memory_status_tx(
         counts.fact_count,
         entity_count,
         ProjectMemoryMemoryAlgebraV1::new(
-            "amari_fhrr".to_owned(),
+            HolographicEncoder::ALGEBRA.to_owned(),
             HolographicEncoder::DIMENSIONS as u64,
-            estimated_holographic_capacity(),
+            superposition_estimate_per_vector(),
         )?,
         counts.trust[0],
         counts.trust[1],
@@ -186,6 +185,6 @@ pub(super) async fn project_memory_status_tx(
 mod tests {
     #[test]
     fn published_capacity_estimate_stays_at_the_2048_dimension_value() {
-        assert_eq!(super::estimated_holographic_capacity(), 268);
+        assert_eq!(super::superposition_estimate_per_vector(), 268);
     }
 }

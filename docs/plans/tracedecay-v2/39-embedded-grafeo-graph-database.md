@@ -623,6 +623,16 @@ remains a holographic implementation (FHRR/HRR binding and unbinding, the
 Recall re-derives candidate vectors from canonical content at query time; that
 is the production holographic path and it must be preserved.
 
+Annotation (2026-10-12, #3519 and #3651): #3519 removed the amari dependency
+and replaced it with real-coefficient operations whose outputs are
+bit-identical, pinned by `encoder_outputs_match_recorded_fhrr_bits`. The
+encoding uses no complex phasors and no unbinding: binding is the
+componentwise product, bundling the normalized average, similarity the
+cosine. That is the real-valued multiply-add family, so #3651 renamed the
+reported algebra label from `amari_fhrr` to `map_c`. The label is a value on
+`MemoryAlgebraV1.name`, so released readers decode both. The invariant this
+decision protects still holds: holographic recall over canonical content.
+
 Owner decision (2026-08-07, second, supersedes the placement flexibility
 above): evidence review found persisted derived vectors are write-only, no
 recall path reads stored bank vectors or stored per-fact vectors. They are

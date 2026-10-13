@@ -5,6 +5,7 @@ use super::*;
 mod attempt_operations;
 mod evidence_retrieval;
 mod intelligence;
+mod job;
 mod leak_adjudication;
 mod outcome;
 mod preparation;
@@ -177,6 +178,9 @@ const fn work_invocation_mutates(request: &WorkApplicationInvocationV1) -> bool 
         | WorkApplicationInvocationV1::RunControl(_)
         | WorkApplicationInvocationV1::PlacementPreflight(_)
         | WorkApplicationInvocationV1::PlacementStatus(_) => false,
+        // Each step a guided job runs is its own Work invocation and publishes
+        // its own activity pulse when it commits.
+        WorkApplicationInvocationV1::AdvanceJob(_) => false,
         WorkApplicationInvocationV1::Create(_)
         | WorkApplicationInvocationV1::ReviewProposal(_)
         | WorkApplicationInvocationV1::AcceptProposal(_)

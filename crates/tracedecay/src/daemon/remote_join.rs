@@ -20,7 +20,9 @@ use tracedecay_store_runtime::{
     DaemonRemoteCredentialAuthorityV1, DaemonSessionRuntimeRegistryV1, RemoteNodeOperatorErrorV1,
 };
 
-use super::http_application::{DaemonHttpApplicationRegistry, remote_node_operator_refusal};
+use super::http_application::{
+    DaemonHttpApplicationRegistry, live_local_http, remote_node_operator_refusal,
+};
 
 /// The authority to discover and the enrolled identity to discover it for.
 /// The enrollment credential travels only in the
@@ -197,29 +199,17 @@ pub(super) fn live_remote_node_operation<T: DeserializeOwned>(
     enrollment_credential: &[u8],
     http_timeout: Option<Duration>,
 ) -> Result<T> {
-    let connection = super::current_profile_daemon_connection(profile)?;
-    let Some(endpoint) = connection.http_application_endpoint() else {
-        return Err(TraceDecayError::Config {
-            message: "TraceDecay daemon HTTP application endpoint is not published. Start or restart the daemon.".to_owned(),
-        });
-    };
     let credential =
         std::str::from_utf8(enrollment_credential).map_err(|_| TraceDecayError::Config {
             message: "Remote Brain enrollment credential must be printable ASCII".to_owned(),
         })?;
-    let origin = format!("http://{endpoint}");
-    let agent = tracedecay_application::http_agent::http_agent(
-        ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .timeout_global(http_timeout)
-            .build(),
-    );
+    let (origin, auth_token, agent) = live_local_http(profile)?;
     let mut response = agent
         .post(&format!("{origin}/remote-nodes/{operation}"))
-        .header(
-            "Authorization",
-            format!("Bearer {}", connection.auth_token()),
-        )
+        .config()
+        .timeout_global(http_timeout)
+        .build()
+        .header("Authorization", format!("Bearer {auth_token}"))
         .header("Origin", &origin)
         .header(REMOTE_ENROLLMENT_CREDENTIAL_HEADER, credential)
         .send_json(request)

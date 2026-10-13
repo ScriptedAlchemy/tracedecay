@@ -400,11 +400,13 @@ mod projectless;
 mod remote_deletion;
 mod remote_drain;
 mod remote_join;
+mod remote_revocation;
 #[cfg(test)]
 use projectless::projectless_tools_call_response;
 use projectless::{projectless_first_request, projectless_tool_call, serve_projectless_client};
 pub use remote_drain::{RemoteNodeDrainReceiptV1, live_remote_drain};
 pub use remote_join::{RemoteNodeJoinRequestV1, live_remote_join};
+pub use remote_revocation::{RemoteNodeRevocationV1, live_remote_node_revocation};
 mod project_composition;
 mod project_delivery_mount;
 pub(crate) use project_composition::daemon_transcript_source_profile;

@@ -187,31 +187,26 @@ async fn scheduler_skill_writer_skips_without_new_session_activity_since_last_su
         "insufficient_repeated_evidence",
     ));
 
-    // The daemon decides due-ness before admission, so a not-due skill
-    // writer never reaches its runner.
-    let summary =
-        tracedecay_automation_runtime::automation::run_ledger::load_run_ledger_task_summary(
-            &cg.store_layout().dashboard_root,
-            AgentTaskKind::SkillWriter,
-            "skill_writer",
-        )
-        .await
-        .unwrap();
-    let decision = tracedecay_automation_runtime::automation::scheduler::schedule_decision(
+    // The daemon found the task due, but by the time the runner re-checks
+    // its schedule no new activity remains. That race must settle as a
+    // clean skip, not a recovery problem.
+    let run = run_skill_writer(
+        &cg,
         &config,
-        None,
-        AgentTaskKind::SkillWriter,
-        summary.records(),
-        tracedecay_automation_runtime::automation::scheduler::load_session_activity(
-            automation_project_context(&cg).project_sessions.as_ref(),
-        )
-        .await,
-        current_timestamp(),
-    );
+        &backend,
+        SkillWriterAutomationOptions {
+            trigger: AutomationTrigger::Scheduler,
+            profile_root: Some(cg.profile_root().unwrap()),
+            ..SkillWriterAutomationOptions::default()
+        },
+    )
+    .await
+    .unwrap();
 
     assert_eq!(backend.calls(), 0);
+    assert_eq!(run.ledger_record.status, AutomationRunStatus::Skipped);
     assert_eq!(
-        decision.skip_reason().map(|reason| reason.as_str()),
+        run.ledger_record.error.as_deref(),
         Some("no_new_session_activity")
     );
 
