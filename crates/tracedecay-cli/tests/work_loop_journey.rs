@@ -907,7 +907,7 @@ exit 0
                                 "max_stdout_bytes": 65536,
                                 "max_stderr_bytes": 65536,
                                 "max_protocol_bytes": 65536,
-                                "max_concurrency": 1
+                                "max_concurrency": 2
                             },
                             "maximum_duration_micros": 600000000,
                             "fallback": { "kind": "disabled" }
