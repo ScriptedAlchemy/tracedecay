@@ -36,6 +36,5 @@ tracedecay-store = { path = "../tracedecay-store" }
 [dev-dependencies]
 tempfile = "3"
 tracedecay-private-fs = { path = "../tracedecay-private-fs", features = ["test-helpers"] }
-tokio = { version = "1", features = ["full", "test-util"] }
 tracedecay-global-db = { path = "../tracedecay-global-db", features = ["test-helpers"] }
 tracedecay-sessions = { path = "../tracedecay-sessions", features = ["test-helpers"] }
