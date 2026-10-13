@@ -225,7 +225,7 @@ fn test_store(database: &RegisteredGlobalDb) -> GlobalDbGitIndexTransactionStore
     GlobalDbGitIndexTransactionStore::new(database)
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn preview_commitments_are_immutable_and_conflicts_are_rejected() {
     let database = open_database().await;
     let store = test_store(database.registered.as_ref());
@@ -264,7 +264,7 @@ async fn preview_commitments_are_immutable_and_conflicts_are_rejected() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn journal_compare_and_swap_rejects_stale_phase_epochs() {
     let database = open_database().await;
     let store = test_store(database.registered.as_ref());
@@ -300,7 +300,7 @@ async fn journal_compare_and_swap_rejects_stale_phase_epochs() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn canonical_schema_exposes_only_transaction_tables() {
     let database = open_database().await;
     let preview = preview();
@@ -357,7 +357,7 @@ async fn canonical_schema_exposes_only_transaction_tables() {
     assert_eq!(stored, preview);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn preview_input_survives_restart_then_gc_retains_typed_expiry_without_private_payload() {
     let database = open_database().await;
     let input = preview_input();
@@ -434,7 +434,7 @@ async fn preview_input_survives_restart_then_gc_retains_typed_expiry_without_pri
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn restart_replays_terminal_receipt_and_rejects_conflicting_input() {
     let database = open_database().await;
     let preview = preview();
@@ -476,7 +476,7 @@ async fn restart_replays_terminal_receipt_and_rejects_conflicting_input() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn terminal_failure_receipts_persist_and_only_inspection_requires_recovery() {
     let database = open_database().await;
     let preview = preview();
@@ -534,7 +534,7 @@ async fn terminal_failure_receipts_persist_and_only_inspection_requires_recovery
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn quarantine_is_durable_and_new_keys_remain_blocked_until_proven_clear() {
     let database = open_database().await;
     let preview = preview();
@@ -650,7 +650,7 @@ async fn quarantine_is_durable_and_new_keys_remain_blocked_until_proven_clear() 
     ));
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn proven_terminal_receipt_atomically_resolves_an_admission_quarantine() {
     let database = open_database().await;
     let preview = preview();
@@ -710,7 +710,7 @@ async fn proven_terminal_receipt_atomically_resolves_an_admission_quarantine() {
     assert_eq!(row.get::<i64>(1).expect("resolution receipt"), 1);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn recovery_indexes_include_only_repositories_with_recoverable_records() {
     let database = open_database().await;
     let first_preview = preview();
@@ -769,7 +769,7 @@ async fn recovery_indexes_include_only_repositories_with_recoverable_records() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn failed_inspection_terminal_insert_rolls_back_journal_and_quarantine() {
     let database = open_database().await;
     let preview = preview();
@@ -816,7 +816,7 @@ async fn failed_inspection_terminal_insert_rolls_back_journal_and_quarantine() {
     ));
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn read_executor_round_trips_preview_and_transaction_record() {
     let database = open_database().await;
     let preview = preview();
@@ -875,7 +875,7 @@ async fn read_executor_round_trips_preview_and_transaction_record() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn read_executor_keyset_walks_recovery_candidates() {
     let database = open_database().await;
     let preview = preview();
@@ -931,7 +931,7 @@ async fn read_executor_keyset_walks_recovery_candidates() {
     assert_eq!(empty.next, None);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn read_executor_keyset_walks_recovery_repositories() {
     let database = open_database().await;
     let first_preview = preview();

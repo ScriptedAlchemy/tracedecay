@@ -60,7 +60,7 @@ async fn code_project_registered(db: &RegisteredGlobalDb) -> bool {
 /// `projects` delete then aborts. Rolling back has to take the first delete
 /// with it, or the sweep leaves a project addressable through its accounting
 /// row with no registry row behind it.
-#[tokio::test]
+#[asupersync::test]
 async fn registry_gc_rolls_back_both_generations_when_one_delete_fails() {
     let harness = RegisteredGlobalDbHarness::open("registry-gc-rollback").await;
     let project = harness.registered.db_path().parent().unwrap().join("gone");
@@ -110,8 +110,8 @@ async fn registry_gc_rolls_back_both_generations_when_one_delete_fails() {
 /// agent is active. The sweep's write transaction must serialize the refresh
 /// rather than interleave with it, so the refresh lands whole afterwards
 /// instead of resurrecting one generation and not the other.
-#[tokio::test]
-async fn registry_gc_transaction_serializes_a_concurrent_project_refresh() {
+#[asupersync::test]
+async fn registry_gc_transaction_serializes_a_concurrent_project_refresh(cx: &asupersync::Cx) {
     let harness = RegisteredGlobalDbHarness::open("registry-gc-serialize").await;
     let project = harness.registered.db_path().parent().unwrap().join("gone");
     register_both_generations(&harness.registered, &project).await;
@@ -130,20 +130,22 @@ async fn registry_gc_transaction_serializes_a_concurrent_project_refresh() {
         .expect("begin registry cleanup transaction");
 
     let concurrent_project = project.clone();
-    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-    let refresh = tokio::spawn(async move {
-        let _ = started_tx.send(());
-        concurrent_db
-            .try_upsert_project_tokens(&concurrent_project, 22)
-            .await
-            .expect("concurrent refresh upsert");
-        concurrent_db
-            .try_get_project_tokens(&concurrent_project)
-            .await
-            .expect("concurrent refresh read")
-    });
-    started_rx.await.unwrap();
-    tokio::task::yield_now().await;
+    let (started_tx, mut started_rx) = asupersync::channel::oneshot::channel();
+    let mut refresh = cx
+        .spawn(move |cx| async move {
+            let _ = started_tx.send(&cx, ());
+            concurrent_db
+                .try_upsert_project_tokens(&concurrent_project, 22)
+                .await
+                .expect("concurrent refresh upsert");
+            concurrent_db
+                .try_get_project_tokens(&concurrent_project)
+                .await
+                .expect("concurrent refresh read")
+        })
+        .expect("spawn concurrent refresh");
+    started_rx.recv(cx).await.unwrap();
+    asupersync::runtime::yield_now().await;
     assert!(
         !refresh.is_finished(),
         "the refresh must block on the sweep's write transaction"
@@ -159,10 +161,14 @@ async fn registry_gc_transaction_serializes_a_concurrent_project_refresh() {
     transaction.commit().await.expect("commit registry cleanup");
     assert_eq!(deleted, (1, 1));
 
-    let refreshed = tokio::time::timeout(std::time::Duration::from_secs(5), refresh)
-        .await
-        .expect("the concurrent refresh must resume once the sweep commits")
-        .expect("the concurrent refresh task must complete");
+    let refreshed = asupersync::time::timeout(
+        asupersync::time::wall_now(),
+        std::time::Duration::from_secs(5),
+        refresh.join(cx),
+    )
+    .await
+    .expect("the concurrent refresh must resume once the sweep commits")
+    .expect("the concurrent refresh task must complete");
     assert_eq!(
         refreshed, 22,
         "the refresh lands whole after the sweep rather than interleaving with it"

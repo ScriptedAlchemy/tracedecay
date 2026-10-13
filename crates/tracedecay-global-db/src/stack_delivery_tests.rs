@@ -20,7 +20,7 @@ fn signal(signal_id: &str, observed_at_micros: i64) -> GitHubStackSignalRecordV1
     }
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn host_pending_delivery_survives_restart_and_settles_only_after_acknowledgement() {
     let harness = RegisteredGlobalDbHarness::open("github-stack-delivery-restart").await;
     let record = signal("signal.github-stack-restart", 10);
@@ -90,7 +90,7 @@ async fn host_pending_delivery_survives_restart_and_settles_only_after_acknowled
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn saturation_defers_but_retains_the_exact_overflow_recipient() {
     let harness = RegisteredGlobalDbHarness::open("github-stack-delivery-saturation").await;
     let recipients = (0..MAX_GITHUB_STACK_ACTIVE_PENDING_V1)
@@ -130,7 +130,7 @@ async fn saturation_defers_but_retains_the_exact_overflow_recipient() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn publishing_a_batch_promotes_the_oldest_deferred_recipient() {
     let harness = RegisteredGlobalDbHarness::open("github-stack-delivery-batch-promotion").await;
     let capacity_signal = signal("signal.github-stack-capacity-promotion", 10);

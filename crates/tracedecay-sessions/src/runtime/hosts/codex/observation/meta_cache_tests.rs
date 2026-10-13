@@ -407,17 +407,15 @@ fn torn_down_fill_task_releases_its_claim_without_publishing() {
         .enable_all()
         .build()
         .unwrap();
-    let lookup = runtime.spawn({
-        let path = path.clone();
-        async move {
-            shared_session_meta_with_provenance(&path, &ObservationCancellation::default()).await
-        }
-    });
+    let CodexMetaLookup::Claimed(claim) = lookup_codex_meta(&key).unwrap() else {
+        panic!("an empty cache elects this fill");
+    };
+    let lookup = runtime.spawn(fill_codex_session_meta(claim, path.clone()));
     gate.wait_parked(1);
     assert!(lock_codex_meta_cache().in_flight.contains_key(&key));
 
-    // Shutting the runtime down tears the fill task down at its await point
-    // while the blocking parse is still parked; the owner releases its claim.
+    // Shutting the runtime down tears the fill down at its await point while
+    // the blocking parse is still parked; the owner releases its claim.
     drop(lookup);
     runtime.shutdown_background();
     let released_by = std::time::Instant::now() + SETTLE_WITHIN;

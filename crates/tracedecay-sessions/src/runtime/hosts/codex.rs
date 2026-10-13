@@ -688,7 +688,7 @@ impl CodexDiscoveryHub {
         let hub = self.clone();
         let consumer = consumer.to_owned();
         let source = source.clone();
-        let (delivery, prefetch) = tokio::task::spawn_blocking(move || {
+        let (delivery, prefetch) = crate::runtime::source::run_blocking(move || {
             let delivery = hub.discover_blocking(&consumer, &source, bounds, frontier)?;
             let prefetch = match &delivery {
                 CodexDiscoveryDelivery::Ready(pass) if pass._shared_page_pin.is_some() => {

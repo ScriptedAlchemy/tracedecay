@@ -381,7 +381,7 @@ mod tests {
     /// Hook-route observations land in the project store's own rows, and
     /// every read (health, presence, sessions_for, scope, session evidence)
     /// answers from the same generation.
-    #[tokio::test]
+    #[asupersync::test]
     async fn recorded_spans_are_read_back_through_every_facade() {
         let root = tempfile::tempdir().unwrap();
         let registered = RegisteredGlobalDbTestRuntime::project(
@@ -489,7 +489,7 @@ mod tests {
         assert_eq!(evidence.commits, Vec::new());
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn profile_sessions_authority_cannot_record_project_git_evidence() {
         let harness = RegisteredGlobalDbHarness::open("git-correlation-profile-isolation").await;
         let store = GlobalDbGitCorrelationStore::new(harness.registered.clone());

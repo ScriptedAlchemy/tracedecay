@@ -157,7 +157,7 @@ async fn queue_state(harness: &RegisteredGlobalDbHarness) -> (i64, i64, i64) {
     )
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn rearm_walks_deferred_retries_in_bounded_batches() {
     let harness = RegisteredGlobalDbHarness::open("rearm-bounded-batches").await;
     seed_queue(&harness, 9, 3).await;
@@ -189,7 +189,7 @@ async fn rearm_walks_deferred_retries_in_bounded_batches() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn daemon_admission_defers_rearm_to_background_convergence() {
     let harness = RegisteredGlobalDbHarness::open("rearm-daemon-admission").await;
     seed_queue(&harness, 5, 0).await;
