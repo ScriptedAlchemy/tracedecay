@@ -1497,8 +1497,8 @@ async fn an_initialize_forgets_the_calls_before_it() {
 }
 
 /// A tool result with `isError: true` already reports the failure; appending
-/// a repeat hint would misreport it. The failed call still counts in the
-/// window, matching how JSON-RPC error responses are treated.
+/// a repeat hint would misreport it. The failed call still takes a window
+/// slot, but an identical call after it is compared with the earlier success.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_failed_tool_call_gets_no_hint_but_still_counts() {
@@ -1531,7 +1531,7 @@ async fn a_failed_tool_call_gets_no_hint_but_still_counts() {
         .and_then(|block| block["text"].as_str())
         .unwrap_or_default();
     assert!(
-        hint.contains("tracedecay_search call 1 call earlier"),
-        "the failed call still counts as a recent call: {hint}"
+        hint.contains("tracedecay_search call 2 calls earlier"),
+        "a failed call is no repeat target but still counts in the window: {hint}"
     );
 }
