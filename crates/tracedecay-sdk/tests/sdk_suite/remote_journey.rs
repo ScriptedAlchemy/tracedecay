@@ -20,8 +20,9 @@ use tracedecay_contracts::remote::query::{
 };
 use tracedecay_contracts::remote::recovery::PromotionConfirmationV1;
 use tracedecay_contracts::remote::replay::{
-    RemoteReplayFindingV1, RemoteReplayPendingReceiptV1, RemoteReplayPendingRequestV1,
-    RemoteReplayPendingStopV1, RemoteReplayRefusalV1,
+    RemoteReplayFindingV1, RemoteReplayOutcomeV1, RemoteReplayPendingReceiptV1,
+    RemoteReplayPendingRequestV1, RemoteReplayPendingStopV1, RemoteReplayRefusalV1,
+    RemoteReplayRequestV1,
 };
 use tracedecay_contracts::{ApplicationProblem, RequestId};
 use tracedecay_domain::{
@@ -856,10 +857,11 @@ fn a_joined_node_drains_offline_frames_in_order_to_its_authority() {
     // refuses the second one's source cursor once the first commits.
     let node = desktop.client(ENROLLMENT_CREDENTIAL);
     let replay_pending = |request_id: &str| {
-        node.replay_pending(&replay_pending_request(
+        node.replay_pending(&replay_request(
             request_id,
             &node_id,
             &writer.authority.fence,
+            RemoteReplayPendingRequestV1 {},
         ))
         .unwrap()
         .result
@@ -1045,8 +1047,13 @@ fn a_laptop_captures_offline_and_its_frames_reach_one_fenced_authority_until_rev
 
     let node = desktop.client(ENROLLMENT_CREDENTIAL);
     let replay_pending = |node: &EnrolledRemoteClient, request_id: &str| {
-        node.replay_pending(&replay_pending_request(request_id, &node_id, &fence))
-            .unwrap()
+        node.replay_pending(&replay_request(
+            request_id,
+            &node_id,
+            &fence,
+            RemoteReplayPendingRequestV1 {},
+        ))
+        .unwrap()
     };
     let replayed = |response: RemoteProtocolResponseV1<RemoteReplayPendingReceiptV1>| {
         response
@@ -1107,6 +1114,31 @@ fn a_laptop_captures_offline_and_its_frames_reach_one_fenced_authority_until_rev
             .iter()
             .all(|frame| frame.replayed.is_none()),
         "a resend commits nothing"
+    );
+    let single = node
+        .replay(&replay_request(
+            "request.remote-qualification-replay-single",
+            &node_id,
+            &fence,
+            RemoteReplayRequestV1 {
+                event_id: event_ids[0].clone(),
+            },
+        ))
+        .unwrap()
+        .result
+        .unwrap_or_else(|problem| {
+            panic!("a single replay of an acknowledged frame succeeds: {problem:?}")
+        })
+        .outcome
+        .payload()
+        .cloned()
+        .expect("a single replay returns its outcome");
+    assert_eq!(
+        single,
+        RemoteReplayOutcomeV1::AlreadyAcknowledged {
+            receipt: first.acknowledged[0].receipt.clone()
+        },
+        "a single replay of an acknowledged frame reports its stored commit receipt"
     );
 
     let query_found = |node: &EnrolledRemoteClient, moment: &str| {
@@ -1200,11 +1232,12 @@ fn a_laptop_captures_offline_and_its_frames_reach_one_fenced_authority_until_rev
     }
 }
 
-fn replay_pending_request(
+fn replay_request<T>(
     request_id: &str,
     node_id: &BrainNodeId,
     fence: &RemoteWriterFenceV1,
-) -> RemoteProtocolRequestV1<RemoteReplayPendingRequestV1> {
+    body: T,
+) -> RemoteProtocolRequestV1<T> {
     RemoteProtocolRequestV1::new(
         RequestId::new(request_id).unwrap(),
         fence.brain_id.clone(),
@@ -1212,7 +1245,7 @@ fn replay_pending_request(
         1,
         Some(fence.clone()),
         now_micros(),
-        RemoteReplayPendingRequestV1 {},
+        body,
     )
     .unwrap()
 }

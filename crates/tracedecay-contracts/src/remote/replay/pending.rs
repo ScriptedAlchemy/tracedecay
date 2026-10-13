@@ -169,8 +169,14 @@ impl RemoteReplayServiceV1 {
             let outcome = self
                 .replay(&frame_request(request, &entry)?, presented_credential)?
                 .outcome;
-            let acknowledged = matches!(outcome, RemoteReplayOutcomeV1::Acknowledged { .. });
-            replayed.insert(entry.event_id, outcome.into_operation_receipt());
+            let acknowledged = matches!(
+                outcome,
+                RemoteReplayOutcomeV1::Acknowledged { .. }
+                    | RemoteReplayOutcomeV1::AlreadyAcknowledged { .. }
+            );
+            if let Some(receipt) = outcome.into_operation_receipt() {
+                replayed.insert(entry.event_id, receipt);
+            }
             if !acknowledged {
                 break;
             }

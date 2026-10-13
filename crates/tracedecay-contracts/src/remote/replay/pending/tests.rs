@@ -25,23 +25,25 @@ use crate::remote::capture::{
     AdmittedRemoteCaptureV1, RemoteCapturePersistenceErrorV1, RemoteCaptureSequenceV1,
     RemoteWriterAuthorityV1,
 };
-use crate::remote::protocol::{RemoteProtocolFailureV1, RemoteProtocolRequestV1};
+use crate::remote::protocol::{
+    RemoteProtocolFailureV1, RemoteProtocolPortV1, RemoteProtocolRequestV1,
+};
 use crate::remote::replay::{
     RemoteReplayApplicationErrorV1, RemoteReplayBacklogEntryV1, RemoteReplayClockPortV1,
     RemoteReplayCommitReceiptV1, RemoteReplayCurrentWriterPortV1, RemoteReplayCurrentWriterV1,
     RemoteReplayFindingV1, RemoteReplayFrameLookupPortV1, RemoteReplayFrameV1,
     RemoteReplayPendingFrameV1, RemoteReplayPendingReceiptV1, RemoteReplayPendingRequestV1,
     RemoteReplayPendingStopV1, RemoteReplayPolicyDecisionV1, RemoteReplayPolicyEvidencePortV1,
-    RemoteReplayPolicyEvidenceV1, RemoteReplayPolicyPortV1, RemoteReplayRefusalV1,
-    RemoteReplayServiceErrorV1, RemoteReplayServiceV1, RemoteReplaySpoolPortV1,
-    RemoteReplaySpoolStateV1, RemoteReplayStateV1, RemoteReplayTransactionErrorV1,
-    RemoteReplayTransactionOutcomeV1, RemoteReplayTransactionPortV1,
-    RemoteReplayTransitionReceiptV1, RemoteReplayTransitionV1, canonical_remote_event_id_v1,
-    replay_protocol_failure,
+    RemoteReplayPolicyEvidenceV1, RemoteReplayPolicyPortV1, RemoteReplayProtocolAdapterV1,
+    RemoteReplayRefusalV1, RemoteReplayRequestV1, RemoteReplayServiceErrorV1,
+    RemoteReplayServiceV1, RemoteReplaySpoolPortV1, RemoteReplaySpoolStateV1, RemoteReplayStateV1,
+    RemoteReplayTransactionErrorV1, RemoteReplayTransactionOutcomeV1,
+    RemoteReplayTransactionPortV1, RemoteReplayTransitionReceiptV1, RemoteReplayTransitionV1,
+    canonical_remote_event_id_v1, replay_protocol_failure,
 };
 use crate::{
-    AuthorityReceipt, CapabilityGrantId, Deadline, DisclosureClass, OperationBudgetUsage,
-    PolicyDecisionRef, RequestId, ResolvedScope,
+    ApplicationOutcome, AuthorityReceipt, CapabilityGrantId, Deadline, DisclosureClass,
+    OperationBudgetUsage, PolicyDecisionRef, RequestId, ResolvedScope,
 };
 
 const SECRET: [u8; 32] = [b'n'; 32];
@@ -758,5 +760,167 @@ fn a_store_refusal_stops_the_walk_and_a_resend_repeats_the_stop() {
     assert_eq!(
         authority.state(&frames[2].event_id),
         RemoteReplayStateV1::Pending
+    );
+}
+
+fn single_request(
+    request_id: &str,
+    expected: Option<RemoteWriterFenceV1>,
+    event_id: &str,
+) -> RemoteProtocolRequestV1<RemoteReplayRequestV1> {
+    RemoteProtocolRequestV1::new(
+        RequestId::new(request_id).unwrap(),
+        BrainId::new("brain.remote").unwrap(),
+        BrainNodeId::new("node.remote").unwrap(),
+        1,
+        expected,
+        UtcMicros(50),
+        RemoteReplayRequestV1 {
+            event_id: event_id.to_owned(),
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_single_replay_of_an_acknowledged_frame_reports_its_stored_receipt() {
+    let frames = frames(2);
+    let authority = FakeAuthority::new(frames.clone(), BTreeSet::new());
+    let credential = OpaqueRemoteCredential::new(SECRET.to_vec()).unwrap();
+    let first = replay_pending(&authority, "request.remote-replay-pending").unwrap();
+    let stored = first.acknowledged[0].receipt.clone();
+    let expected = json!({"outcome": "already_acknowledged", "receipt": stored});
+
+    for request_id in [
+        "request.remote-replay-single",
+        "request.remote-replay-single-again",
+    ] {
+        let outcome = authority
+            .service()
+            .replay(
+                &single_request(request_id, Some(fence(1)), &frames[0].event_id),
+                &credential,
+            )
+            .expect("a single replay of an acknowledged frame answers with its receipt")
+            .outcome;
+        assert_eq!(
+            serde_json::to_value(&outcome).unwrap(),
+            expected,
+            "{request_id}"
+        );
+    }
+
+    let response = RemoteReplayProtocolAdapterV1::new(authority.service())
+        .execute(
+            single_request(
+                "request.remote-replay-single-protocol",
+                Some(fence(1)),
+                &frames[0].event_id,
+            ),
+            OpaqueRemoteCredential::new(SECRET.to_vec()).unwrap(),
+        )
+        .unwrap();
+    let envelope = response
+        .result
+        .expect("the protocol answers a resent replay with success");
+    let ApplicationOutcome::Effect(effect) = envelope.outcome else {
+        panic!("a replay answers with an effect");
+    };
+    assert_eq!(
+        serde_json::to_value(effect.payload.as_ref().unwrap()).unwrap(),
+        expected
+    );
+    assert_eq!(
+        effect.receipt.committed_state.as_ref(),
+        Some(
+            &first.acknowledged[0]
+                .replayed
+                .as_ref()
+                .unwrap()
+                .committed_effect_digest
+        ),
+        "the resent replay names the state the original replay committed"
+    );
+
+    assert_eq!(
+        authority.commits(),
+        2,
+        "a resent replay never commits again"
+    );
+    assert_eq!(
+        authority.state(&frames[0].event_id),
+        RemoteReplayStateV1::Acknowledged
+    );
+
+    authority
+        .rows
+        .lock()
+        .unwrap()
+        .get_mut(&frames[0].event_id)
+        .unwrap()
+        .state = RemoteReplayStateV1::GarbageCollectionEligible;
+    let outcome = authority
+        .service()
+        .replay(
+            &single_request(
+                "request.remote-replay-single-collectable",
+                Some(fence(1)),
+                &frames[0].event_id,
+            ),
+            &credential,
+        )
+        .expect("a collectable frame still answers with its receipt")
+        .outcome;
+    assert_eq!(serde_json::to_value(&outcome).unwrap(), expected);
+    assert_eq!(authority.commits(), 2);
+}
+
+#[test]
+fn a_single_replay_of_an_acknowledged_frame_still_checks_the_fence_and_credential() {
+    let frames = frames(1);
+    let authority = FakeAuthority::new(frames.clone(), BTreeSet::new());
+    replay_pending(&authority, "request.remote-replay-pending").unwrap();
+    let credential = OpaqueRemoteCredential::new(SECRET.to_vec()).unwrap();
+
+    let stale = authority
+        .service()
+        .replay(
+            &single_request(
+                "request.remote-replay-single-stale",
+                Some(fence(2)),
+                &frames[0].event_id,
+            ),
+            &credential,
+        )
+        .expect_err("a stale fence refuses before the stored receipt is reported");
+    assert!(
+        matches!(
+            stale,
+            RemoteReplayServiceErrorV1::ExpectedAuthorityMismatch(_)
+        ),
+        "{stale:?}"
+    );
+
+    let impostor = authority
+        .service()
+        .replay(
+            &single_request(
+                "request.remote-replay-single-impostor",
+                Some(fence(1)),
+                &frames[0].event_id,
+            ),
+            &OpaqueRemoteCredential::new([b'x'; 32].to_vec()).unwrap(),
+        )
+        .expect_err("an unauthenticated caller never reads the stored receipt");
+    assert_eq!(
+        impostor,
+        RemoteReplayServiceErrorV1::Replay(RemoteReplayApplicationErrorV1::Authentication(
+            RemoteAuthenticationError::InvalidCredential
+        ))
+    );
+    assert_eq!(authority.commits(), 1);
+    assert_eq!(
+        authority.state(&frames[0].event_id),
+        RemoteReplayStateV1::Acknowledged
     );
 }

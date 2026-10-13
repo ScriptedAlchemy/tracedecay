@@ -576,6 +576,9 @@ fn replay_result_valid(result: &RemoteReplayOutcomeV1, request: &RemoteReplayReq
         {
             operation_receipt
         }
+        RemoteReplayOutcomeV1::AlreadyAcknowledged { receipt } => {
+            return receipt.event_id == request.event_id;
+        }
         _ => return false,
     };
     operation_receipt.event_id == request.event_id && operation_receipt.validate().is_ok()
