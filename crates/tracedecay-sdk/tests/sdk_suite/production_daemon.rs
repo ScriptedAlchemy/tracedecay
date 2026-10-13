@@ -251,7 +251,7 @@ fn enrolled_remote_client_rejects_an_untrusted_private_authority_and_isolates_en
         &first_certificate,
         &first_private_key,
     );
-    let (mut second, _, second_remote) = spawn_remote_daemon(
+    let (mut second, second_authority, second_remote) = spawn_remote_daemon(
         &binary,
         &second_home,
         &second_profile,
@@ -299,6 +299,30 @@ fn enrolled_remote_client_rejects_an_untrusted_private_authority_and_isolates_en
     let enrollment_credential = *b"fedcba9876543210fedcba9876543210";
     let brain_id = BrainId::new(first_authority["brain_id"].as_str().unwrap()).unwrap();
     let node_id = BrainNodeId::new("node.remote-sdk-production").unwrap();
+    let foreign_brain = BrainId::new(second_authority["brain_id"].as_str().unwrap()).unwrap();
+    assert_ne!(foreign_brain, brain_id);
+    let foreign = remote_grant(
+        foreign_brain,
+        node_id.clone(),
+        project_id,
+        &grant_credential,
+    );
+    let refused = reqwest::blocking::Client::new()
+        .post(format!("{local_base}/remote-nodes/provision"))
+        .bearer_auth(local_token)
+        .header(reqwest::header::ORIGIN, &local_base)
+        .json(&json!({"grant": foreign, "admission": remote_admission(&foreign)}))
+        .send()
+        .unwrap();
+    assert_eq!(
+        (refused.status(), refused.json::<Value>().unwrap()),
+        (
+            reqwest::StatusCode::CONFLICT,
+            json!({"code": "brain_identity_conflict"})
+        ),
+        "a profile must refuse a grant for another profile's Brain as a typed identity conflict"
+    );
+
     let grant = remote_grant(brain_id, node_id, project_id, &grant_credential);
     let admission = remote_admission(&grant);
     let provisioned = reqwest::blocking::Client::new()
@@ -335,10 +359,29 @@ fn enrolled_remote_client_rejects_an_untrusted_private_authority_and_isolates_en
         REMOTE_TLS_ALTERNATE_ROOT_CERTIFICATE,
     )
     .unwrap();
-    assert!(matches!(
-        other_authority.enroll(&request, enrollment_credential),
-        Err(RemoteClientError::Protocol(_))
-    ));
+    let concealed = match other_authority.enroll(&request, enrollment_credential) {
+        Err(RemoteClientError::Problem(problem)) => problem,
+        other => panic!(
+            "an authority that never provisioned the grant must refuse with a typed problem: {:?}",
+            other.err()
+        ),
+    };
+    assert_eq!(
+        (
+            concealed.status,
+            concealed.kind.as_str(),
+            concealed.retry.as_str()
+        ),
+        (404, "not_found_or_not_authorized", "never")
+    );
+    assert_eq!(
+        (
+            &concealed.envelope["request_id"],
+            &concealed.envelope["binding_id"]
+        ),
+        (&json!("request.remote.unauthenticated"), &Value::Null),
+        "the refusal must stay concealed: no caller request identity, no binding"
+    );
 
     let enrolled = EnrolledRemoteClient::new_with_root_certificate(
         format!("https://{first_remote}/remote/"),

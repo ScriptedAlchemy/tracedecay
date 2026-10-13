@@ -37,6 +37,9 @@
 #                        read-only against shared fixtures, so this is safe
 #   TRACEDECAY_BIN       tracedecay binary (default: resolve from PATH)
 #   EVAL_OUT            directory to also copy scoreboard.json + report.md into
+#   LEARNED_SKILL_WORKFLOW  run only learned_skills/<workflow>'s held-out scenarios,
+#                        once per skill variant, on the full condition
+#   LEARNED_SKILL_VARIANTS  variants to compare (default: none generated manual)
 set -euo pipefail
 umask 077
 
@@ -67,6 +70,22 @@ for c in $CHANNELS; do
     *) echo "error: unknown CHANNELS condition '$c' (allowed: $KNOWN_CONDITIONS)" >&2; exit 2 ;;
   esac
 done
+
+LEARNED_SKILL_WORKFLOW="${LEARNED_SKILL_WORKFLOW:-}"
+LEARNED_SKILL_VARIANTS="${LEARNED_SKILL_VARIANTS:-none generated manual}"
+if [[ -n "$LEARNED_SKILL_WORKFLOW" ]]; then
+  if [[ ! "$LEARNED_SKILL_WORKFLOW" =~ ^[a-z0-9_]+$ || ! -d "$here/learned_skills/$LEARNED_SKILL_WORKFLOW" ]]; then
+    echo "error: unknown LEARNED_SKILL_WORKFLOW '$LEARNED_SKILL_WORKFLOW'" >&2; exit 2
+  fi
+  for v in $LEARNED_SKILL_VARIANTS; do
+    case "$v" in none|generated|manual) : ;;
+      *) echo "error: unknown learned-skill variant '$v' (allowed: none generated manual)" >&2; exit 2 ;;
+    esac
+  done
+  # The skill variant is the only independent variable; ablations would
+  # multiply runs without adding a comparison.
+  CHANNELS="full"
+fi
 
 # Fixed steering string used for the hermetic ablation conditions. It replaces
 # the user's ambient ~/.claude/CLAUDE.md (unreachable from the throwaway HOME)
@@ -211,13 +230,48 @@ copy_claude_endpoint_profile() {
 }
 
 scrub_auth_copies() {
-  rm -f "$CODEX_EVAL_CONFIG/auth.json" \
-    "$CLAUDE_EVAL_CONFIG/.credentials.json" \
-    "$CLAUDE_EVAL_CONFIG/credentials.json" \
-    "$CLAUDE_EVAL_CONFIG/settings.json"
+  # $CODEX_HOME is the isolated daemon's (pinned by the re-entry check), where
+  # learned-skill generation puts the writer's auth.
+  rm -f "$CODEX_EVAL_CONFIG/auth.json" "$CODEX_HOME/auth.json"
+  local d
+  for d in "$work"/host-homes/claude*/.claude; do
+    rm -f "$d/.credentials.json" "$d/credentials.json" "$d/settings.json"
+  done
 }
 trap scrub_auth_copies EXIT
 trap 'exit 130' INT TERM HUP
+
+# Learned-skill variants: each gets its own Claude HOME so concurrent runs
+# cannot see another variant's skill. The skill lands where production
+# materialization puts it: the host user skill dir, $HOME/.claude/skills/<slug>/.
+declare -A VARIANT_HOME=() VARIANT_SKILL=()
+ACTIVE_VARIANTS=""
+prepare_learned_variants() {
+  local pack="$here/learned_skills/$LEARNED_SKILL_WORKFLOW" v home skill_md slug
+  for v in $LEARNED_SKILL_VARIANTS; do
+    skill_md=""
+    if [[ "$v" != "none" ]]; then
+      skill_md="$(compgen -G "$pack/$v/*/SKILL.md" | head -1 || true)"
+      if [[ -z "$skill_md" ]]; then
+        echo "skip variant $v: no learned_skills/$LEARNED_SKILL_WORKFLOW/$v/<slug>/SKILL.md" \
+          "(generate it with evals/agent_adoption/generate_learned_skill.sh $LEARNED_SKILL_WORKFLOW)"
+        continue
+      fi
+    fi
+    home="$work/host-homes/claude-v-$v"
+    mkdir -p "$home/.claude"
+    slug=""
+    if [[ -n "$skill_md" ]]; then
+      slug="$(basename "$(dirname "$skill_md")")"
+      mkdir -p "$home/.claude/skills/$slug"
+      cp "$skill_md" "$home/.claude/skills/$slug/SKILL.md"
+    fi
+    VARIANT_HOME[$v]="$home"
+    VARIANT_SKILL[$v]="$slug"
+    ACTIVE_VARIANTS+=" $v"
+  done
+}
+[[ -n "$LEARNED_SKILL_WORKFLOW" ]] && prepare_learned_variants
 
 prepare_host_profiles() {
   # Candidate assets install only into the throwaway Codex profile. Auth is
@@ -231,16 +285,16 @@ prepare_host_profiles() {
     copy_auth_readonly "$REAL_CODEX_HOME/auth.json" "$CODEX_EVAL_CONFIG/auth.json"
   fi
   if [[ " $HOSTS " == *" claude "* ]]; then
-    copy_auth_readonly "$REAL_CLAUDE_CONFIG/.credentials.json" \
-      "$CLAUDE_EVAL_CONFIG/.credentials.json"
-    copy_auth_readonly "$REAL_CLAUDE_CONFIG/credentials.json" \
-      "$CLAUDE_EVAL_CONFIG/credentials.json"
-    copy_claude_endpoint_profile "$REAL_CLAUDE_CONFIG/settings.json" \
-      "$CLAUDE_EVAL_CONFIG/settings.json"
+    local d
+    for d in "$work"/host-homes/claude*/.claude; do
+      copy_auth_readonly "$REAL_CLAUDE_CONFIG/.credentials.json" "$d/.credentials.json"
+      copy_auth_readonly "$REAL_CLAUDE_CONFIG/credentials.json" "$d/credentials.json"
+      copy_claude_endpoint_profile "$REAL_CLAUDE_CONFIG/settings.json" "$d/settings.json"
+    done
   fi
 }
 
-if [[ "$live" == "1" ]]; then
+if [[ "$live" == "1" && -z "${LEARNED_SKILL_GENERATE:-}" ]]; then
   prepare_host_profiles
 fi
 echo "work dir:     $work"
@@ -248,6 +302,9 @@ echo "run dir:      $run_dir"
 echo "tracedecay:   $TD ($("$TD" --version 2>/dev/null | head -1))"
 echo "hosts:        $HOSTS   live=$live"
 echo "channels:     $CHANNELS"
+if [[ -n "$LEARNED_SKILL_WORKFLOW" ]]; then
+  echo "learned:      $LEARNED_SKILL_WORKFLOW variants=[${ACTIVE_VARIANTS# }]"
+fi
 "$TD" disable-upload-counter >/dev/null 2>&1 || true
 
 # ---- build fixtures -------------------------------------------------------- #
@@ -291,6 +348,10 @@ fixture_main="$work/fixture-main"
 fixture_broken="$work/fixture-broken"
 echo "indexing fixture-main (with seeded git history)..."
 build_fixture "$fixture_main" clean history
+if [[ -n "${LEARNED_SKILL_GENERATE:-}" ]]; then
+  source "$here/generate_learned_skill.sh"
+  exit 0
+fi
 echo "indexing fixture-broken..."
 build_fixture "$fixture_broken" broken
 
@@ -403,14 +464,17 @@ claude_extra_for() {
 }
 
 # ---- select scenarios ------------------------------------------------------ #
-python3 - "$EVAL_SCENARIOS_DIR" "${SCENARIOS:-}" "${EVAL_INCLUDE_DEFERRED:-0}" > "$work/selected.tsv" <<'PY'
+python3 - "$EVAL_SCENARIOS_DIR" "${SCENARIOS:-}" "${EVAL_INCLUDE_DEFERRED:-0}" "$LEARNED_SKILL_WORKFLOW" > "$work/selected.tsv" <<'PY'
 import json, os, sys
-sdir, filt, incl_def = sys.argv[1], sys.argv[2].split(), sys.argv[3] == "1"
+sdir, filt, incl_def, workflow = sys.argv[1], sys.argv[2].split(), sys.argv[3] == "1", sys.argv[4]
 for fn in sorted(os.listdir(sdir)):
     if not fn.endswith(".json"):
         continue
     s = json.load(open(os.path.join(sdir, fn)))
-    if s.get("status") == "deferred" and not incl_def:
+    if workflow:
+        if (s.get("learned_skill") or {}).get("workflow") != workflow:
+            continue
+    elif s.get("status") == "learned" or (s.get("status") == "deferred" and not incl_def):
         continue
     if filt and s["id"] not in filt:
         continue
@@ -422,9 +486,9 @@ PY
 # ---- run each scenario x host x condition ---------------------------------- #
 run_claude() {
   # Uses the global CLAUDE_EXTRA array set by claude_extra_for.
-  local prompt="$1" fixture="$2" out="$3" err="$4" model="$5"
+  local prompt="$1" fixture="$2" out="$3" err="$4" model="$5" home="$6"
   local allowed="Read,Glob,Grep,Task,Agent,Skill,mcp__tracedecay__*,mcp__plugin_tracedecay_graph__*,Bash(tracedecay tool *),Bash($TD tool *)"
-  ( cd "$fixture" && HOME="$CLAUDE_EVAL_HOME" CLAUDE_CONFIG_DIR="$CLAUDE_EVAL_CONFIG" PATH="$EVAL_PATH" \
+  ( cd "$fixture" && HOME="$home" CLAUDE_CONFIG_DIR="$home/.claude" PATH="$EVAL_PATH" \
       timeout "$SCENARIO_TIMEOUT" claude -p "$prompt" \
       --output-format stream-json --verbose \
       --model "$model" \
@@ -453,25 +517,29 @@ out_base_for() {
 # One live scenario x host x model x condition x repetition. Runs in a
 # background subshell when PARALLEL > 1, so it must not mutate shared state.
 run_one() {
-  local cond="$1" sid="$2" host="$3" fixture="$4" prompt="$5" model="$6" base="$7"
-  local fdir out err start end rc=0 timed_out=false
+  local cond="$1" sid="$2" host="$3" fixture="$4" prompt="$5" model="$6" base="$7" variant="$8"
+  local fdir out err start end rc=0 timed_out=false home="$CLAUDE_EVAL_HOME" learned=""
+  if [[ -n "$variant" ]]; then
+    home="${VARIANT_HOME[$variant]}"
+    learned=",\"learned_skill_variant\":\"$variant\",\"learned_skill_id\":\"${VARIANT_SKILL[$variant]}\""
+  fi
   fdir="$(fixture_dir_for "$fixture")"
   out="$run_dir/${base}.stdout.jsonl"
   err="$run_dir/${base}.stderr.log"
-  echo "RUN  $sid [$host/$model/$cond] ..."
+  echo "RUN  $sid [$host/$model/$cond${variant:+/v-$variant}] ..."
   start=$(date +%s)
   if [[ "$host" == "claude" ]]; then
     claude_extra_for "$cond" "$fdir"
-    run_claude "$prompt" "$fdir" "$out" "$err" "$model" || rc=$?
+    run_claude "$prompt" "$fdir" "$out" "$err" "$model" "$home" || rc=$?
   else
     run_codex "$prompt" "$fdir" "$out" "$err" "$model" || rc=$?
   fi
   end=$(date +%s)
   [[ $rc -eq 124 ]] && timed_out=true
   cat > "$run_dir/${base}.meta.json" <<JSON
-{"scenario_id":"$sid","host":"$host","model":"$model","fixture":"$fixture","channel_condition":"$cond","exit_code":$rc,"duration_s":$((end-start)),"timed_out":$timed_out}
+{"scenario_id":"$sid","host":"$host","model":"$model","fixture":"$fixture","channel_condition":"$cond","exit_code":$rc,"duration_s":$((end-start)),"timed_out":$timed_out$learned}
 JSON
-  echo "     $sid [$host/$model/$cond] rc=$rc dur=$((end-start))s bytes=$(wc -c <"$out")"
+  echo "     $sid [$host/$model/$cond${variant:+/v-$variant}] rc=$rc dur=$((end-start))s bytes=$(wc -c <"$out")"
 }
 
 for cond in $CHANNELS; do
@@ -492,12 +560,16 @@ while IFS=$'\t' read -r sid host fixture prompt; do
   else
     models="$CODEX_MODELS"
   fi
+  variants=("")
+  [[ -n "$LEARNED_SKILL_WORKFLOW" ]] && read -ra variants <<<"$ACTIVE_VARIANTS"
   for model in $models; do
+  for variant in "${variants[@]}"; do
   for ((rep = 1; rep <= REPS; rep++)); do
   base="$(out_base_for "$cond" "$sid" "$host" "$model")"
+  [[ -n "$variant" ]] && base="${base}__v-${variant}"
   [[ "$REPS" -gt 1 ]] && base="${base}__r${rep}"
   if [[ "$live" != "1" ]]; then
-    echo "DRY  $sid [$host/$model/$cond] fixture=$fixture"
+    echo "DRY  $sid [$host/$model/$cond${variant:+/v-$variant}] fixture=$fixture${variant:+ skill=${VARIANT_SKILL[$variant]:-none}}"
     if [[ "$host" == "claude" ]]; then claude_extra_for "$cond" "$fdir"; fi
     echo "     cwd=$fdir model=$model extra=[${CLAUDE_EXTRA[*]:-}] prompt=\"$prompt\"" >"$run_dir/${base}.stderr.log"
     : >"$run_dir/${base}.stdout.jsonl"
@@ -505,10 +577,11 @@ while IFS=$'\t' read -r sid host fixture prompt; do
   fi
   if [[ "$PARALLEL" -gt 1 ]]; then
     while (( $(jobs -rp | wc -l) >= PARALLEL )); do wait -n || true; done
-    run_one "$cond" "$sid" "$host" "$fixture" "$prompt" "$model" "$base" &
+    run_one "$cond" "$sid" "$host" "$fixture" "$prompt" "$model" "$base" "$variant" &
   else
-    run_one "$cond" "$sid" "$host" "$fixture" "$prompt" "$model" "$base"
+    run_one "$cond" "$sid" "$host" "$fixture" "$prompt" "$model" "$base" "$variant"
   fi
+  done
   done
   done
 done < "$work/selected.tsv"

@@ -681,34 +681,6 @@ impl SessionRefreshReceiptV1 {
     pub const fn terminal_at(&self) -> UtcMicros {
         self.terminal_at
     }
-
-    /// Terminal receipts must preserve identity and never regress committed
-    /// progress. Complete additionally requires a fully committed frontier.
-    pub fn validate_transition_from(
-        &self,
-        progress: &SessionRefreshProgressV1,
-    ) -> SessionStoreResult<()> {
-        if self.operation_id != progress.operation_id || self.session_id != progress.session_id {
-            return Err(SessionStoreError::ReceiptIdentityMismatch {
-                context: "refresh terminal transition",
-            });
-        }
-        if self.frontier.observed_through != progress.frontier.observed_through
-            || self.frontier.committed_through < progress.frontier.committed_through
-            || self.terminal_at < progress.updated_at
-            || !source_coverage_is_successor(
-                progress.source_coverage.as_ref(),
-                self.source_coverage.as_ref(),
-            )
-            || (self.state == SessionRefreshTerminalStateV1::Complete
-                && !self.frontier.is_complete())
-        {
-            return Err(SessionStoreError::InvalidStateTransition {
-                context: "refresh terminal transition",
-            });
-        }
-        Ok(())
-    }
 }
 
 /// Query for one terminal refresh receipt.

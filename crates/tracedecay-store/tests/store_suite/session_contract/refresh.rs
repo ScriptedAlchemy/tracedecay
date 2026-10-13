@@ -230,7 +230,7 @@ fn refresh_frontiers_and_progress_are_monotonic_and_terminal() {
     // than deferred to a SQLite constraint abort the caller reads as storage.
     let stalled = SessionRefreshProgressV1::new(
         operation_id(),
-        session_id.clone(),
+        session_id,
         SessionRefreshFrontierV1::new(10, 8).unwrap(),
         coverage(),
         2,
@@ -243,16 +243,4 @@ fn refresh_frontiers_and_progress_are_monotonic_and_terminal() {
             context: "refresh progress successor"
         })
     ));
-
-    let terminal = SessionRefreshReceiptV1::completed(
-        SessionRefreshCompletionRequestV1::new(
-            operation_id(),
-            session_id,
-            SessionRefreshFrontierV1::new(10, 10).unwrap(),
-            coverage(),
-        )
-        .unwrap(),
-        UtcMicros(102),
-    );
-    assert!(terminal.validate_transition_from(&initial).is_ok());
 }

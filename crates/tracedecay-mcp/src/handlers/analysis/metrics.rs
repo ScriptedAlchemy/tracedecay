@@ -41,40 +41,35 @@ pub(super) async fn compute_rank(
     };
     let (mut symbols, edges) = {
         let _span = tracing::trace_span!("mcp.analysis.rank.graph").entered();
-        {
-            let symbols = verified_analysis_symbols(graph, path_prefix)?;
-            let edges = verified_analysis_edges(graph, &symbols, &[relation_kind])?;
-            (symbols, edges)
-        }
+        let symbols = verified_analysis_symbols(graph, path_prefix)?;
+        let edges = verified_analysis_edges(graph, &symbols, &[relation_kind])?;
+        (symbols, edges)
     };
     let (symbols, counts) = {
         let _span = tracing::trace_span!("mcp.analysis.rank.compute").entered();
-        {
-            let mut counts = HashMap::<SymbolOccurrenceId, u64>::new();
-            for edge in edges {
-                let occurrence = if incoming {
-                    edge.to_occurrence
-                } else {
-                    edge.from_occurrence
-                };
-                *counts.entry(occurrence).or_default() += 1;
-            }
-            if let Some(kind) = node_kind {
-                symbols.retain(|symbol| {
-                    NodeKind::from_str(&symbol.metadata.kind).as_ref() == Some(&kind)
-                });
-            }
-            symbols.sort_by(|left, right| {
-                counts
-                    .get(&right.occurrence)
-                    .copied()
-                    .unwrap_or(0)
-                    .cmp(&counts.get(&left.occurrence).copied().unwrap_or(0))
-                    .then_with(|| left.occurrence.cmp(&right.occurrence))
-            });
-            symbols.truncate(limit);
-            (symbols, counts)
+        let mut counts = HashMap::<SymbolOccurrenceId, u64>::new();
+        for edge in edges {
+            let occurrence = if incoming {
+                edge.to_occurrence
+            } else {
+                edge.from_occurrence
+            };
+            *counts.entry(occurrence).or_default() += 1;
         }
+        if let Some(kind) = node_kind {
+            symbols
+                .retain(|symbol| NodeKind::from_str(&symbol.metadata.kind).as_ref() == Some(&kind));
+        }
+        symbols.sort_by(|left, right| {
+            counts
+                .get(&right.occurrence)
+                .copied()
+                .unwrap_or(0)
+                .cmp(&counts.get(&left.occurrence).copied().unwrap_or(0))
+                .then_with(|| left.occurrence.cmp(&right.occurrence))
+        });
+        symbols.truncate(limit);
+        (symbols, counts)
     };
     let touched_files = unique_file_paths(symbols.iter().map(|symbol| symbol.path.as_str()));
     let ranking: Vec<RankEntryV1> = symbols
@@ -122,22 +117,19 @@ pub(super) async fn compute_largest(
     };
     let symbols = {
         let _span = tracing::trace_span!("mcp.analysis.largest.compute").entered();
-        {
-            if let Some(kind) = node_kind {
-                symbols.retain(|symbol| {
-                    NodeKind::from_str(&symbol.metadata.kind).as_ref() == Some(&kind)
-                });
-            }
-            symbols.sort_by(|left, right| {
-                right
-                    .metadata
-                    .line_span
-                    .cmp(&left.metadata.line_span)
-                    .then_with(|| left.occurrence.cmp(&right.occurrence))
-            });
-            symbols.truncate(limit);
+        if let Some(kind) = node_kind {
             symbols
+                .retain(|symbol| NodeKind::from_str(&symbol.metadata.kind).as_ref() == Some(&kind));
         }
+        symbols.sort_by(|left, right| {
+            right
+                .metadata
+                .line_span
+                .cmp(&left.metadata.line_span)
+                .then_with(|| left.occurrence.cmp(&right.occurrence))
+        });
+        symbols.truncate(limit);
+        symbols
     };
     let touched_files = unique_file_paths(symbols.iter().map(|symbol| symbol.path.as_str()));
     let ranking: Vec<LargestEntryV1> = symbols
@@ -177,50 +169,46 @@ pub(super) async fn compute_coupling(
 
     let (symbols, edges) = {
         let _span = tracing::trace_span!("mcp.analysis.coupling.graph").entered();
-        {
-            let symbols = verified_analysis_symbols(graph, path_prefix)?;
-            let edges = verified_analysis_edges(graph, &symbols, &[])?;
-            (symbols, edges)
-        }
+        let symbols = verified_analysis_symbols(graph, path_prefix)?;
+        let edges = verified_analysis_edges(graph, &symbols, &[])?;
+        (symbols, edges)
     };
     let results = {
         let _span = tracing::trace_span!("mcp.analysis.coupling.compute").entered();
-        {
-            let paths = symbols
-                .iter()
-                .map(|symbol| (symbol.occurrence.clone(), symbol.path.clone()))
-                .collect::<HashMap<_, _>>();
-            let mut coupled = HashMap::<String, HashSet<String>>::new();
-            for edge in edges {
-                let (Some(source), Some(target)) = (
-                    paths.get(&edge.from_occurrence),
-                    paths.get(&edge.to_occurrence),
-                ) else {
-                    return Err(verified_analysis_unavailable(
-                        "coupling",
-                        "a relation endpoint is absent from the admitted symbol census",
-                    ));
+        let paths = symbols
+            .iter()
+            .map(|symbol| (symbol.occurrence.clone(), symbol.path.clone()))
+            .collect::<HashMap<_, _>>();
+        let mut coupled = HashMap::<String, HashSet<String>>::new();
+        for edge in edges {
+            let (Some(source), Some(target)) = (
+                paths.get(&edge.from_occurrence),
+                paths.get(&edge.to_occurrence),
+            ) else {
+                return Err(verified_analysis_unavailable(
+                    "coupling",
+                    "a relation endpoint is absent from the admitted symbol census",
+                ));
+            };
+            if source != target {
+                let (key, value) = if fan_in {
+                    (target, source)
+                } else {
+                    (source, target)
                 };
-                if source != target {
-                    let (key, value) = if fan_in {
-                        (target, source)
-                    } else {
-                        (source, target)
-                    };
-                    coupled
-                        .entry(key.clone())
-                        .or_default()
-                        .insert(value.clone());
-                }
+                coupled
+                    .entry(key.clone())
+                    .or_default()
+                    .insert(value.clone());
             }
-            let mut results = coupled
-                .into_iter()
-                .map(|(path, related)| (path, related.len()))
-                .collect::<Vec<_>>();
-            results.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-            results.truncate(limit);
-            results
         }
+        let mut results = coupled
+            .into_iter()
+            .map(|(path, related)| (path, related.len()))
+            .collect::<Vec<_>>();
+        results.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+        results.truncate(limit);
+        results
     };
     let ranking: Vec<CouplingEntryV1> = results
         .into_iter()
@@ -257,40 +245,36 @@ pub(super) async fn compute_inheritance_depth(
 
     let (mut symbols, edges) = {
         let _span = tracing::trace_span!("mcp.analysis.inheritance_depth.graph").entered();
-        {
-            let symbols = verified_analysis_symbols(graph, path_prefix)?;
-            let edges = verified_analysis_edges(graph, &symbols, &[RelationEdgeKindV1::Extends])?;
-            (symbols, edges)
-        }
+        let symbols = verified_analysis_symbols(graph, path_prefix)?;
+        let edges = verified_analysis_edges(graph, &symbols, &[RelationEdgeKindV1::Extends])?;
+        (symbols, edges)
     };
     let (symbols, memo) = {
         let _span = tracing::trace_span!("mcp.analysis.inheritance_depth.compute").entered();
-        {
-            let mut parents = HashMap::<SymbolOccurrenceId, Vec<SymbolOccurrenceId>>::new();
-            let mut hierarchy_symbols = HashSet::new();
-            for edge in edges {
-                hierarchy_symbols.insert(edge.from_occurrence.clone());
-                hierarchy_symbols.insert(edge.to_occurrence.clone());
-                parents
-                    .entry(edge.from_occurrence)
-                    .or_default()
-                    .push(edge.to_occurrence);
-            }
-            symbols.retain(|symbol| hierarchy_symbols.contains(&symbol.occurrence));
-            let mut memo = HashMap::<SymbolOccurrenceId, u64>::new();
-            for symbol in &symbols {
-                inheritance_depth(&symbol.occurrence, &parents, &mut HashSet::new(), &mut memo)?;
-            }
-            symbols.sort_by(|left, right| {
-                memo.get(&right.occurrence)
-                    .copied()
-                    .unwrap_or(0)
-                    .cmp(&memo.get(&left.occurrence).copied().unwrap_or(0))
-                    .then_with(|| left.occurrence.cmp(&right.occurrence))
-            });
-            symbols.truncate(limit);
-            (symbols, memo)
+        let mut parents = HashMap::<SymbolOccurrenceId, Vec<SymbolOccurrenceId>>::new();
+        let mut hierarchy_symbols = HashSet::new();
+        for edge in edges {
+            hierarchy_symbols.insert(edge.from_occurrence.clone());
+            hierarchy_symbols.insert(edge.to_occurrence.clone());
+            parents
+                .entry(edge.from_occurrence)
+                .or_default()
+                .push(edge.to_occurrence);
         }
+        symbols.retain(|symbol| hierarchy_symbols.contains(&symbol.occurrence));
+        let mut memo = HashMap::<SymbolOccurrenceId, u64>::new();
+        for symbol in &symbols {
+            inheritance_depth(&symbol.occurrence, &parents, &mut HashSet::new(), &mut memo)?;
+        }
+        symbols.sort_by(|left, right| {
+            memo.get(&right.occurrence)
+                .copied()
+                .unwrap_or(0)
+                .cmp(&memo.get(&left.occurrence).copied().unwrap_or(0))
+                .then_with(|| left.occurrence.cmp(&right.occurrence))
+        });
+        symbols.truncate(limit);
+        (symbols, memo)
     };
     let touched_files = unique_file_paths(symbols.iter().map(|symbol| symbol.path.as_str()));
     let ranking: Vec<InheritanceDepthEntryV1> = symbols
@@ -356,68 +340,59 @@ pub(super) async fn compute_distribution(
         verified_analysis_symbols(graph, path_prefix)?
     };
     let view = if request.summary.unwrap_or(false) {
-        {
-            let _span = tracing::trace_span!("mcp.analysis.distribution.compute").entered();
-            {
-                let mut totals = HashMap::<String, u64>::new();
-                for symbol in &symbols {
-                    *totals.entry(symbol.metadata.kind.clone()).or_default() += 1;
-                }
-                let mut sorted = totals.into_iter().collect::<Vec<_>>();
-                sorted
-                    .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-                let distribution = sorted
+        let _span = tracing::trace_span!("mcp.analysis.distribution.compute").entered();
+        let mut totals = HashMap::<String, u64>::new();
+        for symbol in &symbols {
+            *totals.entry(symbol.metadata.kind.clone()).or_default() += 1;
+        }
+        let mut sorted = totals.into_iter().collect::<Vec<_>>();
+        sorted.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+        let distribution = sorted
+            .into_iter()
+            .map(|(kind, count)| DistributionKindCountV1 { kind, count })
+            .collect::<Vec<_>>();
+        DistributionViewV1::Summary {
+            total_kinds: distribution.len() as u64,
+            distribution,
+        }
+    } else {
+        let _span = tracing::trace_span!("mcp.analysis.distribution.compute").entered();
+        let file_limit = request.limit.map_or(100, |v| v.clamp(1, 1000) as usize);
+        let mut counts = HashMap::<String, HashMap<String, u64>>::new();
+        for symbol in &symbols {
+            *counts
+                .entry(symbol.path.clone())
+                .or_default()
+                .entry(symbol.metadata.kind.clone())
+                .or_default() += 1;
+        }
+        let total_file_count = counts.len() as u64;
+        let mut by_file = counts.into_iter().collect::<Vec<_>>();
+        by_file.sort_by(|left, right| {
+            let left_count = left.1.values().copied().sum::<u64>();
+            let right_count = right.1.values().copied().sum::<u64>();
+            right_count
+                .cmp(&left_count)
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        by_file.truncate(file_limit);
+        let files: Vec<DistributionFileV1> = by_file
+            .into_iter()
+            .map(|(file, counts)| {
+                let mut kinds = counts
                     .into_iter()
                     .map(|(kind, count)| DistributionKindCountV1 { kind, count })
                     .collect::<Vec<_>>();
-                DistributionViewV1::Summary {
-                    total_kinds: distribution.len() as u64,
-                    distribution,
-                }
-            }
-        }
-    } else {
-        {
-            let _span = tracing::trace_span!("mcp.analysis.distribution.compute").entered();
-            {
-                let file_limit = request.limit.map_or(100, |v| v.clamp(1, 1000) as usize);
-                let mut counts = HashMap::<String, HashMap<String, u64>>::new();
-                for symbol in &symbols {
-                    *counts
-                        .entry(symbol.path.clone())
-                        .or_default()
-                        .entry(symbol.metadata.kind.clone())
-                        .or_default() += 1;
-                }
-                let total_file_count = counts.len() as u64;
-                let mut by_file = counts.into_iter().collect::<Vec<_>>();
-                by_file.sort_by(|left, right| {
-                    let left_count = left.1.values().copied().sum::<u64>();
-                    let right_count = right.1.values().copied().sum::<u64>();
-                    right_count
-                        .cmp(&left_count)
-                        .then_with(|| left.0.cmp(&right.0))
-                });
-                by_file.truncate(file_limit);
-                let files: Vec<DistributionFileV1> = by_file
-                    .into_iter()
-                    .map(|(file, counts)| {
-                        let mut kinds = counts
-                            .into_iter()
-                            .map(|(kind, count)| DistributionKindCountV1 { kind, count })
-                            .collect::<Vec<_>>();
-                        kinds.sort_by(|left, right| left.kind.cmp(&right.kind));
-                        DistributionFileV1 { file, kinds }
-                    })
-                    .collect();
-                let file_count = files.len() as u64;
-                DistributionViewV1::PerFile {
-                    file_count,
-                    total_file_count,
-                    omitted_file_count: total_file_count.saturating_sub(file_count),
-                    files,
-                }
-            }
+                kinds.sort_by(|left, right| left.kind.cmp(&right.kind));
+                DistributionFileV1 { file, kinds }
+            })
+            .collect();
+        let file_count = files.len() as u64;
+        DistributionViewV1::PerFile {
+            file_count,
+            total_file_count,
+            omitted_file_count: total_file_count.saturating_sub(file_count),
+            files,
         }
     };
 

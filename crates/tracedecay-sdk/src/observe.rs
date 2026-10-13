@@ -86,6 +86,7 @@ pub(crate) fn record_remote_error(error: &RemoteClientError) {
         RemoteClientError::Configuration(_) => "configuration",
         RemoteClientError::Transport(_) => "transport",
         RemoteClientError::Protocol(_) => "protocol",
+        RemoteClientError::Problem(problem) => problem_kind_name(&problem.kind),
     };
     tracing::trace!(name: "sdk.http.error_class", value = ?class);
 }

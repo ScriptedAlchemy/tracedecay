@@ -183,6 +183,48 @@ def lint_scenarios(scenarios: dict) -> list[str]:
     return problems
 
 
+LEARNED_SKILLS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "learned_skills")
+
+
+def session_user_prompts(sessions_dir: str) -> list[str]:
+    prompts = []
+    for fn in sorted(os.listdir(sessions_dir)):
+        if not fn.endswith(".jsonl"):
+            continue
+        with open(os.path.join(sessions_dir, fn)) as f:
+            for ln in f:
+                obj = json.loads(ln) if ln.strip() else {}
+                if obj.get("type") == "user":
+                    prompts.append("\n".join(_string_leaves((obj.get("message") or {}).get("content"))))
+    return prompts
+
+
+def lint_learned_skills(scenarios: dict, learned_root: str = LEARNED_SKILLS_DIR) -> list[str]:
+    """Held-out prompts must not reuse the generation evidence they are scored against."""
+    def norm(text: str) -> str:
+        return " ".join(text.lower().split())
+
+    problems = []
+    for sid in sorted(scenarios):
+        learned = scenarios[sid].get("learned_skill")
+        if learned is None:
+            continue
+        workflow = learned.get("workflow") if isinstance(learned, dict) else None
+        sessions = os.path.join(learned_root, str(workflow), "sessions")
+        if not (isinstance(workflow, str) and re.fullmatch(r"[a-z0-9_]+", workflow)
+                and os.path.isdir(sessions)):
+            problems.append(f"{sid}: unknown learned-skill workflow {workflow!r}")
+            continue
+        if not isinstance(learned.get("expected"), bool):
+            problems.append(f"{sid}: learned_skill.expected must be true or false")
+        prompt = norm(scenarios[sid].get("prompt", ""))
+        for seen in map(norm, session_user_prompts(sessions)):
+            if seen and (prompt in seen or seen in prompt):
+                problems.append(f"{sid}: prompt overlaps a {workflow} generation session")
+                break
+    return problems
+
+
 # --------------------------------------------------------------------------- #
 # Normalization
 # --------------------------------------------------------------------------- #
@@ -224,6 +266,20 @@ def tool_call(seq: int, raw_name: str, inp: dict) -> ToolCall:
     return call
 
 
+COST_KEYS = (
+    "input_tokens", "output_tokens", "cache_read_input_tokens",
+    "cache_creation_input_tokens", "total_cost_usd", "num_turns", "duration_ms",
+)
+
+
+def cost_record(**values) -> dict:
+    """Per-transcript cost; a value the host did not report stays None (unknown), never 0."""
+    cost = {key: values.get(key) for key in COST_KEYS}
+    tokens = [cost[key] for key in COST_KEYS[:4]]
+    cost["total_tokens"] = sum(tokens) if all(isinstance(t, (int, float)) for t in tokens) else None
+    return cost
+
+
 @dataclass
 class Transcript:
     tools: list[ToolCall]
@@ -234,6 +290,8 @@ class Transcript:
     # discovery-channel attribution. Each entry is either
     #   {"kind": "tool", "call": ToolCall} or {"kind": "ctx", "text": str}
     timeline: list[dict] = field(default_factory=list)
+    tool_errors: int = 0
+    cost: dict = field(default_factory=lambda: cost_record())
 
     @property
     def meaningful(self) -> list[ToolCall]:
@@ -298,6 +356,8 @@ def parse_claude(lines: list[str], host: str) -> Transcript:
     final_text = ""
     seq = 0
     last_assistant_text = ""
+    tool_errors = 0
+    cost = cost_record()
     for ln in lines:
         ln = ln.strip()
         if not ln:
@@ -333,13 +393,25 @@ def parse_claude(lines: list[str], host: str) -> Transcript:
             blob = "\n".join(_string_leaves(obj.get("message") or obj))
             if blob.strip():
                 timeline.append({"kind": "ctx", "text": blob})
+            content = (obj.get("message") or {}).get("content")
+            if isinstance(content, list):
+                tool_errors += sum(
+                    1 for item in content
+                    if isinstance(item, dict) and item.get("type") == "tool_result"
+                    and item.get("is_error") is True
+                )
         elif typ == "result":
             r = obj.get("result")
             if isinstance(r, str) and r.strip():
                 final_text = r
+            cost = cost_record(**{
+                **(obj.get("usage") or {}),
+                **{key: obj.get(key) for key in ("total_cost_usd", "num_turns", "duration_ms")},
+            })
     if not final_text:
         final_text = last_assistant_text
-    return Transcript(tools, final_text, host, timeline=timeline)
+    return Transcript(tools, final_text, host, timeline=timeline,
+                      tool_errors=tool_errors, cost=cost)
 
 
 def parse_codex(lines: list[str], host: str) -> Transcript:
@@ -354,6 +426,8 @@ def parse_codex(lines: list[str], host: str) -> Transcript:
     final_text = ""
     seq = 0
     seen_item_ids: set[str] = set()
+    tool_errors = 0
+    turn_usages: list[dict] = []
     for ln in lines:
         ln = ln.strip()
         if not ln:
@@ -372,6 +446,12 @@ def parse_codex(lines: list[str], host: str) -> Transcript:
             msg = obj.get("msg") if isinstance(obj.get("msg"), dict) else obj
         t = msg.get("type") or outer_type
         item_id = str(msg.get("id") or "") if item_envelope else ""
+        if outer_type == "item.completed" and item_envelope and (
+            msg.get("status") == "failed"
+            or (t == "command_execution" and msg.get("exit_code") not in (0, None))
+            or (t == "mcp_tool_call" and msg.get("error"))
+        ):
+            tool_errors += 1
 
         def _add_tool(tc: ToolCall):
             nonlocal seq
@@ -426,6 +506,8 @@ def parse_codex(lines: list[str], host: str) -> Transcript:
             txt = msg.get("message") or msg.get("text") or msg.get("content")
             if isinstance(txt, str) and txt.strip():
                 final_text = txt
+        elif t == "turn.completed":
+            turn_usages.append(obj.get("usage") or {})
         else:
             # Generic fallback: any object exposing a tool name + args.
             raw = msg.get("name")
@@ -443,7 +525,20 @@ def parse_codex(lines: list[str], host: str) -> Transcript:
                 blob = "\n".join(_string_leaves(msg))
                 if blob.strip():
                     timeline.append({"kind": "ctx", "text": blob})
-    return Transcript(tools, final_text, host, timeline=timeline)
+    cost = cost_record()
+    if turn_usages:
+        def summed(key):
+            vals = [u.get(key) for u in turn_usages]
+            return sum(vals) if all(isinstance(v, (int, float)) for v in vals) else None
+
+        cost = cost_record(input_tokens=summed("input_tokens"), output_tokens=summed("output_tokens"),
+                           cache_read_input_tokens=summed("cached_input_tokens"),
+                           num_turns=len(turn_usages))
+        # Codex input_tokens already include cached_input_tokens.
+        if cost["input_tokens"] is not None and cost["output_tokens"] is not None:
+            cost["total_tokens"] = cost["input_tokens"] + cost["output_tokens"]
+    return Transcript(tools, final_text, host, timeline=timeline,
+                      tool_errors=tool_errors, cost=cost)
 
 
 def load_transcript_lines(lines: list[str], host: str) -> Transcript:
@@ -526,6 +621,37 @@ def invoked_skills(tr: Transcript) -> list[str]:
         for value in values:
             skills.update(re.findall(r"tracedecay:([a-z][a-z0-9-]*)", value))
     return sorted(skills)
+
+
+def user_skill_invoked(tr: Transcript, skill_id: str) -> bool:
+    """True when a host Skill call names this un-namespaced user skill exactly."""
+    return any(
+        call.canon == "Skill" and skill_id in (s.strip() for s in _string_leaves(call.input))
+        for call in tr.tools
+    )
+
+
+def learned_skill_routing(learned: dict, tr: Transcript, run_meta: dict) -> dict:
+    variant = run_meta.get("learned_skill_variant")
+    skill_id = run_meta.get("learned_skill_id")
+    if not variant or variant == "none":
+        reason = "no_skill_installed"
+    elif tr.host != "claude":
+        reason = "host_skill_evidence_unsupported"
+    elif not skill_id:
+        reason = "skill_id_unrecorded"
+    else:
+        reason = None
+    invoked = None if reason else user_skill_invoked(tr, skill_id)
+    expected = bool(learned.get("expected"))
+    outcome = "unknown" if reason else {
+        (True, True): "tp", (True, False): "fn", (False, True): "fp", (False, False): "tn",
+    }[(expected, invoked)]
+    return {
+        "workflow": learned.get("workflow"), "variant": variant or "unknown",
+        "skill_id": skill_id, "expected": expected, "invoked": invoked,
+        "outcome": outcome, "unknown_reason": reason,
+    }
 
 
 def _has_hint_signature(text: str) -> bool:
@@ -618,6 +744,13 @@ def score_scenario(scn: dict, tr: Transcript, seeded_facts: dict, run_meta: dict
     details["tool_search_calls"] = sum(
         1 for tc in tr.tools if (tc.raw_name or tc.canon) == "ToolSearch"
     )
+    # A headless run has no human turns, so "corrections" is the agent's own
+    # self-correction within one turn: failed tool calls plus identical retries.
+    call_keys = [(t.canon, json.dumps(t.input, sort_keys=True, default=str)) for t in meaningful]
+    details["tool_errors"] = tr.tool_errors
+    details["repeated_calls"] = len(call_keys) - len(set(call_keys))
+    details["corrections"] = details["tool_errors"] + details["repeated_calls"]
+    details["review_words"] = len(tr.final_text.split())
 
     # 4. outcome (fraction of ground-truth fragments present in final answer)
     if ground_truth:
@@ -688,6 +821,8 @@ def score_scenario(scn: dict, tr: Transcript, seeded_facts: dict, run_meta: dict
             "missed": bool(expected and expected not in selected) if measured else None,
             "unexpected": [skill for skill in selected if skill not in allowed] if measured else None,
         }
+    if scn.get("learned_skill"):
+        details["learned_skill_routing"] = learned_skill_routing(scn["learned_skill"], tr, run_meta)
     td_calls = sum(call.is_tracedecay for call in meaningful)
     details["tracedecay_call_count"] = td_calls
     if "max_tracedecay_calls" in scn:
@@ -720,6 +855,7 @@ def score_scenario(scn: dict, tr: Transcript, seeded_facts: dict, run_meta: dict
         "subscores": {k: round(v, 4) for k, v in subs.items()},
         "details": details,
         "final_answer_chars": len(tr.final_text),
+        "cost": tr.cost,
         "parse_note": tr.parse_note,
         "run_meta": run_meta,
     }
@@ -811,6 +947,85 @@ def aggregate(results: list[dict]) -> dict:
     return agg
 
 
+def _mean(vals: list) -> Optional[float]:
+    known = [v for v in vals if v is not None]
+    return round(sum(known) / len(known), 4) if known else None
+
+
+def learned_skill_aggregate(results: list[dict], invalid_runs: list[dict]) -> list[dict]:
+    """Descriptive per-variant rows; routing `unknown` stays out of tp/fn/fp/tn."""
+    rows: dict[tuple, dict] = {}
+
+    def row(workflow, variant, host, model):
+        key = (workflow, variant, f"{host}/{model}" if model else host)
+        return rows.setdefault(key, {
+            "workflow": key[0], "variant": key[1], "host_model": key[2],
+            "runs": [], "invalid": 0,
+        })
+
+    for r in results:
+        lr = r["details"].get("learned_skill_routing")
+        if lr:
+            row(lr["workflow"], lr["variant"], r["host"], r.get("model"))["runs"].append(r)
+    for inv in invalid_runs:
+        if inv.get("learned_skill_workflow"):
+            row(inv["learned_skill_workflow"], inv.get("learned_skill_variant") or "unknown",
+                inv["host"], inv.get("model"))["invalid"] += 1
+
+    out = []
+    for key in sorted(rows):
+        rs = rows[key].pop("runs")
+        routing = {k: 0 for k in ("tp", "fn", "fp", "tn", "unknown")}
+        for r in rs:
+            routing[r["details"]["learned_skill_routing"]["outcome"]] += 1
+        tokens = [r["cost"]["total_tokens"] for r in rs]
+        usd = [r["cost"]["total_cost_usd"] for r in rs]
+        out.append({
+            **rows[key],
+            "n": len(rs),
+            "outcome_mean": _mean([r["subscores"].get("outcome") for r in rs]),
+            "routing": routing,
+            "tokens_mean": _mean(tokens),
+            "tokens_total": sum(t for t in tokens if t is not None),
+            "tokens_unknown": tokens.count(None),
+            "cost_usd_mean": _mean(usd),
+            "cost_usd_total": round(sum(u for u in usd if u is not None), 4),
+            "cost_usd_unknown": usd.count(None),
+            "tool_calls_mean": _mean([r["details"]["tool_call_count"] for r in rs]),
+            "corrections_mean": _mean([r["details"]["corrections"] for r in rs]),
+            "review_words_mean": _mean([r["details"]["review_words"] for r in rs]),
+            "duration_ms_mean": _mean([r["cost"]["duration_ms"] for r in rs]),
+        })
+    return out
+
+
+def render_learned_skill(rows: list[dict]) -> list[str]:
+    def fmt(x):
+        return "-" if x is None else f"{x:g}"
+    lines = [
+        "## Learned-skill qualification", "",
+        "Descriptive counts only; rows are not ranked. Routing `unknown` (no skill "
+        "installed, or a host without normalized Skill events) is excluded from tp/fn/fp/tn. "
+        "Corrections are tool errors plus repeated identical calls within one headless turn. "
+        "Token and cost means exclude runs whose host reported no usage (`unknown` columns).",
+        "",
+        "| workflow | variant | host/model | n | invalid | outcome | tp | fn | fp | tn | unknown "
+        "| tokens mean | tokens total | tokens unknown | usd mean | usd total | tool calls "
+        "| corrections | review words | duration ms |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for r in rows:
+        ro = r["routing"]
+        lines.append(
+            f"| {r['workflow']} | {r['variant']} | {r['host_model']} | {r['n']} | {r['invalid']} | "
+            f"{fmt(r['outcome_mean'])} | {ro['tp']} | {ro['fn']} | {ro['fp']} | {ro['tn']} | "
+            f"{ro['unknown']} | {fmt(r['tokens_mean'])} | {r['tokens_total']} | {r['tokens_unknown']} | "
+            f"{fmt(r['cost_usd_mean'])} | {fmt(r['cost_usd_total'])} | {fmt(r['tool_calls_mean'])} | "
+            f"{fmt(r['corrections_mean'])} | {fmt(r['review_words_mean'])} | {fmt(r['duration_ms_mean'])} |"
+        )
+    return lines + [""]
+
+
 def render_report(scoreboard: dict) -> str:
     lines = ["# Agent-Adoption Eval Report", ""]
     meta = scoreboard.get("meta", {})
@@ -889,6 +1104,9 @@ def render_report(scoreboard: dict) -> str:
                 )
         lines.append("")
 
+    if scoreboard.get("learned_skill"):
+        lines += render_learned_skill(scoreboard["learned_skill"])
+
     lines.append("## Per-scenario")
     lines.append("")
     lines.append("| scenario | host | model | cond | score | first tool | agent | channel | forbidden-first | tools/budget | outcome |")
@@ -904,6 +1122,14 @@ def render_report(scoreboard: dict) -> str:
             f"{'-' if oc is None else f'{oc:.2f}'} |"
         )
     return "\n".join(lines) + "\n"
+
+
+def split_learned_variant(base: str) -> tuple[str, Optional[str]]:
+    """Remove a `__v-<variant>` learned-skill segment, returning (base, variant)."""
+    m = re.search(r"__v-([a-z][a-z0-9-]*)(?=__|$)", base)
+    if not m:
+        return base, None
+    return base[: m.start()] + base[m.end():], m.group(1)
 
 
 def parse_transcript_base(base: str) -> Optional[tuple[str, str, str, str]]:
@@ -993,14 +1219,15 @@ def main() -> int:
     # Neutrality lint (USER DOCTRINE): prompts must never name tracedecay/MCP/a
     # tool/a skill. Enforced at grade time and available standalone via
     # --lint-only so run.sh can fail fast before spending tokens.
-    violations = lint_scenarios(scenarios)
+    violations = lint_scenarios(scenarios) + lint_learned_skills(scenarios)
     if violations:
         print("SCENARIO NEUTRALITY LINT FAILED:", file=sys.stderr)
         for v in violations:
             print(f"  - {v}", file=sys.stderr)
         print(
             "Rewrite the prompt(s) to neutral, natural phrasing that does not name "
-            "any tracedecay tool, MCP, or skill.",
+            "any tracedecay tool, MCP, or skill, and that does not reuse a "
+            "learned-skill generation session.",
             file=sys.stderr,
         )
         if args.lint_only:
@@ -1033,7 +1260,8 @@ def main() -> int:
         if not fn.endswith(".stdout.jsonl"):
             continue
         base = fn[: -len(".stdout.jsonl")]
-        parsed = parse_transcript_base(base)
+        id_base, variant = split_learned_variant(base)
+        parsed = parse_transcript_base(id_base)
         if not parsed:
             continue
         scn_id, host, condition, model = parsed
@@ -1050,6 +1278,14 @@ def main() -> int:
         per_meta.setdefault("channel_condition", condition)
         if model:
             per_meta.setdefault("model", model)
+        if variant:
+            per_meta.setdefault("learned_skill_variant", variant)
+        learned = {}
+        if scn.get("learned_skill"):
+            learned = {
+                "learned_skill_workflow": scn["learned_skill"].get("workflow"),
+                "learned_skill_variant": per_meta.get("learned_skill_variant"),
+            }
         exit_code = per_meta.get("exit_code")
         if per_meta.get("timed_out") or (exit_code is not None and exit_code != 0):
             invalid_runs.append(
@@ -1061,6 +1297,7 @@ def main() -> int:
                     "exit_code": exit_code,
                     "timed_out": bool(per_meta.get("timed_out")),
                     "reason": "timed_out" if per_meta.get("timed_out") else "launch_failed",
+                    **learned,
                 }
             )
             continue
@@ -1076,6 +1313,7 @@ def main() -> int:
                     "timed_out": False,
                     "reason": "unparseable_empty",
                     "parse_note": tr.parse_note,
+                    **learned,
                 }
             )
             continue
@@ -1091,6 +1329,9 @@ def main() -> int:
         "aggregate": aggregate(results),
         "results": results,
     }
+    learned_rows = learned_skill_aggregate(results, invalid_runs)
+    if learned_rows:
+        scoreboard["learned_skill"] = learned_rows
 
     with open(os.path.join(run_dir, "scoreboard.json"), "w") as f:
         json.dump(scoreboard, f, indent=2)

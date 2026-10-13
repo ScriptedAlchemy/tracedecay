@@ -1,6 +1,12 @@
 #![allow(dead_code, unused_imports)]
 
 mod fixtures;
+mod settlement;
+
+pub(crate) use settlement::{
+    settle_combined_review, settle_memory_curator, settle_session_reflector, settle_skill_writer,
+    settle_user_job,
+};
 
 pub(crate) use fixtures::{
     SeedSessionMessage, SeededDuplicateFacts, fact_exists, fixture_host_home, fixture_open_options,
@@ -46,7 +52,7 @@ pub(crate) use tracedecay_automation_runtime::automation::runner::{
     AutomationSessionRetrieval, AutomationSessionRetrievalFuture, AutomationTemporalEvidence,
     AutomationTemporalEvidenceItem, AutomationTemporalRetrieval, CombinedReviewAutomationOptions,
     CombinedReviewDispatch, MemoryCuratorAutomationOptions, SessionReflectorAutomationOptions,
-    SkillWriterAutomationOptions, run_skill_writer_with_backend_and_retrieval,
+    SkillWriterAutomationOptions,
 };
 pub(crate) use tracedecay_automation_runtime::automation::{
     AutomationRunControl, AutomationRunError,
@@ -279,7 +285,7 @@ impl AutomationSessionRetrieval for RejectedAutomationSessionRetrieval {
     }
 }
 
-pub(crate) async fn run_session_reflector_with_backend(
+pub(crate) async fn run_session_reflector(
     cg: &TraceDecay,
     config: &AutomationConfig,
     run_control: &AutomationRunControl,
@@ -291,7 +297,7 @@ pub(crate) async fn run_session_reflector_with_backend(
 > {
     let retrieval = FixtureAutomationSessionRetrieval::new(cg);
     let context = automation_project_context(cg);
-    tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
+    settle_session_reflector(
         &context,
         config,
         run_control,
@@ -303,7 +309,7 @@ pub(crate) async fn run_session_reflector_with_backend(
     .await
 }
 
-pub(crate) async fn run_skill_writer_with_backend(
+pub(crate) async fn run_skill_writer(
     cg: &TraceDecay,
     config: &AutomationConfig,
     backend: &dyn AgentTaskBackend,
@@ -314,7 +320,7 @@ pub(crate) async fn run_skill_writer_with_backend(
 > {
     let retrieval = FixtureAutomationSessionRetrieval::new(cg);
     let context = automation_project_context(cg);
-    tracedecay_automation_runtime::automation::runner::run_skill_writer_with_backend_and_retrieval(
+    settle_skill_writer(
         &context,
         config,
         &test_configuration_revision(),
@@ -325,7 +331,7 @@ pub(crate) async fn run_skill_writer_with_backend(
     .await
 }
 
-pub(crate) async fn run_combined_review_with_backend(
+pub(crate) async fn run_combined_review(
     cg: &TraceDecay,
     config: &AutomationConfig,
     run_control: &AutomationRunControl,
@@ -334,7 +340,7 @@ pub(crate) async fn run_combined_review_with_backend(
 ) -> tracedecay_domain::errors::Result<CombinedReviewDispatch> {
     let retrieval = FixtureAutomationSessionRetrieval::new(cg);
     let context = automation_project_context(cg);
-    tracedecay_automation_runtime::automation::runner::run_combined_review_with_backend_and_retrieval(
+    settle_combined_review(
         &context,
         config,
         &test_configuration_revision(),
@@ -346,7 +352,7 @@ pub(crate) async fn run_combined_review_with_backend(
     .await
 }
 
-pub(crate) async fn run_memory_curator_with_backend(
+pub(crate) async fn run_memory_curator(
     cg: &TraceDecay,
     config: &AutomationConfig,
     run_control: &AutomationRunControl,
@@ -357,7 +363,7 @@ pub(crate) async fn run_memory_curator_with_backend(
     AutomationRunError,
 > {
     let context = automation_project_context(cg);
-    tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
+    settle_memory_curator(
         &context,
         config,
         &test_configuration_revision(),

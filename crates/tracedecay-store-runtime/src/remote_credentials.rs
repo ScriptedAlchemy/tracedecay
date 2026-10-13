@@ -62,6 +62,22 @@ pub enum DaemonRemoteCredentialRegistryErrorV1 {
     ResetRequired,
 }
 
+/// Typed refusal of a local Remote Brain node operator request.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteNodeOperatorErrorV1 {
+    #[error("remote node operator request is invalid")]
+    InvalidRequest,
+    #[error("grant Brain identity does not match this profile's Brain")]
+    BrainIdentityConflict,
+    #[error("a different grant or credential is already provisioned for this identity")]
+    Conflict,
+    #[error("remote node provisioning capacity is exhausted")]
+    CapacityExceeded,
+    #[error("remote node store is unavailable")]
+    Unavailable,
+}
+
 const REMOTE_LISTENER_STOPPED: u8 = 0;
 const REMOTE_LISTENER_SERVING: u8 = 1;
 const REMOTE_LISTENER_DEGRADED: u8 = 2;

@@ -11,6 +11,18 @@
 //! real process resolves, a terminal receipt that does not become task
 //! acceptance) were untested.
 //!
+//! The same daemon also runs the representative Work job: bounded parallel
+//! implementation with reviewed synthesis and restart recovery. A protected
+//! topology change raises the active-attempt caps to two; a second task is
+//! proposed, accepted, and admitted; each run is placed in its own linked
+//! worktree; one attempt per task runs at the same time; pausing one run
+//! fences a new attempt on it while its in-flight attempt still settles; the
+//! pause survives a daemon
+//! restart with its authority and both receipts unchanged; synthesis is
+//! refused until the run is resumed, then cites exactly the two source stdout
+//! digests and receives both on stdin; artifact hydration returns all three
+//! attempts' digests; and both placements are released.
+//!
 //! Surface. Everything below is a POST to the daemon's published HTTP
 //! application endpoint, authenticated with the token and origin from the
 //! daemon's own authority record, exactly as
@@ -49,6 +61,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+use tracedecay_contracts::workflow_artifact_payload_digest;
 use tracedecay_domain::{
     CommitId, ManifestDigest, ProposalId, RefId, TaskId, WorkEffectStateV1, WorkGraphVersionV1,
     WorkRelationReplanProposalV1, WorkflowOperationRef,
@@ -65,6 +78,24 @@ const SETTLED_ATTEMPT_ID: &str = "attempt.work-loop-journey.settled";
 /// The attempt cancelled while its provider is still running, i.e. before the
 /// effect commit point.
 const CANCELLED_ATTEMPT_ID: &str = "attempt.work-loop-journey.cancelled";
+
+/// The second task, which runs beside the first one's parallel run.
+const PARALLEL_TASK_ID: &str = "task.work-loop-journey.parallel";
+/// Run A belongs to the journey task and is the one paused and synthesized.
+const PARALLEL_RUN_A: &str = "run.work-loop-journey.parallel-a";
+const PARALLEL_RUN_B: &str = "run.work-loop-journey.parallel-b";
+const ALPHA_ATTEMPT_ID: &str = "attempt.work-loop-journey.alpha";
+const BETA_ATTEMPT_ID: &str = "attempt.work-loop-journey.beta";
+const FENCED_ATTEMPT_ID: &str = "attempt.work-loop-journey.fenced";
+const SYNTHESIS_ATTEMPT_ID: &str = "attempt.work-loop-journey.synthesis";
+/// The stand-in derives each source's tag from the last word, so the two
+/// sources print different stdout and seal different artifact digests.
+const ALPHA_INSTRUCTIONS: &str = "Execute the admitted Work-loop parallel source alpha";
+const BETA_INSTRUCTIONS: &str = "Execute the admitted Work-loop parallel source beta";
+const SYNTHESIS_INSTRUCTIONS: &str = "Execute the admitted Work-loop synthesize step.";
+/// The two lines every stand-in invocation ends its stdout with.
+const STREAM_TAIL: &str = "{\"type\":\"system\",\"subtype\":\"init\"}\n\
+                           {\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}\n";
 
 /// Executable ids pinned through the configuration control plane. They sort
 /// ascending, which the setting's own validator requires.
@@ -525,36 +556,41 @@ fn product_task_create_draft(fixture: &ProductionDaemon) -> Value {
                 "title": "Work loop journey",
                 "created_at": occurred_at,
             },
-            "item": {
-                "input": {
-                    "task_id": TASK_ID,
-                    "hierarchy": {
-                        "initiative_id": "initiative.work-loop-journey",
-                        "plan_id": "plan.work-loop-journey",
-                        "milestone_id": "milestone.work-loop-journey",
-                    },
-                    "title": "Work loop journey",
-                    "dependencies": [],
-                    "informational_relations": [],
-                    "causal_candidates": [],
-                    "acceptance_criteria": [],
-                    "effort": 1,
-                    "scheduled_at": null,
-                    "deadline": null,
-                    "created_at": occurred_at,
-                    "updated_at": occurred_at,
-                },
-                "accepted_proposal": null,
-                "accepted_route": null,
-                "execution_admitted_at": null,
-                "evidence_links": [],
-                "accepted_criteria": {},
-                "accepted_attempts": [],
-                "handoffs": [],
-                "accepted_at": null,
-                "archived_at": null,
-            },
+            "item": work_item(TASK_ID, occurred_at),
         },
+    })
+}
+
+/// A fresh task under the journey's milestone.
+fn work_item(task_id: &str, occurred_at: i64) -> Value {
+    json!({
+        "input": {
+            "task_id": task_id,
+            "hierarchy": {
+                "initiative_id": "initiative.work-loop-journey",
+                "plan_id": "plan.work-loop-journey",
+                "milestone_id": "milestone.work-loop-journey",
+            },
+            "title": "Work loop journey",
+            "dependencies": [],
+            "informational_relations": [],
+            "causal_candidates": [],
+            "acceptance_criteria": [],
+            "effort": 1,
+            "scheduled_at": null,
+            "deadline": null,
+            "created_at": occurred_at,
+            "updated_at": occurred_at,
+        },
+        "accepted_proposal": null,
+        "accepted_route": null,
+        "execution_admitted_at": null,
+        "evidence_links": [],
+        "accepted_criteria": {},
+        "accepted_attempts": [],
+        "handoffs": [],
+        "accepted_at": null,
+        "archived_at": null,
     })
 }
 
@@ -617,15 +653,15 @@ fn pinned_executable(directory: &Path, name: &str, body: &str) -> (PathBuf, Mani
 
 fn start_attempt_body(
     project: &Path,
-    attempt_id: &str,
+    identity: &Value,
     execution_snapshot: Value,
     instructions: &str,
     occurred_at: i64,
 ) -> Value {
     json!({
-        "task_id": TASK_ID,
-        "run_id": RUN_ID,
-        "attempt_id": attempt_id,
+        "task_id": identity["task_id"],
+        "run_id": identity["run_id"],
+        "attempt_id": identity["attempt_id"],
         "operation": typed::<WorkflowOperationRef>("operation.work-loop-journey"),
         "execution_snapshot": execution_snapshot,
         "worktree_root": project.to_string_lossy(),
@@ -635,6 +671,40 @@ fn start_attempt_body(
         "effect_state": WorkEffectStateV1::Observational,
         "occurred_at": occurred_at,
     })
+}
+
+fn attempt_identity(task_id: &str, run_id: &str, attempt_id: &str) -> Value {
+    json!({ "task_id": task_id, "run_id": run_id, "attempt_id": attempt_id })
+}
+
+/// Polls one attempt to its successful terminal receipt.
+fn settled_attempt(fixture: &ProductionDaemon, identity: &Value) -> Value {
+    poll_until("an attempt terminal receipt", || {
+        let attempt = fixture.payload(
+            "attempt status",
+            "/application/work/attempt-status",
+            identity,
+        );
+        match attempt["state"].as_str() {
+            Some("succeeded") => Ok(attempt),
+            Some("leased" | "running") => Err(format!("{attempt}")),
+            _ => panic!("{identity} reached an unexpected state: {attempt}"),
+        }
+    })
+}
+
+/// The stdout artifact the daemon must seal for exactly these stand-in bytes.
+fn stdout_artifact(stdout: &str) -> Value {
+    json!([{
+        "artifact_id": "artifact.provider.stdout",
+        "digest": workflow_artifact_payload_digest(stdout.as_bytes()).expect("stdout digest"),
+        "byte_length": stdout.len(),
+    }])
+}
+
+/// What a parallel source prints before the shared stream tail.
+fn source_stdout(tag: &str) -> String {
+    format!("{{\"type\":\"assistant\",\"source\":\"{tag}\"}}\n{STREAM_TAIL}")
 }
 
 /// The seven-step production Work loop, on the surface a client calls.
@@ -754,17 +824,34 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
     let argv_marker = scripts.path().join("argv");
     let stdin_marker = scripts.path().join("stdin");
     let started_marker = scripts.path().join("started");
+    let synthesis_stdin_marker = scripts.path().join("synthesis-stdin");
+    let hold_marker = scripts.path().join("release-parallel-sources");
+    // The synthesize arm comes first because a synthesis stdin carries the
+    // sources' identities and stdout, which other arms would match. A
+    // parallel source holds until the test releases it, bounded so an
+    // orphan cannot outlive a failed run by more than five minutes.
     let (provider_path, provider_digest) = pinned_executable(
         scripts.path(),
         "provider",
         &format!(
-            "#!/bin/sh\nprintf '%s' \"$*\" > {argv}\ninput=$(cat)\nprintf '%s' \"$input\" > {stdin}\n\
-             case \"$input\" in\n  *cancellation*) printf x > {started}; i=0; while [ $i -lt 300 ]; do sleep 1; i=$((i+1)); done;;\n\
-             esac\nprintf '%s\\n' '{{\"type\":\"system\",\"subtype\":\"init\"}}'\n\
-             printf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}}'\nexit 0\n",
+            r#"#!/bin/sh
+printf '%s' "$*" > {argv}
+input=$(cat)
+printf '%s' "$input" > {stdin}
+case "$input" in
+  *synthesize*) printf '%s' "$input" > {synthesis_stdin};;
+  *cancellation*) printf x > {started}; i=0; while [ $i -lt 300 ]; do sleep 1; i=$((i+1)); done;;
+  *parallel*) tag=${{input##* }}; printf x > {scripts}/started-$tag; i=0; while [ ! -e {hold} ] && [ $i -lt 3000 ]; do sleep 0.1; i=$((i+1)); done; printf '{{"type":"assistant","source":"%s"}}\n' "$tag";;
+esac
+printf '%s' '{STREAM_TAIL}'
+exit 0
+"#,
             argv = argv_marker.display(),
             stdin = stdin_marker.display(),
             started = started_marker.display(),
+            synthesis_stdin = synthesis_stdin_marker.display(),
+            scripts = scripts.path().display(),
+            hold = hold_marker.display(),
         ),
     );
     let observed = fixture.payload(
@@ -820,7 +907,7 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
                                 "max_stdout_bytes": 65536,
                                 "max_stderr_bytes": 65536,
                                 "max_protocol_bytes": 65536,
-                                "max_concurrency": 1
+                                "max_concurrency": 2
                             },
                             "maximum_duration_micros": 600000000,
                             "fallback": { "kind": "disabled" }
@@ -835,6 +922,45 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
     assert_ne!(
         set["result_revision_id"], set["base_revision_id"],
         "a committed configuration write must advance the revision: {set}"
+    );
+
+    // The safe default topology admits one active attempt per repository and
+    // globally. The topology key is protected, so raising both caps to two
+    // goes through a redacted preview plan and its exact apply; the per-task
+    // cap stays at one because the parallel attempts belong to distinct tasks.
+    let topology = fixture.payload(
+        "configuration get (work topology policy)",
+        "/application/configuration/configuration_get",
+        &json!({ "key": "work.topology_policy.v1" }),
+    );
+    let mut policy = topology["effective_value"]["value"].clone();
+    assert_eq!(
+        policy["concurrency"]["maximum_active_per_repository"], 1,
+        "the default topology admits one active attempt: {topology}"
+    );
+    policy["concurrency"]["maximum_active_per_repository"] = json!(2);
+    policy["concurrency"]["maximum_global_active"] = json!(2);
+    let plan = fixture.payload(
+        "configuration protected preview (work topology policy)",
+        "/application/configuration/configuration_protected_preview",
+        &json!({
+            "change": { "kind": "replace_work_topology_policy", "value": policy },
+            "expected_revision": set["result_revision_id"],
+        }),
+    );
+    let topology_applied = fixture.payload(
+        "configuration protected apply (work topology policy)",
+        "/application/configuration/configuration_protected_apply",
+        &json!({
+            "plan_id": plan["plan_id"],
+            "expected_base_revision_id": plan["base_revision_id"],
+            "operation_digest": plan["operation_digest"],
+            "idempotency_key": "configuration.idempotency.work-loop-journey.topology",
+        }),
+    );
+    assert_eq!(
+        topology_applied["base_revision_id"], set["result_revision_id"],
+        "the protected apply must commit on the previewed revision: {topology_applied}"
     );
     fixture.restart();
 
@@ -1031,9 +1157,38 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         "admitting execution must not accept the task: {admitted_graph}"
     );
 
+    // The fixture's Git directory lives outside the checkout, so a reader
+    // that opens it by itself sees a bare repository with no worktree.
+    let in_place_preflight = fixture.payload(
+        "clean in-place placement preflight",
+        "/application/work/placement-preflight",
+        &json!({
+            "task_id": TASK_ID,
+            "run_id": RUN_ID,
+            "target": {
+                "kind": "clean_in_place",
+                "root": null,
+                "network_free": true,
+                "in_place_acknowledged": true,
+            },
+            "occurred_at": now_micros(),
+        }),
+    );
+    assert_eq!(
+        in_place_preflight["observation"]["readable"], true,
+        "a --separate-git-dir checkout must read as its worktree: {in_place_preflight}"
+    );
+    assert!(
+        !in_place_preflight["blockers"]
+            .as_array()
+            .expect("preflight blockers")
+            .contains(&json!("target_unreadable")),
+        "{in_place_preflight}"
+    );
+
     let start = start_attempt_body(
         &fixture.project,
-        SETTLED_ATTEMPT_ID,
+        &attempt_identity(TASK_ID, RUN_ID, SETTLED_ATTEMPT_ID),
         admitted["execution_snapshot"].clone(),
         INSTRUCTIONS,
         now_micros(),
@@ -1130,10 +1285,10 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         );
     }
     assert!(
-        components
-            .iter()
-            .any(|component| component["desired_revision_id"] == set["result_revision_id"]),
-        "the desired revision must be the one the write committed: {drift}"
+        components.iter().any(|component| {
+            component["desired_revision_id"] == topology_applied["result_revision_id"]
+        }),
+        "the desired revision must be the one the last write committed: {drift}"
     );
 
     // Resumption is idempotent over a settled attempt: a terminal receipt is
@@ -1195,7 +1350,7 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
     // ladder and seal a cancelled receipt, not a fabricated success.
     let slow_start = start_attempt_body(
         &fixture.project,
-        CANCELLED_ATTEMPT_ID,
+        &attempt_identity(TASK_ID, RUN_ID, CANCELLED_ATTEMPT_ID),
         admitted["execution_snapshot"].clone(),
         CANCELLATION_INSTRUCTIONS,
         now_micros(),
@@ -1258,6 +1413,335 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         "a cancelled attempt seals a cancelled receipt, never a success: {cancelled}"
     );
 
+    let prepared_parallel_task = prepare_product_mutation(
+        &fixture,
+        "prepare the parallel task",
+        json!({ "change": "add_task", "item": work_item(PARALLEL_TASK_ID, now_micros()) }),
+    );
+    commit_product_mutation(&fixture, "add the parallel task", &prepared_parallel_task);
+    let parallel_proposal = fixture.payload(
+        "generate the parallel task proposal",
+        "/application/work/generate-proposal",
+        &json!({
+            "selection": product_selection(&fixture),
+            "task_id": PARALLEL_TASK_ID,
+            "proposal_id": "proposal.work-loop-journey.parallel",
+            "live_git_evidence": Value::Null,
+            "occurred_at": now_micros(),
+        }),
+    );
+    assert_eq!(
+        parallel_proposal["decision"]["recommended_action"], "proceed_to_acceptance",
+        "{parallel_proposal}"
+    );
+    let prepared_parallel_accept = prepare_product_mutation(
+        &fixture,
+        "prepare the parallel proposal acceptance",
+        json!({
+            "change": "decide_proposal",
+            "proposal": parallel_proposal["proposal"].clone(),
+            "disposition": "accepted",
+        }),
+    );
+    commit_product_mutation(
+        &fixture,
+        "accept the parallel proposal",
+        &prepared_parallel_accept,
+    );
+    let prepared_parallel_admission = prepare_product_mutation(
+        &fixture,
+        "prepare the parallel execution admission",
+        json!({ "change": "admit_execution", "task_id": PARALLEL_TASK_ID }),
+    );
+    let parallel_admitted = fixture.payload(
+        "admit the parallel execution",
+        "/application/work/admit-execution",
+        &prepared_parallel_admission["request"],
+    );
+
+    // Each parallel run is placed in its own linked worktree. Placement is
+    // its own authority: start-attempt does not consult it, so it is asserted
+    // as a separate fact rather than as what controls the attempt's cwd.
+    let runs = [
+        (TASK_ID, PARALLEL_RUN_A, "placement-a"),
+        (PARALLEL_TASK_ID, PARALLEL_RUN_B, "placement-b"),
+    ];
+    let placement_root = |name: &str| fixture._home.path().join(name);
+    for (task_id, run_id, name) in runs {
+        run_ok(
+            Command::new("git")
+                .args(["worktree", "add", "--detach", "--quiet"])
+                .arg(placement_root(name))
+                .arg("HEAD")
+                .current_dir(&fixture.project),
+            "git worktree add placement",
+        );
+        let target = json!({
+            "task_id": task_id,
+            "run_id": run_id,
+            "target": {
+                "kind": "linked_worktree",
+                "root": placement_root(name).to_string_lossy(),
+                "network_free": true,
+                "in_place_acknowledged": false,
+            },
+            "occurred_at": now_micros(),
+        });
+        let preflight = fixture.payload(
+            "placement preflight",
+            "/application/work/placement-preflight",
+            &target,
+        );
+        assert_eq!(preflight["blockers"], json!([]), "{preflight}");
+        let placed = fixture.payload(
+            "admit placement",
+            "/application/work/admit-placement",
+            &target,
+        );
+        assert_eq!(placed["state"], "admitted", "{placed}");
+        assert_eq!(placed["authority_version"], 1, "{placed}");
+    }
+
+    let alpha = attempt_identity(TASK_ID, PARALLEL_RUN_A, ALPHA_ATTEMPT_ID);
+    let beta = attempt_identity(PARALLEL_TASK_ID, PARALLEL_RUN_B, BETA_ATTEMPT_ID);
+    for (identity, snapshot, instructions) in [
+        (&alpha, &admitted, ALPHA_INSTRUCTIONS),
+        (&beta, &parallel_admitted, BETA_INSTRUCTIONS),
+    ] {
+        let leased = fixture.payload(
+            "start a parallel source",
+            "/application/work/start-attempt",
+            &start_attempt_body(
+                &fixture.project,
+                identity,
+                snapshot["execution_snapshot"].clone(),
+                instructions,
+                now_micros(),
+            ),
+        );
+        assert_eq!(leased["state"], "leased", "{leased}");
+    }
+    // Neither source can exit before the hold is released, so one listing
+    // with both running, and both processes past their first instruction,
+    // is two attempts executing at the same time.
+    poll_until("both parallel sources running at once", || {
+        let listed = fixture.payload(
+            "list attempts",
+            "/application/work/list-attempts",
+            &json!({ "page_size": 50, "cursor": null }),
+        );
+        let running = |identity: &Value| {
+            listed["attempts"].as_array().is_some_and(|attempts| {
+                attempts.iter().any(|attempt| {
+                    &attempt["identity"] == identity && attempt["state"] == "running"
+                })
+            })
+        };
+        if running(&alpha)
+            && running(&beta)
+            && scripts.path().join("started-alpha").exists()
+            && scripts.path().join("started-beta").exists()
+        {
+            Ok(())
+        } else {
+            Err(format!("{listed}"))
+        }
+    });
+
+    let run_a = json!({ "task_id": TASK_ID, "run_id": PARALLEL_RUN_A });
+    let paused = fixture.payload(
+        "pause run A",
+        "/application/work/pause-run",
+        &json!({
+            "task_id": TASK_ID,
+            "run_id": PARALLEL_RUN_A,
+            "reason": "operator_request",
+            "occurred_at": now_micros(),
+        }),
+    );
+    assert_eq!(paused["state"], "paused", "{paused}");
+    assert_eq!(
+        paused["fenced_attempts"],
+        json!([ALPHA_ATTEMPT_ID]),
+        "a pause must record exactly the in-flight attempt it fenced: {paused}"
+    );
+    let fenced = fixture.problem(
+        "start an attempt on the paused run",
+        "/application/work/start-attempt",
+        &start_attempt_body(
+            &fixture.project,
+            &attempt_identity(TASK_ID, PARALLEL_RUN_A, FENCED_ATTEMPT_ID),
+            admitted["execution_snapshot"].clone(),
+            ALPHA_INSTRUCTIONS,
+            now_micros(),
+        ),
+    );
+    assert_eq!(
+        fenced["code"], "application.work-run-control.paused",
+        "{fenced}"
+    );
+
+    // A pause fences new reservations and never kills what is in flight, so
+    // the fenced source still settles once released.
+    fs::write(&hold_marker, b"").expect("release the parallel sources");
+    let alpha_settled = settled_attempt(&fixture, &alpha);
+    let beta_settled = settled_attempt(&fixture, &beta);
+    assert_eq!(
+        alpha_settled["artifacts"],
+        stdout_artifact(&source_stdout("alpha")),
+        "{alpha_settled}"
+    );
+    assert_eq!(
+        beta_settled["artifacts"],
+        stdout_artifact(&source_stdout("beta")),
+        "{beta_settled}"
+    );
+
+    fixture.restart();
+    let control = fixture.payload(
+        "run A control after restart",
+        "/application/work/run-control",
+        &run_a,
+    );
+    assert_eq!(control["state"], "controlled", "{control}");
+    assert_eq!(
+        control["control"], paused,
+        "the pause must survive a restart with the same authority: {control}"
+    );
+    assert_eq!(control["live_attempts"], json!([]), "{control}");
+    let run_b_control = fixture.payload(
+        "run B control after restart",
+        "/application/work/run-control",
+        &json!({ "task_id": PARALLEL_TASK_ID, "run_id": PARALLEL_RUN_B }),
+    );
+    assert_eq!(
+        run_b_control["state"], "uncontrolled",
+        "pausing run A must not control run B: {run_b_control}"
+    );
+    for (identity, settled) in [(&alpha, &alpha_settled), (&beta, &beta_settled)] {
+        assert_eq!(
+            &fixture.payload(
+                "parallel source after restart",
+                "/application/work/attempt-status",
+                identity,
+            ),
+            settled,
+            "a restart must not rewrite a settled source"
+        );
+    }
+
+    let synthesis_identity = attempt_identity(TASK_ID, PARALLEL_RUN_A, SYNTHESIS_ATTEMPT_ID);
+    let synthesis = json!({
+        "start": start_attempt_body(
+            &fixture.project,
+            &synthesis_identity,
+            admitted["execution_snapshot"].clone(),
+            SYNTHESIS_INSTRUCTIONS,
+            now_micros(),
+        ),
+        "output_name": "output.work-loop-journey.synthesis",
+        "sources": [alpha, beta],
+    });
+    let refused_synthesis = fixture.problem(
+        "synthesize on the paused run",
+        "/application/work/synthesize",
+        &synthesis,
+    );
+    assert_eq!(
+        refused_synthesis["code"], "application.work-run-control.paused",
+        "{refused_synthesis}"
+    );
+    let resumed = fixture.payload(
+        "resume run A",
+        "/application/work/resume-run",
+        &json!({
+            "task_id": TASK_ID,
+            "run_id": PARALLEL_RUN_A,
+            "reason": "operator_request",
+            "expected_authority_version": paused["authority"],
+            "occurred_at": now_micros(),
+        }),
+    );
+    assert_eq!(resumed["state"], "running", "{resumed}");
+
+    let synthesized = fixture.payload(
+        "synthesize the parallel sources",
+        "/application/work/synthesize",
+        &synthesis,
+    );
+    let alpha_digest = &alpha_settled["artifacts"][0]["digest"];
+    let beta_digest = &beta_settled["artifacts"][0]["digest"];
+    assert_ne!(alpha_digest, beta_digest, "the sources must disagree");
+    let mut cited = vec![alpha_digest.clone(), beta_digest.clone()];
+    cited.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
+    assert_eq!(synthesized["synthesis"], "admitted", "{synthesized}");
+    assert_eq!(
+        synthesized["draft"]["cited_source_digests"],
+        json!(cited),
+        "synthesis must cite exactly the two source digests: {synthesized}"
+    );
+    assert_eq!(synthesized["uncited"], json!([]), "{synthesized}");
+    let synthesis_settled = settled_attempt(&fixture, &synthesis_identity);
+    let synthesis_stdin =
+        fs::read_to_string(&synthesis_stdin_marker).expect("synthesis stdin marker");
+    assert!(
+        synthesis_stdin.starts_with(SYNTHESIS_INSTRUCTIONS)
+            && [alpha_digest, beta_digest]
+                .iter()
+                .all(|digest| synthesis_stdin.contains(digest.as_str().expect("digest"))),
+        "the synthesis provider must receive both source digests: {synthesis_stdin}"
+    );
+
+    let hydrated = fixture.payload(
+        "hydrate attempt artifacts",
+        "/application/work/hydrate-artifacts",
+        &json!({ "page_size": 25, "cursor": null }),
+    );
+    assert_eq!(hydrated["state"], "hydrated", "{hydrated}");
+    for (identity, stdout) in [
+        (&alpha, source_stdout("alpha")),
+        (&beta, source_stdout("beta")),
+        (&synthesis_identity, STREAM_TAIL.to_owned()),
+    ] {
+        let row = hydrated["attempts"]
+            .as_array()
+            .and_then(|attempts| {
+                attempts
+                    .iter()
+                    .find(|attempt| &attempt["identity"] == identity)
+            })
+            .unwrap_or_else(|| panic!("hydration must return {identity}: {hydrated}"));
+        assert_eq!(row["artifacts"], stdout_artifact(&stdout), "{row}");
+    }
+    assert_eq!(
+        synthesis_settled["artifacts"],
+        stdout_artifact(STREAM_TAIL),
+        "{synthesis_settled}"
+    );
+
+    for (task_id, run_id, _) in runs {
+        let released = fixture.payload(
+            "release placement",
+            "/application/work/release-placement",
+            &json!({
+                "task_id": task_id,
+                "run_id": run_id,
+                "expected_authority_version": 1,
+                "occurred_at": now_micros(),
+            }),
+        );
+        assert_eq!(released["state"], "released", "{released}");
+        assert_eq!(released["authority_version"], 2, "{released}");
+        assert_eq!(
+            fixture.payload(
+                "placement status after release",
+                "/application/work/placement-status",
+                &json!({ "task_id": task_id, "run_id": run_id }),
+            ),
+            json!({ "state": "placed", "placement": released }),
+        );
+    }
+
     let complete_runtime = product_graph(&fixture, "product graph with complete runtime coverage");
     assert_eq!(
         complete_runtime["snapshot"]["runtime"]["coverage"],
@@ -1268,8 +1752,9 @@ fn the_work_loop_journey_runs_end_to_end_through_the_daemon() {
         complete_runtime["snapshot"]["runtime"]["attempts"]
             .as_array()
             .map(Vec::len),
-        Some(2),
-        "complete coverage must include both accepted attempts: {complete_runtime}"
+        Some(5),
+        "complete coverage must include the two serial, two parallel, and one synthesis \
+         attempt: {complete_runtime}"
     );
     let complete_replan = fixture.payload(
         "generate a replan proposal with complete runtime coverage",

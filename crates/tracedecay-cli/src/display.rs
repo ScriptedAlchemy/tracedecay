@@ -42,45 +42,19 @@ pub struct BranchInfo {
     pub is_fallback: bool,
 }
 
-/// Prints only the header section of the status table (version, sync times, branch).
-pub fn print_status_header(
-    census: &GenerationCensusSnapshot,
-    freshness: Option<&CodeIndexWorktreeFreshnessV1>,
-    branch_info: Option<&BranchInfo>,
-) {
-    let num_cols = 3;
-    let cell_width = compute_cell_width(&census_cells(census));
-    let inner_width = cell_width * num_cols + (num_cols - 1);
-
-    println!("{}", table_separator('╭', '─', '╮', cell_width, num_cols));
-    print_version_row(inner_width);
-    print_freshness_row(freshness, inner_width);
-    if let Some(bi) = branch_info {
-        print_branch_row(bi, inner_width);
-    }
-    println!("{}", table_separator('╰', '─', '╯', cell_width, num_cols));
-}
-
-/// Inputs for rendering the compact status table.
+/// Prints the compact status table; `header_only` stops after the version,
+/// freshness, and branch rows.
 ///
 /// The readings come straight from the daemon status contract: the sealed
 /// generation census (`graph_statistics`) and the scheduler's freshness view
 /// (`code_index_freshness`). Absent readings render as their typed reasons.
 /// nothing is defaulted to zero.
-#[derive(Clone, Copy)]
-pub struct StatusTable<'a> {
-    pub census: &'a GenerationCensusSnapshot,
-    pub freshness: Option<&'a CodeIndexWorktreeFreshnessV1>,
-    pub branch_info: Option<&'a BranchInfo>,
-}
-
-/// Prints the status output from named inputs.
-pub fn print_status_table_with(table: StatusTable<'_>) {
-    let StatusTable {
-        census,
-        freshness,
-        branch_info,
-    } = table;
+pub fn print_status_table(
+    census: &GenerationCensusSnapshot,
+    freshness: Option<&CodeIndexWorktreeFreshnessV1>,
+    branch_info: Option<&BranchInfo>,
+    header_only: bool,
+) {
     let num_cols = 3;
     let census_cells = census_cells(census);
     let cell_width = compute_cell_width(&census_cells);
@@ -91,6 +65,10 @@ pub fn print_status_table_with(table: StatusTable<'_>) {
     print_freshness_row(freshness, inner_width);
     if let Some(bi) = branch_info {
         print_branch_row(bi, inner_width);
+    }
+    if header_only {
+        println!("{}", table_separator('╰', '─', '╯', cell_width, num_cols));
+        return;
     }
     match census_cells {
         Some(cells) => {

@@ -144,7 +144,7 @@ fn call_key(request: &JsonRpcRequest) -> Option<(&Value, (String, String))> {
 
 /// The digest of a successful all-text answer without its trailer blocks and
 /// per-call lines, and the content text bytes a pointer would replace.
-fn answer_digest(result: &Value) -> Option<(String, usize)> {
+pub(super) fn answer_digest(result: &Value) -> Option<(String, usize)> {
     if result.get("isError").and_then(Value::as_bool) == Some(true) {
         return None;
     }
