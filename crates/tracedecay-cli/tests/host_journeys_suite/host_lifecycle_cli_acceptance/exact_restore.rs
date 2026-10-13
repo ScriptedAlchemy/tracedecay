@@ -350,7 +350,7 @@ pub(super) fn snapshot_diff(
     diff
 }
 
-fn run_phase(cli: &IsolatedCli, id: &str, args: &[&str], pending_allowed: bool) {
+pub(super) fn run_phase(cli: &IsolatedCli, id: &str, args: &[&str], pending_allowed: bool) {
     let output = cli.run(args);
     let code = output.status.code();
     let accepted =
