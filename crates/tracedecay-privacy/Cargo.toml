@@ -41,9 +41,9 @@ tracedecay-store = { path = "../tracedecay-store" }
 url = "2"
 
 [dev-dependencies]
+asupersync.workspace = true
 hex = "0.4"
 tempfile = "3"
-tokio = { version = "1", features = ["full", "test-util"] }
 tracedecay-daemon-identity = { path = "../tracedecay-daemon-identity" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", features = ["test-helpers"] }
 tracedecay-session-memory = { path = "../tracedecay-session-memory" }

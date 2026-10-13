@@ -1204,7 +1204,7 @@ mod tests {
     /// The measured failure: four common terms over 300 sessions proposed 41,064
     /// candidates for a query two messages answer, and the candidate read refused
     /// before either reached a page. All four terms must match one message.
-    #[tokio::test]
+    #[asupersync::test]
     async fn root_conjunctive_lexical_answers_with_the_messages_every_term_matches() {
         let directory = tempdir().expect("temporary directory");
         let (database, _owner, connection) = open_root_fixture(&directory).await;
@@ -1253,7 +1253,7 @@ mod tests {
     /// A strict tier that is verified empty, scanned to exhaustion under these
     /// filters and this snapshot, takes exactly one named step down the ladder,
     /// and the answer says which tier produced it.
-    #[tokio::test]
+    #[asupersync::test]
     async fn a_verified_zero_strict_tier_relaxes_one_named_step() {
         let directory = tempdir().expect("temporary directory");
         let (database, _owner, connection) = open_root_fixture(&directory).await;
@@ -1282,7 +1282,7 @@ mod tests {
     /// not advance: the query reports the timeout it hit. The same fixture and
     /// query relax and answer without the deadline, which is what makes the
     /// withheld step observable rather than assumed.
-    #[tokio::test]
+    #[asupersync::test]
     async fn a_timed_out_strict_tier_refuses_instead_of_relaxing() {
         let directory = tempdir().expect("temporary directory");
         let (database, _owner, connection) = open_root_fixture(&directory).await;
@@ -1310,7 +1310,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn root_span_matched_by_many_members_is_one_candidate_over_300_sessions() {
         let directory = tempdir().expect("temporary directory");
         let (database, _owner, connection) = open_root_fixture(&directory).await;
@@ -1344,7 +1344,7 @@ mod tests {
     /// span whose membership dwarfs `record_limit`. The query must return its hit
     /// under the unchanged ceiling, because a group costs its bounds, not its
     /// census.
-    #[tokio::test]
+    #[asupersync::test]
     async fn root_rare_hit_executes_under_the_unchanged_record_ceiling() {
         let directory = tempdir().expect("temporary directory");
         let (database, _owner, connection) = open_root_fixture(&directory).await;
@@ -1378,7 +1378,7 @@ mod tests {
     /// A record read that genuinely runs out must say so in its own terms. Before
     /// this, every one of these reached the surface as an indistinguishable
     /// "unavailable".
-    #[tokio::test]
+    #[asupersync::test]
     async fn root_record_read_exhaustion_is_a_typed_budget_refusal_from_execute() {
         let directory = tempdir().expect("temporary directory");
         let (database, _owner, connection) = open_root_fixture(&directory).await;
@@ -1425,7 +1425,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn root_no_hit_over_256_sessions_is_truthful_zero_not_manifest_limit() {
         let directory = tempdir().expect("temporary directory");
         let (database, _owner, connection) = open_root_fixture(&directory).await;
@@ -1445,7 +1445,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn root_readiness_preserves_storage_failure() {
         let directory = tempdir().expect("temporary directory");
         let connection = TestConnection::open(&directory.path().join("missing-schema.db"));
@@ -1464,7 +1464,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn root_no_hit_reports_aggregate_projection_staleness() {
         let directory = tempdir().expect("temporary directory");
         let (database, _owner, connection) = open_root_fixture(&directory).await;
@@ -1483,7 +1483,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn root_rare_hit_over_256_sessions_freezes_only_the_admitted_participant() {
         let directory = tempdir().expect("temporary directory");
         let (database, _owner, connection) = open_root_fixture(&directory).await;
@@ -1508,7 +1508,7 @@ mod tests {
         assert_eq!(readiness, Some(SessionDataFreshness::Fresh));
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn root_strict_population_over_one_window_returns_truthful_partial_coverage() {
         let directory = tempdir().expect("temporary directory");
         let (database, _owner, connection) = open_root_fixture(&directory).await;
@@ -1568,7 +1568,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn participant_freeze_rejects_an_active_generation_without_its_applied_graph_receipt() {
         let directory = tempdir().expect("temporary directory");
         let database_path = directory.path().join("sessions.db");

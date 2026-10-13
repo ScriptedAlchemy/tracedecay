@@ -81,10 +81,8 @@ fn unprovisioned_remote_registry(identity: &str) -> DaemonHttpApplicationRegistr
         ),
     );
     let transaction = Arc::new(
-        tracedecay_store_runtime::DaemonRemoteReplayTransactionAuthorityV1::new(
-            tokio::runtime::Handle::current(),
-        )
-        .expect("remote replay transaction authority"),
+        tracedecay_store_runtime::DaemonRemoteReplayTransactionAuthorityV1::new()
+            .expect("remote replay transaction authority"),
     );
     let router = tracedecay_daemon_service::build_daemon_remote_protocol_router(
         Arc::clone(&credentials),

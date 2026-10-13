@@ -661,7 +661,7 @@ mod tests {
 
     use super::invalidate_raw_summary_revision;
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn raw_revision_invalidation_pages_beyond_the_former_lineage_cap() {
         const SUMMARY_COUNT: i64 = 4_098;
         const PAGE_LIMIT: usize = 512;
@@ -772,7 +772,7 @@ mod tests {
         assert_eq!(final_rewind, Some(4));
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn raw_revision_invalidation_visits_diamond_nodes_once_across_pages() {
         const PAGE_LIMIT: usize = 1;
         let temp = tempfile::tempdir().unwrap();

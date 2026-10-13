@@ -65,8 +65,8 @@ type ExactSqlHealthSnapshotFactory =
     dyn Fn(Duration) -> Result<ExactSqlReadSnapshot, ExactSqlError> + Send + Sync;
 type ReaderPoolOccupancyRead = dyn Fn() -> Option<ReaderPoolSnapshot> + Send + Sync;
 type ReaderMemoryRelease = dyn Fn() -> Result<MemoryReleaseOutcome, ExactSqlError> + Send + Sync;
-type ExactSqlSnapshotQuery =
-    dyn FnMut(ExactSqlStatement) -> Result<ExactSqlRows, ExactSqlError> + Send;
+type ExactSqlSnapshotQuery = dyn FnMut(ExactSqlStatement, ExactSqlStatementBudget) -> Result<ExactSqlRows, ExactSqlError>
+    + Send;
 type StoreSizeTelemetryRead = dyn Fn(
         Duration,
         &mut dyn FnMut() -> Option<UnavailableReasonV1>,
@@ -717,7 +717,9 @@ pub struct ExactSqlReadSnapshot {
 impl ExactSqlReadSnapshot {
     pub(crate) fn new<F>(query: F) -> Self
     where
-        F: FnMut(ExactSqlStatement) -> Result<ExactSqlRows, ExactSqlError> + Send + 'static,
+        F: FnMut(ExactSqlStatement, ExactSqlStatementBudget) -> Result<ExactSqlRows, ExactSqlError>
+            + Send
+            + 'static,
     {
         Self {
             query: std::sync::Mutex::new(Box::new(query)),
@@ -725,10 +727,18 @@ impl ExactSqlReadSnapshot {
     }
 
     pub fn query(&self, statement: ExactSqlStatement) -> Result<ExactSqlRows, ExactSqlError> {
+        self.query_with_budget(statement, ExactSqlStatementBudget::Request)
+    }
+
+    pub fn query_with_budget(
+        &self,
+        statement: ExactSqlStatement,
+        budget: ExactSqlStatementBudget,
+    ) -> Result<ExactSqlRows, ExactSqlError> {
         statement.validate()?;
         self.query
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)(statement)
+            .unwrap_or_else(std::sync::PoisonError::into_inner)(statement, budget)
     }
 }
 
@@ -869,6 +879,26 @@ impl ExactSqlTransaction {
             .await?
         {
             SqlResult::BatchExecuted(result) => Ok(result),
+            _ => Err(ExactSqlError::TransactionClosed),
+        }
+    }
+
+    /// Runs one query under the same authority-revalidated policy as
+    /// [`Self::execute_authority_revalidated_batch_async`]: no ordinary
+    /// statement deadline, accepted only by an authority-bound long-lease
+    /// transaction.
+    pub async fn query_authority_revalidated_async(
+        &self,
+        statement: ExactSqlStatement,
+    ) -> Result<ExactSqlRows, ExactSqlError> {
+        match self
+            .dispatch_with_policy_async(
+                SqlRequest::Query(statement),
+                ExecutionPolicy::AuthorityRevalidated,
+            )
+            .await?
+        {
+            SqlResult::Queried(result) => Ok(result),
             _ => Err(ExactSqlError::TransactionClosed),
         }
     }
@@ -1187,6 +1217,7 @@ fn execute_batch(connection: &Connection, sql: &str) -> Result<ExactSqlBatchResu
 pub(crate) fn execute_query(
     connection: &Connection,
     request: ExactSqlStatement,
+    budget: ExactSqlStatementBudget,
 ) -> Result<ExactSqlRows, ExactSqlError> {
     request.validate()?;
     with_exact_sql_guard(
@@ -1195,7 +1226,7 @@ pub(crate) fn execute_query(
         false,
         None,
         None,
-        true,
+        budget == ExactSqlStatementBudget::Request,
         None,
         crate::connection::authorize_reader,
         false,

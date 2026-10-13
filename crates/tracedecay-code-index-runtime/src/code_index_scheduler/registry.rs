@@ -2720,10 +2720,16 @@ impl CodeIndexSchedulerRegistryV1 {
                 break;
             }
             let advancing = text.clone();
+            // Graph activation waits on `opened` for the build open and its
+            // reservation only, so that advance commits no pages: the page
+            // batches then run beside the graph build instead of ahead of it.
+            let maximum_work = if opened.is_some() {
+                0
+            } else {
+                TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1
+            };
             let advance = tracing::Instrument::instrument(
-                tokio::task::spawn_blocking(move || {
-                    advancing.advance_text_serving(TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1)
-                }),
+                tokio::task::spawn_blocking(move || advancing.advance_text_serving(maximum_work)),
                 tracing::trace_span!("daemon.code_index.text_projection"),
             )
             .await;

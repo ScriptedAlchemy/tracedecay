@@ -574,8 +574,8 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
             .map_err(map_reader_acquire_error)?;
         lease.begin_exact_sql_snapshot()?;
         self.record_snapshot_admission();
-        Ok(ExactSqlReadSnapshot::new(move |statement| {
-            lease.execute_active_exact_sql_query(statement)
+        Ok(ExactSqlReadSnapshot::new(move |statement, budget| {
+            lease.execute_active_exact_sql_query(statement, budget)
         }))
     }
 
@@ -593,8 +593,8 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         lease.retire_after_snapshot();
         lease.begin_exact_sql_snapshot()?;
         self.record_snapshot_admission();
-        Ok(ExactSqlReadSnapshot::new(move |statement| {
-            lease.execute_active_exact_sql_query(statement)
+        Ok(ExactSqlReadSnapshot::new(move |statement, budget| {
+            lease.execute_active_exact_sql_query(statement, budget)
         }))
     }
 

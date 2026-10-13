@@ -229,14 +229,15 @@ jobs:
 
   publish:
     needs: [validate, build]
-    # A failed build matrix still publishes every target that did build. Six
-    # consecutive betas shipped zero assets because one target's failure
-    # withheld the other three; the recovery planner exists to rebuild only
-    # the missing ones. Only a cancelled build withholds publication.
+    # Publish only a whole release. beta.86 shipped without macOS because a
+    # failed target still published the rest (#3756), and `tracedecay upgrade`
+    # then told Mac users the previous beta was current. Re-dispatching the tag
+    # rebuilds only the targets the release lacks. `skipped` means every
+    # asset is already published.
     if: >-
       always() &&
       needs.validate.result == 'success' &&
-      needs.build.result != 'cancelled'
+      (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
@@ -298,8 +299,6 @@ jobs:
             fi
           done < retained-asset-names
           if [[ "${{ needs.validate.outputs.build_required }}" == "true" ]]; then
-            # A target whose build failed left no artifact; nullglob keeps the
-            # loop from copying the literal pattern.
             shopt -s nullglob
             for artifact in new-binaries/tracedecay-beta-*; do
               destination="binaries/$(basename "$artifact")"
@@ -316,8 +315,7 @@ jobs:
             --profile beta \
             --tag "$RELEASE_TAG" \
             --binaries binaries \
-            --mcpbs mcpbs \
-            --allow-missing-targets
+            --mcpbs mcpbs
           for bundle in mcpbs/*.mcpb; do
             platform="${bundle#mcpbs/tracedecay-beta-"${RELEASE_TAG}"-}"
             platform="${platform%.mcpb}"
@@ -422,8 +420,7 @@ jobs:
             --profile beta \
             --tag "$RELEASE_TAG" \
             --binaries verified-binaries \
-            --mcpbs verified-mcpbs \
-            --allow-missing-targets
+            --mcpbs verified-mcpbs
           scripts/verify-retained-release-assets.sh \
             --tag "$RELEASE_TAG" \
             --repo "${{ github.repository }}" \

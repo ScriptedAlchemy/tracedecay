@@ -42,6 +42,21 @@ pub fn cx() -> Option<Cx> {
 /// Starts the process runtime, so a daemon fails at startup rather than on
 /// its first storage operation.
 pub fn process_runtime() -> Result<RuntimeHandle, String> {
+    started_process_runtime().map(Runtime::handle)
+}
+
+/// Runs `future` to completion on the calling thread, with the tasks it
+/// spawns running on the process runtime's workers. For dedicated threads
+/// outside any native runtime: from a native thread it returns an error rather
+/// than park a worker.
+pub fn block_on<F: Future>(future: F) -> Result<F::Output, String> {
+    if Runtime::current_handle().is_some() {
+        return Err("native block_on called from a native runtime thread".to_owned());
+    }
+    Ok(started_process_runtime()?.block_on(future))
+}
+
+fn started_process_runtime() -> Result<&'static Runtime, String> {
     PROCESS_RUNTIME
         .get_or_init(|| {
             RuntimeBuilder::multi_thread()
@@ -55,7 +70,6 @@ pub fn process_runtime() -> Result<RuntimeHandle, String> {
                 })
         })
         .as_ref()
-        .map(Runtime::handle)
         .map_err(Clone::clone)
 }
 
@@ -83,5 +97,22 @@ mod tests {
         assert!(on_native_worker, "settlement must run on a native worker");
         let mut blocking = cx.spawn_blocking(|_| 7).expect("native blocking task");
         assert_eq!(blocking.join(&cx).await.expect("native blocking join"), 7);
+    }
+
+    #[test]
+    fn dedicated_thread_blocks_on_native_settlement() {
+        let refused_on_worker = std::thread::spawn(|| {
+            block_on(async {
+                let cx = cx().expect("block_on context");
+                let mut task = cx
+                    .spawn(|_| async { block_on(async {}).is_err() })
+                    .expect("native task");
+                task.join(&cx).await.expect("native join")
+            })
+        })
+        .join()
+        .expect("dedicated thread")
+        .expect("process runtime");
+        assert!(refused_on_worker, "block_on must not park a native worker");
     }
 }

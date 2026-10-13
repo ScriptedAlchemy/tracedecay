@@ -486,7 +486,7 @@ fn partial_owning_source_never_reports_complete_outer_coverage() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn task_root_reauthorizes_and_delegates_session_identity_without_task_kernel_input() {
     let sessions = Sessions::default();
     let (service, reads) = task_session_service(&sessions);
@@ -519,7 +519,7 @@ async fn task_root_reauthorizes_and_delegates_session_identity_without_task_kern
     assert_eq!(requests[0].continuation, None);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn limit_omissions_are_counted_without_repeating_identical_rows() {
     let sessions = Sessions::default();
     let (service, reads) = task_session_service(&sessions);
@@ -541,7 +541,7 @@ async fn limit_omissions_are_counted_without_repeating_identical_rows() {
     assert_eq!(reads.load(Ordering::SeqCst), 2);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn stale_matched_task_session_continuation_bubbles_to_the_caller() {
     let sessions = Sessions {
         error: Some(WorkEvidenceHydrationErrorV1::Stale),
@@ -558,7 +558,7 @@ async fn stale_matched_task_session_continuation_bubbles_to_the_caller() {
     assert_eq!(sessions.requests.lock().unwrap().len(), 1);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn unavailable_task_session_continuation_remains_a_partial_read() {
     let sessions = Sessions {
         error: Some(WorkEvidenceHydrationErrorV1::Unavailable),
@@ -581,7 +581,7 @@ async fn unavailable_task_session_continuation_remains_a_partial_read() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn structural_task_session_refusal_remains_typed_in_hydration_omission() {
     let refusal = SessionRetrievalStructuralRefusalV1::CursorManifestLimitExceeded {
         kind: tracedecay_domain::CursorManifestLimitKindV1::Participants,
@@ -628,7 +628,7 @@ fn structural_budget_stage_survives_hydration_rendering() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn stale_task_session_without_a_matched_continuation_remains_an_omission() {
     let sessions = Sessions {
         error: Some(WorkEvidenceHydrationErrorV1::Stale),
@@ -653,7 +653,7 @@ async fn stale_task_session_without_a_matched_continuation_remains_an_omission()
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn continuation_must_match_an_exact_reauthorized_expansion_relation() {
     let mut request = request();
     request.expansion = Some(WorkEvidenceExpansionSelectorV1::Anchor {
@@ -698,7 +698,7 @@ async fn continuation_must_match_an_exact_reauthorized_expansion_relation() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn refused_task_session_continuation_refuses_the_whole_read() {
     let sessions = Sessions {
         error: Some(WorkEvidenceHydrationErrorV1::CursorRefused(
@@ -723,7 +723,7 @@ async fn refused_task_session_continuation_refuses_the_whole_read() {
     assert_eq!(sessions.requests.lock().unwrap().len(), 1);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn missing_root_authority_is_typed_unavailable_before_any_session_read() {
     let sessions = Sessions::default();
     let identity = attempt(&id("task.work-evidence"));
