@@ -541,6 +541,7 @@ fn agent_install_health_check_is_selective() {
         path: None,
         timings: false,
         full_tool_list: false,
+        catalog_profile: None,
     }));
     assert!(should_skip_agent_install_check(&Commands::Install {
         agent: Some("cursor".to_string()),
@@ -766,4 +767,32 @@ fn the_beta_83_claude_plugin_flag_serves_the_full_tool_list() {
             "{flag} must select the full tool list"
         );
     }
+}
+
+#[test]
+fn serve_selects_a_catalog_profile_by_its_short_name() {
+    for args in [
+        &["tracedecay", "serve", "--catalog-profile=compact"][..],
+        &["tracedecay", "serve", "--catalog-profile", "compact"][..],
+    ] {
+        let cli = Cli::try_parse_from(args)
+            .unwrap_or_else(|error| panic!("{args:?} must parse: {error}"));
+        let Some(Commands::Serve {
+            catalog_profile: Some(profile),
+            ..
+        }) = cli.command
+        else {
+            panic!("{args:?} must select a catalog profile");
+        };
+        assert_eq!(profile.name(), "compact");
+    }
+    let error = Cli::try_parse_from(["tracedecay", "serve", "--catalog-profile=profile.compact"])
+        .err()
+        .expect("a catalog profile ID is not its short name");
+    assert!(
+        error
+            .to_string()
+            .contains(r#"unknown catalog profile "profile.compact""#),
+        "{error}"
+    );
 }

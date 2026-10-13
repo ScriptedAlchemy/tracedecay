@@ -487,6 +487,11 @@ pub enum Commands {
         // `--claude-code-tool-search`, which served the same full list.
         #[arg(long, alias = "claude-code-tool-search")]
         full_tool_list: bool,
+        /// List only the tools in this catalog profile (`default`, `compact`,
+        /// `administrative`, `host-limited`). Unlisted tools stay callable by
+        /// name and join the list once called.
+        #[arg(long, value_name = "NAME", value_parser = crate::serve_cmd::parse_catalog_profile)]
+        catalog_profile: Option<tracedecay_contracts::catalog_composition::CatalogProfileName>,
     },
     /// Manage the long-running TraceDecay daemon used by MCP clients
     #[command(long_about = DAEMON_LONG_ABOUT, after_help = DAEMON_AFTER_HELP)]

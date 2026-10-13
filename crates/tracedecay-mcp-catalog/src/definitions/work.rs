@@ -10,6 +10,11 @@ use crate::ToolDefinition;
 
 type DiscoveryResult<T> = Result<T, crate::McpCatalogError>;
 
+/// The MCP tool name of one Work operation.
+pub fn work_tool_name(operation: WorkOperation) -> String {
+    format!("tracedecay_work_{}", operation.operation_key())
+}
+
 /// Build every discoverable Work tool from the mounted executable bindings.
 ///
 /// Every mounted Work operation must have an executable binding; discovery
@@ -24,7 +29,7 @@ pub(super) fn work_definitions() -> DiscoveryResult<Vec<ToolDefinition>> {
         .into_iter()
         .map(|operation| FamilyOperation {
             operation_id: operation.operation_id(),
-            name: format!("tracedecay_work_{}", operation.operation_key()),
+            name: work_tool_name(operation),
             title: format!("Work {}", operation.operation_key()),
             description: operation.description().to_owned(),
         })

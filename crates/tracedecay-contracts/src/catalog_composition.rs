@@ -32,6 +32,61 @@ pub enum CatalogCompositionError {
     Identifier(#[from] IdentifierError),
 }
 
+const PROFILE_ID_PREFIX: &str = "profile.";
+
+/// A catalog profile that enables the MCP surface, selected by its short name
+/// (`compact` for `profile.compact`). Constructible only by parsing against a
+/// catalog snapshot's own profiles, so a new profile needs no edit here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CatalogProfileName {
+    name: String,
+    profile_id: ProfileId,
+}
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+#[error("unknown catalog profile {name:?}; valid: {}", valid.join(", "))]
+pub struct CatalogProfileNameError {
+    name: String,
+    valid: Vec<String>,
+}
+
+impl CatalogProfileName {
+    pub fn parse(catalog: &CatalogSnapshotV1, name: &str) -> Result<Self, CatalogProfileNameError> {
+        let mut valid = Vec::new();
+        for profile in catalog
+            .profiles()
+            .filter(|profile| profile.enables_surface(BindingSurface::Mcp))
+        {
+            let Some(short) = profile
+                .profile_id()
+                .as_str()
+                .strip_prefix(PROFILE_ID_PREFIX)
+            else {
+                continue;
+            };
+            if short == name {
+                return Ok(Self {
+                    name: short.to_owned(),
+                    profile_id: profile.profile_id().clone(),
+                });
+            }
+            valid.push(short.to_owned());
+        }
+        Err(CatalogProfileNameError {
+            name: name.to_owned(),
+            valid,
+        })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn profile_id(&self) -> &ProfileId {
+        &self.profile_id
+    }
+}
+
 /// The process's one catalog snapshot with schema bodies.
 ///
 /// Every descriptor behind it is `const`, so it cannot change while the
@@ -252,5 +307,27 @@ mod tests {
             dashboard_use_case("feedback_get").as_deref(),
             Some("use-case.application.feedback.get")
         );
+    }
+
+    #[test]
+    fn catalog_profile_names_are_the_snapshot_profiles_without_their_prefix() {
+        let snapshot = build_application_binding_snapshot().expect("binding snapshot");
+        let compact = CatalogProfileName::parse(&snapshot, "compact").expect("compact");
+        assert_eq!(compact.name(), "compact");
+        assert_eq!(
+            compact.profile_id().as_str(),
+            APPLICATION_COMPACT_PROFILE_ID
+        );
+        for rejected in ["bogus", APPLICATION_COMPACT_PROFILE_ID, ""] {
+            let error = CatalogProfileName::parse(&snapshot, rejected)
+                .expect_err("only a snapshot profile's short name parses");
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "unknown catalog profile {rejected:?}; \
+                     valid: administrative, compact, default, host-limited"
+                )
+            );
+        }
     }
 }
