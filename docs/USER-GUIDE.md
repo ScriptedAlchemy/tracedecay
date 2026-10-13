@@ -23,14 +23,15 @@ deployment.
 3. [Connecting to Your Agent](#connecting-to-your-agent)
 4. [Exploring Your Codebase from the CLI](#exploring-your-codebase-from-the-cli)
 5. [Keeping the Index Fresh](#keeping-the-index-fresh)
-6. [Checking Your Setup with Doctor](#checking-your-setup-with-doctor)
-7. [Finding Affected Tests](#finding-affected-tests)
-8. [MCP Tools for AI Agents](#mcp-tools-for-ai-agents)
-9. [Supported Languages](#supported-languages)
-10. [Privacy and Network](#privacy-and-network)
-11. [Updating TraceDecay](#updating-tracedecay)
-12. [Configuration Files](#configuration-files)
-13. [Troubleshooting](#troubleshooting)
+6. [Running Parallel Work with Synthesis](#running-parallel-work-with-synthesis)
+7. [Checking Your Setup with Doctor](#checking-your-setup-with-doctor)
+8. [Finding Affected Tests](#finding-affected-tests)
+9. [MCP Tools for AI Agents](#mcp-tools-for-ai-agents)
+10. [Supported Languages](#supported-languages)
+11. [Privacy and Network](#privacy-and-network)
+12. [Updating TraceDecay](#updating-tracedecay)
+13. [Configuration Files](#configuration-files)
+14. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -689,6 +690,125 @@ chmod +x .git/hooks/post-commit
 Use `tracedecay sync` only as an explicit administrative refresh request when a
 diagnostic says the selected generation is stale; routine freshness remains a
 daemon-owned background journey.
+
+## Running Parallel Work with Synthesis
+
+Work runs provider attempts for you: several tasks implemented in parallel,
+then one synthesis attempt that reviews their outputs. The guided path,
+`tracedecay work advance-job`, runs that whole job from one request. Agents
+call the same operation as the `tracedecay_work_advance_job` MCP tool.
+
+### Before you start
+
+Work starts attempts only through a provider route you configured, so set
+`work.executable_bindings.v1` for the project first. The default topology
+admits one active attempt per repository. A job still finishes under that
+default, but its sources run one at a time. To run them at the same time, raise
+`concurrency.maximum_active_per_repository` and
+`concurrency.maximum_global_active` in `work.topology_policy.v1`. That key is
+protected, so change it with a protected preview and apply, then restart the
+daemon.
+
+### Describe the job
+
+Write the job to a file. Each task names its instructions and its placement.
+The synthesis names the task whose run it uses, its output name, and its
+instructions.
+
+```json
+{
+  "job": "parser-rewrite",
+  "title": "Rewrite the parser",
+  "base": { "reference": "refs/heads/main", "commit": "<full commit id>" },
+  "effect_state": "observational",
+  "tasks": [
+    {
+      "key": "alpha",
+      "title": "Recursive-descent parser",
+      "instructions": "Rewrite src/parse.rs as a recursive-descent parser.",
+      "placement": {
+        "kind": "linked_worktree",
+        "root": "/abs/path/to/worktree-alpha",
+        "network_free": true,
+        "in_place_acknowledged": false
+      }
+    },
+    {
+      "key": "beta",
+      "title": "Pratt parser",
+      "instructions": "Rewrite src/parse.rs as a Pratt parser.",
+      "placement": {
+        "kind": "linked_worktree",
+        "root": "/abs/path/to/worktree-beta",
+        "network_free": true,
+        "in_place_acknowledged": false
+      }
+    }
+  ],
+  "synthesis": {
+    "task": "alpha",
+    "output_name": "output.parser-rewrite.review",
+    "instructions": "Compare both rewrites and synthesize the better parser."
+  }
+}
+```
+
+The `job` name and each task `key` use 1 to 48 lowercase letters, digits, or
+hyphens. A job names 1 to 16 tasks. Every Work identity comes from these two
+names, so the job above owns `task.parser-rewrite.alpha`,
+`run.parser-rewrite.alpha`, the source attempt
+`attempt.parser-rewrite.alpha.source`, and the synthesis attempt
+`attempt.parser-rewrite.alpha.synthesis`. The response repeats these
+identities under `job`.
+
+### Run it
+
+```bash
+tracedecay work advance-job --request-file job.json --until-settled
+```
+
+Each call creates every task, accepts its allowed proposal, admits execution,
+admits the placement, and starts the source attempt. It then waits for the
+sources, synthesizes them, waits for the synthesis, and releases each
+placement. Every step is the same Work operation you could call yourself,
+with that operation's own receipt. The output prints one line per step.
+`--until-settled` calls again until the job completes or is refused. Without
+it, one call runs every step it can and returns. Add `--json` to print each
+call's result envelope on its own line.
+
+A call ends in one of four states:
+
+- `advancing`: the call reached its deadline with steps left. Call again.
+- `waiting`: attempts are still running, the proposal route is warming, or the
+  topology has no free attempt slot. Call again later.
+- `refused`: the chain stopped at the named step with a typed problem. The
+  problem is the step operation's own refusal or one of the guided refusals
+  below.
+- `completed`: the response carries the source attempts and the synthesis
+  attempt.
+
+The job keeps no state of its own. Each call reads what the Work authorities
+hold and runs only the steps that are still missing. Sending the same request
+again is always safe, including after a daemon restart.
+
+### When the job is refused
+
+- `application.work-guided.job-conflict`: an object the job owns already
+  exists with different content, such as a changed title, placement, or
+  instructions. Name a new job to run the changed request.
+- `application.work-guided.proposal-withheld`: a task's proposal was not
+  decided `allow`. Review it with `generate-proposal` and `review-proposal`.
+- `application.work-guided.needs-operator`: an attempt failed, timed out, was
+  cancelled, or needs recovery, or a placement is quarantined. Recover it with
+  `resume-attempts`, `retry-attempt`, or `release-placement`.
+- `application.work-guided.invalid-job`: the request itself is malformed.
+
+Pause, resume, cancel, retry, and adjudication stay separate operations. For
+example, while you pause a job's run with `tracedecay work pause-run`, the
+next call refuses synthesis with `application.work-run-control.paused`. After
+`resume-run`, the same request continues. Today an attempt still runs in the
+project checkout. The job admits and releases each placement, but the attempt
+process does not run inside the placement root yet.
 
 ## Checking Your Setup with Doctor
 
