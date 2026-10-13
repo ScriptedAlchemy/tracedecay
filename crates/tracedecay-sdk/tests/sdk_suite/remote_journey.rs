@@ -741,6 +741,8 @@ fn a_joined_node_drains_offline_frames_in_order_to_its_authority() {
         RemoteCapabilityV1::CaptureOffline,
         RemoteCapabilityV1::DiscoverAuthority,
         RemoteCapabilityV1::TransferFrame,
+        RemoteCapabilityV1::Replay,
+        RemoteCapabilityV1::ServeAuthority,
     ]
     .into_iter()
     .collect();
@@ -841,6 +843,37 @@ fn a_joined_node_drains_offline_frames_in_order_to_its_authority() {
         "a second drain sends nothing"
     );
     assert_eq!(desktop.status()["spool"]["pending_count"], json!(2));
+
+    // Both observations start at byte 0 of one source, so the project store
+    // refuses the second one's source cursor once the first commits.
+    let node = desktop.client(ENROLLMENT_CREDENTIAL);
+    let fence = &writer.authority.fence;
+    let replay = |request_id: &str, frame: &Value| {
+        node.replay(&replay_request(
+            request_id,
+            &node_id,
+            fence,
+            frame["event_id"].as_str().unwrap(),
+        ))
+        .unwrap()
+        .result
+        .map(|envelope| envelope.outcome.payload().cloned().unwrap())
+    };
+    let first = replay("request.remote-drain-replay-first", &captured[0]);
+    assert!(
+        matches!(first, Ok(RemoteReplayOutcomeV1::Acknowledged { .. })),
+        "{first:?}"
+    );
+    let refused = replay("request.remote-drain-replay-refused", &captured[1]);
+    assert!(
+        matches!(refused, Ok(RemoteReplayOutcomeV1::Rejected { .. })),
+        "a frame the store refuses is rejected, not left retryable: {refused:?}"
+    );
+    assert_eq!(
+        desktop.status()["spool"]["pending_count"],
+        json!(0),
+        "a rejected frame leaves the authority's pending spool"
+    );
 
     for fixture in [laptop, desktop] {
         let mut daemon = fixture.daemon;
