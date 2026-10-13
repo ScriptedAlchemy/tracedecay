@@ -403,19 +403,18 @@ pub(super) const HANDWRITTEN_TOOLS: &[HandwrittenTool] = &[
     read(
         "tracedecay_by_qualified_name",
         "Lookup by qualified name",
-        "Look up nodes by their qualified name. Multiple rows can share a \
-         qualified name (overloads, generics, separate impl blocks). Useful \
-         for cross-run lookups where the content-hash node ID has changed.",
+        "List the locations of up to 1000 symbols whose qualified name equals the input exactly and case-sensitively, covering overloads, generics, and separate impl blocks. \
+         Use find_exact_symbol for a bare name, qualified_name for full symbol records, or signature for the matches' signatures. \
+         Useful for cross-run lookups where the content-hash node ID has changed.",
     ),
     read(
         "tracedecay_signature",
         "Signature",
-        "Return the signature-level metadata for symbols matching a qualified \
-         name, visibility, signature string (generics, params, return type, \
-         where clauses), docstring, async flag, and kind. No bodies. Use this \
+        "Return signatures without bodies for the symbol at `node_id`, or for every symbol whose qualified name equals `qualified_name` exactly; `node_id` wins when both are set. \
+         Each row carries visibility, the signature string (generics, params, return type, \
+         where clauses), docstring, async flag, kind, and location. Use this \
          instead of reading source files when you only need the public-API \
-         surface of a function, method, or type. Multiple rows can be \
-         returned (overloads, separate impls).",
+         surface of a function, method, or type; use find_exact_symbol first when you only know a bare name.",
     ),
     read(
         "tracedecay_diagnose",
@@ -451,22 +450,26 @@ pub(super) const HANDWRITTEN_TOOLS: &[HandwrittenTool] = &[
     read(
         "tracedecay_fact_store_search",
         "Fact Store Search",
-        "Search durable project or user memory facts by text and trust.",
+        "Rank durable memory facts against free text by text match, holographic similarity, trust, recency, and retrieval count, with a `why` for each score. \
+         Use fact_store_probe or fact_store_reason when you know the exact entity names.",
     ),
     read(
         "tracedecay_fact_store_probe",
         "Fact Store Probe",
-        "Find holographic memory facts connected to one entity.",
+        "List memory facts whose entities include one exact entity (case-insensitive), ranked by trust. \
+         Use fact_store_reason for facts naming several entities together, or fact_store_related for that entity's neighbors.",
     ),
     read(
         "tracedecay_fact_store_related",
         "Fact Store Related",
-        "List entities related to one entity through holographic memory facts.",
+        "List memory facts about an entity's neighbors: facts naming any entity that shares a fact with it, expanded through the memory graph and ranked by trust. \
+         It returns facts, not entities; use fact_store_probe for facts naming the entity itself.",
     ),
     read(
         "tracedecay_fact_store_reason",
         "Fact Store Reason",
-        "Reason over holographic memory facts connecting multiple entities.",
+        "List memory facts whose entities include every entity in `entities` (all must match, case-insensitive), ranked by trust. \
+         With one entity it matches fact_store_probe; use fact_store_related to widen to neighboring entities.",
     ),
     read(
         "tracedecay_fact_store_contradict",
@@ -748,10 +751,8 @@ pub(super) const HANDWRITTEN_TOOLS: &[HandwrittenTool] = &[
     read(
         "tracedecay_find_exact_symbol",
         "Exact Symbol Lookup",
-        "Return every node whose `name` column equals the given bare \
-         identifier, a single O(log n) index probe against `idx_nodes_name`. \
-         No BM25, no fuzzy match, no scoring. Use this when you already know \
-         the symbol name and want the cheapest possible lookup; use \
-         `tracedecay_search` for relevance-ranked discovery instead.",
+        "Find indexed symbols whose bare name equals `name` (case-insensitive, unranked, default 20 and at most 200), with near-miss name suggestions when none match. \
+         Use by_qualified_name when you have the full qualified path, or \
+         `tracedecay_search` for relevance-ranked discovery.",
     ),
 ];

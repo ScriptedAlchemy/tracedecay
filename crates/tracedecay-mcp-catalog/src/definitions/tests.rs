@@ -521,3 +521,62 @@ mod search_schema_tests {
         );
     }
 }
+
+#[test]
+fn every_catalog_tool_has_a_category() {
+    let unclassified: Vec<String> = get_tool_definitions()
+        .expect("tool definitions")
+        .into_iter()
+        .filter(|definition| crate::ToolCategory::of(&definition.name).is_none())
+        .map(|definition| definition.name)
+        .collect();
+    assert!(
+        unclassified.is_empty(),
+        "unclassified tools: {unclassified:?}"
+    );
+}
+
+/// Issue #3653 keeps these as advanced workflows: overlapping entry
+/// vocabulary is routed by description, never by dropping a tool.
+#[test]
+fn advanced_workflow_and_overlapping_tools_stay_advertised() {
+    let advertised: std::collections::BTreeSet<String> = get_tool_definitions()
+        .expect("tool definitions")
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect();
+    let missing: Vec<&str> = [
+        "port_status",
+        "port_order",
+        "todos",
+        "test_map",
+        "test_risk",
+        "affected_tests",
+        "signature_search",
+        "dead_code",
+        "circular",
+        "coupling",
+        "dsm",
+        "gini",
+        "complexity",
+        "god_class",
+        "dependency_depth",
+        "inheritance_depth",
+        "recursion",
+        "distribution",
+        "rank",
+        "hotspots",
+        "redundancy",
+        "fact_store_probe",
+        "fact_store_reason",
+        "fact_store_related",
+        "find_exact_symbol",
+        "by_qualified_name",
+        "qualified_name",
+        "signature",
+    ]
+    .into_iter()
+    .filter(|name| !advertised.contains(&format!("tracedecay_{name}")))
+    .collect();
+    assert!(missing.is_empty(), "no longer advertised: {missing:?}");
+}

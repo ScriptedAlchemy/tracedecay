@@ -16,11 +16,9 @@ use super::{
     required_graph_metadata, user_line,
 };
 
-/// Bare-name lookup against `idx_nodes_name`, no BM25 scoring, no fuzzy
-/// match, no qualified-name suffix walk. Returns every node whose `name`
-/// column equals the query exactly. Useful when you already know the symbol
-/// and want the apples-to-apples cost of an index hit instead of
-/// `tracedecay_search`'s ranked query.
+/// Case-insensitive bare-name lookup in the served graph's simple-name map:
+/// no scoring, no fuzzy match, no qualified-name suffix walk. Edit-distance
+/// suggestions are computed only when nothing matches.
 #[tracing::instrument(name = "mcp.graph.find_exact_symbol.total", level = "trace", skip_all)]
 pub async fn compute_find_exact_symbol(
     ctx: &McpToolContext<'_>,
