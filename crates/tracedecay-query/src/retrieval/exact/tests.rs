@@ -286,6 +286,47 @@ fn central_authority_does_not_promote_unprefixed_natural_language() {
     );
 }
 
+fn identifier_literals(query: &str) -> Vec<String> {
+    let authority = CentralExactAdmissionAuthorityV1::new(id("exact-rules.v1"));
+    let query_view = EphemeralSanitizedQueryViewV1::sanitize(
+        query,
+        id::<SanitizerRevision>("query-sanitizer.v1"),
+        id::<QueryNormalizationRevision>("query-normalization.v1"),
+    )
+    .expect("query sanitizes");
+    authority
+        .parse_literals(&query_view, &base_request(16))
+        .into_iter()
+        .filter(|literal| literal.field == ExactFieldV1::Identifier)
+        .map(|literal| String::from_utf8(literal.original_bytes).expect("utf8"))
+        .collect()
+}
+
+#[test]
+fn central_authority_admits_the_identifier_a_query_of_words_spells() {
+    assert_eq!(
+        identifier_literals("exact admission proof"),
+        [
+            "exact",
+            "admission",
+            "proof",
+            "exact_admission_proof",
+            "exactAdmissionProof",
+            "ExactAdmissionProof",
+        ]
+    );
+    assert_eq!(
+        identifier_literals("admission proof path:src/lib.rs"),
+        ["admission", "proof"],
+        "a typed atom is not a word of a spelled identifier"
+    );
+    assert_eq!(
+        identifier_literals("admission \"proof\""),
+        ["admission"],
+        "a quoted atom is not a word of a spelled identifier"
+    );
+}
+
 /// One literal's specificity share when every request literal is equally
 /// specific.
 fn literal_share(request: &ExactLaneRequest<'_>) -> u64 {

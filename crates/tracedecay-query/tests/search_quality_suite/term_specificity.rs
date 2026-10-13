@@ -39,11 +39,9 @@ const CALLERS_FILES: [&str; 6] = [
 ];
 
 /// One `format_relative_time` definition, six unrelated symbols named
-/// `callers`, and filler functions that name neither. The filler makes the
-/// corpus large enough that every lexical match saturates the lexical
-/// calibration, as it does in a real repository.
-fn sources() -> Vec<String> {
-    let mut sources = vec![
+/// `callers`, and filler functions that name neither.
+fn callers_sources() -> Vec<String> {
+    with_filler(vec![
         "pub fn format_relative_time(seconds: u64) -> String {\n    format!(\"{seconds}s ago\")\n}\n".to_owned(),
         "/// Every node that calls this one; callers are deduplicated.\npub struct CallGraph {\n    /// The callers of this node.\n    pub callers: Vec<u32>,\n}\n".to_owned(),
         "pub struct Index;\nimpl Index {\n    /// Counts the callers of a symbol.\n    pub fn callers(&self) -> usize {\n        0\n    }\n}\n".to_owned(),
@@ -51,7 +49,13 @@ fn sources() -> Vec<String> {
         "pub struct Report {\n    /// How many callers reached the symbol.\n    pub callers: usize,\n    pub callees: usize,\n}\n".to_owned(),
         "pub trait Graph {\n    /// The callers of a node.\n    fn callers(&self) -> Vec<u64>;\n}\n".to_owned(),
         "pub struct Summary {\n    /// Callers, by name.\n    pub callers: Vec<String>,\n}\n".to_owned(),
-    ];
+    ])
+}
+
+/// Filler functions that name nothing a test queries. They make the corpus
+/// large enough that every lexical match saturates the lexical calibration,
+/// as it does in a real repository.
+fn with_filler(mut sources: Vec<String>) -> Vec<String> {
     for file in 0..3 {
         sources.push(
             (0..150)
@@ -135,8 +139,7 @@ fn core_diversity() -> DiversityPolicy {
 
 /// Runs `query` through the exact lane, every planned lexical route, and
 /// composition, the way the daemon's search does.
-fn search(query: &str) -> Vec<RankedCandidate> {
-    let sources = sources();
+fn search(sources: &[String], query: &str) -> Vec<RankedCandidate> {
     let artifact = rust_artifact(&sources.iter().map(String::as_str).collect::<Vec<_>>());
     let generation = artifact.metadata.generation.clone();
     let request = base_request(query, 32);
@@ -225,7 +228,7 @@ fn file(ranked: &RankedCandidate) -> &str {
 
 #[test]
 fn a_named_identifier_outranks_exact_matches_of_a_common_query_word() {
-    let ranked = search("format_relative_time callers");
+    let ranked = search(&callers_sources(), "format_relative_time callers");
     let summary = ranked
         .iter()
         .map(|ranked| (file(ranked), ranked.candidate.utility_micros))
@@ -247,4 +250,28 @@ fn a_named_identifier_outranks_exact_matches_of_a_common_query_word() {
              trim can cut it: {summary:?}"
         );
     }
+}
+
+/// One `store_response_handle` definition and unrelated symbols named
+/// exactly `store`, `response`, and `handle`.
+fn split_word_sources() -> Vec<String> {
+    with_filler(vec![
+        "pub fn store_response_handle(body: &str) -> String {\n    body.to_owned()\n}\n".to_owned(),
+        "pub fn store() -> Vec<u8> {\n    Vec::new()\n}\n".to_owned(),
+        "pub struct Cache;\nimpl Cache {\n    pub fn store(&self, key: u64) -> u64 {\n        key\n    }\n}\n".to_owned(),
+        "pub fn response() -> u16 {\n    200\n}\n".to_owned(),
+        "pub struct Reply {\n    pub response: String,\n}\n".to_owned(),
+        "pub fn handle() -> u32 {\n    0\n}\n".to_owned(),
+        "pub trait Resource {\n    fn handle(&self) -> u32;\n}\n".to_owned(),
+    ])
+}
+
+#[test]
+fn split_words_rank_the_identifier_they_spell_first() {
+    let ranked = search(&split_word_sources(), "store response handle");
+    let summary = ranked
+        .iter()
+        .map(|ranked| (file(ranked), ranked.candidate.utility_micros))
+        .collect::<Vec<_>>();
+    assert_eq!(file(&ranked[0]), "file.fixture.0", "{summary:?}");
 }
