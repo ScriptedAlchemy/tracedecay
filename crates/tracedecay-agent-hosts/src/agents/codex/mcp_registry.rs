@@ -108,12 +108,14 @@ pub(super) fn is_mcp_only_component_set(components: &[HostComponentV1]) -> bool 
 }
 
 /// Whether `component` is an MCP route served by Codex's standalone registry
-/// server, launching `tracedecay_bin` when one is given. This is the MCP-only
-/// install's readback: that install never activates the plugin.
+/// server, launching `tracedecay_bin` when one is given with exactly
+/// `serve_args`. This is the MCP-only install's readback: that install never
+/// activates the plugin.
 pub(super) fn standalone_mcp_route(
     component: HostComponentV1,
     home: &Path,
     tracedecay_bin: Option<&str>,
+    serve_args: &ServeArgs,
 ) -> std::result::Result<bool, ()> {
     if !matches!(
         component,
@@ -124,8 +126,18 @@ pub(super) fn standalone_mcp_route(
     let Some(server) = standalone_server(home).map_err(drop)? else {
         return Ok(false);
     };
-    Ok(tracedecay_bin
-        .is_none_or(|bin| server.get("command").and_then(toml::Value::as_str) == Some(bin)))
+    let args_match = server
+        .get("args")
+        .and_then(toml::Value::as_array)
+        .and_then(|args| {
+            args.iter()
+                .map(toml::Value::as_str)
+                .collect::<Option<Vec<_>>>()
+        })
+        .is_some_and(|args| serve_args.matches(&args, &[]));
+    Ok(args_match
+        && tracedecay_bin
+            .is_none_or(|bin| server.get("command").and_then(toml::Value::as_str) == Some(bin)))
 }
 
 fn standalone_server(home: &Path) -> Result<Option<toml::Value>> {
@@ -362,6 +374,40 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use tracedecay_runtime_core::test_executable::write_executable_script;
+
+    /// A standalone server on another catalog profile is not current, so an
+    /// MCP-only install that switches profiles re-registers it.
+    #[test]
+    fn the_standalone_readback_requires_the_selected_catalog_profile() {
+        let home = tempfile::tempdir().unwrap();
+        let config_path = codex_config_path(home.path());
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config_path,
+            "[mcp_servers.tracedecay]\ncommand = \"/bin/td\"\nargs = [\"serve\"]\n",
+        )
+        .unwrap();
+        let catalog =
+            tracedecay_contracts::catalog_composition::build_application_binding_snapshot()
+                .unwrap();
+        let compact = ServeArgs::from(
+            tracedecay_contracts::catalog_composition::CatalogProfileName::parse(
+                &catalog, "compact",
+            )
+            .unwrap(),
+        );
+        let route = |serve_args: &ServeArgs| {
+            standalone_mcp_route(
+                HostComponentV1::ContextMcp,
+                home.path(),
+                Some("/bin/td"),
+                serve_args,
+            )
+            .unwrap()
+        };
+        assert!(route(&ServeArgs::default()));
+        assert!(!route(&compact));
+    }
 
     /// Install a fake `codex` that appends each invocation's argv to `log` and
     /// then performs `body`.
@@ -631,8 +677,7 @@ exit 0"#;
                 selection,
                 0,
                 tracedecay_bin,
-                crate::agents::TEST_GENERATOR_COMMIT,
-            )
+                crate::agents::TEST_GENERATOR_COMMIT, &crate::agents::serve_args::ServeArgs::default(),)
             .unwrap();
         let request = HostComponentSetExecutionRequestV1 {
             lifecycle: HostComponentSetLifecycleRequestV1 {

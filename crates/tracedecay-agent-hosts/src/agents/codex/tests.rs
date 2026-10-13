@@ -1475,7 +1475,7 @@ fn plugin_bearing_activation_retires_the_standalone_server() {
         codex_plugin_activation_state(
             &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             home.path(),
-            Some(TEST_BIN)
+            Some((TEST_BIN, &ServeArgs::default()))
         )
         .unwrap()
     );

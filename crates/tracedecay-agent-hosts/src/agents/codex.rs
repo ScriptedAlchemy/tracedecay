@@ -224,7 +224,12 @@ impl AgentIntegration for CodexIntegration {
             Ok(true) => {}
             Err(()) => return State::Corrupt,
         }
-        match mcp_registry::standalone_mcp_route(component, &ctx.home, None) {
+        match mcp_registry::standalone_mcp_route(
+            component,
+            &ctx.home,
+            None,
+            &ctx.catalog_profiles.serve_args(self.id()),
+        ) {
             Ok(true) => return State::Current,
             Ok(false) => {}
             Err(()) => return State::Corrupt,
@@ -253,6 +258,7 @@ impl AgentIntegration for CodexIntegration {
             component,
             &ctx.home,
             Some(&install.tracedecay_bin),
+            &install.serve_args,
         ) {
             Ok(true) => return State::Current,
             Ok(false) => {}
