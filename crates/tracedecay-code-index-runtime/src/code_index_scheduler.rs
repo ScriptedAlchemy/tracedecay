@@ -210,6 +210,8 @@ pub use demand_admission::{
     CodeIndexDemandAdmissionV1, CodeIndexDemandUnavailableV1, CodeIndexDemandV1,
 };
 pub use graph_activation::{CodeGraphActivationAuthorityV1, CodeGraphActivationPolicyV1};
+#[cfg(any(test, feature = "test-helpers"))]
+pub use graph_activation::{InjectedActivationGateV1, install_injected_catalog_warm_gate};
 pub use ignored_dependencies::{
     CodeIndexIgnoredDependencyIndexOutcomeV1, CodeIndexIgnoredDependencyRefusalV1,
     CodeIndexIgnoredDependencyRequestV1,

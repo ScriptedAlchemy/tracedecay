@@ -505,7 +505,12 @@ fn enrolled_remote_failover_without_a_published_writer_is_a_typed_refusal() {
         project_id,
         &grant_credential,
     );
-    grant.capabilities = [RemoteCapabilityV1::Promote].into_iter().collect();
+    grant.capabilities = [
+        RemoteCapabilityV1::Promote,
+        RemoteCapabilityV1::ServeAuthority,
+    ]
+    .into_iter()
+    .collect();
     let provisioned = reqwest::blocking::Client::new()
         .post(format!("{local_base}/remote-nodes/provision"))
         .bearer_auth(local_token)
@@ -670,7 +675,12 @@ fn enrolled_node_fails_over_after_the_operator_publishes_the_first_writer() {
         project_id,
         &grant_credential,
     );
-    grant.capabilities = [RemoteCapabilityV1::Promote].into_iter().collect();
+    grant.capabilities = [
+        RemoteCapabilityV1::Promote,
+        RemoteCapabilityV1::ServeAuthority,
+    ]
+    .into_iter()
+    .collect();
     let operator = reqwest::blocking::Client::new();
     let local_post = |path: &str, body: &Value| {
         let response = operator
