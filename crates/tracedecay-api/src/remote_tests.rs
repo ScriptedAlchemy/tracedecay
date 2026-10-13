@@ -31,7 +31,10 @@ use tracedecay_contracts::remote::query::{
     RemoteQueryResultV1,
 };
 use tracedecay_contracts::remote::recovery::{PromotionCasReceiptV1, PromotionConfirmationV1};
-use tracedecay_contracts::remote::replay::{RemoteReplayOutcomeV1, RemoteReplayRequestV1};
+use tracedecay_contracts::remote::replay::{
+    RemoteReplayOutcomeV1, RemoteReplayPendingReceiptV1, RemoteReplayPendingRequestV1,
+    RemoteReplayRequestV1,
+};
 use tracedecay_contracts::remote::transfer::{
     RemoteFrameTransferReceiptV1, RemoteFrameTransferRequestV1,
 };
@@ -151,6 +154,7 @@ macro_rules! unreachable_protocol_port {
 
 unreachable_protocol_port!(RemoteCaptureRequestV1, RemoteCaptureReceiptV1);
 unreachable_protocol_port!(RemoteReplayRequestV1, RemoteReplayOutcomeV1);
+unreachable_protocol_port!(RemoteReplayPendingRequestV1, RemoteReplayPendingReceiptV1);
 unreachable_protocol_port!(RemoteQueryRequestV1, RemoteQueryResultV1);
 unreachable_protocol_port!(PromotionConfirmationV1, PromotionCasReceiptV1);
 unreachable_protocol_port!(RemoteFrameTransferRequestV1, RemoteFrameTransferReceiptV1);
@@ -209,6 +213,7 @@ fn credential_authority() -> RemoteCredentialAdmissionServiceV1<OneCredentialAut
         capabilities: std::collections::BTreeSet::from([
             RemoteCapabilityV1::Query,
             RemoteCapabilityV1::Promote,
+            RemoteCapabilityV1::ServeAuthority,
         ]),
         scope: scope.clone(),
     };
@@ -335,6 +340,7 @@ fn test_protocol_router(
         RemoteOperationProtocolPortsV1 {
             capture: port.clone(),
             replay: port.clone(),
+            replay_pending: port.clone(),
             frame_transfer: port.clone(),
             query: port.clone(),
             promotion: port.clone(),

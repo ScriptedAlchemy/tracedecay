@@ -24,7 +24,9 @@ use super::protocol::{
 };
 use super::query::{RemoteQueryRequestV1, remote_exact_observation_query_result_contract_v1};
 use super::recovery::{PromotionConfirmationV1, remote_promotion_result_contract_v1};
-use super::replay::RemoteReplayRequestV1;
+use super::replay::{
+    RemoteReplayPendingRequestV1, RemoteReplayRequestV1, remote_replay_pending_result_contract_v1,
+};
 use super::transfer::{RemoteFrameTransferRequestV1, remote_frame_transfer_result_contract_v1};
 use crate::{ApplicationContractError, ResultContractRef};
 
@@ -439,6 +441,21 @@ impl RemoteSessionBoundProtocolBodyV1 for RemoteReplayRequestV1 {
 
     fn result_contract() -> Result<ResultContractRef, ApplicationContractError> {
         Ok(remote_replay_result_contract_v1())
+    }
+
+    fn bind_authenticated_session(
+        session: &RemoteAuthenticatedSessionV1,
+        request: &RemoteProtocolRequestV1<Self>,
+    ) -> Result<(), RemoteCredentialAdmissionErrorV1> {
+        bind_protocol_body(session, request, Self::CREDENTIAL_USE)
+    }
+}
+
+impl RemoteSessionBoundProtocolBodyV1 for RemoteReplayPendingRequestV1 {
+    const CREDENTIAL_USE: RemoteCredentialUseV1 = RemoteCredentialUseV1::Replay;
+
+    fn result_contract() -> Result<ResultContractRef, ApplicationContractError> {
+        remote_replay_pending_result_contract_v1()
     }
 
     fn bind_authenticated_session(

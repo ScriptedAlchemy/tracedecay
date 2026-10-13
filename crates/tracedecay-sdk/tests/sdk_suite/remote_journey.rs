@@ -12,12 +12,17 @@ use tempfile::TempDir;
 use tracedecay_contracts::remote::capture::{RemoteCaptureSequenceV1, RemoteWriterAuthorityV1};
 use tracedecay_contracts::remote::capture_protocol::RemoteCaptureRequestV1;
 use tracedecay_contracts::remote::composition::ExpectedRemoteShardV1;
-use tracedecay_contracts::remote::protocol::{CurrentAuthorityRequestV1, RemoteProtocolRequestV1};
+use tracedecay_contracts::remote::protocol::{
+    CurrentAuthorityRequestV1, RemoteProtocolRequestV1, RemoteProtocolResponseV1,
+};
 use tracedecay_contracts::remote::query::{
     RemoteExactObservationResultV1, RemoteQueryOperationV1, RemoteQueryRequestV1,
 };
 use tracedecay_contracts::remote::recovery::PromotionConfirmationV1;
-use tracedecay_contracts::remote::replay::{RemoteReplayOutcomeV1, RemoteReplayRequestV1};
+use tracedecay_contracts::remote::replay::{
+    RemoteReplayFindingV1, RemoteReplayPendingReceiptV1, RemoteReplayPendingRequestV1,
+    RemoteReplayPendingStopV1, RemoteReplayRefusalV1,
+};
 use tracedecay_contracts::{ApplicationProblem, RequestId};
 use tracedecay_domain::{
     BrainId, BrainNodeId, ComponentVersion, DurableObservationV1, EnrollmentGrantV1, ObservationId,
@@ -850,32 +855,77 @@ fn a_joined_node_drains_offline_frames_in_order_to_its_authority() {
     // Both observations start at byte 0 of one source, so the project store
     // refuses the second one's source cursor once the first commits.
     let node = desktop.client(ENROLLMENT_CREDENTIAL);
-    let fence = &writer.authority.fence;
-    let replay = |request_id: &str, frame: &Value| {
-        node.replay(&replay_request(
+    let replay_pending = |request_id: &str| {
+        node.replay_pending(&replay_pending_request(
             request_id,
             &node_id,
-            fence,
-            frame["event_id"].as_str().unwrap(),
+            &writer.authority.fence,
         ))
         .unwrap()
         .result
-        .map(|envelope| envelope.outcome.payload().cloned().unwrap())
+        .unwrap_or_else(|problem| panic!("the authority replays the drained frames: {problem:?}"))
+        .outcome
+        .payload()
+        .cloned()
+        .expect("a guided replay returns its receipt")
     };
-    let first = replay("request.remote-drain-replay-first", &captured[0]);
-    assert!(
-        matches!(first, Ok(RemoteReplayOutcomeV1::Acknowledged { .. })),
-        "{first:?}"
+    let stopped = replay_pending("request.remote-drain-replay");
+    assert_eq!(
+        stopped
+            .acknowledged
+            .iter()
+            .map(|frame| (frame.sequence, frame.replayed.is_some()))
+            .collect::<Vec<_>>(),
+        vec![(1, true)],
+        "the first frame commits before the store refuses the second: {stopped:?}"
     );
-    let refused = replay("request.remote-drain-replay-refused", &captured[1]);
-    assert!(
-        matches!(refused, Ok(RemoteReplayOutcomeV1::Rejected { .. })),
-        "a frame the store refuses is rejected, not left retryable: {refused:?}"
+    let stop = stopped
+        .stopped_at
+        .clone()
+        .expect("the guided replay stops at the frame the store refuses");
+    assert_eq!(
+        (
+            stop.event_id.as_str(),
+            stop.sequence,
+            stop.refusal,
+            stop.finding,
+            stop.replayed.is_some()
+        ),
+        (
+            captured[1]["event_id"].as_str().unwrap(),
+            2,
+            RemoteReplayRefusalV1::Rejected,
+            RemoteReplayFindingV1::StoreRefused,
+            true
+        ),
+        "a frame the store refuses is rejected, not left retryable"
     );
     assert_eq!(
         desktop.status()["spool"]["pending_count"],
         json!(0),
         "a rejected frame leaves the authority's pending spool"
+    );
+    let again = replay_pending("request.remote-drain-replay-again");
+    assert_eq!(
+        again
+            .acknowledged
+            .iter()
+            .map(|frame| (&frame.receipt, frame.replayed.is_none()))
+            .collect::<Vec<_>>(),
+        stopped
+            .acknowledged
+            .iter()
+            .map(|frame| (&frame.receipt, true))
+            .collect::<Vec<_>>(),
+        "a resend reports the same commit and replays nothing"
+    );
+    assert_eq!(
+        again.stopped_at,
+        Some(RemoteReplayPendingStopV1 {
+            replayed: None,
+            ..stop
+        }),
+        "a resend repeats the same stop without replaying it"
     );
 
     for fixture in [laptop, desktop] {
@@ -994,37 +1044,69 @@ fn a_laptop_captures_offline_and_its_frames_reach_one_fenced_authority_until_rev
     assert_eq!(laptop.status()["spool"]["pending_count"], json!(0));
 
     let node = desktop.client(ENROLLMENT_CREDENTIAL);
-    let replay = |request_id: &str, event_id: &str| {
-        node.replay(&replay_request(request_id, &node_id, &fence, event_id))
+    let replay_pending = |node: &EnrolledRemoteClient, request_id: &str| {
+        node.replay_pending(&replay_pending_request(request_id, &node_id, &fence))
             .unwrap()
     };
-    for (index, event_id) in event_ids.iter().enumerate() {
-        let replayed = replay(
-            &format!("request.remote-qualification-replay-{index}"),
-            event_id,
-        );
-        let outcome = replayed
+    let replayed = |response: RemoteProtocolResponseV1<RemoteReplayPendingReceiptV1>| {
+        response
             .result
             .unwrap_or_else(|problem| {
-                panic!("the authority replays drained frame {index}: {problem:?}")
+                panic!("the authority replays the drained frames: {problem:?}")
             })
             .outcome
             .payload()
             .cloned()
-            .expect("a replay returns its outcome");
-        let RemoteReplayOutcomeV1::Acknowledged { receipt, .. } = outcome else {
-            panic!("drained frame {index} is acknowledged: {outcome:?}");
-        };
-        assert_eq!(
-            (&receipt.event_id, &receipt.writer_fence),
-            (event_id, &fence),
-            "the frame commits under the one published writer fence"
-        );
-    }
+            .expect("a guided replay returns its receipt")
+    };
+    let first = replayed(replay_pending(&node, "request.remote-qualification-replay"));
+    assert_eq!(first.stopped_at, None, "{first:?}");
+    assert_eq!(
+        first
+            .acknowledged
+            .iter()
+            .map(|frame| (&frame.receipt.event_id, &frame.receipt.writer_fence))
+            .collect::<Vec<_>>(),
+        event_ids
+            .iter()
+            .map(|event_id| (event_id, &fence))
+            .collect::<Vec<_>>(),
+        "each drained frame commits, in capture order, under the one published writer fence"
+    );
+    assert!(
+        first
+            .acknowledged
+            .iter()
+            .all(|frame| frame.replayed.is_some()),
+        "this step replayed both frames"
+    );
     assert_eq!(
         desktop.status()["spool"]["pending_count"],
         json!(0),
         "replayed frames leave the authority's pending spool"
+    );
+    let again = replayed(replay_pending(
+        &node,
+        "request.remote-qualification-replay-again",
+    ));
+    let receipts = |receipt: &RemoteReplayPendingReceiptV1| {
+        receipt
+            .acknowledged
+            .iter()
+            .map(|frame| frame.receipt.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        (receipts(&again), again.stopped_at.clone()),
+        (receipts(&first), None),
+        "a resend converges on the same commit receipts"
+    );
+    assert!(
+        again
+            .acknowledged
+            .iter()
+            .all(|frame| frame.replayed.is_none()),
+        "a resend commits nothing"
     );
 
     let query_found = |node: &EnrolledRemoteClient, moment: &str| {
@@ -1054,10 +1136,6 @@ fn a_laptop_captures_offline_and_its_frames_reach_one_fenced_authority_until_rev
     desktop.restart();
     let node = desktop.client(ENROLLMENT_CREDENTIAL);
     query_found(&node, "after a restart with no new commit");
-    let replay = |request_id: &str, event_id: &str| {
-        node.replay(&replay_request(request_id, &node_id, &fence, event_id))
-            .unwrap()
-    };
 
     let revocation = desktop.revoke(&node_id);
     assert_eq!(
@@ -1067,10 +1145,10 @@ fn a_laptop_captures_offline_and_its_frames_reach_one_fenced_authority_until_rev
     );
     let refused_as_revoked =
         |authority: Value| authority["value"]["reason"] == "enrollment_revoked";
-    let replayed = replay("request.remote-qualification-replay-revoked", &event_ids[0]);
-    assert!(replayed.result.is_err());
+    let refused = replay_pending(&node, "request.remote-qualification-replay-revoked");
+    assert!(refused.result.is_err());
     assert!(
-        refused_as_revoked(serde_json::to_value(&replayed.authority).unwrap()),
+        refused_as_revoked(serde_json::to_value(&refused.authority).unwrap()),
         "a revoked node cannot replay"
     );
     let queried = node
@@ -1122,12 +1200,11 @@ fn a_laptop_captures_offline_and_its_frames_reach_one_fenced_authority_until_rev
     }
 }
 
-fn replay_request(
+fn replay_pending_request(
     request_id: &str,
     node_id: &BrainNodeId,
     fence: &RemoteWriterFenceV1,
-    event_id: &str,
-) -> RemoteProtocolRequestV1<RemoteReplayRequestV1> {
+) -> RemoteProtocolRequestV1<RemoteReplayPendingRequestV1> {
     RemoteProtocolRequestV1::new(
         RequestId::new(request_id).unwrap(),
         fence.brain_id.clone(),
@@ -1135,9 +1212,7 @@ fn replay_request(
         1,
         Some(fence.clone()),
         now_micros(),
-        RemoteReplayRequestV1 {
-            event_id: event_id.to_owned(),
-        },
+        RemoteReplayPendingRequestV1 {},
     )
     .unwrap()
 }

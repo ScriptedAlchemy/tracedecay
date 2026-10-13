@@ -36,8 +36,9 @@ use tracedecay_contracts::remote::recovery::{
     RemoteRecoveryInterruptionV1, RemoteRecoveryProtocolOwnerV1,
 };
 use tracedecay_contracts::remote::replay::{
-    RemoteReplayOutcomeV1, RemoteReplayProtocolAdapterV1, RemoteReplayRequestV1,
-    RemoteReplayServiceV1,
+    RemoteReplayOutcomeV1, RemoteReplayPendingReceiptV1, RemoteReplayPendingRequestV1,
+    RemoteReplayProtocolAdapterV1, RemoteReplayRequestV1, RemoteReplayServiceV1,
+    remote_replay_pending_result_contract_v1,
 };
 use tracedecay_contracts::{
     ApplicationContractError, ApplicationEnvelope, ApplicationOutcome, CancellationSignal,
@@ -325,6 +326,35 @@ struct DaemonRemoteReplayProtocolPortV1 {
     transaction: Arc<DaemonRemoteReplayTransactionAuthorityV1>,
 }
 
+impl DaemonRemoteReplayProtocolPortV1 {
+    /// The replay service over the node store the presented credential routes
+    /// to, or `None` when the credential routes to no store or spool key.
+    fn adapter(
+        &self,
+        credential: &OpaqueRemoteCredential,
+        enrollment_revision: u64,
+    ) -> Option<RemoteReplayProtocolAdapterV1> {
+        let registered = self
+            .credentials
+            .storage_for_presented(RemoteCredentialUseV1::Replay, credential)
+            .ok()?;
+        let keyring = presented_spool_keyring(credential, enrollment_revision)?;
+        let storage = Arc::new(registered.storage.with_keyring(keyring));
+        Some(RemoteReplayProtocolAdapterV1::new(
+            RemoteReplayServiceV1::new(
+                storage.clone(),
+                storage.clone(),
+                storage.clone(),
+                storage.clone(),
+                storage.clone(),
+                storage.clone(),
+                self.transaction.clone(),
+                storage,
+            ),
+        ))
+    }
+}
+
 impl RemoteProtocolPortV1<RemoteReplayRequestV1> for DaemonRemoteReplayProtocolPortV1 {
     type Output = RemoteReplayOutcomeV1;
 
@@ -334,41 +364,34 @@ impl RemoteProtocolPortV1<RemoteReplayRequestV1> for DaemonRemoteReplayProtocolP
         request: RemoteProtocolRequestV1<RemoteReplayRequestV1>,
         credential: OpaqueRemoteCredential,
     ) -> std::result::Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
-        let request_id = request.request_id.clone();
-        let observed_at = request.sent_at;
-        let registered = match self
-            .credentials
-            .storage_for_presented(RemoteCredentialUseV1::Replay, &credential)
-        {
-            Ok(registered) => registered,
-            Err(_) => {
-                return remote_authority_unavailable_response(
-                    request_id,
-                    observed_at,
-                    remote_replay_result_contract_v1(),
-                );
-            }
-        };
-        let Some(keyring) = presented_spool_keyring(&credential, request.enrollment_revision)
-        else {
+        let Some(adapter) = self.adapter(&credential, request.enrollment_revision) else {
             return remote_authority_unavailable_response(
-                request_id,
-                observed_at,
+                request.request_id,
+                request.sent_at,
                 remote_replay_result_contract_v1(),
             );
         };
-        let storage = Arc::new(registered.storage.with_keyring(keyring));
-        RemoteReplayProtocolAdapterV1::new(RemoteReplayServiceV1::new(
-            storage.clone(),
-            storage.clone(),
-            storage.clone(),
-            storage.clone(),
-            storage.clone(),
-            storage.clone(),
-            self.transaction.clone(),
-            storage,
-        ))
-        .execute(request, credential)
+        adapter.execute(request, credential)
+    }
+}
+
+impl RemoteProtocolPortV1<RemoteReplayPendingRequestV1> for DaemonRemoteReplayProtocolPortV1 {
+    type Output = RemoteReplayPendingReceiptV1;
+
+    #[tracing::instrument(name = "daemon.remote.replay_pending", level = "trace", skip_all)]
+    fn execute(
+        &self,
+        request: RemoteProtocolRequestV1<RemoteReplayPendingRequestV1>,
+        credential: OpaqueRemoteCredential,
+    ) -> std::result::Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
+        let Some(adapter) = self.adapter(&credential, request.enrollment_revision) else {
+            return remote_authority_unavailable_response(
+                request.request_id,
+                request.sent_at,
+                remote_replay_pending_result_contract_v1()?,
+            );
+        };
+        adapter.execute(request, credential)
     }
 }
 
@@ -518,6 +541,14 @@ pub fn build_daemon_remote_protocol_router(
             },
         )),
         replay: Arc::new(CurrentAuthorityEnvelopeV1::new(
+            &credentials,
+            RemoteCredentialUseV1::Replay,
+            DaemonRemoteReplayProtocolPortV1 {
+                credentials: Arc::clone(&credentials),
+                transaction: Arc::clone(&transaction),
+            },
+        )),
+        replay_pending: Arc::new(CurrentAuthorityEnvelopeV1::new(
             &credentials,
             RemoteCredentialUseV1::Replay,
             DaemonRemoteReplayProtocolPortV1 {

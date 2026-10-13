@@ -35,7 +35,7 @@ use tracedecay_contracts::remote::protocol::{
 use tracedecay_contracts::remote::protocol_owner::RemoteOperationProtocolPortsV1;
 use tracedecay_contracts::remote::query::RemoteQueryRequestV1;
 use tracedecay_contracts::remote::recovery::PromotionConfirmationV1;
-use tracedecay_contracts::remote::replay::RemoteReplayRequestV1;
+use tracedecay_contracts::remote::replay::{RemoteReplayPendingRequestV1, RemoteReplayRequestV1};
 use tracedecay_contracts::remote::transfer::RemoteFrameTransferRequestV1;
 use tracedecay_contracts::{
     ApplicationContractError, CancellationSignal, RequestId, ResultContractRef,
@@ -303,6 +303,7 @@ pub fn remote_protocol_router(
     mount_operations! {
         "/capture" => RemoteCaptureRequestV1, operations.capture;
         "/replay" => RemoteReplayRequestV1, operations.replay;
+        "/replay/pending" => RemoteReplayPendingRequestV1, operations.replay_pending;
         "/frames/transfer" => RemoteFrameTransferRequestV1, operations.frame_transfer;
         "/query" => RemoteQueryRequestV1, operations.query;
         "/failover" => PromotionConfirmationV1, operations.promotion;

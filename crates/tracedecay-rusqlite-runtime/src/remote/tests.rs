@@ -30,8 +30,8 @@ use tracedecay_contracts::remote::{
         RemoteQueryAuthorizationPortV1, RemoteQueryPolicyRecordV1,
     },
     replay::{
-        RemoteReplayApplicationErrorV1, RemoteReplayCommitReceiptV1, RemoteReplayFindingV1,
-        RemoteReplayFrameLookupPortV1, RemoteReplayPolicyDecisionV1,
+        RemoteReplayApplicationErrorV1, RemoteReplayBacklogEntryV1, RemoteReplayCommitReceiptV1,
+        RemoteReplayFindingV1, RemoteReplayFrameLookupPortV1, RemoteReplayPolicyDecisionV1,
         RemoteReplayPolicyEvidencePortV1, RemoteReplayPolicyEvidenceV1, RemoteReplaySpoolPortV1,
     },
     transfer::{
@@ -995,10 +995,6 @@ fn writer_authority_readers_report_an_unpublished_writer_as_typed_absence() {
         placement_revision: fence.placement_revision.get(),
         authority_epoch: fence.authority_epoch.0,
     };
-    let frame = tracedecay_contracts::remote::replay::RemoteReplayFrameV1 {
-        event_id: "remote.event.unpublished".to_owned(),
-        capture: admitted(),
-    };
     let read_all =
         |storage: &RemoteSqliteStorageV1| {
             (
@@ -1007,7 +1003,7 @@ fn writer_authority_readers_report_an_unpublished_writer_as_typed_absence() {
             )
             .map(|_| ()),
             tracedecay_contracts::remote::replay::RemoteReplayCurrentWriterPortV1::current_writer(
-                storage, &frame,
+                storage, fence,
             )
             .map(|current| current.writer),
             storage
@@ -1485,6 +1481,140 @@ fn abandoning_an_attempt_a_terminal_transition_already_released_succeeds() {
             receipt: None,
             last_attempt: attempt,
         }
+    );
+}
+
+#[test]
+fn replay_backlog_lists_one_enrollments_frames_in_sequence_order() {
+    let fixture = fixture();
+    let storage = storage(&fixture);
+    let receipt = RemoteReplayCommitReceiptV1 {
+        event_id: "remote.event.backlog-1".to_owned(),
+        writer_fence: writer().authority.fence,
+        commit_sequence: 4,
+        committed_at: UtcMicros(20),
+        budget: OperationBudgetUsage {
+            units_consumed: 1,
+            bytes_consumed: 1,
+            elapsed_micros: 0,
+        },
+    };
+    let receipt_json = serde_json::to_string(&receipt).unwrap();
+    let finding_json = serde_json::to_string(&RemoteReplayFindingV1::StoreRefused).unwrap();
+    let insert = |event: &str,
+                  enrollment: &str,
+                  sequence: i64,
+                  state: &str,
+                  receipt: Option<&str>,
+                  finding: Option<&str>| {
+        fixture
+            .handle
+            .execute(
+                ExactSqlStatement::new(
+                    "INSERT INTO remote_spool_frames (
+                        event_id, enrollment_id, sequence, frame_digest, key_revision,
+                        nonce, ciphertext, state, receipt_json, finding, captured_at
+                     ) VALUES (?1, ?2, ?3, 'sha256:frame', 7, ?4, ?5, ?6, ?7, ?8, 10)"
+                        .to_owned(),
+                    vec![
+                        text(event),
+                        text(enrollment),
+                        ExactSqlValue::Integer(sequence),
+                        ExactSqlValue::Blob(vec![0; 12]),
+                        ExactSqlValue::Blob(vec![0]),
+                        text(state),
+                        optional_text(receipt),
+                        optional_text(finding),
+                    ],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    };
+    insert(
+        "remote.event.backlog-3",
+        "enrollment.backlog",
+        3,
+        "pending",
+        None,
+        None,
+    );
+    insert(
+        "remote.event.backlog-1",
+        "enrollment.backlog",
+        1,
+        "acknowledged",
+        Some(receipt_json.as_str()),
+        None,
+    );
+    insert(
+        "remote.event.foreign-1",
+        "enrollment.foreign",
+        1,
+        "pending",
+        None,
+        None,
+    );
+    insert(
+        "remote.event.backlog-2",
+        "enrollment.backlog",
+        2,
+        "rejected",
+        None,
+        Some(finding_json.as_str()),
+    );
+    let entry = |event_id: &str, sequence, state, receipt, finding| RemoteReplayBacklogEntryV1 {
+        event_id: event_id.to_owned(),
+        sequence,
+        state,
+        receipt,
+        finding,
+    };
+
+    assert_eq!(
+        storage.replay_backlog(&EntityId::new("enrollment.backlog").unwrap()),
+        Ok(vec![
+            entry(
+                "remote.event.backlog-1",
+                1,
+                RemoteReplayStateV1::Acknowledged,
+                Some(receipt),
+                None,
+            ),
+            entry(
+                "remote.event.backlog-2",
+                2,
+                RemoteReplayStateV1::Rejected,
+                None,
+                Some(RemoteReplayFindingV1::StoreRefused),
+            ),
+            entry(
+                "remote.event.backlog-3",
+                3,
+                RemoteReplayStateV1::Pending,
+                None,
+                None,
+            ),
+        ]),
+        "only this enrollment's frames, lowest sequence first, with their receipt and finding"
+    );
+    assert_eq!(
+        storage.replay_backlog(&EntityId::new("enrollment.absent").unwrap()),
+        Ok(Vec::new())
+    );
+
+    insert(
+        "remote.event.corrupt-1",
+        "enrollment.corrupt",
+        1,
+        "rejected",
+        None,
+        Some("not a finding"),
+    );
+    assert_eq!(
+        storage.replay_backlog(&EntityId::new("enrollment.corrupt").unwrap()),
+        Err(RemoteCapturePersistenceErrorV1::Corruption),
+        "an undecodable finding is corruption, not an absent finding"
     );
 }
 
