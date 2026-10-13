@@ -40,8 +40,8 @@ use crate::repository::RetainedExactSqlCapability;
 use tracedecay_contracts::{
     OperationBudgetUsage,
     remote::replay::{
-        RemoteReplaySpoolPortV1, RemoteReplaySpoolStateV1, RemoteReplayStateV1,
-        RemoteReplayTransitionReceiptV1, RemoteReplayTransitionV1,
+        RemoteReplayBacklogEntryV1, RemoteReplaySpoolPortV1, RemoteReplaySpoolStateV1,
+        RemoteReplayStateV1, RemoteReplayTransitionReceiptV1, RemoteReplayTransitionV1,
     },
 };
 
@@ -1083,13 +1083,7 @@ impl RemoteReplaySpoolPortV1 for RemoteSqliteStorageV1 {
                     .map(serde_json::to_string)
                     .transpose()
                     .map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)?;
-                let terminal = matches!(
-                    transition.to,
-                    RemoteReplayStateV1::Acknowledged
-                        | RemoteReplayStateV1::Rejected
-                        | RemoteReplayStateV1::Quarantined
-                        | RemoteReplayStateV1::GarbageCollectionEligible
-                );
+                let terminal = transition.to.is_settled();
                 let transition_bytes = canonical_json_bytes(&transition)
                     .map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)?
                     .len();
@@ -1235,6 +1229,23 @@ impl RemoteReplaySpoolPortV1 for RemoteSqliteStorageV1 {
             return Err(RemoteCapturePersistenceErrorV1::Corruption);
         }
         Ok(())
+    }
+
+    fn replay_backlog(
+        &self,
+        enrollment_id: &EntityId,
+    ) -> Result<Vec<RemoteReplayBacklogEntryV1>, RemoteCapturePersistenceErrorV1> {
+        query(
+            self.handle(),
+            "SELECT event_id, sequence, state, receipt_json, finding
+             FROM remote_spool_frames WHERE enrollment_id = ?1 ORDER BY sequence",
+            vec![text(enrollment_id.as_str())],
+        )
+        .map_err(map_persistence_error)?
+        .rows
+        .iter()
+        .map(decode_backlog_entry)
+        .collect()
     }
 }
 
