@@ -432,6 +432,105 @@ async fn persistence_failure_cannot_be_rewritten_as_a_clean_terminal() {
 }
 
 #[tokio::test]
+async fn failed_flush_shutdown_leaves_rollup_maintenance_to_the_next_producer() {
+    let (_project, runtime) = runtime().await;
+    let db = runtime.project_database_arc().expect("project database");
+    let scope = "project.observability.shutdown";
+    let blocker = db
+        .begin_write_transaction()
+        .await
+        .expect("hold registered writer");
+    tokio::time::pause();
+    let producer = BoundedObservabilityProducerV1::start(
+        db.clone(),
+        identity(scope, "boot:failed-flush-maintenance"),
+        1,
+    )
+    .expect("producer");
+    assert_eq!(
+        producer
+            .try_emit(envelope(scope))
+            .expect("queued observation"),
+        ObservabilityEmissionOutcomeV1::Enqueued
+    );
+    tokio::time::sleep(producer.persistence_deadline() * 3).await;
+    tokio::time::resume();
+    blocker.commit().await.expect("release registered writer");
+
+    let error = producer
+        .shutdown()
+        .await
+        .expect_err("lost observation keeps shutdown typed as failed");
+    assert!(
+        error
+            .to_string()
+            .contains("observability_persistence_deadline"),
+        "unexpected shutdown error: {error}"
+    );
+    assert!(
+        producer.shutdown_settled(),
+        "the durable terminal settles the writer"
+    );
+    assert!(
+        db.claim_observability_rollup_dirty_day(scope, "shutdown:rollup-check", 30)
+            .await
+            .expect("inspect terminal day")
+            .is_some(),
+        "a failed flush spends no shutdown budget on optional rollup maintenance",
+    );
+}
+
+#[tokio::test]
+async fn shutdown_preempts_rollup_maintenance_waiting_on_the_writer() {
+    let (_project, runtime) = runtime().await;
+    let db = runtime.project_database_arc().expect("project database");
+    let scope = "project.observability.shutdown";
+    let blocker = db
+        .begin_write_transaction()
+        .await
+        .expect("hold registered writer");
+    // Paused, the clock moves only while every task waits. The first idle
+    // rollup tick is due at start, so this sleep lets it begin its frontier
+    // write on the held writer, where its deadline can no longer elapse.
+    tokio::time::pause();
+    let producer = Arc::new(
+        BoundedObservabilityProducerV1::start(
+            db.clone(),
+            identity(scope, "boot:preempted-maintenance"),
+            1,
+        )
+        .expect("producer"),
+    );
+    tokio::time::sleep(Duration::from_millis(1)).await;
+
+    let cancel = tokio::spawn({
+        let producer = Arc::clone(&producer);
+        async move { producer.cancel().await }
+    });
+    // Cancellation writes nothing while the queue is empty, so the worker
+    // joins without the clock moving, unless maintenance still holds it.
+    for _ in 0..64 {
+        if producer.shutdown_joined() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        producer.shutdown_joined(),
+        "shutdown must not wait for optional maintenance on a held writer"
+    );
+
+    tokio::time::resume();
+    blocker.commit().await.expect("release registered writer");
+    let summary = cancel
+        .await
+        .expect("cancel task")
+        .expect("the writer fence settles the preempted write");
+    assert!(summary.cancelled);
+    assert!(producer.shutdown_settled());
+}
+
+#[tokio::test]
 async fn carried_positive_drop_then_clean_terminal_remains_partial() {
     let (_project, runtime) = runtime().await;
     let db = runtime.project_database_arc().expect("project database");
