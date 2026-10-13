@@ -261,7 +261,7 @@ async fn combined_review_refreshes_skill_and_fact_outcomes() {
     assert_eq!(before.skills_refreshed_at, None);
     assert_eq!(before.facts_refreshed_at, None);
 
-    let dispatch = run_combined_review_with_backend_and_retrieval(
+    let dispatch = settle_combined_review(
         &automation_project_context(&cg),
         &scheduler_config(Some(3600), None),
         &test_configuration_revision(),
