@@ -1,0 +1,81 @@
+name: Upstream compatibility lanes
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/upstream-compat.yml
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      nightly-date:
+        description: "Rust nightly snapshot to probe; empty uses yesterday UTC."
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+# PR smoke runs stay informational; a fresh upstream breakage should not
+# red-light an unrelated PR. Scheduled and dispatched probes fail for real.
+concurrency:
+  group: upstream-compat-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'upstream' }}
+  cancel-in-progress: true
+
+jobs:
+  # Catch Bazel 10's default flag flips on the pinned 9.3.0 (they exist there
+  # precisely so workspaces can migrate early) before the next LTS lands.
+  bazel-10-readiness:
+    name: Bazel 10 readiness (flipped-flag build on 9.3.0)
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    continue-on-error: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-bazel
+        with:
+          cache-key: upstream-compat-bazel10
+      - name: Build the Rust workspace with Bazel 10 default flags
+        run: |
+          bazel build --config=ci \
+            --experimental_fetch_all_coverage_outputs \
+            --experimental_split_coverage_postprocessing \
+            --incompatible_check_testonly_for_output_files \
+            --incompatible_exclude_starlark_flags_from_exec_config \
+            --incompatible_no_implicit_file_export \
+            --rewind_lost_inputs \
+            //crates/...
+
+  # Same lanes, nightly rustc: the probe runs one build against a recent
+  # upstream snapshot so next releases stop being a surprise. Never adopt
+  # nightly; the pinned stable 1.99.0 stays the authority lane.
+  nightly-rust-probe:
+    name: Rust nightly toolchain probe
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    continue-on-error: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Re-pin MODULE.bazel to the nightly snapshot
+        env:
+          NIGHTLY_DATE_INPUT: ${{ inputs.nightly-date }}
+        run: |
+          set -euo pipefail
+          NIGHTLY_DATE="${NIGHTLY_DATE_INPUT:-$(date -u -d yesterday +%F)}"
+          echo "Probing Rust nightly $NIGHTLY_DATE"
+          if ! grep -F 'versions = ["1.99.0"],' MODULE.bazel >/dev/null; then
+            echo "MODULE.bazel no longer names 1.99.0; refresh this probe's patterns"
+            exit 2
+          fi
+          if ! grep -F 'rustfmt_version = "1.99.0"' MODULE.bazel >/dev/null; then
+            echo "MODULE.bazel no longer pins rustfmt to 1.99.0; refresh this probe's patterns"
+            exit 2
+          fi
+          sed -i "s|versions = \[\"1\.99\.0\"\]|versions = [\"nightly/$NIGHTLY_DATE\"]|" MODULE.bazel
+          sed -i "s|rustfmt_version = \"1\.99\.0\"|rustfmt_version = \"nightly/$NIGHTLY_DATE\"|" MODULE.bazel
+          grep -n "nightly" MODULE.bazel
+      - uses: ./.github/actions/setup-bazel
+        with:
+          cache-key: upstream-compat-nightly
+      - name: Build the Rust workspace on nightly
+        run: bazel build --config=ci //crates/... --keep_going
