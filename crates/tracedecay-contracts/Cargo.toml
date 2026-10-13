@@ -21,7 +21,7 @@ tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 tracing = "0.1"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt"] }
+asupersync.workspace = true
 
 # These are test modules declared inside automation/tests.rs, which is linked
 # into the lib via #[path]; shear cannot follow #[path] inclusions.

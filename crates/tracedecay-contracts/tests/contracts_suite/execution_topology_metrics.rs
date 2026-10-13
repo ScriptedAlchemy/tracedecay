@@ -244,7 +244,7 @@ fn find<'a>(
         .unwrap_or_else(|| panic!("descriptor {metric} is present with the requested dimensions"))
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn an_empty_horizon_is_a_typed_absence_for_every_descriptor_not_a_zero() {
     let model = read(&Observations::Page(page(Vec::new()))).await;
 
@@ -274,7 +274,7 @@ async fn an_empty_horizon_is_a_typed_absence_for_every_descriptor_not_a_zero() {
     }
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn admission_refuses_missing_capability_cancellation_deadline_and_grant_expiry_before_read() {
     let observations = CountingObservations::new();
     let cases = [
@@ -330,7 +330,7 @@ async fn admission_refuses_missing_capability_cancellation_deadline_and_grant_ex
     assert_eq!(observations.query_count(), 0);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn emitted_delayed_dropped_and_sampled_evidence_weaken_family_coverage() {
     let mut dropped = envelope(
         1,
@@ -387,7 +387,7 @@ async fn emitted_delayed_dropped_and_sampled_evidence_weaken_family_coverage() {
     assert!(!sampled_model.current);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn explicit_drop_receipt_and_next_envelope_carrier_are_counted_once() {
     let mut drop_receipt = envelope(
         2,
@@ -421,7 +421,7 @@ async fn explicit_drop_receipt_and_next_envelope_carrier_are_counted_once() {
     assert_eq!(model.drill_anchors[0].cursor, "cursor.3");
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn replayed_idempotency_identity_is_excluded_without_double_counting() {
     let original = envelope(
         1,
@@ -453,7 +453,7 @@ async fn replayed_idempotency_identity_is_excluded_without_double_counting() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn github_stack_capability_is_counted_as_an_observed_topology_family() {
     let capability =
         ObservabilityPayloadV1::GitHubStackCapability(GitHubStackCapabilityObservedV1 {
@@ -492,7 +492,7 @@ async fn github_stack_capability_is_counted_as_an_observed_topology_family() {
     assert_eq!(model.github_stack_capability.unavailable, None);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn concurrency_width_is_duration_weighted_while_fanout_width_counts_samples() {
     let model = read(&Observations::Page(page(vec![
         envelope(
@@ -557,7 +557,7 @@ async fn concurrency_width_is_duration_weighted_while_fanout_width_counts_sample
     assert_eq!(ratio.unavailable, None);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn a_sample_without_a_bounded_interval_is_censored_not_zero_duration() {
     let model = read(&Observations::Page(page(vec![
         envelope(
@@ -614,7 +614,7 @@ async fn a_sample_without_a_bounded_interval_is_censored_not_zero_duration() {
     assert_eq!(peak.value.value, Some(5.0));
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn blocked_wall_time_unions_while_per_cause_time_attributes_and_may_exceed_it() {
     let mut events = Vec::new();
     for index in 0..5_u64 {
@@ -662,7 +662,7 @@ async fn blocked_wall_time_unions_while_per_cause_time_attributes_and_may_exceed
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn conflicting_same_revision_blocked_intervals_are_order_independent_and_unavailable() {
     let first = envelope(
         1,
@@ -693,7 +693,7 @@ async fn conflicting_same_revision_blocked_intervals_are_order_independent_and_u
     assert_eq!(wall.value.coverage.unknown, 1);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn conflict_cells_suppress_below_five_and_precision_remains_unavailable() {
     let prediction =
         ObservabilityPayloadV1::WorkConflictPrediction(WorkConflictPredictionObservedV1 {
@@ -754,7 +754,7 @@ async fn conflict_cells_suppress_below_five_and_precision_remains_unavailable() 
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn late_conflict_correction_rebuilds_to_the_same_highest_revision() {
     let prediction = envelope(
         1,
@@ -828,7 +828,7 @@ async fn late_conflict_correction_rebuilds_to_the_same_highest_revision() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn an_unreadable_store_and_a_capped_page_are_distinct_typed_absences() {
     let refused = read(&Observations::Refused).await;
     assert!(!refused.current);
@@ -857,7 +857,7 @@ async fn an_unreadable_store_and_a_capped_page_are_distinct_typed_absences() {
     }
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn no_metric_label_or_read_model_field_carries_an_identity() {
     let fanout = ObservabilityPayloadV1::WorkDeliveryFanout(WorkDeliveryFanoutObservedV1 {
         event_class: DeliveryEventClassV1::OperationTerminal,
@@ -890,7 +890,7 @@ async fn no_metric_label_or_read_model_field_carries_an_identity() {
     assert_eq!(model.drill_anchors[0].cursor, "cursor.1");
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn an_inverted_horizon_and_an_oversized_budget_are_typed_invalid_requests() {
     let observations = Observations::Page(page(Vec::new()));
     let inverted = ExecutionTopologyMetricsRequestV1 {
@@ -937,7 +937,7 @@ async fn an_inverted_horizon_and_an_oversized_budget_are_typed_invalid_requests(
     assert!(matches!(problem, ApplicationProblem::InvalidRequest { .. }));
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn malformed_store_cursor_authority_is_unavailable_not_an_unanchored_success() {
     let mut malformed = page(vec![envelope(
         1,
@@ -954,7 +954,7 @@ async fn malformed_store_cursor_authority_is_unavailable_not_an_unanchored_succe
     }));
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn a_store_row_from_another_scope_cannot_contribute_to_the_authorized_projection() {
     let mut foreign = envelope(
         1,

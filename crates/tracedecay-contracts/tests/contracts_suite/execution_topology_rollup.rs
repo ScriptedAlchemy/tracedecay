@@ -804,7 +804,7 @@ fn canonical_serde_roundtrip_and_bad_missing_interiors_fail_closed() {
     );
     assert_store_unavailable(&missing);
 }
-#[tokio::test]
+#[asupersync::test]
 async fn retained_read_preserves_stale_missing_malformed_and_capped_source_states() {
     let exact_day = horizon(0, DAY_MICROS);
     let full_horizon = horizon(0, DAY_MICROS.saturating_mul(2));

@@ -103,7 +103,7 @@ fn unbound_query_refuses_source_reads() {
     assert_denied(error);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn resolve_rejects_absolute_path_under_another_project_root() {
     let home = tempfile::tempdir().expect("temp");
     let project_a = home.path().join("project-a");
@@ -133,7 +133,7 @@ async fn resolve_rejects_absolute_path_under_another_project_root() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn open_denies_cross_project_source_at_bind() {
     let home = tempfile::tempdir().expect("temp");
     let admission = ImmediateAdmission {
