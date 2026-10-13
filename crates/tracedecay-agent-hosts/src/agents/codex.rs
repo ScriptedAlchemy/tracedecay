@@ -29,6 +29,7 @@
 //! observes that file before the registry command runs and can restore the
 //! pre-command document if the effect is rejected.
 
+use super::serve_args::ServeArgs;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tracedecay_runtime_core::config::ProfileRoot;
@@ -83,7 +84,12 @@ impl AgentIntegration for CodexIntegration {
         ] {
             super::ensure_project_local_safe_path(project_path, &path)?;
         }
-        install_codex_repo_plugin(ctx.profile.data_dir(), project_path, &ctx.tracedecay_bin)
+        install_codex_repo_plugin(
+            ctx.profile.data_dir(),
+            project_path,
+            &ctx.tracedecay_bin,
+            &ctx.serve_args,
+        )
     }
 
     fn project_host_component_registration_paths(
@@ -108,6 +114,7 @@ impl AgentIntegration for CodexIntegration {
             tracedecay_bin: ctx.tracedecay_bin.clone(),
             project_root: Some(project_path.to_path_buf()),
             dashboard: ctx.dashboard,
+            serve_args: ctx.serve_args.clone(),
         };
         uninstall_codex_repo_plugin_if_present(&local)
     }
@@ -242,7 +249,7 @@ impl AgentIntegration for CodexIntegration {
                 match codex_plugin_activation_state(
                     &ctx.profile,
                     &ctx.home,
-                    Some(&install.tracedecay_bin),
+                    Some((&install.tracedecay_bin, &install.serve_args)),
                 ) {
                     Ok(true) => State::Current,
                     Ok(false) => State::Repairable,
@@ -349,7 +356,11 @@ impl AgentIntegration for CodexIntegration {
         // retired skill left there would keep the loaded plugin from ever
         // matching the rendered bundle.
         remove_codex_retired_bundle_files(&codex_plugin_install_dir(&ctx.home))?;
-        if !codex_plugin_is_natively_active(&ctx.profile, &ctx.home, Some(&ctx.tracedecay_bin))? {
+        if !codex_plugin_is_natively_active(
+            &ctx.profile,
+            &ctx.home,
+            Some((&ctx.tracedecay_bin, &ctx.serve_args)),
+        )? {
             let codex_cli = plugin_registry::require_codex_plugin_cli()?;
             // `codex plugin add` resolves the catalog-deployed source through
             // this entry; it is a registration path, so rollback restores it.
@@ -378,14 +389,16 @@ impl AgentIntegration for CodexIntegration {
     }
 
     fn deactivate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
-        if codex_plugin_is_natively_active(&ctx.profile, &ctx.home, Some(&ctx.tracedecay_bin))?
-            || codex_plugin_enabled(&ctx.home).map_err(|()| TraceDecayError::Config {
-                message: format!(
-                    "could not read Codex native plugin activation state at {}",
-                    codex_config_path(&ctx.home).display()
-                ),
-            })?
-        {
+        if codex_plugin_is_natively_active(
+            &ctx.profile,
+            &ctx.home,
+            Some((&ctx.tracedecay_bin, &ctx.serve_args)),
+        )? || codex_plugin_enabled(&ctx.home).map_err(|()| TraceDecayError::Config {
+            message: format!(
+                "could not read Codex native plugin activation state at {}",
+                codex_config_path(&ctx.home).display()
+            ),
+        })? {
             let marketplace_name = codex_cached_marketplace_name(&ctx.home);
             let codex_cli = plugin_registry::require_codex_plugin_cli()?;
             plugin_registry::codex_plugin_remove_with(&codex_cli, &ctx.home, &marketplace_name)?;
@@ -427,7 +440,12 @@ impl AgentIntegration for CodexIntegration {
     ) -> Result<()> {
         if mcp_registry::is_mcp_only_component_set(components) {
             let codex_cli = mcp_registry::require_codex_cli()?;
-            return mcp_registry::codex_mcp_add_with(&codex_cli, &ctx.home, &ctx.tracedecay_bin);
+            return mcp_registry::codex_mcp_add_with(
+                &codex_cli,
+                &ctx.home,
+                &ctx.tracedecay_bin,
+                &ctx.serve_args,
+            );
         }
         if components.contains(&super::host_bundle::HostComponentV1::Core) {
             return self.activate_deployed_host_registration(ctx);
@@ -591,11 +609,13 @@ fn install_codex_repo_plugin(
     profile_root: &Path,
     project_path: &Path,
     tracedecay_bin: &str,
+    serve_args: &ServeArgs,
 ) -> Result<()> {
     let install_dir = codex_repo_plugin_install_dir(project_path);
     install_codex_plugin_bundle(
         &install_dir,
         tracedecay_bin,
+        serve_args,
         InstallScope::ProjectLocal,
         profile_root,
     )?;
@@ -706,23 +726,14 @@ impl CodexBundlePolicy {
         self.scope == InstallScope::Global
     }
 
-    /// The `serve` args baked into the bundle's `.mcp.json`.
-    ///
-    /// Both arms build on [`CODEX_MCP_SERVER_ARGS`] so this writer and the
-    /// CLI-driven registration in [`mcp_registry`] launch the same server.
-    fn mcp_args(self) -> serde_json::Value {
-        // Scope adds to the shared base; it never restates `serve`.
+    /// The `serve` args baked into the bundle's `.mcp.json`: the launch args
+    /// every host shares, plus this scope's own tail.
+    fn mcp_args(self, serve_args: &ServeArgs) -> serde_json::Value {
         let scoped: &[&str] = match self.scope {
             InstallScope::Global => &[],
             InstallScope::ProjectLocal => &["--path", "."],
         };
-        serde_json::Value::Array(
-            CODEX_MCP_SERVER_ARGS
-                .iter()
-                .chain(scoped.iter())
-                .map(|arg| serde_json::Value::String((*arg).to_string()))
-                .collect(),
-        )
+        serve_args.json(scoped)
     }
 
     /// Where Codex records trust for this bundle's hooks, `None` for scopes
@@ -735,11 +746,12 @@ impl CodexBundlePolicy {
 fn install_codex_plugin_bundle(
     install_dir: &Path,
     tracedecay_bin: &str,
+    serve_args: &ServeArgs,
     scope: InstallScope,
     profile_root: &Path,
 ) -> Result<()> {
     let policy = CodexBundlePolicy::for_scope(scope);
-    write_codex_plugin_bundle_base(install_dir, tracedecay_bin, policy)?;
+    write_codex_plugin_bundle_base(install_dir, tracedecay_bin, serve_args, policy)?;
     install_codex_managed_skill_overlay(profile_root, install_dir)?;
     Ok(())
 }
@@ -753,6 +765,7 @@ pub fn export_codex_plugin_artifact(
     write_codex_plugin_bundle_base(
         output,
         tracedecay_bin,
+        &ServeArgs::default(),
         CodexBundlePolicy::for_scope(InstallScope::Global),
     )?;
     tracedecay_automation_runtime::automation::skill_targets::export_native_skill_overlay(
@@ -770,6 +783,7 @@ pub fn export_codex_plugin_artifact(
 fn write_codex_plugin_bundle_base(
     install_dir: &Path,
     tracedecay_bin: &str,
+    serve_args: &ServeArgs,
     policy: CodexBundlePolicy,
 ) -> Result<()> {
     if let Some(parent) = install_dir.parent() {
@@ -778,7 +792,7 @@ fn write_codex_plugin_bundle_base(
         })?;
     }
     remove_codex_plugin_install(install_dir)?;
-    write_codex_plugin_files(install_dir, tracedecay_bin, policy)
+    write_codex_plugin_files(install_dir, tracedecay_bin, serve_args, policy)
 }
 
 fn install_codex_managed_skill_overlay(
@@ -796,9 +810,10 @@ fn install_codex_managed_skill_overlay(
 fn write_codex_plugin_files(
     install_dir: &Path,
     tracedecay_bin: &str,
+    serve_args: &ServeArgs,
     policy: CodexBundlePolicy,
 ) -> Result<()> {
-    for (relative, rendered) in rendered_plugin_files(tracedecay_bin, policy)? {
+    for (relative, rendered) in rendered_plugin_files(tracedecay_bin, serve_args, policy)? {
         safe_write_text_file(&install_dir.join(relative), &rendered)?;
     }
     Ok(())
@@ -812,15 +827,18 @@ fn write_codex_plugin_files(
 /// is an empty scaffold rendered only at install time).
 pub(crate) fn rendered_global_plugin_files(
     tracedecay_bin: &str,
+    serve_args: &ServeArgs,
 ) -> Result<Vec<(&'static str, String)>> {
     rendered_plugin_files(
         tracedecay_bin,
+        serve_args,
         CodexBundlePolicy::for_scope(InstallScope::Global),
     )
 }
 
 fn rendered_plugin_files(
     tracedecay_bin: &str,
+    serve_args: &ServeArgs,
     policy: CodexBundlePolicy,
 ) -> Result<Vec<(&'static str, String)>> {
     codex_embedded_plugin_files()?
@@ -828,7 +846,7 @@ fn rendered_plugin_files(
         .filter_map(|(relative, contents)| {
             let rendered = match relative {
                 ".codex-plugin/plugin.json" => codex_plugin_manifest(&contents, policy),
-                ".mcp.json" => codex_plugin_mcp(&contents, tracedecay_bin, policy),
+                ".mcp.json" => codex_plugin_mcp(&contents, tracedecay_bin, serve_args, policy),
                 "hooks/hooks.json" if !policy.include_hooks() => return None,
                 "hooks/hooks.json" => codex_plugin_hooks(&contents, tracedecay_bin),
                 _ => Ok(contents),
@@ -848,10 +866,15 @@ fn codex_plugin_manifest(raw: &str, policy: CodexBundlePolicy) -> Result<String>
     })
 }
 
-fn codex_plugin_mcp(raw: &str, tracedecay_bin: &str, policy: CodexBundlePolicy) -> Result<String> {
+fn codex_plugin_mcp(
+    raw: &str,
+    tracedecay_bin: &str,
+    serve_args: &ServeArgs,
+    policy: CodexBundlePolicy,
+) -> Result<String> {
     // Reuse the shared command rewrite, then layer the policy's args on top
     // of the result.
-    let stamped = super::plugin_bundle::set_mcp_command(raw, tracedecay_bin)?;
+    let stamped = super::plugin_bundle::set_mcp_command(raw, tracedecay_bin, serve_args)?;
     let mut mcp: serde_json::Value = serde_json::from_str(&stamped)?;
     // Codex's legacy MCP loader resolves cwd relative to the plugin but does
     // not expand the portable PLUGIN_ROOT token in args. Keep the adapter path
@@ -867,7 +890,7 @@ fn codex_plugin_mcp(raw: &str, tracedecay_bin: &str, policy: CodexBundlePolicy) 
         }
     }
     let server = &mut mcp["mcpServers"]["graph"];
-    server["args"] = policy.mcp_args();
+    server["args"] = policy.mcp_args(serve_args);
     server["env"] = CODEX_MCP_SERVER_ENV
         .iter()
         .map(|(key, value)| ((*key).to_owned(), serde_json::json!(value)))
@@ -933,19 +956,8 @@ const CODEX_GLOBAL_PLUGIN_SOURCE_PATH: &str = "./.codex/plugins/tracedecay";
 const CODEX_MCP_STARTUP_TIMEOUT_SECS: u64 = 120;
 const CODEX_MCP_TOOL_TIMEOUT_SECS: u64 = 900;
 
-/// Arguments the tracedecay MCP server is launched with under Codex's global
-/// scope.
-///
-/// Shared by the plugin bundle's `.mcp.json` writer
-/// ([`CodexBundlePolicy::mcp_args`]) and the CLI-driven MCP-only registration
-/// ([`mcp_registry::codex_mcp_add_with`], which passes them after `--`), so the
-/// two spellings of the same server cannot drift apart. The project-local
-/// bundle appends its own `--path .` on top of this base rather than restating
-/// `serve`.
-const CODEX_MCP_SERVER_ARGS: &[&str] = &["serve"];
-
 /// Environment for the tracedecay MCP server under Codex, shared the same way
-/// as [`CODEX_MCP_SERVER_ARGS`]. Codex starts one server per thread, so each
+/// as the launch args. Codex starts one server per thread, so each
 /// connection belongs to one agent and `serve` may answer a repeated identical
 /// read with a pointer to the result that agent already holds.
 const CODEX_MCP_SERVER_ENV: &[(&str, &str)] = &[("TRACEDECAY_MCP_REPEAT_READ_POINTERS", "1")];
@@ -1445,11 +1457,11 @@ fn codex_registration_residue(home: &Path) -> std::result::Result<bool, ()> {
 fn codex_plugin_activation_state(
     profile: &ProfileRoot,
     home: &Path,
-    tracedecay_bin: Option<&str>,
+    launch: Option<(&str, &ServeArgs)>,
 ) -> std::result::Result<bool, ()> {
     Ok(codex_source_manifest_matches_catalog_version(home)?
         && codex_plugin_enabled(home)?
-        && codex_loaded_cache_matches_rendered_bundle(profile, home, tracedecay_bin)?)
+        && codex_loaded_cache_matches_rendered_bundle(profile, home, launch)?)
 }
 
 fn codex_plugin_enabled(home: &Path) -> std::result::Result<bool, ()> {
@@ -1477,16 +1489,17 @@ fn codex_plugin_enabled(home: &Path) -> std::result::Result<bool, ()> {
 fn codex_loaded_cache_matches_rendered_bundle(
     profile: &ProfileRoot,
     home: &Path,
-    tracedecay_bin: Option<&str>,
+    launch: Option<(&str, &ServeArgs)>,
 ) -> std::result::Result<bool, ()> {
     let Some(marketplace_name) = codex_exact_personal_marketplace_name(home)? else {
         return Ok(false);
     };
     let cache_root = codex_plugin_cached_root(home, &marketplace_name).join(crate::PRODUCT_VERSION);
     let source_root = codex_plugin_install_dir(home);
-    let (expected, relatives) = match tracedecay_bin {
-        Some(tracedecay_bin) => {
-            let rendered = rendered_global_plugin_files(tracedecay_bin).map_err(|_| ())?;
+    let (expected, relatives) = match launch {
+        Some((tracedecay_bin, serve_args)) => {
+            let rendered =
+                rendered_global_plugin_files(tracedecay_bin, serve_args).map_err(|_| ())?;
             let (digest, relatives) =
                 super::rendered_bundle_content_digest(&rendered).map_err(|_| ())?;
             (Some(digest), relatives)
@@ -1632,15 +1645,13 @@ fn codex_exact_personal_marketplace_name(home: &Path) -> std::result::Result<Opt
 fn codex_plugin_is_natively_active(
     profile: &ProfileRoot,
     home: &Path,
-    tracedecay_bin: Option<&str>,
+    launch: Option<(&str, &ServeArgs)>,
 ) -> Result<bool> {
-    codex_plugin_activation_state(profile, home, tracedecay_bin).map_err(|()| {
-        TraceDecayError::Config {
-            message: format!(
-                "could not read Codex native plugin activation state at {}",
-                codex_config_path(home).display()
-            ),
-        }
+    codex_plugin_activation_state(profile, home, launch).map_err(|()| TraceDecayError::Config {
+        message: format!(
+            "could not read Codex native plugin activation state at {}",
+            codex_config_path(home).display()
+        ),
     })
 }
 

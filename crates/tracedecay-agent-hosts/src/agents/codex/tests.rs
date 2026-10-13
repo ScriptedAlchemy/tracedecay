@@ -57,7 +57,13 @@ fn codex_plugin_mcp_pins_explorer_binary_and_plugin_relative_adapter() {
         .expect("codex bundle ships .mcp.json");
     let bin = "/opt/tracedecay/bin/tracedecay";
     for scope in [InstallScope::Global, InstallScope::ProjectLocal] {
-        let rendered = codex_plugin_mcp(&raw, bin, CodexBundlePolicy::for_scope(scope)).unwrap();
+        let rendered = codex_plugin_mcp(
+            &raw,
+            bin,
+            &ServeArgs::default(),
+            CodexBundlePolicy::for_scope(scope),
+        )
+        .unwrap();
         let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
         let explorer = &value["mcpServers"]["tracedecay-explorer"];
         assert_eq!(explorer["command"], json!("node"));
@@ -485,7 +491,14 @@ fn sync_codex_hook_trust_reads_a_custom_marketplace_cache() {
         ".codex/plugins/cache/my-marketplace/tracedecay/{}",
         crate::PRODUCT_VERSION
     ));
-    install_codex_plugin_bundle(&plugin_dir, TEST_BIN, InstallScope::Global, home.path()).unwrap();
+    install_codex_plugin_bundle(
+        &plugin_dir,
+        TEST_BIN,
+        &ServeArgs::default(),
+        InstallScope::Global,
+        home.path(),
+    )
+    .unwrap();
     let hooks_path = plugin_dir.join("hooks/hooks.json");
     let mut hooks = load_json_file_strict(&hooks_path).unwrap();
     hooks["hooks"]["SessionStart"][0]["hooks"][0]["timeout"] = json!(9);
@@ -712,6 +725,7 @@ fn install_ctx(home: &Path) -> InstallContext {
         tracedecay_bin: TEST_BIN.to_string(),
         project_root: None,
         dashboard: false,
+        serve_args: Default::default(),
     }
 }
 
@@ -719,7 +733,13 @@ fn install_ctx(home: &Path) -> InstallContext {
 /// Core install leaves them.
 fn install_codex_personal_bootstrap(home: &Path, tracedecay_bin: &str) -> Result<PathBuf> {
     let install_dir = codex_plugin_install_dir(home);
-    install_codex_plugin_bundle(&install_dir, tracedecay_bin, InstallScope::Global, home)?;
+    install_codex_plugin_bundle(
+        &install_dir,
+        tracedecay_bin,
+        &ServeArgs::default(),
+        InstallScope::Global,
+        home,
+    )?;
     install_codex_marketplace_entry(
         &codex_personal_marketplace_path(home),
         "personal",
@@ -732,7 +752,9 @@ fn install_codex_personal_bootstrap(home: &Path, tracedecay_bin: &str) -> Result
 fn copy_rendered_bundle_to_native_cache(home: &Path, tracedecay_bin: &str) {
     let source = codex_plugin_install_dir(home);
     let cache = codex_plugin_current_cached_install_dir(home);
-    for (relative, _) in rendered_global_plugin_files(tracedecay_bin).unwrap() {
+    for (relative, _) in
+        rendered_global_plugin_files(tracedecay_bin, &ServeArgs::default()).unwrap()
+    {
         let target = cache.join(relative);
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
         std::fs::copy(source.join(relative), target).unwrap();
@@ -771,14 +793,28 @@ fn native_activation_binds_enabled_key_to_exact_marketplace_and_cache() {
             .and_then(serde_json::Value::as_str),
         Some("./.codex/plugins/tracedecay")
     );
-    assert!(codex_plugin_activation_state(profile, home.path(), Some(TEST_BIN)).unwrap());
+    assert!(
+        codex_plugin_activation_state(
+            profile,
+            home.path(),
+            Some((TEST_BIN, &ServeArgs::default()))
+        )
+        .unwrap()
+    );
 
     std::fs::write(
         codex_config_path(home.path()),
         "[plugins.\"tracedecay@other\"]\nenabled = true\n",
     )
     .unwrap();
-    assert!(!codex_plugin_activation_state(profile, home.path(), Some(TEST_BIN)).unwrap());
+    assert!(
+        !codex_plugin_activation_state(
+            profile,
+            home.path(),
+            Some((TEST_BIN, &ServeArgs::default()))
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -791,7 +827,14 @@ fn native_activation_rejects_cache_from_another_marketplace() {
     std::fs::create_dir_all(other.parent().unwrap()).unwrap();
     std::fs::rename(exact, other).unwrap();
 
-    assert!(!codex_plugin_activation_state(profile, home.path(), Some(TEST_BIN)).unwrap());
+    assert!(
+        !codex_plugin_activation_state(
+            profile,
+            home.path(),
+            Some((TEST_BIN, &ServeArgs::default()))
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -809,7 +852,14 @@ fn native_activation_rejects_marketplace_source_path_drift() {
     )
     .unwrap();
 
-    assert!(!codex_plugin_activation_state(profile, home.path(), Some(TEST_BIN)).unwrap());
+    assert!(
+        !codex_plugin_activation_state(
+            profile,
+            home.path(),
+            Some((TEST_BIN, &ServeArgs::default()))
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -819,29 +869,78 @@ fn native_cache_content_drift_and_binary_relocation_require_refresh() {
     let old_bin = "/old/bin/tracedecay";
     let new_bin = "/relocated/bin/tracedecay";
     write_exact_native_activation(home.path(), old_bin);
-    assert!(codex_plugin_is_natively_active(profile, home.path(), Some(old_bin)).unwrap());
+    assert!(
+        codex_plugin_is_natively_active(
+            profile,
+            home.path(),
+            Some((old_bin, &ServeArgs::default()))
+        )
+        .unwrap()
+    );
 
     let retired_skill =
         codex_plugin_current_cached_install_dir(home.path()).join("skills/retired/SKILL.md");
     std::fs::create_dir_all(retired_skill.parent().unwrap()).unwrap();
     std::fs::write(&retired_skill, "# stale auto-discovered skill\n").unwrap();
-    assert!(!codex_plugin_is_natively_active(profile, home.path(), Some(old_bin)).unwrap());
+    assert!(
+        !codex_plugin_is_natively_active(
+            profile,
+            home.path(),
+            Some((old_bin, &ServeArgs::default()))
+        )
+        .unwrap()
+    );
     std::fs::remove_file(retired_skill).unwrap();
-    assert!(codex_plugin_is_natively_active(profile, home.path(), Some(old_bin)).unwrap());
+    assert!(
+        codex_plugin_is_natively_active(
+            profile,
+            home.path(),
+            Some((old_bin, &ServeArgs::default()))
+        )
+        .unwrap()
+    );
 
     std::fs::write(
         codex_plugin_current_cached_install_dir(home.path()).join(".mcp.json"),
         "{}\n",
     )
     .unwrap();
-    assert!(!codex_plugin_is_natively_active(profile, home.path(), Some(old_bin)).unwrap());
+    assert!(
+        !codex_plugin_is_natively_active(
+            profile,
+            home.path(),
+            Some((old_bin, &ServeArgs::default()))
+        )
+        .unwrap()
+    );
     copy_rendered_bundle_to_native_cache(home.path(), old_bin);
-    assert!(codex_plugin_is_natively_active(profile, home.path(), Some(old_bin)).unwrap());
+    assert!(
+        codex_plugin_is_natively_active(
+            profile,
+            home.path(),
+            Some((old_bin, &ServeArgs::default()))
+        )
+        .unwrap()
+    );
 
     install_codex_personal_bootstrap(home.path(), new_bin).unwrap();
-    assert!(!codex_plugin_is_natively_active(profile, home.path(), Some(new_bin)).unwrap());
+    assert!(
+        !codex_plugin_is_natively_active(
+            profile,
+            home.path(),
+            Some((new_bin, &ServeArgs::default()))
+        )
+        .unwrap()
+    );
     copy_rendered_bundle_to_native_cache(home.path(), new_bin);
-    assert!(codex_plugin_is_natively_active(profile, home.path(), Some(new_bin)).unwrap());
+    assert!(
+        codex_plugin_is_natively_active(
+            profile,
+            home.path(),
+            Some((new_bin, &ServeArgs::default()))
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -869,7 +968,14 @@ fn redeploy_preserves_foreign_discovery_and_support_bytes() {
     let helper = source.join("hooks/helper.py");
     let helper_bytes = b"# operator helper for tracedecay_lcm_describe\n";
     std::fs::write(&helper, helper_bytes).unwrap();
-    assert!(!codex_plugin_is_natively_active(profile, home.path(), Some(TEST_BIN)).unwrap());
+    assert!(
+        !codex_plugin_is_natively_active(
+            profile,
+            home.path(),
+            Some((TEST_BIN, &ServeArgs::default()))
+        )
+        .unwrap()
+    );
 
     install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
     assert_eq!(
@@ -886,7 +992,14 @@ fn redeploy_preserves_foreign_discovery_and_support_bytes() {
     );
     assert_eq!(std::fs::read(&reference).unwrap(), reference_bytes);
     assert_eq!(std::fs::read(&helper).unwrap(), helper_bytes);
-    assert!(!codex_plugin_is_natively_active(profile, home.path(), Some(TEST_BIN)).unwrap());
+    assert!(
+        !codex_plugin_is_natively_active(
+            profile,
+            home.path(),
+            Some((TEST_BIN, &ServeArgs::default()))
+        )
+        .unwrap()
+    );
 }
 
 /// `skills/tracedecay-find-impact/SKILL.md` exactly as a released bundle
@@ -903,7 +1016,14 @@ fn activation_retires_released_skill_files_and_converges() {
     let retired_dir = codex_plugin_install_dir(home.path()).join("skills/tracedecay-find-impact");
     std::fs::create_dir_all(&retired_dir).unwrap();
     std::fs::write(retired_dir.join("SKILL.md"), RELEASED_RETIRED_SKILL).unwrap();
-    assert!(!codex_plugin_is_natively_active(profile, home.path(), Some(TEST_BIN)).unwrap());
+    assert!(
+        !codex_plugin_is_natively_active(
+            profile,
+            home.path(),
+            Some((TEST_BIN, &ServeArgs::default()))
+        )
+        .unwrap()
+    );
 
     CodexIntegration
         .activate_deployed_host_registration(&install_ctx(home.path()))
@@ -914,7 +1034,14 @@ fn activation_retires_released_skill_files_and_converges() {
         "activation must delete the retired skill and its emptied directory"
     );
     copy_rendered_bundle_to_native_cache(home.path(), TEST_BIN);
-    assert!(codex_plugin_is_natively_active(profile, home.path(), Some(TEST_BIN)).unwrap());
+    assert!(
+        codex_plugin_is_natively_active(
+            profile,
+            home.path(),
+            Some((TEST_BIN, &ServeArgs::default()))
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -978,8 +1105,7 @@ fn install_preview_refuses_foreign_entrypoints_as_ownership_conflict() {
             &[HostComponentV1::Core],
             0,
             TEST_BIN,
-            crate::agents::TEST_GENERATOR_COMMIT,
-        )
+            crate::agents::TEST_GENERATOR_COMMIT, &crate::agents::serve_args::ServeArgs::default(),)
         .unwrap();
     let request = HostComponentSetExecutionRequestV1 {
         lifecycle: HostComponentSetLifecycleRequestV1 {

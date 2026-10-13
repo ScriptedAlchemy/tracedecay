@@ -1351,6 +1351,10 @@ impl HostBundleRegistrationInspectorV1 for CurrentRegistration {
     ) -> HostBundleRegistrationStateV1 {
         HostBundleRegistrationStateV1::Current
     }
+
+    fn serve_args(&self, _host: HostKindV1) -> crate::agents::serve_args::ServeArgs {
+        crate::agents::serve_args::ServeArgs::default()
+    }
 }
 
 struct MissingRegistration;
@@ -1362,6 +1366,10 @@ impl HostBundleRegistrationInspectorV1 for MissingRegistration {
         _component: HostComponentV1,
     ) -> HostBundleRegistrationStateV1 {
         HostBundleRegistrationStateV1::Missing
+    }
+
+    fn serve_args(&self, _host: HostKindV1) -> crate::agents::serve_args::ServeArgs {
+        crate::agents::serve_args::ServeArgs::default()
     }
 }
 
@@ -1691,6 +1699,10 @@ impl HostBundleRegistrationInspectorV1 for InteractiveActivationRegistration {
     fn interactive_activation_guidance(&self, _host: HostKindV1) -> Option<String> {
         Some(INTERACTIVE_ACTIVATION_GUIDANCE.to_string())
     }
+
+    fn serve_args(&self, _host: HostKindV1) -> crate::agents::serve_args::ServeArgs {
+        crate::agents::serve_args::ServeArgs::default()
+    }
 }
 
 /// A host TraceDecay can activate without the operator: no guidance, so a
@@ -1704,6 +1716,10 @@ impl HostBundleRegistrationInspectorV1 for NonInteractiveStagedRegistration {
         _component: HostComponentV1,
     ) -> HostBundleRegistrationStateV1 {
         HostBundleRegistrationStateV1::Repairable
+    }
+
+    fn serve_args(&self, _host: HostKindV1) -> crate::agents::serve_args::ServeArgs {
+        crate::agents::serve_args::ServeArgs::default()
     }
 }
 

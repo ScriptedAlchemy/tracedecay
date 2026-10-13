@@ -50,6 +50,10 @@ pub trait HostBundleRegistrationInspectorV1 {
     fn interactive_activation_guidance(&self, _host: HostKindV1) -> Option<String> {
         None
     }
+
+    /// The launch args this machine renders the host's embedded bundle with,
+    /// so the receipt digest check compares against the same bytes install wrote.
+    fn serve_args(&self, host: HostKindV1) -> crate::agents::serve_args::ServeArgs;
 }
 
 /// Read-only classification of one installed component (or one of its
@@ -282,6 +286,7 @@ pub fn inspect_installed_host_bundle_components_at(
             receipt.component,
             0,
             generator_commit,
+            &registrations.serve_args(receipt.host),
         )
         .ok()
         .is_some_and(|bundle| {

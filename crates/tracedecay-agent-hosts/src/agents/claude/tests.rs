@@ -8,7 +8,9 @@ use tracedecay_runtime_core::test_executable::write_executable_script;
 /// catalog deploys it.
 fn deploy_rendered_bundle(home: &Path, tracedecay_bin: &str) -> PathBuf {
     let deploy_dir = plugin_deploy_dir(home);
-    for (relative, rendered) in rendered_plugin_files(tracedecay_bin).unwrap() {
+    for (relative, rendered) in
+        rendered_plugin_files(tracedecay_bin, &ServeArgs::default()).unwrap()
+    {
         safe_write_text_file(&deploy_dir.join(relative), &rendered).unwrap();
     }
     deploy_dir
@@ -17,7 +19,7 @@ fn deploy_rendered_bundle(home: &Path, tracedecay_bin: &str) -> PathBuf {
 fn copy_rendered_bundle_to_native_cache(home: &Path, tracedecay_bin: &str) {
     let source = plugin_deploy_dir(home);
     let cache = claude_current_cached_plugin_root(home);
-    for (relative, _) in rendered_plugin_files(tracedecay_bin).unwrap() {
+    for (relative, _) in rendered_plugin_files(tracedecay_bin, &ServeArgs::default()).unwrap() {
         let target = cache.join(relative);
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
         std::fs::copy(source.join(relative), target).unwrap();
@@ -53,14 +55,26 @@ fn native_activation_requires_exact_catalog_mount_and_versioned_cache() {
     let home = tempfile::tempdir().unwrap();
     deploy_rendered_bundle(home.path(), "/bin/tracedecay");
     write_native_activation(home.path(), "/bin/tracedecay");
-    assert!(claude_plugin_is_natively_active(home.path(), Some("/bin/tracedecay")).unwrap());
+    assert!(
+        claude_plugin_is_natively_active(
+            home.path(),
+            Some(("/bin/tracedecay", &ServeArgs::default()))
+        )
+        .unwrap()
+    );
 
     let marketplace = known_marketplaces_path(home.path());
     let mut state: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&marketplace).unwrap()).unwrap();
     state["tracedecay"]["installLocation"] = json!("/different/marketplace");
     safe_write_json_file(&marketplace, &state).unwrap();
-    assert!(!claude_plugin_is_natively_active(home.path(), Some("/bin/tracedecay")).unwrap());
+    assert!(
+        !claude_plugin_is_natively_active(
+            home.path(),
+            Some(("/bin/tracedecay", &ServeArgs::default()))
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -78,7 +92,13 @@ fn native_activation_rejects_current_version_manifest_in_unbound_cache_directory
     std::fs::create_dir_all(unbound.parent().unwrap()).unwrap();
     std::fs::rename(&exact, &unbound).unwrap();
 
-    assert!(!claude_plugin_is_natively_active(home.path(), Some("/bin/tracedecay")).unwrap());
+    assert!(
+        !claude_plugin_is_natively_active(
+            home.path(),
+            Some(("/bin/tracedecay", &ServeArgs::default()))
+        )
+        .unwrap()
+    );
 }
 
 #[test]
@@ -88,29 +108,50 @@ fn native_cache_content_drift_and_binary_relocation_require_refresh() {
     let new_bin = "/relocated/bin/tracedecay";
     deploy_rendered_bundle(home.path(), old_bin);
     write_native_activation(home.path(), old_bin);
-    assert!(claude_plugin_is_natively_active(home.path(), Some(old_bin)).unwrap());
+    assert!(
+        claude_plugin_is_natively_active(home.path(), Some((old_bin, &ServeArgs::default())))
+            .unwrap()
+    );
 
     let retired_command =
         claude_current_cached_plugin_root(home.path()).join("commands/retired.md");
     std::fs::create_dir_all(retired_command.parent().unwrap()).unwrap();
     std::fs::write(&retired_command, "# stale auto-discovered command\n").unwrap();
-    assert!(!claude_plugin_is_natively_active(home.path(), Some(old_bin)).unwrap());
+    assert!(
+        !claude_plugin_is_natively_active(home.path(), Some((old_bin, &ServeArgs::default())))
+            .unwrap()
+    );
     std::fs::remove_file(retired_command).unwrap();
-    assert!(claude_plugin_is_natively_active(home.path(), Some(old_bin)).unwrap());
+    assert!(
+        claude_plugin_is_natively_active(home.path(), Some((old_bin, &ServeArgs::default())))
+            .unwrap()
+    );
 
     std::fs::write(
         claude_current_cached_plugin_root(home.path()).join(".mcp.json"),
         "{}\n",
     )
     .unwrap();
-    assert!(!claude_plugin_is_natively_active(home.path(), Some(old_bin)).unwrap());
+    assert!(
+        !claude_plugin_is_natively_active(home.path(), Some((old_bin, &ServeArgs::default())))
+            .unwrap()
+    );
     copy_rendered_bundle_to_native_cache(home.path(), old_bin);
-    assert!(claude_plugin_is_natively_active(home.path(), Some(old_bin)).unwrap());
+    assert!(
+        claude_plugin_is_natively_active(home.path(), Some((old_bin, &ServeArgs::default())))
+            .unwrap()
+    );
 
     deploy_rendered_bundle(home.path(), new_bin);
-    assert!(!claude_plugin_is_natively_active(home.path(), Some(new_bin)).unwrap());
+    assert!(
+        !claude_plugin_is_natively_active(home.path(), Some((new_bin, &ServeArgs::default())))
+            .unwrap()
+    );
     copy_rendered_bundle_to_native_cache(home.path(), new_bin);
-    assert!(claude_plugin_is_natively_active(home.path(), Some(new_bin)).unwrap());
+    assert!(
+        claude_plugin_is_natively_active(home.path(), Some((new_bin, &ServeArgs::default())))
+            .unwrap()
+    );
 }
 
 #[test]
@@ -137,6 +178,7 @@ fn missing_manifest_with_stale_registration_is_repairable() {
             profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             home: home.path().to_path_buf(),
             project_path: project.path().to_path_buf(),
+            catalog_profiles: Default::default(),
         },
     );
     assert_eq!(state, HostBundleRegistrationStateV1::Repairable);
@@ -160,6 +202,7 @@ fn project_only_legacy_residue_does_not_claim_plugin_registration() {
             profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             home: home.path().to_path_buf(),
             project_path: project.path().to_path_buf(),
+            catalog_profiles: Default::default(),
         },
     );
     assert_eq!(state, HostBundleRegistrationStateV1::Missing);
@@ -678,6 +721,7 @@ fn activation_adds_wildcard_permission_without_replacing_user_settings() {
         tracedecay_bin: tracedecay_bin.to_string(),
         project_root: None,
         dashboard: true,
+        serve_args: Default::default(),
     };
 
     ClaudeIntegration
@@ -714,6 +758,7 @@ fn deactivation_removes_the_wildcard_permission_activation_added() {
         tracedecay_bin: "/bin/tracedecay".to_string(),
         project_root: None,
         dashboard: true,
+        serve_args: Default::default(),
     };
 
     safe_write_json_file(
