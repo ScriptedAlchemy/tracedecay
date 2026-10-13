@@ -8,7 +8,8 @@
 
 use std::fmt::Write as _;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tracedecay::daemon::call_tool;
@@ -28,7 +29,8 @@ use crate::code_index_journey::{
     wait_for_readiness, wait_for_terminal_generation,
 };
 use crate::common::{
-    IsolatedHome, daemon_socket_path, spawn_tracedecay_daemon_logged, spawn_tracedecay_daemon_with,
+    IsolatedHome, daemon_socket_path, poll_until, spawn_tracedecay_daemon_logged,
+    spawn_tracedecay_daemon_with,
 };
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
@@ -123,24 +125,17 @@ async fn wait_for_overflow_cadence_receipt(log_path: &Path) {
     .unwrap_or_else(|_| panic!("overflow omitted its terminal cadence receipt; log={last}"));
 }
 
-/// The batch must keep its refresh in flight across the two in-flight
-/// receipts and the SIGTERM (tens of milliseconds), and the restarted daemon
-/// must rebuild all of it inside one `RECEIPT_TIMEOUT` ready wait.
+/// The cancelled refresh parks on `TRACEDECAY_TEST_HOLD_AFTER_COLD_EXTRACTION`
+/// until SIGTERM cancels it, so the batch needs only the one probe the
+/// assertions name.
 fn write_cancellation_batch(project: &Path, scratch: &Path) {
     let batch = scratch.join("cancelled_batch_staging");
     fs::create_dir_all(&batch).expect("cancellation batch directory");
-    for file_index in 0..96_u32 {
-        let mut source = String::new();
-        for symbol_index in 0..128_u32 {
-            writeln!(
-                source,
-                "pub fn cancellation_probe_{file_index:04}_{symbol_index:03}(input: u32) -> u32 {{ input + {symbol_index} }}"
-            )
-            .expect("format cancellation source");
-        }
-        fs::write(batch.join(format!("file_{file_index:04}.rs")), source)
-            .expect("write cancellation source");
-    }
+    fs::write(
+        batch.join("file_0000.rs"),
+        "pub fn cancellation_probe_0000_000(input: u32) -> u32 { input }\n",
+    )
+    .expect("write cancellation source");
     fs::rename(&batch, project.join("src/cancelled_batch"))
         .expect("atomically install cancellation batch");
 }
@@ -613,11 +608,15 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
     let log_path = environment
         .scratch()
         .join("incremental-lifecycle-daemon.log");
+    let refresh_hold = environment.scratch().join("hold-after-cold-extraction");
+    let refresh_entered = PathBuf::from(format!("{}.entered", refresh_hold.display()));
     let mut daemon = spawn_tracedecay_daemon_logged(environment.home(), &log_path, |command| {
-        command.env(
-            "RUST_LOG",
-            "tracedecay_code_index_runtime::code_index_scheduler::registry=debug",
-        );
+        command
+            .env(
+                "RUST_LOG",
+                "tracedecay_code_index_runtime::code_index_scheduler::registry=debug",
+            )
+            .env("TRACEDECAY_TEST_HOLD_AFTER_COLD_EXTRACTION", &refresh_hold);
     });
     let project_id = initialize_tracedecay(environment.home(), &project);
     let identity = exact_identity(&project, project_id);
@@ -744,8 +743,15 @@ async fn mounted_incremental_lifecycle_preserves_only_complete_compatible_genera
     .await;
     wait_for_overflow_cadence_receipt(&log_path).await;
 
+    fs::write(&refresh_hold, b"hold").expect("arm the refresh hold");
     write_cancellation_batch(&project, environment.scratch());
     inject_overflow(&socket, &handshake).await;
+    poll_until(
+        Instant::now() + RECEIPT_TIMEOUT,
+        Duration::from_millis(20),
+        || refresh_entered.is_file().then_some(()),
+        || "the cancellation refresh never reached its extraction hold".to_owned(),
+    );
     let refreshing = wait_for_refreshing_old_generation(
         &socket,
         &handshake,

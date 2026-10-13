@@ -93,3 +93,30 @@ fn generic_command_is_interrupted_by_live_cancellation() {
     assert!(matches!(result, Err(GitCommandError::Cancelled)));
     assert!(started.elapsed() < Duration::from_secs(1));
 }
+
+#[cfg(unix)]
+#[test]
+fn output_limit_stops_a_child_that_is_still_running() {
+    let mut command = Command::new("sh");
+    command.args(["-c", "head -c 1048576 /dev/zero; exec sleep 30"]);
+    let bounds = GitCommandBounds {
+        deadline: Instant::now() + Duration::from_secs(5),
+        max_stdout_bytes: 1024,
+        ..GitCommandBounds::default()
+    };
+    let started = Instant::now();
+
+    let result = bounded_command_output(command, None, &bounds);
+
+    assert!(
+        matches!(
+            result,
+            Err(GitCommandError::OutputLimitExceeded {
+                stream: "stdout",
+                bound: 1024
+            })
+        ),
+        "got {result:?}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(1));
+}

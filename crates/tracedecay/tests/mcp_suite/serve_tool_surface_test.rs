@@ -365,24 +365,67 @@ fn is_work_or_workflow_name(name: &str) -> bool {
     name.starts_with("tracedecay_work_") || name.starts_with("tracedecay_workflow_")
 }
 
-/// The profile's `config.toml` bytes and every path under its data directory.
-fn profile_state(home: &Path) -> (Option<Vec<u8>>, BTreeSet<std::path::PathBuf>) {
+/// Daemon-owned runtime state that changes on its own while a session runs:
+/// code-index generations, dashboard automation spools, the shared and
+/// per-project databases (`tracedecay.grafeo`, `tracedecay.sealed`, the replay
+/// log) with their delivery spools, and the daemon's own
+/// authority, socket, and mmap files. A catalog profile never writes these, so
+/// the profile-state comparison skips every entry whose name starts with one.
+const DAEMON_OWNED_PREFIXES: &[&str] = &[
+    "code-index-v1",
+    "dashboard",
+    "daemon",
+    "global.db",
+    "hook_analytics",
+    "lcm-payloads",
+    "maintenance",
+    "monitor.mmap",
+    "response-handles",
+    "sessions.db",
+    "tracedecay.",
+    "user-sessions",
+];
+
+/// Lock, WAL, SHM, and host-admission sidecars, and the `.tmp` staging files
+/// of the daemon's atomic writes, including the hidden ones.
+const DAEMON_OWNED_SUFFIXES: &[&str] =
+    &[".lock", "-wal", "-shm", ".wal", ".host-admission", ".tmp"];
+
+fn is_daemon_owned(name: &str) -> bool {
+    DAEMON_OWNED_PREFIXES
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+        || DAEMON_OWNED_SUFFIXES
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
+}
+
+/// The state a catalog profile selection could write: the bytes of
+/// `config.toml` and `profile-identity.json`, and every other path under the
+/// profile data directory except the daemon-owned runtime state above.
+fn profile_state(home: &Path) -> (Vec<Option<Vec<u8>>>, BTreeSet<std::path::PathBuf>) {
     let root = profile_root(home);
-    let config = std::fs::read(root.join("config.toml")).ok();
+    let pinned = ["config.toml", "profile-identity.json"]
+        .map(|name| std::fs::read(root.join(name)).ok())
+        .to_vec();
     let mut files = BTreeSet::new();
     let mut pending = vec![root.clone()];
     while let Some(dir) = pending.pop() {
-        for entry in std::fs::read_dir(&dir).unwrap_or_else(|error| {
-            panic!("read {}: {error}", dir.display());
-        }) {
-            let path = entry.expect("profile entry").path();
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if is_daemon_owned(&entry.file_name().to_string_lossy()) {
+                continue;
+            }
+            let path = entry.path();
             if path.is_dir() {
                 pending.push(path.clone());
             }
             files.insert(path.strip_prefix(&root).expect("under root").to_path_buf());
         }
     }
-    (config, files)
+    (pinned, files)
 }
 
 /// Lists past the readiness read, calls `tool` by name, and re-lists. Returns
@@ -465,6 +508,8 @@ async fn compact_profile_withholds_work_and_workflow_tools_without_changing_auth
         "the default profile lists every Work and Workflow tool: {unlisted:?}"
     );
 
+    let before = profile_state(home.path());
+
     for extra in [
         &[COMPACT_PROFILE][..],
         &[COMPACT_PROFILE, FULL_TOOL_LIST][..],
@@ -507,7 +552,6 @@ async fn compact_profile_withholds_work_and_workflow_tools_without_changing_auth
         withheld,
     );
 
-    let before = profile_state(home.path());
     let (first, compact_answer, announced, relisted) = list_call_relist(
         ServeSession::start(serve_command(
             home.path(),
@@ -542,10 +586,16 @@ async fn compact_profile_withholds_work_and_workflow_tools_without_changing_auth
             .all(|name| name == withheld),
         "only the called tool joins the list"
     );
+    let after = profile_state(home.path());
     assert_eq!(
-        profile_state(home.path()),
-        before,
-        "selecting a catalog profile stores nothing"
+        after.0, before.0,
+        "selecting a catalog profile rewrote the configuration or identity"
+    );
+    let appeared: Vec<_> = after.1.difference(&before.1).collect();
+    let vanished: Vec<_> = before.1.difference(&after.1).collect();
+    assert!(
+        appeared.is_empty() && vanished.is_empty(),
+        "selecting a catalog profile stores nothing: appeared {appeared:?}, vanished {vanished:?}"
     );
 }
 
