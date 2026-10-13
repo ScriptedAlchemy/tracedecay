@@ -7,6 +7,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use tokio::sync::Mutex;
 use tracedecay_contracts::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
+use tracedecay_contracts::remote::discovery::RemoteAuthorityDiscoveryV1;
 use tracedecay_domain::{BrainId, BrainNodeId, EnrollmentGrantV1};
 use tracedecay_graph_db::{GraphDbRegistry, GraphDbRegistryConfig};
 use tracedecay_runtime_core::RuntimeOperationTaskOwnerV1;
@@ -909,30 +910,51 @@ impl DaemonSessionRuntimeRegistryV1 {
         self.mount_remote_node_storage(node_id, keyring, None).await
     }
 
-    /// Mounts the store through which this profile is node `node_id` of
-    /// another profile's Brain. Only an explicit operator join reaches this,
-    /// after the authority authenticated the node's credential; provisioning
-    /// keeps refusing every foreign grant.
+    /// Makes this profile the node that `discovery` names in another
+    /// profile's Brain. Only the operator join route reaches this, with an
+    /// answer the authority returned to the node's own credential and the
+    /// caller already verified; provisioning keeps refusing every foreign
+    /// grant. The store adopts the authority's enrollment record verbatim, so
+    /// both sides hold one enrollment identity and revision. A rerun with the
+    /// same answer converges.
     pub async fn join_remote_node(
         &self,
-        member_brain: &BrainId,
-        node_id: BrainNodeId,
-    ) -> std::result::Result<RemoteSqliteStorageV1, RemoteNodeOperatorErrorV1> {
-        if member_brain == self.identity.brain_id() {
+        discovery: &RemoteAuthorityDiscoveryV1,
+    ) -> std::result::Result<(), RemoteNodeOperatorErrorV1> {
+        let enrollment = &discovery.enrollment.enrollment;
+        if &enrollment.brain_id == self.identity.brain_id() {
             return Err(RemoteNodeOperatorErrorV1::BrainIdentityConflict);
         }
         let keyring: Arc<dyn RemoteSpoolKeyringV1> = Arc::new(UnavailableRemoteSpoolKeyringV1);
         let storage = self
-            .mount_remote_node_storage(node_id, keyring, Some(member_brain))
+            .mount_remote_node_storage(
+                enrollment.node_id.clone(),
+                keyring,
+                Some(&enrollment.brain_id),
+            )
             .await
             .map_err(|error| {
                 tracing::warn!(%error, "remote node store mount failed during join");
                 RemoteNodeOperatorErrorV1::Unavailable
             })?;
-        if storage.member_brain() != member_brain {
+        if storage.member_brain() != &enrollment.brain_id {
             return Err(RemoteNodeOperatorErrorV1::BrainIdentityConflict);
         }
-        Ok(storage)
+        storage
+            .record_authority_discovery(discovery, tracedecay_contracts::clock::now_micros())
+            .map_err(|error| match error {
+                RemoteSqliteStorageErrorV1::Conflict
+                | RemoteSqliteStorageErrorV1::BindingMismatch => {
+                    RemoteNodeOperatorErrorV1::Conflict
+                }
+                error => {
+                    tracing::warn!(%error, "remote node join persistence failed");
+                    RemoteNodeOperatorErrorV1::Unavailable
+                }
+            })?;
+        self.remote_credential_authority
+            .refresh_storage(&enrollment.node_id)
+            .map_err(map_registry_error)
     }
 
     pub async fn provision_remote_node(
@@ -975,18 +997,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             })?;
         self.remote_credential_authority
             .refresh_storage(&grant.node_id)
-            .map_err(|error| match error {
-                crate::DaemonRemoteCredentialRegistryErrorV1::IdentityConflict => {
-                    RemoteNodeOperatorErrorV1::Conflict
-                }
-                crate::DaemonRemoteCredentialRegistryErrorV1::CapacityExceeded => {
-                    RemoteNodeOperatorErrorV1::CapacityExceeded
-                }
-                error => {
-                    tracing::warn!(%error, "remote enrollment grant registration failed");
-                    RemoteNodeOperatorErrorV1::Unavailable
-                }
-            })
+            .map_err(map_registry_error)
     }
 
     async fn mount_remote_node_storage(
@@ -1964,6 +1975,23 @@ impl DaemonSessionRuntimeRegistryV1 {
             mounted.get(project_id),
             Some(ProjectRuntimeOwnerStateV1::Ready(owners)) if owners.memory.is_some()
         )
+    }
+}
+
+fn map_registry_error(
+    error: crate::DaemonRemoteCredentialRegistryErrorV1,
+) -> RemoteNodeOperatorErrorV1 {
+    match error {
+        crate::DaemonRemoteCredentialRegistryErrorV1::IdentityConflict => {
+            RemoteNodeOperatorErrorV1::Conflict
+        }
+        crate::DaemonRemoteCredentialRegistryErrorV1::CapacityExceeded => {
+            RemoteNodeOperatorErrorV1::CapacityExceeded
+        }
+        error => {
+            tracing::warn!(%error, "remote node credential registration failed");
+            RemoteNodeOperatorErrorV1::Unavailable
+        }
     }
 }
 

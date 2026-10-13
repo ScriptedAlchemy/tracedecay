@@ -46,6 +46,9 @@ pub enum RemoteCommand {
         args: RemoteProtocolArgs,
         enrollment_credential_file: PathBuf,
     },
+    Join {
+        args: RemoteProtocolArgs,
+    },
     Capture {
         args: RemoteProtocolArgs,
     },
@@ -71,6 +74,7 @@ pub fn run(profile: &ProfileRoot, command: RemoteCommand) -> Result<()> {
             args,
             enrollment_credential_file,
         } => run_enroll(args, enrollment_credential_file),
+        RemoteCommand::Join { args } => run_join(profile, args),
         RemoteCommand::Capture { args } => {
             let request = read_protocol_request(&args.request_file)?;
             let client = build_client(&args)?;
@@ -168,6 +172,50 @@ fn run_enroll(args: RemoteProtocolArgs, enrollment_credential_file: PathBuf) -> 
         },
         args.json,
     )
+}
+
+#[tracing::instrument(name = "serve.remote.join", level = "trace", skip_all)]
+fn run_join(profile: &ProfileRoot, args: RemoteProtocolArgs) -> Result<()> {
+    if args.timeout_secs == 0 {
+        return Err(TraceDecayError::Config {
+            message: "Remote Brain --timeout-secs must be greater than zero".to_owned(),
+        });
+    }
+    let credential =
+        std::fs::read(&args.credential_file).map_err(|error| TraceDecayError::File {
+            message: format!("failed to read Remote Brain credential file: {error}"),
+            path: args.credential_file.display().to_string(),
+        })?;
+    let trust_root_pem = args
+        .trust_root_file
+        .as_ref()
+        .map(|path| {
+            std::fs::read_to_string(path).map_err(|error| TraceDecayError::File {
+                message: format!("failed to read Remote Brain trust-root file: {error}"),
+                path: path.display().to_string(),
+            })
+        })
+        .transpose()?;
+    let request = tracedecay::daemon::RemoteNodeJoinRequestV1 {
+        endpoint: args.endpoint,
+        trust_root_pem,
+        timeout_secs: args.timeout_secs,
+        discovery: read_protocol_request(&args.request_file)?,
+    };
+    let discovery = tracedecay::daemon::live_remote_join(profile, &request, &credential)?;
+    if args.json {
+        print!("{}", canonical_json_line(&discovery)?);
+    } else {
+        let enrollment = &discovery.enrollment.enrollment;
+        println!(
+            "Joined Brain {} as node {} (enrollment {} revision {})",
+            enrollment.brain_id.as_str(),
+            enrollment.node_id.as_str(),
+            enrollment.enrollment_id.as_str(),
+            enrollment.revision
+        );
+    }
+    Ok(())
 }
 
 #[tracing::instrument(name = "serve.remote.client", level = "trace", skip_all)]

@@ -54,6 +54,7 @@ use tracedecay_store::{
     StorageRuntimeErrorV1, StoreIncarnationV1, VerifiedStoreLocatorV1,
 };
 
+mod membership;
 mod transfer;
 
 use crate::{

@@ -74,6 +74,8 @@ pub enum RemoteNodeOperatorErrorV1 {
     Conflict,
     #[error("remote node provisioning capacity is exhausted")]
     CapacityExceeded,
+    #[error("the remote authority did not answer discovery for this enrollment")]
+    AuthorityUnavailable,
     #[error("remote node store is unavailable")]
     Unavailable,
 }

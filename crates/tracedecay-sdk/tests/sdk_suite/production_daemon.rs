@@ -14,7 +14,11 @@ use rustls::pki_types::pem::PemObject;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay_contracts::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
-use tracedecay_contracts::remote::protocol::{EnrollmentRequestV1, RemoteProtocolRequestV1};
+use tracedecay_contracts::remote::capture::RemoteCaptureSequenceV1;
+use tracedecay_contracts::remote::capture_protocol::RemoteCaptureRequestV1;
+use tracedecay_contracts::remote::protocol::{
+    CurrentAuthorityRequestV1, EnrollmentRequestV1, RemoteProtocolRequestV1,
+};
 use tracedecay_contracts::remote::recovery::PromotionConfirmationV1;
 use tracedecay_contracts::remote::replay::{
     RemoteReplayPolicyDecisionV1, RemoteReplayPolicyEvidenceV1,
@@ -24,10 +28,14 @@ use tracedecay_contracts::{
     RequestId, ResolvedScope, RetryDirective,
 };
 use tracedecay_domain::{
-    ActorId, BrainId, BrainNodeId, ComponentVersion, EnrollmentGrantV1, EntityId, ManifestDigest,
-    ProjectId, RefId, RemoteCapabilityV1, RemoteCredentialFingerprintV1, RemoteRepositoryScopeV1,
-    RemoteWriterFenceV1, RepositoryId, RepositoryStateSnapshotId, UtcMicros, WorktreeId,
-    canonical_sha256,
+    ActorId, BrainId, BrainNodeId, ComponentVersion, DurableObservationV1, EnrollmentGrantV1,
+    EntityId, ManifestDigest, ObservationId, ObservationIdentityMaterialV1,
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceGenerationV1,
+    ObservationSourceIdentityV1, ObservationSourceRangeV1, PayloadReferenceV1, ProjectId,
+    ProviderId, RefId, RemoteCapabilityV1, RemoteCredentialFingerprintV1, RemoteRepositoryScopeV1,
+    RemoteWriterFenceV1, RepositoryId, RepositoryStateSnapshotId, RetentionClass,
+    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
+    SensitivityV1, SessionId, UtcMicros, WorktreeId, canonical_sha256,
 };
 use tracedecay_sdk::client::{
     CancellationStatus, Client, ClientError, ConnectionMode, StreamOptions, StreamResume,
@@ -802,6 +810,341 @@ fn enrolled_node_fails_over_after_the_operator_publishes_the_first_writer() {
     );
 
     stop_daemon(&mut daemon);
+}
+
+#[test]
+#[ignore = "requires a prebuilt production tracedecay daemon"]
+fn a_laptop_profile_joins_a_desktop_brain_and_holds_its_exact_enrollment() {
+    let scratch = TempDir::new().unwrap();
+    let desktop_home = scratch.path().join("desktop-home");
+    let laptop_home = scratch.path().join("laptop-home");
+    let desktop_profile = desktop_home.join(".tracedecay");
+    let laptop_profile = laptop_home.join(".tracedecay");
+    let project = scratch.path().join("project");
+    fs::create_dir_all(&desktop_home).unwrap();
+    fs::create_dir_all(&laptop_home).unwrap();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname=\"remote-join-fixture\"\nversion=\"0.0.0\"\nedition=\"2024\"\n",
+    )
+    .unwrap();
+    fs::write(
+        project.join("src/lib.rs"),
+        "pub const FIXTURE: bool = true;\n",
+    )
+    .unwrap();
+    run(Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&project));
+    let desktop_certificate = scratch.path().join("desktop.crt.pem");
+    let desktop_private_key = scratch.path().join("desktop.key.pem");
+    let laptop_certificate = scratch.path().join("laptop.crt.pem");
+    let laptop_private_key = scratch.path().join("laptop.key.pem");
+    fs::write(&desktop_certificate, REMOTE_TLS_CERTIFICATE).unwrap();
+    fs::write(&desktop_private_key, REMOTE_TLS_PRIVATE_KEY).unwrap();
+    fs::write(&laptop_certificate, REMOTE_TLS_ALTERNATE_CERTIFICATE).unwrap();
+    fs::write(&laptop_private_key, REMOTE_TLS_ALTERNATE_PRIVATE_KEY).unwrap();
+    fs::set_permissions(&desktop_private_key, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::set_permissions(&laptop_private_key, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let binary = production_binary();
+    let (mut desktop, desktop_authority, desktop_remote) = spawn_remote_daemon(
+        &binary,
+        &desktop_home,
+        &desktop_profile,
+        &project,
+        &desktop_certificate,
+        &desktop_private_key,
+    );
+    let (mut laptop, laptop_authority, _) = spawn_remote_daemon(
+        &binary,
+        &laptop_home,
+        &laptop_profile,
+        &project,
+        &laptop_certificate,
+        &laptop_private_key,
+    );
+    let desktop_brain = BrainId::new(desktop_authority["brain_id"].as_str().unwrap()).unwrap();
+    assert_ne!(
+        laptop_authority["brain_id"].as_str().unwrap(),
+        desktop_brain.as_str(),
+        "each profile mints its own Brain"
+    );
+
+    let mut init = Command::new(&binary);
+    init.arg("init").current_dir(&project);
+    isolated(&mut init, &desktop_home, &desktop_profile);
+    run(&mut init);
+    let mut context_command = Command::new(&binary);
+    context_command
+        .args(["projects", "context"])
+        .arg(&project)
+        .arg("--json")
+        .current_dir(&project);
+    isolated(&mut context_command, &desktop_home, &desktop_profile);
+    let context: Value = serde_json::from_slice(&run(&mut context_command)).unwrap();
+    let project_id = context["project"]["project_id"].as_str().unwrap();
+    let local_post = |authority: &Value, path: &str, body: &Value| {
+        let base = format!(
+            "http://{}",
+            authority["http_application_endpoint"].as_str().unwrap()
+        );
+        let response = reqwest::blocking::Client::new()
+            .post(format!("{base}{path}"))
+            .bearer_auth(authority["auth_token"].as_str().unwrap())
+            .header(reqwest::header::ORIGIN, &base)
+            .json(body)
+            .send()
+            .unwrap();
+        (response.status(), response.text().unwrap())
+    };
+
+    let grant_credential = *b"0123456789abcdef0123456789abcdef";
+    let enrollment_credential = *b"fedcba9876543210fedcba9876543210";
+    let node_id = BrainNodeId::new("node.remote-join-laptop").unwrap();
+    let mut grant = remote_grant(
+        desktop_brain.clone(),
+        node_id.clone(),
+        project_id,
+        &grant_credential,
+    );
+    grant.capabilities = [
+        RemoteCapabilityV1::CaptureOffline,
+        RemoteCapabilityV1::DiscoverAuthority,
+    ]
+    .into_iter()
+    .collect();
+    let (status, body) = local_post(
+        &desktop_authority,
+        "/remote-nodes/provision",
+        &json!({"grant": grant, "admission": remote_admission(&grant)}),
+    );
+    assert_eq!(status, reqwest::StatusCode::NO_CONTENT, "{body}");
+    let desktop_endpoint = format!("https://{desktop_remote}/remote/");
+    let enrolled = EnrolledRemoteClient::new_with_root_certificate(
+        &desktop_endpoint,
+        grant_credential,
+        Duration::from_secs(30),
+        REMOTE_TLS_ROOT_CERTIFICATE,
+    )
+    .unwrap()
+    .enroll(&enrollment_request(&grant), enrollment_credential)
+    .unwrap()
+    .result
+    .expect("the desktop commits the laptop's enrollment");
+    let committed = serde_json::to_value(enrolled.outcome.payload().unwrap()).unwrap();
+
+    let writer = json!({
+        "project_id": project_id,
+        "scope": grant.scope,
+        "authority": {
+            "fence": {
+                "brain_id": desktop_brain.as_str(),
+                "shard_id": "shard.remote-join",
+                "generation_id": "generation.remote-join",
+                "placement_revision": 1,
+                "authority_epoch": 1,
+                "authority_node_id": node_id.as_str(),
+            },
+            "credential_revision": 1,
+            "observed_at": now_micros(),
+        },
+    });
+    let (status, body) = local_post(
+        &desktop_authority,
+        "/remote-nodes/writer-authority",
+        &json!({
+            "node_id": node_id,
+            "writer": writer,
+            "replay_policy": replay_policy(&grant.scope),
+        }),
+    );
+    assert_eq!(status, reqwest::StatusCode::NO_CONTENT, "{body}");
+
+    let credential_file = scratch.path().join("laptop-enrollment.cred");
+    let trust_root_file = scratch.path().join("desktop-root.pem");
+    let request_file = scratch.path().join("discovery.json");
+    fs::write(&credential_file, enrollment_credential).unwrap();
+    fs::write(&trust_root_file, REMOTE_TLS_ROOT_CERTIFICATE).unwrap();
+    fs::write(
+        &request_file,
+        serde_json::to_vec(
+            &RemoteProtocolRequestV1::new(
+                RequestId::new("request.remote-join").unwrap(),
+                desktop_brain.clone(),
+                node_id.clone(),
+                1,
+                None,
+                now_micros(),
+                CurrentAuthorityRequestV1 {
+                    scope: grant.scope.clone(),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let join = || {
+        let mut command = Command::new(&binary);
+        command
+            .args(["remote", "join", "--json", "--endpoint", &desktop_endpoint])
+            .arg("--credential-file")
+            .arg(&credential_file)
+            .arg("--trust-root-file")
+            .arg(&trust_root_file)
+            .arg("--request-file")
+            .arg(&request_file)
+            .current_dir(&project);
+        isolated(&mut command, &laptop_home, &laptop_profile);
+        serde_json::from_slice::<Value>(&run(&mut command)).unwrap()
+    };
+    let joined = join();
+    assert_eq!(
+        joined["enrollment"]["enrollment"], committed,
+        "the laptop holds the desktop's committed enrollment record verbatim"
+    );
+    assert_eq!(
+        (
+            &joined["enrollment"]["enrollment"]["enrollment_id"],
+            &joined["enrollment"]["enrollment"]["revision"],
+            &joined["enrollment"]["enrollment"]["brain_id"],
+        ),
+        (
+            &json!("enrollment.remote-sdk-production"),
+            &json!(1),
+            &json!(desktop_brain.as_str())
+        )
+    );
+    assert_eq!(join(), joined, "rerunning the join converges");
+
+    let laptop_status: Value = reqwest::blocking::Client::new()
+        .get(format!(
+            "http://{}/remote-status",
+            laptop_authority["http_application_endpoint"]
+                .as_str()
+                .unwrap()
+        ))
+        .bearer_auth(laptop_authority["auth_token"].as_str().unwrap())
+        .header(
+            reqwest::header::ORIGIN,
+            format!(
+                "http://{}",
+                laptop_authority["http_application_endpoint"]
+                    .as_str()
+                    .unwrap()
+            ),
+        )
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(
+        (
+            &laptop_status["status"]["enrollment_configured"],
+            &laptop_status["status"]["authority"]["state"],
+            &laptop_status["status"]["authority"]["value"]["fence"],
+        ),
+        (
+            &json!(true),
+            &json!("available"),
+            &writer["authority"]["fence"]
+        ),
+        "{laptop_status}"
+    );
+
+    let laptop_capture = EnrolledRemoteClient::new_local_daemon(
+        format!(
+            "http://{}/remote/",
+            laptop_authority["http_application_endpoint"]
+                .as_str()
+                .unwrap()
+        ),
+        enrollment_credential,
+        Duration::from_secs(30),
+    )
+    .unwrap()
+    .capture(
+        &RemoteProtocolRequestV1::new(
+            RequestId::new("request.remote-join-capture").unwrap(),
+            desktop_brain.clone(),
+            node_id.clone(),
+            1,
+            None,
+            now_micros(),
+            RemoteCaptureRequestV1 {
+                writer: serde_json::from_value(writer.clone()).unwrap(),
+                policy_revision: 1,
+                sequence: RemoteCaptureSequenceV1 {
+                    sequence: 1,
+                    previous_event_id: None,
+                },
+                observation: join_observation(project_id),
+            },
+        )
+        .unwrap(),
+    )
+    .expect("the laptop's own daemon answers the node credential with a protocol response");
+    assert!(
+        serde_json::to_string(&laptop_capture)
+            .unwrap()
+            .contains("remote.authority_reachable"),
+        "the adopted enrollment admits the node's credential on the laptop; only reachability refuses: {}",
+        serde_json::to_string(&laptop_capture).unwrap()
+    );
+
+    let (status, body) = local_post(
+        &laptop_authority,
+        "/remote-nodes/provision",
+        &json!({"grant": grant, "admission": remote_admission(&grant)}),
+    );
+    assert_eq!(
+        (status, body),
+        (
+            reqwest::StatusCode::CONFLICT,
+            json!({"code": "brain_identity_conflict"}).to_string()
+        ),
+        "joining never lets the laptop adopt the desktop's Brain through provisioning"
+    );
+
+    stop_daemon(&mut laptop);
+    stop_daemon(&mut desktop);
+}
+
+fn join_observation(project_id: &str) -> DurableObservationV1 {
+    let payload = json!({"kind": "assistant_message", "body": "remote join fixture"});
+    DurableObservationV1::new(
+        ObservationIdentityMaterialV1::for_native_record(
+            ObservationSourceIdentityV1::for_provider(
+                ProviderId::new("provider.remote-join").unwrap(),
+                SessionId::new("session.remote-join").unwrap(),
+            )
+            .unwrap(),
+            ObservationScopeV1::Project {
+                project_id: ProjectId::new(project_id).unwrap(),
+            },
+            ObservationSourceGenerationV1::new(1).unwrap(),
+            ObservationSourceRangeV1::new(0, 1).unwrap(),
+            ObservationOrderingDomainV1::SqliteRowId,
+            ObservationId::new("observation.remote-join").unwrap(),
+        )
+        .unwrap(),
+        SanitizationReceiptV1::new(
+            SanitizationReceiptRefV1::new(
+                SanitizationReceiptId::new("receipt.remote-join").unwrap(),
+                ComponentVersion::new("sanitizer.remote-join.v1").unwrap(),
+            )
+            .unwrap(),
+            SanitizerDispositionV1::Accepted,
+            SensitivityV1::NonSensitive,
+            Some(PayloadReferenceV1::for_payload(&payload).unwrap()),
+        )
+        .unwrap(),
+        RetentionClass::new("retention.remote-join").unwrap(),
+        payload,
+    )
+    .unwrap()
 }
 
 fn spawn_remote_daemon(

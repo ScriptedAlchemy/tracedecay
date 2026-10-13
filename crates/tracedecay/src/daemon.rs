@@ -398,9 +398,11 @@ mod profile_owner;
 mod profile_retained;
 mod projectless;
 mod remote_deletion;
+mod remote_join;
 #[cfg(test)]
 use projectless::projectless_tools_call_response;
 use projectless::{projectless_first_request, projectless_tool_call, serve_projectless_client};
+pub use remote_join::{RemoteNodeJoinRequestV1, live_remote_join};
 mod project_composition;
 mod project_delivery_mount;
 pub(crate) use project_composition::daemon_transcript_source_profile;
