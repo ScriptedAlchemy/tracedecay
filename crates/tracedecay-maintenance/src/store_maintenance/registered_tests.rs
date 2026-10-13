@@ -43,7 +43,7 @@ fn generation_file_count(store_root: &Path) -> usize {
 /// The unmounted primary scope is collected while the linked worktree's scope,
 /// which a mounted graph owns, is left to that graph's own pass. The retired
 /// generations wait in the release queue for the next mount.
-#[tokio::test]
+#[asupersync::test]
 async fn registered_pass_collects_unmounted_scopes_and_leaves_mounted_ones() {
     let temp = tempfile::TempDir::new().expect("temp root");
     let profile_root = temp.path().join("profile");

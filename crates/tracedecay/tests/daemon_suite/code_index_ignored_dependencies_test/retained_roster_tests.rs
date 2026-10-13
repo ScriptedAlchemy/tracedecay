@@ -183,6 +183,80 @@ export function GenerationAnchor(value: PublicWidget) { return value; }
     restarted.shutdown().await;
 }
 
+/// A restart pass that refuses the retained roster parks the worktree and
+/// holds later passes over unchanged input. The retained text projection
+/// that finishes beside that pass cannot clear the park, or admission waits
+/// for a seat or a park that never comes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retained_text_projection_keeps_the_roster_refusal_park() {
+    let fixture = GitFixture::new(
+        r#"import type { PublicWidget } from "pkg";
+export function GenerationAnchor(value: PublicWidget) { return value; }
+"#,
+    );
+    let store = TempDir::new().expect("store root");
+    let (registry, request, _) = admit_package(&fixture, &store).await;
+    git(
+        fixture.path(),
+        &["add", "-f", "node_modules/pkg/index.d.ts"],
+    );
+    git(
+        fixture.path(),
+        &["commit", "-qm", "track dependency source"],
+    );
+    reconcile_through_worker(&registry, fixture.path(), &request.scope).await;
+    registry.shutdown().await;
+
+    let restarted = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let (projection_entered, release_projection) =
+        restarted.pause_next_retained_text_projection(fixture.path().to_path_buf());
+    let admission = restarted
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold restart activation");
+    restarted
+        .mount_worktree(project_id(), fixture.path(), store.path().to_path_buf())
+        .await
+        .expect("remount retained ignored-source store");
+    // The restart's first pass then validates the retained roster instead of
+    // only restoring the retained generation.
+    restarted.notify_hook_overflow(fixture.path()).await;
+    drop(admission);
+    projection_entered
+        .await
+        .expect("restart projects its retained text owner");
+    let parked = wait_for_owner(&restarted, fixture.path(), || {
+        restarted.convergence_park(fixture.path())
+    })
+    .await;
+    release_projection
+        .send(())
+        .expect("release the retained text projection");
+    wait_for_reconciling(&restarted, fixture.path(), 0).await;
+    assert_eq!(
+        restarted
+            .convergence_park(fixture.path())
+            .await
+            .map(|park| park.reason),
+        Some(parked.reason),
+        "the roster refusal park outlives the retained text projection"
+    );
+    let error = index_dependency(&restarted, fixture.path(), request, StaticControl::active())
+        .await
+        .expect_err("the parked restart refuses re-admission");
+    assert!(
+        matches!(
+            &error,
+            CodeIndexSchedulerErrorV1::IgnoredDependency(
+                CodeIndexIgnoredDependencyRefusalV1::ConvergenceParked(_)
+            )
+        ),
+        "admission answers with the park: {error:?}"
+    );
+    restarted.shutdown().await;
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retargeted_dependency_symlink_is_rejected_by_reconcile_and_restart() {

@@ -132,7 +132,7 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn registered_retention_always_prunes_observability_analytics() {
         let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
             "maintenance-registered-observability-retention",
@@ -196,7 +196,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn registered_retention_reaps_stale_orphan_payloads_in_place() {
         const NOW: i64 = 40 * 86_400;
         let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
@@ -243,7 +243,7 @@ mod tests {
     /// `lcm_status` reads the store the retention tick cleaned. A profile with
     /// orphaned payloads but no sessions still reports the tick's GC record
     /// and the payload directory it scanned.
-    #[tokio::test]
+    #[asupersync::test]
     async fn lcm_status_reports_the_payload_gc_the_retention_tick_recorded() {
         const NOW: i64 = 40 * 86_400;
         let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
@@ -299,7 +299,7 @@ mod tests {
         assert_eq!(status().await, (Some("ok".to_owned()), Some(1), 1));
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn observability_retention_failure_preserves_typed_owner_diagnostic() {
         let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
             "maintenance-registered-observability-retention-error",

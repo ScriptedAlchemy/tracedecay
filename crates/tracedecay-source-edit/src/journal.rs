@@ -217,10 +217,13 @@ impl SourceEditDurability {
             deadline_ms: u64::try_from(SOURCE_EDIT_ADMISSION_DEADLINE.as_millis())
                 .unwrap_or(u64::MAX),
         };
-        let queued =
-            tokio::time::timeout_at(deadline.into(), source_edit_owner(&self.root).lock_owned())
-                .await
-                .map_err(|_| deadline_error())?;
+        let queued = asupersync::time::timeout(
+            asupersync::time::wall_now(),
+            deadline.saturating_duration_since(Instant::now()),
+            source_edit_owner(&self.root).lock_owned(),
+        )
+        .await
+        .map_err(|_| deadline_error())?;
         fs::create_dir_all(&self.root)
             .map_err(|error| io_error("create source edit root", error))?;
         let file = fs::OpenOptions::new()
@@ -230,15 +233,15 @@ impl SourceEditDurability {
             .truncate(false)
             .open(&lock_path)
             .map_err(|error| io_error("open source edit lock", error))?;
-        let file = tokio::task::spawn_blocking(move || lock_until(&file, deadline).map(|()| file))
-            .await
-            .map_err(|error| {
-                config_error(format!("source edit lock admission task failed: {error}"))
-            })?
-            .map_err(|error| match error {
-                LockAdmissionError::TimedOut => deadline_error(),
-                LockAdmissionError::Io(error) => io_error("acquire source edit lock", error),
-            })?;
+        let file = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+            lock_until(&file, deadline).map(|()| file)
+        })
+        .await
+        .map_err(|error| config_error(format!("source edit lock admission task failed: {error}")))?
+        .map_err(|error| match error {
+            LockAdmissionError::TimedOut => deadline_error(),
+            LockAdmissionError::Io(error) => io_error("acquire source edit lock", error),
+        })?;
         Ok(SourceEditLease {
             _file: FileLease::held(file, "source_edit.writer"),
             _queued: queued,

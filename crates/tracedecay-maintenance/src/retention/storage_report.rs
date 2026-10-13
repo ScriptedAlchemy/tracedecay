@@ -42,6 +42,7 @@ use tracedecay_code_index_retention::code_index_generations::{
     plan_code_generation_retention_with_verification, scoped_code_index_store_root,
 };
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+use tracedecay_runtime_core::native_runtime;
 use tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME;
 
 use crate::store_maintenance::{CodeGenerationProtectionUnavailableV1, code_generation_protection};
@@ -377,7 +378,7 @@ pub async fn build_storage_report(
     // the remaining diagnostic fields.
     let full_profile_root = profile_root.to_path_buf();
     let full_profile_size =
-        tokio::task::spawn_blocking(move || scan_full_profile_size(&full_profile_root))
+        native_runtime::spawn_blocking(move || scan_full_profile_size(&full_profile_root))
             .await
             .map_err(|error| report_error("join full profile size scan", error))?;
     let registered_projects = if global_db_path.exists() {
@@ -386,7 +387,7 @@ pub async fn build_storage_report(
         Vec::new()
     };
     let profile_root_buf = profile_root.to_path_buf();
-    let sampled = tokio::task::spawn_blocking(move || {
+    let sampled = native_runtime::spawn_blocking(move || {
         sample_registered_storage(&profile_root_buf, &global_db_path, registered_projects)
     })
     .await
@@ -424,7 +425,7 @@ async fn load_registered_project_rows(
 ) -> tracedecay_domain::errors::Result<Vec<(String, String)>> {
     let profile_root = profile_root.to_path_buf();
     let global_db_path = global_db_path.to_path_buf();
-    let (scratch, snapshot_source) = tokio::task::spawn_blocking(move || {
+    let (scratch, snapshot_source) = native_runtime::spawn_blocking(move || {
         let scratch = tempfile::tempdir()
             .map_err(|error| report_error("create external read-snapshot scratch", error))?;
         validate_external_scratch(&profile_root, scratch.path())
@@ -597,7 +598,7 @@ pub async fn build_storage_report_page_from_registered_global_db(
         }
     };
     let profile_root_buf = profile_root.to_path_buf();
-    let directory_page = tokio::task::spawn_blocking(move || {
+    let directory_page = native_runtime::spawn_blocking(move || {
         list_project_directories_page(
             &profile_root_buf,
             after_directory.as_deref().unwrap_or_default(),
@@ -618,7 +619,7 @@ pub async fn build_storage_report_page_from_registered_global_db(
         .filter(|(name, _)| !registered.contains(name))
         .map(|(_, path)| path.clone())
         .collect::<Vec<_>>();
-    let (unregistered_dir_count, unregistered_bytes) = tokio::task::spawn_blocking(move || {
+    let (unregistered_dir_count, unregistered_bytes) = native_runtime::spawn_blocking(move || {
         let bytes = unregistered.iter().fold(0u64, |total, path| {
             total.saturating_add(super::orphan_stores::dir_size_bytes(path))
         });
@@ -689,7 +690,7 @@ async fn project_storage_report_page(
         );
     }
     let profile_root = profile_root.to_path_buf();
-    tokio::task::spawn_blocking(move || {
+    native_runtime::spawn_blocking(move || {
         let mut report = StorageReport {
             profile_root: profile_root.display().to_string(),
             global_db_bytes,
@@ -793,7 +794,7 @@ pub async fn build_project_storage_report_from_daemon(
     let profile_root = profile_root.to_path_buf();
     let project_id = project_id.to_owned();
     let canonical_root = canonical_root.to_path_buf();
-    tokio::task::spawn_blocking(move || {
+    native_runtime::spawn_blocking(move || {
         build_project_storage_report(&profile_root, &project_id, &canonical_root, protection)
     })
     .await
@@ -1439,7 +1440,7 @@ mod tests {
         assert!((0..17).all(|index| observed.contains(&format!("proj_{index:02}"))));
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn project_directory_storage_report_counts_stable_resume_and_rejects_invalid_position() {
         let tmp = tempfile::TempDir::new().unwrap();
         let profile_root = tmp.path();
@@ -1670,7 +1671,7 @@ mod tests {
             .collect()
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn report_sizes_every_registered_store_and_counts_unregistered_dirs() {
         let tmp = tempfile::TempDir::new().unwrap();
         let profile_root = tmp.path().join("profile");
@@ -1693,7 +1694,7 @@ mod tests {
         assert!(report.unregistered_bytes >= 2048);
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn storage_report_names_user_sessions_db_family() {
         let tmp = tempfile::TempDir::new().unwrap();
         let profile_root = tmp.path().join("profile");
@@ -1717,7 +1718,7 @@ mod tests {
         assert_eq!(total.user_sessions_db_bytes, 5_120);
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn full_profile_total_includes_session_and_generation_files() {
         let tmp = tempfile::TempDir::new().unwrap();
         let profile_root = tmp.path().join("profile");
@@ -1748,7 +1749,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn storage_report_preserves_the_exact_live_global_database_family() {
         for checkpointed in [false, true] {
             let tmp = tempfile::TempDir::new().unwrap();
@@ -1818,7 +1819,7 @@ mod tests {
     /// The report must never freeze a store family to size it: a snapshot
     /// reflinks or, when the filesystem cannot, fully copies the database.
     /// Sizing must come from metadata and leave no scratch behind.
-    #[tokio::test]
+    #[asupersync::test]
     async fn sizing_a_store_copies_nothing_and_leaves_no_scratch() {
         let tmp = tempfile::TempDir::new().unwrap();
         let profile_root = tmp.path().join("profile");
@@ -1862,7 +1863,7 @@ mod tests {
     /// A registered store whose graph database is unreadable still reports its
     /// on-disk size; only the free-page fields degrade to `None`. Reporting a
     /// zero ratio there would read as "no bloat".
-    #[tokio::test]
+    #[asupersync::test]
     async fn an_unreadable_store_reports_size_with_unsampled_free_pages() {
         let tmp = tempfile::TempDir::new().unwrap();
         let profile_root = tmp.path().join("profile");
@@ -1890,7 +1891,7 @@ mod tests {
     /// ancestor would recurse until the stack ran out, and one pointing
     /// outside would bill another tree's bytes to the backlog.
     #[cfg(unix)]
-    #[tokio::test]
+    #[asupersync::test]
     async fn unregistered_sizing_does_not_follow_symlinks() {
         let tmp = tempfile::TempDir::new().unwrap();
         let profile_root = tmp.path().join("profile");
@@ -1988,7 +1989,7 @@ mod tests {
     /// The daemon page the CLI walks lists the collectable backlog against the
     /// protection set the scheduler registry resolves; without that authority
     /// the same store reports the backlog unavailable.
-    #[tokio::test]
+    #[asupersync::test]
     async fn daemon_report_page_lists_the_collectable_generation_backlog() {
         let tmp = tempfile::TempDir::new().unwrap();
         let profile_root = tmp.path().join("profile");

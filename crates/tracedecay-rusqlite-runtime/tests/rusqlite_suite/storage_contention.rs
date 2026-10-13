@@ -1048,6 +1048,64 @@ fn at_least_attachment_reads_use_the_writers_committed_watermark() {
 }
 
 #[test]
+fn at_least_reads_under_a_newer_authority_epoch_inherit_the_committed_frontier() {
+    let database = TestDatabase::new("read-newer-epoch.db");
+    seed(&database);
+    let previous = binding(0);
+    let mut reopened = previous.clone();
+    reopened.authority_epoch =
+        StoreAuthorityEpochV1::new(previous.authority_epoch.get() + 1).unwrap();
+    let writer = start_writer(
+        &database,
+        &previous,
+        ConcreteRepositoryWriteExecutor::default(),
+    );
+    let receipt = commit(&writer, publication(&previous, "generation.restarted", 1));
+    writer.shutdown_and_join().unwrap();
+    let attachment = RepositoryPhysicalAttachmentFactory
+        .attach(
+            &tracedecay_rusqlite_runtime::native_runtime::handle().expect("native runtime"),
+            reopened.clone(),
+            verified_locator(&reopened),
+            database.path.canonicalize().unwrap(),
+            AdmissionConfigV1::default(),
+        )
+        .unwrap();
+    let request = RuntimeReadRequestV1::new(
+        reopened.clone(),
+        ConsistencyModeV1::AtLeast {
+            commit_sequence: receipt.commit_sequence,
+        },
+        RuntimeReadOperationV1::TemporalHealth,
+        OperationPriorityV1::Health,
+        1,
+        read_request(&reopened, "health").control().clone(),
+    )
+    .unwrap();
+
+    let outcome = attachment
+        .dispatch_read(request.clone(), &Probe::for_read(&request))
+        .unwrap();
+
+    let RuntimeReadCoverageV1::Complete { coverage } = outcome.coverage() else {
+        panic!(
+            "a reopened authority with no commit yet must serve the inherited frontier, got {:?}",
+            outcome.coverage()
+        );
+    };
+    let observed = coverage.observed(&reopened.shard_id).unwrap();
+    assert_eq!(observed.commit_sequence, receipt.commit_sequence);
+    assert_eq!(observed.authority_epoch, reopened.authority_epoch);
+    assert!(matches!(
+        outcome.value(),
+        Some(RuntimeReadResultV1::TemporalHealth { healthy: true })
+    ));
+    assert_eq!(outcome.validate_for(&request), Ok(()));
+    attachment.drain().unwrap();
+    attachment.close_and_join().unwrap();
+}
+
+#[test]
 fn at_least_reads_under_a_superseded_authority_epoch_are_typed_unavailable() {
     let database = TestDatabase::new("read-superseded-epoch.db");
     seed(&database);

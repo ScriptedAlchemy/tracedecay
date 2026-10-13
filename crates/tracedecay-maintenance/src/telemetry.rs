@@ -21,6 +21,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros};
 use tracedecay_runtime_core::db::DatabaseStorageTelemetryHandle;
+use tracedecay_runtime_core::native_runtime;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use crate::tick::MaintenanceTickOutcome;
@@ -122,7 +123,7 @@ impl GuardedStoreTelemetryPort {
                 let handle = self.handle.clone();
                 let reader_wait = self.reader_wait;
                 let context = context.clone();
-                let Ok(Ok(current)) = tokio::task::spawn_blocking(move || {
+                let Ok(Ok(current)) = native_runtime::spawn_blocking(move || {
                     handle.table_size_telemetry(reader_wait, || telemetry_interruption(&context))
                 })
                 .await
@@ -174,7 +175,7 @@ impl StoreSizeTelemetryPort for GuardedStoreTelemetryPort {
                 let handle = self.handle.clone();
                 let reader_wait = self.reader_wait;
                 let context = context.clone();
-                let Ok(Ok(sample)) = tokio::task::spawn_blocking(move || {
+                let Ok(Ok(sample)) = native_runtime::spawn_blocking(move || {
                     handle.store_size_telemetry(reader_wait, || telemetry_interruption(&context))
                 })
                 .await

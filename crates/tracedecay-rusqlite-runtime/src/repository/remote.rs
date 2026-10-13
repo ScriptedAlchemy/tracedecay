@@ -186,7 +186,9 @@ pub(super) fn install_writer_fence(
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use tracedecay_domain::{ManifestDigest, RemoteWriterFenceV1, UtcMicros, canonical_sha256};
+    use tracedecay_domain::{
+        ManifestDigest, RemoteWriterFenceV1, UtcMicros, remote_recovery_authority_key,
+    };
 
     use super::*;
 
@@ -203,13 +205,7 @@ mod tests {
     }
 
     fn authority_key() -> ManifestDigest {
-        canonical_sha256(&(
-            "tracedecay.remote-recovery-authority.v1",
-            "brain.remote",
-            "shard.remote",
-            "generation.remote",
-        ))
-        .unwrap()
+        remote_recovery_authority_key("brain.remote", "shard.remote", "generation.remote").unwrap()
     }
 
     fn install() -> RemoteWriterFenceInstallV1 {
