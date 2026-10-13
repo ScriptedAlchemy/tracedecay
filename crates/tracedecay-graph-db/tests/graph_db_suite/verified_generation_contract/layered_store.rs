@@ -173,6 +173,8 @@ fn replay_source(generation: &GraphGenerationId, input: char) -> SealedCodeGener
     }
 }
 
+/// Publishes unhurried: the seal-peak probe sends production-width
+/// generations through here, and no test in this file asserts a deadline.
 fn publish_rows(
     graph: &RegisteredGraph,
     root: &Path,
@@ -198,7 +200,7 @@ fn publish_rows(
     graph
         .registry
         .publish_verified(
-            registration(graph.binding.clone(), root),
+            unhurried_registration(graph.binding.clone(), root),
             authority,
             &context,
             &record.publication.key,
@@ -219,7 +221,7 @@ fn publish_cold(
     let mut spill = graph
         .registry
         .generation_row_spill(
-            registration(graph.binding.clone(), root),
+            unhurried_registration(graph.binding.clone(), root),
             manifest.projection.clone(),
         )
         .unwrap();
@@ -917,7 +919,7 @@ fn layered_seal_peak_probe() {
     let base = graph
         .registry
         .sealed_generation_base(
-            registration(graph.binding.clone(), root.path()),
+            unhurried_registration(graph.binding.clone(), root.path()),
             child.projection.clone(),
             GraphGenerationId::new("peak-g1").unwrap(),
             &|| Ok(()),
@@ -927,7 +929,7 @@ fn layered_seal_peak_probe() {
     let mut spill = graph
         .registry
         .layered_row_spill(
-            registration(graph.binding.clone(), root.path()),
+            unhurried_registration(graph.binding.clone(), root.path()),
             child.projection.clone(),
             base,
         )
