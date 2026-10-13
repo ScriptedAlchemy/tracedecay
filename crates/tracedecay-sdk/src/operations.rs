@@ -1639,6 +1639,14 @@ typed_operation!(
     WorkAdmitPlacement, work_admit_placement, "operation.work.admit_placement", OperationTransport::Http { route: "/application/work/admit-placement" }, "binding.http.work.admit_placement", EffectClass::Administrative, IdempotencyContract::Required, SdkRequestIdControlV1::ServerMinted, SdkResultSemanticsV1::SchemaOnly, true, &[CancellationPoint::BeforeAdmission, CancellationPoint::BeforeEffect, CancellationPoint::EffectInFlight, CancellationPoint::AfterCommit], 30000, DeadlineBehavior::ReturnEffectReceipt, ReconciliationContract::Required, ReceiptContract::DurableEffect, &[TerminalState::Completed, TerminalState::Cancelled, TerminalState::TimedOut, TerminalState::Failed, TerminalState::EffectUnknown, TerminalState::Partial], "schema.work.admit_placement.result", 1
 );
 
+pub mod work_advance_job {
+    pub type Request = tracedecay_contracts::AdvanceWorkJobRequestV1;
+    pub type Result = tracedecay_contracts::AdvanceWorkJobResultV1;
+}
+typed_operation!(
+    WorkAdvanceJob, work_advance_job, "operation.work.advance_job", OperationTransport::Http { route: "/application/work/advance-job" }, "binding.http.work.advance_job", EffectClass::Administrative, IdempotencyContract::Required, SdkRequestIdControlV1::ServerMinted, SdkResultSemanticsV1::SchemaOnly, true, &[CancellationPoint::BeforeAdmission, CancellationPoint::BeforeEffect, CancellationPoint::EffectInFlight, CancellationPoint::AfterCommit], 30000, DeadlineBehavior::ReturnEffectReceipt, ReconciliationContract::Required, ReceiptContract::DurableEffect, &[TerminalState::Completed, TerminalState::Cancelled, TerminalState::TimedOut, TerminalState::Failed, TerminalState::EffectUnknown, TerminalState::Partial], "schema.work.advance_job.result", 1
+);
+
 pub mod work_attempt_status {
     pub type Request = tracedecay_contracts::WorkAttemptStatusRequestV1;
     pub type Result = tracedecay_domain::WorkAttemptV1;
