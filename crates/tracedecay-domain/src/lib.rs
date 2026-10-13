@@ -288,7 +288,7 @@ pub use remote::{
     EnrollmentGrantV1, MAX_REMOTE_CREDENTIAL_BYTES, MIN_REMOTE_CREDENTIAL_BYTES,
     RemoteAuthorityUnavailableReasonV1, RemoteCapabilityV1, RemoteCredentialFingerprintV1,
     RemotePlacementRevisionV1, RemoteRepositoryScopeV1, RemoteWriterFenceV1,
-    validate_remote_secret_length,
+    remote_recovery_authority_key, validate_remote_secret_length,
 };
 pub use repository::{
     EvidenceAvailabilityV1, GenerationBoundRepositoryProvenanceV1, RepositoryDirtyStateV1,

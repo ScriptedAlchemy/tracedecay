@@ -12,6 +12,7 @@ use tracedecay_contracts::doctor::{
 use tracedecay_contracts::storage::{StoreKeyV1, retention_backlog_finding};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_lcm::LcmRetentionConfig;
+use tracedecay_runtime_core::native_runtime;
 
 use super::orphan_stores::{
     OrphanStoreFinding, StoreDisposition, UnregisteredStoreFinding, UnverifiableReason,
@@ -107,7 +108,7 @@ pub async fn collect_profile_storage_findings(
     observed_at_secs: i64,
 ) -> ProfileStorageFindingsV1 {
     let scan_root = profile_root.join("projects");
-    let permitted = tokio::task::spawn_blocking(move || {
+    let permitted = native_runtime::spawn_blocking(move || {
         let _span = tracing::trace_span!("maintenance.diagnostics.profile_scan").entered();
         permits_synchronous_exhaustive_scan(&scan_root)
     })
@@ -116,7 +117,7 @@ pub async fn collect_profile_storage_findings(
     if !permitted {
         return ProfileStorageFindingsV1::unknown();
     }
-    let (registered_census, unregistered) = tokio::join!(
+    let (registered_census, unregistered) = futures_util::join!(
         super::orphan_stores::build_store_census(global_db, profile_root),
         collect_unregistered_store_findings(
             global_db,

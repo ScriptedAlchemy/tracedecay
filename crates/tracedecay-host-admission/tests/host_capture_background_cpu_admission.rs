@@ -122,7 +122,7 @@ fn capture_requests(session_id: &SessionId, count: usize) -> Vec<CaptureObservat
 
 /// One facade composed without the authority, then the same authorities with
 /// it injected: nothing process-global changes between the two halves.
-#[tokio::test]
+#[asupersync::test]
 async fn capture_is_rejected_without_the_authority_and_admitted_with_it() {
     let tmp = TempDir::new().expect("temp profile root");
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())

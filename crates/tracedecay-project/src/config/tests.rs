@@ -3,7 +3,7 @@ use std::process::Command;
 use tempfile::TempDir;
 use tracedecay_runtime_core::config::ProfileRoot;
 
-#[tokio::test]
+#[asupersync::test]
 async fn discover_project_root_with_identity_does_not_open_registry_only_store() {
     let profile_dir = TempDir::new().unwrap();
     let profile = ProfileRoot::new(profile_dir.path());
@@ -80,7 +80,7 @@ async fn discover_project_root_with_identity_does_not_open_registry_only_store()
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn store_layout_for_identity_does_not_open_registry_without_enrollment() {
     let profile_dir = TempDir::new().unwrap();
     let profile = ProfileRoot::new(profile_dir.path());
@@ -140,7 +140,7 @@ async fn store_layout_for_identity_does_not_open_registry_without_enrollment() {
     }
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn discover_project_root_with_identity_does_not_bind_non_git_child_to_parent_store() {
     let profile_dir = TempDir::new().unwrap();
     let profile = ProfileRoot::new(profile_dir.path());
@@ -187,7 +187,7 @@ async fn discover_project_root_with_identity_does_not_bind_non_git_child_to_pare
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn discover_project_root_with_identity_preserves_sync_fast_path() {
     let profile_dir = TempDir::new().unwrap();
     let profile = ProfileRoot::new(profile_dir.path());
@@ -428,7 +428,7 @@ mod runtime_configuration_cutover {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn runtime_current_reads_the_store_after_startup_snapshot_drifts() {
         let profile = TempDir::new().expect("temporary profile root");
         let root = TempDir::new().expect("temporary project root");
@@ -510,7 +510,7 @@ mod runtime_configuration_cutover {
     /// patterns it never compiled. Opening such a store keeps the
     /// configuration, and so its repair, available; the stored pattern is left
     /// unapplied and `get` names it with the actions that clear it.
-    #[tokio::test]
+    #[asupersync::test]
     async fn a_stored_uncompilable_index_pattern_is_a_typed_setting_finding() {
         let profile = TempDir::new().expect("temporary profile root");
         let root = TempDir::new().expect("temporary project root");
@@ -612,7 +612,7 @@ mod runtime_configuration_cutover {
     /// reads afterwards. The three surfaces must hand out the same revision
     /// and the same shared settings, while the daemon-only settings keep
     /// their exact values.
-    #[tokio::test]
+    #[asupersync::test]
     async fn open_cached_read_and_configuration_change_share_one_runtime_pin() {
         let profile = TempDir::new().expect("temporary profile root");
         let root = TempDir::new().expect("temporary project root");
@@ -736,7 +736,7 @@ mod runtime_configuration_cutover {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn ensure_runtime_configuration_persists_initial_resolution_when_cache_is_empty() {
         let profile = TempDir::new().expect("temporary profile root");
         let root = TempDir::new().expect("temporary project root");
@@ -810,7 +810,7 @@ mod runtime_configuration_cutover {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn existing_snapshot_converges_new_native_graph_default_before_materialization() {
         use tracedecay_runtime_core::db::engine::params;
 
@@ -917,7 +917,7 @@ mod runtime_configuration_cutover {
         assert_eq!(reopened.revision_id(), converged.revision_id());
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn ensure_runtime_configuration_rejects_a_revision_without_the_registered_binding() {
         let profile = TempDir::new().expect("temporary profile root");
         let root = TempDir::new().expect("temporary project root");
@@ -963,7 +963,7 @@ mod runtime_configuration_cutover {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
+    #[asupersync::test]
     async fn ensure_runtime_configuration_keeps_binding_revision_across_linked_worktrees() {
         let profile = TempDir::new().expect("temporary profile root");
         let root = TempDir::new().expect("temporary root");
@@ -1077,7 +1077,7 @@ mod runtime_configuration_cutover {
     /// A fresh init binds the checkout's `origin` as the project's GitHub
     /// source; the binding follows `origin` when the remote changes.
     #[cfg(unix)]
-    #[tokio::test]
+    #[asupersync::test]
     async fn fresh_open_binds_the_github_origin_as_the_project_github_source() {
         let profile = TempDir::new().expect("temporary profile root");
         let root = TempDir::new().expect("temporary root");
@@ -1156,7 +1156,7 @@ mod runtime_configuration_cutover {
     /// digest; the registry still resolves the same registered project. The
     /// open path must republish the daemon binding with the new digest as a
     /// durable revision instead of demanding a reset.
-    #[tokio::test]
+    #[asupersync::test]
     async fn ensure_runtime_configuration_rebinds_locator_digest_for_a_renamed_checkout() {
         let profile = TempDir::new().expect("temporary profile root");
         let root = TempDir::new().expect("temporary root");
@@ -1209,7 +1209,7 @@ mod runtime_configuration_cutover {
     /// A store whose single authority-matching binding carries a foreign
     /// binding id (and a store whose bindings belong to another project)
     /// must stay a typed reset, never a silent rebind.
-    #[tokio::test]
+    #[asupersync::test]
     async fn ensure_runtime_configuration_rejects_locator_drift_without_the_daemon_binding() {
         let profile = TempDir::new().expect("temporary profile root");
         let root = TempDir::new().expect("temporary root");
@@ -1295,7 +1295,7 @@ mod runtime_configuration_cutover {
         ));
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn resolve_runtime_configuration_pins_registered_project_when_cache_is_cold() {
         let profile = TempDir::new().expect("temporary profile root");
         let root = TempDir::new().expect("temporary project root");
@@ -1351,7 +1351,7 @@ mod runtime_configuration_cutover {
         assert_eq!(reresolved.snapshot(), pinned.snapshot());
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn resolve_runtime_configuration_errors_typed_when_authority_is_unresolvable() {
         let profile = TempDir::new().expect("temporary profile root");
         let root = TempDir::new().expect("temporary project root");
@@ -1390,7 +1390,7 @@ mod runtime_configuration_cutover {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn read_only_open_rejects_an_uninitialized_store_without_fabricated_defaults() {
         let profile = TempDir::new().expect("temporary profile root");
         let root = TempDir::new().expect("temporary project root");

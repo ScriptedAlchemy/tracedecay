@@ -9,6 +9,7 @@
 //! executor never blocks on the native runtime.
 
 use std::sync::OnceLock;
+use std::time::Instant;
 
 use asupersync::runtime::{Runtime, RuntimeBuilder, RuntimeHandle};
 use asupersync::{Budget, Cx};
@@ -81,6 +82,25 @@ where
         .map_err(|error| format!("native blocking work ended without a result: {error}"))
 }
 
+/// Completes at `deadline` on a native timer task, so a foreign executor never
+/// polls an Asupersync timer: its wait wakes through the join's `Waker`.
+/// Dropping the returned future cancels the timer.
+pub async fn sleep_until(deadline: Instant) -> Result<(), String> {
+    let cx = cx().ok_or("native execution context unavailable")?;
+    let mut timer = cx
+        .spawn(move |cx| async move {
+            // Measured before the timer clock is read, so the wake never lands
+            // before `deadline`.
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            asupersync::time::sleep(cx.now(), remaining).await;
+        })
+        .map_err(|error| format!("native timer was not admitted: {error}"))?;
+    timer
+        .join(&cx)
+        .await
+        .map_err(|error| format!("native timer ended without firing: {error}"))
+}
+
 fn started_process_runtime() -> Result<&'static Runtime, String> {
     PROCESS_RUNTIME
         .get_or_init(|| {
@@ -122,6 +142,16 @@ mod tests {
         assert!(on_native_worker, "settlement must run on a native worker");
         let mut blocking = cx.spawn_blocking(|_| 7).expect("native blocking task");
         assert_eq!(blocking.join(&cx).await.expect("native blocking join"), 7);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn foreign_executor_wakes_at_a_native_deadline() {
+        let deadline = Instant::now() + Duration::from_millis(50);
+        tokio::time::timeout(Duration::from_secs(10), sleep_until(deadline))
+            .await
+            .expect("a Tokio waiter must wake when the native timer fires")
+            .expect("native timer");
+        assert!(Instant::now() >= deadline, "the timer must not fire early");
     }
 
     #[test]

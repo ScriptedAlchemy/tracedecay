@@ -262,7 +262,7 @@ mod tests {
     /// First touch of a root under the OS temp directory against a durable
     /// profile is refused before any layout, and therefore any shard
     /// directory, exists. A hermetic (temp) profile still admits temp roots.
-    #[tokio::test]
+    #[asupersync::test]
     async fn first_touch_refuses_an_ephemeral_root_before_minting_a_layout() {
         const PROFILE_ENV: &str = "TRACEDECAY_EPHEMERAL_ROOT_FIXTURE_PROFILE";
         let Some(profile) = std::env::var_os(PROFILE_ENV) else {
@@ -353,7 +353,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn first_touch_refuses_a_retired_checkout_enrollment_marker() {
         let project = tempfile::TempDir::new().expect("project");
         let hermetic = tempfile::TempDir::new().expect("hermetic profile");

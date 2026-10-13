@@ -241,7 +241,7 @@ mod tests {
     /// single check that every hook capability this crate composes answers
     /// through it (here: the registered-identity gates for an unregistered
     /// checkout) instead of through a slot that may be empty.
-    #[tokio::test]
+    #[asupersync::test]
     async fn the_hook_runtime_handle_answers_through_project_adapters() {
         registered();
         let profile_home = tempfile::tempdir().expect("profile home");

@@ -180,7 +180,7 @@ pub async fn ensure_daemon_connection_live(
 /// if the read still blocks after the I/O driver has observed everything the
 /// daemon wrote before it stopped listening.
 ///
-/// The reader stays held across polls. `read_mcp_line` is dropped when
+/// The reader stays held across polls. `read_mcp_line_tokio` is dropped when
 /// another branch wins `select!`; the accumulator lives on the line reader.
 pub async fn poll_daemon_response_line<R, F, Fut>(
     reader: &mut R,
@@ -197,14 +197,14 @@ where
     loop {
         tokio::select! {
             biased;
-            result = line_reader.read_mcp_line() => return response_line(result, request_label),
+            result = line_reader.read_mcp_line_tokio() => return response_line(result, request_label),
             () = tokio::time::sleep(liveness_poll_interval) => {}
         }
         let probe = ensure_live();
         tokio::pin!(probe);
         let probe_failure = tokio::select! {
             biased;
-            result = line_reader.read_mcp_line() => return response_line(result, request_label),
+            result = line_reader.read_mcp_line_tokio() => return response_line(result, request_label),
             probe_result = &mut probe => match probe_result {
                 Ok(()) => continue,
                 Err(error) => error,
@@ -216,7 +216,7 @@ where
         tokio::task::yield_now().await;
         tokio::select! {
             biased;
-            result = line_reader.read_mcp_line() => return response_line(result, request_label),
+            result = line_reader.read_mcp_line_tokio() => return response_line(result, request_label),
             () = std::future::ready(()) => return Err(probe_failure),
         }
     }

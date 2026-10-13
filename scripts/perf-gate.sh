@@ -232,6 +232,7 @@ if [[ -n "${TRACEDECAY_PERF_BIN:-}" ]]; then
   [[ -x "$TRACEDECAY_PERF_BIN" ]] || die "TRACEDECAY_PERF_BIN '$TRACEDECAY_PERF_BIN' is not executable"
   BIN="$(cd "$(dirname "$TRACEDECAY_PERF_BIN")" && pwd)/$(basename "$TRACEDECAY_PERF_BIN")"
   log "==> PHASE BUILD: using prebuilt binary $BIN"
+  PERF_BUILD_PROFILE=prebuilt
 else
   command -v bazel >/dev/null 2>&1 || die "bazel is required unless TRACEDECAY_PERF_BIN is set"
   log "==> PHASE BUILD: bazel build --config=release //crates/tracedecay-cli:tracedecay"
@@ -240,6 +241,7 @@ else
   BUILD_DIR="$(cd "$REPO_ROOT" && bazel info --config=release bazel-bin)" ||
     die "could not resolve the Bazel output directory"
   BIN="$BUILD_DIR/crates/tracedecay-cli/tracedecay"
+  PERF_BUILD_PROFILE=release
   [[ -x "$BIN" ]] || die "expected a binary at $BIN after the build"
 fi
 BUILD_VERSION="$("$BIN" --version 2>/dev/null | tr -d '\n' || echo unknown)"
@@ -293,11 +295,12 @@ td() { td_project "$PERF_TARGET_REPO" "$1" "$2"; }
 # not enrolled" refusal, which is exactly what init goes on to fix. A refusal the
 # daemon routed still proves the request path serves, which is the whole claim
 # of this phase, so readiness means answered rather than succeeded. The CLI
-# prefixes every routed refusal with `daemon tool call failed`, so that marker
+# reports a routed refusal either as `daemon tool call failed` or as the tool's
+# typed refusal (`<tool> refused the request (<code>)`); either marker
 # separates an answer from a connection that never landed.
 daemon_answered_status() {
   td status '{"format":"json"}' >"$RUN_DIR/status-cold.json" 2>"$RUN_DIR/status.err" && return 0
-  grep -q 'daemon tool call failed' "$RUN_DIR/status.err"
+  grep -qE 'daemon tool call failed|refused the request' "$RUN_DIR/status.err"
 }
 
 until daemon_answered_status; do
@@ -328,14 +331,16 @@ import json, sys
 
 try:
     envelope = json.load(open(sys.argv[1]))
-    payload = json.loads(envelope["content"][0]["text"])
+    payload = envelope.get("structuredContent") or json.loads(envelope["content"][0]["text"])
 except Exception:
     raise SystemExit(1)
 
 freshness = payload.get("code_index_freshness") or {}
 serving = (freshness.get("worktree") or {}).get("code_graph_serving") or {}
 state = serving.get("state")
-if freshness.get("status") == "current" and state == "ready":
+# A graph engine released for memory still serves: the next read re-warms it.
+released = state == "warming" and "released for memory" in (serving.get("reason") or "")
+if freshness.get("status") == "current" and (state == "ready" or released):
     raise SystemExit(0)
 if state == "refused" or serving.get("reason") == "activation_disabled":
     print(f"graph serving refused: {serving}", file=sys.stderr)
@@ -401,7 +406,7 @@ python3 - "$RUN_DIR/status.json" >"$RUN_DIR/counts.env" <<'PY' || die "could not
 import json, sys
 
 envelope = json.load(open(sys.argv[1]))
-payload = json.loads(envelope["content"][0]["text"])
+payload = envelope.get("structuredContent") or json.loads(envelope["content"][0]["text"])
 statistics = payload.get("graph_statistics") or {}
 health = payload.get("storage_health") or {}
 worktree = (payload.get("code_index_freshness") or {}).get("worktree") or {}
@@ -430,7 +435,7 @@ import json, sys
 
 try:
     envelope = json.load(open(sys.argv[1]))
-    payload = json.loads(envelope["content"][0]["text"])
+    payload = envelope.get("structuredContent") or json.loads(envelope["content"][0]["text"])
 except Exception:
     raise SystemExit(0)
 for hit in payload.get("results") or []:
@@ -506,7 +511,7 @@ worker() {
     case $((slot % 4)) in
       0) timed_call "$record" search "$(printf '{"query":"%s","limit":10,"format":"json"}' "$q")" ;;
       1) timed_call "$record" grep "$(printf '{"pattern":"%s","fixed_strings":true,"max_results":20,"format":"json"}' "$g")" ;;
-      2) timed_call "$record" callers "$(printf '{"node_id":"%s","max_depth":2,"format":"json"}' "$NODE_ID")" ;;
+      2) timed_call "$record" callers "$(printf '{"node_id":"%s","maximum_depth":2,"format":"json"}' "$NODE_ID")" ;;
       3) timed_call "$record" context "$(printf '{"task":"%s","max_nodes":20,"format":"json"}' "$c")" ;;
     esac
     i=$((i + 1))
@@ -521,7 +526,7 @@ WARMUP_SEED="${PERF_SEED_SYMBOLS[0]}"
 : >"$WARMUP_RECORD"
 timed_call "$WARMUP_RECORD" search "$(printf '{"query":"%s","limit":10,"format":"json"}' "$WARMUP_SEED")"
 timed_call "$WARMUP_RECORD" grep "$(printf '{"pattern":"%s","fixed_strings":true,"max_results":20,"format":"json"}' "$WARMUP_SEED")"
-timed_call "$WARMUP_RECORD" callers "$(printf '{"node_id":"%s","max_depth":2,"format":"json"}' "$NODE_ID")"
+timed_call "$WARMUP_RECORD" callers "$(printf '{"node_id":"%s","maximum_depth":2,"format":"json"}' "$NODE_ID")"
 timed_call "$WARMUP_RECORD" context '{"task":"how does the daemon serve tool calls","max_nodes":20,"format":"json"}'
 
 log "==> PHASE LOAD: $PERF_WORKERS workers x ${PERF_DURATION_SECONDS}s"
@@ -615,7 +620,7 @@ PERF_CALLS_DIR="$CALLS_DIR" \
   PERF_DB_SIZE_BYTES="$DB_SIZE_BYTES" \
   PERF_DAEMON_SURVIVED="$DAEMON_SURVIVED" \
   PERF_BINARY_VERSION="$BUILD_VERSION" \
-  PERF_CARGO_PROFILE="$PERF_CARGO_PROFILE" \
+  PERF_BUILD_PROFILE="$PERF_BUILD_PROFILE" \
   PERF_WORKERS="$PERF_WORKERS" \
   PERF_REINDEX_WORKTREES="$PERF_REINDEX_WORKTREES" \
   PERF_BUDGET_INDEX_SECONDS="$PERF_BUDGET_INDEX_SECONDS" \
@@ -724,7 +729,7 @@ if not daemon_survived:
 metrics = {
     "schema": "tracedecay.perf-gate/v1",
     "binary_version": env["PERF_BINARY_VERSION"].strip(),
-    "cargo_profile": env["PERF_CARGO_PROFILE"],
+    "build_profile": env["PERF_BUILD_PROFILE"],
     "workers": int(env["PERF_WORKERS"]),
     "reindex_worktrees_under_load": int(env["PERF_REINDEX_WORKTREES"]),
     "load_seconds": load_seconds,
@@ -760,7 +765,7 @@ with open(metrics_path, "w") as handle:
 lines = [
     f"## Serving-path perf gate: {metrics['verdict']}",
     "",
-    f"`{metrics['binary_version']}`, {metrics['cargo_profile']} profile, "
+    f"`{metrics['binary_version']}`, {metrics['build_profile']} build, "
     f"{metrics['workers']} workers x {load_seconds:.0f}s",
     "",
     "### Index",
