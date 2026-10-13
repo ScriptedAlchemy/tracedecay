@@ -534,6 +534,9 @@ impl CodeGraphProjectionStore {
             .serving_engine
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        if slot.is_some() && self.interactive_catalog.engine_held() {
+            return Ok(CodeGraphEngineReleaseV1::Busy);
+        }
         let Some(pin) = slot.take() else {
             return Ok(CodeGraphEngineReleaseV1::NotPinned);
         };
@@ -621,19 +624,26 @@ impl CodeGraphProjectionStore {
         self.await_rewarm_for(budget, CodeGraphReadinessRequirement::Catalog)
     }
 
-    /// Catalog reads retain the catalog before waiting so a parked release
-    /// cannot evict a newly warmed catalog before the reader opens. Engine
-    /// reads wait only for the engine and do not retain the catalog.
+    /// Every read holds the engine, and Catalog reads the catalog, before
+    /// waiting, so a park release cannot close what the wait saw resident
+    /// before the reader opens on it.
     pub fn await_rewarm_and_retain_for(
         &self,
         budget: Duration,
         requirement: CodeGraphReadinessRequirement,
-    ) -> Result<Option<Arc<InteractiveCatalogReaderLeaseV1>>, CodeGraphRewarmPendingV1> {
-        let retain = match requirement {
-            CodeGraphReadinessRequirement::Catalog => Some(
-                InteractiveCatalogReaderLeaseV1::retain(&self.interactive_catalog),
-            ),
-            CodeGraphReadinessRequirement::Engine => None,
+    ) -> Result<Arc<InteractiveCatalogReaderLeaseV1>, CodeGraphRewarmPendingV1> {
+        let retain = {
+            // `release_serving_engine` checks for holds under this lock, so a
+            // release either sees this hold or closed the engine before the
+            // wait below looks at it.
+            let _slot = self
+                .serving_engine
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            InteractiveCatalogReaderLeaseV1::admit(
+                &self.interactive_catalog,
+                requirement == CodeGraphReadinessRequirement::Catalog,
+            )
         };
         self.await_rewarm_for(budget, requirement)?;
         Ok(retain)
