@@ -143,6 +143,7 @@ fn fixture_with_binding(binding: StoreRuntimeBindingV1) -> Fixture {
         LocatorDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
     );
     let writer = PersistentWriter::start(
+        &crate::native_runtime::handle().expect("native runtime"),
         ExistingWriterLocator::new(binding.clone(), locator.clone(), path.clone()).unwrap(),
         AdmissionConfigV1::default(),
         NoWrites,

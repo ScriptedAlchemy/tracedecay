@@ -1363,9 +1363,9 @@ mod auxiliary_scheduling_tests {
         let telemetry = WriterTelemetry::default();
         let mut queue = FairQueue::default();
         let mut inflight = HashMap::new();
-        let (leader, leader_rx) =
+        let (leader, mut leader_rx) =
             accepted_request_with_reply("operation.duplicate-attach", "key.duplicate-attach");
-        let (follower, follower_rx) =
+        let (follower, mut follower_rx) =
             accepted_request_with_reply("operation.duplicate-attach", "key.duplicate-attach");
         assert!(enqueue(&mut queue, &mut inflight, leader, &telemetry));
         assert!(enqueue(&mut queue, &mut inflight, follower, &telemetry));
@@ -1379,13 +1379,10 @@ mod auxiliary_scheduling_tests {
             .expect("queued leader")
             .settle(Ok(outcome.clone()));
         assert_eq!(
-            leader_rx.blocking_recv().expect("leader reply"),
+            leader_rx.try_recv().expect("leader reply"),
             Ok(outcome.clone())
         );
-        assert_eq!(
-            follower_rx.blocking_recv().expect("follower reply"),
-            Ok(outcome)
-        );
+        assert_eq!(follower_rx.try_recv().expect("follower reply"), Ok(outcome));
     }
 
     #[test]
@@ -1393,9 +1390,9 @@ mod auxiliary_scheduling_tests {
         let telemetry = WriterTelemetry::default();
         let mut queue = FairQueue::default();
         let mut inflight = HashMap::new();
-        let (leader, leader_rx) =
+        let (leader, mut leader_rx) =
             accepted_request_with_reply("operation.inflight-attach", "key.inflight-attach");
-        let (follower, follower_rx) =
+        let (follower, mut follower_rx) =
             accepted_request_with_reply("operation.inflight-attach", "key.inflight-attach");
         assert!(enqueue(&mut queue, &mut inflight, leader, &telemetry));
         let mut selected = queue.drain_fair();
@@ -1408,13 +1405,10 @@ mod auxiliary_scheduling_tests {
         };
         executing.settle(Ok(outcome.clone()));
         assert_eq!(
-            leader_rx.blocking_recv().expect("leader reply"),
+            leader_rx.try_recv().expect("leader reply"),
             Ok(outcome.clone())
         );
-        assert_eq!(
-            follower_rx.blocking_recv().expect("follower reply"),
-            Ok(outcome)
-        );
+        assert_eq!(follower_rx.try_recv().expect("follower reply"), Ok(outcome));
     }
 
     #[test]
@@ -1422,14 +1416,14 @@ mod auxiliary_scheduling_tests {
         let telemetry = WriterTelemetry::default();
         let mut queue = FairQueue::default();
         let mut inflight = HashMap::new();
-        let (leader, leader_rx) =
+        let (leader, mut leader_rx) =
             accepted_request_with_reply("operation.duplicate-conflict", "key.leader");
-        let (conflict, conflict_rx) =
+        let (conflict, mut conflict_rx) =
             accepted_request_with_reply("operation.duplicate-conflict", "key.conflict");
         assert!(enqueue(&mut queue, &mut inflight, leader, &telemetry));
         assert!(!enqueue(&mut queue, &mut inflight, conflict, &telemetry));
         assert!(matches!(
-            conflict_rx.blocking_recv().expect("conflict reply"),
+            conflict_rx.try_recv().expect("conflict reply"),
             Err(tracedecay_store::StorageRuntimeErrorV1::DuplicateOperationInFlight {
                 operation_id
             }) if operation_id == "operation.duplicate-conflict"
@@ -1442,10 +1436,7 @@ mod auxiliary_scheduling_tests {
             .pop()
             .expect("leader remains queued")
             .settle(Ok(outcome.clone()));
-        assert_eq!(
-            leader_rx.blocking_recv().expect("leader reply"),
-            Ok(outcome)
-        );
+        assert_eq!(leader_rx.try_recv().expect("leader reply"), Ok(outcome));
     }
 
     #[test]
@@ -1499,7 +1490,10 @@ mod auxiliary_scheduling_tests {
             .handle()
             .try_request_cx_with_budget(Budget::INFINITE)
             .expect("context");
-        let enqueued_at = Instant::now();
+        // The foreground window is at most 2 ms of wall time, which a loaded
+        // machine spends before the dwell starts. Stamping both requests in
+        // the future keeps the window open the way a paused clock did.
+        let enqueued_at = Instant::now() + Duration::from_secs(60);
         let mut config = tracedecay_store::AdmissionConfigV1::default();
         config.foreground_batch.max_operations = 2;
         config.validate().expect("valid foreground batch limit");
@@ -1523,7 +1517,7 @@ mod auxiliary_scheduling_tests {
             write_tx
                 .try_send(accepted_request(
                     1,
-                    enqueued_at,
+                    enqueued_at + Duration::from_millis(1),
                     OperationPriorityV1::Foreground,
                     false,
                 ))

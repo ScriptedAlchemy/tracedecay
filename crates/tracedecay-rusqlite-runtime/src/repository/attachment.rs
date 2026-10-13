@@ -915,7 +915,30 @@ mod tests {
         maintenance::{ExclusiveMaintenancePermit, MaintenanceOwnerId},
     };
 
+    use asupersync::channel::watch;
+
     use super::*;
+
+    fn native_runtime() -> RuntimeHandle {
+        crate::native_runtime::handle().expect("native runtime")
+    }
+
+    fn cx() -> Cx {
+        crate::native_runtime::cx().expect("native runtime context")
+    }
+
+    async fn wait_for<T>(
+        cx: &Cx,
+        receiver: &mut watch::Receiver<T>,
+        mut predicate: impl FnMut(&T) -> bool,
+    ) -> Result<(), watch::RecvError> {
+        loop {
+            if predicate(&receiver.borrow_and_update()) {
+                return Ok(());
+            }
+            receiver.changed(cx).await?;
+        }
+    }
 
     struct UnrestrictedAuthority;
 
@@ -995,6 +1018,7 @@ mod tests {
         let path = path.canonicalize().unwrap();
         let binding = binding();
         let result = RepositoryPhysicalAttachmentFactory.attach_with_start_hook(
+            &native_runtime(),
             binding.clone(),
             locator(&binding),
             path.clone(),
@@ -1047,6 +1071,7 @@ mod tests {
         for cycle in 0_i64..3 {
             let attachment = factory
                 .attach(
+                    &native_runtime(),
                     binding.clone(),
                     locator.clone(),
                     path.clone(),
@@ -1189,6 +1214,7 @@ mod tests {
         let binding = binding();
         RepositoryPhysicalAttachmentFactory
             .attach(
+                &native_runtime(),
                 binding.clone(),
                 locator(&binding),
                 path,
@@ -1216,7 +1242,13 @@ mod tests {
         admission.wal.soft_limit_bytes = 8 * 1024;
         admission.wal.hard_limit_bytes = 16 * 1024;
         let attachment = RepositoryPhysicalAttachmentFactory
-            .attach(binding.clone(), locator(&binding), path, admission)
+            .attach(
+                &native_runtime(),
+                binding.clone(),
+                locator(&binding),
+                path,
+                admission,
+            )
             .unwrap();
         let handle = attachment.exact_sql_handle().unwrap();
         handle
@@ -1252,9 +1284,11 @@ mod tests {
             .unwrap();
         let mut status = checkpoint.status_subscription();
         runtime
-            .block_on(checkpoint.pressure_subscription().wait_for(|pressure| {
-                matches!(pressure, crate::CheckpointPressure::BlockGeneral { .. })
-            }))
+            .block_on(wait_for(
+                &cx(),
+                &mut checkpoint.pressure_subscription(),
+                |pressure| matches!(pressure, crate::CheckpointPressure::BlockGeneral { .. }),
+            ))
             .expect("the first over-hard-limit write must publish hard checkpoint pressure");
         let blocked_wal_bytes = std::fs::metadata(&wal_path).unwrap().len();
 
@@ -1287,7 +1321,7 @@ mod tests {
         // Every hard-drain retry publishes a checkpoint status, so wait for
         // one instead of assuming the 100 ms retry timer fired in time.
         let writer_snapshot = loop {
-            status.mark_unchanged();
+            status.mark_seen();
             let writer_snapshot = attachment
                 .snapshot()
                 .writer
@@ -1296,7 +1330,7 @@ mod tests {
                 break writer_snapshot;
             }
             runtime
-                .block_on(status.changed())
+                .block_on(status.changed(&cx()))
                 .expect("the writer keeps retrying the hard drain");
         };
         assert!(matches!(
@@ -1311,7 +1345,7 @@ mod tests {
         completed_rx.recv().unwrap().unwrap();
         queued.join().unwrap();
         runtime
-            .block_on(status.wait_for(|status| {
+            .block_on(wait_for(&cx(), &mut status, |status| {
                 matches!(checkpoint.pressure(), crate::CheckpointPressure::Open)
                     && status.latest.as_ref().is_some_and(|outcome| match outcome {
                         crate::CheckpointOutcome::BelowSoft { wal }
@@ -1387,9 +1421,11 @@ mod tests {
             CheckpointBlockers::default(),
         );
         let error = runtime
-            .block_on(
-                attachment.run_maintenance_checkpoint(request, Arc::new(UnrestrictedAuthority)),
-            )
+            .block_on(attachment.run_maintenance_checkpoint(
+                &cx(),
+                request,
+                Arc::new(UnrestrictedAuthority),
+            ))
             .unwrap_err();
         assert!(matches!(
             error,
@@ -1414,6 +1450,7 @@ mod tests {
 
         let error = runtime
             .block_on(attachment.run_maintenance_checkpoint(
+                &cx(),
                 maintenance_request(&attachment, MaintenanceCheckpointMode::Truncate),
                 Arc::new(DeniedAuthority),
             ))
@@ -1455,9 +1492,11 @@ mod tests {
             blockers.clone(),
         );
         let error = runtime
-            .block_on(
-                attachment.run_maintenance_checkpoint(request, Arc::new(UnrestrictedAuthority)),
-            )
+            .block_on(attachment.run_maintenance_checkpoint(
+                &cx(),
+                request,
+                Arc::new(UnrestrictedAuthority),
+            ))
             .unwrap_err();
         assert!(matches!(
             error,
@@ -1497,9 +1536,11 @@ mod tests {
         ));
         let request = maintenance_request(&read_only, MaintenanceCheckpointMode::Truncate);
         let error = runtime
-            .block_on(
-                read_only.run_maintenance_checkpoint(request, Arc::new(UnrestrictedAuthority)),
-            )
+            .block_on(read_only.run_maintenance_checkpoint(
+                &cx(),
+                request,
+                Arc::new(UnrestrictedAuthority),
+            ))
             .unwrap_err();
         assert!(matches!(error, RepositoryDispatchError::Closed));
         read_only.drain().unwrap();
@@ -1514,7 +1555,11 @@ mod tests {
         ));
         let request = maintenance_request(&writable, MaintenanceCheckpointMode::Truncate);
         let error = runtime
-            .block_on(writable.run_maintenance_checkpoint(request, Arc::new(UnrestrictedAuthority)))
+            .block_on(writable.run_maintenance_checkpoint(
+                &cx(),
+                request,
+                Arc::new(UnrestrictedAuthority),
+            ))
             .unwrap_err();
         assert!(matches!(error, RepositoryDispatchError::Closed));
     }
@@ -1550,6 +1595,7 @@ mod tests {
             .unwrap();
         let outcome = runtime
             .block_on(attachment.run_maintenance_checkpoint(
+                &cx(),
                 maintenance_request(&attachment, MaintenanceCheckpointMode::Restart),
                 Arc::new(UnrestrictedAuthority),
             ))
@@ -1617,6 +1663,7 @@ mod tests {
             .unwrap();
         let outcome = runtime
             .block_on(attachment.run_maintenance_checkpoint(
+                &cx(),
                 maintenance_request(&attachment, MaintenanceCheckpointMode::Truncate),
                 Arc::new(UnrestrictedAuthority),
             ))
@@ -1649,6 +1696,7 @@ mod tests {
         drop(pinned);
         let outcome = runtime
             .block_on(attachment.run_maintenance_checkpoint(
+                &cx(),
                 maintenance_request(&attachment, MaintenanceCheckpointMode::Truncate),
                 Arc::new(UnrestrictedAuthority),
             ))
