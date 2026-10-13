@@ -581,8 +581,8 @@ mod tests {
 
     use super::*;
     use tracedecay_domain::{
-        AuthorityEpoch, CurrentRemoteAuthorityV1, ProjectId, RemotePlacementRevisionV1,
-        RepositoryId, RepositoryStateSnapshotId, WorktreeId,
+        AuthorityEpoch, ProjectId, ProjectionGenerationId, RemotePlacementRevisionV1, RepositoryId,
+        RepositoryStateSnapshotId, ShardId, WorktreeId,
     };
     use tracedecay_tool_catalog::SchemaId;
 

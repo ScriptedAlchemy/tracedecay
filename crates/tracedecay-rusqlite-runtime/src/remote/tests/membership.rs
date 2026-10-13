@@ -77,7 +77,11 @@ fn a_joined_store_adopts_the_authority_enrollment_verbatim_and_converges() {
     assert_eq!(registrations.len(), 1);
     assert_eq!(registrations[0].brain_id, *joined.member_brain());
     assert_eq!(
-        joined.current_writer_authority(&discovery.writer).unwrap(),
+        <RemoteSqliteStorageV1 as RemoteCapturePortV1>::current_writer_authority(
+            &joined,
+            &discovery.writer
+        )
+        .unwrap(),
         CurrentRemoteAuthorityStateV1::Available(discovery.writer.authority.clone()),
         "capture admission reads the authority's writer as observed at join"
     );
