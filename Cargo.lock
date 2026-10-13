@@ -6297,6 +6297,7 @@ dependencies = [
 name = "tracedecay-contracts"
 version = "0.1.0"
 dependencies = [
+ "asupersync",
  "getrandom 0.2.17",
  "hex",
  "schemars",
@@ -6304,7 +6305,6 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "thiserror",
- "tokio",
  "tracedecay-domain",
  "tracedecay-policy",
  "tracedecay-tool-catalog",

@@ -1029,7 +1029,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn memory_dispatch_preserves_partial_effect_receipt_as_an_admitted_terminal() {
         let operation =
             retained_surface_application_operation(RetainedSurfaceOperation::FactStoreSearch)
@@ -1067,7 +1067,7 @@ mod tests {
         assert_eq!(envelope.problem.committed_receipt.as_ref(), Some(&receipt));
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn memory_dispatch_preserves_reset_required_as_an_admitted_terminal() {
         let operation =
             retained_surface_application_operation(RetainedSurfaceOperation::FactStoreSearch)
