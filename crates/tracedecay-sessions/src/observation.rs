@@ -463,7 +463,7 @@ where
     ) -> Result<PreparedObservationCapture, ObservationApplicationError> {
         let sanitizer = self.sanitizer.clone();
         let background_cpu = self.background_cpu.clone();
-        crate::runtime::source::run_blocking(move || match background_cpu {
+        tracedecay_runtime_core::native_runtime::spawn_blocking(move || match background_cpu {
             Some(authority) => {
                 authority.with_permit(|| Self::prepare_capture_with_sanitizer(&sanitizer, request))
             }

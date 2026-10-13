@@ -111,7 +111,7 @@ pub(super) struct ReadOnlyDb {
 /// treat this as a no-op.
 pub(super) async fn open_readonly_immutable(db_path: &Path) -> Result<ReadOnlyDb, String> {
     let path = db_path.to_path_buf();
-    crate::runtime::source::run_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         let opened = tracedecay_rusqlite_runtime::open_verified_immutable_reader(&path)
             .map_err(|error| format!("could not open '{}' read-only: {error}", path.display()))?;
         let (conn, canonical_path, file_identity) = opened.into_parts();

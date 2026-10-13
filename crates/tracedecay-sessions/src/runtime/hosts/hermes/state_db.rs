@@ -584,7 +584,7 @@ pub(super) async fn try_ingest_user_state_db_bounded_with_admission(
 /// to (or create) another agent's live store.
 pub async fn open_read_only_strict(path: &Path) -> Result<SqliteReadConn, String> {
     let owned = path.to_path_buf();
-    let opened = crate::runtime::source::run_blocking(move || {
+    let opened = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         tracedecay_rusqlite_runtime::open_immutable_reader(&owned)
     })
     .await

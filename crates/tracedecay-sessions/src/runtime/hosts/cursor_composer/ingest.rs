@@ -276,7 +276,7 @@ async fn state_path_matches_generation(
     generation: ObservationSourceGenerationV1,
 ) -> bool {
     let canonical_path = canonical_path.to_path_buf();
-    crate::runtime::source::run_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         tracedecay_runtime_core::db::sqlite_generation_identity(&canonical_path)
             .is_ok_and(|identity| identity == generation.file_id())
     })

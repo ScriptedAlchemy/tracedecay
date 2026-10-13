@@ -35,7 +35,7 @@ where
 {
     let permit = acquire_permit(permits, control).await?;
     control.check()?;
-    let join = crate::runtime::source::run_blocking(move || {
+    let join = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         // A cancelled caller drops the join handle but cannot cancel blocking
         // work, so capacity stays charged until the detached closure exits.
         let _permit = permit;

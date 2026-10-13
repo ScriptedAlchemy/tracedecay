@@ -1326,7 +1326,7 @@ async fn prepare_shared_jsonl_window_with_background_cpu(
     let task_cancellation = cancellation.clone();
     #[cfg(test)]
     let (preparation_file_identity, window_preparations) = (page.file_identity, jobs.len());
-    let prepared = crate::runtime::source::run_blocking(move || {
+    let prepared = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         jobs.into_par_iter()
             .map(|(index, bytes, range)| {
                 if task_cancellation.is_cancelled() {
@@ -1479,21 +1479,22 @@ async fn shared_jsonl_page_with_frame_limit_and_cancellation(
         operation: operation_cancellation,
     } = cancellation;
     let identity_path = path.to_path_buf();
-    let (canonical_path, identity) = crate::runtime::source::run_blocking(move || {
-        let canonical_path = std::fs::canonicalize(&identity_path).map_err(|source| {
-            TranscriptIngestError::ScanIo {
-                operation: "resolve shared JSONL page identity",
-                path: identity_path.clone(),
-                source,
-            }
-        })?;
-        Ok::<_, TranscriptIngestError>((
-            canonical_path,
-            shared_jsonl_file_identity(&identity_path)?,
-        ))
-    })
-    .await
-    .map_err(|_| TranscriptIngestError::BlockingScanTaskFailed { provider: "jsonl" })??;
+    let (canonical_path, identity) =
+        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+            let canonical_path = std::fs::canonicalize(&identity_path).map_err(|source| {
+                TranscriptIngestError::ScanIo {
+                    operation: "resolve shared JSONL page identity",
+                    path: identity_path.clone(),
+                    source,
+                }
+            })?;
+            Ok::<_, TranscriptIngestError>((
+                canonical_path,
+                shared_jsonl_file_identity(&identity_path)?,
+            ))
+        })
+        .await
+        .map_err(|_| TranscriptIngestError::BlockingScanTaskFailed { provider: "jsonl" })??;
     // Preparation policy is part of the page key. Codex prefetch and demand
     // both select `Lazy`, so a pinned page stays raw until ordered admission
     // proves which frames can affect scope. Explicit eager consumers retain
@@ -1621,7 +1622,7 @@ async fn shared_jsonl_page_with_frame_limit_and_cancellation(
         }
     };
     let scan_path = path.to_path_buf();
-    let page = crate::runtime::source::run_blocking(move || {
+    let page = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         build_shared_jsonl_page_with_frame_limit(
             scan_path,
             previous,

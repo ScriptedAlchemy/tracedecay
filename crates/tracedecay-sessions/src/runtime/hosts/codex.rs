@@ -688,20 +688,21 @@ impl CodexDiscoveryHub {
         let hub = self.clone();
         let consumer = consumer.to_owned();
         let source = source.clone();
-        let (delivery, prefetch) = crate::runtime::source::run_blocking(move || {
-            let delivery = hub.discover_blocking(&consumer, &source, bounds, frontier)?;
-            let prefetch = match &delivery {
-                CodexDiscoveryDelivery::Ready(pass) if pass._shared_page_pin.is_some() => {
-                    hub.paths_needing_source_read(&consumer, &pass.report.paths)?
-                }
-                _ => Vec::new(),
-            };
-            Ok::<_, TranscriptIngestError>((delivery, prefetch))
-        })
-        .await
-        .map_err(|_| TranscriptIngestError::InvalidCodexDiscoveryFrontier {
-            detail: "Codex discovery blocking task failed",
-        })??;
+        let (delivery, prefetch) =
+            tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+                let delivery = hub.discover_blocking(&consumer, &source, bounds, frontier)?;
+                let prefetch = match &delivery {
+                    CodexDiscoveryDelivery::Ready(pass) if pass._shared_page_pin.is_some() => {
+                        hub.paths_needing_source_read(&consumer, &pass.report.paths)?
+                    }
+                    _ => Vec::new(),
+                };
+                Ok::<_, TranscriptIngestError>((delivery, prefetch))
+            })
+            .await
+            .map_err(|_| TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                detail: "Codex discovery blocking task failed",
+            })??;
         if let CodexDiscoveryDelivery::Ready(pass) = &delivery
             && let Some(pin) = &pass._shared_page_pin
         {
