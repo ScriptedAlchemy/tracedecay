@@ -28,9 +28,10 @@ pub(super) async fn open_database(
     database_path: PathBuf,
     budget: HostScanBudget,
 ) -> TranscriptIngestResult<(OpenedOpenCodeDatabase, HostScanBudget)> {
-    let inspected = tokio::task::spawn_blocking(move || inspect_database(&database_path, budget))
-        .await
-        .map_err(|_| TranscriptIngestError::BlockingScanTaskFailed { provider: PROVIDER })??;
+    let inspected =
+        crate::runtime::source::run_blocking(move || inspect_database(&database_path, budget))
+            .await
+            .map_err(|_| TranscriptIngestError::BlockingScanTaskFailed { provider: PROVIDER })??;
     Ok(inspected)
 }
 

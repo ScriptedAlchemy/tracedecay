@@ -2,9 +2,9 @@
 use std::path::Path;
 use std::time::Duration;
 
+use asupersync::channel::oneshot;
+use asupersync::time::{timeout, wall_now};
 use tempfile::TempDir;
-use tokio::sync::oneshot;
-use tokio::time::timeout;
 
 use tracedecay_runtime_core::db::engine::{
     Connection, TestConnection, TransactionBehavior, params,

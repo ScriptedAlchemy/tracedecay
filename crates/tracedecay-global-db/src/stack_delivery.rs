@@ -1086,7 +1086,7 @@ mod batch_tests {
         }
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn delivery_batch_reads_all_keys_in_one_query() {
         let harness = RegisteredGlobalDbHarness::open("github-stack-delivery-batch-read").await;
         let record = GitHubStackSignalRecordV1 {

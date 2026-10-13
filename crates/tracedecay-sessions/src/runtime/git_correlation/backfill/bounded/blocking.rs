@@ -35,7 +35,7 @@ where
 {
     let permit = acquire_permit(permits, control).await?;
     control.check()?;
-    let join = tokio::task::spawn_blocking(move || {
+    let join = crate::runtime::source::run_blocking(move || {
         // A cancelled caller drops the join handle but cannot cancel blocking
         // work, so capacity stays charged until the detached closure exits.
         let _permit = permit;
@@ -56,7 +56,8 @@ where
                     }
                 };
             }
-            () = tokio::time::sleep(CONTROL_POLL_INTERVAL) => {
+            tick = crate::runtime::source::native_sleep(CONTROL_POLL_INTERVAL) => {
+                tick.map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
                 control.check()?;
             }
         }
@@ -76,7 +77,9 @@ async fn acquire_permit(
             permit = &mut acquire => {
                 return permit.map_err(|_| BoundedBackfillInterruption::SourceUnavailable);
             }
-            () = tokio::time::sleep(CONTROL_POLL_INTERVAL) => {}
+            tick = crate::runtime::source::native_sleep(CONTROL_POLL_INTERVAL) => {
+                tick.map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+            }
         }
     }
 }

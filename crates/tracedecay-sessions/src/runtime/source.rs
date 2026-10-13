@@ -400,7 +400,50 @@ pub trait TranscriptSource: Send + Sync {
     }
 }
 
-/// Runs one synchronous transcript discovery/parse section on Tokio's
+/// The native blocking pool could not run, or did not finish, a section.
+#[derive(Debug, Error)]
+#[error("{0}")]
+pub(crate) struct BlockingSectionFailed(String);
+
+/// Runs `work` on the native blocking pool, so the calling worker is free
+/// while it runs.
+///
+/// Dropping the returned future detaches the work, as Tokio's
+/// `spawn_blocking` did: the task handle is polled directly because dropping
+/// a `join` future requests cancellation of the task.
+pub(crate) async fn run_blocking<T, F>(work: F) -> Result<T, BlockingSectionFailed>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let mut task = tracedecay_runtime_core::native_runtime::cx()
+        .ok_or_else(|| BlockingSectionFailed("native runtime unavailable".to_owned()))?
+        .spawn_blocking(move |_cx| work())
+        .map_err(|error| {
+            BlockingSectionFailed(format!("blocking section was not admitted: {error}"))
+        })?;
+    std::future::poll_fn(|context| task.poll_join(context))
+        .await
+        .map_err(|error| BlockingSectionFailed(error.to_string()))
+}
+
+/// Completes after `duration` on a native timer task, so a Tokio caller never
+/// polls an Asupersync timer. Dropping the returned future cancels the timer.
+pub(crate) async fn native_sleep(
+    duration: std::time::Duration,
+) -> Result<(), BlockingSectionFailed> {
+    let cx = tracedecay_runtime_core::native_runtime::cx()
+        .ok_or_else(|| BlockingSectionFailed("native runtime unavailable".to_owned()))?;
+    let mut timer = cx
+        .spawn(move |cx| async move { asupersync::time::sleep(cx.now(), duration).await })
+        .map_err(|error| BlockingSectionFailed(format!("timer was not admitted: {error}")))?;
+    timer
+        .join(&cx)
+        .await
+        .map_err(|error| BlockingSectionFailed(error.to_string()))
+}
+
+/// Runs one synchronous transcript discovery/parse section on the native
 /// blocking pool so historical ingest cannot pin a request-runtime worker.
 ///
 /// [`TranscriptSource`] is deliberately synchronous: adapters walk host
@@ -424,7 +467,7 @@ where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
-    tokio::task::spawn_blocking(work).await.map_err(|error| {
+    run_blocking(work).await.map_err(|error| {
         tracing::error!(provider, error = %error, "blocking transcript section failed");
         TranscriptIngestError::BlockingScanTaskFailed { provider }
     })
@@ -433,8 +476,8 @@ where
 /// Spawns a task on `handle` and waits for it from a blocking section.
 ///
 /// On a one-worker multi-thread runtime this only succeeds when the caller
-/// is inside [`run_blocking_transcript_section`]: `spawn_blocking` frees
-/// the worker so the spawned task can run. An inline filesystem/JSONL
+/// is inside [`run_blocking_transcript_section`]: the native blocking pool
+/// leaves the worker free so the spawned task can run. An inline filesystem/JSONL
 /// section deadlocks until the receive timeout fails.
 #[cfg(test)]
 pub(crate) fn require_blocking_section_releases_worker(handle: tokio::runtime::Handle) {

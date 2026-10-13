@@ -604,6 +604,10 @@ impl CodeGraphProjectionStore {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner) = failure;
                 store.rewarming.store(false, AtomicOrdering::Release);
+                // A release after the warm's own settle leaves waiters that
+                // found this re-warm running asleep, and a re-pinned slot
+                // never settled the begin above; this settle covers both.
+                store.warm_clock.settle(WarmOwner::Engine, false);
             });
         if let Err(error) = spawned {
             *self
@@ -613,6 +617,32 @@ impl CodeGraphProjectionStore {
             self.rewarming.store(false, AtomicOrdering::Release);
             self.warm_clock.settle(WarmOwner::Engine, false);
         }
+    }
+
+    /// Starts a released engine's background re-warm and runs `while_held`
+    /// once the engine is back, while the re-warm is held before it records
+    /// its outcome and stops re-warming.
+    #[cfg(feature = "test-helpers")]
+    pub fn with_rewarm_held_before_completion_for_test<R>(
+        &self,
+        while_held: impl FnOnce() -> R,
+    ) -> R {
+        let completion = self
+            .rewarm_failure
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.rewarm_in_background();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while self.released.load(AtomicOrdering::Acquire) {
+            assert!(
+                Instant::now() < deadline,
+                "the held re-warm never brought the engine back"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let held = while_held();
+        drop(completion);
+        held
     }
 
     /// Waits up to `budget` for a released engine or catalog to warm again,

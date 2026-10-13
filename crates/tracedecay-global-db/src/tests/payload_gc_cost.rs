@@ -74,7 +74,7 @@ async fn reap_steps(
 /// Each delete rewrites only its payload's owner row, found through the
 /// `(provider, message_id)` unique index. Reaping the same number of payloads
 /// on a store 8x larger costs the GC write transactions the same work.
-#[tokio::test]
+#[asupersync::test]
 async fn payload_gc_deletes_do_not_scale_with_the_session_store() {
     const BASE: usize = 48;
     const GROWN: usize = 8 * BASE;

@@ -227,7 +227,7 @@ fn payload_dir_holds(storage_root: &std::path::Path, needle: &str) -> bool {
     })
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn at_rest_rescan_remediates_legacy_rows_and_settles_watermark() {
     let harness = RegisteredGlobalDbHarness::open("lcm-privacy-rescan").await;
     let storage_root = harness

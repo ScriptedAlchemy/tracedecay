@@ -201,7 +201,7 @@ async fn projected_text_contains(
     false
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn changed_project_key_rebinds_without_blocking_other_sessions() {
     let tmp = TempDir::new().unwrap();
     let profile = tmp.path().join("profile");
@@ -361,7 +361,7 @@ async fn stored_project(
     (session.project_key, session.project_path)
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn lcm_compression_before_the_rollout_stores_the_session_under_its_store_scope() {
     let tmp = TempDir::new().unwrap();
     let profile = tmp.path().join("profile");
@@ -467,7 +467,7 @@ async fn lcm_compression_before_the_rollout_stores_the_session_under_its_store_s
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn a_rollout_starting_after_lcm_compression_keeps_its_own_start_time() {
     const ROLLOUT_STARTED_AT: i64 = 4_102_444_800;
     let tmp = TempDir::new().unwrap();
@@ -535,7 +535,7 @@ async fn a_rollout_starting_after_lcm_compression_keeps_its_own_start_time() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn genuine_session_collision_is_recorded_and_later_sessions_project() {
     let tmp = TempDir::new().unwrap();
     let profile = tmp.path().join("profile");

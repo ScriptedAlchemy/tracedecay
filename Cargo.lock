@@ -6493,6 +6493,7 @@ dependencies = [
 name = "tracedecay-global-db"
 version = "0.1.0"
 dependencies = [
+ "asupersync",
  "base64 0.22.1",
  "criterion",
  "futures-util",
@@ -6506,7 +6507,6 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "thiserror",
- "tokio",
  "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-graph-db",
@@ -6590,6 +6590,8 @@ dependencies = [
 name = "tracedecay-host-admission"
 version = "0.1.0"
 dependencies = [
+ "asupersync",
+ "futures-util",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -6825,6 +6827,7 @@ dependencies = [
 name = "tracedecay-project"
 version = "1.0.0-beta.86"
 dependencies = [
+ "asupersync",
  "rusqlite",
  "serde_json",
  "sha2 0.11.0",
@@ -7094,9 +7097,11 @@ dependencies = [
 name = "tracedecay-sessions"
 version = "0.1.0"
 dependencies = [
+ "asupersync",
  "base64 0.22.1",
  "criterion",
  "filetime",
+ "futures-util",
  "getrandom 0.2.17",
  "gix",
  "hex",

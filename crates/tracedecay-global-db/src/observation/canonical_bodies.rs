@@ -52,7 +52,7 @@ pub(crate) async fn converge_canonical_bodies(
         if after.is_none() {
             break;
         }
-        tokio::task::yield_now().await;
+        asupersync::runtime::yield_now().await;
     }
     let mut after = 0;
     loop {
@@ -73,7 +73,7 @@ pub(crate) async fn converge_canonical_bodies(
             break;
         };
         after = next;
-        tokio::task::yield_now().await;
+        asupersync::runtime::yield_now().await;
     }
     Ok(())
 }
@@ -387,7 +387,7 @@ mod tests {
         })
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn body_reads_distinguish_storage_failures_from_missing_rows() {
         let tmp = TempDir::new().unwrap();
         let conn = TestConnection::open(&tmp.path().join("body-read-errors.db"));
@@ -406,7 +406,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn completed_legacy_compaction_upgrades_small_reference_rows() {
         let tmp = TempDir::new().unwrap();
         let conn = TestConnection::open(&tmp.path().join("legacy-bodies.db"));
@@ -449,7 +449,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn compaction_advances_past_unchanged_rows_and_counts_utf8_bytes() {
         let tmp = TempDir::new().unwrap();
         let conn = TestConnection::open(&tmp.path().join("observations.db"));
@@ -528,7 +528,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn compaction_stores_large_bodies_once_and_shrinks_existing_rows() {
         const N: usize = 16;
         const PAYLOAD_CHARS: usize = 80_000;
