@@ -15,7 +15,7 @@ use rmcp::model::{
     ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, RequestMetaObject,
     ServerCapabilities, ServerConfig,
 };
-use rmcp::service::{NotificationContext, RequestContext};
+use rmcp::service::{MaybeSendFuture, NotificationContext, RequestContext};
 use rmcp::{RoleServer, ServerHandler};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -816,24 +816,29 @@ where
         )
     }
 
-    async fn list_resource_templates(
+    fn list_resource_templates(
         &self,
         _request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
-    ) -> Result<ListResourceTemplatesResult, ErrorData> {
-        empty_list_result(
+    ) -> impl Future<Output = Result<ListResourceTemplatesResult, ErrorData>> + MaybeSendFuture + '_
+    {
+        std::future::ready(empty_list_result(
             &context,
             "resources/templates/list",
             json!({ "resourceTemplates": [] }),
-        )
+        ))
     }
 
-    async fn list_prompts(
+    fn list_prompts(
         &self,
         _request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
-    ) -> Result<ListPromptsResult, ErrorData> {
-        empty_list_result(&context, "prompts/list", json!({ "prompts": [] }))
+    ) -> impl Future<Output = Result<ListPromptsResult, ErrorData>> + MaybeSendFuture + '_ {
+        std::future::ready(empty_list_result(
+            &context,
+            "prompts/list",
+            json!({ "prompts": [] }),
+        ))
     }
 
     async fn read_resource(
