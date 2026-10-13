@@ -28,7 +28,11 @@ use tracedecay_contracts::remote::query::{
 use tracedecay_contracts::remote::recovery::{
     PromotionCasReceiptV1, PromotionConfirmationV1, remote_promotion_result_contract_v1,
 };
-use tracedecay_contracts::remote::replay::{RemoteReplayOutcomeV1, RemoteReplayRequestV1};
+use tracedecay_contracts::remote::replay::{
+    RemoteReplayCommitReceiptV1, RemoteReplayOperationReceiptV1, RemoteReplayOutcomeV1,
+    RemoteReplayPendingReceiptV1, RemoteReplayPendingRequestV1, RemoteReplayRequestV1,
+    remote_replay_pending_result_contract_v1,
+};
 use tracedecay_contracts::remote::transfer::{
     RemoteFrameTransferReceiptV1, RemoteFrameTransferRequestV1,
     remote_frame_transfer_result_contract_v1,
@@ -257,6 +261,22 @@ impl EnrolledRemoteClient {
             remote_replay_result_contract_v1(),
             RemoteSuccessKind::Effect,
             |outcome: &RemoteReplayOutcomeV1| replay_result_valid(outcome, &request.body),
+        )
+    }
+
+    /// Replays every frame the authority holds for the caller's enrollment,
+    /// lowest sequence first, stopping at the first refusal. Sending it again
+    /// reports the same frames and commits nothing twice.
+    pub fn replay_pending(
+        &self,
+        request: &RemoteProtocolRequestV1<RemoteReplayPendingRequestV1>,
+    ) -> Result<RemoteProtocolResponseV1<RemoteReplayPendingReceiptV1>, RemoteClientError> {
+        self.execute_authenticated(
+            "replay/pending",
+            request,
+            remote_replay_pending_result_contract_v1().map_err(protocol_error)?,
+            RemoteSuccessKind::Result,
+            replay_pending_result_valid,
         )
     }
 
@@ -559,6 +579,39 @@ fn replay_result_valid(result: &RemoteReplayOutcomeV1, request: &RemoteReplayReq
         _ => return false,
     };
     operation_receipt.event_id == request.event_id && operation_receipt.validate().is_ok()
+}
+
+/// Sequences strictly increase through the stop, and every replay receipt
+/// belongs to the frame it is reported for.
+fn replay_pending_result_valid(receipt: &RemoteReplayPendingReceiptV1) -> bool {
+    let replayed_valid =
+        |replayed: Option<&RemoteReplayOperationReceiptV1>,
+         event_id: &str,
+         transaction: Option<&RemoteReplayCommitReceiptV1>| {
+            replayed.is_none_or(|replayed| {
+                replayed.event_id == event_id
+                    && replayed.transaction.as_ref() == transaction
+                    && replayed.validate().is_ok()
+            })
+        };
+    let acknowledged = receipt.acknowledged.iter().all(|frame| {
+        replayed_valid(
+            frame.replayed.as_ref(),
+            &frame.receipt.event_id,
+            Some(&frame.receipt),
+        )
+    });
+    let stopped = receipt
+        .stopped_at
+        .as_ref()
+        .is_none_or(|stop| replayed_valid(stop.replayed.as_ref(), &stop.event_id, None));
+    let sequences = receipt
+        .acknowledged
+        .iter()
+        .map(|frame| frame.sequence)
+        .chain(receipt.stopped_at.as_ref().map(|stop| stop.sequence))
+        .collect::<Vec<_>>();
+    acknowledged && stopped && sequences.windows(2).all(|pair| pair[0] < pair[1])
 }
 
 fn canonical_response_payload(
