@@ -1,4 +1,4 @@
-use tracedecay_domain::{ManifestDigest, RemoteWriterFenceV1, canonical_sha256};
+use tracedecay_domain::{ManifestDigest, RemoteWriterFenceV1};
 
 use crate::exact_sql::{ExactSqlHandle, ExactSqlRows, ExactSqlTransaction, ExactSqlValue};
 
@@ -7,13 +7,9 @@ use super::{RemoteSqliteStorageErrorV1, one_row, query, statement, text};
 fn promotion_authority_key(
     writer: &RemoteWriterFenceV1,
 ) -> Result<ManifestDigest, RemoteSqliteStorageErrorV1> {
-    canonical_sha256(&(
-        "tracedecay.remote-recovery-authority.v1",
-        &writer.brain_id,
-        &writer.shard_id,
-        &writer.generation_id,
-    ))
-    .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)
+    writer
+        .recovery_authority_key()
+        .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)
 }
 
 pub(super) fn promotion_pending(

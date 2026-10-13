@@ -700,12 +700,11 @@ fn current_authority_from_receipt(
 fn authority_key_for_expectation(
     expected: &RecoveryAuthorityExpectationV1,
 ) -> Result<String, RemoteSqliteStorageErrorV1> {
-    canonical_sha256(&(
-        "tracedecay.remote-recovery-authority.v1",
+    tracedecay_domain::remote_recovery_authority_key(
         &expected.brain_id,
         &expected.shard_id,
         &expected.generation_id,
-    ))
+    )
     .map(|digest| digest.as_str().to_owned())
     .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)
 }
@@ -713,14 +712,10 @@ fn authority_key_for_expectation(
 fn authority_key_for_writer(
     writer: &RemoteWriterFenceV1,
 ) -> Result<String, RemoteSqliteStorageErrorV1> {
-    canonical_sha256(&(
-        "tracedecay.remote-recovery-authority.v1",
-        &writer.brain_id,
-        &writer.shard_id,
-        &writer.generation_id,
-    ))
-    .map(|digest| digest.as_str().to_owned())
-    .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)
+    writer
+        .recovery_authority_key()
+        .map(|digest| digest.as_str().to_owned())
+        .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)
 }
 
 fn map_physical_error(
