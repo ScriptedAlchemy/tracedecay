@@ -259,10 +259,12 @@ jobs:
   verify-release:
     name: Verify immutable GitHub release
     needs: [validate-release, build]
+    # Both publishers (GitHub assets and the npm SDK) need this job, so a
+    # failed target stops them here.
     if: >-
       always() &&
       needs.validate-release.result == 'success' &&
-      needs.build.result != 'cancelled'
+      (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -313,15 +315,13 @@ jobs:
   publish-assets:
     name: Publish release assets
     needs: [validate-release, build, verify-release]
-    # A failed build matrix still publishes every target that did build; the
-    # recovery planner rebuilds only the missing ones. Only a cancelled build
-    # withholds publication. Marking the release latest, refreshing
-    # server.json, and publishing the SDK stay gated on a complete build.
+    # Publish only a whole release (#3756): verify-release runs only when every
+    # target built or was already published, so a failed target withholds
+    # every asset. Re-dispatching the tag rebuilds only the missing targets.
     if: >-
       always() &&
       needs.validate-release.result == 'success' &&
-      needs.verify-release.result == 'success' &&
-      needs.build.result != 'cancelled'
+      needs.verify-release.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -403,8 +403,7 @@ jobs:
             --manifest .github/release-targets.json \
             --tag "$TAG" \
             --binaries binaries \
-            --mcpbs mcpbs \
-            --allow-missing-targets
+            --mcpbs mcpbs
           for bundle in mcpbs/*.mcpb; do
             platform="${bundle#mcpbs/tracedecay-"${TAG}"-}"
             platform="${platform%.mcpb}"
@@ -528,8 +527,7 @@ jobs:
             --manifest .github/release-targets.json \
             --tag "$TAG" \
             --binaries remote-assets/binaries \
-            --mcpbs remote-assets/mcpbs \
-            --allow-missing-targets
+            --mcpbs remote-assets/mcpbs
           scripts/verify-retained-release-assets.sh \
             --tag "$TAG" \
             --repo "${{ github.repository }}" \
