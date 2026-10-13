@@ -6825,6 +6825,7 @@ dependencies = [
 name = "tracedecay-project"
 version = "1.0.0-beta.86"
 dependencies = [
+ "asupersync",
  "rusqlite",
  "serde_json",
  "sha2 0.11.0",
