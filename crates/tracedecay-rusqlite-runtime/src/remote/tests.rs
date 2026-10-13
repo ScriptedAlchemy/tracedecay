@@ -336,6 +336,7 @@ fn enrollment_grant(secret: &[u8]) -> EnrollmentGrantV1 {
         capabilities: std::collections::BTreeSet::from([
             RemoteCapabilityV1::Replay,
             RemoteCapabilityV1::Promote,
+            RemoteCapabilityV1::ServeAuthority,
         ]),
         scope: writer().scope,
     }
