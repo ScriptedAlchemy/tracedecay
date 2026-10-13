@@ -82,7 +82,10 @@ impl RemoteSqliteStorageV1 {
             published_at,
         )? == RemoteWriterPublicationStateV1::Published
         {
-            transaction.rollback().map_err(unavailable)?;
+            // A writer published before publication carried a query policy
+            // gains it on an exact republish.
+            insert_query_policy(&transaction, query_policy)?;
+            transaction.commit().map_err(unavailable)?;
             return Ok(());
         }
         let state = CurrentRemoteAuthorityStateV1::Available(writer.authority.clone());
@@ -101,18 +104,7 @@ impl RemoteSqliteStorageV1 {
                         text(&encode(policy)?),
                     ],
                 )?;
-                execute(
-                    &transaction,
-                    "INSERT INTO remote_query_policies (
-                    scope_digest, policy_revision, record_json
-                 ) VALUES (?1, ?2, ?3)
-                 ON CONFLICT(scope_digest) DO NOTHING",
-                    vec![
-                        text(query_policy_scope_digest(query_policy)?.as_str()),
-                        integer(query_policy.policy_revision)?,
-                        text(&encode(query_policy)?),
-                    ],
-                )?;
+                insert_query_policy(&transaction, query_policy)?;
                 execute(
                     &transaction,
                     "INSERT INTO remote_authorities (
@@ -235,6 +227,23 @@ fn execute(
         .map_err(|_| RemoteWriterPublicationErrorV1::Corruption)?;
     transaction.execute(statement).map_err(unavailable)?;
     Ok(())
+}
+
+fn insert_query_policy(
+    transaction: &ExactSqlTransaction,
+    query_policy: &RemoteQueryPolicyRecordV1,
+) -> Result<(), RemoteWriterPublicationErrorV1> {
+    execute(
+        transaction,
+        "INSERT INTO remote_query_policies (scope_digest, policy_revision, record_json)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(scope_digest) DO NOTHING",
+        vec![
+            text(query_policy_scope_digest(query_policy)?.as_str()),
+            integer(query_policy.policy_revision)?,
+            text(&encode(query_policy)?),
+        ],
+    )
 }
 
 fn optional_row(rows: ExactSqlRows) -> Result<Option<ExactSqlRow>, RemoteWriterPublicationErrorV1> {

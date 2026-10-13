@@ -1190,6 +1190,25 @@ fn writer_publication_seeds_one_provisioned_writer_and_refuses_rivals() {
         )),
         "publication installs the query policy that admits reads of the writer's frames"
     );
+    fixture
+        .handle
+        .execute(
+            ExactSqlStatement::new("DELETE FROM remote_query_policies".to_owned(), vec![]).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        authorize().unwrap_err(),
+        RemoteExactObservationQueryErrorV1::PolicyUnavailable,
+        "a writer published before publication carried a query policy"
+    );
+    storage
+        .publish_authority(&writer, &policy, &reads, UtcMicros(12))
+        .unwrap();
+    assert_eq!(
+        authorize().map(|evidence| evidence.decision),
+        Ok(RemoteQueryAuthorizationDecisionV1::Allow),
+        "an exact republish installs the missing query policy"
+    );
     let mut rival = writer.clone();
     rival.authority.fence.authority_node_id = BrainNodeId::new("node.rival").unwrap();
     let mut rival_policy = policy.clone();
