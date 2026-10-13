@@ -199,52 +199,6 @@ pub(super) async fn project_open_tasks(
     gates.lock().await.tasks.clone()
 }
 
-/// Run one blocking repository/filesystem probe off the async workers.
-///
-/// Live defect this exists for: a daemon connection resolved its route by
-/// running `gix` discovery, enrollment-marker reads, and a HEAD read inline on
-/// the tokio worker that was serving it. With sixteen clients arriving at once
-/// against a checkout on a slow volume, every worker sat inside that
-/// filesystem work, the accept loop was never polled, and the listening socket
-/// refused new connections while the process stayed alive and its other
-/// servers answered.
-///
-/// The probe itself cannot be interrupted once it starts, but the caller is
-/// bounded: a probe that outlives [`REPOSITORY_DISCOVERY_DEADLINE`] yields the
-/// same retryable deferred-discovery refusal a timed-out `git` helper does,
-/// and the abandoned probe finishes on the blocking pool without a worker.
-pub(super) async fn bounded_repository_probe<Probe, Value>(
-    project_path: &Path,
-    probe: Probe,
-) -> Result<Value>
-where
-    Probe: FnOnce() -> Value + Send + 'static,
-    Value: Send + 'static,
-{
-    let probe = tokio::task::spawn_blocking(probe);
-    let budget = tracedecay_runtime_core::git_discovery::repository_discovery_budget(
-        project_path,
-        std::time::Instant::now() + REPOSITORY_DISCOVERY_DEADLINE,
-    );
-    tokio::pin!(probe);
-    tokio::pin!(budget);
-    match tokio::select! {
-        biased;
-        joined = &mut probe => Ok(joined),
-        () = &mut budget => Err(()),
-    } {
-        Ok(Ok(value)) => Ok(value),
-        Ok(Err(_)) => Err(super::core_proxy::repository_discovery_deferred(
-            project_path,
-            tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown::ProbeFailed,
-        )),
-        Err(()) => Err(super::core_proxy::repository_discovery_deferred(
-            project_path,
-            tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown::DeadlineExceeded,
-        )),
-    }
-}
-
 /// Finish or refuse repository discovery before any cross-project admission lock.
 ///
 /// Live defect this exists for: one project's `open()` of a git ref ran while
@@ -297,19 +251,27 @@ pub(super) async fn resolved_project_server_key(
     };
     let probe_path = canonical_project_path.to_path_buf();
     let data_root = layout.data_root.clone();
-    let fallback_warning = bounded_repository_probe(canonical_project_path, move || {
-        let graph_scope =
-            tracedecay_runtime_core::branch::current_branch(&probe_path).or_else(|| {
-                tracedecay_runtime_core::worktree::detached_worktree_graph_scope(&probe_path)
-            });
-        let (_, fallback_warning) = tracedecay_project::project::TraceDecay::resolve_serving_branch(
-            &probe_path,
-            &data_root,
-            graph_scope.as_deref(),
-        );
-        fallback_warning
-    })
-    .await?;
+    let fallback_warning = tracedecay_runtime_core::git_discovery::bounded_repository_probe(
+        canonical_project_path,
+        super::core_proxy::repository_discovery_parent_deadline(),
+        move || {
+            let graph_scope =
+                tracedecay_runtime_core::branch::current_branch(&probe_path).or_else(|| {
+                    tracedecay_runtime_core::worktree::detached_worktree_graph_scope(&probe_path)
+                });
+            let (_, fallback_warning) =
+                tracedecay_project::project::TraceDecay::resolve_serving_branch(
+                    &probe_path,
+                    &data_root,
+                    graph_scope.as_deref(),
+                );
+            fallback_warning
+        },
+    )
+    .await
+    .map_err(|reason| {
+        super::core_proxy::repository_discovery_deferred(canonical_project_path, reason)
+    })?;
     if fallback_warning.is_some() {
         return Ok(None);
     }

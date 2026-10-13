@@ -22,7 +22,7 @@ fn run_git(cwd: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} failed in {}", cwd.display());
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn repository_identity_does_not_depend_on_the_cli_helper() {
     let fixture = TempDir::new().expect("fixture");
     let repository = fixture.path().join("repository");
