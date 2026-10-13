@@ -99,10 +99,7 @@ pub(super) async fn advance_job(
                 break WorkJobStateV1::Refused { step, problem };
             }
             WorkJobNextV1::Complete { sources, synthesis } => {
-                break WorkJobStateV1::Completed {
-                    sources,
-                    synthesis: Box::new(synthesis),
-                };
+                break WorkJobStateV1::Completed { sources, synthesis };
             }
         };
         match act(host, &job, &seen, &step).await {
@@ -242,7 +239,7 @@ async fn act(
                 },
             )
             .await?;
-            (receipt, WorkJobStepResultV1::Graph(mutation))
+            (receipt, WorkJobStepResultV1::Graph(Box::new(mutation)))
         }
         WorkJobStepV1::AcceptProposal { task: key } => {
             let task = task(key)?;
@@ -294,7 +291,7 @@ async fn act(
                 },
             )
             .await?;
-            (receipt, WorkJobStepResultV1::Graph(mutation))
+            (receipt, WorkJobStepResultV1::Graph(Box::new(mutation)))
         }
         WorkJobStepV1::AdmitExecution { task: key } => {
             let prepared = prepare(

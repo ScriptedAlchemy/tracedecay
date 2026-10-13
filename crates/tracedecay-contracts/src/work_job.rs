@@ -232,7 +232,7 @@ pub struct WorkJobStepRecordV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "result", content = "value", rename_all = "snake_case")]
 pub enum WorkJobStepResultV1 {
-    Graph(WorkProductMutationReceiptV1),
+    Graph(Box<WorkProductMutationReceiptV1>),
     Execution(Box<AdmittedWorkExecutionV1>),
     Placement(WorkPlacementV1),
     Attempt(Box<WorkAttemptV1>),
@@ -444,7 +444,7 @@ pub enum WorkJobNextV1 {
     Refuse(WorkJobStepV1, ApplicationProblem),
     Complete {
         sources: Vec<WorkAttemptV1>,
-        synthesis: WorkAttemptV1,
+        synthesis: Box<WorkAttemptV1>,
     },
 }
 
@@ -469,10 +469,11 @@ pub fn next_work_job_step(job: &WorkJobV1, seen: &WorkJobObservationV1) -> WorkJ
     };
     let placed = |task: &WorkJobTaskPlanV1| seen.placements.contains_key(&task.key);
     let started = |task: &WorkJobTaskPlanV1| seen.sources.contains_key(&task.key);
-    let stages: [(
+    type Stage<'a> = (
         fn(WorkJobKeyV1) -> WorkJobStepV1,
-        &dyn Fn(&WorkJobTaskPlanV1) -> bool,
-    ); 5] = [
+        &'a dyn Fn(&WorkJobTaskPlanV1) -> bool,
+    );
+    let stages: [Stage; 5] = [
         (|task| WorkJobStepV1::CreateTask { task }, &created),
         (|task| WorkJobStepV1::AcceptProposal { task }, &accepted),
         (|task| WorkJobStepV1::AdmitExecution { task }, &admitted),
@@ -514,7 +515,7 @@ pub fn next_work_job_step(job: &WorkJobV1, seen: &WorkJobObservationV1) -> WorkJ
             .iter()
             .filter_map(|task| seen.sources.get(&task.key).cloned())
             .collect(),
-        synthesis: synthesis.clone(),
+        synthesis: Box::new(synthesis.clone()),
     }
 }
 
