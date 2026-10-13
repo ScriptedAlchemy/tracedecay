@@ -631,6 +631,7 @@ pub struct RepositoryDiscoveryBlock {
 impl RepositoryDiscoveryBlock {
     /// Wait until the parked walk has entered its blocking section. Callable
     /// from any executor.
+    #[allow(clippy::expect_used)]
     pub async fn wait_entered(&mut self) {
         let cx = crate::native_runtime::cx().expect("native runtime for the discovery block");
         discovery_block_entered(&cx, &mut self.entered).await;
@@ -805,6 +806,7 @@ fn observed_count(root: &Path, count: impl Fn(&RepositoryDiscoveryObservation) -
 /// A caller that returned without joining is the defect a test asserts on,
 /// so both end the wait; a caller that did neither within ten seconds fails.
 #[cfg(any(test, feature = "test-helpers"))]
+#[allow(clippy::expect_used)]
 pub async fn wait_for_topology_callers_for_test(
     root: &Path,
     callers: u64,
