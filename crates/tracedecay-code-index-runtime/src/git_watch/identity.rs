@@ -62,10 +62,7 @@ async fn discover_watch_identity(
     let outcome = tokio::select! {
         biased;
         () = cancellation.cancelled() => return WatchIdentityResolution::Cancelled,
-        outcome = tokio::time::timeout(GIT_OBSERVATION_BUDGET, discovery) => match outcome {
-            Ok(outcome) => outcome,
-            Err(_) => return WatchIdentityResolution::Unknown,
-        }
+        outcome = discovery => outcome,
     };
     match outcome {
         GitRepositoryIdentityOutcome::Resolved(identity) => {
