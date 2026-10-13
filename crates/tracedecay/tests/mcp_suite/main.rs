@@ -41,6 +41,8 @@ mod mcp_server_test;
 mod multi_mcp_coordination_test;
 mod serve_harness;
 #[cfg(unix)]
+mod serve_protocol_revision_test;
+#[cfg(unix)]
 mod serve_repeat_read_test;
 mod serve_template_path_test;
 #[cfg(unix)]
