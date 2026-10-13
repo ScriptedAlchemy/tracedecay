@@ -20,7 +20,9 @@ use tracedecay_store::{
 };
 
 use crate::connection::{self, ConnectionMode, OpenedDatabaseFile};
-use crate::exact_sql::{ExactSqlError, ExactSqlRows, ExactSqlStatement, execute_query};
+use crate::exact_sql::{
+    ExactSqlError, ExactSqlRows, ExactSqlStatement, ExactSqlStatementBudget, execute_query,
+};
 use crate::telemetry::{ReaderAdmissionRecorder, take_observed_vm};
 
 use super::{ExistingReaderLocator, ReaderStartError};
@@ -139,6 +141,7 @@ enum SnapshotCommand {
     },
     ExactSqlQuery {
         request: ExactSqlStatement,
+        budget: ExactSqlStatementBudget,
         reply: SyncSender<Result<ExactSqlRows, ExactSqlError>>,
     },
     StoreSize {
@@ -227,13 +230,18 @@ impl WorkerClient {
     pub fn execute_exact_sql_query(
         &self,
         request: ExactSqlStatement,
+        budget: ExactSqlStatementBudget,
     ) -> Result<ExactSqlRows, ExactSqlError> {
         let sender = self
             .snapshot_sender()
             .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
         let (reply, receive) = mpsc::sync_channel(1);
         sender
-            .send(SnapshotCommand::ExactSqlQuery { request, reply })
+            .send(SnapshotCommand::ExactSqlQuery {
+                request,
+                budget,
+                reply,
+            })
             .map_err(|_| {
                 ExactSqlError::ReaderUnavailable(ReaderWorkerError::WorkerClosed.to_string())
             })?;
@@ -579,11 +587,15 @@ fn run_snapshot<E: ReaderQueryExecutor>(
                 admission.executed(started.elapsed(), take_observed_vm());
                 let _ = reply.send(result);
             }
-            SnapshotCommand::ExactSqlQuery { request, reply } => {
+            SnapshotCommand::ExactSqlQuery {
+                request,
+                budget,
+                reply,
+            } => {
                 let started = Instant::now();
                 let result = {
                     let _span = tracing::trace_span!("rusqlite.reader.exact_sql").entered();
-                    execute_query(&transaction, request)
+                    execute_query(&transaction, request, budget)
                 };
                 admission.executed(started.elapsed(), take_observed_vm());
                 let _ = reply.send(result);

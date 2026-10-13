@@ -113,6 +113,23 @@ impl Transaction {
         .await
     }
 
+    /// Runs one query under the authority-revalidated policy, without the
+    /// ordinary statement deadline.
+    pub async fn query_authority_revalidated<P>(&self, sql: &str, params: P) -> Result<Rows>
+    where
+        P: IntoParams,
+    {
+        let statement = statement(sql, params)?;
+        self.settle(move |gate| async move {
+            Ok(Rows::from_exact(
+                open(&gate)?
+                    .query_authority_revalidated_async(statement)
+                    .await?,
+            ))
+        })
+        .await
+    }
+
     /// Executes one separately authorized authority-revalidated batch without the ordinary
     /// statement deadline.
     pub async fn execute_authority_revalidated_batch(&self, sql: &str) -> Result<()> {
