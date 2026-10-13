@@ -199,7 +199,7 @@ impl HashingSink {
     }
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn near_limit_file_payload_streams_with_chunk_sized_peak_memory() {
     let dir = tempdir().expect("temporary directory");
     let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
@@ -241,7 +241,7 @@ async fn near_limit_file_payload_streams_with_chunk_sized_peak_memory() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn payload_file_rewritten_or_removed_under_the_reader_is_refused() {
     for remove_instead_of_replace in [false, true] {
         let dir = tempdir().expect("temporary directory");
@@ -298,7 +298,7 @@ async fn payload_file_rewritten_or_removed_under_the_reader_is_refused() {
     }
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn cancellation_after_the_first_chunk_settles_typed_and_releases_the_source() {
     let dir = tempdir().expect("temporary directory");
     let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
@@ -359,7 +359,7 @@ async fn cancellation_after_the_first_chunk_settles_typed_and_releases_the_sourc
 /// backend, two in the LCM open) and the proof then checkpoints once per
 /// 64 KiB window of the 1 MiB payload, so a budget of eight is exhausted at
 /// the fifth window, any budget in 5..=20 trips inside the proof.
-#[tokio::test]
+#[asupersync::test]
 async fn work_budget_exhausted_during_file_proof_is_typed_and_emits_nothing() {
     let dir = tempdir().expect("temporary directory");
     let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())

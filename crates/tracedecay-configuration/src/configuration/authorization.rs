@@ -199,7 +199,7 @@ mod tests {
         (snapshot, receipt)
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn current_policy_grant_authorizes_exact_internal_effect() {
         let (snapshot, receipt) = fixture();
         let service =
@@ -222,7 +222,7 @@ mod tests {
         assert_eq!(current.policy_digest, snapshot.policy_digest);
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn hidden_and_revoked_grants_share_one_rejection() {
         let (mut snapshot, receipt) = fixture();
         let hidden = PolicyBackedConfigurationMutationAuthorization::new(Authority(Err(

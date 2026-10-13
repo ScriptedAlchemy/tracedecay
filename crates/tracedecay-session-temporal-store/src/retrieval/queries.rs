@@ -642,8 +642,11 @@ pub(super) const ROOT_OCCURRENCE_FTS_COUNT_QUERY: &str = concat!(
 // Newest-first empty-query browse across every active participant. The
 // leading table is the occurrence index on knowledge_at so LIMIT can stop
 // after one keyset page instead of joining every generation to every
-// occurrence and sorting the project. `ROOT_TIME_CANDIDATE_QUERY` keeps the
-// generation-first shape because its window already bounds that join.
+// occurrence and sorting the project. `CROSS JOIN` pins that loop order:
+// once a reader loads `ANALYZE` statistics, a small anchor or generation
+// table otherwise wins the outer loop and the page sorts the whole window.
+// `ROOT_TIME_CANDIDATE_QUERY` keeps the generation-first shape because its
+// window already bounds that join.
 pub(super) const ROOT_SCOPE_CANDIDATE_QUERY: &str = concat!(
     "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
@@ -651,13 +654,13 @@ pub(super) const ROOT_SCOPE_CANDIDATE_QUERY: &str = concat!(
            authority_session.provider, frozen.generation
     FROM session_occurrences AS o
     INDEXED BY idx_session_occurrences_root_generation_order
-    JOIN session_temporal_generations AS frozen
+    CROSS JOIN session_temporal_generations AS frozen
       ON frozen.session_id = o.session_id
      AND frozen.state = 'active'
      AND +o.generation <= frozen.generation
-    JOIN retrieval_anchors AS authority_anchor
+    CROSS JOIN retrieval_anchors AS authority_anchor
       ON authority_anchor.anchor_id = o.retrieval_anchor_id
-    JOIN sessions AS authority_session
+    CROSS JOIN sessions AS authority_session
       ON authority_session.session_id = o.session_id
      AND authority_session.provider = o.source_provider
      AND authority_session.project_key = ?1
