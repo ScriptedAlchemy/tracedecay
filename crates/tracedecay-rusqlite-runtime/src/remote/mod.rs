@@ -69,7 +69,7 @@ use enrollment::{
     enrollment_one_row, enrollment_row_text, load_authority_state, load_enrollment,
     map_enrollment_error,
 };
-use identity::{bind_node_identity, provision_node_identity};
+use identity::{adopt_runtime_binding, bind_node_identity, provision_node_identity};
 use promotion_gate::{promotion_pending, promotion_pending_in};
 pub use recovery_authority::{
     RemoteRecoveryPhysicalCommitV1, RemoteRecoveryPhysicalEffectErrorV1,
@@ -185,6 +185,7 @@ impl RemoteSqliteStorageV1 {
         }
         validate_final_schema(retained.handle())?;
         let member_brain = bind_node_identity(retained.handle(), &binding)?;
+        adopt_runtime_binding(retained.handle(), &binding)?;
         Ok(Self {
             retained,
             binding,

@@ -16,58 +16,64 @@ use tracedecay_domain::{
     ObservabilityTerminalResultV1, UtcMicros, canonical_sha256, sha256_hex_suffix,
 };
 
-use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_global_db::RegisteredGlobalDb;
 
 use crate::observability::RegisteredObservabilityPortV1;
 
-use tracedecay_graph_query::health::{VerifiedHealthSnapshotV1, compute_verified_health_snapshot};
+use tracedecay_graph_query::health::{
+    HEALTH_DEFINITION, HealthDimension, VerifiedHealthSnapshotV1, compute_verified_health_snapshot,
+};
 use tracedecay_graph_query::queries::GraphQueryManager;
 
 const HEALTH_DELTA_SCHEMA_VERSION: u32 = 1;
 const HEALTH_DELTA_CURSOR_PREFIX: &str = "health-delta.v1.";
 
+#[derive(Debug, thiserror::Error)]
+pub enum HealthDeltaError {
+    #[error("health-delta path_prefix must be one canonical project-relative path")]
+    InvalidPathPrefix,
+    #[error("invalid health-delta cursor")]
+    MalformedCursor,
+    #[error("health-delta cursor is unknown or expired")]
+    UnknownCursor,
+    #[error("health-delta point failed identity validation")]
+    CorruptPoint,
+    #[error(
+        "the before point was measured under health definition {recorded}, not {HEALTH_DEFINITION}"
+    )]
+    DefinitionMismatch { recorded: String },
+    #[error("the before point predates recorded health definitions")]
+    DefinitionUnrecorded,
+    #[error(transparent)]
+    Graph(TraceDecayError),
+    #[error("health-delta storage failed: {0}")]
+    Storage(String),
+}
+
+type Result<T> = std::result::Result<T, HealthDeltaError>;
+
+fn storage(context: &str, error: impl std::fmt::Display) -> HealthDeltaError {
+    HealthDeltaError::Storage(format!("{context}: {error}"))
+}
+
 #[derive(Debug)]
 enum PersistHealthDeltaError {
     IdempotencyConflict,
-    Other(TraceDecayError),
-}
-
-fn health_score_ppm(value: f64) -> u64 {
-    (value.clamp(0.0, 1.0) * 1_000_000.0).round() as u64
-}
-
-fn health_dimension_values(snapshot: &VerifiedHealthSnapshotV1) -> [(&'static str, f64); 6] {
-    [
-        ("acyclicity", snapshot.acyclicity),
-        ("depth", snapshot.depth),
-        ("equality", snapshot.equality),
-        ("redundancy", snapshot.redundancy),
-        ("modularity", snapshot.modularity),
-        ("coverage_discipline", snapshot.coverage_discipline),
-    ]
+    Other(HealthDeltaError),
 }
 
 fn health_delta_dimensions(
     snapshot: &VerifiedHealthSnapshotV1,
 ) -> BTreeMap<String, HealthDimensionPointV1> {
-    health_dimension_values(snapshot)
+    HealthDimension::ALL
         .into_iter()
-        .map(|(name, score)| {
-            let denominator = match name {
-                "acyclicity" => Some(snapshot.total_edges as u64),
-                "depth" => Some(snapshot.max_chain as u64),
-                "equality" => Some(snapshot.complexity_files as u64),
-                "modularity" => Some(snapshot.modularity_components as u64),
-                "redundancy" | "coverage_discipline" => Some(snapshot.total_fns as u64),
-                _ => None,
-            }
-            .filter(|value| *value > 0);
+        .map(|dimension| {
             (
-                name.to_owned(),
+                dimension.name().to_owned(),
                 HealthDimensionPointV1 {
-                    score_ppm: health_score_ppm(score),
-                    denominator,
+                    score_ppm: dimension.score_ppm(snapshot),
+                    denominator: dimension.denominator(snapshot),
                 },
             )
         })
@@ -90,10 +96,7 @@ fn health_delta_scope(
                     .split('/')
                     .any(|component| component.is_empty() || matches!(component, "." | ".."))
             {
-                return Err(TraceDecayError::Config {
-                    message: "health-delta path_prefix must be one canonical project-relative path"
-                        .to_owned(),
-                });
+                return Err(HealthDeltaError::InvalidPathPrefix);
             }
             Ok(trimmed.to_owned())
         })
@@ -103,9 +106,7 @@ fn health_delta_scope(
         project_id.as_deref(),
         path_prefix.as_deref(),
     ))
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("failed to bind health-delta scope: {error}"),
-    })?;
+    .map_err(|error| storage("failed to bind health-delta scope", error))?;
     Ok(HealthDeltaScopeV1 {
         project_id,
         scope_digest,
@@ -130,20 +131,17 @@ fn health_delta_watermark(
         function_denominator,
         dimensions,
     ))
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("failed to seal health-delta watermark: {error}"),
-    })
+    .map_err(|error| storage("failed to seal health-delta watermark", error))
 }
 
 fn health_delta_cursor(scope: &HealthDeltaScopeV1, generation: &str) -> Result<String> {
     let digest = canonical_sha256(&(
-        "tracedecay.health-delta.cursor.v1",
+        "tracedecay.health-delta.cursor.v2",
         scope.scope_digest.as_str(),
         generation,
+        HEALTH_DEFINITION,
     ))
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("failed to bind health-delta cursor: {error}"),
-    })?;
+    .map_err(|error| storage("failed to bind health-delta cursor", error))?;
     Ok(format!(
         "{HEALTH_DELTA_CURSOR_PREFIX}{}",
         sha256_hex_suffix(digest.as_str()).unwrap_or_default()
@@ -151,7 +149,7 @@ fn health_delta_cursor(scope: &HealthDeltaScopeV1, generation: &str) -> Result<S
 }
 
 fn health_delta_digest_from_cursor(cursor: &str) -> Result<&str> {
-    let digest = cursor
+    cursor
         .strip_prefix(HEALTH_DELTA_CURSOR_PREFIX)
         .filter(|value| {
             value.len() == 64
@@ -159,23 +157,14 @@ fn health_delta_digest_from_cursor(cursor: &str) -> Result<&str> {
                     .bytes()
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         })
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "invalid health-delta cursor".to_owned(),
-        })?;
-    Ok(digest)
+        .ok_or(HealthDeltaError::MalformedCursor)
 }
 
-#[tracing::instrument(
-    name = "usecases.graph.health_delta.persist",
-    level = "trace",
-    skip_all
-)]
-async fn persist_health_delta_point(
-    db: &RegisteredGlobalDb,
+fn health_delta_envelope(
     scope: &HealthDeltaScopeV1,
     point: &HealthDeltaPointV1,
-    cursor: String,
-) -> std::result::Result<String, PersistHealthDeltaError> {
+    cursor: &str,
+) -> ObservabilityEnvelopeV1 {
     let payload = HealthSnapshotObservedV1 {
         scope_digest: scope.scope_digest.as_str().to_owned(),
         quality_signal: point.quality_signal,
@@ -194,6 +183,7 @@ async fn persist_health_delta_point(
                 )
             })
             .collect(),
+        definition: Some(HEALTH_DEFINITION.to_owned()),
     };
     let coverage = if point.files_analyzed > 0
         && point.function_denominator > 0
@@ -207,12 +197,12 @@ async fn persist_health_delta_point(
         CoverageStateV1::Partial
     };
     let observed_at = point.observed_at.0;
-    let envelope = ObservabilityEnvelopeV1 {
-        event_id: cursor.clone(),
+    ObservabilityEnvelopeV1 {
+        event_id: cursor.to_owned(),
         event_kind: "health.snapshot.observed.v1".to_owned(),
         schema_revision: HEALTH_DELTA_SCHEMA_VERSION,
-        idempotency_key: cursor.clone(),
-        trace_id: cursor.clone(),
+        idempotency_key: cursor.to_owned(),
+        trace_id: cursor.to_owned(),
         scope_ref: scope.scope_digest.as_str().to_owned(),
         capability: "health_delta".to_owned(),
         operation: "observe".to_owned(),
@@ -236,7 +226,13 @@ async fn persist_health_delta_point(
         process_boot_id: format!("health-delta-{}", std::process::id()),
         producer_sequence: observed_at.max(0) as u64,
         payload: ObservabilityPayloadV1::HealthSnapshot(payload),
-    };
+    }
+}
+
+async fn record_health_delta_envelope(
+    db: &RegisteredGlobalDb,
+    envelope: ObservabilityEnvelopeV1,
+) -> std::result::Result<(), PersistHealthDeltaError> {
     let port = RegisteredObservabilityPortV1::new(db);
     ObservabilityApplicationV1::new(port, port)
         .record(envelope)
@@ -247,11 +243,12 @@ async fn persist_health_delta_point(
             {
                 PersistHealthDeltaError::IdempotencyConflict
             }
-            error => PersistHealthDeltaError::Other(TraceDecayError::Config {
-                message: format!("failed to retain health-delta observation: {error}"),
-            }),
+            error => PersistHealthDeltaError::Other(storage(
+                "failed to retain health-delta observation",
+                error,
+            )),
         })?;
-    Ok(cursor)
+    Ok(())
 }
 
 #[tracing::instrument(
@@ -265,8 +262,8 @@ async fn persist_canonical_health_delta_point(
     point: &HealthDeltaPointV1,
     cursor: &str,
 ) -> Result<HealthDeltaPointV1> {
-    match persist_health_delta_point(db, scope, point, cursor.to_owned()).await {
-        Ok(_) | Err(PersistHealthDeltaError::IdempotencyConflict) => {
+    match record_health_delta_envelope(db, health_delta_envelope(scope, point, cursor)).await {
+        Ok(()) | Err(PersistHealthDeltaError::IdempotencyConflict) => {
             load_health_delta_point(db, scope, cursor).await
         }
         Err(PersistHealthDeltaError::Other(error)) => Err(error),
@@ -283,10 +280,8 @@ async fn find_health_delta_point(
     let port = RegisteredObservabilityPortV1::new(db);
     port.read_exact(scope.scope_digest.as_str(), cursor)
         .await
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("failed to read health-delta observation: {error}"),
-        })?
-        .map(|envelope| decode_health_delta_point(scope, envelope))
+        .map_err(|error| storage("failed to read health-delta observation", error))?
+        .map(|envelope| verify_health_delta_point(scope, envelope))
         .transpose()
 }
 
@@ -298,26 +293,19 @@ async fn load_health_delta_point(
 ) -> Result<HealthDeltaPointV1> {
     find_health_delta_point(db, scope, cursor)
         .await?
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "health-delta cursor is unknown or expired".to_owned(),
-        })
+        .ok_or(HealthDeltaError::UnknownCursor)
 }
 
-fn decode_health_delta_point(
+fn verify_health_delta_point(
     scope: &HealthDeltaScopeV1,
     envelope: ObservabilityEnvelopeV1,
 ) -> Result<HealthDeltaPointV1> {
     let ObservabilityPayloadV1::HealthSnapshot(payload) = envelope.payload else {
-        return Err(TraceDecayError::Config {
-            message: "health-delta cursor snapshot is invalid".to_owned(),
-        });
+        return Err(HealthDeltaError::CorruptPoint);
     };
     let stored = HealthDeltaPointV1 {
-        watermark: ManifestDigest::new(envelope.watermark).map_err(|_| {
-            TraceDecayError::Config {
-                message: "health-delta cursor snapshot is invalid".to_owned(),
-            }
-        })?,
+        watermark: ManifestDigest::new(envelope.watermark)
+            .map_err(|_| HealthDeltaError::CorruptPoint)?,
         observed_at: UtcMicros(envelope.event_time_micros),
         quality_signal: payload.quality_signal,
         files_analyzed: payload.files_analyzed,
@@ -345,43 +333,87 @@ fn decode_health_delta_point(
         &stored.dimensions,
     )?;
     if payload.scope_digest != scope.scope_digest.as_str() || stored.watermark != recomputed {
-        return Err(TraceDecayError::Config {
-            message: "health-delta cursor snapshot failed identity validation".to_owned(),
-        });
+        return Err(HealthDeltaError::CorruptPoint);
     }
-    Ok(stored)
+    match payload.definition {
+        Some(recorded) if recorded == HEALTH_DEFINITION => Ok(stored),
+        Some(recorded) => Err(HealthDeltaError::DefinitionMismatch { recorded }),
+        None => Err(HealthDeltaError::DefinitionUnrecorded),
+    }
 }
 
 fn health_dimension_deltas(
     before: &HealthDeltaPointV1,
     after: &HealthDeltaPointV1,
 ) -> BTreeMap<String, HealthDimensionDeltaV1> {
-    after
-        .dimensions
-        .iter()
-        .filter_map(|(name, after_value)| {
-            let before_value = before.dimensions.get(name)?;
+    let measured =
+        |dimension: HealthDimension, point: &HealthDeltaPointV1, value: &HealthDimensionPointV1| {
+            dimension
+                .no_evidence(value.denominator, point.files_analyzed)
+                .is_none()
+        };
+    HealthDimension::ALL
+        .into_iter()
+        .filter_map(|dimension| {
+            let before_value = before.dimensions.get(dimension.name())?;
+            let after_value = after.dimensions.get(dimension.name())?;
             let delta_ppm = after_value.score_ppm as i64 - before_value.score_ppm as i64;
+            let status = if !measured(dimension, before, before_value)
+                || !measured(dimension, after, after_value)
+            {
+                "no_evidence"
+            } else if delta_ppm > 1_000 {
+                "improved"
+            } else if delta_ppm < -1_000 {
+                "degraded"
+            } else {
+                "unchanged"
+            };
             Some((
-                name.clone(),
+                dimension.name().to_owned(),
                 HealthDimensionDeltaV1 {
                     before_ppm: before_value.score_ppm,
                     after_ppm: after_value.score_ppm,
                     delta_ppm,
                     before_denominator: before_value.denominator,
                     after_denominator: after_value.denominator,
-                    status: if delta_ppm > 1_000 {
-                        "improved"
-                    } else if delta_ppm < -1_000 {
-                        "degraded"
-                    } else {
-                        "unchanged"
-                    }
-                    .to_owned(),
+                    status: status.to_owned(),
                 },
             ))
         })
         .collect()
+}
+
+fn health_delta_result(
+    scope: HealthDeltaScopeV1,
+    (before, before_cursor): (HealthDeltaPointV1, String),
+    (after, after_cursor): (HealthDeltaPointV1, String),
+) -> HealthDeltaResult {
+    let delta = i64::from(after.quality_signal) - i64::from(before.quality_signal);
+    let comparable = before.files_analyzed > 0 && after.files_analyzed > 0;
+    let files = after.files_analyzed;
+    let observed_at = after.observed_at;
+    HealthDeltaResult {
+        schema_version: HEALTH_DELTA_SCHEMA_VERSION,
+        scope,
+        dimensions: health_dimension_deltas(&before, &after),
+        before,
+        after,
+        before_cursor,
+        after_cursor,
+        pass: comparable && delta >= 0,
+        delta,
+        coverage: HealthDeltaCoverageV1 {
+            eligible: Some(files),
+            visited: Some(files),
+            denominator: (files > 0).then_some(files),
+            completeness: if comparable { "complete" } else { "unknown" }.to_owned(),
+        },
+        currentness: HealthDeltaCurrentnessV1 {
+            state: "current".to_owned(),
+            observed_at,
+        },
+    }
 }
 
 #[tracing::instrument(name = "usecases.graph.health_delta", level = "trace", skip_all)]
@@ -409,14 +441,15 @@ pub async fn compute_verified_health_delta(
         tracing::trace_span!("usecases.graph.health_delta.find"),
     )
     .await?;
-    let (after, after_cursor) = if let Some(after) = current {
-        (after, current_cursor)
+    let after = if let Some(after) = current {
+        after
     } else {
         let snapshot = tracing::Instrument::instrument(
             compute_verified_health_snapshot(graph, scope.path_prefix.as_deref()),
             tracing::trace_span!("usecases.graph.health_delta.snapshot"),
         )
-        .await?;
+        .await
+        .map_err(HealthDeltaError::Graph)?;
         let observed_at = tracedecay_contracts::now_micros();
         let dimensions = health_delta_dimensions(&snapshot);
         let watermark = health_delta_watermark(
@@ -435,53 +468,15 @@ pub async fn compute_verified_health_delta(
             function_denominator: snapshot.total_fns as u64,
             dimensions,
         };
-        let after = tracing::Instrument::instrument(
+        tracing::Instrument::instrument(
             persist_canonical_health_delta_point(db, &scope, &after, &current_cursor),
             tracing::trace_span!("usecases.graph.health_delta.persist_canonical"),
         )
-        .await?;
-        (after, current_cursor)
+        .await?
     };
-    let observed_at = after.observed_at;
-    let (before, before_cursor) =
-        pinned_before.unwrap_or_else(|| (after.clone(), after_cursor.clone()));
-    let delta = i64::from(after.quality_signal) - i64::from(before.quality_signal);
-    let eligible = before.files_analyzed.saturating_add(after.files_analyzed);
-    let denominator = (eligible > 0).then_some(eligible);
-    Ok(HealthDeltaResult {
-        schema_version: HEALTH_DELTA_SCHEMA_VERSION,
-        scope,
-        before: before.clone(),
-        after: after.clone(),
-        before_cursor,
-        after_cursor,
-        pass: denominator.is_some() && delta >= 0,
-        delta,
-        dimensions: health_dimension_deltas(&before, &after),
-        coverage: HealthDeltaCoverageV1 {
-            eligible: denominator,
-            visited: denominator,
-            denominator,
-            completeness: if denominator.is_some() {
-                "complete"
-            } else {
-                "unknown"
-            }
-            .to_owned(),
-        },
-        currentness: HealthDeltaCurrentnessV1 {
-            // Currentness follows the exact snapshots observed above. Legacy
-            // branch-database existence/fallback state is neither generation
-            // evidence nor an authority for this scoped comparison.
-            state: if denominator.is_some() {
-                "current"
-            } else {
-                "degraded"
-            }
-            .to_owned(),
-            observed_at,
-        },
-    })
+    let after = (after, current_cursor);
+    let before = pinned_before.unwrap_or_else(|| after.clone());
+    Ok(health_delta_result(scope, before, after))
 }
 
 #[cfg(test)]
@@ -508,10 +503,9 @@ mod tests {
         for path in ["/src", "src\\lib", "src/../other", "src//lib", "."] {
             let error = health_delta_scope(Some("project.first".to_owned()), Some(path))
                 .expect_err("noncanonical path must not enter a persisted health-delta scope");
-            assert_eq!(
-                error.to_string(),
-                "config error: health-delta path_prefix must be one canonical project-relative path",
-                "{path}"
+            assert!(
+                matches!(error, HealthDeltaError::InvalidPathPrefix),
+                "{path}: {error}"
             );
         }
     }
@@ -529,9 +523,9 @@ mod tests {
             health_delta_cursor(&scope, "generation.second").expect("next cursor")
         );
         let error = health_delta_digest_from_cursor("health-delta.v1.not-a-digest").unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "config error: invalid health-delta cursor"
+        assert!(
+            matches!(error, HealthDeltaError::MalformedCursor),
+            "{error}"
         );
     }
 
@@ -561,9 +555,12 @@ mod tests {
             dimensions,
         };
         let cursor = health_delta_cursor(&scope, "generation.first").expect("cursor");
-        persist_health_delta_point(&harness.registered, &scope, &point, cursor.clone())
-            .await
-            .expect("persist current point");
+        record_health_delta_envelope(
+            &harness.registered,
+            health_delta_envelope(&scope, &point, &cursor),
+        )
+        .await
+        .expect("persist current point");
         let template = harness
             .registered
             .read_observability_event(scope.scope_digest.as_str(), &cursor)
@@ -680,5 +677,238 @@ mod tests {
                 .expect("canonical point"),
             first_result
         );
+    }
+
+    fn scored_point(
+        scope: &HealthDeltaScopeV1,
+        files_analyzed: u64,
+        quality_signal: u32,
+        dimensions: &[(HealthDimension, u64, Option<u64>)],
+    ) -> HealthDeltaPointV1 {
+        let dimensions = dimensions
+            .iter()
+            .map(|(dimension, score_ppm, denominator)| {
+                (
+                    dimension.name().to_owned(),
+                    HealthDimensionPointV1 {
+                        score_ppm: *score_ppm,
+                        denominator: *denominator,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let observed_at = UtcMicros(100);
+        HealthDeltaPointV1 {
+            watermark: health_delta_watermark(
+                scope,
+                observed_at,
+                quality_signal,
+                files_analyzed,
+                4,
+                &dimensions,
+            )
+            .expect("watermark"),
+            observed_at,
+            quality_signal,
+            files_analyzed,
+            function_denominator: 4,
+            dimensions,
+        }
+    }
+
+    fn unlabeled_release_cursor(scope: &HealthDeltaScopeV1, generation: &str) -> String {
+        let digest = canonical_sha256(&(
+            "tracedecay.health-delta.cursor.v1",
+            scope.scope_digest.as_str(),
+            generation,
+        ))
+        .expect("legacy cursor digest");
+        format!(
+            "{HEALTH_DELTA_CURSOR_PREFIX}{}",
+            sha256_hex_suffix(digest.as_str()).expect("legacy cursor hex")
+        )
+    }
+
+    async fn record_point_under(
+        db: &RegisteredGlobalDb,
+        scope: &HealthDeltaScopeV1,
+        point: &HealthDeltaPointV1,
+        cursor: &str,
+        definition: Option<&str>,
+    ) {
+        let mut envelope = health_delta_envelope(scope, point, cursor);
+        let ObservabilityPayloadV1::HealthSnapshot(payload) = &mut envelope.payload else {
+            panic!("health-delta envelopes carry a health snapshot");
+        };
+        payload.definition = definition.map(str::to_owned);
+        record_health_delta_envelope(db, envelope)
+            .await
+            .expect("record point");
+    }
+
+    #[tokio::test]
+    async fn an_unlabeled_released_point_is_refused_and_never_reused_as_after() {
+        let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+            "health-delta-unlabeled-point",
+        )
+        .await;
+        let scope = health_delta_scope(Some("project.first".to_owned()), Some("src"))
+            .expect("canonical scope");
+        let point = scored_point(
+            &scope,
+            2,
+            8706,
+            &[(HealthDimension::Modularity, 500_000, Some(2))],
+        );
+        let released = unlabeled_release_cursor(&scope, "generation.first");
+        record_point_under(&harness.registered, &scope, &point, &released, None).await;
+
+        let error = load_health_delta_point(&harness.registered, &scope, &released)
+            .await
+            .expect_err("an unlabeled before point must not be compared");
+        assert!(
+            matches!(error, HealthDeltaError::DefinitionUnrecorded),
+            "{error}"
+        );
+        let current = health_delta_cursor(&scope, "generation.first").expect("cursor");
+        assert_ne!(current, released);
+        assert!(
+            find_health_delta_point(&harness.registered, &scope, &current)
+                .await
+                .expect("read current generation")
+                .is_none(),
+            "the current definition must mint its own point at an observed generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_point_from_another_definition_is_refused() {
+        let harness = tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness::open(
+            "health-delta-other-definition",
+        )
+        .await;
+        let scope =
+            health_delta_scope(Some("project.first".to_owned()), None).expect("canonical scope");
+        let point = scored_point(
+            &scope,
+            2,
+            8706,
+            &[(HealthDimension::Modularity, 500_000, Some(2))],
+        );
+        let cursor = health_delta_cursor(&scope, "generation.first").expect("cursor");
+        record_point_under(
+            &harness.registered,
+            &scope,
+            &point,
+            &cursor,
+            Some("health.2026-01-01"),
+        )
+        .await;
+
+        let error = load_health_delta_point(&harness.registered, &scope, &cursor)
+            .await
+            .expect_err("a point from another definition must not be compared");
+        assert!(
+            matches!(
+                &error,
+                HealthDeltaError::DefinitionMismatch { recorded } if recorded == "health.2026-01-01"
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_emptied_scope_fails_and_counts_only_the_current_files() {
+        let scope = health_delta_scope(Some("project.first".to_owned()), Some("src"))
+            .expect("canonical scope");
+        let before = scored_point(
+            &scope,
+            3,
+            8706,
+            &[(HealthDimension::Modularity, 500_000, Some(2))],
+        );
+        let emptied = scored_point(
+            &scope,
+            0,
+            10_000,
+            &[(HealthDimension::Modularity, 1_000_000, None)],
+        );
+
+        let result = health_delta_result(
+            scope,
+            (before, "before".to_owned()),
+            (emptied, "after".to_owned()),
+        );
+
+        assert_eq!(result.delta, 1_294);
+        assert!(
+            !result.pass,
+            "an emptied scope must not pass on the empty-graph score"
+        );
+        assert_eq!(result.coverage.eligible, Some(0));
+        assert_eq!(result.coverage.visited, Some(0));
+        assert_eq!(result.coverage.denominator, None);
+        assert_eq!(result.coverage.completeness, "unknown");
+        assert_eq!(result.dimensions["modularity"].status, "no_evidence");
+    }
+
+    #[test]
+    fn a_comparable_delta_counts_the_current_files_and_reads_each_dimension() {
+        let scope =
+            health_delta_scope(Some("project.first".to_owned()), None).expect("canonical scope");
+        let before = scored_point(
+            &scope,
+            3,
+            7_000,
+            &[
+                (HealthDimension::Modularity, 500_000, Some(2)),
+                (HealthDimension::Acyclicity, 1_000_000, None),
+                (HealthDimension::Redundancy, 900_000, Some(4)),
+            ],
+        );
+        let after = scored_point(
+            &scope,
+            2,
+            6_900,
+            &[
+                (HealthDimension::Modularity, 666_667, Some(3)),
+                (HealthDimension::Acyclicity, 500_000, Some(2)),
+                (HealthDimension::Redundancy, 899_500, Some(4)),
+            ],
+        );
+
+        let result = health_delta_result(
+            scope,
+            (before, "before".to_owned()),
+            (after, "after".to_owned()),
+        );
+
+        assert!(!result.pass);
+        assert_eq!(result.delta, -100);
+        assert_eq!(result.coverage.eligible, Some(2));
+        assert_eq!(result.coverage.visited, Some(2));
+        assert_eq!(result.coverage.denominator, Some(2));
+        assert_eq!(result.coverage.completeness, "complete");
+        assert_eq!(result.currentness.state, "current");
+        assert_eq!(result.dimensions["modularity"].status, "improved");
+        assert_eq!(result.dimensions["acyclicity"].status, "no_evidence");
+        assert_eq!(result.dimensions["redundancy"].status, "unchanged");
+    }
+
+    #[test]
+    fn a_baseline_passes_only_when_the_scope_has_files() {
+        let scope =
+            health_delta_scope(Some("project.first".to_owned()), None).expect("canonical scope");
+        let baseline = |files| {
+            let point = scored_point(&scope, files, 9_000, &[]);
+            health_delta_result(
+                scope.clone(),
+                (point.clone(), "cursor".to_owned()),
+                (point, "cursor".to_owned()),
+            )
+        };
+
+        assert!(baseline(2).pass);
+        assert!(!baseline(0).pass);
     }
 }

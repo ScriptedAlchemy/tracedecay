@@ -90,7 +90,7 @@ impl From<HolographicEncodingError> for MemoryAnalysisError {
     }
 }
 
-/// Score all pairs above `threshold` from facts encoded into FHRR vectors for this read.
+/// Score all pairs above `threshold` from facts encoded into MAP-C vectors for this read.
 pub fn score_similar_pairs(
     decoded: &[(Value, Vec<f64>)],
     threshold: f64,

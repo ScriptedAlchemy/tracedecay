@@ -39,7 +39,8 @@ use super::{
     AuthenticatedDiagnosticCursorAuthorityV1, DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
     all_code_graph_symbols, completed, completed_unsupported, diagnostics_result,
     diagnostics_unavailable, evidence_unavailable, failed, graph_query_outcome, graph_read_outcome,
-    now_observed, omitted_evidence, open_code_graph, refused, unpublished_file_outcome,
+    health_delta_outcome, now_observed, omitted_evidence, open_code_graph, refused,
+    unpublished_file_outcome,
 };
 use crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use crate::diagnostics_query::{DiagnosticPageRequest, DiagnosticQueryCoverage, DiagnosticsQuery};
@@ -815,12 +816,7 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                 .await
                 {
                     Ok(result) => completed(result, EvidenceDomain::Operational, now_observed()),
-                    Err(_) => evidence_unavailable(
-                        EvidenceDomain::Operational,
-                        observed_at,
-                        OmissionReason::Unavailable,
-                        0,
-                    ),
+                    Err(error) => health_delta_outcome(&error, observed_at),
                 }
             },
             tracing::trace_span!("usecases.primitives.health_delta"),

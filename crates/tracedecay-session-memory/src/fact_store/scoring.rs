@@ -131,7 +131,7 @@ struct FactVectorCache {
     order: VecDeque<FactVectorKey>,
 }
 
-/// Cached FHRR encodings of canonical fact payloads, shared across searches.
+/// Cached MAP-C encodings of canonical fact payloads, shared across searches.
 ///
 /// An assertion's payload is immutable (`memory_v2_payloads_no_update`
 /// rejects updates), and the encoded vector is a deterministic function of
@@ -145,7 +145,7 @@ struct FactVectorCache {
 static FACT_VECTOR_CACHE: LazyLock<Mutex<FactVectorCache>> =
     LazyLock::new(|| Mutex::new(FactVectorCache::default()));
 
-/// Returns the FHRR encoding for a canonical fact projection, computing and
+/// Returns the MAP-C encoding for a canonical fact projection, computing and
 /// retaining it on first use for the fact's current active assertion.
 pub(super) fn project_memory_fact_vector(
     encoder: &HolographicEncoder,

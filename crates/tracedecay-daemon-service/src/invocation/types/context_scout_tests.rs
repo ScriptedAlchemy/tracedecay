@@ -256,3 +256,124 @@ async fn explicit_request_preserves_a_newer_native_event() {
     unregister_hook_orchestration_runtime([191; 16], [193; 16], &runtime);
     assert!(runtime.shutdown().await);
 }
+
+/// A boundary of a session with no Context Scout lifecycle runs once and
+/// settles. It reruns only when a later hook of that session carries a
+/// lifecycle, and a newer boundary of the session replaces it.
+#[tokio::test]
+async fn lifecycle_less_boundary_settles_and_resumes_on_its_sessions_lifecycle() {
+    let mut boundary = native_request(201);
+    let lifecycle = boundary.lifecycle.take().unwrap();
+    let envelope = boundary.hook.envelope().clone();
+    let binding = HookScopeBindingV1 {
+        host: envelope.producer,
+        project_id: envelope.project_id,
+        repository_id: envelope.repository_id,
+        worktree_id: envelope.worktree_id,
+        worktree_epoch: envelope.worktree_epoch,
+        binding_token: envelope.binding_token,
+        capabilities: vec![tracedecay_hooks::HookCapabilityV1 {
+            family: tracedecay_hooks::HookEventFamily::SavedEdit,
+            support: tracedecay_hooks::stock_event_support(
+                envelope.producer,
+                tracedecay_hooks::HookEventFamily::SavedEdit,
+            ),
+        }],
+    };
+    let (ran, mut runs) = tokio::sync::mpsc::unbounded_channel();
+    let runtime = BoundedHookOrchestratorV1::new(1, move |request, _| {
+        let ran = ran.clone();
+        async move {
+            let has_lifecycle = request.lifecycle.is_some();
+            ran.send((request.hook.envelope().event_id, has_lifecycle))
+                .unwrap();
+            if has_lifecycle {
+                HookOrchestrationWorkOutcomeV1::Completed
+            } else {
+                HookOrchestrationWorkOutcomeV1::AwaitingLifecycle
+            }
+        }
+    })
+    .unwrap();
+    assert!(register_hook_orchestration_runtime(
+        envelope.project_id,
+        envelope.worktree_id,
+        &runtime
+    ));
+    let saved_edit = |event_id: u8| {
+        let mut saved_edit = envelope.clone();
+        saved_edit.event_id = [event_id; 16];
+        let (completed, completion) = tokio::sync::oneshot::channel();
+        let completed = StdMutex::new(Some(completed));
+        assert_eq!(
+            admit_registered_hook_orchestration(
+                saved_edit,
+                binding.clone(),
+                None,
+                1,
+                false,
+                Some(Arc::new(move || {
+                    if let Some(completed) = completed.lock().unwrap().take() {
+                        let _ = completed.send(());
+                    }
+                })),
+            ),
+            HookOrchestrationAdmissionV1::Enqueued
+        );
+        completion
+    };
+    let session_hook = |event_id: u8, lifecycle: Option<ContextScoutLifecycleAddressV1>| {
+        let mut session_start = envelope.clone();
+        session_start.event_id = [event_id; 16];
+        session_start.event = HookEventV2::SessionBoundary {
+            boundary: HookBoundaryV1::Start,
+        };
+        assert_eq!(
+            admit_registered_hook_orchestration(
+                session_start,
+                binding.clone(),
+                lifecycle,
+                1,
+                false,
+                None
+            ),
+            HookOrchestrationAdmissionV1::UnsupportedTrigger
+        );
+    };
+
+    let first = saved_edit(210);
+    assert_eq!(runs.recv().await, Some(([210; 16], false)));
+    first
+        .await
+        .expect("a boundary awaiting a lifecycle settles its owed work");
+
+    session_hook(211, None);
+    session_hook(212, Some(lifecycle.clone()));
+    assert_eq!(
+        runs.recv().await,
+        Some(([210; 16], true)),
+        "only the session's hook that carries a lifecycle resumes the parked boundary"
+    );
+    session_hook(213, Some(lifecycle.clone()));
+    let second = saved_edit(214);
+    assert_eq!(
+        runs.recv().await,
+        Some(([214; 16], false)),
+        "a resumed boundary is no longer parked"
+    );
+    second.await.unwrap();
+
+    let third = saved_edit(215);
+    assert_eq!(runs.recv().await, Some(([215; 16], false)));
+    third.await.unwrap();
+    session_hook(216, Some(lifecycle));
+    assert_eq!(
+        runs.recv().await,
+        Some(([215; 16], true)),
+        "the newer boundary replaced the older parked one"
+    );
+
+    unregister_hook_orchestration_runtime(envelope.project_id, envelope.worktree_id, &runtime);
+    assert!(runtime.shutdown().await);
+    assert!(runs.try_recv().is_err());
+}

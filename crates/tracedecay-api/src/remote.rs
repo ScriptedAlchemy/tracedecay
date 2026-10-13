@@ -23,7 +23,8 @@ use thiserror::Error;
 use tracedecay_contracts::remote::auth::OpaqueRemoteCredential;
 use tracedecay_contracts::remote::capture_protocol::RemoteCaptureRequestV1;
 use tracedecay_contracts::remote::credential_admission::{
-    RemoteAuthenticatedSessionV1, RemoteCredentialAdmissionPortV1, RemoteSessionBoundProtocolBodyV1,
+    RemoteAuthenticatedSessionV1, RemoteCredentialAdmissionErrorV1,
+    RemoteCredentialAdmissionPortV1, RemoteSessionBoundProtocolBodyV1,
 };
 use tracedecay_contracts::remote::protocol::{
     CurrentAuthorityRequestV1, EnrollmentRequestV1, RemoteEnrollmentProtocolPortV1,
@@ -39,7 +40,9 @@ use tracedecay_contracts::remote::transfer::RemoteFrameTransferRequestV1;
 use tracedecay_contracts::{
     ApplicationContractError, CancellationSignal, RequestId, ResultContractRef,
 };
-use tracedecay_domain::UtcMicros;
+use tracedecay_domain::{
+    CurrentRemoteAuthorityStateV1, RemoteAuthorityUnavailableReasonV1, UtcMicros,
+};
 use tracedecay_tool_catalog::SchemaId;
 
 const BEARER_PREFIX: &[u8] = b"Bearer ";
@@ -151,9 +154,19 @@ impl<Port: ?Sized> Clone for RemoteProtocolRouterStateV1<Port> {
 ///
 /// It intentionally implements neither `Clone`, `Debug`, nor serialization.
 struct RemotePreBodyAdmissionV1<Request> {
-    session: RemoteAuthenticatedSessionV1,
-    credential: OpaqueRemoteCredential,
+    outcome: RemotePreBodyOutcomeV1,
     request: PhantomData<fn() -> Request>,
+}
+
+enum RemotePreBodyOutcomeV1 {
+    Admitted {
+        session: RemoteAuthenticatedSessionV1,
+        credential: OpaqueRemoteCredential,
+    },
+    /// The presented secret matched a revoked enrollment, so only its holder
+    /// reaches this. The body is read only to address the refusal; no
+    /// operation port runs.
+    Revoked,
 }
 
 impl<Port: ?Sized, Request> FromRequestParts<RemoteProtocolRouterStateV1<Port>>
@@ -172,13 +185,20 @@ where
         let authorization = authorization_header(&parts.headers)
             .map_err(|_| concealed_authentication_rejection())?;
         let credential = authorization.into_credential();
-        let session = state
-            .credential_admission
-            .admit_before_body(&credential, Request::CREDENTIAL_USE, (state.clock)())
-            .map_err(|_| concealed_authentication_rejection())?;
+        let outcome = match state.credential_admission.admit_before_body(
+            &credential,
+            Request::CREDENTIAL_USE,
+            (state.clock)(),
+        ) {
+            Ok(session) => RemotePreBodyOutcomeV1::Admitted {
+                session,
+                credential,
+            },
+            Err(RemoteCredentialAdmissionErrorV1::Revoked) => RemotePreBodyOutcomeV1::Revoked,
+            Err(_) => return Err(concealed_authentication_rejection()),
+        };
         Ok(Self {
-            session,
-            credential,
+            outcome,
             request: PhantomData,
         })
     }
@@ -311,11 +331,18 @@ where
                         .map_err(RemoteHttpRejection::Contract);
                 }
             };
-            let RemotePreBodyAdmissionV1 {
-                mut session,
-                credential,
-                ..
-            } = admission;
+            let (mut session, credential) = match admission.outcome {
+                RemotePreBodyOutcomeV1::Admitted {
+                    session,
+                    credential,
+                } => (session, credential),
+                RemotePreBodyOutcomeV1::Revoked => {
+                    return enrollment_revoked_response::<Request>(
+                        request.request.request_id,
+                        (state.clock)(),
+                    );
+                }
+            };
             if Request::bind_authenticated_session(&session, &request.request).is_err() {
                 return Err(concealed_authentication_rejection());
             }
@@ -325,6 +352,12 @@ where
                     .reauthorize_publication(&session, (state.clock)())
                 {
                     Ok(session) => session,
+                    Err(RemoteCredentialAdmissionErrorV1::Revoked) => {
+                        return enrollment_revoked_response::<Request>(
+                            request.request.request_id,
+                            (state.clock)(),
+                        );
+                    }
                     Err(_) => return Err(concealed_authentication_rejection()),
                 };
                 if Request::bind_authenticated_session(&session, &request.request).is_err() {
@@ -477,6 +510,29 @@ fn concealed_authentication_rejection() -> RemoteHttpRejection {
         Ok(response) => RemoteHttpRejection::Response(Box::new(response)),
         Err(error) => RemoteHttpRejection::Contract(error),
     }
+}
+
+/// Typed refusal for the holder of a revoked enrollment credential, addressed
+/// to its own request so the client can decode it.
+fn enrollment_revoked_response<Request: RemoteSessionBoundProtocolBodyV1>(
+    request_id: RequestId,
+    observed_at: UtcMicros,
+) -> Result<Response, RemoteHttpRejection> {
+    let failure = RemoteProtocolFailureV1::EnrollmentRevoked;
+    let response = Request::result_contract()
+        .and_then(|contract| remote_protocol_problem(contract, request_id.clone(), failure))
+        .and_then(|problem| {
+            RemoteProtocolResponseV1::<()>::new(
+                request_id,
+                CurrentRemoteAuthorityStateV1::Unavailable {
+                    reason: RemoteAuthorityUnavailableReasonV1::EnrollmentRevoked,
+                    observed_at,
+                },
+                Err(problem),
+            )
+        })
+        .map_err(RemoteHttpRejection::Contract)?;
+    Ok(remote_protocol_response(response.into()))
 }
 
 fn concealed_request_id() -> RequestId {

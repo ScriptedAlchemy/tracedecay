@@ -87,12 +87,12 @@ computes:
 - **`jaccard`** = `project_memory_jaccard`, the exact Jaccard similarity
   between `project_memory_tokens(query)` and `project_memory_fact_tokens(fact)`
   (fact tokens are content + tags + entities, tokenized identically).
-- **`holographic`** = `project_memory_holographic_score`: FHRR-2048 binding of
+- **`holographic`** = `project_memory_holographic_score`: MAP-C 2048-dimension binding of
   content + normalized entities via `HolographicEncoder`
   (`crates/tracedecay-session-memory/src/memory/encoding.rs`, unchanged in
   spirit from the pre-rewrite code), every token still becomes a
   deterministic SHA-256-derived coefficient vector; there is no semantic
-  embedding model. The raw FHRR similarity is rescaled with
+  embedding model. The raw cosine similarity is rescaled with
   `midpoint(sim, 1.0)` (i.e. `(sim + 1) / 2`), so the usable band is still
   `[0, 1]` with an unrelated-content floor near 0.5.
 - **`trust`** = the fact's persisted `trust_score` (a `Confidence` in

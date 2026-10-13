@@ -284,7 +284,7 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
         let memory_status = &memory_status["payload"];
         assert_eq!(memory_status["memory"]["fact_count"], 3);
         assert_eq!(memory_status["memory"]["entity_count"], 3);
-        assert_eq!(memory_status["memory"]["algebra"]["name"], "amari_fhrr");
+        assert_eq!(memory_status["memory"]["algebra"]["name"], "map_c");
         assert_eq!(memory_status["memory"]["algebra"]["hrr_dim"], 2048);
 
         let (status, projection) = get_json(
