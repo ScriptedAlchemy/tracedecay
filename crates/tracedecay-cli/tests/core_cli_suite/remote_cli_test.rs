@@ -620,7 +620,12 @@ fn remote_failover_json_refusal_prints_exactly_one_protocol_document() {
         project_id,
         &grant_credential,
     );
-    grant.capabilities = [RemoteCapabilityV1::Promote].into_iter().collect();
+    grant.capabilities = [
+        RemoteCapabilityV1::Promote,
+        RemoteCapabilityV1::ServeAuthority,
+    ]
+    .into_iter()
+    .collect();
     provision_remote_node(&fixture, &grant);
 
     let request = enrollment_request(&grant);
