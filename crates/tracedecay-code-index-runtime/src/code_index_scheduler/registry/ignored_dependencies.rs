@@ -17,7 +17,9 @@ use super::{
     CodeIndexSchedulerRegistryV1, CodeIndexSeatParkV1, CodeIndexSeatWaitV1, PendingWakeV1,
     ServingGenerationSlot,
 };
-use crate::code_index_scheduler::graph_activation::CodeGraphActivationAuthorityV1;
+use crate::code_index_scheduler::graph_activation::{
+    CodeGraphActivationAuthorityV1, CodeGraphCatalogWarmV1,
+};
 use crate::code_index_scheduler::{
     CodeGraphReplayBindingV1, CodeIndexCadenceTriggerV1, CodeIndexIgnoredDependencyIndexOutcomeV1,
     CodeIndexIgnoredDependencyRefusalV1, CodeIndexIgnoredDependencyRequestV1,
@@ -693,10 +695,13 @@ impl CodeIndexSchedulerRegistryV1 {
             replay_binding,
         )
         .await;
-        if let Err(error) = activation {
-            request_reactivation();
-            return Err(error);
-        }
+        let catalog_warm = match activation {
+            Ok(catalog_warm) => catalog_warm,
+            Err(error) => {
+                request_reactivation();
+                return Err(error);
+            }
+        };
         *text_generation
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
@@ -792,6 +797,10 @@ impl CodeIndexSchedulerRegistryV1 {
             project_root.to_path_buf(),
             &build.publication,
         );
+        drop((_reconcile_pass, _build_publication, _daemon_admission));
+        if let Some(catalog_warm) = catalog_warm {
+            await_catalog_warm(catalog_warm, control, &shutting_down).await;
+        }
         Ok(build.outcome)
     }
 }
@@ -868,7 +877,7 @@ async fn activate_committed_generation(
     latest: LatestCompleteCodeIndexV1,
     predecessor: Option<Arc<CodeGraphProjectionStore>>,
     replay_binding: CodeGraphReplayBindingV1,
-) -> Result<(), CodeIndexSchedulerErrorV1> {
+) -> Result<Option<CodeGraphCatalogWarmV1>, CodeIndexSchedulerErrorV1> {
     graph_activation
         .activate(
             project_id,
@@ -880,6 +889,28 @@ async fn activate_committed_generation(
             Arc::new(AtomicBool::new(false)),
         )
         .await
+}
+
+/// Admission answers "the generation advanced, retry", and the retry reads the
+/// catalog this warm builds, so the answer waits for it. A request out of time
+/// or a worktree shutting down answers without it: the generation is already
+/// committed, and catalog reads serve once the warm settles.
+async fn await_catalog_warm(
+    catalog_warm: CodeGraphCatalogWarmV1,
+    control: &(dyn CodeIndexExecutionControlV1 + Send + Sync),
+    shutting_down: &AtomicBool,
+) {
+    let mut settled = std::pin::pin!(catalog_warm.settled());
+    loop {
+        tokio::select! {
+            () = &mut settled => return,
+            () = tokio::time::sleep(Duration::from_millis(5)) => {
+                if refuse_if_interrupted(control, shutting_down).is_err() {
+                    return;
+                }
+            }
+        }
+    }
 }
 
 async fn acquire_publication_gate<'a>(

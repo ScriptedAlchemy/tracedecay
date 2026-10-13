@@ -502,7 +502,7 @@ impl CodeGraphActivationAuthorityV1 {
         predecessor: Option<Arc<CodeGraphProjectionStore>>,
         replay_binding: CodeGraphReplayBindingV1,
         cancellation: Arc<AtomicBool>,
-    ) -> Result<(), CodeIndexSchedulerErrorV1> {
+    ) -> Result<Option<CodeGraphCatalogWarmV1>, CodeIndexSchedulerErrorV1> {
         let policy = self.policy();
         if policy == CodeGraphActivationPolicyV1::RefusedByConfiguration {
             let reason = "code graph activation was refused by project configuration";
@@ -544,14 +544,16 @@ impl CodeGraphActivationAuthorityV1 {
                         "code graph activation task failed: {error}"
                     ))
                 })??;
-                if let Some(pending_catalog_warm) = pending_catalog_warm {
+                let catalog_warm = pending_catalog_warm.map(|pending_catalog_warm| {
                     #[cfg(any(test, feature = "test-helpers"))]
                     let gate = injected_faults()
                         .catalog_warm_gates
                         .remove(worktree_id.as_str());
-                    drop(tokio::task::spawn_blocking(move || {
+                    #[cfg(any(test, feature = "test-helpers"))]
+                    let warm_gate = gate.clone();
+                    let handle = tokio::task::spawn_blocking(move || {
                         #[cfg(any(test, feature = "test-helpers"))]
-                        if let Some(gate) = gate {
+                        if let Some(gate) = warm_gate {
                             tokio::runtime::Handle::current().block_on(async {
                                 gate.started.notify_one();
                                 gate.release.notified().await;
@@ -563,10 +565,15 @@ impl CodeGraphActivationAuthorityV1 {
                                 "background code graph interactive catalog warm failed"
                             );
                         }
-                    }));
-                }
+                    });
+                    CodeGraphCatalogWarmV1 {
+                        handle,
+                        #[cfg(any(test, feature = "test-helpers"))]
+                        gate,
+                    }
+                });
                 Self::record_seated(seated, generation_id);
-                Ok(())
+                Ok(catalog_warm)
             }
             #[cfg(any(test, feature = "test-helpers"))]
             Self::Memory { .. } => {
@@ -624,7 +631,7 @@ impl CodeGraphActivationAuthorityV1 {
                     ));
                 }
                 latest.prewarm_serving_derivations();
-                Ok(())
+                Ok(None)
             }
         }
     }
@@ -691,6 +698,26 @@ struct SchedulerGraphCancellation(Arc<AtomicBool>);
 impl GraphCancellation for SchedulerGraphCancellation {
     fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Acquire)
+    }
+}
+
+/// A seated generation's catalog warm, which runs in the background. Dropping
+/// it leaves the warm running.
+pub struct CodeGraphCatalogWarmV1 {
+    handle: tokio::task::JoinHandle<()>,
+    #[cfg(any(test, feature = "test-helpers"))]
+    gate: Option<Arc<InjectedActivationGateStateV1>>,
+}
+
+impl CodeGraphCatalogWarmV1 {
+    /// Resolves once the warm settled, with a ready catalog or a failure
+    /// catalog reads report.
+    pub async fn settled(self) {
+        #[cfg(any(test, feature = "test-helpers"))]
+        if let Some(gate) = &self.gate {
+            gate.awaited.notify_one();
+        }
+        let _ = self.handle.await;
     }
 }
 
