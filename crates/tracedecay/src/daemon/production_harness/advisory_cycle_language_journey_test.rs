@@ -516,8 +516,8 @@ async fn hook_boundary_without_a_scout_session_is_not_redriven() {
         assert_eq!(
             redrives_until_completed(&harness, &project, 2).await,
             Some(0),
-            "with Context Scout {state}, a boundary without a Scout session owes no Scout \
-             work; redriving it cannot produce a session"
+            "with Context Scout {state}, a boundary without a Scout session must settle and \
+             wait for that session's lifecycle; redriving it cannot produce one"
         );
     }
     harness.shutdown().await;
