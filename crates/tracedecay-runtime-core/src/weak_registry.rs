@@ -150,11 +150,11 @@ impl<K: Eq + Hash, V> SingleFlightWeakRegistry<K, V> {
             });
             Arc::clone(slots.entry(key).or_default())
         };
-        let mut live = slot.lock(&cx).await.map_err(|error| {
-            tracedecay_domain::errors::TraceDecayError::Config {
+        let mut live = asupersync::sync::OwnedMutexGuard::lock(slot, &cx)
+            .await
+            .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!("single-flight open lock unavailable: {error}"),
-            }
-        })?;
+            })?;
         if let Some(value) = live.upgrade() {
             return Ok(value);
         }

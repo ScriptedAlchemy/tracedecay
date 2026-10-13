@@ -294,9 +294,11 @@ mod tests {
                             observed.store(true, Ordering::Release);
                         })
                         .unwrap();
-                    accepted
-                        .send(&request_cx, (owner, request_cx.clone()))
-                        .unwrap();
+                    assert!(
+                        accepted
+                            .send(&request_cx, (owner, request_cx.clone()))
+                            .is_ok()
+                    );
                     std::future::pending::<()>().await;
                 })
                 .unwrap();
@@ -425,6 +427,41 @@ mod tests {
                 .unwrap();
             assert_eq!(result.recv(&cx).await.unwrap(), 73);
             owner.shutdown(&cx).await.unwrap();
+        });
+    }
+
+    #[test]
+    fn dropping_owner_after_shutdown_began_keeps_accepted_settlement() {
+        let runtime = RuntimeBuilder::current_thread()
+            .blocking_threads(1, 1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let cx = Cx::current().unwrap();
+            let owner = RuntimeOperationTaskOwnerV1::new(runtime.handle()).unwrap();
+            let (release, mut gate) = oneshot::channel::<()>();
+            let (settled, mut done) = oneshot::channel();
+            owner
+                .retain(move |child| async move {
+                    gate.recv(&child).await.unwrap();
+                    assert!(settled.send(&child, 7_u32).is_ok());
+                })
+                .unwrap();
+            {
+                let mut shutdown = std::pin::pin!(owner.shutdown(&cx));
+                std::future::poll_fn(|context| {
+                    assert!(shutdown.as_mut().poll(context).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+            }
+            drop(owner);
+            assert!(release.send(&cx, ()).is_ok());
+            assert_eq!(
+                done.recv(&cx).await.unwrap(),
+                7,
+                "settlement accepted before shutdown must finish after its owner drops"
+            );
         });
     }
 

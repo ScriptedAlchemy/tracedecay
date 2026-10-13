@@ -166,7 +166,6 @@ mod tests {
     use std::task::Poll;
     use std::time::Duration;
 
-    use asupersync::Cx;
     use asupersync::sync::Notify;
     use asupersync::time::timeout;
 

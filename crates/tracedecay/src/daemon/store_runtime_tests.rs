@@ -1444,10 +1444,13 @@ async fn terminal_shutdown_cancels_and_joins_blocked_schema_convergence() {
     convergence_gate.wait_until_blocked().await;
 
     registry.cancel_terminal_tasks();
-    tokio::time::timeout(MUST_NOT_BLOCK, registry.shutdown_terminal_tasks())
-        .await
-        .expect("terminal shutdown must not wait for cancelled convergence work")
-        .expect("session runtime terminal tasks shut down cleanly");
+    tokio::time::timeout(
+        MUST_NOT_BLOCK,
+        registry.shutdown_terminal_tasks(&tracedecay_runtime_core::native_runtime::cx().unwrap()),
+    )
+    .await
+    .expect("terminal shutdown must not wait for cancelled convergence work")
+    .expect("session runtime terminal tasks shut down cleanly");
     convergence_gate.release();
     tokio::task::yield_now().await;
 
@@ -1955,7 +1958,7 @@ async fn corrupt_derived_graph_preserves_relational_owner_lifecycle() {
     drop(first_database);
     first_registry.cancel_terminal_tasks();
     first_registry
-        .shutdown_terminal_tasks()
+        .shutdown_terminal_tasks(&tracedecay_runtime_core::native_runtime::cx().unwrap())
         .await
         .expect("first terminal tasks shut down");
     first_registry.cancel_memory_graph_reconciliation_tasks();
@@ -2058,7 +2061,7 @@ async fn corrupt_session_relation_graph_preserves_relational_session_database() 
     drop(first_database);
     first_registry.cancel_terminal_tasks();
     first_registry
-        .shutdown_terminal_tasks()
+        .shutdown_terminal_tasks(&tracedecay_runtime_core::native_runtime::cx().unwrap())
         .await
         .expect("first terminal tasks shut down");
     first_registry
@@ -2104,7 +2107,7 @@ async fn corrupt_session_relation_graph_preserves_relational_session_database() 
     drop(reopened);
     reopened_registry.cancel_terminal_tasks();
     reopened_registry
-        .shutdown_terminal_tasks()
+        .shutdown_terminal_tasks(&tracedecay_runtime_core::native_runtime::cx().unwrap())
         .await
         .expect("detached session relation graph task shuts down");
     reopened_registry

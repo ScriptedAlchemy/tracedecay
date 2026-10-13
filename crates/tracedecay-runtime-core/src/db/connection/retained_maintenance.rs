@@ -194,9 +194,8 @@ impl Database {
             message: "database health check requires an Asupersync context".to_owned(),
         })?;
         let queued_at = std::time::Instant::now();
-        let _health_guard = DATABASE_HEALTH_GATE
-            .get_or_init(|| asupersync::sync::Mutex::new(()))
-            .lock(&cx)
+        let health_gate = DATABASE_HEALTH_GATE.get_or_init(Arc::default);
+        let _health_guard = asupersync::sync::OwnedMutexGuard::lock(Arc::clone(health_gate), &cx)
             .await
             .map_err(|error| TraceDecayError::Database {
                 message: format!("database health admission failed: {error}"),

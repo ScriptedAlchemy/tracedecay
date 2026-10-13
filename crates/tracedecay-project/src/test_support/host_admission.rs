@@ -410,7 +410,12 @@ impl HostAdmissionTestRuntimeV1 {
         session_registry.cancel_store_opens_for_shutdown();
         session_registry.cancel_terminal_tasks();
         session_registry.cancel_memory_graph_reconciliation_tasks();
-        let terminal = session_registry.shutdown_terminal_tasks().await;
+        let cx = tracedecay_runtime_core::native_runtime::cx().ok_or_else(|| {
+            TraceDecayError::Config {
+                message: "native execution runtime is unavailable".to_owned(),
+            }
+        })?;
+        let terminal = session_registry.shutdown_terminal_tasks(&cx).await;
         let reconciliation = session_registry
             .shutdown_memory_graph_reconciliation_tasks()
             .await;

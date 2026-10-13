@@ -859,6 +859,29 @@ mod tests {
     }
 
     #[asupersync::test]
+    async fn runtime_held_through_shutdown_close_still_closes_exactly_once_released() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("runtime.db");
+        let (registry, profile, code, authority) = mount_code_runtime(path.clone()).await;
+        let binding = code.binding().clone();
+
+        registry.close_idle_for_shutdown().await.unwrap();
+        assert!(matches!(
+            registry.lookup(&binding),
+            StoreRuntimeLookup::Ready(_)
+        ));
+        drop(code);
+
+        let proof = registry.close_exact(&binding, &authority).await.unwrap();
+        assert_eq!(proof.binding(), &binding);
+        assert!(matches!(
+            registry.lookup(&binding),
+            StoreRuntimeLookup::Missing { .. }
+        ));
+        drop(profile);
+    }
+
+    #[asupersync::test]
     async fn exact_close_refuses_an_operation_token_after_the_client_drops() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("runtime.db");

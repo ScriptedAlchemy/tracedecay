@@ -118,7 +118,7 @@ enum DatabaseHealth {
     Corrupt(String),
 }
 
-static DATABASE_HEALTH_GATE: OnceLock<asupersync::sync::Mutex<()>> = OnceLock::new();
+static DATABASE_HEALTH_GATE: OnceLock<Arc<asupersync::sync::Mutex<()>>> = OnceLock::new();
 
 /// A writer connection that cannot outlive the canonical database's writer
 /// lane. It is another capability over the same physical attachment, never a
