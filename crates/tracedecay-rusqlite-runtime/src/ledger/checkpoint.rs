@@ -246,8 +246,11 @@ pub(crate) fn current_watermark(
             requested: binding.authority_epoch,
         });
     }
-    Ok(
-        (checkpoint.watermark.authority_epoch == binding.authority_epoch)
-            .then_some(checkpoint.watermark),
-    )
+    // Commit sequences continue across authority epochs of one incarnation, so
+    // a newer authority that has not committed yet stands at the frontier it
+    // inherited.
+    Ok(Some(ShardWatermarkV1 {
+        authority_epoch: binding.authority_epoch,
+        ..checkpoint.watermark
+    }))
 }
