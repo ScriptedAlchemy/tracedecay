@@ -62,7 +62,7 @@ async fn skill_writer_runner_skips_when_task_is_disabled() {
         ..AutomationConfig::default()
     };
 
-    let run = run_skill_writer_with_backend(
+    let run = run_skill_writer(
         &cg,
         &config,
         &backend,
@@ -111,7 +111,7 @@ async fn skill_writer_default_provider_searches_all_providers() {
     ));
     let config = enabled_skill_writer_config();
 
-    let run = run_skill_writer_with_backend(
+    let run = run_skill_writer(
         &cg,
         &config,
         &backend,
@@ -158,20 +158,19 @@ async fn skill_writer_replays_recent_sessions_without_keyword_matches() {
         "Ran the dashboard build twice before every release cut.",
     );
 
-    let run =
-        tracedecay_automation_runtime::automation::runner::run_skill_writer_with_backend_and_retrieval(
-            &automation_project_context(&cg),
-            &config,
-            &test_configuration_revision(),
-            &backend,
-            &retrieval,
-            SkillWriterAutomationOptions {
-                profile_root: Some(profile_root),
-                ..SkillWriterAutomationOptions::default()
-            },
-        )
-        .await
-        .unwrap();
+    let run = settle_skill_writer(
+        &automation_project_context(&cg),
+        &config,
+        &test_configuration_revision(),
+        &backend,
+        &retrieval,
+        SkillWriterAutomationOptions {
+            profile_root: Some(profile_root),
+            ..SkillWriterAutomationOptions::default()
+        },
+    )
+    .await
+    .unwrap();
 
     assert_eq!(run.ledger_record.status, AutomationRunStatus::Succeeded);
 }
@@ -214,7 +213,7 @@ async fn skill_writer_host_modes_do_not_select_alternate_lcm_storage() {
     ] {
         let mut config = enabled_skill_writer_config();
         config.host_mode = host_mode;
-        let run = run_skill_writer_with_backend(
+        let run = run_skill_writer(
             &cg,
             &config,
             &backend,
@@ -319,7 +318,7 @@ async fn skill_writer_runner_repairs_then_activates_validated_create() {
     ]);
     let config = enabled_skill_writer_config();
 
-    let run = run_skill_writer_with_backend(
+    let run = run_skill_writer(
         &cg,
         &config,
         &backend,
@@ -487,7 +486,7 @@ async fn skill_writer_quarantines_output_after_bounded_repair_exhaustion() {
     });
     let backend = SequentialJsonBackend::new(vec![invalid.clone(), invalid]);
 
-    let error = run_skill_writer_with_backend(
+    let error = run_skill_writer(
         &cg,
         &enabled_skill_writer_config(),
         &backend,
@@ -577,7 +576,7 @@ async fn skill_writer_evidence_imports_project_skill_usage_analytics_before_summ
     let backend = InspectSkillWriterUsageBackend;
     let config = enabled_skill_writer_config();
 
-    let run = run_skill_writer_with_backend_and_retrieval(
+    let run = settle_skill_writer(
         &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
@@ -675,7 +674,7 @@ async fn skill_writer_runner_activates_validated_skills() {
     ]);
     let config = enabled_skill_writer_config();
 
-    let run = run_skill_writer_with_backend(
+    let run = run_skill_writer(
         &cg,
         &config,
         &backend,
@@ -756,7 +755,7 @@ async fn skill_writer_host_deployment_failure_is_retried_after_cooldown() {
     config.tasks.skill_writer.cooldown_secs = Some(300);
     let context = cg.automation_project_context(None).unwrap();
 
-    let result = run_skill_writer_with_backend_and_retrieval(
+    let result = settle_skill_writer(
         &context,
         &config,
         &test_configuration_revision(),
@@ -853,7 +852,7 @@ async fn skill_writer_scheduled_retry_deploys_previously_committed_skill() {
     };
 
     let homeless_context = cg.automation_project_context(None).unwrap();
-    let failed = match run_skill_writer_with_backend_and_retrieval(
+    let failed = match settle_skill_writer(
         &homeless_context,
         &config,
         &test_configuration_revision(),
@@ -879,7 +878,7 @@ async fn skill_writer_scheduled_retry_deploys_previously_committed_skill() {
     let deployed_skill = host_home.join(".claude/skills/scheduler-review/SKILL.md");
     assert!(!deployed_skill.exists());
 
-    let retry = run_skill_writer_with_backend_and_retrieval(
+    let retry = settle_skill_writer(
         &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
@@ -932,7 +931,7 @@ async fn skill_writer_dashboard_retry_deploys_previously_committed_skill() {
     let config = enabled_skill_writer_config();
 
     let homeless_context = cg.automation_project_context(None).unwrap();
-    let failed = match run_skill_writer_with_backend_and_retrieval(
+    let failed = match settle_skill_writer(
         &homeless_context,
         &config,
         &test_configuration_revision(),
@@ -961,7 +960,7 @@ async fn skill_writer_dashboard_retry_deploys_previously_committed_skill() {
     // An on-demand run must settle the owed deployment instead of asking the
     // backend for new work and hiding the pending deployment behind a later
     // no-mutation terminal.
-    let retry = run_skill_writer_with_backend_and_retrieval(
+    let retry = settle_skill_writer(
         &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
@@ -1064,7 +1063,7 @@ async fn skill_writer_retry_preserves_apply_time_rejected_proposals() {
     };
 
     let homeless_context = cg.automation_project_context(None).unwrap();
-    let failed = match run_skill_writer_with_backend_and_retrieval(
+    let failed = match settle_skill_writer(
         &homeless_context,
         &config,
         &test_configuration_revision(),
@@ -1096,7 +1095,7 @@ async fn skill_writer_retry_preserves_apply_time_rejected_proposals() {
 
     // The retry deploys the committed skills, but the earlier apply-time
     // rejection must survive as a failed terminal rather than a clean success.
-    let retry = run_skill_writer_with_backend_and_retrieval(
+    let retry = settle_skill_writer(
         &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
@@ -1263,7 +1262,7 @@ async fn skill_writer_runner_updates_existing_skills_with_checksum_precondition(
     ]);
     let config = enabled_skill_writer_config();
 
-    let run = run_skill_writer_with_backend(
+    let run = run_skill_writer(
         &cg,
         &config,
         &backend,
@@ -1362,7 +1361,7 @@ async fn skill_writer_runner_ledgers_malformed_backend_output() {
     let backend = SkillTextBackend::new("not json");
     let config = enabled_skill_writer_config();
 
-    let err = run_skill_writer_with_backend(
+    let err = run_skill_writer(
         &cg,
         &config,
         &backend,
@@ -1412,7 +1411,7 @@ async fn skill_writer_runner_ledgers_missing_skills_array() {
     let backend = SkillJsonBackend::new(output.clone());
     let config = enabled_skill_writer_config();
 
-    let err = run_skill_writer_with_backend(
+    let err = run_skill_writer(
         &cg,
         &config,
         &backend,
@@ -1464,7 +1463,7 @@ async fn skill_writer_runner_records_noop_fallback_when_backend_run_task_fails()
         ..enabled_skill_writer_config()
     };
 
-    let run = run_skill_writer_with_backend(
+    let run = run_skill_writer(
         &cg,
         &config,
         &backend,
@@ -1517,7 +1516,7 @@ async fn skill_writer_runner_retains_no_skill_needed_without_deployment() {
         "outcome": "no_skill_needed",
         "decision": decision.clone()
     }));
-    let run = run_skill_writer_with_backend(
+    let run = run_skill_writer(
         &cg,
         &enabled_skill_writer_config(),
         &backend,
