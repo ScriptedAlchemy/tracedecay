@@ -309,29 +309,15 @@ pub fn resolve_branch_head(
         format!("refs/remotes/origin/{branch}"),
     ];
     for reference in candidates {
-        if let Some(sha) = resolve_git_ref(repo_root, &reference, command_control) {
+        if let ExactRefReadV1::Present(sha) =
+            read_exact_ref(repo_root, &reference, command_control)?
+        {
             return Ok(sha);
         }
     }
     Err(ManualBranchActivationError::invalid_ref(format!(
         "branch '{branch}' does not resolve to a git ref"
     )))
-}
-
-fn resolve_git_ref(
-    repo_root: &Path,
-    reference: &str,
-    command_control: &PrCommandControlV1,
-) -> Option<String> {
-    successful_git_with_control(
-        repo_root,
-        &["rev-parse", "--verify", "--end-of-options", reference],
-        command_control,
-    )
-    .ok()
-    .and_then(|output| String::from_utf8(output.stdout).ok())
-    .map(|sha| sha.trim().to_string())
-    .filter(|sha| !sha.is_empty())
 }
 
 pub fn prepare_manual_branch_worktree(
