@@ -4,11 +4,12 @@
 //! `tracedecay-maintenance`. This module keeps the pass that must hold
 //! [`StoreAdministration`] for the writer-gated branch-admin action.
 
+use std::path::Path;
+
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_runtime_core::branch::BranchAdminAction;
 
 use super::branch_admin::StoreAdministration;
-use tracedecay_project::project::TraceDecay;
 use tracedecay_runtime_core::logging::log_daemon_event;
 
 /// Runs branch-store GC for a project through the daemon administration
@@ -20,11 +21,9 @@ pub(super) async fn run_gc(
     administration: &StoreAdministration,
     schedulers: &CodeIndexSchedulerRegistryV1,
     branch_gc_days: u64,
-    cg: &TraceDecay,
+    root: &Path,
+    data_root: &Path,
 ) -> bool {
-    let root = cg.project_root();
-    let data_root = &cg.store_layout().data_root;
-
     // The coordinator owns the writer gate and its process/store-holder
     // safety checks; GC never runs beside a content writer on the same store.
     let report = administration

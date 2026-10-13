@@ -357,12 +357,16 @@ impl Default for MaintenanceCoordinator {
     }
 }
 
-/// One unit of bounded per-tick maintenance work: either a mounted session
-/// database or a mounted project graph. Arcs are cloned into the item so the
-/// store stays alive for the duration of the writer-held critical section.
+/// One unit of bounded per-tick maintenance work: a mounted session database
+/// or a mounted project graph, named by its database path. A tick holds no
+/// mounted store between units. Each unit resolves its store when its
+/// writer-held section starts and drops it when that section ends. Capacity
+/// retirement of an idle project refuses while anything leases its stores, so
+/// a tick that kept every listed store for its whole run refused those
+/// retirements. A store unmounted since the listing is skipped.
 enum MaintenanceStoreWork {
-    Session(tracedecay_global_db::RegisteredGlobalDbLeaseV1),
-    Graph(Arc<tracedecay_project::project::TraceDecay>),
+    Session(PathBuf),
+    Graph(PathBuf),
     /// The code-index scopes of a registered project that no mounted graph
     /// owns; its database is never opened by this unit.
     Registered(RegisteredProjectStoreV1),
@@ -371,11 +375,28 @@ enum MaintenanceStoreWork {
 impl MaintenanceStoreWork {
     fn database_path(&self) -> Option<&Path> {
         match self {
-            Self::Session(database) => Some(database.db_path()),
-            Self::Graph(graph) => Some(graph.db().database_path()),
+            Self::Session(database_path) | Self::Graph(database_path) => Some(database_path),
             Self::Registered(_) => None,
         }
     }
+}
+
+/// What a tick reads from one mounted project graph, copied out at listing.
+struct MountedGraphListing {
+    key: String,
+    database_path: PathBuf,
+    project_root: PathBuf,
+    data_root: PathBuf,
+    code_index_store_root: PathBuf,
+}
+
+/// The work-list key of a mounted project graph: its root and serving branch.
+fn graph_work_key(graph: &tracedecay_project::project::TraceDecay) -> String {
+    format!(
+        "g:{}\u{1f}{}",
+        graph.project_root().display(),
+        graph.serving_branch().unwrap_or_default()
+    )
 }
 
 pub(crate) fn project_store_maintenance_lease(
@@ -644,11 +665,30 @@ impl MaintenanceCoordinator {
             .store_telemetry_sampling()
             .begin_retention_tick_log_window();
         let session_databases = if continuation.is_none() {
-            administration.mounted_registered_session_databases().await
+            administration
+                .mounted_registered_session_databases()
+                .await
+                .iter()
+                .map(|database| database.db_path().to_path_buf())
+                .collect()
         } else {
             Vec::new()
         };
-        let project_graphs = administration.mounted_project_graphs().await;
+        let project_graphs = administration
+            .mounted_project_graphs()
+            .await
+            .iter()
+            .map(|graph| MountedGraphListing {
+                key: graph_work_key(graph),
+                database_path: graph.db().database_path().to_path_buf(),
+                project_root: graph.project_root().to_path_buf(),
+                data_root: graph.store_layout().data_root.clone(),
+                code_index_store_root: code_index_store_root(
+                    &graph.store_layout().data_root,
+                    &graph.store_layout().project_root,
+                ),
+            })
+            .collect::<Vec<_>>();
         #[cfg(any(test, feature = "test-helpers"))]
         {
             let _ = crate::test_support::hold_after_maintenance_listing_for_test().await;
@@ -670,21 +710,14 @@ impl MaintenanceCoordinator {
             };
         let mounted_store_roots = project_graphs
             .iter()
-            .map(|graph| {
-                let layout = graph.store_layout();
-                code_index_store_root(&layout.data_root, &layout.project_root)
-            })
+            .map(|graph| graph.code_index_store_root.clone())
             .collect::<BTreeSet<_>>();
         let mut active_telemetry_paths = BTreeSet::from([profile_database.db_path().to_path_buf()]);
-        active_telemetry_paths.extend(
-            session_databases
-                .iter()
-                .map(|database| database.db_path().to_path_buf()),
-        );
+        active_telemetry_paths.extend(session_databases.iter().cloned());
         active_telemetry_paths.extend(
             project_graphs
                 .iter()
-                .map(|graph| graph.db().database_path().to_path_buf()),
+                .map(|graph| graph.database_path.clone()),
         );
         // Build one stably-sorted work list across both store kinds so the
         // per-tick budget and round-robin cursor bound the total work, not each
@@ -694,20 +727,16 @@ impl MaintenanceCoordinator {
         let mut work: Vec<(String, MaintenanceStoreWork)> = Vec::with_capacity(
             session_databases.len() + project_graphs.len() + registered_projects.len(),
         );
-        for database in &session_databases {
+        for database_path in &session_databases {
             work.push((
-                format!("s:{}", database.db_path().display()),
-                MaintenanceStoreWork::Session(database.clone()),
+                format!("s:{}", database_path.display()),
+                MaintenanceStoreWork::Session(database_path.clone()),
             ));
         }
         for graph in &project_graphs {
             work.push((
-                format!(
-                    "g:{}\u{1f}{}",
-                    graph.project_root().display(),
-                    graph.serving_branch().unwrap_or_default()
-                ),
-                MaintenanceStoreWork::Graph(Arc::clone(graph)),
+                graph.key.clone(),
+                MaintenanceStoreWork::Graph(graph.database_path.clone()),
             ));
         }
         for (project_id, store) in registered_projects {
@@ -731,7 +760,7 @@ impl MaintenanceCoordinator {
         let maintenance_observations = administration.store_telemetry_sampling();
         let active_maintenance_projects = project_graphs
             .iter()
-            .map(|graph| graph.project_root().to_path_buf())
+            .map(|graph| graph.project_root.clone())
             .collect::<BTreeSet<_>>();
         maintenance_observations.retain_project_maintenance_state(&active_maintenance_projects);
         let telemetry_sampling = if continuation.is_none() {
@@ -757,17 +786,34 @@ impl MaintenanceCoordinator {
             }
             let admitted = administration
                 .try_with_writer(|| async {
-                    match &work[index].1 {
-                        MaintenanceStoreWork::Session(database) => {
-                            if run_registered_store_retention(database, retention).await {
+                    let (key, unit) = &work[index];
+                    match unit {
+                        MaintenanceStoreWork::Session(database_path) => {
+                            let Some(database) = administration
+                                .mounted_registered_session_databases()
+                                .await
+                                .into_iter()
+                                .find(|database| database.db_path() == database_path)
+                            else {
+                                return MaintenanceTickOutcome::Complete;
+                            };
+                            if run_registered_store_retention(&database, retention).await {
                                 MaintenanceTickOutcome::Complete
                             } else {
                                 MaintenanceTickOutcome::Retry
                             }
                         }
-                        MaintenanceStoreWork::Graph(graph) => {
+                        MaintenanceStoreWork::Graph(_) => {
+                            let Some(graph) = administration
+                                .mounted_project_graphs()
+                                .await
+                                .into_iter()
+                                .find(|graph| graph_work_key(graph) == *key)
+                            else {
+                                return MaintenanceTickOutcome::Complete;
+                            };
                             run_project_generation_maintenance(
-                                &project_store_maintenance_lease(graph),
+                                &project_store_maintenance_lease(&graph),
                                 code_index_schedulers,
                                 &maintenance_observations,
                                 &self.cancellation,
@@ -860,7 +906,7 @@ impl MaintenanceCoordinator {
             owner_roots.extend(
                 project_graphs
                     .iter()
-                    .map(|graph| graph.project_root().to_path_buf()),
+                    .map(|graph| graph.project_root.clone()),
             );
             match administration
                 .try_with_writer(|| {
@@ -916,7 +962,8 @@ impl MaintenanceCoordinator {
                         administration,
                         code_index_schedulers,
                         branch_gc.branch_gc_days,
-                        graph,
+                        &graph.project_root,
+                        &graph.data_root,
                     )
                     .await;
                 }
