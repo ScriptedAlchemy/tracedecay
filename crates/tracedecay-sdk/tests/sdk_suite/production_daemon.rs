@@ -1093,6 +1093,15 @@ fn a_laptop_profile_joins_a_desktop_brain_and_holds_its_exact_enrollment() {
         "the adopted enrollment admits the node's credential on the laptop; only reachability refuses: {}",
         serde_json::to_string(&laptop_capture).unwrap()
     );
+    let envelope_authority = serde_json::to_value(&laptop_capture.authority).unwrap();
+    assert_eq!(
+        (
+            &envelope_authority["state"],
+            &envelope_authority["value"]["fence"]
+        ),
+        (&json!("available"), &writer["authority"]["fence"]),
+        "the laptop's envelope reports the desktop writer it joined, not its own Brain"
+    );
 
     let (status, body) = local_post(
         &laptop_authority,
