@@ -6785,6 +6785,7 @@ name = "tracedecay-privacy"
 version = "0.1.0"
 dependencies = [
  "aho-corasick",
+ "asupersync",
  "hex",
  "jsonc-parser",
  "percent-encoding",
@@ -6795,7 +6796,6 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "thiserror",
- "tokio",
  "toml",
  "tracedecay-capture",
  "tracedecay-daemon-identity",
