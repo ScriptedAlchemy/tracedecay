@@ -189,7 +189,8 @@ impl BenchmarkConnection {
     }
 
     async fn status(&self) -> Result<(), String> {
-        self.client
+        let result = self
+            .client
             .call_tool(
                 CallToolRequestParams::new("tracedecay_status").with_arguments(
                     json!({"admission_only": true, "format": "json"})
@@ -199,8 +200,26 @@ impl BenchmarkConnection {
                 ),
             )
             .await
-            .map(|_| ())
-            .map_err(|error| format!("call typed benchmark RMCP status: {error}"))
+            .map_err(|error| format!("call typed benchmark RMCP status: {error}"))?;
+        if result.is_error == Some(true) {
+            return Err("benchmark status returned a tool error".to_owned());
+        }
+        let result = match result.structured_content {
+            Some(value) => value,
+            None => {
+                let text = result
+                    .content
+                    .first()
+                    .and_then(|content| content.as_text())
+                    .ok_or_else(|| "benchmark status returned no JSON result".to_owned())?;
+                serde_json::from_str(&text.text)
+                    .map_err(|error| format!("decode benchmark status JSON: {error}"))?
+            }
+        };
+        if result.get("project_admitted") != Some(&json!(true)) {
+            return Err("benchmark status did not confirm project admission".to_owned());
+        }
+        Ok(())
     }
 
     async fn shutdown(mut self) -> Result<(), String> {

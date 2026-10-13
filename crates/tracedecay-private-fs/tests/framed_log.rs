@@ -9,8 +9,11 @@ use std::os::unix::ffi::OsStrExt;
 use std::io::Write;
 
 #[cfg(target_os = "linux")]
-use tracedecay_private_fs::framed_log::DurableFileBatch;
+use std::time::{Duration, Instant};
+
 use tracedecay_private_fs::framed_log::{DirectorySyncPolicy, atomic_write_prepared, read_bounded};
+#[cfg(target_os = "linux")]
+use tracedecay_private_fs::framed_log::{DurableFileBatch, sync_latency};
 
 #[test]
 fn bounded_read_distinguishes_missing_oversized_and_non_regular_objects() {
@@ -163,5 +166,35 @@ fn durable_batch_sync_is_sized_to_its_members_not_the_filesystem() {
     assert!(
         batch_sync * 4 < unrelated_sync,
         "one-member batch sync took {batch_sync:?}; flushing the unrelated 128 MiB took {unrelated_sync:?}"
+    );
+}
+
+/// On a disk whose every fsync is its own log commit (ZFS's intent log), a
+/// batch that syncs its members one after another pays one commit per member.
+/// The members' barriers must be in flight together, so a seal of many
+/// segments waits about one barrier, not one per segment.
+#[cfg(target_os = "linux")]
+#[test]
+fn durable_batch_sync_overlaps_member_barriers_on_a_slow_disk() {
+    const MEMBERS: u32 = 16;
+    const BARRIER: Duration = Duration::from_millis(500);
+    let root = tempfile::tempdir().expect("batch fixture root");
+    let mut batch = DurableFileBatch::new();
+    for index in 0..MEMBERS {
+        let path = root.path().join(format!("segment-{index}.tmp"));
+        let mut member = fs::File::create(&path).expect("member file");
+        member.write_all(b"sealed segment").expect("member bytes");
+        batch.written(&path, &member).expect("record member");
+    }
+    let slow_disk = sync_latency::inject(root.path(), BARRIER);
+
+    let started = Instant::now();
+    batch.sync().expect("batch sync");
+    let elapsed = started.elapsed();
+
+    assert_eq!(slow_disk.syncs(), u64::from(MEMBERS));
+    assert!(
+        elapsed < BARRIER * (MEMBERS / 4),
+        "{MEMBERS} member barriers of {BARRIER:?} each took {elapsed:?} together"
     );
 }

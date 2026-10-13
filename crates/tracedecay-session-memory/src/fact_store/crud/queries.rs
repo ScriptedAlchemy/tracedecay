@@ -977,10 +977,7 @@ impl DatabaseFactStore<'_> {
         let db = (*self.db).clone();
         let batch = batch.clone();
         let write_control = write_control.clone();
-        // The task owns every commit input so caller-future cancellation cannot
-        // interrupt SQLite after the control admits the commit-start transition.
-
-        tokio::spawn(async move {
+        super::super::envelope::settle_fact_write(COMMIT_OPERATION, move |cx| async move {
             if write_control.interrupted() {
                 return Err(storage_message(
                     COMMIT_OPERATION,
@@ -1029,6 +1026,7 @@ impl DatabaseFactStore<'_> {
                         .assertion()
                         .map(|assertion| assertion.payload().content().to_owned());
                     crate::fact_store::commit_barrier::wait_after_durable_fact_commit(
+                        &cx,
                         barrier_content.as_deref(),
                     )
                     .await;
@@ -1044,11 +1042,10 @@ impl DatabaseFactStore<'_> {
                 &outcome,
                 FactCommitOutcome::Committed(_) | FactCommitOutcome::IdempotentReplay(_)
             ) {
-                super::super::graph::publish_project_memory_graph_after_write(db.clone()).await;
+                super::super::graph::publish_project_memory_graph_after_write(&cx, db.clone()).await;
             }
             Ok(outcome)
         })
         .await
-        .map_err(|error| storage_error(COMMIT_OPERATION, error))?
     }
 }

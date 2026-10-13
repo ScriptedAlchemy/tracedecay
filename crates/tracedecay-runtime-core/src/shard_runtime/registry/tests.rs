@@ -29,8 +29,8 @@ fn budget_accepts_the_cap_and_rejects_zero_or_above_cap() {
     }
 }
 
-#[test]
-fn exclusive_maintenance_budget_accepts_any_nonzero_exact_count() {
+#[asupersync::test]
+async fn exclusive_maintenance_budget_accepts_any_nonzero_exact_count() {
     for budget in [1, MAX_PROJECT_CODE_OPEN_RUNTIMES + 1, usize::MAX] {
         let config = StoreRuntimeRegistryConfig::for_exclusive_maintenance(budget).unwrap();
         assert_eq!(config.project_code_open_runtime_budget(), budget);
@@ -45,7 +45,7 @@ fn exclusive_maintenance_budget_accepts_any_nonzero_exact_count() {
     ));
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn concurrent_openers_publish_one_concrete_runtime_and_one_locator() {
     for clients in [1, 8, 32, 64] {
         let (registry, resolver, publisher) = registry(StoreRuntimeRegistryConfig::default());
@@ -87,7 +87,7 @@ async fn concurrent_openers_publish_one_concrete_runtime_and_one_locator() {
     }
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn each_open_waiter_receives_an_independent_client_token_while_clones_share_one() {
     let (registry, _, publisher) = registry(StoreRuntimeRegistryConfig::default());
     let pin = profile_pin(&registry).await;
@@ -119,7 +119,7 @@ async fn each_open_waiter_receives_an_independent_client_token_while_clones_shar
     drop(second);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn identity_bound_open_rejects_foreign_attachment_before_registry_publication() {
     let (registry, _, _) = registry(StoreRuntimeRegistryConfig::default());
     let pin = profile_pin(&registry).await;
@@ -142,7 +142,7 @@ async fn identity_bound_open_rejects_foreign_attachment_before_registry_publicat
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn identity_bound_open_refusal_preserves_an_existing_matching_runtime() {
     let (registry, _, _) = registry(StoreRuntimeRegistryConfig::default());
     let pin = profile_pin(&registry).await;
@@ -168,7 +168,7 @@ async fn identity_bound_open_refusal_preserves_an_existing_matching_runtime() {
     ));
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn failed_open_wakes_joiners_and_retry_uses_a_higher_fence() {
     let (registry, _, publisher) = registry(StoreRuntimeRegistryConfig::default());
     let pin = profile_pin(&registry).await;
@@ -179,9 +179,11 @@ async fn failed_open_wakes_joiners_and_retry_uses_a_higher_fence() {
     wait_for_calls(&publisher.calls, 2).await;
     let second = registry.begin_or_join_open(&request);
     publisher.release.notify_one();
-    let (first, second) = tokio::time::timeout(Duration::from_secs(2), async {
-        tokio::join!(first.wait(), second.wait())
-    })
+    let (first, second) = asupersync::time::timeout(
+        asupersync::Cx::current().unwrap().now(),
+        Duration::from_secs(2),
+        async { asupersync::join!(first.wait(), second.wait()) },
+    )
     .await
     .expect("joiners cannot be stranded");
     for result in [first, second] {
@@ -202,13 +204,14 @@ async fn failed_open_wakes_joiners_and_retry_uses_a_higher_fence() {
 }
 
 #[test]
-fn cancelled_open_task_wakes_every_joiner_and_allows_retry() {
+fn runtime_shutdown_wakes_every_joiner_and_rejects_reuse() {
     for round in 0..8 {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .blocking_threads(0, 4)
             .build()
             .unwrap();
-        let (registry, _, publisher) = registry(StoreRuntimeRegistryConfig::default());
+        let (registry, _, publisher) =
+            runtime.block_on(async { registry(StoreRuntimeRegistryConfig::default()) });
         let (first, second, request) = runtime.block_on(async {
             let pin = profile_pin(&registry).await;
             publisher.block.store(true, Ordering::SeqCst);
@@ -220,14 +223,16 @@ fn cancelled_open_task_wakes_every_joiner_and_allows_retry() {
         });
 
         drop(runtime);
-        let waiter = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
+        let waiter = asupersync::runtime::RuntimeBuilder::current_thread()
+            .blocking_threads(0, 4)
             .build()
             .unwrap();
         waiter.block_on(async {
-            let (first, second) = tokio::time::timeout(Duration::from_secs(2), async {
-                tokio::join!(first.wait(), second.wait())
-            })
+            let (first, second) = asupersync::time::timeout(
+                asupersync::Cx::current().unwrap().now(),
+                Duration::from_secs(2),
+                async { asupersync::join!(first.wait(), second.wait()) },
+            )
             .await
             .expect("cancelled opener cannot strand joiners");
             for result in [first, second] {
@@ -240,7 +245,15 @@ fn cancelled_open_task_wakes_every_joiner_and_allows_retry() {
             }
 
             publisher.block.store(false, Ordering::SeqCst);
-            open_published(&registry, request).await;
+            assert!(
+                matches!(
+                    registry.open(request).await,
+                    StoreRuntimeOpenResult::Failed(
+                        StoreRuntimeRegistryFailure::PhysicalRuntimeFailed { .. }
+                    )
+                ),
+                "a registry cannot acquire authority from a replacement runtime"
+            );
         });
     }
 }
@@ -248,7 +261,7 @@ fn cancelled_open_task_wakes_every_joiner_and_allows_retry() {
 /// Shutdown during an in-flight open: the shutdown close cancels and joins the
 /// open instead of skipping it, the open ends typed-cancelled with nothing
 /// published, and every idle published runtime still closes.
-#[tokio::test]
+#[asupersync::test]
 async fn shutdown_close_cancels_and_joins_an_in_flight_open() {
     let (registry, _, publisher) = registry(StoreRuntimeRegistryConfig::default());
     let pin = profile_pin(&registry).await;
@@ -259,18 +272,25 @@ async fn shutdown_close_cancels_and_joins_an_in_flight_open() {
     let opening_key = request.key.clone();
     drop((request, pin));
 
-    let close = tokio::spawn({
-        let registry = registry.clone();
-        async move { registry.close_idle_for_shutdown().await }
-    });
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while !registry.open_cancellation().is_cancelled() {
-            tokio::task::yield_now().await;
-        }
-    })
+    let mut close = asupersync::Cx::current()
+        .unwrap()
+        .spawn({
+            let registry = registry.clone();
+            move |_| async move { registry.close_idle_for_shutdown().await }
+        })
+        .unwrap();
+    asupersync::time::timeout(
+        asupersync::Cx::current().unwrap().now(),
+        Duration::from_secs(2),
+        async {
+            while !registry.open_cancellation().is_cancelled() {
+                asupersync::runtime::yield_now().await;
+            }
+        },
+    )
     .await
     .expect("shutdown close cancels in-flight opens");
-    tokio::task::yield_now().await;
+    asupersync::runtime::yield_now().await;
     assert!(
         !close.is_finished(),
         "shutdown close must join the open it cancelled, not skip it"
@@ -286,7 +306,15 @@ async fn shutdown_close_cancels_and_joins_an_in_flight_open() {
         ),
         "a cancelled open publishes nothing: {opened:?}"
     );
-    assert_eq!(close.await.unwrap().unwrap(), 1, "only the profile runtime");
+    assert_eq!(
+        close
+            .join(&asupersync::Cx::current().unwrap())
+            .await
+            .unwrap()
+            .unwrap(),
+        1,
+        "only the profile runtime"
+    );
     let inventory = registry.inventory(AdmissionConfigV1::default(), None);
     assert_eq!(inventory.opening_shards, 0);
     assert_eq!(inventory.entries.len(), 0);
@@ -308,7 +336,7 @@ async fn shutdown_close_cancels_and_joins_an_in_flight_open() {
     assert_eq!(publisher.calls.load(Ordering::SeqCst), 2);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn profile_pin_budget_and_all_runtime_blockers_are_authoritative() {
     let config = StoreRuntimeRegistryConfig::new(2).unwrap();
     let (registry, _, _publisher) = registry(config);
@@ -366,7 +394,7 @@ async fn profile_pin_budget_and_all_runtime_blockers_are_authoritative() {
     ));
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn profile_sessions_require_the_profile_pin_without_consuming_project_capacity() {
     let config = StoreRuntimeRegistryConfig::new(1).unwrap();
     let (registry, _, _) = registry(config);
@@ -395,7 +423,7 @@ async fn profile_sessions_require_the_profile_pin_without_consuming_project_capa
     ));
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn project_memory_and_sessions_do_not_consume_code_capacity() {
     let config = StoreRuntimeRegistryConfig::new(1).unwrap();
     let (registry, _, _) = registry(config);
@@ -426,12 +454,13 @@ async fn project_memory_and_sessions_do_not_consume_code_capacity() {
     }
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn epochs_are_monotonic_across_registries_and_respect_a_retained_floor() {
     let resolver: Arc<dyn StoreRuntimeResolver> = Arc::new(TestResolver::default());
     let publisher: Arc<dyn ShardRuntimePublisher> = Arc::new(TestPublisher::default());
     let floor = StoreAuthorityEpochV1::new(1_000_000).unwrap();
     let first = StoreRuntimeRegistry::with_config_and_authority_epoch_floor(
+        asupersync::runtime::Runtime::current_handle().unwrap(),
         resolver.clone(),
         publisher.clone(),
         StoreRuntimeRegistryConfig::default(),
@@ -443,7 +472,12 @@ async fn epochs_are_monotonic_across_registries_and_respect_a_retained_floor() {
         StoreRuntimeOpenRequest::new(profile_shard(), incarnation(), None),
     )
     .await;
-    let second = StoreRuntimeRegistry::new(resolver, publisher);
+    let second = StoreRuntimeRegistry::new(
+        asupersync::runtime::Runtime::current_handle().unwrap(),
+        resolver,
+        publisher,
+    )
+    .unwrap();
     let second = open_published(
         &second,
         StoreRuntimeOpenRequest::new(profile_shard(), incarnation(), None),
@@ -485,7 +519,7 @@ fn exact_sql_authority_rechecks_opened_file_identity() {
 }
 
 #[cfg(unix)]
-#[tokio::test]
+#[asupersync::test]
 async fn registered_identity_inspection_failures_preserve_operation_and_safe_category() {
     use crate::db::{
         Database, DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
@@ -576,5 +610,52 @@ async fn registered_identity_inspection_failures_preserve_operation_and_safe_cat
         exact_sql_error,
         ExactSqlError::AuthorityDenied(message)
             if message == "execute registered exact SQL statement: registered SQLite file identity inspection failed: inspect failed (not_found)"
+    ));
+}
+
+#[asupersync::test]
+async fn cancelling_an_open_waiter_preserves_owned_publication_and_shutdown_drain() {
+    let cx = asupersync::Cx::current().unwrap();
+    let (registry, _, publisher) = registry(StoreRuntimeRegistryConfig::default());
+    let pin = profile_pin(&registry).await;
+    publisher.block.store(true, Ordering::SeqCst);
+    let request = project_request("project.cancelled-waiter", &pin);
+    let opening = registry.begin_or_join_open(&request);
+    wait_for_calls(&publisher.calls, 2).await;
+    let joined = registry.begin_or_join_open(&request);
+    let (started, mut waiting) = asupersync::channel::oneshot::channel();
+    let mut waiter = cx
+        .spawn(move |cx| async move {
+            started.send(&cx, ()).unwrap();
+            opening.wait().await
+        })
+        .unwrap();
+    waiting.recv(&cx).await.unwrap();
+    waiter.abort();
+    assert!(matches!(
+        waiter.join(&cx).await.unwrap(),
+        StoreRuntimeOpenResult::Failed(StoreRuntimeRegistryFailure::WaitCancelled {
+            operation: "wait for registered runtime open",
+        })
+    ));
+    assert_eq!(
+        registry
+            .inventory(AdmissionConfigV1::default(), None)
+            .opening_shards,
+        1
+    );
+    publisher.release.notify_one();
+    let published = match joined.wait().await {
+        StoreRuntimeOpenResult::Published(published) => published,
+        other @ StoreRuntimeOpenResult::Failed(_) => {
+            panic!("accepted open lost its owner: {other:?}")
+        }
+    };
+    let binding = published.binding().clone();
+    drop((published, request, pin));
+    assert_eq!(registry.close_idle_for_shutdown().await.unwrap(), 2);
+    assert!(matches!(
+        registry.lookup(&binding),
+        StoreRuntimeLookup::Missing { .. }
     ));
 }

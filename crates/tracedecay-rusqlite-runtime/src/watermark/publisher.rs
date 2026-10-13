@@ -1,8 +1,7 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
-
-use tokio::sync::watch;
+use std::sync::Mutex;
 use tracedecay_store::{
     CommitSequenceV1, ShardWatermarkV1, StoreCommitReceiptV1, StoreRuntimeBindingV1, StoreShardIdV1,
 };
@@ -32,7 +31,7 @@ impl fmt::Display for CommitWatermarkPublicationError {
             Self::MissingShard(shard_id) => {
                 write!(
                     formatter,
-                    "committed watermark publisher has no channel for shard {shard_id:?}"
+                    "committed watermark publisher has no watermark for shard {shard_id:?}"
                 )
             }
             Self::WrongIncarnation(shard_id) => {
@@ -62,16 +61,12 @@ impl fmt::Display for CommitWatermarkPublicationError {
 
 impl Error for CommitWatermarkPublicationError {}
 
-struct Channels {
-    by_shard: BTreeMap<StoreShardIdV1, watch::Sender<ShardWatermarkV1>>,
-}
-
 /// The small capability a writer calls only after its transaction commits.
 ///
 /// Publication is strictly monotonic and fenced to the bindings supplied at
 /// construction.
 pub struct CommittedWatermarkPublisher {
-    channels: Channels,
+    watermarks: BTreeMap<StoreShardIdV1, Mutex<ShardWatermarkV1>>,
 }
 
 impl CommittedWatermarkPublisher {
@@ -97,7 +92,7 @@ impl CommittedWatermarkPublisher {
         for watermark in watermarks {
             let shard_id = watermark.shard_id.clone();
             if by_shard
-                .insert(shard_id.clone(), watch::channel(watermark).0)
+                .insert(shard_id.clone(), Mutex::new(watermark))
                 .is_some()
             {
                 return Err(CommitWatermarkPublicationError::DuplicateShard(Box::new(
@@ -106,16 +101,18 @@ impl CommittedWatermarkPublisher {
             }
         }
         Ok(Self {
-            channels: Channels { by_shard },
+            watermarks: by_shard,
         })
     }
 
     #[cfg(test)]
     pub(crate) fn current(&self, shard_id: &StoreShardIdV1) -> Option<ShardWatermarkV1> {
-        self.channels
-            .by_shard
-            .get(shard_id)
-            .map(|sender| sender.borrow().clone())
+        self.watermarks.get(shard_id).map(|watermark| {
+            watermark
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        })
     }
 
     pub fn publish_committed(
@@ -134,37 +131,33 @@ impl CommittedWatermarkPublisher {
         &self,
         watermark: ShardWatermarkV1,
     ) -> Result<(), CommitWatermarkPublicationError> {
-        let Some(sender) = self.channels.by_shard.get(&watermark.shard_id) else {
+        let Some(watermark_cell) = self.watermarks.get(&watermark.shard_id) else {
             return Err(CommitWatermarkPublicationError::MissingShard(Box::new(
                 watermark.shard_id,
             )));
         };
 
-        let mut outcome = Ok(());
-        sender.send_if_modified(|current| {
-            if current.incarnation != watermark.incarnation {
-                outcome = Err(CommitWatermarkPublicationError::WrongIncarnation(Box::new(
-                    watermark.shard_id.clone(),
-                )));
-                return false;
-            }
-            if current.authority_epoch != watermark.authority_epoch {
-                outcome = Err(CommitWatermarkPublicationError::WrongAuthorityEpoch(
-                    Box::new(watermark.shard_id.clone()),
-                ));
-                return false;
-            }
-            if watermark.commit_sequence <= current.commit_sequence {
-                outcome = Err(CommitWatermarkPublicationError::NonMonotonic {
-                    shard_id: Box::new(watermark.shard_id.clone()),
-                    current: current.commit_sequence,
-                    attempted: watermark.commit_sequence,
-                });
-                return false;
-            }
-            *current = watermark;
-            true
-        });
-        outcome
+        let mut current = watermark_cell
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if current.incarnation != watermark.incarnation {
+            return Err(CommitWatermarkPublicationError::WrongIncarnation(Box::new(
+                watermark.shard_id,
+            )));
+        }
+        if current.authority_epoch != watermark.authority_epoch {
+            return Err(CommitWatermarkPublicationError::WrongAuthorityEpoch(
+                Box::new(watermark.shard_id),
+            ));
+        }
+        if watermark.commit_sequence <= current.commit_sequence {
+            return Err(CommitWatermarkPublicationError::NonMonotonic {
+                shard_id: Box::new(watermark.shard_id),
+                current: current.commit_sequence,
+                attempted: watermark.commit_sequence,
+            });
+        }
+        *current = watermark;
+        Ok(())
     }
 }

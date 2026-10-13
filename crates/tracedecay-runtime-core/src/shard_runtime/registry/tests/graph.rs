@@ -54,10 +54,11 @@ impl StoreRuntimeResolver for TemporaryGraphPathResolver {
     }
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn graph_db_map_owner_is_not_counted_as_an_ordinary_store_graph_client() {
     let directory = tempfile::tempdir().unwrap();
     let store_registry = StoreRuntimeRegistry::with_config(
+        asupersync::runtime::Runtime::current_handle().unwrap(),
         Arc::new(TemporaryGraphPathResolver {
             graph_path: directory.path().join("project.grafeo"),
         }),
@@ -111,7 +112,7 @@ async fn graph_db_map_owner_is_not_counted_as_an_ordinary_store_graph_client() {
     assert_eq!(store_registry.retained_graph_publications_for_test(), 1);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn graph_map_owner_issued_operation_lease_is_an_ordinary_token_and_releases_on_drop() {
     let (store_registry, resolver, _) = registry(StoreRuntimeRegistryConfig::default());
     let pin = profile_pin(&store_registry).await;
@@ -155,7 +156,7 @@ async fn graph_map_owner_issued_operation_lease_is_an_ordinary_token_and_release
     assert_eq!(store_registry.retained_graph_publications_for_test(), 0);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn reserved_graph_map_owner_cannot_issue_operation_leases() {
     let (store_registry, _, _) = registry(StoreRuntimeRegistryConfig::default());
     let pin = profile_pin(&store_registry).await;
@@ -186,7 +187,7 @@ async fn reserved_graph_map_owner_cannot_issue_operation_leases() {
     drop(owner_attachment);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn graph_map_owner_operation_lease_rejects_foreign_and_stale_identities() {
     let (store_registry, _, _) = registry(StoreRuntimeRegistryConfig::default());
     let pin = profile_pin(&store_registry).await;
@@ -246,7 +247,7 @@ async fn graph_map_owner_operation_lease_rejects_foreign_and_stale_identities() 
     drop(owner_attachment);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn graph_map_owner_attachment_rejects_a_second_map_owner() {
     let (store_registry, _, _) = registry(StoreRuntimeRegistryConfig::default());
     let pin = profile_pin(&store_registry).await;
@@ -268,7 +269,7 @@ async fn graph_map_owner_attachment_rejects_a_second_map_owner() {
     ));
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn exact_graph_scopes_publish_without_a_physical_runtime() {
     let (registry, resolver, publisher) = registry(StoreRuntimeRegistryConfig::default());
     let pin = profile_pin(&registry).await;
@@ -302,7 +303,7 @@ async fn exact_graph_scopes_publish_without_a_physical_runtime() {
     assert_eq!(registry.retained_graph_publications_for_test(), 0);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn linked_worktree_code_scopes_share_one_project_graph_lease() {
     let (registry, resolver, publisher) = registry(StoreRuntimeRegistryConfig::default());
     let pin = profile_pin(&registry).await;
@@ -386,7 +387,7 @@ async fn linked_worktree_code_scopes_share_one_project_graph_lease() {
     assert_eq!(registry.retained_graph_publications_for_test(), 0);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn broad_profile_graph_scope_is_rejected_before_resolution() {
     let (registry, resolver, publisher) = registry(StoreRuntimeRegistryConfig::default());
     let error = registry
@@ -402,7 +403,7 @@ async fn broad_profile_graph_scope_is_rejected_before_resolution() {
     assert_eq!(publisher.calls.load(Ordering::SeqCst), 0);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn graph_and_relational_publications_share_one_exact_binding() {
     let (registry, _, _) = registry(StoreRuntimeRegistryConfig::default());
     let pin = profile_pin(&registry).await;
@@ -424,7 +425,7 @@ async fn graph_and_relational_publications_share_one_exact_binding() {
     assert_eq!(graph_after.binding(), relational_first.binding());
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn concurrent_relational_open_reuses_its_reserved_binding_for_graph() {
     let (registry, _, publisher) = registry(StoreRuntimeRegistryConfig::default());
     let pin = profile_pin(&registry).await;
@@ -448,7 +449,7 @@ async fn concurrent_relational_open_reuses_its_reserved_binding_for_graph() {
     assert_eq!(graph.binding(), relational.binding());
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn graph_lease_drop_is_counted_and_epoch_compare_and_swap_safe() {
     let (registry, _, _) = registry(StoreRuntimeRegistryConfig::default());
     let pin = profile_pin(&registry).await;

@@ -43,12 +43,51 @@ fn query_execution_time_is_bounded() {
                 SELECT count(*) FROM n AS left_n CROSS JOIN n AS right_n",
             vec![],
         ),
+        ExactSqlStatementBudget::Request,
     )
     .unwrap_err();
 
     assert!(matches!(error, ExactSqlError::Sqlite { code: Some(9), .. }));
     // The interrupt must land near the execution limit, not multiples beyond.
     assert!(clock.elapsed() < EXACT_SQL_EXECUTION_LIMIT * 2);
+}
+
+#[test]
+fn convergence_query_runs_past_the_request_deadline() {
+    // A store-sized audit scan on a large store outlives any request
+    // deadline; interrupting it reproduces #3760's "SQLite advance query
+    // failed: interrupted" on every open.
+    let clock = FakeClock::ticking(EXACT_SQL_EXECUTION_LIMIT / 4);
+    clock.install();
+    let connection = rusqlite::Connection::open_in_memory().unwrap();
+    let scan = || {
+        statement(
+            "WITH RECURSIVE n(value) AS (
+                    VALUES(1)
+                    UNION ALL
+                    SELECT value + 1 FROM n WHERE value < 100000
+                )
+                SELECT count(*) FROM n",
+            vec![],
+        )
+    };
+
+    let error = execute_query(&connection, scan(), ExactSqlStatementBudget::Request).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            ExactSqlError::Sqlite {
+                operation: "advance query",
+                code: Some(9),
+                ..
+            }
+        ),
+        "a request-budget scan past the deadline is interrupted: {error}"
+    );
+
+    let rows = execute_query(&connection, scan(), ExactSqlStatementBudget::Convergence)
+        .expect("a convergence-budget scan has no wall-clock deadline");
+    assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(100_000)]);
 }
 
 #[test]

@@ -89,6 +89,7 @@ fn assert_family_mount(binding: StoreRuntimeBindingV1, path: &std::path::Path) {
     );
     let attachment = RepositoryPhysicalAttachmentFactory
         .attach(
+            &tracedecay_rusqlite_runtime::native_runtime::handle().expect("native runtime"),
             binding.clone(),
             locator,
             path.to_path_buf(),

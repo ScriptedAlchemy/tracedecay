@@ -15,7 +15,7 @@ fn queued_fact_write_rechecks_authority_before_opening_a_transaction() {
         .unwrap();
 
     let queued_outcome = runtime
-        .block_on(writer.submit_authorized(request, probe, authority))
+        .block_on(writer.submit_authorized(&cx(), request, probe, authority))
         .unwrap();
 
     assert_eq!(
@@ -72,7 +72,7 @@ fn queued_anchor_writes_recheck_authority_before_sql_dispatch() {
         .unwrap();
 
     let outcome = runtime
-        .block_on(writer.submit_authorized(request, probe, authority))
+        .block_on(writer.submit_authorized(&cx(), request, probe, authority))
         .unwrap();
 
     assert_eq!(
@@ -122,7 +122,7 @@ fn fact_write_rechecks_authority_before_outer_commit_and_rolls_back() {
         .unwrap();
 
     let outcome = runtime
-        .block_on(writer.submit_authorized(request, probe, authority))
+        .block_on(writer.submit_authorized(&cx(), request, probe, authority))
         .unwrap();
 
     assert_eq!(
@@ -148,7 +148,9 @@ fn fact_write_rechecks_authority_before_outer_commit_and_rolls_back() {
     );
     let retry_probe = Arc::new(Probe::new(&retry, None));
     assert!(matches!(
-        runtime.block_on(writer.submit(retry, retry_probe)).unwrap(),
+        runtime
+            .block_on(writer.submit(&cx(), retry, retry_probe))
+            .unwrap(),
         RuntimeSubmitOutcomeV1::Committed { .. }
     ));
     assert_eq!(applied.load(Ordering::SeqCst), 2);

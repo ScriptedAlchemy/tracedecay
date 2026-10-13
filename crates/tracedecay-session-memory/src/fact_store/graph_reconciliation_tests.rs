@@ -1054,7 +1054,11 @@ async fn reconciliation_pass_loads_large_payload_source_once() {
     // source load through the same telemetry a settled pass records.
     let observer = database.project_memory_reconciliation_telemetry_observer();
     let before_single = observer.snapshot();
-    super::graph::publish_project_memory_graph_after_write(database.clone()).await;
+    super::graph::publish_project_memory_graph_after_write(
+        &tracedecay_runtime_core::native_runtime::cx().unwrap(),
+        database.clone(),
+    )
+    .await;
     let single = observer.snapshot();
     assert_eq!(
         single.reconciliation_passes,
@@ -1073,7 +1077,11 @@ async fn reconciliation_pass_loads_large_payload_source_once() {
 
     let runtime = bind_runtime(&database);
     let before_pass = observer.snapshot();
-    super::graph::publish_project_memory_graph_after_write(database.clone()).await;
+    super::graph::publish_project_memory_graph_after_write(
+        &tracedecay_runtime_core::native_runtime::cx().unwrap(),
+        database.clone(),
+    )
+    .await;
     let after_pass = observer.snapshot();
 
     assert_eq!(runtime.reconcile_calls.load(Ordering::SeqCst), 1);
@@ -1118,7 +1126,11 @@ async fn source_mutation_during_publication_conflicts_and_republishes() {
     runtime.arm_graph_access_hold();
     let publisher_database = database.clone();
     let held_publisher = tokio::spawn(async move {
-        super::graph::publish_project_memory_graph_after_write(publisher_database).await;
+        super::graph::publish_project_memory_graph_after_write(
+            &tracedecay_runtime_core::native_runtime::cx().unwrap(),
+            publisher_database,
+        )
+        .await;
     });
     runtime.wait_for_held_graph_access().await;
     let held = observer.snapshot();

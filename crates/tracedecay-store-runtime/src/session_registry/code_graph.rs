@@ -690,7 +690,6 @@ pub(crate) struct RetainedCodeGraphRuntimeV1 {
     sealed_state_digest: tracedecay_graph_db::SealedGraphStateDigest,
     lifecycle_cancelled: Arc<AtomicBool>,
     operation_task_owner: Arc<RuntimeOperationTaskOwnerV1>,
-    operation_runtime: tokio::runtime::Handle,
     /// Registry-owned per-project-publication-shard locks; see
     /// `DaemonSessionRuntimeRegistryV1::code_graph_publication_gates`.
     publication_locks: Arc<CodeGraphShardPublicationLocksV1>,
@@ -1796,21 +1795,11 @@ impl RetainedCodeGraphRuntimeV1 {
             }
             let _ = release_process_allocator_memory_v1();
         };
-        // Publication also runs on plain measurement threads. Enter the
-        // runtime captured at mount so those calls use the same task owner.
-        let _entered = self.operation_runtime.enter();
-        if !self.operation_task_owner.retain(async move {
-            if let Err(error) = tokio::task::spawn_blocking(sweep).await {
-                tracing::warn!(
-                    event = "graph_staging_release_failed",
-                    error = %error,
-                    "staging release worker failed; maintenance will retry the release"
-                );
-            }
-        }) {
+        if let Err(error) = self.operation_task_owner.retain_blocking(sweep) {
             tracing::warn!(
                 event = "graph_staging_release_failed",
-                "staging release admission closed; maintenance will retry the release"
+                error = %error,
+                "staging release admission failed; maintenance will retry the release"
             );
             let _ = release_process_allocator_memory_v1();
         }
@@ -2688,9 +2677,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             .map_err(|error| {
                 session_registry_error("bind code graph replay route", error.to_string())
             })?;
-        let operation_runtime = tokio::runtime::Handle::try_current().map_err(|error| {
-            session_registry_error("retain code graph operation runtime", error.to_string())
-        })?;
         let publication_locks = self.retain_project_publication_locks(&project_shard);
         Ok(RetainedCodeGraphRuntimeV1 {
             graph_registry: self.graph_registry.clone(),
@@ -2707,7 +2693,6 @@ impl DaemonSessionRuntimeRegistryV1 {
             sealed_state_digest: replay_binding.sealed_state_digest,
             lifecycle_cancelled: Arc::clone(&self.graph_lifecycle_cancelled),
             operation_task_owner: Arc::clone(&self.operation_task_owner),
-            operation_runtime,
             publication_locks,
         })
     }

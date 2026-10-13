@@ -1,5 +1,7 @@
 use std::sync::atomic::Ordering;
 
+use tracedecay_runtime_core::Cx;
+
 use super::DaemonSessionRuntimeRegistryV1;
 
 impl DaemonSessionRuntimeRegistryV1 {
@@ -18,11 +20,11 @@ impl DaemonSessionRuntimeRegistryV1 {
         level = "trace",
         skip_all
     )]
-    pub async fn shutdown_terminal_tasks(&self) -> Result<(), String> {
+    pub async fn shutdown_terminal_tasks(&self, cx: &Cx) -> Result<(), String> {
         self.cancel_terminal_tasks();
         let mut failures = Vec::new();
-        if let Err(error) = self.operation_task_owner.shutdown().await {
-            failures.push(error);
+        if let Err(error) = self.operation_task_owner.shutdown(cx).await {
+            failures.push(error.to_string());
         }
         if let Err(error) = self.retained_hook_tasks.shutdown().await {
             failures.push(error);

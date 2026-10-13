@@ -16,6 +16,7 @@ default = []
 test-transport = ["tracedecay-runtime-core/test-transport"]
 
 [dependencies]
+asupersync.workspace = true
 hex = "0.4"
 regex = "1.12.3"
 memmap2 = "0.9"
