@@ -43,14 +43,11 @@ pub struct VerifiedHealthSnapshotV1 {
 }
 
 impl VerifiedHealthSnapshotV1 {
-    /// Why `dimension` measured nothing in this scope, or `None` when its
-    /// score is a measurement.
     pub fn no_evidence(&self, dimension: HealthDimension) -> Option<NoEvidence> {
         dimension.no_evidence(dimension.denominator(self), self.files_analyzed as u64)
     }
 }
 
-/// One scored dimension of the health panel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HealthDimension {
     Acyclicity,
@@ -71,8 +68,6 @@ impl HealthDimension {
         Self::Redundancy,
     ];
 
-    /// The dimension's key in the panel, the report, and persisted
-    /// health-delta points.
     pub const fn name(self) -> &'static str {
         match self {
             Self::Acyclicity => "acyclicity",
@@ -95,13 +90,10 @@ impl HealthDimension {
         }
     }
 
-    /// The score in parts per million, as health-delta points persist it.
     pub fn score_ppm(self, snapshot: &VerifiedHealthSnapshotV1) -> u64 {
         (self.score(snapshot).clamp(0.0, 1.0) * 1_000_000.0).round() as u64
     }
 
-    /// The count the score is measured over, as health-delta points persist
-    /// it; `None` when that count is zero.
     pub fn denominator(self, snapshot: &VerifiedHealthSnapshotV1) -> Option<u64> {
         let count = match self {
             Self::Acyclicity => snapshot.total_edges,
@@ -113,8 +105,6 @@ impl HealthDimension {
         (count > 0).then_some(count)
     }
 
-    /// The one evidence rule. It reads only values a persisted health-delta
-    /// point carries, so a stored point and a live snapshot are judged alike.
     pub fn no_evidence(self, denominator: Option<u64>, files_analyzed: u64) -> Option<NoEvidence> {
         if files_analyzed == 0 {
             return Some(NoEvidence::NoFiles);
@@ -138,8 +128,6 @@ impl HealthDimension {
     }
 }
 
-/// Why a dimension's score is the formula's value for an empty measurement
-/// rather than a measurement of the scope.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NoEvidence {
     NoFiles,
@@ -688,9 +676,6 @@ pub struct HealthDimensions {
     pub coverage_discipline: f64,
 }
 
-/// Measured dimensions, worst score first with ties broken by name, then
-/// `no evidence: name (reason), ...` for the dimensions the scope gave
-/// nothing to measure.
 pub fn health_panel(snapshot: &VerifiedHealthSnapshotV1) -> String {
     if snapshot.files_analyzed == 0 {
         return format!("no evidence: {}", NoEvidence::NoFiles.label());
