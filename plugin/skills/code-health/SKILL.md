@@ -8,7 +8,9 @@ description: Assess project or directory architecture, coupling, and structural 
 Start with the requested project's health dimensions, then investigate the weak
 ones: cycles and depth for architecture, modularity and coupling for boundaries,
 and test risk for poorly covered hubs. A score is a lead, not a finding; inspect
-the implicated code and its callers.
+the implicated code and its callers. Skip the dimensions the panel lists under
+`no evidence:`; the scope gave them nothing to measure, and `quality_signal`
+does not summarize such a scope.
 
 Check indexed coverage before comparing scores. Unmounted files may look healthy
 in the graph while no build root reaches them; inspect the real build or runtime
