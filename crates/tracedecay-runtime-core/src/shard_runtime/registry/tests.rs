@@ -647,7 +647,9 @@ async fn cancelling_an_open_waiter_preserves_owned_publication_and_shutdown_drai
     publisher.release.notify_one();
     let published = match joined.wait().await {
         StoreRuntimeOpenResult::Published(published) => published,
-        other => panic!("accepted open lost its owner: {other:?}"),
+        other @ StoreRuntimeOpenResult::Failed(_) => {
+            panic!("accepted open lost its owner: {other:?}")
+        }
     };
     let binding = published.binding().clone();
     drop((published, request, pin));

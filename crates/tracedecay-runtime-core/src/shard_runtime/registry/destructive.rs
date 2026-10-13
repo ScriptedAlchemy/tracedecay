@@ -327,10 +327,10 @@ impl StoreRuntimeRegistry {
     }
 
     fn release_destructive_after_cancellation(&self, attempt: u64) {
-        if let Some(reservation) = self.lock_state().destructive_paths.remove(&attempt) {
-            if let Err(error) = reservation.released.send(true) {
-                tracing::error!(%error, "failed to publish destructive reservation release");
-            }
+        if let Some(reservation) = self.lock_state().destructive_paths.remove(&attempt)
+            && let Err(error) = reservation.released.send(true)
+        {
+            tracing::error!(%error, "failed to publish destructive reservation release");
         }
     }
 }

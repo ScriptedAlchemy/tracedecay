@@ -668,21 +668,18 @@ impl ProcessSampler {
         };
         let mut completion_generation = self.completion_generation.subscribe();
         self.read();
-        if lock_cache(&self.cache).sample_in_flight {
-            match asupersync::time::timeout(
+        let sample_in_flight = lock_cache(&self.cache).sample_in_flight;
+        if sample_in_flight
+            && let Ok(Err(error)) = asupersync::time::timeout(
                 asupersync::time::wall_now(),
                 PROCESS_SAMPLE_RESPONSE_WAIT_BOUND,
                 completion_generation.changed(&cx),
             )
             .await
-            {
-                Ok(Err(error)) => {
-                    return ProcessTelemetry::SampleFailed {
-                        error: format!("process sample completion unavailable: {error}"),
-                    };
-                }
-                Ok(Ok(())) | Err(_) => {}
-            }
+        {
+            return ProcessTelemetry::SampleFailed {
+                error: format!("process sample completion unavailable: {error}"),
+            };
         }
         self.read()
     }

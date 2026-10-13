@@ -489,7 +489,7 @@ async fn reconcile_project_memory_graph_pass(
                 .reconcile_verified_manifest(&manifest, idempotency_key)
         })
         .map_err(|error| storage_error(OPERATION, error))?
-        .join(&cx)
+        .join(cx)
         .await
         .map_err(|error| storage_error(OPERATION, error))?
     {
@@ -592,7 +592,7 @@ async fn verified_head_matching(
                 .verified_snapshot(&projection_for_read, read_control)
         })
         .map_err(|error| storage_error(OPERATION, error))?
-        .join(&cx)
+        .join(cx)
         .await
         .map_err(|error| storage_error(OPERATION, error))?
         .map_err(|error| graph_error(owner, error))?;

@@ -74,7 +74,7 @@ pub(super) fn materialize_on_thread(path: &Path, control: &SnapshotReadControl) 
     drop(connection);
     control.checkpoint()?;
     for suffix in ["-wal", "-shm"] {
-        match fs::remove_file(with_suffix(&path, suffix)) {
+        match fs::remove_file(with_suffix(path, suffix)) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),

@@ -1230,9 +1230,10 @@ mod tests {
         .expect("lifecycle retry must settle without another write");
         wait_until(|| reconciliation_retirement_is_admissible(&owner)).await;
         assert_eq!(calls.load(Ordering::SeqCst), 3);
-        let attempt_times = attempt_times.lock().unwrap();
-        assert!(attempt_times[2].duration_since(attempt_times[1]) >= AUTOMATIC_RETRY_BASE);
-        drop(attempt_times);
+        {
+            let attempt_times = attempt_times.lock().unwrap();
+            assert!(attempt_times[2].duration_since(attempt_times[1]) >= AUTOMATIC_RETRY_BASE);
+        }
         assert!(!owner.pending());
         owner.shutdown().await.expect("join reconciler worker");
     }

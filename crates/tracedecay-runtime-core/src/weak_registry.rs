@@ -228,9 +228,10 @@ mod single_flight_tests {
                 .await;
             assert!(matches!(failed, Err(TraceDecayError::Config { .. })));
             {
-                let mut cancelled = pin!(registry.get_or_open("a", || std::future::pending::<
-                    Result<usize, TraceDecayError>,
-                >()));
+                let mut cancelled = pin!(
+                    registry
+                        .get_or_open("a", std::future::pending::<Result<usize, TraceDecayError>>)
+                );
                 assert!(poll_once(cancelled.as_mut()).is_pending());
             }
             let opened = registry
