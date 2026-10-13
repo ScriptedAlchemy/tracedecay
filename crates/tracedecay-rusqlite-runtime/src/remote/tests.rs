@@ -772,6 +772,13 @@ fn node_revocation_keeps_replay_receipts_and_repeats_its_receipts() {
         .unwrap();
     let replayed = storage.state(&captured.event_id).unwrap();
     assert!(replayed.receipt.is_some());
+    let brain_id = BrainId::new("brain.remote").unwrap();
+    assert!(
+        storage
+            .status_at(&brain_id, UtcMicros(30))
+            .unwrap()
+            .has_active_enrollment
+    );
 
     let revoked = storage
         .revoke_node_enrollments(&enrollment.node_id, UtcMicros(30))
@@ -801,6 +808,66 @@ fn node_revocation_keeps_replay_receipts_and_repeats_its_receipts() {
         "a repeat keeps the first revocation"
     );
     assert_eq!(storage.state(&captured.event_id).unwrap(), replayed);
+    assert!(
+        !storage
+            .status_at(&brain_id, UtcMicros(40))
+            .unwrap()
+            .has_active_enrollment,
+        "a revoked enrollment no longer counts as configured"
+    );
+}
+
+#[test]
+fn node_revocation_spends_only_that_nodes_unredeemed_grants() {
+    let fixture = fixture();
+    let storage = storage(&fixture);
+    let grant = enrollment_grant(&[7_u8; 32]);
+    let admission = enrollment_admission(&grant);
+    storage.store_enrollment_grant(&grant, &admission).unwrap();
+    let mut other = enrollment_grant(&[8_u8; 32]);
+    other.grant_id = EntityId::new("grant.remote.other-node").unwrap();
+    other.node_id = BrainNodeId::new("node.remote.other").unwrap();
+    storage
+        .store_enrollment_grant(&other, &enrollment_admission(&other))
+        .unwrap();
+
+    assert_eq!(
+        storage
+            .revoke_node_grants(&grant.node_id, UtcMicros(30))
+            .unwrap(),
+        vec![grant.grant_id.clone()]
+    );
+    assert_eq!(
+        storage.credential_by_fingerprint(
+            RemoteCredentialClassV1::EnrollmentGrant,
+            &grant.fingerprint
+        ),
+        Err(RemoteCredentialLookupErrorV1::NotFound)
+    );
+    assert_eq!(
+        storage.load_grant(&grant.grant_id),
+        Err(RemoteEnrollmentAuthorityErrorV1::GrantConsumed)
+    );
+    assert!(
+        matches!(
+            storage.store_enrollment_grant(&grant, &admission),
+            Err(RemoteSqliteStorageErrorV1::Corruption)
+        ),
+        "a spent grant cannot be provisioned again"
+    );
+    assert!(
+        storage
+            .credential_by_fingerprint(RemoteCredentialClassV1::EnrollmentGrant, &other.fingerprint)
+            .is_ok(),
+        "another node's grant stays usable"
+    );
+    assert_eq!(
+        storage
+            .revoke_node_grants(&grant.node_id, UtcMicros(40))
+            .unwrap(),
+        Vec::<EntityId>::new(),
+        "a repeat finds nothing left to spend"
+    );
 }
 
 #[test]

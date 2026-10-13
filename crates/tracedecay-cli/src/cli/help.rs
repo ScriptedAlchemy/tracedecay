@@ -728,7 +728,7 @@ frame to an enrolled node, and `query` reads one exact observation and \
 renders the honest remote shard coverage next to the caller's own pending \
 local spool. `revoke` asks the running daemon to revoke every enrollment of \
 a node it provisioned; that node's later capture, transfer and replay are \
-refused as revoked. Protocol actions take a typed `RemoteProtocolRequestV1` \
+refused as revoked, and its unredeemed grants can no longer enroll it. Protocol actions take a typed `RemoteProtocolRequestV1` \
 JSON body from `--request-file` (`-` reads stdin) and send credentials only \
 from files. `--json` emits one canonical JSON line.";
 
