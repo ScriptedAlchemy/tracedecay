@@ -157,7 +157,7 @@ where
 {
     let (answer, mut answered) = asupersync::channel::oneshot::channel();
     // A probe the pool never runs drops its sender, which reads as `ProbeFailed`.
-    if let Ok(runtime) = crate::native_runtime::process_runtime() {
+    if let Some(runtime) = crate::native_runtime::handle() {
         let _ = runtime.spawn_blocking(move || {
             let _ = answer.send_blocking(probe());
         });
@@ -248,9 +248,9 @@ fn join_identity_resolution(directory: &Path) -> PublishedIdentity {
         drop(retire);
         let _ = publish.send(Some(result));
     };
-    // The process runtime owns the walk because callers on any runtime join
-    // it; a caller's own runtime could shut down under the others.
-    if let Ok(runtime) = crate::native_runtime::process_runtime() {
+    // The walk is a detached blocking task, not part of any caller's future,
+    // so a caller that stops waiting leaves it running.
+    if let Some(runtime) = crate::native_runtime::handle() {
         let _ = runtime.spawn_blocking(resolve);
     }
     published
