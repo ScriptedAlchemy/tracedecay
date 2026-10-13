@@ -76,7 +76,7 @@ async fn memory_curator_empty_store_skips_without_a_backend_attempt_and_releases
     };
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
 
-    let run = tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
+    let run = settle_memory_curator(
         &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
@@ -160,7 +160,7 @@ async fn memory_curator_repairs_then_applies_validated_ops_and_records_ledger() 
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let run = tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
+    let run = settle_memory_curator(
         &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
@@ -643,7 +643,7 @@ async fn memory_curator_persists_transient_transient_success_retry_receipt() {
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let run = tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
+    let run = settle_memory_curator(
         &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
@@ -690,7 +690,7 @@ async fn scheduler_memory_curator_applies_validated_ops_automatically() {
     config.tasks.memory_curator.interval_secs = Some(1);
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let run = tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
+    let run = settle_memory_curator(
         &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
@@ -736,7 +736,7 @@ async fn memory_curator_runner_artifacts_block_handoff_without_validation_exampl
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let run = tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
+    let run = settle_memory_curator(
         &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
@@ -831,7 +831,7 @@ async fn memory_curator_quarantines_legacy_output_after_bounded_repair_exhaustio
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let error = tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
+    let error = settle_memory_curator(
         &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
@@ -903,7 +903,7 @@ async fn memory_curator_runner_auto_applies_validated_operations() {
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let run = tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
+    let run = settle_memory_curator(
         &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
@@ -998,7 +998,7 @@ async fn memory_curator_stops_before_backend_or_apply_when_caller_is_interrupted
     let interrupted = Arc::new(AtomicBool::new(true));
     let run_control = test_automation_run_control(Arc::clone(&interrupted));
 
-    let error = tracedecay_automation_runtime::automation::runner::run_memory_curator_with_backend(
+    let error = settle_memory_curator(
         &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),

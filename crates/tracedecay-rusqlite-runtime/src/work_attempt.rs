@@ -74,12 +74,7 @@ pub(crate) fn insert_attempt_in_transaction(
     require_first_run_admission(transaction, authority, attempt)?;
     require_placement_root(transaction, authority, attempt)?;
     if let Some(concurrency) = concurrency {
-        crate::work::capacity::require_capacity(
-            transaction,
-            authority,
-            attempt.identity().task_id(),
-            concurrency,
-        )?;
+        crate::work::capacity::require_capacity(transaction, authority, attempt, concurrency)?;
     }
     {
         let _span = tracing::trace_span!("rusqlite.work_attempt.cas.insert").entered();
@@ -445,12 +440,7 @@ pub(crate) fn insert_synthesis_in_transaction(
     require_first_run_admission(transaction, authority, attempt)?;
     require_placement_root(transaction, authority, attempt)?;
     if let Some(concurrency) = concurrency {
-        crate::work::capacity::require_capacity(
-            transaction,
-            authority,
-            attempt.identity().task_id(),
-            concurrency,
-        )?;
+        crate::work::capacity::require_capacity(transaction, authority, attempt, concurrency)?;
     }
     {
         let _span = tracing::trace_span!("rusqlite.work_attempt.cas.synthesis").entered();

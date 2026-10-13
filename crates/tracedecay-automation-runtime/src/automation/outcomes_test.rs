@@ -71,7 +71,7 @@ fn skill_outcome_requires_an_activation_timestamp() {
     assert!(skill_outcome(&record, 100 * DAY).is_none());
     record.activated_at = Some(10 * DAY);
     let outcome = skill_outcome(&record, 100 * DAY).unwrap();
-    assert_eq!(outcome.verdict, SkillOutcomeVerdict::Ignored);
+    assert_eq!(outcome.verdict, SkillOutcomeVerdict::Unknown);
     assert_eq!(outcome.days_since_activation, 90);
 }
 
@@ -105,8 +105,8 @@ fn unused_skill_inside_window_is_too_early() {
 }
 
 #[test]
-fn unused_skill_past_window_is_ignored() {
-    let mut record = summary("ignored-skill");
+fn unused_skill_past_window_is_unknown() {
+    let mut record = summary("unmeasured-skill");
     record.activated_at = Some(10 * DAY);
     record.view_count_at_activation = Some(2);
     record.use_count_at_activation = Some(0);
@@ -114,7 +114,7 @@ fn unused_skill_past_window_is_ignored() {
     record.last_viewed_at = Some(12 * DAY);
 
     let outcome = skill_outcome(&record, 10 * DAY + SKILL_ACTIVATION_WINDOW_SECS).unwrap();
-    assert_eq!(outcome.verdict, SkillOutcomeVerdict::Ignored);
+    assert_eq!(outcome.verdict, SkillOutcomeVerdict::Unknown);
     assert_eq!(outcome.views_since_activation, 2);
     assert_eq!(outcome.uses_since_activation, 0);
 }
@@ -132,8 +132,32 @@ fn ledger_without_activation_baseline_uses_last_activity_fallback() {
 
     record.last_used_at = Some(9 * DAY);
     let outcome = skill_outcome(&record, 20 * DAY).unwrap();
-    assert_eq!(outcome.verdict, SkillOutcomeVerdict::Ignored);
+    assert_eq!(outcome.verdict, SkillOutcomeVerdict::Unknown);
     assert_eq!(outcome.uses_since_activation, 0);
+}
+
+#[test]
+fn stored_ignored_verdict_loads_and_reserializes_as_unknown() {
+    let stored = json!({
+        "schema_version": 3,
+        "skills": [{
+            "skill_id": "legacy-skill",
+            "activated_at": 10 * DAY,
+            "days_since_activation": 40,
+            "views_since_activation": 1,
+            "uses_since_activation": 0,
+            "verdict": "ignored",
+        }],
+        "facts": [],
+        "skills_refreshed_at": 50 * DAY,
+    });
+
+    let snapshot: AutomationOutcomesSnapshot = serde_json::from_value(stored).unwrap();
+    let reserialized = serde_json::to_value(&snapshot).unwrap();
+
+    assert_eq!(reserialized["skills"][0]["verdict"], "unknown");
+    assert_eq!(reserialized["skills"][0]["activated_at"], 10 * DAY);
+    assert_eq!(reserialized["skills_refreshed_at"], 50 * DAY);
 }
 
 #[test]

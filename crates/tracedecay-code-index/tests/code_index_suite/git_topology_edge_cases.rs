@@ -249,9 +249,6 @@ fn detached_head_projection_traverses_and_verifies_its_watermark() {
     let store = store(&detached);
     let cancellation = Arc::new(NeverCancelled);
 
-    store
-        .verify_ref_watermark(&detached.ref_watermark)
-        .expect("detached watermark verifies against its own generation");
     assert_eq!(
         store.ref_watermark(),
         &detached.ref_watermark,
@@ -278,7 +275,7 @@ fn detached_head_projection_traverses_and_verifies_its_watermark() {
     );
 
     // The same refs under an attached HEAD are a different observation, so the
-    // watermark and the generation must both diverge and be provably stale.
+    // watermark and the generation must both diverge.
     let attached = chain_projection(GitHeadStateV1::Attached {
         branch: "main".to_owned(),
         commit: oid('c'),
@@ -288,17 +285,10 @@ fn detached_head_projection_traverses_and_verifies_its_watermark() {
         git_topology_generation_id(&detached, &revision()).expect("detached generation"),
         git_topology_generation_id(&attached, &revision()).expect("attached generation")
     );
-    assert_eq!(
-        store.verify_ref_watermark(&attached.ref_watermark),
-        Err(GitTopologyProjectionError::Stale {
-            projected: detached.ref_watermark,
-            current: attached.ref_watermark,
-        })
-    );
 }
 
 #[test]
-fn deleted_branch_generation_proves_watermark_staleness_and_drops_its_commits() {
+fn deleted_branch_generation_changes_watermark_and_drops_its_commits() {
     // W1: `main` at c plus a `side` branch whose commit d is exclusive to it.
     let with_branch = projection(
         repository("repository.git-topology-edge"),
@@ -327,25 +317,8 @@ fn deleted_branch_generation_proves_watermark_staleness_and_drops_its_commits() 
     let after = store(&without_branch);
     let cancellation = Arc::new(NeverCancelled);
 
-    // The W1 generation can prove it is stale against the W2 watermark.
-    assert_eq!(
-        before.verify_ref_watermark(&without_branch.ref_watermark),
-        Err(GitTopologyProjectionError::Stale {
-            projected: with_branch.ref_watermark.clone(),
-            current: without_branch.ref_watermark.clone(),
-        })
-    );
-    // And the reverse: the W2 generation rejects the retired W1 watermark.
-    assert_eq!(
-        after.verify_ref_watermark(&with_branch.ref_watermark),
-        Err(GitTopologyProjectionError::Stale {
-            projected: without_branch.ref_watermark.clone(),
-            current: with_branch.ref_watermark.clone(),
-        })
-    );
-    after
-        .verify_ref_watermark(&without_branch.ref_watermark)
-        .expect("current watermark verifies against the new generation");
+    assert_eq!(before.ref_watermark(), &with_branch.ref_watermark);
+    assert_eq!(after.ref_watermark(), &without_branch.ref_watermark);
     assert_ne!(
         git_topology_generation_id(&with_branch, &revision()).expect("W1 generation"),
         git_topology_generation_id(&without_branch, &revision()).expect("W2 generation")

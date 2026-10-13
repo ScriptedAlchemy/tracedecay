@@ -105,12 +105,7 @@ pub(crate) fn insert_retry_bounded_in_transaction(
     require_first_run_admission(transaction, authority, &write.attempt)?;
     crate::work_attempt::require_placement_root(transaction, authority, &write.attempt)?;
     insert_receipt(transaction, authority, write)?;
-    crate::work::capacity::require_capacity(
-        transaction,
-        authority,
-        write.attempt.identity().task_id(),
-        concurrency,
-    )?;
+    crate::work::capacity::require_capacity(transaction, authority, &write.attempt, concurrency)?;
     insert_attempt(transaction, authority, &write.attempt)?;
     Ok(WorkRetryAttemptOutcomeV1::Created {
         receipt: write.receipt.clone(),

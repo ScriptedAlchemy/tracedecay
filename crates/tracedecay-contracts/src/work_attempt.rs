@@ -94,9 +94,11 @@ pub trait WorkAttemptStoragePort: Send + Sync {
         attempt: &WorkAttemptV1,
     ) -> Result<WorkAttemptInsertOutcome, WorkAttemptStorageError>;
 
-    /// Inserts a lease only while the registered topology still has room.
-    /// The capacity check and insertion are one storage transaction so two
-    /// concurrent admissions cannot overbook the project, repository, or task.
+    /// Inserts a lease only while the registered topology still has room and
+    /// the attempt's requested route is below the `max_concurrency` its
+    /// execution snapshot pins. The capacity check and insertion are one
+    /// storage transaction so two concurrent admissions cannot overbook the
+    /// project, repository, task, or route.
     fn insert_bounded(
         &self,
         authority: &WorkAuthority,
@@ -105,7 +107,8 @@ pub trait WorkAttemptStoragePort: Send + Sync {
     ) -> Result<WorkAttemptInsertOutcome, WorkAttemptStorageError>;
 
     /// Reads the same exact project/repository/task capacity counts used by
-    /// bounded insertion without reserving or mutating capacity.
+    /// bounded insertion without reserving or mutating capacity. The route
+    /// limit is not part of this verdict; bounded insertion still applies it.
     fn admission_capacities(
         &self,
         authority: &WorkAuthority,

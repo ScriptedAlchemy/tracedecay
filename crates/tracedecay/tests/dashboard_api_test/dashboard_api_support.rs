@@ -293,9 +293,9 @@ fn spawn_dashboard_server_with_runner(
                 endpoint,
                 tracedecay_project::product_runtime::register_fixture_product_runtime()
                     .build_version(),
-                tracedecay_api::static_dashboard_router(std::sync::Arc::new(
+                tracedecay_api::static_dashboard_router(
                     tracedecay_project::product_runtime::FIXTURE_DASHBOARD_ASSETS,
-                )),
+                ),
                 async move {
                     let _ = shutdown_rx.await;
                 },

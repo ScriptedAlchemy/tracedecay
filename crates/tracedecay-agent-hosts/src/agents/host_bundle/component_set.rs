@@ -8,8 +8,9 @@ use sha2::{Digest, Sha256};
 use tracedecay_host_integration::host_bundle_stale_preview;
 
 use super::control::{
-    component_set_receipt_matches, component_set_receipt_matches_preview,
-    validate_component_set_receipt, validate_component_set_request,
+    ComponentReceiptsV1, component_receipts, component_set_receipt_matches,
+    component_set_receipt_matches_preview, validate_component_set_receipt,
+    validate_component_set_request,
 };
 use super::model::{
     HostComponentSetExecutionRequestV1, HostComponentSetLifecyclePreviewV1,
@@ -133,7 +134,7 @@ struct PreparedHostComponentSetComponentV1 {
     manifest: HostBundleManifestV1,
     content_by_path: BTreeMap<String, Vec<u8>>,
     plan: HostBundleMutationPlanV1,
-    previous_receipt: Option<HostBundleInstallReceiptV1>,
+    receipts: ComponentReceiptsV1,
 }
 
 impl HostBundleWriterV1 {
@@ -273,7 +274,7 @@ impl HostBundleWriterV1 {
             recorded.extend(
                 prepared
                     .iter()
-                    .filter_map(|component| component.previous_receipt.as_ref())
+                    .flat_map(|component| component.receipts.recorded())
                     .flat_map(|receipt| receipt.created_directories.iter().cloned()),
             );
             if predates_creation_records {
@@ -291,6 +292,14 @@ impl HostBundleWriterV1 {
             )?;
             for component_receipt in &receipt.component_receipts {
                 self.write_receipt(component_receipt)?;
+            }
+            // Retire superseded receipts before the aggregate receipt, which
+            // turns a rerun of this operation id into an early-returning replay.
+            for superseded in prepared
+                .iter()
+                .flat_map(|component| &component.receipts.superseded)
+            {
+                self.remove_receipt(superseded.host, superseded.component)?;
             }
             self.write_component_set_receipt(&receipt)?;
             Ok(receipt)
@@ -334,9 +343,14 @@ impl HostBundleWriterV1 {
                 request.lifecycle.operation,
                 &component.contents,
             )?;
-            let previous_receipt =
-                self.load_receipt(component.manifest.host, component.manifest.component)?;
-            let owned_receipt = previous_receipt
+            let receipts = component_receipts(
+                &self.root_path,
+                component.manifest.host,
+                component.manifest.component,
+                |host, component| self.load_receipt(host, component),
+            )?;
+            let owned_receipt = receipts
+                .evidence
                 .as_ref()
                 .filter(|receipt| receipt.operation != HostBundleLifecycleOpV1::Uninstall);
             let manifest_observed =
@@ -422,7 +436,7 @@ impl HostBundleWriterV1 {
                 manifest: component.manifest.clone(),
                 content_by_path,
                 plan,
-                previous_receipt,
+                receipts,
             });
         }
         Ok(prepared)
@@ -480,7 +494,10 @@ impl HostBundleWriterV1 {
         self.undo_artifact_mutations(undo)?;
         self.prune_created_directories(&self.created_directories(missing_before))?;
         for component in prepared.iter().rev() {
-            match &component.previous_receipt {
+            for superseded in &component.receipts.superseded {
+                self.write_receipt(superseded)?;
+            }
+            match &component.receipts.own {
                 Some(receipt) => self.write_receipt(receipt)?,
                 None => self.remove_receipt(component_set.host, component.manifest.component)?,
             }
@@ -516,7 +533,7 @@ fn recorded_creations(
 ) -> (Vec<HostConfigCreationV1>, bool) {
     let previous = prepared
         .iter()
-        .filter_map(|component| component.previous_receipt.as_ref());
+        .flat_map(|component| component.receipts.recorded());
     let predates_records = previous
         .clone()
         .any(|receipt| receipt.created_config.is_none());
@@ -595,7 +612,7 @@ fn component_set_receipt_from_prepared(
                     .mutations
                     .iter()
                     .all(|mutation| mutation.action == HostArtifactActionV1::Noop)
-                && let Some(previous_receipt) = &component.previous_receipt
+                && let Some(previous_receipt) = &component.receipts.evidence
                 && previous_receipt.manifest_digest == component.manifest.canonical_digest()?
             {
                 return Ok(HostBundleInstallReceiptV1 {

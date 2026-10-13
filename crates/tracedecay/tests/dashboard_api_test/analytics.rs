@@ -524,9 +524,9 @@ async fn start_fixture(seed_durable_events: bool) -> Fixture {
                 access,
             },
             tracedecay_project::product_runtime::register_fixture_product_runtime().build_version(),
-            tracedecay_api::static_dashboard_router(std::sync::Arc::new(
+            tracedecay_api::static_dashboard_router(
                 tracedecay_project::product_runtime::FIXTURE_DASHBOARD_ASSETS,
-            )),
+            ),
             std::future::pending(),
         )
         .await;
