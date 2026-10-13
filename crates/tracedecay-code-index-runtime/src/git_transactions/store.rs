@@ -27,6 +27,7 @@ use tracedecay_store::{
 use tracedecay_global_db::{
     GitIndexReadExecutor, GlobalDbGitIndexTransactionStore, RegisteredGlobalDbLeaseV1,
 };
+use tracedecay_runtime_core::native_runtime;
 
 /// The actor queue is intentionally finite: saturation fails closed instead of
 /// accumulating unbounded mutation work while a durable writer is stalled.
@@ -168,16 +169,7 @@ impl DaemonGitIndexTransactionStore {
         let worker = std::thread::Builder::new()
             .name("tracedecay-git-index-store".to_owned())
             .spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build();
-                let Ok(runtime) = runtime else {
-                    let _ = ready.send(Err(GitIndexTransactionStoreError::unavailable(
-                        "failed to start git index store runtime",
-                    )));
-                    return;
-                };
-                let next_expiry = runtime.block_on(database.next_live_preview_input_expiry());
+                let next_expiry = settle(database.next_live_preview_input_expiry());
                 let Ok(next_expiry) = next_expiry else {
                     let _ = ready.send(Err(GitIndexTransactionStoreError::unavailable(
                         "failed to read next live preview input expiry",
@@ -187,7 +179,7 @@ impl DaemonGitIndexTransactionStore {
                 if ready.send(Ok(())).is_err() {
                     return;
                 }
-                run_store_actor(&runtime, &database, &receiver, next_expiry);
+                run_store_actor(&database, &receiver, next_expiry);
             })
             .map_err(GitIndexTransactionStoreError::unavailable)?;
         let startup = started
@@ -435,8 +427,14 @@ impl GitIndexTransactionStore for DaemonGitIndexTransactionStore {
     }
 }
 
+fn settle<T>(
+    operation: impl Future<Output = GitIndexTransactionStoreResult<T>>,
+) -> GitIndexTransactionStoreResult<T> {
+    native_runtime::block_on(operation)
+        .unwrap_or_else(|error| Err(GitIndexTransactionStoreError::unavailable(error)))
+}
+
 fn run_store_actor(
-    runtime: &tokio::runtime::Runtime,
     database: &ActorDatabase,
     receiver: &Receiver<StoreCommand>,
     mut next_expiry: Option<UtcMicros>,
@@ -483,7 +481,7 @@ fn run_store_actor(
         };
         gc_due |= next_expiry.is_some_and(|expires_at| expires_at <= observed_at);
         if gc_due {
-            match runtime.block_on(
+            match settle(
                 database.purge_expired_preview_inputs(
                     observed_at,
                     MAX_GIT_INDEX_PREVIEW_INPUT_GC_BATCH,
@@ -517,7 +515,7 @@ fn run_store_actor(
         match command {
             StoreCommand::SavePreviewInput(input, reply) => {
                 let expires_at = input.expires_at;
-                let result = runtime.block_on(
+                let result = settle(
                     database
                         .git_index_transaction_store()
                         .save_preview_input(input),
@@ -528,7 +526,7 @@ fn run_store_actor(
                 let _ = reply.send(result);
             }
             StoreCommand::ReadPreviewInput(preview_id, observed_at, reply) => {
-                let result = runtime.block_on(
+                let result = settle(
                     database
                         .git_index_transaction_store()
                         .read_preview_input(&preview_id, observed_at),
@@ -536,8 +534,7 @@ fn run_store_actor(
                 let _ = reply.send(result);
             }
             StoreCommand::PurgeExpiredPreviewInputs(observed_at, limit, reply) => {
-                let result =
-                    runtime.block_on(database.purge_expired_preview_inputs(observed_at, limit));
+                let result = settle(database.purge_expired_preview_inputs(observed_at, limit));
                 match result {
                     Ok(result) => {
                         next_expiry = result.next_expiry;
@@ -549,18 +546,17 @@ fn run_store_actor(
                 }
             }
             StoreCommand::SavePreview(preview, reply) => {
-                let result =
-                    runtime.block_on(database.git_index_transaction_store().save_preview(preview));
+                let result = settle(database.git_index_transaction_store().save_preview(preview));
                 let _ = reply.send(result);
             }
             StoreCommand::ReadCode(operation, reply) => {
                 let store = database.git_index_transaction_store();
                 let executor = GitIndexReadExecutor::new(&store);
-                let result = runtime.block_on(executor.execute_read(&operation));
+                let result = settle(executor.execute_read(&operation));
                 let _ = reply.send(result);
             }
             StoreCommand::BeginOrReplay(request, reply) => {
-                let result = runtime.block_on(
+                let result = settle(
                     database
                         .git_index_transaction_store()
                         .begin_or_replay(*request),
@@ -568,7 +564,7 @@ fn run_store_actor(
                 let _ = reply.send(result);
             }
             StoreCommand::CompareAndSwapJournal(key, epoch, replacement, reply) => {
-                let result = runtime.block_on(
+                let result = settle(
                     database
                         .git_index_transaction_store()
                         .compare_and_swap_journal(&key, epoch, replacement),
@@ -576,12 +572,11 @@ fn run_store_actor(
                 let _ = reply.send(result);
             }
             StoreCommand::WriteTerminal(write, reply) => {
-                let result =
-                    runtime.block_on(database.git_index_transaction_store().write_terminal(write));
+                let result = settle(database.git_index_transaction_store().write_terminal(write));
                 let _ = reply.send(result);
             }
             StoreCommand::QuarantineRepository(repository_id, transaction_id, reply) => {
-                let result = runtime.block_on(
+                let result = settle(
                     database
                         .git_index_transaction_store()
                         .quarantine_repository(&repository_id, &transaction_id),
@@ -594,7 +589,7 @@ fn run_store_actor(
                 receipt,
                 reply,
             ) => {
-                let result = runtime.block_on(
+                let result = settle(
                     database
                         .git_index_transaction_store()
                         .clear_repository_quarantine(&repository_id, &transaction_id, receipt),

@@ -24,6 +24,7 @@ use tracedecay_store::{
 };
 
 use tracedecay_global_db::{GlobalDbNativeIntegrationStore, RegisteredGlobalDbLeaseV1};
+use tracedecay_runtime_core::native_runtime;
 
 /// The actor queue is intentionally finite: saturation fails closed instead of
 /// accumulating unbounded mutation work while a durable writer is stalled.
@@ -143,34 +144,10 @@ impl DaemonNativeIntegrationStore {
     )]
     fn open_actor(database: ActorDatabase) -> NativeIntegrationStoreResult<Self> {
         let (commands, receiver) = sync_channel(NATIVE_INTEGRATION_STORE_ACTOR_CAPACITY);
-        let (ready, started) = sync_channel::<NativeIntegrationStoreResult<()>>(1);
         let worker = std::thread::Builder::new()
             .name("tracedecay-native-integration-store".to_owned())
-            .spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build();
-                let Ok(runtime) = runtime else {
-                    let _ = ready.send(Err(NativeIntegrationStoreError::unavailable(
-                        "failed to start native integration store runtime",
-                    )));
-                    return;
-                };
-                if ready.send(Ok(())).is_err() {
-                    return;
-                }
-                run_store_actor(&runtime, &database, &receiver);
-            })
+            .spawn(move || run_store_actor(&database, &receiver))
             .map_err(NativeIntegrationStoreError::unavailable)?;
-        let startup = started
-            .recv_timeout(NATIVE_INTEGRATION_STORE_ACTOR_TIMEOUT)
-            .map_err(NativeIntegrationStoreError::unavailable)
-            .and_then(|result| result);
-        if let Err(error) = startup {
-            drop(commands);
-            let _ = worker.join();
-            return Err(error);
-        }
         Ok(Self {
             commands: Mutex::new(Some(commands)),
             worker: Mutex::new(Some(worker)),
@@ -584,43 +561,46 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
     }
 }
 
-fn run_store_actor(
-    runtime: &tokio::runtime::Runtime,
-    database: &ActorDatabase,
-    receiver: &Receiver<StoreCommand>,
-) {
+fn settle<T>(
+    operation: impl Future<Output = NativeIntegrationStoreResult<T>>,
+) -> NativeIntegrationStoreResult<T> {
+    native_runtime::block_on(operation)
+        .unwrap_or_else(|error| Err(NativeIntegrationStoreError::unavailable(error)))
+}
+
+fn run_store_actor(database: &ActorDatabase, receiver: &Receiver<StoreCommand>) {
     while let Ok(command) = receiver.recv() {
         let store = database.native_integration_store();
         match command {
             StoreCommand::SavePreview(preview, reply) => {
-                let _ = reply.send(runtime.block_on(store.save_preview(*preview)));
+                let _ = reply.send(settle(store.save_preview(*preview)));
             }
             StoreCommand::ReadPreview(preview_id, reply) => {
-                let _ = reply.send(runtime.block_on(store.read_preview(&preview_id)));
+                let _ = reply.send(settle(store.read_preview(&preview_id)));
             }
             StoreCommand::ReadPreviewByDigest(preview_digest, reply) => {
-                let _ = reply.send(runtime.block_on(store.read_preview_by_digest(&preview_digest)));
+                let _ = reply.send(settle(store.read_preview_by_digest(&preview_digest)));
             }
             StoreCommand::SaveApproval(approval, reply) => {
-                let _ = reply.send(runtime.block_on(store.save_approval(*approval)));
+                let _ = reply.send(settle(store.save_approval(*approval)));
             }
             StoreCommand::ReadApproval(approval_id, reply) => {
-                let _ = reply.send(runtime.block_on(store.read_approval(&approval_id)));
+                let _ = reply.send(settle(store.read_approval(&approval_id)));
             }
             StoreCommand::BeginOrReplay(record, reply) => {
-                let _ = reply.send(runtime.block_on(store.begin_or_replay(*record)));
+                let _ = reply.send(settle(store.begin_or_replay(*record)));
             }
             StoreCommand::ReadStatus(transaction_id, reply) => {
-                let _ = reply.send(runtime.block_on(store.read_status(&transaction_id)));
+                let _ = reply.send(settle(store.read_status(&transaction_id)));
             }
             StoreCommand::ReadRecord(transaction_id, reply) => {
-                let _ = reply.send(runtime.block_on(store.read_record(&transaction_id)));
+                let _ = reply.send(settle(store.read_record(&transaction_id)));
             }
             StoreCommand::ReadReceipt(transaction_id, reply) => {
-                let _ = reply.send(runtime.block_on(store.read_receipt(&transaction_id)));
+                let _ = reply.send(settle(store.read_receipt(&transaction_id)));
             }
             StoreCommand::ReadReceiptByDigest(receipt_digest, reply) => {
-                let _ = reply.send(runtime.block_on(store.read_receipt_by_digest(&receipt_digest)));
+                let _ = reply.send(settle(store.read_receipt_by_digest(&receipt_digest)));
             }
             StoreCommand::CompareAndSwapStatus(
                 transaction_id,
@@ -628,7 +608,7 @@ fn run_store_actor(
                 replacement,
                 reply,
             ) => {
-                let _ = reply.send(runtime.block_on(store.compare_and_swap_status(
+                let _ = reply.send(settle(store.compare_and_swap_status(
                     &transaction_id,
                     expected_phase_revision,
                     *replacement,
@@ -640,41 +620,38 @@ fn run_store_actor(
                 receipt,
                 reply,
             ) => {
-                let _ = reply.send(runtime.block_on(store.write_terminal(
+                let _ = reply.send(settle(store.write_terminal(
                     &transaction_id,
                     expected_phase_revision,
                     *receipt,
                 )));
             }
             StoreCommand::PendingTransactions(repository_id, reply) => {
-                let _ = reply
-                    .send(runtime.block_on(store.pending_transactions(repository_id.as_ref())));
+                let _ = reply.send(settle(store.pending_transactions(repository_id.as_ref())));
             }
             StoreCommand::LiveCandidateGenerationBindings(repository_id, observed_at, reply) => {
-                let _ = reply.send(runtime.block_on(
+                let _ = reply.send(settle(
                     store.live_candidate_generation_bindings(&repository_id, observed_at),
                 ));
             }
             StoreCommand::ApprovalConsumed(approval_id, reply) => {
-                let _ = reply.send(runtime.block_on(store.approval_consumed(&approval_id)));
+                let _ = reply.send(settle(store.approval_consumed(&approval_id)));
             }
             StoreCommand::QuarantineRepository(repository_id, transaction_id, reply) => {
-                let _ =
-                    reply
-                        .send(runtime.block_on(
-                            store.quarantine_repository(&repository_id, &transaction_id),
-                        ));
+                let _ = reply.send(settle(
+                    store.quarantine_repository(&repository_id, &transaction_id),
+                ));
             }
             StoreCommand::BeginWorktreeCleanup(transaction, reply) => {
-                let _ = reply.send(runtime.block_on(store.begin_worktree_cleanup(*transaction)));
+                let _ = reply.send(settle(store.begin_worktree_cleanup(*transaction)));
             }
             StoreCommand::ReadWorktreeCleanup(confirmation_digest, reply) => {
-                let _ =
-                    reply.send(runtime.block_on(store.read_worktree_cleanup(&confirmation_digest)));
+                let _ = reply.send(settle(store.read_worktree_cleanup(&confirmation_digest)));
             }
             StoreCommand::PendingWorktreeCleanups(repository_id, limit, reply) => {
-                let _ = reply
-                    .send(runtime.block_on(store.pending_worktree_cleanups(&repository_id, limit)));
+                let _ = reply.send(settle(
+                    store.pending_worktree_cleanups(&repository_id, limit),
+                ));
             }
             StoreCommand::CompareAndSwapWorktreeCleanup(
                 confirmation_digest,
@@ -682,7 +659,7 @@ fn run_store_actor(
                 replacement,
                 reply,
             ) => {
-                let _ = reply.send(runtime.block_on(store.compare_and_swap_worktree_cleanup(
+                let _ = reply.send(settle(store.compare_and_swap_worktree_cleanup(
                     &confirmation_digest,
                     expected_phase_revision,
                     *replacement,
@@ -694,7 +671,7 @@ fn run_store_actor(
                 receipt,
                 reply,
             ) => {
-                let _ = reply.send(runtime.block_on(store.write_worktree_cleanup_terminal(
+                let _ = reply.send(settle(store.write_worktree_cleanup_terminal(
                     &confirmation_digest,
                     expected_phase_revision,
                     *receipt,
