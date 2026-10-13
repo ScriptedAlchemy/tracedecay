@@ -24,11 +24,12 @@ pub struct ContextScoutModelConfig<'a> {
     pub codex: &'a LcmSummarizerExecutableV1,
 }
 
-const CONTEXT_SCOUT_PROMPT_V1: &str = "\
-Select one supplied candidate and return only the JSON object required by the response schema. \
-You may refine suggestion_text, but selected_dedupe_key and cited_anchor_ids must come from that \
-same candidate. Do not call tools, inspect files, run commands, access credentials, mutate state, \
-or add facts not present in the supplied candidates.";
+const CONTEXT_SCOUT_PROMPT: &str = "\
+The request holds one candidate. Return only the JSON object required by the response schema. \
+You may rewrite its suggestion_text for clarity and actionability. Copy its dedupe_key into \
+selected_dedupe_key and its citation_anchor_ids into cited_anchor_ids unchanged. Do not add \
+facts, identifiers, paths, or numbers absent from that candidate. Do not call tools, inspect \
+files, run commands, access credentials, mutate state.";
 
 pub fn context_scout_backend_from_automation_config(
     config: &AutomationConfig,
@@ -216,12 +217,12 @@ fn backend_request(
         serde_json::to_value(request).map_err(|_| ContextScoutModelErrorV1::InvalidOutput)?;
     let contract = AgentTaskContract {
         task_key: "context_scout_v1".to_string(),
-        prompt_version: "context-scout-model-v1".to_string(),
+        prompt_version: "context-scout-model-v2".to_string(),
         response_schema: response_schema(),
         strict_json: true,
     };
     let prompt = format!(
-        "{CONTEXT_SCOUT_PROMPT_V1} The maximum serialized output budget is \
+        "{CONTEXT_SCOUT_PROMPT} The maximum serialized output budget is \
          {max_output_tokens} tokens."
     );
     Ok(AgentTaskRequest::new(
