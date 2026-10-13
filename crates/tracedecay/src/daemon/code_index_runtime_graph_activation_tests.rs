@@ -2283,6 +2283,7 @@ async fn initial_publisher_parks_and_releases_its_graph(
         .await
         .expect("mounted owner activity");
     let mut headroom = owners.subscribe_headroom();
+    let cx = tracedecay_runtime_core::native_runtime::cx().expect("native task context");
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if activity.worker_phase()
@@ -2298,7 +2299,7 @@ async fn initial_publisher_parks_and_releases_its_graph(
             }
             tokio::select! {
                 changed = activity.changed() => changed.expect("live owner activity"),
-                changed = headroom.changed() => changed.expect("live resident owners"),
+                changed = headroom.changed(&cx) => changed.expect("live resident owners"),
             }
         }
     })

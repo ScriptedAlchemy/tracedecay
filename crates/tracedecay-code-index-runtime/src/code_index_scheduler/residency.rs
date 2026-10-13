@@ -93,7 +93,7 @@ impl ParkHeadroomV1 {
     /// lower value; its epoch moving wakes the reader to count again.
     pub(super) fn released_by_others(
         &self,
-        headroom: &mut tokio::sync::watch::Receiver<u64>,
+        headroom: &mut asupersync::channel::watch::Receiver<u64>,
     ) -> u64 {
         let epoch = *headroom.borrow_and_update();
         epoch.saturating_sub(self.0.load(Ordering::Acquire))

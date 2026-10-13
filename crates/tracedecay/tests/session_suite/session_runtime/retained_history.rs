@@ -118,14 +118,14 @@ struct RetryThenBlockHistoricalIngestor {
     passes: WatchedCount,
     cancelled: AtomicBool,
     wake: tokio::sync::Notify,
-    capacity: tokio::sync::watch::Sender<u64>,
+    capacity: asupersync::channel::watch::Sender<u64>,
 }
 
 struct BlockThirdHistoricalIngestor {
     passes: AtomicUsize,
     third_entered: tokio::sync::watch::Sender<bool>,
     release_third: tokio::sync::Notify,
-    capacity: tokio::sync::watch::Sender<u64>,
+    capacity: asupersync::channel::watch::Sender<u64>,
 }
 
 struct CountingDeferredProjector {
@@ -304,7 +304,7 @@ impl RetryThenBlockHistoricalIngestor {
             passes: WatchedCount::default(),
             cancelled: AtomicBool::new(false),
             wake: tokio::sync::Notify::new(),
-            capacity: tokio::sync::watch::Sender::new(0),
+            capacity: asupersync::channel::watch::channel(0).0,
         }
     }
 }
@@ -315,7 +315,7 @@ impl BlockThirdHistoricalIngestor {
             passes: AtomicUsize::new(0),
             third_entered: tokio::sync::watch::Sender::new(false),
             release_third: tokio::sync::Notify::new(),
-            capacity: tokio::sync::watch::Sender::new(0),
+            capacity: asupersync::channel::watch::channel(0).0,
         }
     }
 }
@@ -327,7 +327,7 @@ impl SessionHistoricalIngestor for BlockThirdHistoricalIngestor {
                 0 => SessionHistoricalIngestOutcome::Complete,
                 1 => {
                     // The refused capacity frees while this pass is running.
-                    self.capacity.send_modify(|epoch| *epoch += 1);
+                    self.capacity.send_modify(|epoch| *epoch += 1).unwrap();
                     SessionHistoricalIngestOutcome::Pending {
                         made_progress: false,
                     }
@@ -927,7 +927,7 @@ async fn retrying_history_is_typed_stale() {
         }
     );
 
-    ingestor.capacity.send_modify(|epoch| *epoch += 1);
+    ingestor.capacity.send_modify(|epoch| *epoch += 1).unwrap();
     ingestor.passes.wait_for(|passes| *passes >= 2).await;
 
     registry.shutdown().await;

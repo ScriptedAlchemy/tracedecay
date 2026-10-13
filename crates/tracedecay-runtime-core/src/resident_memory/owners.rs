@@ -23,7 +23,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
-use tokio::sync::watch;
+use asupersync::channel::watch;
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, ProjectId, WorktreeId};
 
 use super::advance_headroom_epoch;
@@ -300,7 +300,7 @@ impl ResidentOwnersV1 {
         Self {
             idle_window,
             state: Mutex::new(OwnersStateV1::default()),
-            headroom: watch::Sender::new(0),
+            headroom: watch::channel(0).0,
         }
     }
 
@@ -998,20 +998,80 @@ mod tests {
         );
 
         assert_eq!(owners.release_idle(start).len(), 0);
-        assert!(
-            !headroom.has_changed().unwrap(),
-            "a sweep that frees nothing"
-        );
+        assert!(!headroom.has_changed(), "a sweep that frees nothing");
 
         assert_eq!(
             owners.release_idle(start + Duration::from_secs(301)).len(),
             1
         );
-        assert!(headroom.has_changed().unwrap());
+        assert!(headroom.has_changed());
         assert_eq!(*headroom.borrow_and_update(), 1);
 
         owners.note_headroom();
         assert_eq!(*headroom.borrow_and_update(), 2);
+    }
+
+    /// A waiter polled by a foreign executor wakes through its own waker: one
+    /// advance wakes every waiter, and dropping the inventory ends the wait.
+    #[test]
+    fn an_advance_wakes_every_waiter_and_a_drop_ends_the_wait() {
+        struct Woken(AtomicBool);
+        impl std::task::Wake for Woken {
+            fn wake(self: Arc<Self>) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        fn poll_all<F: Future + Unpin>(
+            waits: &mut [F],
+            woken: &[Arc<Woken>],
+        ) -> Vec<std::task::Poll<F::Output>> {
+            waits
+                .iter_mut()
+                .zip(woken)
+                .map(|(wait, woken)| {
+                    woken.0.store(false, Ordering::Release);
+                    let waker = std::task::Waker::from(Arc::clone(woken));
+                    std::pin::Pin::new(wait).poll(&mut std::task::Context::from_waker(&waker))
+                })
+                .collect()
+        }
+        let all_woken = |woken: &[Arc<Woken>]| woken.iter().all(|w| w.0.load(Ordering::Acquire));
+
+        let owners = ResidentOwnersV1::new(Duration::from_mins(5));
+        let cx = crate::native_runtime::cx().unwrap();
+        let mut receivers = [(); 2].map(|()| owners.subscribe_headroom());
+        let woken = [(); 2].map(|()| Arc::new(Woken(AtomicBool::new(false))));
+
+        let mut waits: Vec<_> = receivers.iter_mut().map(|r| r.changed(&cx)).collect();
+        assert!(
+            poll_all(&mut waits, &woken)
+                .iter()
+                .all(std::task::Poll::is_pending)
+        );
+        owners.note_headroom();
+        assert!(all_woken(&woken), "one advance wakes every waiter");
+        assert!(
+            poll_all(&mut waits, &woken)
+                .iter()
+                .all(|poll| matches!(poll, std::task::Poll::Ready(Ok(())))),
+        );
+        drop(waits);
+        assert!(receivers.iter().all(|r| *r.borrow() == 1));
+
+        let mut waits: Vec<_> = receivers.iter_mut().map(|r| r.changed(&cx)).collect();
+        assert!(
+            poll_all(&mut waits, &woken)
+                .iter()
+                .all(std::task::Poll::is_pending)
+        );
+        drop(owners);
+        assert!(all_woken(&woken), "dropping the sender wakes every waiter");
+        assert!(
+            poll_all(&mut waits, &woken)
+                .iter()
+                .all(|poll| matches!(poll, std::task::Poll::Ready(Err(_)))),
+            "a dropped sender ends the wait"
+        );
     }
 
     #[test]

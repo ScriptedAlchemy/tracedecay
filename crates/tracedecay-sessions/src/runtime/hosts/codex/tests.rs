@@ -1453,7 +1453,7 @@ mod recent_first_discovery_tests {
         else {
             panic!("the first scan delivers");
         };
-        assert!(!released.has_changed().unwrap());
+        assert!(!released.has_changed());
         hub.acknowledge("profile");
 
         // A consumer joining now replays the source's index, which another
@@ -1479,7 +1479,7 @@ mod recent_first_discovery_tests {
         hub.discover("profile", &source, bounds, first.next_frontier)
             .await
             .unwrap();
-        assert!(released.has_changed().unwrap());
+        assert!(released.has_changed());
     }
 
     #[tokio::test]

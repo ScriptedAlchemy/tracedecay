@@ -68,8 +68,8 @@ use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
+use asupersync::channel::watch;
 use sha2::{Digest, Sha256};
-use tokio::sync::watch;
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_private_fs::{ChangeClockReading, ChangeStamp, RewriteWitness};
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
@@ -156,10 +156,19 @@ pub struct CodexDiscoveryState {
     idle: Option<CodexIdleProbe>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct CodexDiscoveryHub {
     inner: std::sync::Arc<Mutex<CodexDiscoveryHubState>>,
-    scan_released: watch::Sender<u64>,
+    scan_released: std::sync::Arc<watch::Sender<u64>>,
+}
+
+impl Default for CodexDiscoveryHub {
+    fn default() -> Self {
+        Self {
+            inner: std::sync::Arc::default(),
+            scan_released: std::sync::Arc::new(watch::channel(0).0),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -936,7 +945,8 @@ impl CodexDiscoveryHub {
                 }
             })?;
             if std::mem::take(&mut inner.scan_waited) {
-                self.scan_released
+                let _ = self
+                    .scan_released
                     .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
             }
             let Some(source_key) = replay_source else {

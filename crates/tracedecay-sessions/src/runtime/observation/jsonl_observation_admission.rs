@@ -1,3 +1,4 @@
+use asupersync::channel::watch;
 use futures_util::future::AbortHandle;
 use rayon::prelude::*;
 use std::borrow::Cow;
@@ -7,7 +8,7 @@ use std::num::NonZeroU64;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
-use tokio::sync::{Notify, watch};
+use tokio::sync::Notify;
 
 use tracedecay_domain::{
     ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
