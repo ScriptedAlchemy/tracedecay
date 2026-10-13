@@ -401,9 +401,12 @@ impl RemoteRecoveryOperationPortV1 for RemoteRecoverySqliteAuthorityV1 {
                     self.handle(),
                     &authority_key,
                     &expected,
-                    &replacement,
+                    &CurrentRemoteAuthorityV1 {
+                        fence: replacement.clone(),
+                        credential_revision: caller.enrollment_revision,
+                        observed_at: physical.committed_at,
+                    },
                     physical.output.published_frontier_sequence,
-                    physical.committed_at,
                 )?;
                 persist_sink_receipts(
                     self.handle(),
