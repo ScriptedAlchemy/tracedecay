@@ -1251,19 +1251,17 @@ async fn cancelled_activation_keeps_its_lifecycle_owner_bounded_during_stalled_e
         "the exact Git ref reader must block on the real FIFO"
     );
 
-    let (writer_ready_tx, writer_ready_rx) = std::sync::mpsc::sync_channel(1);
     let writer_path = ref_path.clone();
     let fifo_writer_task = tokio::task::spawn_blocking(move || {
-        let writer = std::fs::OpenOptions::new()
+        std::fs::OpenOptions::new()
             .write(true)
             .open(writer_path)
-            .expect("open FIFO writer once Git begins its exact ref read");
-        writer_ready_tx
-            .send(writer)
-            .expect("deliver open FIFO writer");
+            .expect("open FIFO writer once Git begins its exact ref read")
     });
 
-    let (owner_done_tx, owner_done_rx) = tokio::sync::oneshot::channel();
+    let (owner_done_tx, mut owner_done_rx) = tokio::sync::oneshot::channel();
+    let owner_cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
+    let owner_control = PrCommandControl::with_cancellation(owner_cancellation.clone());
     let owner_repo = repo.path().to_path_buf();
     let owner_data_root = data_root.clone();
     let owner_graph = Arc::clone(&graph);
@@ -1274,12 +1272,15 @@ async fn cancelled_activation_keeps_its_lifecycle_owner_bounded_during_stalled_e
             let lifecycle = acquire_manual_branch_lifecycle(&owner_data_root, &owner_branch)
                 .await
                 .expect("activation owner acquires the exact lifecycle");
-            let control = PrCommandControl::with_timeout(Duration::from_millis(300));
             let outcome = activate_manual_branch_with_administration(
                 &owner_repo,
                 &owner_data_root,
                 &owner_branch,
-                PrStoreAdministration::with_control(&owner_schedulers, &owner_graph, &control),
+                PrStoreAdministration::with_control(
+                    &owner_schedulers,
+                    &owner_graph,
+                    &owner_control,
+                ),
                 &lifecycle,
             )
             .await;
@@ -1288,38 +1289,41 @@ async fn cancelled_activation_keeps_its_lifecycle_owner_bounded_during_stalled_e
         let _ = owner.await;
     });
 
-    let fifo_writer = tokio::time::timeout(
-        Duration::from_secs(2),
-        tokio::task::spawn_blocking(move || {
-            writer_ready_rx
-                .recv()
-                .expect("Git exact-ref read opens the FIFO")
-        }),
-    )
-    .await
-    .expect("activation reaches the stalled exact-ref read")
-    .expect("FIFO-writer task joins");
-    fifo_writer_task.await.expect("FIFO writer task joins");
-    let (heartbeat_tx, heartbeat_rx) = tokio::sync::oneshot::channel();
-    tokio::spawn(async move {
-        tokio::task::yield_now().await;
-        let _ = heartbeat_tx.send(());
-    });
-    tokio::time::timeout(Duration::from_millis(100), heartbeat_rx)
-        .await
-        .expect("the current-thread runtime keeps scheduling while Git exact-read stalls")
-        .expect("heartbeat task runs");
+    // Git opening the FIFO is the stall itself; the test task observing it
+    // also proves the current-thread runtime keeps scheduling during the read.
+    let fifo_writer = tokio::select! {
+        biased;
+        writer = fifo_writer_task => writer.expect("FIFO writer task joins"),
+        outcome = &mut owner_done_rx => {
+            // The read end releases the blocked writer so the runtime can shut down.
+            drop(std::fs::File::open(&ref_path));
+            panic!("activation finished before Git reached the stalled exact-ref read: {outcome:?}");
+        }
+    };
 
     requester.abort();
     assert!(
         requester.await.is_err(),
         "the requester is cancelled while its lifecycle owner continues"
     );
-    let error = tokio::time::timeout(Duration::from_secs(2), owner_done_rx)
+    assert!(
+        matches!(
+            owner_done_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ),
+        "the lifecycle owner stays in its stalled exact read after the requester is cancelled"
+    );
+    owner_cancellation.cancel();
+    let error = owner_done_rx
         .await
-        .expect("lifecycle owner remains bounded by its Git deadline")
         .expect("lifecycle owner reports its terminal activation outcome")
-        .expect_err("a timed-out exact read cannot be treated as a missing ref");
+        .expect_err("a cancelled exact read cannot be treated as a missing ref");
+    assert!(
+        error
+            .detail()
+            .contains(&tracedecay_runtime_core::git::GitCommandError::Cancelled.to_string()),
+        "the owner's cancellation, not its Git deadline, ends the stalled read: {error}"
+    );
     assert!(matches!(
         &error,
         ManualBranchActivationError::GitAuthorityUnavailable { .. }

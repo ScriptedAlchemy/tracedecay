@@ -218,6 +218,8 @@ Examples:
   tracedecay install --agent kimi --component context-mcp
   tracedecay install --agent opencode --component context-mcp
   tracedecay install --agent codex --automation  Also enable the automation loop
+  tracedecay install --agent cursor --catalog-profile compact
+                                                 Serve Cursor the compact tool list
   tracedecay install --agent hermes              Configure every existing Hermes profile
   tracedecay install --local                     Project-local config in cwd
 
@@ -319,7 +321,12 @@ except to debug the protocol. For ad-hoc tool calls from a shell, use \
 names every tool but carries full schemas only for the always-loaded set; \
 the rest are stubs with a short description and an open schema. Calling a \
 stub works and lists its full schema from then on. `--full-tool-list` lists \
-every schema, for hosts that defer tool schemas themselves. With \
+every schema, for hosts that defer tool schemas themselves. \
+`--catalog-profile <NAME>` lists only the tools in that catalog profile \
+(`default`, `compact`, `administrative`, `host-limited`); a tool outside it is \
+not listed, but calling it by name still works, adds it to this session's \
+list, and announces `notifications/tools/list_changed`. The profile changes \
+what is listed, never what a call may do. With \
 TRACEDECAY_MCP_REPEAT_READ_POINTERS=1, a repeated identical source, context, \
 or file-listing read whose answer is unchanged returns a short pointer to \
 the earlier result, and repeating the call once more returns it in full. \
@@ -332,6 +339,7 @@ Examples:
   tracedecay serve --path /path/to/repo          Pin the project explicitly
   tracedecay serve --timings                     Annotate responses with handler time
   tracedecay serve --full-tool-list              Every tool with its full schema
+  tracedecay serve --catalog-profile=compact     List only the compact profile's tools
 
 Related: tracedecay tool (same tools from the shell), tracedecay install
 (writes this command into agent MCP config), tracedecay daemon.";

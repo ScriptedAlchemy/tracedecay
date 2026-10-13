@@ -17,6 +17,7 @@
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -118,6 +119,11 @@ fn daemon_tool_json<'a>(
     ))
 }
 
+/// How long a host hook waits for the daemon to acknowledge its event before
+/// returning control to the agent. The daemon still applies an event whose
+/// acknowledgement arrives later.
+const HOOK_EVENT_NOTIFY_TIMEOUT: Duration = Duration::from_millis(750);
+
 fn notify_hook_event<'a>(
     profile: &'a tracedecay_runtime_core::config::ProfileRoot,
     project_root: &'a Path,
@@ -125,7 +131,11 @@ fn notify_hook_event<'a>(
 ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
     Box::pin(tracing::Instrument::instrument(
         async move {
-            let _ = crate::daemon::notify_hook_event(profile, project_root, event).await;
+            let _ = tokio::time::timeout(
+                HOOK_EVENT_NOTIFY_TIMEOUT,
+                crate::daemon::notify_hook_event(profile, project_root, event),
+            )
+            .await;
         },
         tracing::trace_span!("runtime_ports.notify_hook"),
     ))

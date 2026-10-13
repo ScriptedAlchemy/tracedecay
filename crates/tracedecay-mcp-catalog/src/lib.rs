@@ -40,7 +40,8 @@ pub use definitions::{
     ALWAYS_LOAD_META, RESPONSE_RETRIEVE_TOOL, cli_tool_definition, context_description,
     context_warming_description, explore_call_budget, format_capable_tool_names,
     get_tool_definitions, get_tool_definitions_ref, get_tool_definitions_with_budget,
-    mcp_input_schema, project_catalog_discovery_scope, tool_defaults_to_markdown,
+    mcp_input_schema, project_catalog_discovery_scope, tool_defaults_to_markdown, work_tool_name,
+    workflow_tool_name,
 };
 pub use project_access::registered_project_reader_tool_names;
 

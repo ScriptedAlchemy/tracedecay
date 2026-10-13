@@ -97,6 +97,7 @@ fn install_legacy_operator_mcp(home: &Path) {
         0,
         OLD_BIN,
         crate::product_runtime::PRODUCT_FULL_SHA,
+        &tracedecay_agent_hosts::agents::serve_args::ServeArgs::default(),
     )
     .unwrap();
     applied(apply_canonical_component_set(

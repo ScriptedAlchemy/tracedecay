@@ -105,6 +105,7 @@ fn render_install(home: &Path) -> std::io::Result<()> {
         0,
         FIXTURE_TRACEDECAY_BIN,
         GENERATOR_COMMIT,
+        &tracedecay_agent_hosts::agents::serve_args::ServeArgs::default(),
     )
     .map_err(std::io::Error::other)?;
     for component in component_set.component_set.components {

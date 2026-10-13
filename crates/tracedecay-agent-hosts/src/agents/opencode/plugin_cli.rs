@@ -168,7 +168,12 @@ mod tests {
         )
         .unwrap();
 
-        super::super::install_mcp_server(&config_path, "/usr/bin/tracedecay").unwrap();
+        super::super::install_mcp_server(
+            &config_path,
+            "/usr/bin/tracedecay",
+            &crate::agents::serve_args::ServeArgs::default(),
+        )
+        .unwrap();
 
         let config = crate::agents::load_json_file_strict(&config_path).unwrap();
         assert_eq!(config["plugins"], host_written);
@@ -190,7 +195,12 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let config_path = home.path().join("opencode.json");
 
-        super::super::install_mcp_server(&config_path, "/usr/bin/tracedecay").unwrap();
+        super::super::install_mcp_server(
+            &config_path,
+            "/usr/bin/tracedecay",
+            &crate::agents::serve_args::ServeArgs::default(),
+        )
+        .unwrap();
 
         let config = crate::agents::load_json_file_strict(&config_path).unwrap();
         assert!(

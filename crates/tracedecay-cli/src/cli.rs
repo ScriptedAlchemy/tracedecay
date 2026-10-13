@@ -307,6 +307,18 @@ pub enum Commands {
         /// repository away from `.git/hooks`. Never prompts.
         #[arg(long)]
         git_hook: bool,
+        /// List only this catalog profile's tools in the agent's MCP server
+        /// (`default`, `compact`, `administrative`, `host-limited`). Saved for the
+        /// agent; later installs, reinstalls, and updates keep it until
+        /// `--catalog-profile default` resets it.
+        #[arg(
+            long,
+            value_name = "NAME",
+            requires = "agent",
+            conflicts_with = "local",
+            value_parser = crate::serve_cmd::parse_catalog_profile
+        )]
+        catalog_profile: Option<tracedecay_contracts::catalog_composition::CatalogProfileName>,
     },
     /// Refresh settings for all already-installed agents
     #[command(long_about = REINSTALL_LONG_ABOUT, after_help = REINSTALL_AFTER_HELP)]
@@ -487,6 +499,11 @@ pub enum Commands {
         // `--claude-code-tool-search`, which served the same full list.
         #[arg(long, alias = "claude-code-tool-search")]
         full_tool_list: bool,
+        /// List only the tools in this catalog profile (`default`, `compact`,
+        /// `administrative`, `host-limited`). Unlisted tools stay callable by
+        /// name and join the list once called.
+        #[arg(long, value_name = "NAME", value_parser = crate::serve_cmd::parse_catalog_profile)]
+        catalog_profile: Option<tracedecay_contracts::catalog_composition::CatalogProfileName>,
     },
     /// Manage the long-running TraceDecay daemon used by MCP clients
     #[command(long_about = DAEMON_LONG_ABOUT, after_help = DAEMON_AFTER_HELP)]

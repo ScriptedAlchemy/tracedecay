@@ -388,12 +388,18 @@ fn workflow_manifest(operation: &str) -> Result<CapabilityManifestV1, CatalogVal
         })?,
         availability: AvailabilityContract::Available,
         binding_ids: vec![binding_id],
-        profile_eligibility: vec![
-            ProfileId::new("profile.default")
-                .map_err(|_| invalid_catalog_value("workflow profile ID", "ID is invalid"))?,
-        ],
+        profile_eligibility: workflow_profile_eligibility()?,
         required_features: Vec::new(),
     })
+}
+
+/// Catalog profiles every Workflow capability is eligible for. The manifests
+/// and the serve-time profile filter both read it, since Workflow tools are
+/// mounted outside the application catalog snapshot.
+pub fn workflow_profile_eligibility() -> Result<Vec<ProfileId>, CatalogValidationError> {
+    Ok(vec![ProfileId::new("profile.default").map_err(|_| {
+        invalid_catalog_value("workflow profile ID", "ID is invalid")
+    })?])
 }
 
 fn schema_ref(id: String) -> Result<SchemaRef, CatalogValidationError> {
