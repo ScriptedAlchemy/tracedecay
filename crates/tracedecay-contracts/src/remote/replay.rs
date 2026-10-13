@@ -704,14 +704,15 @@ impl RemoteProtocolPortV1<RemoteReplayRequestV1> for RemoteReplayProtocolAdapter
         match self.service.replay(&request, &credential) {
             Ok(outcome) => {
                 let authority = outcome.authority.clone();
-                let result = match replay_effect_envelope(request, outcome) {
-                    Ok(envelope) => Ok(envelope),
-                    Err(failure) => Err(remote_protocol_problem(
-                        remote_replay_result_contract_v1(),
-                        request_id.clone(),
-                        failure,
-                    )?),
-                };
+                let result =
+                    match replay_effect_envelope(request, outcome, self.service.clock.as_ref()) {
+                        Ok(envelope) => Ok(envelope),
+                        Err(failure) => Err(remote_protocol_problem(
+                            remote_replay_result_contract_v1(),
+                            request_id.clone(),
+                            failure,
+                        )?),
+                    };
                 RemoteProtocolResponseV1::new_or_unavailable(
                     request_id,
                     authority,
@@ -776,38 +777,47 @@ fn replay_failure_response<T>(
 fn replay_effect_envelope(
     request: RemoteProtocolRequestV1<RemoteReplayRequestV1>,
     outcome: RemoteReplayServiceOutcomeV1,
+    clock: &dyn RemoteReplayClockPortV1,
 ) -> Result<ApplicationEnvelope<RemoteReplayOutcomeV1>, RemoteProtocolFailureV1> {
-    let operation_receipt = match &outcome.outcome {
+    let deadline = Deadline::new(outcome.caller.expires_at)
+        .map_err(|_| RemoteProtocolFailureV1::EnrollmentExpired)?;
+    let (expected_state, committed_state, execution) = match &outcome.outcome {
         RemoteReplayOutcomeV1::Acknowledged {
             receipt,
             operation_receipt,
             ..
-        } if operation_receipt.transaction.as_ref() == Some(receipt) => operation_receipt,
+        } if operation_receipt.transaction.as_ref() == Some(receipt) => {
+            replayed_effect(&request, operation_receipt, deadline)?
+        }
         RemoteReplayOutcomeV1::Rejected { operation_receipt }
         | RemoteReplayOutcomeV1::Quarantined { operation_receipt }
             if operation_receipt.transaction.is_none() =>
         {
-            operation_receipt
+            replayed_effect(&request, operation_receipt, deadline)?
+        }
+        // Answered like a retried transfer: the effect names the state the
+        // original replay committed, and this request changed nothing.
+        RemoteReplayOutcomeV1::AlreadyAcknowledged { receipt } => {
+            let committed = canonical_sha256(receipt)
+                .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;
+            let answered_at = clock
+                .now()
+                .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;
+            let execution = OperationReceipt::completed(
+                request.sent_at,
+                answered_at,
+                deadline,
+                OperationBudgetUsage {
+                    units_consumed: 1,
+                    bytes_consumed: 0,
+                    elapsed_micros: 0,
+                },
+            )
+            .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;
+            (committed.clone(), committed, execution)
         }
         _ => return Err(RemoteProtocolFailureV1::AuthorityUnavailable),
     };
-    operation_receipt
-        .validate()
-        .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;
-    if operation_receipt.committed_at < request.sent_at {
-        return Err(RemoteProtocolFailureV1::AuthorityUnavailable);
-    }
-    let expected_state = operation_receipt.pre_state_digest.clone();
-    let committed_state = operation_receipt.committed_effect_digest.clone();
-    let deadline = Deadline::new(outcome.caller.expires_at)
-        .map_err(|_| RemoteProtocolFailureV1::EnrollmentExpired)?;
-    let execution = OperationReceipt::completed(
-        request.sent_at,
-        operation_receipt.committed_at,
-        deadline,
-        operation_receipt.budget,
-    )
-    .map_err(|_| RemoteProtocolFailureV1::EnrollmentExpired)?;
     let event_digest = canonical_sha256(&(
         "tracedecay.remote-replay-effect.v1",
         &outcome.frame.event_id,
@@ -862,6 +872,32 @@ fn replay_effect_envelope(
         request.request_id,
         outcome.policy.scope,
         effect,
+    ))
+}
+
+/// The expected state, committed state, and execution of a replay this request ran.
+fn replayed_effect(
+    request: &RemoteProtocolRequestV1<RemoteReplayRequestV1>,
+    operation_receipt: &RemoteReplayOperationReceiptV1,
+    deadline: Deadline,
+) -> Result<(ManifestDigest, ManifestDigest, OperationReceipt), RemoteProtocolFailureV1> {
+    operation_receipt
+        .validate()
+        .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;
+    if operation_receipt.committed_at < request.sent_at {
+        return Err(RemoteProtocolFailureV1::AuthorityUnavailable);
+    }
+    let execution = OperationReceipt::completed(
+        request.sent_at,
+        operation_receipt.committed_at,
+        deadline,
+        operation_receipt.budget,
+    )
+    .map_err(|_| RemoteProtocolFailureV1::EnrollmentExpired)?;
+    Ok((
+        operation_receipt.pre_state_digest.clone(),
+        operation_receipt.committed_effect_digest.clone(),
+        execution,
     ))
 }
 
@@ -983,16 +1019,22 @@ pub enum RemoteReplayOutcomeV1 {
     Quarantined {
         operation_receipt: RemoteReplayOperationReceiptV1,
     },
+    /// An earlier replay acknowledged the frame; this request committed nothing.
+    AlreadyAcknowledged {
+        receipt: RemoteReplayCommitReceiptV1,
+    },
 }
 
 impl RemoteReplayOutcomeV1 {
-    pub fn into_operation_receipt(self) -> RemoteReplayOperationReceiptV1 {
+    /// This request's replay receipt; `None` when an earlier replay acknowledged the frame.
+    pub fn into_operation_receipt(self) -> Option<RemoteReplayOperationReceiptV1> {
         match self {
             Self::Acknowledged {
                 operation_receipt, ..
             }
             | Self::Rejected { operation_receipt }
-            | Self::Quarantined { operation_receipt } => operation_receipt,
+            | Self::Quarantined { operation_receipt } => Some(operation_receipt),
+            Self::AlreadyAcknowledged { .. } => None,
         }
     }
 }
@@ -1011,6 +1053,37 @@ pub fn replay_remote_capture(
     clock: &dyn RemoteReplayClockPortV1,
 ) -> Result<RemoteReplayOutcomeV1, RemoteReplayApplicationErrorV1> {
     let observed_at = clock.now()?;
+    let spool_state = spool
+        .state(&frame.event_id)
+        .map_err(RemoteReplayApplicationErrorV1::Persistence)?;
+    // A settled row is answered before an attempt opens: no transition would
+    // close an attempt opened on it, so the next replay would see corruption.
+    if matches!(
+        spool_state.state,
+        RemoteReplayStateV1::Acknowledged | RemoteReplayStateV1::GarbageCollectionEligible
+    ) {
+        validate_scope_and_fence(frame, current_writer, caller_credential)?;
+        authenticate_remote_request(
+            authentication,
+            &current_writer.authority,
+            authority_credential,
+            caller_credential,
+            presented_caller_credential,
+            RemoteCapabilityV1::Replay,
+            &frame.capture.writer.scope,
+            observed_at,
+        )
+        .map_err(RemoteReplayApplicationErrorV1::Authentication)?;
+        let receipt = spool_state
+            .receipt
+            .ok_or(RemoteReplayApplicationErrorV1::ReceiptMissing)?;
+        // The writer fence is not compared: after a failover the stored
+        // receipt still names the writer that committed it.
+        if receipt.event_id != frame.event_id {
+            return Err(RemoteReplayApplicationErrorV1::ReceiptMismatch);
+        }
+        return Ok(RemoteReplayOutcomeV1::AlreadyAcknowledged { receipt });
+    }
     with_replay_attempt(spool, &frame.event_id, observed_at, |replay_attempt| {
         replay_remote_capture_attempt(
             authentication,
