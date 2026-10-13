@@ -15,10 +15,13 @@ use super::{
 };
 
 const READER_WAIT: Duration = Duration::from_secs(5);
-/// Doctor and other health probes must not sit behind a writer or a saturated
-/// general lane. The reserved health reader either admits immediately or the
-/// caller reports a typed locked/unavailable state.
-const HEALTH_READER_WAIT: Duration = Duration::ZERO;
+/// Health probes read through the reserved health lane, so they never queue
+/// behind a writer or a saturated general lane. That one-worker lane is shared
+/// with the store-size and table-growth telemetry Doctor samples concurrently,
+/// and each health snapshot retires its worker. A zero wait therefore loses to
+/// whichever bounded sibling probe or worker reopen got there first, and
+/// reports a healthy store as only partially observed.
+const HEALTH_READER_WAIT: Duration = READER_WAIT;
 
 #[derive(Clone)]
 pub struct Connection {

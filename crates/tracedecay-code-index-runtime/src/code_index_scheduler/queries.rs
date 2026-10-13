@@ -1919,7 +1919,7 @@ impl CodeIndexSchedulerRegistryV1 {
             })
             .await
             {
-                Ok(Ok(retain)) => catalog_retain = retain,
+                Ok(Ok(retain)) => catalog_retain = Some(retain),
                 Ok(Err(_pending)) => return Err(CallableCodeCursorError::Unavailable),
                 Err(join_error) => {
                     tracing::warn!(

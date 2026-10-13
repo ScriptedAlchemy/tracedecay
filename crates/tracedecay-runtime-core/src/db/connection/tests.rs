@@ -1104,8 +1104,9 @@ async fn remote_storage_factories_validate_and_retain_one_issuing_client() {
     drop(runtime);
 
     let database = owner.issue_lease().unwrap();
+    let member_brain = database.registered_binding().shard_id.brain_id.clone();
     let provisioned = database
-        .provision_remote_storage(purpose_test_remote_keyring())
+        .provision_remote_storage(purpose_test_remote_keyring(), &member_brain)
         .unwrap();
     assert_eq!(provisioned.binding(), database.registered_binding());
     drop(provisioned);
@@ -1323,7 +1324,10 @@ async fn read_only_owner_issuance_preserves_the_published_access_policy() {
     );
     assert!(
         database
-            .provision_remote_storage(purpose_test_remote_keyring())
+            .provision_remote_storage(
+                purpose_test_remote_keyring(),
+                &database.registered_binding().shard_id.brain_id,
+            )
             .is_err()
     );
 }

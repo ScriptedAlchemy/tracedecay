@@ -71,7 +71,7 @@ fn refuse_projection_wait(request: &CodeGraphReadRequest<'_>) -> Result<(), Code
 async fn await_rewarm(
     store: &Arc<CodeGraphProjectionStore>,
     request: &CodeGraphReadRequest<'_>,
-) -> Result<Option<Arc<InteractiveCatalogReaderLeaseV1>>, CodeGraphReadError> {
+) -> Result<Arc<InteractiveCatalogReaderLeaseV1>, CodeGraphReadError> {
     // A zero budget never blocks: it starts the re-warm and reports it.
     let requirement = request.readiness;
     if let Ok(retain) = store.await_rewarm_and_retain_for(Duration::ZERO, requirement) {
@@ -355,7 +355,7 @@ impl tracedecay_graph_query::CodeGraphProjectionReadPort for ProjectCodeGraphPro
                 self.authority.scope.clone(),
                 projection.store,
                 projection.freshness,
-                catalog_retain,
+                Some(catalog_retain),
             )
         })
     }

@@ -307,6 +307,18 @@ pub enum Commands {
         /// repository away from `.git/hooks`. Never prompts.
         #[arg(long)]
         git_hook: bool,
+        /// List only this catalog profile's tools in the agent's MCP server
+        /// (`default`, `compact`, `administrative`, `host-limited`). Saved for the
+        /// agent; later installs, reinstalls, and updates keep it until
+        /// `--catalog-profile default` resets it.
+        #[arg(
+            long,
+            value_name = "NAME",
+            requires = "agent",
+            conflicts_with = "local",
+            value_parser = crate::serve_cmd::parse_catalog_profile
+        )]
+        catalog_profile: Option<tracedecay_contracts::catalog_composition::CatalogProfileName>,
     },
     /// Refresh settings for all already-installed agents
     #[command(long_about = REINSTALL_LONG_ABOUT, after_help = REINSTALL_AFTER_HELP)]
@@ -487,6 +499,11 @@ pub enum Commands {
         // `--claude-code-tool-search`, which served the same full list.
         #[arg(long, alias = "claude-code-tool-search")]
         full_tool_list: bool,
+        /// List only the tools in this catalog profile (`default`, `compact`,
+        /// `administrative`, `host-limited`). Unlisted tools stay callable by
+        /// name and join the list once called.
+        #[arg(long, value_name = "NAME", value_parser = crate::serve_cmd::parse_catalog_profile)]
+        catalog_profile: Option<tracedecay_contracts::catalog_composition::CatalogProfileName>,
     },
     /// Manage the long-running TraceDecay daemon used by MCP clients
     #[command(long_about = DAEMON_LONG_ABOUT, after_help = DAEMON_AFTER_HELP)]
@@ -761,6 +778,21 @@ pub enum RemoteAction {
         #[arg(long, value_name = "FILE")]
         enrollment_credential_file: PathBuf,
     },
+    /// Make this profile the enrolled node of another profile's Brain. The
+    /// running daemon discovers the authority with the enrollment credential
+    /// (`--credential-file`) and adopts the enrollment the authority holds.
+    /// `--request-file` holds a `CurrentAuthorityRequestV1` protocol request.
+    Join {
+        #[command(flatten)]
+        authority: RemoteAuthorityArgs,
+    },
+    /// Send this joined node's pending offline-capture frames, in sequence
+    /// order, to the owning authority. Takes the same arguments as `join`;
+    /// each frame is released only after the authority's receipt.
+    Drain {
+        #[command(flatten)]
+        authority: RemoteAuthorityArgs,
+    },
     /// Capture one observation into a node's offline spool while the
     /// authority is unreachable
     Capture {
@@ -787,8 +819,9 @@ pub enum RemoteAction {
         #[command(flatten)]
         authority: RemoteAuthorityArgs,
     },
-    /// Revoke every enrollment of a node this daemon provisioned, such as a
-    /// lost machine; its capture, transfer and replay are refused afterward
+    /// Revoke every enrollment and unredeemed grant of a node this daemon
+    /// provisioned, such as a lost machine; its enrollment, capture, transfer
+    /// and replay are refused afterward
     Revoke {
         /// Node identity the node was provisioned with
         #[arg(long, value_name = "NODE")]

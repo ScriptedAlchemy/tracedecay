@@ -16,8 +16,9 @@ use super::auth::{
     OpaqueRemoteCredential, RemoteEnrollmentAdmissionEvidenceV1, RemoteEnrollmentCommitReceiptV1,
 };
 use super::capture_protocol::RemoteCaptureRequestV1;
+use super::discovery::remote_authority_result_contract_v1;
 use super::protocol::{
-    EnrollmentRequestV1, RemoteProtocolBodyV1, RemoteProtocolRequestV1,
+    CurrentAuthorityRequestV1, EnrollmentRequestV1, RemoteProtocolBodyV1, RemoteProtocolRequestV1,
     remote_capture_result_contract_v1, remote_enrollment_result_contract_v1,
     remote_replay_result_contract_v1,
 };
@@ -43,6 +44,7 @@ pub enum RemoteCredentialUseV1 {
     Replay,
     Query,
     Promote,
+    DiscoverAuthority,
 }
 
 impl RemoteCredentialUseV1 {
@@ -53,7 +55,8 @@ impl RemoteCredentialUseV1 {
             | Self::TransferFrame
             | Self::Replay
             | Self::Query
-            | Self::Promote => RemoteCredentialClassV1::Enrollment,
+            | Self::Promote
+            | Self::DiscoverAuthority => RemoteCredentialClassV1::Enrollment,
         }
     }
 
@@ -65,6 +68,7 @@ impl RemoteCredentialUseV1 {
             Self::Replay => Some(RemoteCapabilityV1::Replay),
             Self::Query => Some(RemoteCapabilityV1::Query),
             Self::Promote => Some(RemoteCapabilityV1::Promote),
+            Self::DiscoverAuthority => Some(RemoteCapabilityV1::DiscoverAuthority),
         }
     }
 }
@@ -477,6 +481,22 @@ impl RemoteSessionBoundProtocolBodyV1 for RemoteQueryRequestV1 {
             return Err(RemoteCredentialAdmissionErrorV1::BindingMismatch);
         }
         Ok(())
+    }
+}
+
+impl RemoteSessionBoundProtocolBodyV1 for CurrentAuthorityRequestV1 {
+    const CREDENTIAL_USE: RemoteCredentialUseV1 = RemoteCredentialUseV1::DiscoverAuthority;
+
+    fn result_contract() -> Result<ResultContractRef, ApplicationContractError> {
+        remote_authority_result_contract_v1()
+    }
+
+    fn bind_authenticated_session(
+        session: &RemoteAuthenticatedSessionV1,
+        request: &RemoteProtocolRequestV1<Self>,
+    ) -> Result<(), RemoteCredentialAdmissionErrorV1> {
+        bind_protocol_body(session, request, Self::CREDENTIAL_USE)?;
+        session.bind_scope(&request.body.scope)
     }
 }
 

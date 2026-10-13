@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use tracedecay_code_index::graph_projection::{
-    CodeGraphCatalogReleaseV1, CodeGraphReadinessRequirement,
+    CodeGraphCatalogReleaseV1, CodeGraphEngineReleaseV1, CodeGraphReadinessRequirement,
 };
 use tracedecay_code_index_runtime::CodeGraphSeatRuntimePortV1;
 use tracedecay_code_index_runtime::code_index_executor::code_index_search_executor;
@@ -1041,8 +1041,16 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
     }
 
     let settled_context = graph_request_context(scope.clone(), "restart-settled");
-    let settled_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    // Publishing a rebuilt or repaired graph is background work with no
+    // latency bound, so the wait follows the worker's activity instead of a
+    // clock. Settlement is sampled before the observation, because a worker
+    // that had already settled cannot seat the graph afterwards.
+    let mut activity = registry
+        .subscribe_owner_activity(fixture.path())
+        .await
+        .expect("mounted owner activity");
     let (settled, settled_read) = loop {
+        let worker_settled = activity.pass_finished() && !activity.wake_pending();
         let observed = registry
             .latest_text_serving_freshness_for_scope(&scope)
             .await;
@@ -1067,15 +1075,16 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
             );
         }
         assert!(
-            std::time::Instant::now() <= settled_deadline,
-            "persistent graph generation did not become query-serving: text={:?}, graph={graph_read:?}",
+            !worker_settled,
+            "the worker settled without a query-serving persistent graph generation: \
+             text={:?}, graph={graph_read:?}",
             observed.as_ref().map(|(latest, current)| (
                 current,
                 latest.code_graph_serving_readiness(),
                 latest.interactive_graph_store().err(),
             ))
         );
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        activity.changed().await.expect("live owner activity");
     };
     if corrupt_graph {
         assert_eq!(
@@ -1993,13 +2002,32 @@ async fn first_index_serves_graph_reads_without_decoding_the_generation() {
 async fn admitted_graph_read_retains_only_the_catalog_it_requires() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
     let store = TempDir::new().expect("store root");
+    let owners = Arc::new(ResidentOwnersV1::new(RESIDENT_OWNER_IDLE_WINDOW_V1));
     let mount = PersistentGraphMountV1::mount(
-        CodeIndexSchedulerRegistryV1::new(1),
+        CodeIndexSchedulerRegistryV1::new(1).with_resident_owners(Arc::clone(&owners)),
         &fixture,
         &store,
         "graph read catalog retention",
     )
     .await;
+    // A read after the publisher's park re-warms the engine on a background
+    // thread that briefly holds the catalog after the read is served, and
+    // the releases below would race it. Restore both here instead.
+    initial_publisher_parks_and_releases_its_graph(&mount, &fixture, &owners).await;
+    let serving = mount
+        .registry
+        .retained_text_owner_for_root(fixture.path())
+        .await
+        .expect("text owner")
+        .interactive_graph_store()
+        .expect("serving graph store");
+    serving.warm_serving_engine().expect("restore the engine");
+    serving
+        .warm_interactive_catalog_with_cancellation(
+            None,
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("restore the catalog");
     let context = graph_request_context(mount.scope.clone(), "catalog-retention");
     let port = project_code_graph_projection_read_port(
         mount.registry.clone(),
@@ -2070,6 +2098,49 @@ async fn admitted_graph_read_retains_only_the_catalog_it_requires() {
     );
     drop(read);
     drop(graph);
+    mount.shutdown().await;
+}
+
+/// A worktree parks between a graph read's admission and its reader opening
+/// (the `files` tool reads freshness in that gap). The engine the admission
+/// waited out must still be there when the reader opens.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admitted_graph_read_retains_the_engine_until_its_reader_opens() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let mount = PersistentGraphMountV1::mount(
+        CodeIndexSchedulerRegistryV1::new(1),
+        &fixture,
+        &store,
+        "graph read engine retention",
+    )
+    .await;
+    let context = graph_request_context(mount.scope.clone(), "engine-retention");
+    let port = project_code_graph_projection_read_port(
+        mount.registry.clone(),
+        fixture.path().into(),
+        mount.scope.clone(),
+    );
+    for readiness in [
+        CodeGraphReadinessRequirement::Catalog,
+        CodeGraphReadinessRequirement::Engine,
+    ] {
+        let read = port
+            .open(
+                CodeGraphReadRequest::from_context(&context, now_micros())
+                    .with_readiness(readiness),
+            )
+            .await
+            .expect("admit graph read");
+        let graph = Arc::clone(read.store());
+        assert_eq!(
+            graph.release_serving_engine().expect("park release"),
+            CodeGraphEngineReleaseV1::Busy,
+            "a {readiness:?} read's admission must hold the engine its reader opens on"
+        );
+        read.reader(&context, now_micros())
+            .expect("the admitted read opens on the engine it waited for");
+    }
     mount.shutdown().await;
 }
 

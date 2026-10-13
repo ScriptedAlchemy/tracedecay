@@ -106,41 +106,69 @@ pub(super) struct InteractiveCatalogCache {
     /// read turns every later catalog lookup into the typed warming answer
     /// the reader could not have waited out.
     readers: std::sync::atomic::AtomicUsize,
+    /// Admitted reads holding the store's serving engine. An engine release
+    /// answers Busy while any is held, so a read keeps the engine it waited
+    /// out until its reader opens.
+    engine_readers: std::sync::atomic::AtomicUsize,
     /// One-shot retry of a park release a live read answered Busy, taken and
-    /// run by the last reader's lease drop.
+    /// run by the last lease drop.
     park_release_on_reads_drain: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     clock: Arc<WarmClock>,
 }
 
-/// One assembled reader's hold on the catalog cache.
+/// One read's hold on the catalog cache, the serving engine, or both.
 ///
-/// Mirrors the engine release, which already stays pinned while a reader is
-/// open: the catalog owner is retained across the complete read, so a park
-/// release cannot evict it between a readiness wait and the reader's next
-/// catalog lookup.
+/// Held across the complete read, so a park release cannot evict either
+/// between a readiness wait and the reader opening or its next catalog
+/// lookup.
 pub struct InteractiveCatalogReaderLeaseV1 {
     cache: Arc<InteractiveCatalogCache>,
+    catalog: bool,
+    engine: bool,
 }
 
 impl InteractiveCatalogReaderLeaseV1 {
+    /// An assembled reader's hold on the catalog; its open reader already
+    /// keeps the engine.
     pub(super) fn retain(cache: &Arc<InteractiveCatalogCache>) -> Arc<Self> {
-        cache
-            .readers
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        Arc::new(Self {
+        Arc::new(Self::hold(cache, true, false))
+    }
+
+    /// A read admission's hold on the engine and, when `catalog`, the
+    /// catalog. Taken under the store's engine slot lock, so an engine
+    /// release either sees it or ran before it.
+    pub(super) fn admit(cache: &Arc<InteractiveCatalogCache>, catalog: bool) -> Arc<Self> {
+        Arc::new(Self::hold(cache, catalog, true))
+    }
+
+    fn hold(cache: &Arc<InteractiveCatalogCache>, catalog: bool, engine: bool) -> Self {
+        use std::sync::atomic::Ordering::SeqCst;
+        if catalog {
+            cache.readers.fetch_add(1, SeqCst);
+        }
+        if engine {
+            cache.engine_readers.fetch_add(1, SeqCst);
+        }
+        Self {
             cache: Arc::clone(cache),
-        })
+            catalog,
+            engine,
+        }
     }
 }
 
 impl Drop for InteractiveCatalogReaderLeaseV1 {
     fn drop(&mut self) {
-        if self
-            .cache
-            .readers
-            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel)
-            != 1
-        {
+        use std::sync::atomic::Ordering::SeqCst;
+        if self.catalog {
+            self.cache.readers.fetch_sub(1, SeqCst);
+        }
+        if self.engine {
+            self.cache.engine_readers.fetch_sub(1, SeqCst);
+        }
+        // Each lease decrements both counts before it reads them, so the last
+        // of two concurrent drops sees both drained and runs the retry.
+        if self.cache.reads_live() {
             return;
         }
         let release = self
@@ -208,6 +236,7 @@ impl InteractiveCatalogCache {
             scan_builds: std::sync::atomic::AtomicUsize::new(0),
             ready_bytes: std::sync::atomic::AtomicU64::new(0),
             readers: std::sync::atomic::AtomicUsize::new(0),
+            engine_readers: std::sync::atomic::AtomicUsize::new(0),
             park_release_on_reads_drain: Mutex::new(None),
             clock,
         }
@@ -225,11 +254,22 @@ impl InteractiveCatalogCache {
             .park_release_on_reads_drain
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if self.readers.load(std::sync::atomic::Ordering::Acquire) == 0 {
+        if !self.reads_live() {
             return false;
         }
         *armed = Some(release);
         true
+    }
+
+    fn reads_live(&self) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.readers.load(SeqCst) > 0 || self.engine_readers.load(SeqCst) > 0
+    }
+
+    pub(super) fn engine_held(&self) -> bool {
+        self.engine_readers
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0
     }
 
     pub(super) fn residency(&self) -> CatalogResidency {

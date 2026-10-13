@@ -15,7 +15,10 @@ use super::feedback_component::{
     aggregate_with_feedback_component, companion_owned_live_paths, live_feedback_receipt,
     selected_feedback_component,
 };
-use super::{host_bundle_error, host_kind_for_agent, load_host_lifecycle_user_config};
+use super::{
+    host_bundle_error, host_kind_for_agent, load_host_lifecycle_user_config, saved_serve_args,
+};
+use tracedecay_agent_hosts::agents::serve_args::{HostCatalogProfiles, ServeArgs};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -39,6 +42,11 @@ struct FeedbackRollbackCliState {
         Vec<tracedecay_agent_hosts::agents::host_bundle::HostBundleArtifactContentV1>,
     target_manifest: tracedecay_agent_hosts::agents::host_bundle::HostBundleManifestV1,
     dashboard_enabled: bool,
+    /// The saved catalog profile the target bundle rendered with; `None` is the
+    /// default profile, the only one a state written before this field existed
+    /// could have used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    catalog_profile: Option<String>,
     switch_operation_id: [u8; 16],
     effect_started: bool,
     registration_effect_started: bool,
@@ -217,6 +225,7 @@ pub(crate) async fn handle_feedback_rollback_command(
 fn feedback_rollback_inputs(
     profile: &ProfileRoot,
     agent_id: &str,
+    serve_args: &ServeArgs,
 ) -> tracedecay_domain::errors::Result<(
     PathBuf,
     PathBuf,
@@ -250,6 +259,7 @@ fn feedback_rollback_inputs(
             component,
             0,
             crate::product_runtime::PRODUCT_FULL_SHA,
+            serve_args,
         )
         .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("compiled feedback route is unavailable for {agent_id}: {error}"),
@@ -1140,7 +1150,9 @@ fn feedback_rollback_dry_run(
     profile: &ProfileRoot,
     agent_id: &str,
 ) -> tracedecay_domain::errors::Result<()> {
-    let (home, _lifecycle_root, aggregate, target) = feedback_rollback_inputs(profile, agent_id)?;
+    let serve_args = saved_serve_args(&load_host_lifecycle_user_config(profile)?, agent_id)?;
+    let (home, _lifecycle_root, aggregate, target) =
+        feedback_rollback_inputs(profile, agent_id, &serve_args)?;
     let (previous, previous_receipt) = live_feedback_receipt(&home, &aggregate)?;
     let verifier = feedback_pair_verifier(&previous, &target.manifest)?;
     let request = feedback_request(
@@ -1185,9 +1197,11 @@ fn feedback_rollback_apply(
     agent_id: &str,
     state_path: &Path,
 ) -> tracedecay_domain::errors::Result<()> {
-    let dashboard_enabled =
-        load_host_lifecycle_user_config(profile)?.dashboard_enabled_for_agent(agent_id);
-    let (home, lifecycle_root, aggregate, target) = feedback_rollback_inputs(profile, agent_id)?;
+    let user_config = load_host_lifecycle_user_config(profile)?;
+    let dashboard_enabled = user_config.dashboard_enabled_for_agent(agent_id);
+    let serve_args = saved_serve_args(&user_config, agent_id)?;
+    let (home, lifecycle_root, aggregate, target) =
+        feedback_rollback_inputs(profile, agent_id, &serve_args)?;
     let (previous, _previous_receipt) = live_feedback_receipt(&home, &aggregate)?;
     let previous_contents = read_feedback_repair_contents(&home, &previous)?;
     let artifact_permissions = snapshot_feedback_artifact_permissions(&home, &previous)?;
@@ -1215,6 +1229,7 @@ fn feedback_rollback_apply(
         previous_contents,
         target_manifest: target.manifest.clone(),
         dashboard_enabled,
+        catalog_profile: user_config.agent_catalog_profile.get(agent_id).cloned(),
         switch_operation_id: request.operation_id,
         effect_started: false,
         registration_effect_started: false,
@@ -1277,6 +1292,7 @@ fn feedback_rollback_apply(
             .unwrap_or_else(|| "tracedecay".to_string()),
         project_root: None,
         dashboard: state.dashboard_enabled,
+        serve_args: serve_args.clone(),
     };
     let registration_snapshot = validate_feedback_registration_snapshot(
         profile,
@@ -1308,6 +1324,7 @@ fn feedback_rollback_apply(
                     home: home.clone(),
                     profile: profile.clone(),
                     project_path: std::env::current_dir().unwrap_or_else(|_| home.clone()),
+                    catalog_profiles: HostCatalogProfiles::only(agent_id, serve_args.clone()),
                 };
                 (integration.host_component_registration(target.manifest.component, &health)
                     == tracedecay_agent_hosts::agents::host_bundle::HostBundleRegistrationStateV1::Current)
@@ -1403,9 +1420,8 @@ fn feedback_rollback_restore(
         });
     }
     let integration = tracedecay_agent_hosts::agents::get_integration(&state.agent_id)?;
-    let dashboard_enabled =
-        load_host_lifecycle_user_config(profile)?.dashboard_enabled_for_agent(&state.agent_id);
-    if dashboard_enabled != state.dashboard_enabled {
+    let user_config = load_host_lifecycle_user_config(profile)?;
+    if user_config.dashboard_enabled_for_agent(&state.agent_id) != state.dashboard_enabled {
         return Err(tracedecay_domain::errors::TraceDecayError::Config {
             message: format!(
                 "feedback rollback dashboard policy changed for {:?}; restore the exact policy before resuming",
@@ -1413,6 +1429,15 @@ fn feedback_rollback_restore(
             ),
         });
     }
+    if user_config.agent_catalog_profile.get(&state.agent_id) != state.catalog_profile.as_ref() {
+        return Err(tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!(
+                "feedback rollback catalog profile changed for {:?}; restore the exact profile before resuming",
+                state.agent_id
+            ),
+        });
+    }
+    let serve_args = saved_serve_args(&user_config, &state.agent_id)?;
     if state.switch_receipt.is_none() && !state.effect_started {
         validate_feedback_registration_restore(
             profile,
@@ -1638,6 +1663,7 @@ fn feedback_rollback_restore(
             .unwrap_or_else(|| "tracedecay".to_string()),
         project_root: None,
         dashboard: state.dashboard_enabled,
+        serve_args: serve_args.clone(),
     };
     if !state.compensation_preserves_registration {
         restore_feedback_registration(

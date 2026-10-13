@@ -752,6 +752,73 @@ async fn capacity_retirement_behind_a_parked_bind_eviction_cleanup_completes() {
     assert_clean_shutdown_log(&fs::read_to_string(&log_path).expect("daemon log"));
 }
 
+/// The maintenance loop admits its first retention tick one retry delay after
+/// the daemon starts.
+const FIRST_MAINTENANCE_TICK: Duration = Duration::from_mins(1);
+
+/// A retention maintenance tick lists every mounted store before it works
+/// through them one unit at a time. An idle project it listed must still
+/// retire for capacity while the tick runs, so the open waiting on that
+/// capacity is admitted on its first attempt. The tick parks right after its
+/// listing for the whole retirement.
+#[tokio::test]
+async fn capacity_retirement_completes_while_a_maintenance_tick_runs() {
+    let (environment, first) = IsolatedHome::new();
+    let mut projects = vec![first];
+    projects.extend((1..=8).map(|ordinal| environment.scratch().join(format!("p{ordinal}"))));
+    let projects = projects
+        .into_iter()
+        .map(|project| {
+            initialize_repository(&project);
+            project.canonicalize().expect("canonical fixture project")
+        })
+        .collect::<Vec<_>>();
+    let (incoming, cached) = projects.split_last().expect("nine projects");
+    let log_path = environment
+        .scratch()
+        .join("capacity-during-maintenance.log");
+    let tick_hold = environment.scratch().join("hold-after-maintenance-listing");
+    let tick_entered = PathBuf::from(format!("{}.entered", tick_hold.display()));
+    fs::write(&tick_hold, b"hold").expect("hold file");
+    let daemon_started = Instant::now();
+    let mut daemon = spawn_tracedecay_daemon_logged(environment.home(), &log_path, |command| {
+        command.env("TRACEDECAY_TEST_HOLD_AFTER_MAINTENANCE_LISTING", &tick_hold);
+    });
+    let socket = daemon_socket_path(environment.home());
+    for project in cached {
+        initialize_tracedecay(environment.home(), project);
+    }
+    poll_until(
+        daemon_started + FIRST_MAINTENANCE_TICK + RECEIPT_TIMEOUT,
+        Duration::from_millis(20),
+        || tick_entered.is_file().then_some(()),
+        || "the first maintenance tick never listed the mounted stores".to_owned(),
+    );
+
+    // Every cached project is idle, so the ninth open retires the least
+    // recently used one, a store the parked tick listed.
+    initialize_tracedecay(environment.home(), incoming);
+    fs::remove_file(&tick_hold).expect("release the parked maintenance tick");
+    tracedecay_project::product_runtime::register_fixture_product_runtime();
+    let incoming_handshake = tracedecay::daemon::handshake_for_current_client(
+        environment.profile(),
+        Some(incoming.clone()),
+        None,
+        false,
+        false,
+    )
+    .expect("incoming project handshake");
+    wait_for_readiness(&socket, &incoming_handshake, "ready", RECEIPT_TIMEOUT).await;
+
+    let log = fs::read_to_string(&log_path).expect("daemon log");
+    assert!(
+        !log.contains("project_server_capacity_reached"),
+        "a running maintenance tick must not block capacity retirement; log={log}"
+    );
+    stop_daemon_gracefully(&mut daemon);
+    assert_clean_shutdown_log(&fs::read_to_string(&log_path).expect("daemon log"));
+}
+
 #[tokio::test]
 async fn stop_cancels_an_admitted_project_open() {
     let (environment, project) = IsolatedHome::new();

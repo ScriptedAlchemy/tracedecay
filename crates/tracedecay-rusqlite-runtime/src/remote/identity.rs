@@ -20,10 +20,13 @@ fn identity_text(
     row_text(row, index).map_err(|_| RemoteSqliteStorageErrorV1::Corruption)
 }
 
+/// Admits the singleton identity of the store at `binding` and returns the
+/// Brain the store serves. A hosted store serves the profile Brain its shard
+/// binding names; a joined store serves the authority Brain an operator joined.
 pub(super) fn bind_node_identity(
     handle: &ExactSqlHandle,
     binding: &StoreRuntimeBindingV1,
-) -> Result<(), RemoteSqliteStorageErrorV1> {
+) -> Result<BrainId, RemoteSqliteStorageErrorV1> {
     let StoreShardScopeV1::RemoteNode { node_id } = &binding.shard_id.scope else {
         return Err(RemoteSqliteStorageErrorV1::BindingMismatch);
     };
@@ -41,13 +44,12 @@ pub(super) fn bind_node_identity(
         .first()
         .ok_or(RemoteSqliteStorageErrorV1::ResetRequired)?;
     if rows.rows.len() != 1
-        || identity_text(row, 0)? != binding.shard_id.brain_id.as_str()
         || identity_text(row, 1)? != binding.shard_id.profile_id.as_str()
         || identity_text(row, 2)? != node_id.as_str()
     {
         return Err(RemoteSqliteStorageErrorV1::BindingMismatch);
     }
-    Ok(())
+    BrainId::new(identity_text(row, 0)?).map_err(|_| RemoteSqliteStorageErrorV1::Corruption)
 }
 
 /// Moves writer-authority rows to the runtime attaching this store. Each
@@ -91,7 +93,8 @@ pub(super) fn adopt_runtime_binding(
 pub(super) fn provision_node_identity(
     handle: &ExactSqlHandle,
     binding: &StoreRuntimeBindingV1,
-) -> Result<(), RemoteSqliteStorageErrorV1> {
+    member_brain: &BrainId,
+) -> Result<BrainId, RemoteSqliteStorageErrorV1> {
     let StoreShardScopeV1::RemoteNode { node_id } = &binding.shard_id.scope else {
         return Err(RemoteSqliteStorageErrorV1::BindingMismatch);
     };
@@ -113,7 +116,7 @@ pub(super) fn provision_node_identity(
          ) VALUES (1, ?1, ?2, ?3)"
             .to_owned(),
         vec![
-            text(binding.shard_id.brain_id.as_str()),
+            text(member_brain.as_str()),
             text(binding.shard_id.profile_id.as_str()),
             text(node_id.as_str()),
         ],
@@ -126,9 +129,10 @@ impl RemoteSqliteStorageV1 {
     /// Reads the typed singleton used by daemon startup to remount only stores
     /// owned by the active profile. Exact final schema admission still occurs
     /// through [`Self::from_retained_exact_sql`] before the store is published.
+    /// The served Brain is not checked here: a joined store legitimately serves
+    /// another profile's Brain.
     pub fn discover_registered_node(
         path: &Path,
-        expected_brain: &BrainId,
         expected_profile: &UserProfileId,
     ) -> Result<BrainNodeId, RemoteSqliteStorageErrorV1> {
         let connection = rusqlite::Connection::open_with_flags(
@@ -136,15 +140,15 @@ impl RemoteSqliteStorageV1 {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .map_err(|_| RemoteSqliteStorageErrorV1::Unavailable)?;
-        let (brain_id, profile_id, node_id): (String, String, String) = connection
+        let (profile_id, node_id): (String, String) = connection
             .query_row(
-                "SELECT brain_id, profile_id, node_id
+                "SELECT profile_id, node_id
                  FROM remote_node_identity WHERE singleton = 1",
                 (),
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(|_| RemoteSqliteStorageErrorV1::ResetRequired)?;
-        if brain_id != expected_brain.as_str() || profile_id != expected_profile.as_str() {
+        if profile_id != expected_profile.as_str() {
             return Err(RemoteSqliteStorageErrorV1::BindingMismatch);
         }
         let node_id =

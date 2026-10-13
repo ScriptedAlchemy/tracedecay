@@ -154,6 +154,10 @@ unreachable_protocol_port!(RemoteReplayRequestV1, RemoteReplayOutcomeV1);
 unreachable_protocol_port!(RemoteQueryRequestV1, RemoteQueryResultV1);
 unreachable_protocol_port!(PromotionConfirmationV1, PromotionCasReceiptV1);
 unreachable_protocol_port!(RemoteFrameTransferRequestV1, RemoteFrameTransferReceiptV1);
+unreachable_protocol_port!(
+    tracedecay_contracts::remote::protocol::CurrentAuthorityRequestV1,
+    tracedecay_contracts::remote::discovery::RemoteAuthorityDiscoveryV1
+);
 
 fn unavailable_response<Request, Output>(
     request: RemoteProtocolRequestV1<Request>,
@@ -333,7 +337,8 @@ fn test_protocol_router(
             replay: port.clone(),
             frame_transfer: port.clone(),
             query: port.clone(),
-            promotion: port,
+            promotion: port.clone(),
+            authority: port,
         },
         admission,
         clock,

@@ -16,7 +16,6 @@ pub const HOOK_EVENT_METHOD: &str = "tracedecay/hookEvent";
 pub enum HookEventNotifyOutcomeV1 {
     Delivered,
     Unavailable,
-    TimedOut,
     Malformed,
 }
 

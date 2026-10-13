@@ -37,6 +37,8 @@ pub fn run(profile: &ProfileRoot, action: RemoteAction) -> Result<()> {
             authority,
             enrollment_credential_file,
         } => run_enroll(authority, enrollment_credential_file),
+        RemoteAction::Join { authority } => run_join(profile, authority),
+        RemoteAction::Drain { authority } => run_drain(profile, authority),
         RemoteAction::Capture { authority: args } => {
             let request = read_protocol_request(&args.request_file)?;
             let client = build_client(&args)?;
@@ -120,22 +122,23 @@ fn render_revocation_human(
     node_id: &BrainNodeId,
     revocation: &tracedecay::daemon::RemoteNodeRevocationV1,
 ) -> String {
-    if revocation.revocations.is_empty() {
-        return format!("Node {node_id} holds no enrollments\n");
+    if revocation.revocations.is_empty() && revocation.revoked_grants.is_empty() {
+        return format!("Node {node_id} holds no enrollments or unredeemed grants\n");
     }
-    revocation
-        .revocations
+    let enrollments = revocation.revocations.iter().map(|receipt| {
+        format!(
+            "Revoked enrollment {} on node {} (revision {} -> {})\n",
+            receipt.enrollment_id,
+            receipt.node_id,
+            receipt.prior_revision,
+            receipt.current_revision
+        )
+    });
+    let grants = revocation
+        .revoked_grants
         .iter()
-        .map(|receipt| {
-            format!(
-                "Revoked enrollment {} on node {} (revision {} -> {})\n",
-                receipt.enrollment_id,
-                receipt.node_id,
-                receipt.prior_revision,
-                receipt.current_revision
-            )
-        })
-        .collect()
+        .map(|grant_id| format!("Revoked unredeemed grant {grant_id} for node {node_id}\n"));
+    grants.chain(enrollments).collect()
 }
 
 #[tracing::instrument(name = "serve.remote.status", level = "trace", skip_all)]
@@ -171,6 +174,75 @@ fn run_enroll(args: RemoteAuthorityArgs, enrollment_credential_file: PathBuf) ->
         },
         args.json,
     )
+}
+
+#[tracing::instrument(name = "serve.remote.join", level = "trace", skip_all)]
+fn run_join(profile: &ProfileRoot, args: RemoteAuthorityArgs) -> Result<()> {
+    let json = args.json;
+    let (request, credential) = node_operation_request(args)?;
+    let discovery = tracedecay::daemon::live_remote_join(profile, &request, &credential)?;
+    if json {
+        print!("{}", canonical_json_line(&discovery)?);
+    } else {
+        let enrollment = &discovery.enrollment.enrollment;
+        println!(
+            "Joined Brain {} as node {} (enrollment {} revision {})",
+            enrollment.brain_id.as_str(),
+            enrollment.node_id.as_str(),
+            enrollment.enrollment_id.as_str(),
+            enrollment.revision
+        );
+    }
+    Ok(())
+}
+
+#[tracing::instrument(name = "serve.remote.drain", level = "trace", skip_all)]
+fn run_drain(profile: &ProfileRoot, args: RemoteAuthorityArgs) -> Result<()> {
+    let json = args.json;
+    let (request, credential) = node_operation_request(args)?;
+    let drained = tracedecay::daemon::live_remote_drain(profile, &request, &credential)?;
+    if json {
+        print!("{}", canonical_json_line(&drained)?);
+    } else {
+        println!(
+            "Drained {} pending frame(s) to the authority",
+            drained.transferred.len()
+        );
+    }
+    Ok(())
+}
+
+/// The node operation request and enrollment credential `args` name.
+fn node_operation_request(
+    args: RemoteAuthorityArgs,
+) -> Result<(tracedecay::daemon::RemoteNodeJoinRequestV1, Vec<u8>)> {
+    if args.timeout_secs == 0 {
+        return Err(TraceDecayError::Config {
+            message: "Remote Brain --timeout-secs must be greater than zero".to_owned(),
+        });
+    }
+    let credential =
+        std::fs::read(&args.credential_file).map_err(|error| TraceDecayError::File {
+            message: format!("failed to read Remote Brain credential file: {error}"),
+            path: args.credential_file.display().to_string(),
+        })?;
+    let trust_root_pem = args
+        .trust_root_file
+        .as_ref()
+        .map(|path| {
+            std::fs::read_to_string(path).map_err(|error| TraceDecayError::File {
+                message: format!("failed to read Remote Brain trust-root file: {error}"),
+                path: path.display().to_string(),
+            })
+        })
+        .transpose()?;
+    let request = tracedecay::daemon::RemoteNodeJoinRequestV1 {
+        endpoint: args.endpoint,
+        trust_root_pem,
+        timeout_secs: args.timeout_secs,
+        discovery: read_protocol_request(&args.request_file)?,
+    };
+    Ok((request, credential))
 }
 
 #[tracing::instrument(name = "serve.remote.client", level = "trace", skip_all)]
