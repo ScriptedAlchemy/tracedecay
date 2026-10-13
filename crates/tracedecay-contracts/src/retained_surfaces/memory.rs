@@ -18,7 +18,7 @@ pub(super) const SPECS: [RetainedSurfaceSpec; 13] = [
     RetainedSurfaceSpec {
         operation: RetainedSurfaceOperation::FactStoreSearch,
         summary: "Search retained facts",
-        description: "Search authorized facts through the owner-bound memory application.",
+        description: "Rank authorized memory facts against free text by text match, holographic similarity, trust, recency, and retrieval count, with a `why` for each score. Use fact_store_probe or fact_store_reason when you know the exact entity names.",
         example: "Search the retained project facts",
         effect: EffectClass::Read,
         scope: MEMORY_SCOPE,
@@ -28,8 +28,8 @@ pub(super) const SPECS: [RetainedSurfaceSpec; 13] = [
     RetainedSurfaceSpec {
         operation: RetainedSurfaceOperation::FactStoreProbe,
         summary: "Probe retained facts",
-        description: "Probe authorized facts through the owner-bound memory application.",
-        example: "Probe retained project facts for this topic",
+        description: "List authorized memory facts whose entities include one exact entity (case-insensitive), ranked by trust. Use fact_store_reason for facts naming several entities together, or fact_store_related for that entity's neighbors.",
+        example: "Probe retained project facts for this entity",
         effect: EffectClass::Read,
         scope: MEMORY_SCOPE,
         paginated: true,
@@ -38,8 +38,8 @@ pub(super) const SPECS: [RetainedSurfaceSpec; 13] = [
     RetainedSurfaceSpec {
         operation: RetainedSurfaceOperation::FactStoreRelated,
         summary: "Find related retained facts",
-        description: "Find authorized related facts through the owner-bound memory application.",
-        example: "Find facts related to this retained fact",
+        description: "List authorized memory facts about an entity's neighbors: facts naming any entity that shares a fact with it, ranked by trust. It returns facts, not entities; use fact_store_probe for facts naming the entity itself.",
+        example: "Find facts about this entity's neighbors",
         effect: EffectClass::Read,
         scope: MEMORY_SCOPE,
         paginated: true,
@@ -48,8 +48,8 @@ pub(super) const SPECS: [RetainedSurfaceSpec; 13] = [
     RetainedSurfaceSpec {
         operation: RetainedSurfaceOperation::FactStoreReason,
         summary: "Reason over retained facts",
-        description: "Read authorized supporting facts through the owner-bound memory application.",
-        example: "Find retained facts supporting this claim",
+        description: "List authorized memory facts whose entities include every entity in `entities` (all must match, case-insensitive), ranked by trust. Use fact_store_related to widen to neighboring entities.",
+        example: "Find retained facts naming all of these entities",
         effect: EffectClass::Read,
         scope: MEMORY_SCOPE,
         paginated: true,

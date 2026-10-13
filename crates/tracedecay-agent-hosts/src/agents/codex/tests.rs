@@ -1270,3 +1270,111 @@ fn hook_trust_uninstall_removes_a_config_it_created() {
     );
     assert!(!config_path.exists());
 }
+
+/// A fake `codex` that logs its argv and whose registry commands only ever
+/// drop the `[mcp_servers.tracedecay]` table.
+#[cfg(unix)]
+fn install_table_scoped_codex_cli(
+    dir: &Path,
+) -> tracedecay_runtime_core::config::HostProgramSearchPathGuard {
+    let log = dir.join("invocations.log");
+    write_executable_script(
+        &dir.join("codex"),
+        format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> '{log}'
+config="$HOME/.codex/config.toml"
+/usr/bin/awk '/^\[/ {{ owned = ($0 == "[mcp_servers.tracedecay]") }} !owned' "$config" > "$config.next"
+/bin/mv "$config.next" "$config"
+exit 0
+"#,
+            log = log.display()
+        ),
+    )
+    .unwrap();
+    tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(dir)
+}
+
+#[cfg(unix)]
+const STANDALONE_SERVERS: &str = "\n[mcp_servers.other]\ncommand = \"other\"\n\n\
+                                  [mcp_servers.tracedecay]\ncommand = \"/usr/local/bin/tracedecay\"\n\
+                                  args = [\"serve\"]\n";
+
+#[cfg(unix)]
+fn mcp_server_names(home: &Path) -> Vec<String> {
+    load_toml_file(&codex_config_path(home)).unwrap()["mcp_servers"]
+        .as_table()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect()
+}
+
+/// A plugin-bearing install over an MCP-only one leaves the plugin's server
+/// as the only tracedecay server. Core alone ships no MCP route, so it keeps
+/// the standalone server.
+#[cfg(unix)]
+#[test]
+fn plugin_bearing_activation_retires_the_standalone_server() {
+    let home = tempfile::tempdir().unwrap();
+    let cli_dir = tempfile::tempdir().unwrap();
+    let _codex_cli = install_table_scoped_codex_cli(cli_dir.path());
+    write_exact_native_activation(home.path(), TEST_BIN);
+    let config_path = codex_config_path(home.path());
+    let mut config = std::fs::read_to_string(&config_path).unwrap();
+    config.push_str(STANDALONE_SERVERS);
+    std::fs::write(&config_path, config).unwrap();
+
+    CodexIntegration
+        .activate_deployed_host_component_registration(
+            &[HostComponentV1::Core],
+            &install_ctx(home.path()),
+        )
+        .unwrap();
+    assert_eq!(mcp_server_names(home.path()), ["other", "tracedecay"]);
+
+    CodexIntegration
+        .activate_deployed_host_component_registration(
+            &[HostComponentV1::Core, HostComponentV1::ContextMcp],
+            &install_ctx(home.path()),
+        )
+        .unwrap();
+
+    assert_eq!(mcp_server_names(home.path()), ["other"]);
+    assert_eq!(
+        std::fs::read_to_string(cli_dir.path().join("invocations.log")).unwrap(),
+        "mcp remove tracedecay\n"
+    );
+    assert!(
+        codex_plugin_activation_state(
+            &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
+            home.path(),
+            Some(TEST_BIN)
+        )
+        .unwrap()
+    );
+}
+
+/// A plugin-bearing uninstall over an MCP-only install removes the standalone
+/// server too, so no TraceDecay registration residue survives it.
+#[cfg(unix)]
+#[test]
+fn plugin_bearing_deactivation_leaves_no_standalone_residue() {
+    let home = tempfile::tempdir().unwrap();
+    let cli_dir = tempfile::tempdir().unwrap();
+    let _codex_cli = install_table_scoped_codex_cli(cli_dir.path());
+    install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
+    let config_path = codex_config_path(home.path());
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(&config_path, STANDALONE_SERVERS).unwrap();
+
+    CodexIntegration
+        .deactivate_deployed_host_component_registration(
+            &[HostComponentV1::Core, HostComponentV1::ContextMcp],
+            &install_ctx(home.path()),
+        )
+        .unwrap();
+
+    assert_eq!(mcp_server_names(home.path()), ["other"]);
+    assert_eq!(codex_registration_residue(home.path()), Ok(false));
+}

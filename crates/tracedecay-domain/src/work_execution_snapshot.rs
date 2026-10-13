@@ -136,6 +136,10 @@ impl WorkExecutionLimits {
     pub const fn max_protocol_bytes(self) -> u64 {
         self.max_protocol_bytes
     }
+
+    pub const fn max_concurrency(self) -> u32 {
+        self.max_concurrency
+    }
 }
 
 impl<'de> Deserialize<'de> for WorkExecutionLimits {

@@ -1,33 +1,22 @@
 use super::super::managed_skills::{ManagedSkillSource, ManagedSkillState};
-use super::super::outcomes::{SkillOutcomeRecord, SkillOutcomeVerdict, skill_outcome};
 use super::{SkillImprovementRecommendation, SkillStaleRecommendation, SkillUsageSummary};
 
 pub fn stale_skill_recommendations(
     summaries: &[SkillUsageSummary],
-    now_unix: i64,
-    stale_after_secs: i64,
 ) -> Vec<SkillStaleRecommendation> {
-    summaries
-        .iter()
-        .map(|summary| stale_skill_recommendation(summary, now_unix, stale_after_secs))
-        .collect()
+    summaries.iter().map(stale_skill_recommendation).collect()
 }
 
 pub fn skill_improvement_recommendations(
     summaries: &[SkillUsageSummary],
 ) -> Vec<SkillImprovementRecommendation> {
-    let now_unix = tracedecay_runtime_core::tracedecay::current_timestamp();
     summaries
         .iter()
-        .map(|summary| skill_improvement_recommendation(summary, now_unix))
+        .map(skill_improvement_recommendation)
         .collect()
 }
 
-fn stale_skill_recommendation(
-    summary: &SkillUsageSummary,
-    now_unix: i64,
-    stale_after_secs: i64,
-) -> SkillStaleRecommendation {
+fn stale_skill_recommendation(summary: &SkillUsageSummary) -> SkillStaleRecommendation {
     let evidence = usage_evidence(summary);
     if summary.pinned {
         return keep_recommendation(
@@ -57,61 +46,16 @@ fn stale_skill_recommendation(
         _ => {}
     }
 
-    if summary.view_count == 0 && summary.use_count == 0 && summary.patch_count == 0 {
-        return SkillStaleRecommendation {
-            skill_id: summary.skill_id.clone(),
-            stale: true,
-            recommendation: "archive_candidate".to_string(),
-            reason: "no view, use, or patch activity has been recorded".to_string(),
-            evidence,
-        };
-    }
-
-    let age_secs = now_unix.saturating_sub(summary.last_activity_at);
-    if age_secs >= stale_after_secs && summary.use_count == 0 && summary.patch_count == 0 {
-        return SkillStaleRecommendation {
-            skill_id: summary.skill_id.clone(),
-            stale: true,
-            recommendation: "archive_candidate".to_string(),
-            reason: format!("last viewed {age_secs} seconds ago with no recorded uses or patches"),
-            evidence,
-        };
-    }
-
-    // Outcome feedback: an activated skill that agents never use is a
-    // real-quality failure even when views keep it "active".
-    if let Some(outcome) = ignored_outcome(summary, now_unix) {
-        return SkillStaleRecommendation {
-            skill_id: summary.skill_id.clone(),
-            stale: true,
-            recommendation: "archive_candidate".to_string(),
-            reason: format!(
-                "skill was activated {} days ago but has not been used since activation",
-                outcome.days_since_activation
-            ),
-            evidence,
-        };
-    }
-
+    // No production host records a skill use, so absent activity is missing
+    // telemetry rather than evidence that the skill is stale.
     keep_recommendation(
         summary,
-        "recent or meaningful activity is present",
+        "skill use is not measured, so absent activity is unknown, not stale",
         evidence,
     )
 }
 
-/// The post-activation outcome when it is an actionable `ignored` verdict.
-fn ignored_outcome(summary: &SkillUsageSummary, now_unix: i64) -> Option<SkillOutcomeRecord> {
-    skill_outcome(summary, now_unix).filter(|outcome| {
-        outcome.verdict == SkillOutcomeVerdict::Ignored
-            && summary.state == Some(ManagedSkillState::Active)
-    })
-}
-
-fn skill_improvement_recommendation(
-    summary: &SkillUsageSummary,
-    now_unix: i64,
-) -> SkillImprovementRecommendation {
+fn skill_improvement_recommendation(summary: &SkillUsageSummary) -> SkillImprovementRecommendation {
     let evidence = usage_evidence(summary);
     if summary.pinned {
         return no_improvement_recommendation(
@@ -138,16 +82,6 @@ fn skill_improvement_recommendation(
         );
     }
 
-    if summary.patch_count > 0 && summary.use_count == 0 {
-        return SkillImprovementRecommendation {
-            skill_id: summary.skill_id.clone(),
-            improvement: true,
-            recommendation: "repair_candidate".to_string(),
-            reason: "skill has been patched but still has no recorded successful uses".to_string(),
-            priority: "high".to_string(),
-            evidence,
-        };
-    }
     if summary.patch_count >= 2 && summary.use_count <= summary.patch_count {
         return SkillImprovementRecommendation {
             skill_id: summary.skill_id.clone(),
@@ -155,35 +89,6 @@ fn skill_improvement_recommendation(
             recommendation: "repair_candidate".to_string(),
             reason: "repeated patches suggest the skill instructions may still be unstable"
                 .to_string(),
-            priority: "medium".to_string(),
-            evidence,
-        };
-    }
-    if summary.view_count >= 3 && summary.use_count == 0 {
-        return SkillImprovementRecommendation {
-            skill_id: summary.skill_id.clone(),
-            improvement: true,
-            recommendation: "clarify_activation".to_string(),
-            reason: "skill is repeatedly viewed but never used; activation guidance may be unclear"
-                .to_string(),
-            priority: "medium".to_string(),
-            evidence,
-        };
-    }
-
-    // Outcome feedback: activation was supposed to put the skill to work, so a
-    // post-activation `ignored` verdict is a stronger signal than raw
-    // lifetime counts.
-    if let Some(outcome) = ignored_outcome(summary, now_unix) {
-        return SkillImprovementRecommendation {
-            skill_id: summary.skill_id.clone(),
-            improvement: true,
-            recommendation: "clarify_activation".to_string(),
-            reason: format!(
-                "skill has not been used in the {} days since activation; \
-                 revise or archive it automatically when validation admits it",
-                outcome.days_since_activation
-            ),
             priority: "medium".to_string(),
             evidence,
         };
@@ -231,6 +136,14 @@ fn usage_evidence(summary: &SkillUsageSummary) -> Vec<String> {
         format!("pinned={}", summary.pinned),
         format!("views={}", summary.view_count),
         format!("uses={}", summary.use_count),
+        format!(
+            "use_telemetry={}",
+            if summary.last_used_at.is_some() {
+                "observed"
+            } else {
+                "unobserved"
+            }
+        ),
         format!("patches={}", summary.patch_count),
         format!("last_activity_at={}", summary.last_activity_at),
     ];
@@ -266,91 +179,121 @@ fn source_key(source: ManagedSkillSource) -> &'static str {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::super::super::outcomes::SKILL_ACTIVATION_WINDOW_SECS;
     use super::super::SkillUsageRecord;
     use super::*;
     use std::collections::BTreeSet;
 
-    /// An activated, active, automation-authored skill with recent views but
-    /// no uses since activation: kept by the plain activity heuristics, so any
-    /// stale recommendation must come from the outcome verdict.
-    fn ignored_since_activation_summary(now: i64) -> SkillUsageRecord {
+    const DAY: i64 = 24 * 60 * 60;
+
+    fn automation_skill(skill_id: &str) -> SkillUsageRecord {
         SkillUsageRecord {
-            schema_version: 2,
-            skill_id: "ignored-skill".to_string(),
-            title: Some("Ignored skill".to_string()),
+            schema_version: 3,
+            skill_id: skill_id.to_string(),
+            title: Some(format!("{skill_id} title")),
             category: Some("maintenance".to_string()),
             state: Some(ManagedSkillState::Active),
             pinned: false,
             created_by: Some("tracedecay".to_string()),
             provenance_source: Some(ManagedSkillSource::AutomationRun),
             targets: Vec::new(),
-            view_count: 2,
+            view_count: 0,
             use_count: 0,
             patch_count: 0,
             first_seen_at: 0,
-            last_activity_at: now,
-            last_viewed_at: Some(now),
+            last_activity_at: 0,
+            last_viewed_at: None,
             last_used_at: None,
             last_patched_at: None,
-            activated_at: Some(now - SKILL_ACTIVATION_WINDOW_SECS - 1),
-            view_count_at_activation: Some(0),
-            use_count_at_activation: Some(0),
+            activated_at: None,
+            view_count_at_activation: None,
+            use_count_at_activation: None,
             imported_analytics_events: BTreeSet::new(),
         }
     }
 
-    #[test]
-    fn ignored_outcome_strengthens_stale_recommendation() {
-        let now = 100 * 24 * 60 * 60;
-        let summary = ignored_since_activation_summary(now);
+    fn activated_long_ago(skill_id: &str, now: i64) -> SkillUsageRecord {
+        let mut summary = automation_skill(skill_id);
+        summary.activated_at = Some(now - 200 * DAY);
+        summary.last_activity_at = now - 200 * DAY;
+        summary.view_count_at_activation = Some(0);
+        summary.use_count_at_activation = Some(0);
+        summary
+    }
 
-        let recommendation = stale_skill_recommendation(&summary, now, 365 * 24 * 60 * 60);
-        assert!(recommendation.stale);
-        assert_eq!(recommendation.recommendation, "archive_candidate");
-        assert!(recommendation.reason.contains("since activation"));
-        assert!(
-            recommendation
-                .evidence
-                .iter()
-                .any(|entry| entry.starts_with("activated_at="))
-        );
+    fn by_id<'a, T>(items: &'a [T], skill_id: &str, id: fn(&T) -> &str) -> &'a T {
+        items.iter().find(|item| id(item) == skill_id).unwrap()
     }
 
     #[test]
-    fn adopted_outcome_keeps_skill() {
-        let now = 100 * 24 * 60 * 60;
-        let mut summary = ignored_since_activation_summary(now);
-        summary.use_count = 3;
-        summary.last_used_at = Some(now);
+    fn absent_skill_activity_is_unknown_not_an_archive_signal() {
+        let now = tracedecay_runtime_core::tracedecay::current_timestamp();
+        let idle = activated_long_ago("idle-skill", now);
+        let mut viewed_once = activated_long_ago("viewed-once-skill", now);
+        viewed_once.view_count = 1;
+        viewed_once.last_viewed_at = Some(now - 150 * DAY);
+        viewed_once.last_activity_at = now - 150 * DAY;
+        let mut pinned = activated_long_ago("pinned-skill", now);
+        pinned.pinned = true;
+        let mut user = activated_long_ago("user-skill", now);
+        user.provenance_source = Some(ManagedSkillSource::User);
 
-        let recommendation = stale_skill_recommendation(&summary, now, 365 * 24 * 60 * 60);
-        assert!(!recommendation.stale);
-        assert_eq!(recommendation.recommendation, "keep");
+        let recommendations = stale_skill_recommendations(&[idle, viewed_once, pinned, user]);
+        let id: fn(&SkillStaleRecommendation) -> &str = |recommendation| &recommendation.skill_id;
+
+        for skill_id in ["idle-skill", "viewed-once-skill"] {
+            let recommendation = by_id(&recommendations, skill_id, id);
+            assert!(!recommendation.stale, "{recommendation:?}");
+            assert_eq!(recommendation.recommendation, "keep");
+            assert!(
+                recommendation.reason.contains("unknown"),
+                "{recommendation:?}"
+            );
+            assert!(
+                recommendation
+                    .evidence
+                    .contains(&"use_telemetry=unobserved".to_string()),
+                "{recommendation:?}"
+            );
+        }
+        let pinned = by_id(&recommendations, "pinned-skill", id);
+        assert!(!pinned.stale);
+        assert!(pinned.reason.contains("pinned"));
+        let user = by_id(&recommendations, "user-skill", id);
+        assert!(!user.stale);
+        assert!(user.reason.contains("user-authored"));
     }
 
     #[test]
-    fn ignored_outcome_triggers_improvement_review() {
-        let now = 100 * 24 * 60 * 60;
-        let summary = ignored_since_activation_summary(now);
+    fn only_repeated_patches_recommend_skill_repair() {
+        let now = tracedecay_runtime_core::tracedecay::current_timestamp();
+        let mut viewed_unused = activated_long_ago("viewed-unused-skill", now);
+        viewed_unused.view_count = 3;
+        viewed_unused.last_viewed_at = Some(now - DAY);
+        let mut patched_once = activated_long_ago("patched-once-skill", now);
+        patched_once.patch_count = 1;
+        patched_once.last_patched_at = Some(now - DAY);
+        let unused = activated_long_ago("unused-skill", now);
+        let mut patched_twice = activated_long_ago("patched-twice-skill", now);
+        patched_twice.patch_count = 2;
+        patched_twice.last_patched_at = Some(now - DAY);
 
-        let recommendation = skill_improvement_recommendation(&summary, now);
-        assert!(recommendation.improvement);
-        assert_eq!(recommendation.recommendation, "clarify_activation");
-        assert!(recommendation.reason.contains("since activation"));
-        assert_eq!(recommendation.priority, "medium");
-    }
+        let recommendations = skill_improvement_recommendations(&[
+            viewed_unused,
+            patched_once,
+            unused,
+            patched_twice,
+        ]);
+        let id: fn(&SkillImprovementRecommendation) -> &str =
+            |recommendation| &recommendation.skill_id;
 
-    #[test]
-    fn never_activated_skill_gets_no_outcome_driven_improvement() {
-        let now = 100 * 24 * 60 * 60;
-        let mut summary = ignored_since_activation_summary(now);
-        summary.activated_at = None;
-        summary.view_count_at_activation = None;
-        summary.use_count_at_activation = None;
-
-        let recommendation = skill_improvement_recommendation(&summary, now);
-        assert!(!recommendation.improvement);
-        assert_eq!(recommendation.recommendation, "none");
+        for skill_id in ["viewed-unused-skill", "patched-once-skill", "unused-skill"] {
+            let recommendation = by_id(&recommendations, skill_id, id);
+            assert!(!recommendation.improvement, "{recommendation:?}");
+            assert_eq!(recommendation.recommendation, "none");
+        }
+        let repair = by_id(&recommendations, "patched-twice-skill", id);
+        assert!(repair.improvement);
+        assert_eq!(repair.recommendation, "repair_candidate");
+        assert_eq!(repair.priority, "medium");
     }
 }

@@ -789,6 +789,7 @@ fn validated_model_candidate(
     let output_tokens = serialized_token_count(&output)?;
     if !base.durable()
         || !safe_suggestion_text(&output.suggestion_text)
+        || !unsupported_code_tokens(&base.suggestion_text, &output.suggestion_text).is_empty()
         || output.suggestion_text.len() > limits.max_text_bytes
         || output_tokens > limits.max_model_output_tokens
         || output.cited_anchor_ids.len() > limits.max_evidence
@@ -805,6 +806,29 @@ fn validated_model_candidate(
         suggestion_text: output.suggestion_text,
         ..base.clone()
     })
+}
+
+/// Code-like tokens of `refined` that never occur in `original`. The model
+/// sees only the original text, so such a token is an invented identifier,
+/// path, or number presented under the original's exact citations.
+fn unsupported_code_tokens<'a>(original: &str, refined: &'a str) -> BTreeSet<&'a str> {
+    refined
+        .split(|character: char| {
+            !(character.is_ascii_alphanumeric() || matches!(character, '_' | ':' | '/' | '.' | '-'))
+        })
+        .map(|token| token.trim_matches(['.', ',', ':', ';', '-']))
+        .filter(|token| code_like_token(token) && !original.contains(token))
+        .collect()
+}
+
+fn code_like_token(token: &str) -> bool {
+    token.contains(['_', '/', '.'])
+        || token.contains("::")
+        || token.bytes().any(|byte| byte.is_ascii_digit())
+        || token
+            .as_bytes()
+            .windows(2)
+            .any(|pair| pair[0].is_ascii_lowercase() && pair[1].is_ascii_uppercase())
 }
 
 fn validate_candidate_set(
@@ -1748,6 +1772,7 @@ mod tests {
     }
 
     fn model_execution() -> ContextScoutModelExecutionV1 {
+        warm_token_counter();
         ContextScoutModelExecutionV1::new(
             MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
             CancellationToken::new(),
@@ -2406,6 +2431,127 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "token-counting")]
+    struct RewritingModel(&'static str);
+
+    #[cfg(feature = "token-counting")]
+    impl ContextScoutModelAssistantV1 for RewritingModel {
+        fn backend(&self) -> ContextScoutModelBackendV1 {
+            ContextScoutModelBackendV1::CodexAppServer
+        }
+
+        fn propose(
+            &self,
+            request: ContextScoutModelRequestV1,
+            _execution: ContextScoutModelExecutionV1,
+        ) -> ContextScoutModelFuture<'_> {
+            let text = self.0;
+            Box::pin(async move {
+                let candidate = request
+                    .candidates
+                    .first()
+                    .ok_or(ContextScoutModelErrorV1::InvalidOutput)?;
+                Ok(ContextScoutModelProposalV1 {
+                    candidate: ContextScoutModelCandidateV1 {
+                        selected_dedupe_key: candidate.dedupe_key,
+                        suggestion_text: text.to_owned(),
+                        cited_anchor_ids: candidate.citation_anchor_ids.clone(),
+                    },
+                    receipt: model_receipt(),
+                })
+            })
+        }
+    }
+
+    #[cfg(feature = "token-counting")]
+    async fn refine_diagnostic(refined: &'static str) -> ContextScoutSelectionV1 {
+        let diagnostic = ContextScoutCandidateV1 {
+            category: ContextScoutCategoryV1::Diagnostic,
+            suggestion_text: "error[E0308]: mismatched types in order_total at src/orders.rs:42"
+                .to_owned(),
+            ..candidate(1, 10)
+        };
+        select_model_assisted_context_scout(
+            &input(vec![diagnostic]),
+            ContextScoutLimitsV1::bounded_defaults(),
+            &RewritingModel(refined),
+            model_execution(),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[cfg(feature = "token-counting")]
+    fn selected_text(selection: &ContextScoutSelectionV1) -> &str {
+        let ContextScoutDecisionV1::Ready { envelope } = &selection.decision else {
+            panic!("selection should stay ready");
+        };
+        &envelope.candidate.suggestion_text
+    }
+
+    #[cfg(feature = "token-counting")]
+    #[tokio::test]
+    async fn refinement_inventing_identifiers_falls_back_to_deterministic_text() {
+        for invented in [
+            "Fix the mismatched types in apply_tax at src/orders.rs:42 (E0308).",
+            "Fix the mismatched types in order_total at src/billing.rs (E0308).",
+            "Fix the mismatched types in order_total at src/orders.rs:42 (E0308) via TaxRate.",
+        ] {
+            let selection = refine_diagnostic(invented).await;
+            assert_eq!(
+                (selection.route, selection.model_outcome),
+                (
+                    ContextScoutRouteV1::DeterministicFallback,
+                    ContextScoutModelOutcomeV1::InvalidOutput
+                ),
+                "{invented}"
+            );
+            assert_eq!(
+                selected_text(&selection),
+                "error[E0308]: mismatched types in order_total at src/orders.rs:42"
+            );
+            assert!(selection.model_receipt.is_none());
+        }
+    }
+
+    #[cfg(feature = "token-counting")]
+    #[tokio::test]
+    async fn faithful_rewording_keeps_the_model_refinement() {
+        let reworded = "Fix the mismatched types in order_total at src/orders.rs:42 (E0308).";
+        let selection = refine_diagnostic(reworded).await;
+        assert_eq!(
+            (selection.route, selection.model_outcome),
+            (
+                ContextScoutRouteV1::ModelAssisted,
+                ContextScoutModelOutcomeV1::Succeeded
+            )
+        );
+        assert_eq!(selected_text(&selection), reworded);
+    }
+
+    #[test]
+    fn unsupported_code_tokens_flag_only_code_like_tokens_absent_from_the_original() {
+        let original = "error[E0308]: mismatched types in order_total at src/orders.rs:42";
+        for (refined, expected) in [
+            ("Plain words only, rewritten freely.", vec![]),
+            ("Check order_total in src/orders.rs:42 for E0308.", vec![]),
+            ("Check apply_tax.", vec!["apply_tax"]),
+            ("See src/billing.rs.", vec!["src/billing.rs"]),
+            ("Line 43 instead.", vec!["43"]),
+            ("Use TaxRate or orderTotal.", vec!["TaxRate", "orderTotal"]),
+            ("Call orders::total now.", vec!["orders::total"]),
+            ("Open config.toml first.", vec!["config.toml"]),
+            ("Rust CI is red; well-known issue.", vec![]),
+            ("apply_tax and apply_tax again.", vec!["apply_tax"]),
+        ] {
+            assert_eq!(
+                unsupported_code_tokens(original, refined),
+                BTreeSet::from_iter(expected),
+                "{refined}"
+            );
+        }
+    }
+
     #[test]
     fn saved_content_delivery_and_feedback_remain_exact() {
         let ContextScoutDecisionV1::Ready { envelope } = select_deterministic_context_scout(
@@ -2881,5 +3027,250 @@ mod tests {
         );
         assert_eq!(requests.lock().unwrap().len(), 0);
         assert!(queued_entries(&store).await.is_empty());
+    }
+
+    #[cfg(feature = "token-counting")]
+    struct ProposalCapturingModel<M> {
+        inner: M,
+        proposal: Mutex<Option<ContextScoutModelProposalV1>>,
+    }
+
+    #[cfg(feature = "token-counting")]
+    impl<M: ContextScoutModelAssistantV1> ContextScoutModelAssistantV1 for ProposalCapturingModel<M> {
+        fn backend(&self) -> ContextScoutModelBackendV1 {
+            self.inner.backend()
+        }
+
+        fn propose(
+            &self,
+            request: ContextScoutModelRequestV1,
+            execution: ContextScoutModelExecutionV1,
+        ) -> ContextScoutModelFuture<'_> {
+            Box::pin(async move {
+                let result = self.inner.propose(request, execution).await;
+                if let Ok(proposal) = &result {
+                    *self.proposal.lock().unwrap() = Some(proposal.clone());
+                }
+                result
+            })
+        }
+    }
+
+    /// Keeps the backend's failure reason, which the Scout outcome taxonomy
+    /// collapses (a spawn failure and a retryable error both read `Unavailable`).
+    #[cfg(feature = "token-counting")]
+    struct ErrorCapturingBackend {
+        inner: Arc<dyn tracedecay_automation_runtime::automation::backend::AgentTaskBackend>,
+        error: Mutex<Option<String>>,
+    }
+
+    #[cfg(feature = "token-counting")]
+    impl tracedecay_automation_runtime::automation::backend::AgentTaskBackend
+        for ErrorCapturingBackend
+    {
+        fn run_task(
+            &self,
+            request: &tracedecay_automation_runtime::automation::backend::AgentTaskRequest,
+        ) -> Result<
+            tracedecay_automation_runtime::automation::backend::AgentTaskResponse,
+            tracedecay_automation_runtime::automation::backend::AgentTaskError,
+        > {
+            let result = self.inner.run_task(request);
+            if let Err(error) = &result {
+                *self.error.lock().unwrap() = Some(error.to_string());
+            }
+            result
+        }
+
+        fn executable(&self) -> Option<&std::path::Path> {
+            self.inner.executable()
+        }
+    }
+
+    /// The prompt runner the composition root registers in
+    /// `tracedecay-project`'s `runtime_ports`; a test process has no root.
+    #[cfg(feature = "token-counting")]
+    fn eval_codex_prompt_runner(
+        prompt: &str,
+        config: &tracedecay_automation_runtime::ports::codex_app_server::SummaryConfig,
+        thread_source: &str,
+        response_schema: Option<&serde_json::Value>,
+    ) -> Result<
+        tracedecay_automation_runtime::ports::codex_app_server::Summary,
+        tracedecay_automation_runtime::automation::backend::AgentTaskError,
+    > {
+        use tracedecay_sessions::runtime::hosts::codex_app_server as sessions;
+        let config = sessions::CodexAppServerSummaryConfig {
+            codex_bin: config.codex_bin.to_string_lossy().into_owned(),
+            model: config.model.clone(),
+            timeout: config.timeout,
+        };
+        match response_schema {
+            Some(schema) => sessions::run_prompt_with_codex_app_server_response_schema(
+                prompt,
+                &config,
+                thread_source,
+                schema,
+            ),
+            None => sessions::run_prompt_with_codex_app_server(prompt, &config, thread_source),
+        }
+        .map(
+            |summary| tracedecay_automation_runtime::ports::codex_app_server::Summary {
+                text: summary.text,
+                model: summary.model,
+            },
+        )
+        .map_err(|error| {
+            tracedecay_automation_runtime::automation::backend::AgentTaskError::new(
+                error.class,
+                error.message,
+            )
+        })
+    }
+
+    /// Measures factual drift of live Codex refinement over a synthetic
+    /// diagnostic corpus about the `evals/agent_adoption/fixture` orders crate.
+    ///
+    /// Ignored by default; it costs one provider call per case. Run it with
+    /// `TRACEDECAY_SCOUT_LIVE_EVAL_CODEX` set to the absolute path of a `codex`
+    /// executable and, optionally, `TRACEDECAY_SCOUT_LIVE_EVAL_MODEL` set to the
+    /// model id:
+    ///
+    /// ```text
+    /// TRACEDECAY_SCOUT_LIVE_EVAL_CODEX=/path/to/codex \
+    /// TRACEDECAY_SCOUT_LIVE_EVAL_MODEL=<model> \
+    /// env -u CC -u CXX bazel run //crates/tracedecay-agent-hosts:unit_test -- \
+    ///   --ignored --nocapture live_codex_refinement_eval
+    /// ```
+    ///
+    /// Each row reports the route, the model outcome, the deterministic text,
+    /// the raw model proposal, the code-like tokens that proposal added (even
+    /// when the guard rejected it), receipt usage and cost, and wall time. It
+    /// asserts only that every case ends in a defined route.
+    #[cfg(feature = "token-counting")]
+    #[tokio::test]
+    #[ignore = "live provider call per case; needs TRACEDECAY_SCOUT_LIVE_EVAL_CODEX"]
+    async fn live_codex_refinement_eval() {
+        use super::model::ProductionContextScoutModelAssistantV1;
+        use tracedecay_automation_runtime::automation::backend::{
+            AgentTaskBackend, CodexAppServerBackend,
+        };
+        use tracedecay_domain::configuration::LcmSummarizerExecutableV1;
+
+        const TIMEOUT_SECS: u64 = 120;
+        let Some(codex) = std::env::var_os("TRACEDECAY_SCOUT_LIVE_EVAL_CODEX") else {
+            eprintln!("skipped: set TRACEDECAY_SCOUT_LIVE_EVAL_CODEX to a codex executable");
+            return;
+        };
+        tracedecay_automation_runtime::ports::codex_app_server::register(eval_codex_prompt_runner);
+        let executable = LcmSummarizerExecutableV1::configured(
+            std::fs::canonicalize(codex).expect("TRACEDECAY_SCOUT_LIVE_EVAL_CODEX must exist"),
+        )
+        .expect("canonical codex executable");
+        let model = std::env::var("TRACEDECAY_SCOUT_LIVE_EVAL_MODEL").ok();
+        let backend: Arc<dyn AgentTaskBackend> =
+            Arc::new(CodexAppServerBackend::new(model, TIMEOUT_SECS, &executable));
+        let limits = ContextScoutLimitsV1::bounded_defaults();
+        let cases = [
+            (
+                "type_error",
+                ContextScoutCategoryV1::Diagnostic,
+                "error[E0308]: mismatched types at src/pricing.rs:15:9 in compute_total: \
+                 expected `u64`, found `u32`",
+            ),
+            (
+                "unused_variable",
+                ContextScoutCategoryV1::Diagnostic,
+                "warning: unused variable: `percent` at src/discount.rs:7:34 in apply_discount",
+            ),
+            (
+                "failing_assertion",
+                ContextScoutCategoryV1::Verification,
+                "test pricing::tests::grand_total_includes_tax failed: assertion `left == right` \
+                 failed, left: 1080, right: 1000",
+            ),
+            (
+                "review_comment",
+                ContextScoutCategoryV1::Retrieval,
+                "Review: reserve_stock in src/inventory.rs decrements stock before \
+                 check_availability succeeds, so a failed order still consumes inventory.",
+            ),
+            (
+                "ci_failure",
+                ContextScoutCategoryV1::Verification,
+                "CI job orders-fixture-test failed: the first failing test is \
+                 orders::tests::place_order_rejects_unknown_sku in src/orders.rs.",
+            ),
+            (
+                "coordination",
+                ContextScoutCategoryV1::Coordination,
+                "Another active agent edited src/orders.rs place_order in the last few minutes; \
+                 coordinate before changing it.",
+            ),
+        ];
+        println!(
+            "case\troute\tmodel_outcome\tdeterministic\trefined\tunsupported\tinput_tokens\t\
+             output_tokens\tcost_microusd\twall_ms\tbackend_error"
+        );
+        for (name, category, text) in cases {
+            let recorder = Arc::new(ErrorCapturingBackend {
+                inner: Arc::clone(&backend),
+                error: Mutex::new(None),
+            });
+            let model = ProposalCapturingModel {
+                inner: ProductionContextScoutModelAssistantV1::new(
+                    Arc::clone(&recorder) as Arc<dyn AgentTaskBackend>,
+                    ContextScoutModelBackendV1::CodexAppServer,
+                ),
+                proposal: Mutex::new(None),
+            };
+            let execution = ContextScoutModelExecutionV1::new(
+                MonotonicDeadline::at(Instant::now() + Duration::from_secs(TIMEOUT_SECS + 5)),
+                CancellationToken::new(),
+                limits,
+            )
+            .unwrap();
+            let case = ContextScoutCandidateV1 {
+                category,
+                suggestion_text: text.to_owned(),
+                ..candidate(1, 10)
+            };
+            let started = Instant::now();
+            let selection =
+                select_model_assisted_context_scout(&input(vec![case]), limits, &model, execution)
+                    .await
+                    .unwrap();
+            let wall_ms = started.elapsed().as_millis();
+            let proposal = model.proposal.into_inner().unwrap();
+            let refined = proposal
+                .as_ref()
+                .map_or("-", |proposal| &proposal.candidate.suggestion_text);
+            let unsupported = proposal.as_ref().map_or_else(Vec::new, |proposal| {
+                unsupported_code_tokens(text, &proposal.candidate.suggestion_text)
+                    .into_iter()
+                    .collect()
+            });
+            let receipt = proposal.as_ref().map(|proposal| &proposal.receipt);
+            let usage =
+                |value: Option<u64>| value.map_or_else(|| "-".to_owned(), |v| v.to_string());
+            println!(
+                "{name}\t{:?}\t{:?}\t{text}\t{refined}\t{}\t{}\t{}\t{}\t{wall_ms}\t{}",
+                selection.route,
+                selection.model_outcome,
+                unsupported.join(","),
+                usage(receipt.and_then(|receipt| receipt.input_tokens)),
+                usage(receipt.and_then(|receipt| receipt.output_tokens)),
+                usage(receipt.and_then(|receipt| receipt.estimated_cost_microusd)),
+                recorder.error.lock().unwrap().as_deref().unwrap_or("-"),
+            );
+            assert!(
+                matches!(
+                    selection.route,
+                    ContextScoutRouteV1::ModelAssisted | ContextScoutRouteV1::DeterministicFallback
+                ),
+                "{name} ended in {:?}",
+                selection.route
+            );
+        }
     }
 }
