@@ -179,7 +179,7 @@ pub(super) fn replay_scope_digest(
         .map_err(|_| RemoteReplayApplicationErrorV1::PolicyMismatch)
 }
 
-fn query_scope_digest(
+pub(super) fn query_scope_digest(
     scope: &RemoteRepositoryScopeV1,
 ) -> Result<ManifestDigest, RemoteExactObservationQueryErrorV1> {
     canonical_sha256(&("tracedecay.remote-query-policy-scope.v2", scope))

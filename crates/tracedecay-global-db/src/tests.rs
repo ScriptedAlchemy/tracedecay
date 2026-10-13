@@ -469,6 +469,7 @@ async fn queued_registered_write_rechecks_authority_when_dequeued(cx: &asupersyn
 }
 
 /// Drives `task` until `signal` resolves; the task must still be pending.
+#[cfg(test)]
 async fn drive_until<T>(
     mut task: std::pin::Pin<&mut impl std::future::Future<Output = ()>>,
     signal: impl std::future::Future<Output = T>,
