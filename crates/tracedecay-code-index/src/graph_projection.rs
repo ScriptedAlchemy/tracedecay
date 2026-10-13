@@ -615,6 +615,32 @@ impl CodeGraphProjectionStore {
         }
     }
 
+    /// Starts a released engine's background re-warm and runs `while_held`
+    /// once the engine is back, while the re-warm is held before it records
+    /// its outcome and stops re-warming.
+    #[cfg(feature = "test-helpers")]
+    pub fn with_rewarm_held_before_completion_for_test<R>(
+        &self,
+        while_held: impl FnOnce() -> R,
+    ) -> R {
+        let completion = self
+            .rewarm_failure
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.rewarm_in_background();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while self.released.load(AtomicOrdering::Acquire) {
+            assert!(
+                Instant::now() < deadline,
+                "the held re-warm never brought the engine back"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let held = while_held();
+        drop(completion);
+        held
+    }
+
     /// Waits up to `budget` for a released engine or catalog to warm again,
     /// starting its re-warm, so a read admitted during a re-warm that
     /// finishes within its budget is served instead of refused. Returns at

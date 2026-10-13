@@ -1568,6 +1568,70 @@ async fn a_released_serving_engine_closes_and_rewarms_on_the_next_read() {
     );
 }
 
+/// A park release can drop the engine again after its re-warm brought it
+/// back but before that re-warm finished. A read that waits then finds the
+/// re-warm still running and sleeps on it, so the re-warm's end must wake
+/// it to answer the cold engine instead of sleeping out its whole budget.
+///
+/// Fails if a finishing re-warm leaves its waiters asleep (issue #3819).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_read_waiting_on_a_finishing_rewarm_wakes_when_it_ends() {
+    use tracedecay_code_index::graph_projection::{
+        CodeGraphEngineReleaseV1, CodeGraphProjectionStore, CodeGraphReadinessRequirement,
+    };
+
+    let fixture = sealed_generation_fixture(
+        "project.graph-engine-rewarm-wakeup",
+        "pub fn rewarmed_value() -> usize { 13 }\n",
+    )
+    .await;
+    let snapshot = fixture
+        .runtime
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .expect("seal the code graph");
+    let store =
+        CodeGraphProjectionStore::from_verified_snapshot(snapshot, fixture.generation_id.clone())
+            .expect("projection store over the sealed snapshot");
+    store.warm_serving_engine().expect("background warm");
+    assert!(matches!(
+        store.release_serving_engine().expect("release"),
+        CodeGraphEngineReleaseV1::Released { .. }
+    ));
+
+    let waiter = store.with_rewarm_held_before_completion_for_test(|| {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match store.release_serving_engine().expect("park release") {
+                CodeGraphEngineReleaseV1::Released { .. } => break,
+                CodeGraphEngineReleaseV1::Busy => {
+                    assert!(Instant::now() < deadline, "the re-warmed engine stays held");
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                CodeGraphEngineReleaseV1::NotPinned => panic!("the re-warm pins the engine"),
+            }
+        }
+        let waiting = store.clone();
+        let waiter = std::thread::spawn(move || {
+            let started = Instant::now();
+            let outcome = waiting.await_rewarm_for(
+                Duration::from_secs(5),
+                CodeGraphReadinessRequirement::Engine,
+            );
+            (outcome, started.elapsed())
+        });
+        // Lets the waiter park before the re-warm finishes. A waiter that
+        // has not parked yet sees the re-warm over and starts its own, which
+        // wakes it, so a short sleep can only pass vacuously, never fail.
+        std::thread::sleep(Duration::from_millis(200));
+        waiter
+    });
+    let (outcome, waited) = waiter.join().expect("waiter thread");
+    assert!(
+        waited < Duration::from_secs(2),
+        "the finished re-warm left its waiter asleep for {waited:?} ({outcome:?})"
+    );
+}
+
 /// A crate of documented functions that call each other and structs with
 /// methods, so the graph carries symbol records, docstrings, and edges.
 fn accounting_source(functions: usize) -> String {
