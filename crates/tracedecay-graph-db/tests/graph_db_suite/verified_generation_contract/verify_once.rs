@@ -90,18 +90,6 @@ fn marker_path(root: &std::path::Path) -> std::path::PathBuf {
     support::graph_path(root).with_extension("verified")
 }
 
-/// The shared `registration` helper carries a 30s deadline, which a
-/// production-width publication legitimately outruns. Only the measurement
-/// harness needs this; every contract test above stays on the default.
-fn unhurried_registration(
-    binding: tracedecay_store::StoreRuntimeBindingV1,
-    root: &std::path::Path,
-) -> tracedecay_graph_db::GraphDbRegistration {
-    let mut registration = registration(binding, root);
-    registration.deadline = std::time::Instant::now() + std::time::Duration::from_secs(3_600);
-    registration
-}
-
 /// A publication proves the generation in full and files that proof, so the
 /// marker is on disk once the store closes. Nothing is skipped here -- this is
 /// the write that makes the *next* open cheap.
