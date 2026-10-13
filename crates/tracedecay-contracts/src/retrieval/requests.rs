@@ -279,15 +279,20 @@ pub struct HealthDimensionDeltaV1 {
     pub delta_ppm: i64,
     pub before_denominator: Option<u64>,
     pub after_denominator: Option<u64>,
+    /// `improved` or `degraded` when the score moved more than 1000 ppm,
+    /// otherwise `unchanged`. `no_evidence` when either point's scope gave
+    /// the dimension nothing to measure, so its scores are formula values.
     pub status: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HealthDeltaCoverageV1 {
+    /// Files the `after` point analyzed.
     pub eligible: Option<u64>,
     pub visited: Option<u64>,
     pub denominator: Option<u64>,
+    /// `complete` when both points analyzed files, otherwise `unknown`.
     pub completeness: String,
 }
 
@@ -307,6 +312,13 @@ pub struct HealthDeltaResult {
     pub after: HealthDeltaPointV1,
     pub before_cursor: String,
     pub after_cursor: String,
+    /// True when both points analyzed files and quality_signal did not drop.
+    /// Both points always share one health definition: a before_cursor
+    /// recorded under another definition, or before definitions were
+    /// recorded, is refused with
+    /// `application.health-delta.definition-mismatch` or
+    /// `application.health-delta.definition-unrecorded`; omit before_cursor to
+    /// record a new baseline.
     pub pass: bool,
     pub delta: i64,
     pub dimensions: BTreeMap<String, HealthDimensionDeltaV1>,

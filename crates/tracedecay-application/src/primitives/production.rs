@@ -321,6 +321,53 @@ fn refused<T>(
     )
 }
 
+/// A before_cursor the delta cannot compare is a cursor refusal, so the
+/// caller's legal action is to restart without it and record a new baseline.
+fn health_delta_outcome<T>(
+    error: &crate::graph_health_delta::HealthDeltaError,
+    finished_at: UtcMicros,
+) -> RetrievalPortOutcome<T> {
+    use crate::graph_health_delta::HealthDeltaError;
+    let domain = EvidenceDomain::Operational;
+    let (kind, code, message) = match error {
+        HealthDeltaError::InvalidPathPrefix => (
+            PrimitiveFailureKind::InvalidRequest,
+            "application.health-delta.invalid-path-prefix",
+            "path_prefix must be one canonical project-relative path.",
+        ),
+        HealthDeltaError::MalformedCursor => (
+            PrimitiveFailureKind::CursorRefused,
+            "application.health-delta.invalid-cursor",
+            "before_cursor is not a health-delta cursor.",
+        ),
+        HealthDeltaError::UnknownCursor => (
+            PrimitiveFailureKind::CursorRefused,
+            "application.health-delta.cursor-unknown",
+            "before_cursor names no retained point for this scope. Omit before_cursor to record a new baseline.",
+        ),
+        HealthDeltaError::DefinitionMismatch { .. } => (
+            PrimitiveFailureKind::CursorRefused,
+            "application.health-delta.definition-mismatch",
+            "before_cursor was measured under another health definition. Omit before_cursor to record a new baseline.",
+        ),
+        HealthDeltaError::DefinitionUnrecorded => (
+            PrimitiveFailureKind::CursorRefused,
+            "application.health-delta.definition-unrecorded",
+            "before_cursor predates recorded health definitions. Omit before_cursor to record a new baseline.",
+        ),
+        HealthDeltaError::CorruptPoint => (
+            PrimitiveFailureKind::Unavailable,
+            "application.health-delta.point-corrupt",
+            "A retained health-delta point failed identity validation.",
+        ),
+        HealthDeltaError::Graph(error) => return graph_query_outcome(error, domain, finished_at),
+        HealthDeltaError::Storage(_) => {
+            return evidence_unavailable(domain, finished_at, OmissionReason::Unavailable, 0);
+        }
+    };
+    refused(kind, code, message, domain, finished_at)
+}
+
 /// Refuses a file-scoped read of a path the admitted generation never
 /// published. `symbols_in_logical_file` answers such a path with an empty
 /// list, which would otherwise read as a complete account of a real file.
