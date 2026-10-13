@@ -6554,10 +6554,10 @@ dependencies = [
 name = "tracedecay-graph-query"
 version = "0.1.0"
 dependencies = [
+ "asupersync",
  "serde_json",
  "tempfile",
  "thiserror",
- "tokio",
  "tracedecay-code-extraction",
  "tracedecay-code-index",
  "tracedecay-contracts",
