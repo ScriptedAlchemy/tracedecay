@@ -247,6 +247,50 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
+async fn combined_review_refreshes_skill_and_fact_outcomes() {
+    let temp = tempdir().unwrap();
+    let profile_root = temp.path().join("profile");
+    let cg = init_project(temp.path()).await;
+    seed_session_evidence(&cg).await;
+    let dashboard_root = cg.store_layout().dashboard_root.clone();
+    let before = tracedecay_automation_runtime::automation::outcomes::load_outcomes_snapshot(
+        &dashboard_root,
+    )
+    .await
+    .unwrap();
+    assert_eq!(before.skills_refreshed_at, None);
+    assert_eq!(before.facts_refreshed_at, None);
+
+    let dispatch = settle_combined_review(
+        &automation_project_context(&cg),
+        &scheduler_config(Some(3600), None),
+        &test_configuration_revision(),
+        &CombinedJsonBackend::new(combined_no_skill_needed_output()),
+        &FixtureAutomationSessionRetrieval::new(&cg),
+        combined_options(&profile_root),
+        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(dispatch, CombinedReviewDispatch::Ran(_)));
+
+    let after = tracedecay_automation_runtime::automation::outcomes::load_outcomes_snapshot(
+        &dashboard_root,
+    )
+    .await
+    .unwrap();
+    assert!(
+        after.facts_refreshed_at.is_some(),
+        "combined review must refresh the fact outcomes it publishes"
+    );
+    assert!(
+        after.skills_refreshed_at.is_some(),
+        "combined review must refresh the skill outcomes it publishes"
+    );
+}
+
+#[cfg(feature = "test-transport")]
+#[tokio::test]
 async fn retained_combined_review_defers_both_ledgers_and_holds_both_task_locks() {
     let temp = tempdir().unwrap();
     let profile_root = temp.path().join("profile");
