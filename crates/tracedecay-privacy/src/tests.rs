@@ -380,6 +380,75 @@ fn sanitize_parsed_rejects_ordering_domain_mismatch() {
     ));
 }
 
+fn sanitize_codex_session_locator(transcript_path: &str) -> Value {
+    let record = serde_json::to_vec(&json!({"type": "session_meta"})).unwrap();
+    let range = ObservationSourceRangeV1::new(0, u64::try_from(record.len()).unwrap()).unwrap();
+    let provider = ProviderId::new("codex").unwrap();
+    let session_id = SessionId::new("session.codex-locator").unwrap();
+    let record_id = ObservationId::new("session.codex-locator.meta").unwrap();
+    let parsed = parse_normalized_observation_record_v1(
+        &record,
+        range,
+        ObservationOrderingDomainV1::FileBytes,
+        |_| {
+            CanonicalObservationEnvelopeV1::new(
+                provider.clone(),
+                "session_meta",
+                record_id.clone(),
+                CanonicalObservationRelationsV1::new(session_id.clone()),
+                vec![CanonicalObservationFactV1::Session {
+                    project_path: Some("/Users/dev/project".to_owned()),
+                    location_path: Some("/Users/dev/project".to_owned()),
+                    transcript_path: Some(transcript_path.to_owned()),
+                    title: None,
+                    started_at: None,
+                    ended_at: None,
+                    source: Some("codex_rollout".to_owned()),
+                    native_source: Some("codex".to_owned()),
+                    profile: None,
+                    location_provenance: Some("rollout_context".to_owned()),
+                }],
+                CanonicalObservationEvidenceV1::new(ObservationOrderingDomainV1::FileBytes, range),
+            )
+            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
+        },
+    )
+    .unwrap();
+    let source = ObservationSourceIdentityV1::for_provider(provider, session_id).unwrap();
+    let identity = ObservationIdentityMaterialV1::for_native_record(
+        source,
+        ObservationScopeV1::Profile,
+        ObservationSourceGenerationV1::new(1).unwrap(),
+        range,
+        ObservationOrderingDomainV1::FileBytes,
+        record_id,
+    )
+    .unwrap();
+    let outcome = RecordSanitizerV1::observation_v1()
+        .unwrap()
+        .sanitize_parsed(parsed, identity, retention_class())
+        .unwrap();
+    outcome.durable_observation().unwrap().payload()["facts"][0]["transcript_path"].clone()
+}
+
+/// The `codex/sessions/<date>/rollout-<uuid>` run of a rollout path reads as
+/// one high-entropy token, so the entropy heuristic replaced it and every
+/// Codex session row stored the redaction marker as its transcript path.
+#[test]
+fn observation_sanitizer_keeps_a_session_transcript_path_a_path() {
+    let path = "/Users/dev/.codex/sessions/2025/10/11/\
+                rollout-2025-10-11T09-41-27-0199d2a8-5c1e-7f32-9a4b-3e8f1c2d7b60.jsonl";
+    assert_eq!(sanitize_codex_session_locator(path), json!(path));
+
+    let credential = "ghp_KsY7QwT2mZ4bV9nR6cX1jH8pL3dG5fA0eUwQ";
+    let leaked = format!("/Users/dev/{credential}/rollout.jsonl");
+    let sanitized = sanitize_codex_session_locator(&leaked);
+    assert!(
+        !sanitized.as_str().unwrap().contains(credential),
+        "a credential inside a locator is still redacted: {sanitized}"
+    );
+}
+
 #[test]
 fn provider_sanitizer_uses_provider_neutral_policy_and_receipt_domain() {
     let record = serde_json::to_vec(&json!({"message": "ordinary provider fixture"}))

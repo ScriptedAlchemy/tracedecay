@@ -3838,10 +3838,11 @@ fn feedback_document_identity_for_file(
     let manifest = generation.metadata().manifest();
     let generation_digest = ManifestDigest::new(manifest.snapshot_digest.as_str().to_owned())
         .map_err(|_| LspRuntimeFailure::new("feedback-code-index-generation-invalid"))?;
-    let language = file
-        .language
-        .clone()
-        .ok_or_else(|| LspRuntimeFailure::new("feedback-code-index-language-unavailable"))?;
+    // A file sealed without a language has no analyzer in this generation, so
+    // repeating the request for it cannot succeed.
+    let language = file.language.clone().ok_or_else(|| {
+        LspRuntimeFailure::invalid_request("feedback-code-index-language-unavailable")
+    })?;
     Ok(
         tracedecay_application::feedback::cycle_production::ProductionFeedbackDocumentIdentityV1 {
             generation_id: manifest.generation_id.clone(),

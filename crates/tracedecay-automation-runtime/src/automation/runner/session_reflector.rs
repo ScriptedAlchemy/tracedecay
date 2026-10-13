@@ -37,7 +37,7 @@ use super::evidence::{
     SessionReflectorEvidenceBundle, SessionReflectorEvidenceOutcome,
     build_session_reflector_evidence,
 };
-use super::retrieval::{AutomationSessionRetrieval, unavailable_automation_retrieval};
+use super::retrieval::AutomationSessionRetrieval;
 
 mod privacy;
 use privacy::{
@@ -943,29 +943,6 @@ fn run_session_reflector_for_store_with_publication_inner<'a, A: ProjectMemoryFa
     })
 }
 
-pub async fn run_session_reflector_with_backend_and_retrieval(
-    cg: &AutomationProjectContext,
-    config: &AutomationConfig,
-    run_control: &AutomationRunControl,
-    configuration_revision_id: &ConfigurationRevisionId,
-    backend: &dyn AgentTaskBackend,
-    retrieval: &dyn AutomationSessionRetrieval,
-    options: SessionReflectorAutomationOptions,
-) -> AutomationRunResult<SessionReflectorAutomationRun> {
-    run_session_reflector_with_backend_and_retrieval_publication(
-        cg,
-        config,
-        run_control,
-        configuration_revision_id,
-        backend,
-        retrieval,
-        options,
-        AutomationRunLedgerPublication::Immediate,
-        None,
-    )
-    .await
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn run_session_reflector_with_backend_and_retrieval_publication(
     cg: &AutomationProjectContext,
@@ -1008,27 +985,6 @@ async fn run_session_reflector_with_backend_and_retrieval_publication(
         None,
         ledger_publication,
         settlement_guard,
-    )
-    .await
-}
-
-pub async fn run_session_reflector_with_backend(
-    cg: &AutomationProjectContext,
-    config: &AutomationConfig,
-    run_control: &AutomationRunControl,
-    configuration_revision_id: &ConfigurationRevisionId,
-    backend: &dyn AgentTaskBackend,
-    options: SessionReflectorAutomationOptions,
-) -> AutomationRunResult<SessionReflectorAutomationRun> {
-    let retrieval = unavailable_automation_retrieval("session_evidence_retrieval_unavailable");
-    run_session_reflector_with_backend_and_retrieval(
-        cg,
-        config,
-        run_control,
-        configuration_revision_id,
-        backend,
-        retrieval.as_ref(),
-        options,
     )
     .await
 }
