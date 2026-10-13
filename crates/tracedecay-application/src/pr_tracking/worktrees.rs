@@ -309,29 +309,15 @@ pub fn resolve_branch_head(
         format!("refs/remotes/origin/{branch}"),
     ];
     for reference in candidates {
-        if let Some(sha) = resolve_git_ref(repo_root, &reference, command_control) {
+        if let ExactRefReadV1::Present(sha) =
+            read_exact_ref(repo_root, &reference, command_control)?
+        {
             return Ok(sha);
         }
     }
     Err(ManualBranchActivationError::invalid_ref(format!(
         "branch '{branch}' does not resolve to a git ref"
     )))
-}
-
-fn resolve_git_ref(
-    repo_root: &Path,
-    reference: &str,
-    command_control: &PrCommandControlV1,
-) -> Option<String> {
-    successful_git_with_control(
-        repo_root,
-        &["rev-parse", "--verify", "--end-of-options", reference],
-        command_control,
-    )
-    .ok()
-    .and_then(|output| String::from_utf8(output.stdout).ok())
-    .map(|sha| sha.trim().to_string())
-    .filter(|sha| !sha.is_empty())
 }
 
 pub fn prepare_manual_branch_worktree(
@@ -1162,6 +1148,28 @@ mod tests {
                 .worktree,
             "each head stages its own worktree"
         );
+    }
+
+    #[test]
+    fn branch_resolution_keeps_unavailable_git_retryable() {
+        let repo = tempfile::tempdir().unwrap();
+        let branch = "feature/resolve-unavailable";
+        init_manual_branch_repo(repo.path(), branch);
+
+        let error = resolve_branch_head(
+            repo.path(),
+            branch,
+            &PrCommandControlV1::with_timeout(Duration::ZERO),
+        )
+        .expect_err("unavailable Git cannot resolve a branch head");
+        assert!(
+            matches!(
+                &error,
+                ManualBranchActivationError::GitAuthorityUnavailable { .. }
+            ),
+            "unavailable Git must not be collapsed into a missing branch: {error}"
+        );
+        assert!(error.retryable());
     }
 
     #[test]
