@@ -44,9 +44,10 @@ use super::{
     ColdMountAdmissionV1, ColdMountReservationV1, GraphActivationGateV1, GraphSeatGateV1,
     MountedCodeIndexWorktreeV1, PendingWakeV1, PublishedTextProjectionOutcomeV1,
     ServingGenerationSlot, ServingSwapOutcomeV1, TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1,
-    clear_convergence_park, clear_graph_resident_memory_park, convergence_park_retries_on_wake,
-    graph_head_belongs_to_another_generation, is_repeated_conflict_verdict, park_convergence,
-    publication_authority_is_terminal, retained_noop_requires_follow_up_wake,
+    clear_convergence_park, clear_graph_resident_memory_park, clear_reconcile_refusal_park,
+    convergence_park_retries_on_wake, graph_head_belongs_to_another_generation,
+    is_repeated_conflict_verdict, park_convergence, publication_authority_is_terminal,
+    retained_noop_requires_follow_up_wake,
 };
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
@@ -1610,6 +1611,9 @@ impl CodeIndexSchedulerRegistryV1 {
                     matches!(&source_result, Ok(Ok(CodeIndexReconcileOutcomeV1::Noop(_)))),
                 );
                 if let Ok(Ok(outcome)) = &source_result {
+                    // The source no longer reproduces a refusal parked over
+                    // earlier input; retire it before this pass seats.
+                    clear_reconcile_refusal_park(&worker_convergence_park);
                     Self::record_source_reconcile_observation(
                         worker_index_observability.get(),
                         &worker_pending_wake,

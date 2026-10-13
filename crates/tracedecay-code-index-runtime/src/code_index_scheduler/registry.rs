@@ -1086,16 +1086,49 @@ fn convergence_park_retries_on_wake(slot: &RwLock<Option<CodeIndexConvergencePar
 /// refusal is preserved too: text progress does not activate the refused
 /// graph, so only [`clear_graph_resident_memory_park`] retires it.
 fn clear_convergence_park(slot: &RwLock<Option<CodeIndexConvergenceParkedV1>>) {
+    clear_convergence_park_unless(slot, |_| false);
+}
+
+/// [`clear_convergence_park`] for text projection progress, which runs beside
+/// the worker's passes. A reconcile refusal over unchanged input is not text
+/// work: the worker holds its passes until the input changes, so clearing the
+/// park here would leave those held passes with nothing to report.
+fn clear_convergence_park_after_text_progress(slot: &RwLock<Option<CodeIndexConvergenceParkedV1>>) {
+    clear_convergence_park_unless(slot, is_reconcile_refusal_park);
+}
+
+fn clear_convergence_park_unless(
+    slot: &RwLock<Option<CodeIndexConvergenceParkedV1>>,
+    preserve: impl Fn(&CodeIndexConvergenceParkedV1) -> bool,
+) {
     let mut slot = slot
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if slot.as_ref().is_some_and(|parked| {
         is_terminal_publication_authority_park(parked)
             || parked.blocked_reason == Some(CodeIndexBuildBlockedReasonV1::ResidentMemory)
+            || preserve(parked)
     }) {
         return;
     }
     *slot = None;
+}
+
+/// The park a reconcile refusal over unchanged input leaves while the worker
+/// holds its passes.
+fn is_reconcile_refusal_park(parked: &CodeIndexConvergenceParkedV1) -> bool {
+    !parked.retries_on_wake
+        && parked.remediation == CONVERGENCE_PARK_RECONCILE_FAILURE_REMEDIATION_V1
+}
+
+/// Retire a reconcile refusal once a pass over changed input completed.
+fn clear_reconcile_refusal_park(slot: &RwLock<Option<CodeIndexConvergenceParkedV1>>) {
+    let mut slot = slot
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if slot.as_ref().is_some_and(is_reconcile_refusal_park) {
+        *slot = None;
+    }
 }
 
 /// Retire a resident-memory graph refusal once a native graph activated.
@@ -2742,11 +2775,11 @@ impl CodeIndexSchedulerRegistryV1 {
             }
             match advance {
                 Ok(Ok(true)) => {
-                    clear_convergence_park(&convergence_park);
+                    clear_convergence_park_after_text_progress(&convergence_park);
                     break;
                 }
                 Ok(Ok(false)) => {
-                    clear_convergence_park(&convergence_park);
+                    clear_convergence_park_after_text_progress(&convergence_park);
                 }
                 Ok(Err(error)) => {
                     if matches!(
