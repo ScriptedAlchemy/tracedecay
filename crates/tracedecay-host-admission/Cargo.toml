@@ -18,10 +18,11 @@ test-helpers = [
 test-transport = ["test-helpers", "tracedecay-runtime-core/test-transport"]
 
 [dependencies]
+asupersync.workspace = true
+futures-util = "0.3.33"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
-tokio = { version = "1", features = ["sync", "rt", "macros"] }
 tracing = "0.1"
 tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-global-db = { path = "../tracedecay-global-db" }
