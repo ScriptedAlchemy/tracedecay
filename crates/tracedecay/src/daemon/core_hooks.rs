@@ -7,7 +7,6 @@
 use std::path::Path;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::time::{Duration, timeout};
 use tracedecay_hooks::core_events::{DaemonHookEvent, HOOK_EVENT_METHOD, HookEventNotifyOutcomeV1};
 
 use tracedecay_daemon_identity::{
@@ -18,8 +17,9 @@ use tracedecay_mcp::server::attach_stateless_request_context;
 
 use super::{BrokerStream, JsonRpcRequest, write_daemon_preamble};
 
-pub(crate) const HOOK_EVENT_NOTIFY_TIMEOUT: Duration = Duration::from_millis(750);
-
+/// Delivers `event` and resolves once the daemon acknowledges it, however
+/// long admission takes. A host hook that must not block its agent bounds
+/// this call itself.
 #[tracing::instrument(name = "daemon.engine.hooks.notify", level = "trace", skip_all)]
 pub async fn notify_hook_event(
     profile: &tracedecay_runtime_core::config::ProfileRoot,
@@ -35,15 +35,7 @@ pub async fn notify_hook_event(
     let Ok(connection) = connection else {
         return HookEventNotifyOutcomeV1::Unavailable;
     };
-    match timeout(
-        HOOK_EVENT_NOTIFY_TIMEOUT,
-        notify_hook_event_to_connection(profile, project_path, event, connection),
-    )
-    .await
-    {
-        Ok(outcome) => outcome,
-        Err(_) => HookEventNotifyOutcomeV1::TimedOut,
-    }
+    notify_hook_event_to_connection(profile, project_path, event, connection).await
 }
 
 #[tracing::instrument(name = "daemon.engine.hooks.deliver", level = "trace", skip_all)]
@@ -123,7 +115,7 @@ async fn notify_hook_event_to_connection(
 
 #[cfg(all(test, unix))]
 mod tests {
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use super::*;
 
