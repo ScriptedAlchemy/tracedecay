@@ -7094,9 +7094,11 @@ dependencies = [
 name = "tracedecay-sessions"
 version = "0.1.0"
 dependencies = [
+ "asupersync",
  "base64 0.22.1",
  "criterion",
  "filetime",
+ "futures-util",
  "getrandom 0.2.17",
  "gix",
  "hex",

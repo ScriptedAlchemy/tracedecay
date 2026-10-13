@@ -56,7 +56,8 @@ where
                     }
                 };
             }
-            () = tokio::time::sleep(CONTROL_POLL_INTERVAL) => {
+            tick = crate::runtime::source::native_sleep(CONTROL_POLL_INTERVAL) => {
+                tick.map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
                 control.check()?;
             }
         }
@@ -76,7 +77,9 @@ async fn acquire_permit(
             permit = &mut acquire => {
                 return permit.map_err(|_| BoundedBackfillInterruption::SourceUnavailable);
             }
-            () = tokio::time::sleep(CONTROL_POLL_INTERVAL) => {}
+            tick = crate::runtime::source::native_sleep(CONTROL_POLL_INTERVAL) => {
+                tick.map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+            }
         }
     }
 }
