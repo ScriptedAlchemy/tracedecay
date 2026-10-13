@@ -7128,6 +7128,7 @@ dependencies = [
 name = "tracedecay-source-edit"
 version = "0.1.0"
 dependencies = [
+ "asupersync",
  "cap-fs-ext",
  "cap-std",
  "same-file",
