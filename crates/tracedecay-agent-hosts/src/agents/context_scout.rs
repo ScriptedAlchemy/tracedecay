@@ -473,8 +473,8 @@ pub struct ContextScoutModelCandidateInputV1 {
     pub citation_anchor_ids: Vec<RetrievalAnchorId>,
 }
 
-/// Structured model output may refine text only. It must select one supplied
-/// deterministic candidate and cite exactly that candidate's durable anchors.
+/// Structured model output may refine text only. It must echo the supplied
+/// deterministic candidate's dedupe key and cite exactly its durable anchors.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContextScoutModelCandidateV1 {
@@ -670,14 +670,7 @@ pub async fn select_model_assisted_context_scout(
             model_receipt: None,
         });
     }
-    let Some(request) = model_request(input, limits)? else {
-        return Ok(ContextScoutSelectionV1 {
-            route: ContextScoutRouteV1::DeterministicFallback,
-            decision: deterministic,
-            model_outcome: ContextScoutModelOutcomeV1::TokenBudgetExceeded,
-            model_receipt: None,
-        });
-    };
+    let request = model_request(selected_candidate);
     if let Err(error) = execution.validate_input(&request) {
         return Ok(ContextScoutSelectionV1 {
             route: ContextScoutRouteV1::DeterministicFallback,
@@ -770,53 +763,18 @@ fn valid_model_receipt(
         && receipt.estimated_cost_microusd.is_some()
 }
 
-fn model_request(
-    input: &ContextScoutSelectionInputV1,
-    limits: ContextScoutLimitsV1,
-) -> Result<Option<ContextScoutModelRequestV1>, ContextScoutErrorV1> {
-    limits.validate()?;
-    input.address.validate()?;
-    if input.candidates.len() > limits.max_candidates {
-        return Err(ContextScoutErrorV1::InvalidCandidate);
+/// Only the deterministic pick reaches the model. Refined text keeps that
+/// candidate's citations, so text from any other candidate would add context
+/// those anchors do not support.
+fn model_request(selected: &ContextScoutCandidateV1) -> ContextScoutModelRequestV1 {
+    ContextScoutModelRequestV1 {
+        candidates: vec![ContextScoutModelCandidateInputV1 {
+            dedupe_key: selected.dedupe_key,
+            category: selected.category,
+            suggestion_text: selected.suggestion_text.clone(),
+            citation_anchor_ids: selected.evidence.anchors().cloned().collect(),
+        }],
     }
-    validate_candidate_set(&input.candidates, limits)?;
-    let mut eligible = input
-        .candidates
-        .iter()
-        .filter(|candidate| {
-            candidate.durable()
-                && candidate.expires_at.0 > input.now.0
-                && !input.delivered_dedupe_keys.contains(&candidate.dedupe_key)
-        })
-        .collect::<Vec<_>>();
-    eligible.sort_by(|left, right| {
-        right
-            .relevance_score
-            .cmp(&left.relevance_score)
-            .then_with(|| left.dedupe_key.cmp(&right.dedupe_key))
-            .then_with(|| left.category.cmp(&right.category))
-            .then_with(|| left.suggestion_text.cmp(&right.suggestion_text))
-    });
-    let candidates = eligible
-        .into_iter()
-        .map(|candidate| ContextScoutModelCandidateInputV1 {
-            dedupe_key: candidate.dedupe_key,
-            category: candidate.category,
-            suggestion_text: candidate.suggestion_text.clone(),
-            citation_anchor_ids: candidate.evidence.anchors().cloned().collect(),
-        })
-        .collect::<Vec<_>>();
-    if candidates.is_empty() {
-        return Ok(None);
-    }
-    let request = ContextScoutModelRequestV1 { candidates };
-    let Some(tokens) = serialized_token_count(&request) else {
-        return Ok(None);
-    };
-    if tokens > limits.max_model_input_tokens {
-        return Ok(None);
-    }
-    Ok(Some(request))
 }
 
 fn validated_model_candidate(
@@ -1680,7 +1638,7 @@ where
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
     use std::time::Duration;
     use tempfile::TempDir;
     use tracedecay_contracts::context_scout::ContextScoutEvidenceEnvelopeV1;
@@ -2243,7 +2201,7 @@ mod tests {
 
     #[tokio::test]
     async fn pre_cancelled_execution_never_calls_the_model_assistant() {
-        let calls = Arc::new(AtomicUsize::new(0));
+        let requests = Arc::new(Mutex::new(Vec::new()));
         let cancellation = CancellationToken::new();
         cancellation.cancel();
         let execution = ContextScoutModelExecutionV1::new(
@@ -2256,14 +2214,14 @@ mod tests {
             &input(vec![candidate(1, 10)]),
             ContextScoutLimitsV1::bounded_defaults(),
             &RecordingModel {
-                calls: Arc::clone(&calls),
+                requests: Arc::clone(&requests),
             },
             execution,
         )
         .await
         .unwrap();
 
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(requests.lock().unwrap().len(), 0);
         assert_eq!(
             selection.model_outcome,
             ContextScoutModelOutcomeV1::Cancelled
@@ -2324,6 +2282,128 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(selection.route, ContextScoutRouteV1::DeterministicFallback);
+    }
+
+    #[cfg(feature = "token-counting")]
+    fn stale_candidate(key: u8, score: u16) -> ContextScoutCandidateV1 {
+        let fresh = evidence();
+        let mut sources = fresh.sources.clone();
+        sources[0].contribution_state = tracedecay_contracts::RetrieverContributionState::Stale;
+        sources[0].temporal.freshness = tracedecay_contracts::FreshnessState::Stale;
+        let evidence = ContextScoutEvidenceEnvelopeV1::claim(
+            fresh.scope,
+            fresh.authorized_scope,
+            fresh.content,
+            fresh.code_generation_id,
+            fresh.authority,
+            fresh.redaction,
+            sources,
+            fresh.claimed_at,
+        )
+        .unwrap();
+        assert_eq!(
+            evidence.availability,
+            ContextScoutEvidenceAvailabilityV1::Stale
+        );
+        ContextScoutCandidateV1 {
+            evidence,
+            ..candidate(key, score)
+        }
+    }
+
+    #[cfg(feature = "token-counting")]
+    fn model_candidate_input(
+        candidate: &ContextScoutCandidateV1,
+    ) -> ContextScoutModelCandidateInputV1 {
+        ContextScoutModelCandidateInputV1 {
+            dedupe_key: candidate.dedupe_key,
+            category: candidate.category,
+            suggestion_text: candidate.suggestion_text.clone(),
+            citation_anchor_ids: candidate.evidence.anchors().cloned().collect(),
+        }
+    }
+
+    #[cfg(feature = "token-counting")]
+    #[tokio::test]
+    async fn model_request_carries_only_the_deterministically_selected_candidate() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let selection = select_model_assisted_context_scout(
+            &input(vec![
+                candidate(2, 10),
+                stale_candidate(3, 30),
+                candidate(1, 20),
+            ]),
+            ContextScoutLimitsV1::bounded_defaults(),
+            &RecordingModel {
+                requests: Arc::clone(&requests),
+            },
+            model_execution(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *requests.lock().unwrap(),
+            vec![ContextScoutModelRequestV1 {
+                candidates: vec![ContextScoutModelCandidateInputV1 {
+                    dedupe_key: [1; 32],
+                    category: ContextScoutCategoryV1::Retrieval,
+                    suggestion_text: "Use evidence 1.".to_owned(),
+                    citation_anchor_ids: vec![RetrievalAnchorId::new("anchor.scout").unwrap()],
+                }],
+            }]
+        );
+        assert_eq!(selection.route, ContextScoutRouteV1::ModelAssisted);
+        let ContextScoutDecisionV1::Ready { envelope } = selection.decision else {
+            panic!("refined selection should stay ready");
+        };
+        assert_eq!(envelope.candidate.dedupe_key, [1; 32]);
+        assert_eq!(
+            envelope.candidate.suggestion_text,
+            "Evidence-bound model refinement."
+        );
+    }
+
+    #[cfg(feature = "token-counting")]
+    #[tokio::test]
+    async fn input_budget_counts_only_the_selected_candidate() {
+        let candidates = (1..=8)
+            .map(|key| candidate(key, 100 - u16::from(key)))
+            .collect::<Vec<_>>();
+        let selected_only = ContextScoutModelRequestV1 {
+            candidates: vec![model_candidate_input(&candidates[0])],
+        };
+        let whole_set = ContextScoutModelRequestV1 {
+            candidates: candidates.iter().map(model_candidate_input).collect(),
+        };
+        let mut limits = ContextScoutLimitsV1::bounded_defaults();
+        limits.max_model_input_tokens = serialized_token_count(&selected_only).unwrap();
+        assert!(serialized_token_count(&whole_set).unwrap() > limits.max_model_input_tokens);
+        let execution = ContextScoutModelExecutionV1::new(
+            MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
+            CancellationToken::new(),
+            limits,
+        )
+        .unwrap();
+
+        let selection = select_model_assisted_context_scout(
+            &input(candidates),
+            limits,
+            &RecordingModel {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            },
+            execution,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            (selection.route, selection.model_outcome),
+            (
+                ContextScoutRouteV1::ModelAssisted,
+                ContextScoutModelOutcomeV1::Succeeded
+            )
+        );
     }
 
     #[test]
@@ -2435,7 +2515,7 @@ mod tests {
 
     #[derive(Clone)]
     struct RecordingModel {
-        calls: Arc<AtomicUsize>,
+        requests: Arc<Mutex<Vec<ContextScoutModelRequestV1>>>,
     }
 
     impl ContextScoutModelAssistantV1 for RecordingModel {
@@ -2448,9 +2528,8 @@ mod tests {
             request: ContextScoutModelRequestV1,
             _execution: ContextScoutModelExecutionV1,
         ) -> ContextScoutModelFuture<'_> {
-            let calls = Arc::clone(&self.calls);
+            self.requests.lock().unwrap().push(request.clone());
             Box::pin(async move {
-                calls.fetch_add(1, Ordering::SeqCst);
                 let candidate = request
                     .candidates
                     .first()
@@ -2471,9 +2550,9 @@ mod tests {
     #[tokio::test]
     async fn durable_runtime_replays_exact_entry_and_cancellation_is_generation_bound() {
         let (_temporary, store) = durable_store().await;
-        let calls = Arc::new(AtomicUsize::new(0));
+        let requests = Arc::new(Mutex::new(Vec::new()));
         let model = RecordingModel {
-            calls: Arc::clone(&calls),
+            requests: Arc::clone(&requests),
         };
         let mut runtime = ContextScoutDurableRuntimeV1::new(Arc::clone(&store), model.clone());
         let outcome = runtime
@@ -2494,7 +2573,7 @@ mod tests {
         };
         assert_eq!(store_outcome, ContextScoutDurableStoreOutcomeV1::Stored);
         assert_eq!(entry.route, ContextScoutRouteV1::ModelAssisted);
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(requests.lock().unwrap().len(), 1);
         let status = runtime
             .status(ContextScoutControlV1 {
                 configuration_revision: [16; 32],
@@ -2608,11 +2687,11 @@ mod tests {
     #[tokio::test]
     async fn controlled_model_execution_cannot_widen_daemon_limits() {
         let (_temporary, store) = durable_store().await;
-        let calls = Arc::new(AtomicUsize::new(0));
+        let requests = Arc::new(Mutex::new(Vec::new()));
         let mut runtime = ContextScoutDurableRuntimeV1::new(
             Arc::clone(&store),
             RecordingModel {
-                calls: Arc::clone(&calls),
+                requests: Arc::clone(&requests),
             },
         );
         let limits = ContextScoutLimitsV1::bounded_defaults();
@@ -2636,7 +2715,7 @@ mod tests {
                 .await,
             Err(ContextScoutErrorV1::InvalidLimits)
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(requests.lock().unwrap().len(), 0);
         assert!(queued_entries(&store).await.is_empty());
     }
 
@@ -2769,11 +2848,11 @@ mod tests {
     #[tokio::test]
     async fn dirty_overlay_never_invokes_model_or_durable_queue() {
         let (_temporary, store) = durable_store().await;
-        let calls = Arc::new(AtomicUsize::new(0));
+        let requests = Arc::new(Mutex::new(Vec::new()));
         let mut runtime = ContextScoutDurableRuntimeV1::new(
             Arc::clone(&store),
             RecordingModel {
-                calls: Arc::clone(&calls),
+                requests: Arc::clone(&requests),
             },
         );
         let mut dirty = candidate(2, 10);
@@ -2800,7 +2879,7 @@ mod tests {
                 .await,
             Err(ContextScoutErrorV1::InvalidEvidence)
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(requests.lock().unwrap().len(), 0);
         assert!(queued_entries(&store).await.is_empty());
     }
 }

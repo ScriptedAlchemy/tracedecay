@@ -134,3 +134,32 @@ fn advisory_deadline_outside_monotonic_horizon_is_typed() {
         } if code == "feedback.advisory-cycle.deadline"
     ));
 }
+
+#[test]
+fn stop_boundary_runs_over_the_first_analyzable_document() {
+    let file = |path: &str, language: Option<&str>| tracedecay_domain::SanitizedCodeFileV1 {
+        file_occurrence_id: tracedecay_domain::FileOccurrenceId::new("file.fixture")
+            .expect("file occurrence id"),
+        logical_path: path.to_owned(),
+        language: language
+            .map(|language| tracedecay_domain::LanguageId::new(language).expect("language id")),
+        content_digest: tracedecay_domain::ContentDigest::new(
+            tracedecay_domain::test_fixtures::repeated_sha256_text('a'),
+        )
+        .expect("content digest"),
+        disposition: if language.is_some() {
+            tracedecay_domain::SnapshotFileDispositionV1::Present
+        } else {
+            tracedecay_domain::SnapshotFileDispositionV1::UnsupportedLanguage
+        },
+    };
+    let files = [
+        file("src/main.rs", Some("rust")),
+        file(".gitignore", None),
+        file("deploy.conf", None),
+        file("src/lib.rs", Some("rust")),
+    ];
+
+    assert_eq!(stop_boundary_document(&files), Some("src/lib.rs"));
+    assert_eq!(stop_boundary_document(&files[1..3]), None);
+}

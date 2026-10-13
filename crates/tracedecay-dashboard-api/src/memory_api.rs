@@ -231,7 +231,7 @@ async fn memory_status_payload(
     let application = memory_application_for_db(state.memory_owner.clone(), &state.mem_db)
         .map_err(|error| error.to_string())?;
     let typed_status = application
-        .dashboard_memory_status(read_control)
+        .project_memory_status(read_control)
         .await
         .map_err(|error| error.to_string())?;
     let funnel = typed_status.feedback_funnel();

@@ -597,18 +597,17 @@ export function conflictCard(): WorkAccountingCard {
     ),
   }));
 
+  const caveat =
+    'Every cell is carried separately and stays separate: no accuracy, precision, or recall scalar is derived here, because the plan forbids collapsing the matrix and forbids the dashboard deriving a metric at all.';
   return {
     dimension,
     title: accountingDimensionTitle(dimension),
     mandate: 'mechanical/semantic conflict confusion matrices',
-    reading: metricsGap(
-      dimension,
-      'the conflict confusion matrices',
-      'Every cell is carried separately below and stays separate: no accuracy, precision, or recall scalar is derived here, because the plan forbids collapsing the matrix and forbids the dashboard deriving a metric at all.',
-    ),
+    reading: metricsGap(dimension, 'the conflict confusion matrices', caveat),
     rows: [],
     matrices,
     contradictions: [],
     provenance: absentProvenance(dimension),
+    caveat,
   };
 }

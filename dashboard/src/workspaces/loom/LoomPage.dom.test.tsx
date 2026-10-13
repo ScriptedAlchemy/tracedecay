@@ -1,11 +1,13 @@
 import { MemoryRouter, useLocation } from 'react-router';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LoomPage } from './LoomPage.tsx';
+import { sessionHref } from '../sessions/SessionPivots.tsx';
 import { useScope } from '../../data/scope/store.ts';
 import { applicationSuccess } from '../../test/applicationEnvelope.ts';
+import { responseWithBodyPendingUntilAbort } from '../../test/pendingBody.ts';
 
 /**
  * What this suite guards is not layout, it is the surface's claims.
@@ -279,7 +281,7 @@ const TEMPORAL = {
         branch: 'main',
         worktree: '/work/tracedecay',
         relation: 'produced',
-        evidence: 'transcript',
+        evidence: 'tool_result',
         confidence: 100,
         span_overlap_kind: 'within_span',
       },
@@ -743,6 +745,95 @@ describe('LoomPage', () => {
     expect(document.querySelectorAll('[data-event][data-kind="test_run"]')).toHaveLength(0);
     await user.click(filter);
     expect(document.querySelectorAll(selector)).toHaveLength(1);
+  });
+
+  it('opens the thread a Delivery link names by its bare session id', async () => {
+    const temporal = structuredClone(TEMPORAL);
+    temporal.payload.sessions[0]!.session_id = 'session.alpha.1';
+    renderLoom({ ...HAPPY, '/api/loom/temporal': { status: 200, body: temporal } }, '/loom?loomSession=session.alpha.1');
+    const thread = await screen.findByRole('region', { name: 'Loaded execution' });
+    expect(thread.textContent).toContain('Deliver Git primitive runtime');
+    expect(screen.queryByText(/outside this loaded page/)).toBeNull();
+    expect(screen.getByTestId('loom-url').textContent).toBe('?loomSession=session.alpha.1');
+  });
+
+  it('opens no thread for a bare id two providers answer to and says so', async () => {
+    const temporal = structuredClone(TEMPORAL);
+    temporal.payload.sessions[1]!.session_id = 'sess-open';
+    renderLoom({ ...HAPPY, '/api/loom/temporal': { status: 200, body: temporal } }, '/loom?loomSession=sess-open');
+    expect(await screen.findByText(/names 2 sessions on this loaded page/)).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'Loaded execution' })).toBeNull();
+    expect(screen.queryByText(/outside this loaded page/)).toBeNull();
+  });
+
+  it('offers the session\'s transcript and delegation when a link names one outside the loaded page', async () => {
+    renderLoom(HAPPY, '/loom?loomSession=session.old');
+    expect(await screen.findByText(/outside this loaded page/)).toBeTruthy();
+    const links = screen.getByRole('navigation', { name: 'Open this session in' });
+    const href = (name: RegExp) => {
+      const url = new URL(within(links).getByRole('link', { name }).getAttribute('href')!, 'http://dashboard.test');
+      return [url.pathname, Object.fromEntries(url.searchParams)];
+    };
+    const scoped = { scope: 'project-loom', scopeLabel: 'project loom', sessionId: 'session.old' };
+    expect(href(/Open in Sessions/)).toEqual(['/sessions', scoped]);
+    expect(href(/Open in Agents/)).toEqual(['/agents', scoped]);
+    expect(within(links).queryByRole('link', { name: /Open in Loom/ })).toBeNull();
+  });
+
+  it('opens the selected thread elsewhere by its recorded provider', async () => {
+    renderLoom(HAPPY, `/loom?loomSession=${encodeURIComponent(LANE('cursor', 'sess-open'))}`);
+    const thread = await screen.findByRole('region', { name: 'Loaded execution' });
+    const links = within(thread.parentElement!).getByRole('navigation', { name: 'Open this session in' });
+    const agents = new URL(within(links).getByRole('link', { name: /Open in Agents/ }).getAttribute('href')!, 'http://dashboard.test');
+    expect(agents.searchParams.get('sessionId')).toBe('sess-open');
+    expect(agents.searchParams.get('sessionProvider')).toBe('cursor');
+  });
+
+  it('selects a session whose provider was never recorded through the link other workspaces write', async () => {
+    const temporal = structuredClone(TEMPORAL);
+    temporal.payload.sessions[0]!.provider = '';
+    renderLoom(
+      { ...HAPPY, '/api/loom/temporal': { status: 200, body: temporal } },
+      sessionHref('loom', { provider: '', sessionId: 'sess-open' }, useScope.getState().scope),
+    );
+    const thread = await screen.findByRole('region', { name: 'Loaded execution' });
+    expect(thread.textContent).toContain('Deliver Git primitive runtime');
+    expect(screen.queryByText(/outside this loaded page/)).toBeNull();
+  });
+
+  it('cancels the temporal read when the reader leaves before it settles', async () => {
+    const signals: (AbortSignal | null | undefined)[] = [];
+    const routed = serve(HAPPY);
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (!String(input).includes('/loom/temporal')) return routed(input);
+      signals.push(init?.signal);
+      return responseWithBodyPendingUntilAbort(200, init?.signal);
+    }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    const { unmount } = render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={['/loom?scope=project-loom']}><LoomPage /></MemoryRouter>
+      </QueryClientProvider>,
+    );
+    await waitFor(() => expect(signals).toHaveLength(1));
+    unmount();
+    expect(signals[0]?.aborted).toBe(true);
+  });
+
+  it('asks the timeline for the day buckets and window it reads the busiest day from', async () => {
+    const fetchMock = serve(HAPPY);
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter><LoomPage /></MemoryRouter>
+      </QueryClientProvider>,
+    );
+    await screen.findByRole('button', { name: 'Select session Deliver Git primitive runtime' });
+    const timeline = fetchMock.mock.calls
+      .map((call) => new URL(String(call[0]), 'http://dashboard.test'))
+      .filter((url) => url.pathname.endsWith('/hermes-lcm/timeline'));
+    expect(timeline.map((url) => url.search)).toEqual(['?bucket=day&limit=400']);
   });
 
   it('uses the Loom temporal read for recorded ends and causal relations', async () => {

@@ -316,9 +316,9 @@ mod spa_router_tests {
 
     #[tokio::test]
     async fn unknown_api_paths_never_receive_the_single_page_app() {
-        let response = tracedecay_api::static_dashboard_router(std::sync::Arc::new(
+        let response = tracedecay_api::static_dashboard_router(
             tracedecay_project::product_runtime::FIXTURE_DASHBOARD_ASSETS,
-        ))
+        )
         .oneshot(
             Request::builder()
                 .uri("/api/not-a-real-route")

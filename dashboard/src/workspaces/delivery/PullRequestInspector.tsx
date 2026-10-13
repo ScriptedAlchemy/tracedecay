@@ -6,6 +6,7 @@ import type {
   DeliveryInboxPullRequestV1,
   DeliveryInboxPullRequestStateV1,
 } from '../../contracts/generated.ts';
+import { useScope } from '../../data/scope/store.ts';
 import { StateChip, type DomainStateKind } from '../../ui/StateChip.tsx';
 import { Panel } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn.ts';
@@ -51,6 +52,7 @@ export function PullRequestInspector({
   className?: string;
 }) {
   const { inbox, location, navigate } = context;
+  const scope = useScope((state) => state.scope);
   const project = projectFor(inbox, row.project_id);
   const edges = edgesFor(inbox, row);
   const umbrellas = umbrellasFor(context.umbrellas, row.id);
@@ -199,7 +201,7 @@ export function PullRequestInspector({
         ) : (
           <ul className="divide-y divide-edge-subtle">
             {edges.map((edge) => {
-              const href = membershipHref(edge.basis);
+              const href = membershipHref(edge.basis, scope);
               return (
                 <li key={edge.id} className="px-3 py-2">
                   <div className="flex flex-wrap items-center justify-between gap-2">

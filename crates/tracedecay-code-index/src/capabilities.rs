@@ -3,13 +3,6 @@
 //! revisions, available grains and exact-term fields, supported languages,
 //! graph edge-authority classes, privacy domain/key epoch, source coverage,
 //! exclusions, partial states, and manifest digest.
-//!
-//! Consumers must reject a missing, incompatible, mixed-generation, or
-//! unauthorized base manifest before candidate production. The optional
-//! semantic manifest augments this base; its absence cannot block authorized
-//! lexical/graph retrieval.
-
-use std::collections::BTreeMap;
 
 use serde::Serialize;
 use thiserror::Error;
@@ -30,8 +23,6 @@ pub enum CapabilityEmissionErrorV1 {
     GenerationNotSealed,
     #[error("the generation manifest mixes snapshots or generations")]
     MixedGeneration,
-    #[error("the privacy domain or key epoch is not authorized for this consumer")]
-    UnauthorizedPrivacyDomain,
     #[error("contract violation: {0}")]
     Contract(String),
 }
@@ -247,76 +238,6 @@ impl<R: LanguageRegistry> BaseCapabilityEmitter<R> {
     }
 }
 
-/// The consumer-side base-manifest validator. Authorization is pinned at
-/// construction: the expected chunk schema revision and the authorized
-/// privacy domains with their maximum key epochs.
-pub struct BaseCapabilityValidator {
-    chunk_schema_revision: String,
-    /// Privacy domain identity -> maximum authorized key epoch.
-    authorized_privacy_domains: BTreeMap<String, u64>,
-}
-
-impl BaseCapabilityValidator {
-    /// Create a validator for the query base chunk schema.
-    pub fn new() -> Self {
-        Self {
-            chunk_schema_revision: CHUNK_SCHEMA_REVISION_V1.to_owned(),
-            authorized_privacy_domains: BTreeMap::new(),
-        }
-    }
-
-    /// Authorize one privacy domain up to `max_key_epoch` (inclusive).
-    #[must_use]
-    pub fn authorize_privacy_domain(
-        mut self,
-        domain: &PrivacyDomainId,
-        max_key_epoch: u64,
-    ) -> Self {
-        self.authorized_privacy_domains
-            .insert(domain.as_str().to_owned(), max_key_epoch);
-        self
-    }
-}
-
-impl Default for BaseCapabilityValidator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl BaseCapabilityValidator {
-    /// Validate that `manifest` authorizes candidate production for
-    /// `generation`: reject missing, incompatible, mixed-generation, or
-    /// unauthorized manifests before candidate production.
-    pub fn validate_for_candidates(
-        &self,
-        generation: &CodeGenerationId,
-        manifest: &CodeIndexCapabilityManifestV1,
-    ) -> Result<(), CapabilityEmissionErrorV1> {
-        if &manifest.generation_id != generation {
-            return Err(CapabilityEmissionErrorV1::MixedGeneration);
-        }
-        // Structural and digest validation (including the recomputed
-        // manifest digest) is owned by the domain contract.
-        manifest
-            .validate()
-            .map_err(|error| CapabilityEmissionErrorV1::Contract(error.to_string()))?;
-        if manifest.chunk_schema_revision != self.chunk_schema_revision {
-            return Err(CapabilityEmissionErrorV1::Contract(format!(
-                "chunk schema revision {} is not compatible with {}",
-                manifest.chunk_schema_revision, self.chunk_schema_revision
-            )));
-        }
-        match self
-            .authorized_privacy_domains
-            .get(manifest.privacy_domain.as_str())
-        {
-            Some(max_epoch) if manifest.privacy_key_epoch <= *max_epoch => Ok(()),
-            _ => Err(CapabilityEmissionErrorV1::UnauthorizedPrivacyDomain),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,40 +333,6 @@ mod tests {
         assert_eq!(
             emitter().emit(&mixed),
             Err(CapabilityEmissionErrorV1::MixedGeneration)
-        );
-    }
-
-    #[test]
-    fn validator_rejects_wrong_generation_tampering_and_unauthorized_domains() {
-        let generation = generation_manifest();
-        let manifest = emitter().emit(&generation).expect("emission succeeds");
-        let validator =
-            BaseCapabilityValidator::new().authorize_privacy_domain(&generation.privacy_domain, 7);
-
-        let other = CodeGenerationId::new("generation.other").expect("valid id");
-        assert_eq!(
-            validator.validate_for_candidates(&other, &manifest),
-            Err(CapabilityEmissionErrorV1::MixedGeneration)
-        );
-
-        let mut tampered = manifest.clone();
-        tampered.source_coverage.files_eligible = 11;
-        assert!(matches!(
-            validator.validate_for_candidates(&generation.generation_id, &tampered,),
-            Err(CapabilityEmissionErrorV1::Contract(_))
-        ));
-
-        let no_domains = BaseCapabilityValidator::new();
-        assert_eq!(
-            no_domains.validate_for_candidates(&generation.generation_id, &manifest,),
-            Err(CapabilityEmissionErrorV1::UnauthorizedPrivacyDomain)
-        );
-
-        let stale_epoch =
-            BaseCapabilityValidator::new().authorize_privacy_domain(&generation.privacy_domain, 6);
-        assert_eq!(
-            stale_epoch.validate_for_candidates(&generation.generation_id, &manifest,),
-            Err(CapabilityEmissionErrorV1::UnauthorizedPrivacyDomain)
         );
     }
 }

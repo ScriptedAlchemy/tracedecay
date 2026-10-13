@@ -115,7 +115,7 @@ async fn skill_writer_runner_auto_applies_safe_consolidations() {
     ]);
     let config = enabled_skill_writer_config();
 
-    let run = run_skill_writer_with_backend(
+    let run = run_skill_writer(
         &cg,
         &config,
         &backend,

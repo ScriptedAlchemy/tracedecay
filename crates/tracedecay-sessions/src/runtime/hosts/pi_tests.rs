@@ -270,14 +270,7 @@ async fn malformed_session_file_is_refused_with_a_typed_failure() {
     let temp_root = layout._temp.path().to_string_lossy().into_owned();
     let escaped_temp = serde_json::to_string(&temp_root).unwrap();
     let normalized = normalized.replace(&escaped_temp[1..escaped_temp.len() - 1], "/tmp-root");
-    // The encoded project directory includes the platform's temporary ancestry,
-    // which can itself contain high-entropy tokens. Derive only this variable
-    // path through the canonical sanitizer; keep the full payload byte check.
-    let transcript = layout.session_dir().join(FIXTURE_NAME);
-    let expected_transcript =
-        tracedecay_privacy::sanitize_provider_metadata_text(&transcript.to_string_lossy())
-            .expect("fixture transcript path is sanitizable");
-    let expected_transcript = serde_json::to_string(&expected_transcript)
+    let expected_transcript = serde_json::to_string(&layout.session_dir().join(FIXTURE_NAME))
         .unwrap()
         .replace(&escaped[1..escaped.len() - 1], "/project")
         .replace(&escaped_temp[1..escaped_temp.len() - 1], "/tmp-root");
