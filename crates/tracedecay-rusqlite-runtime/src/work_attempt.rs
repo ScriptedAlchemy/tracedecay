@@ -72,13 +72,9 @@ pub(crate) fn insert_attempt_in_transaction(
     }
     require_run_reservation_admitted(transaction, authority, attempt.identity())?;
     require_first_run_admission(transaction, authority, attempt)?;
+    require_placement_root(transaction, authority, attempt)?;
     if let Some(concurrency) = concurrency {
-        crate::work::capacity::require_capacity(
-            transaction,
-            authority,
-            attempt.identity().task_id(),
-            concurrency,
-        )?;
+        crate::work::capacity::require_capacity(transaction, authority, attempt, concurrency)?;
     }
     {
         let _span = tracing::trace_span!("rusqlite.work_attempt.cas.insert").entered();
@@ -442,13 +438,9 @@ pub(crate) fn insert_synthesis_in_transaction(
     }
     require_run_reservation_admitted(transaction, authority, attempt.identity())?;
     require_first_run_admission(transaction, authority, attempt)?;
+    require_placement_root(transaction, authority, attempt)?;
     if let Some(concurrency) = concurrency {
-        crate::work::capacity::require_capacity(
-            transaction,
-            authority,
-            attempt.identity().task_id(),
-            concurrency,
-        )?;
+        crate::work::capacity::require_capacity(transaction, authority, attempt, concurrency)?;
     }
     {
         let _span = tracing::trace_span!("rusqlite.work_attempt.cas.synthesis").entered();
@@ -701,6 +693,38 @@ fn require_first_run_admission(
         return Ok(());
     }
     Err(WorkAttemptStorageError::RunAdmissionConflict)
+}
+
+/// An admitted managed placement binds where its run's attempts execute. An
+/// attempt naming any other worktree root would write a tree the placement
+/// authority does not record for this run.
+pub(crate) fn require_placement_root(
+    transaction: &crate::exact_sql::ExactSqlTransaction,
+    authority: &WorkAuthority,
+    attempt: &WorkAttemptV1,
+) -> Result<(), WorkAttemptStorageError> {
+    let rows = registered_work_query(
+        transaction,
+        "SELECT 1 FROM work_placements_v1
+         WHERE project_id = ?1 AND repository_id = ?2 AND worktree_id = ?3
+           AND actor_id = ?4 AND policy_digest = ?5
+           AND task_id = ?6 AND run_id = ?7
+           AND state = 'admitted' AND target_root IS NOT NULL AND target_root != ?8",
+        authority_params_owned(authority)
+            .into_iter()
+            .chain([
+                ExactSqlValue::Text(attempt.identity().task_id().as_str().to_owned()),
+                ExactSqlValue::Text(attempt.identity().run_id().as_str().to_owned()),
+                ExactSqlValue::Text(attempt.execution().worktree_root().to_owned()),
+            ])
+            .collect(),
+    )
+    .map_err(|_| WorkAttemptStorageError::Unavailable)?;
+    if rows.rows.is_empty() {
+        Ok(())
+    } else {
+        Err(WorkAttemptStorageError::PlacementRootConflict)
+    }
 }
 
 fn require_run_reservation_admitted(

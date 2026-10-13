@@ -18,6 +18,12 @@ not already located.
 | Find an exact string or config key | exploring-code | `tracedecay_grep` |
 | Recover what a prior session said | managing-session-context | `tracedecay_message_search` |
 | Recall a durable project fact | project-memory | `tracedecay_fact_store_search` |
+| Facts about one entity | project-memory | `tracedecay_fact_store_probe` |
+| Facts naming several entities together | project-memory | `tracedecay_fact_store_reason` |
+| Facts about an entity's neighbors | project-memory | `tracedecay_fact_store_related` |
+| Find a symbol by its bare name | exploring-code | `tracedecay_find_exact_symbol` |
+| Find a symbol by its full qualified name | exploring-code | `tracedecay_by_qualified_name` |
+| Read a known symbol's signature without its body | exploring-code | `tracedecay_signature` |
 | Review a diff | reviewing-changes | `tracedecay_diff_context` |
 | Which tests reach a change | assessing-impact | `tracedecay_affected_tests` |
 | A build or type error | fixing-build-and-type-errors | `tracedecay_diagnose` |

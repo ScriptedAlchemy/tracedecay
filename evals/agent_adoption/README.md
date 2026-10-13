@@ -82,6 +82,7 @@ paths, so do **not** commit run artifacts.
 | `SCENARIO_TIMEOUT` | `240` | per scenario wall-clock seconds |
 | `REPS` | `1` | repetitions per scenario x host x model x condition cell; `>1` suffixes transcripts with `__r<N>` and the grader pools the repetitions, so a cell of n=15 gives a usable exact-binomial interval instead of a single draw |
 | `PARALLEL` | `1` | concurrent live agent runs; scenarios are read-only against shared fixtures and each `claude` process spawns its own MCP server, so `4` is a safe default for high-rep cells |
+| `REPEATED_QUERY_HINTS` | `off` | `on` turns on the profile setting `user.repeated_query_hints.v1` for the eval's isolated profile before any agent launches, and suffixes transcripts with `__qhints`; see "Repeated-query hints on vs off" |
 | `TRACEDECAY_BIN` | candidate branch (live) | explicit tracedecay binary override |
 | `EVAL_OUT` | unset | dir to copy scoreboard + report into |
 | `LEARNED_SKILL_WORKFLOW` | unset | run only that workflow's held-out scenarios, once per variant, on `full` |
@@ -336,6 +337,55 @@ Host-specific MCP tool names collapse to canonical form, e.g.
 
 Successful exits that contain neither a parsed tool call nor a final answer are
 recorded as `unparseable_empty` invalid runs and excluded from aggregates.
+
+## Repeated-query hints on vs off
+
+The optional repeated-query hint (off by default) appends one result block
+starting `tracedecay_repeated_query:` when a call nearly repeats a recent call
+to the same tool. With `REPEATED_QUERY_HINTS=on`, `run.sh` sets
+`user.repeated_query_hints.v1` through `tracedecay tool configuration_set` on
+the isolated profile, reads it back, and aborts (exit 4) if either step fails,
+for example on a binary that does not register the key. Run and record both
+settings on the same scenarios:
+
+```sh
+TRACEDECAY_AGENT_EVALS=1 HOSTS=claude CLAUDE_MODELS=sonnet REPS=4 \
+  SCENARIOS="loop_absent_stock_release narrow_availability_call_chain" \
+  REPEATED_QUERY_HINTS=on evals/agent_adoption/run.sh
+# then the same command with REPEATED_QUERY_HINTS=off
+```
+
+`loop_absent_stock_release` asks for behavior the fixture lacks, so agents tend
+to re-query with variants. `narrow_availability_call_chain` needs several
+related caller queries, so a hint there is a false-positive opportunity. The
+`__qhints` suffix keeps the two runs' transcripts apart, so one grade covers
+both:
+
+```sh
+merged="$(mktemp -d)"
+cp <off-run-dir>/*__*.stdout.jsonl <off-run-dir>/*__*.meta.json \
+   <on-run-dir>/*__*.stdout.jsonl <on-run-dir>/*__*.meta.json "$merged"
+python3 evals/agent_adoption/grade.py --run-dir "$merged"
+```
+
+Each scoreboard result carries `repeated_query_hints`, `cost` (Claude
+`total_cost_usd`, `num_turns`, and input/output/cache tokens; Codex tokens
+only; unreported fields stay `null`), and `repeated_query_hint_next_steps`:
+one entry per hint block, naming the next tool call or `answer`.
+`cost_and_hints` and the report's **Outcome, cost, and repeated-query hints**
+table put the `hints-on` and `hints-off` cells of each host/model and
+condition side by side. Read outcome first, then cost and turns. A hint
+helped when hints-on keeps or raises outcome at lower cost on the loop
+scenario; on the narrowing scenario any hint is a false positive, and a lower
+outcome or extra cost there is harm. `after hint` shows whether agents
+changed course (a different tool or an answer) or repeated the same tool. At
+`REPS=4`, read differences as direction, not significance; check transcripts
+before claiming either way.
+
+Use Claude for this comparison. The hint is added by `tracedecay serve`, and
+Codex in this harness reaches TraceDecay through the `tracedecay-explorer`
+extension and the shell instead: 12 Codex runs of these two scenarios made no
+`serve` call, so no hint could fire in either setting.
 
 ## Adding a scenario
 

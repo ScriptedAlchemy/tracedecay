@@ -153,6 +153,8 @@ pub enum WorkProductAttemptAdmissionErrorV1 {
     IdempotencyConflict,
     #[error("Work product attempt capacity is exhausted")]
     CapacityExceeded,
+    #[error("Work product attempt names a worktree root outside its run's admitted placement")]
+    PlacementRootConflict,
     #[error("Work product attempt authority is unavailable")]
     Unavailable,
     #[error("Work product attempt admission was cancelled")]
