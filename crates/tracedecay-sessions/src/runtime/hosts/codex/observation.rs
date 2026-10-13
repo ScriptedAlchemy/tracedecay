@@ -197,7 +197,7 @@ async fn fill_codex_session_meta(
     let memory = reserve_shared_jsonl_page()?;
     let background_cpu = shared_jsonl_background_cpu()?;
     let parse_path = claim.key.path.clone();
-    let (parsed, mut memory) = crate::runtime::source::run_blocking(move || {
+    let (parsed, mut memory) = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         let parsed = background_cpu.with_permit(|| session_meta_with_provenance(&parse_path));
         (parsed, memory)
     })
@@ -463,7 +463,7 @@ async fn shared_session_meta_with_provenance(
     cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<Arc<CodexMetaWithProvenance>> {
     let identity_path = path.to_path_buf();
-    let key = crate::runtime::source::run_blocking(move || {
+    let key = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         let canonical = std::fs::canonicalize(&identity_path).map_err(|source| {
             TranscriptIngestError::ScanIo {
                 operation: "resolve Codex session metadata identity",

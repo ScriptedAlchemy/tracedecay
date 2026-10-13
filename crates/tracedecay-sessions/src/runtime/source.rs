@@ -400,47 +400,15 @@ pub trait TranscriptSource: Send + Sync {
     }
 }
 
-/// The native blocking pool could not run, or did not finish, a section.
-#[derive(Debug, Error)]
-#[error("{0}")]
-pub(crate) struct BlockingSectionFailed(String);
-
-/// Runs `work` on the native blocking pool, so the calling worker is free
-/// while it runs.
-///
-/// Dropping the returned future detaches the work, as Tokio's
-/// `spawn_blocking` did: the task handle is polled directly because dropping
-/// a `join` future requests cancellation of the task.
-pub(crate) async fn run_blocking<T, F>(work: F) -> Result<T, BlockingSectionFailed>
-where
-    T: Send + 'static,
-    F: FnOnce() -> T + Send + 'static,
-{
-    let mut task = tracedecay_runtime_core::native_runtime::cx()
-        .ok_or_else(|| BlockingSectionFailed("native runtime unavailable".to_owned()))?
-        .spawn_blocking(move |_cx| work())
-        .map_err(|error| {
-            BlockingSectionFailed(format!("blocking section was not admitted: {error}"))
-        })?;
-    std::future::poll_fn(|context| task.poll_join(context))
-        .await
-        .map_err(|error| BlockingSectionFailed(error.to_string()))
-}
-
 /// Completes after `duration` on a native timer task, so a Tokio caller never
 /// polls an Asupersync timer. Dropping the returned future cancels the timer.
-pub(crate) async fn native_sleep(
-    duration: std::time::Duration,
-) -> Result<(), BlockingSectionFailed> {
+pub(crate) async fn native_sleep(duration: std::time::Duration) -> Result<(), String> {
     let cx = tracedecay_runtime_core::native_runtime::cx()
-        .ok_or_else(|| BlockingSectionFailed("native runtime unavailable".to_owned()))?;
+        .ok_or_else(|| "native runtime unavailable".to_owned())?;
     let mut timer = cx
         .spawn(move |cx| async move { asupersync::time::sleep(cx.now(), duration).await })
-        .map_err(|error| BlockingSectionFailed(format!("timer was not admitted: {error}")))?;
-    timer
-        .join(&cx)
-        .await
-        .map_err(|error| BlockingSectionFailed(error.to_string()))
+        .map_err(|error| format!("timer was not admitted: {error}"))?;
+    timer.join(&cx).await.map_err(|error| error.to_string())
 }
 
 /// Runs one synchronous transcript discovery/parse section on the native
@@ -467,10 +435,12 @@ where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
-    run_blocking(work).await.map_err(|error| {
-        tracing::error!(provider, error = %error, "blocking transcript section failed");
-        TranscriptIngestError::BlockingScanTaskFailed { provider }
-    })
+    tracedecay_runtime_core::native_runtime::spawn_blocking(work)
+        .await
+        .map_err(|error| {
+            tracing::error!(provider, error = %error, "blocking transcript section failed");
+            TranscriptIngestError::BlockingScanTaskFailed { provider }
+        })
 }
 
 /// Spawns a task on `handle` and waits for it from a blocking section.
