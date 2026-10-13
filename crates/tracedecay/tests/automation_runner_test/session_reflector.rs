@@ -111,7 +111,7 @@ async fn session_reflector_runner_skips_when_task_is_disabled() {
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let run = run_session_reflector_with_backend(
+    let run = run_session_reflector(
         &cg,
         &config,
         &run_control,
@@ -170,7 +170,7 @@ async fn session_reflector_interrupts_validation_before_near_match_or_apply() {
         ..AutomationConfig::default()
     };
 
-    let error = run_session_reflector_with_backend(
+    let error = run_session_reflector(
         &cg,
         &config,
         &run_control,
@@ -235,7 +235,7 @@ async fn project_runners_keep_distinct_budget_stages_in_terminal_reports_and_led
         tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
     );
 
-    let reflector = tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
+    let reflector = settle_session_reflector(
         &automation_project_context(&cg),
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
@@ -246,7 +246,7 @@ async fn project_runners_keep_distinct_budget_stages_in_terminal_reports_and_led
     )
     .await
     .unwrap();
-    let skill = tracedecay_automation_runtime::automation::runner::run_skill_writer_with_backend_and_retrieval(
+    let skill = settle_skill_writer(
         &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
@@ -282,24 +282,40 @@ async fn project_runners_keep_distinct_budget_stages_in_terminal_reports_and_led
         assert_eq!(run.fallback_status, None);
         assert_eq!(run.session_evidence_budget_stage, Some(stage));
     }
-    assert!(
-        load_run_records(&cg.store_layout().dashboard_root, 10)
-            .await
-            .unwrap()
-            .is_empty(),
-        "unpersisted refusals must leave durable publication to scheduler settlement"
+    let mut published: Vec<_> = load_run_records(&cg.store_layout().dashboard_root, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|record| (record.run_id, record.session_evidence_budget_stage))
+        .collect();
+    published.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut expected = vec![
+        (
+            reflector.run_id.clone(),
+            reflector.ledger_record.session_evidence_budget_stage,
+        ),
+        (
+            skill.run_id.clone(),
+            skill.ledger_record.session_evidence_budget_stage,
+        ),
+    ];
+    expected.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(
+        published, expected,
+        "settlement publishes each unpersisted refusal once, keeping its budget stage"
     );
     assert!(!profile_root.exists());
 }
 
 #[tokio::test]
 async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_writes() {
+    // Budget exhaustion is never a bare rejection: retrieval reports it as a
+    // staged structural refusal, covered by the budget-stage test above.
     for reason in [
         "session_evidence_denied",
         "session_evidence_stale",
         "session_evidence_partial",
         "session_evidence_unavailable",
-        "session_evidence_budget_exhausted",
         "session_evidence_cancelled",
     ] {
         let temp = tempdir().unwrap();
@@ -331,19 +347,18 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
             ..AutomationConfig::default()
         };
 
-        let reflector =
-            tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
-                &automation_project_context(&cg),
-                &config,
-                &test_automation_run_control(Arc::new(AtomicBool::new(false))),
-                &test_configuration_revision(),
-                &reflector_backend,
-                &retrieval,
-                SessionReflectorAutomationOptions::default(),
-            )
-            .await
-            .unwrap();
-        let skill = tracedecay_automation_runtime::automation::runner::run_skill_writer_with_backend_and_retrieval(
+        let reflector = settle_session_reflector(
+            &automation_project_context(&cg),
+            &config,
+            &test_automation_run_control(Arc::new(AtomicBool::new(false))),
+            &test_configuration_revision(),
+            &reflector_backend,
+            &retrieval,
+            SessionReflectorAutomationOptions::default(),
+        )
+        .await
+        .unwrap();
+        let skill = settle_skill_writer(
             &automation_project_context(&cg),
             &config,
             &test_configuration_revision(),
@@ -361,12 +376,15 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
         assert_eq!(skill.ledger_record.error.as_deref(), Some(reason));
         assert_eq!(reflector_backend.calls(), 0);
         assert_eq!(skill_backend.calls(), 0);
-        assert!(
-            load_run_records(&cg.store_layout().dashboard_root, 10)
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        let records = load_run_records(&cg.store_layout().dashboard_root, 10)
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 2, "settlement publishes both skip terminals");
+        assert!(records.iter().all(|record| {
+            record.status == AutomationRunStatus::Skipped
+                && record.error.as_deref() == Some(reason)
+                && record.proposed_ops.is_none()
+        }));
         assert!(!profile_root.exists());
     }
 
@@ -398,32 +416,30 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
         },
         ..AutomationConfig::default()
     };
-    let reflector =
-        tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
-            &automation_project_context(&cg),
-            &config,
-            &test_automation_run_control(Arc::new(AtomicBool::new(false))),
-            &test_configuration_revision(),
-            &reflector_backend,
-            &retrieval,
-            SessionReflectorAutomationOptions::default(),
-        )
-        .await
-        .unwrap();
-    let skill =
-        tracedecay_automation_runtime::automation::runner::run_skill_writer_with_backend_and_retrieval(
-            &automation_project_context(&cg),
-            &config,
-            &test_configuration_revision(),
-            &skill_backend,
-            &retrieval,
-            SkillWriterAutomationOptions {
-                profile_root: Some(profile_root.clone()),
-                ..SkillWriterAutomationOptions::default()
-            },
-        )
-        .await
-        .unwrap();
+    let reflector = settle_session_reflector(
+        &automation_project_context(&cg),
+        &config,
+        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
+        &test_configuration_revision(),
+        &reflector_backend,
+        &retrieval,
+        SessionReflectorAutomationOptions::default(),
+    )
+    .await
+    .unwrap();
+    let skill = settle_skill_writer(
+        &automation_project_context(&cg),
+        &config,
+        &test_configuration_revision(),
+        &skill_backend,
+        &retrieval,
+        SkillWriterAutomationOptions {
+            profile_root: Some(profile_root.clone()),
+            ..SkillWriterAutomationOptions::default()
+        },
+    )
+    .await
+    .unwrap();
     assert_eq!(
         reflector.ledger_record.error.as_deref(),
         Some("no_session_evidence")
@@ -432,12 +448,15 @@ async fn project_reflector_and_skill_writer_terminal_evidence_matrix_has_zero_wr
         skill.ledger_record.error.as_deref(),
         Some("no_session_evidence")
     );
-    assert!(
-        load_run_records(&cg.store_layout().dashboard_root, 10)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    let records = load_run_records(&cg.store_layout().dashboard_root, 10)
+        .await
+        .unwrap();
+    assert_eq!(records.len(), 2, "settlement publishes both skip terminals");
+    assert!(records.iter().all(|record| {
+        record.status == AutomationRunStatus::Skipped
+            && record.error.as_deref() == Some("no_session_evidence")
+            && record.proposed_ops.is_none()
+    }));
     assert!(!profile_root.exists());
 }
 
@@ -586,7 +605,7 @@ async fn session_reflector_runner_applies_valid_automatic_facts_by_default() {
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let run = run_session_reflector_with_backend(
+    let run = run_session_reflector(
         &cg,
         &config,
         &run_control,
@@ -850,7 +869,7 @@ async fn session_reflector_runner_auto_applies_validated_facts() {
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let run = run_session_reflector_with_backend(
+    let run = run_session_reflector(
         &cg,
         &config,
         &run_control,
@@ -973,7 +992,7 @@ async fn session_reflector_runner_reports_partial_terminal_effects_for_duplicate
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let run = run_session_reflector_with_backend(
+    let run = run_session_reflector(
         &cg,
         &config,
         &run_control,
@@ -1038,7 +1057,7 @@ async fn session_reflector_records_terminal_quarantine_without_an_admitted_fact(
     };
 
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
-    let run = run_session_reflector_with_backend(
+    let run = run_session_reflector(
         &cg,
         &config,
         &run_control,
@@ -1204,7 +1223,7 @@ async fn session_reflector_rejects_unsupported_source_role_and_time_filters_with
         run_id: None,
         ..SessionReflectorAutomationOptions::default()
     };
-    let standalone = run_session_reflector_with_backend(
+    let standalone = run_session_reflector(
         &cg,
         &AutomationConfig {
             enabled: true,
@@ -1235,7 +1254,7 @@ async fn session_reflector_rejects_unsupported_source_role_and_time_filters_with
         Some("session_evidence_filter_unavailable")
     );
 
-    let delegated = run_session_reflector_with_backend(
+    let delegated = run_session_reflector(
         &cg,
         &AutomationConfig {
             enabled: true,
@@ -1282,10 +1301,18 @@ async fn session_reflector_rejects_unsupported_source_role_and_time_filters_with
     let records = load_run_records(&cg.store_layout().dashboard_root, 10)
         .await
         .unwrap();
+    let mut skip_reasons: Vec<_> = records
+        .iter()
+        .map(|record| record.error.as_deref())
+        .collect();
+    skip_reasons.sort();
     assert_eq!(
-        records.len(),
-        1,
-        "only the delegated host gate persists a skip record: {records:?}"
+        skip_reasons,
+        vec![
+            Some("delegated_host_mode"),
+            Some("session_evidence_filter_unavailable")
+        ],
+        "settlement publishes the filter refusal beside the delegated host gate: {records:?}"
     );
     assert!(
         records.iter().all(|record| {
@@ -1357,7 +1384,7 @@ async fn session_reflector_replays_recent_sessions_without_keyword_matches() {
         ..AutomationConfig::default()
     };
 
-    let run = tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
+    let run = settle_session_reflector(
         &automation_project_context(&cg),
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
@@ -1477,7 +1504,7 @@ async fn session_reflector_replay_respects_include_summaries_false() {
         "Remember TraceDecay automation should manage durable session reflection facts directly.",
     );
 
-    let run = tracedecay_automation_runtime::automation::runner::run_session_reflector_with_backend_and_retrieval(
+    let run = settle_session_reflector(
         &automation_project_context(&cg),
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
@@ -1519,7 +1546,7 @@ async fn session_reflector_runner_ledgers_malformed_backend_output() {
         ..AutomationConfig::default()
     };
 
-    let err = run_session_reflector_with_backend(
+    let err = run_session_reflector(
         &cg,
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
@@ -1585,7 +1612,7 @@ async fn session_reflector_runner_ledgers_missing_facts_array() {
         ..AutomationConfig::default()
     };
 
-    let err = run_session_reflector_with_backend(
+    let err = run_session_reflector(
         &cg,
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
@@ -1662,7 +1689,7 @@ async fn session_reflector_runner_records_noop_fallback_when_backend_run_task_fa
         ..AutomationConfig::default()
     };
 
-    let run = run_session_reflector_with_backend(
+    let run = run_session_reflector(
         &cg,
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),

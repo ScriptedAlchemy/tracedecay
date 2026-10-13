@@ -20,6 +20,7 @@ import {
   integrationOutcomesCard,
 } from './workAccountingMetrics.ts';
 import {
+  accountingCardCoverage,
   unavailableCard,
   type WorkAccountingCard,
   type WorkTopologyAccountingReading,
@@ -164,6 +165,8 @@ export function workTopologyAccounting(
 
   return {
     cards,
+    stated: cards.filter((card) => accountingCardCoverage(card) === 'stated'),
+    uncovered: cards.filter((card) => accountingCardCoverage(card) === 'uncovered'),
     measured: cards.filter((card) => card.reading.available).length,
   };
 }

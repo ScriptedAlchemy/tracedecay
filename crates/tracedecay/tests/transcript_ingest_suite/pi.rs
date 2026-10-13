@@ -6,7 +6,7 @@ use tracedecay_sessions::runtime::SessionProvider;
 use crate::restart_atomicity::{
     ingest_global_sources_for_provider, mark_test_project, open_project_session_db,
 };
-use crate::support::{assert_sanitized_path_text_eq, init_git_repo, setup};
+use crate::support::{assert_path_text_eq, init_git_repo, setup};
 
 const SESSION_ID: &str = "5f0c2a8e-3b1d-4c7e-9a2f-6d8e1b4c7a90";
 const FIXTURE_NAME: &str = "2026-09-25T16-00-00-000Z_5f0c2a8e-3b1d-4c7e-9a2f-6d8e1b4c7a90.jsonl";
@@ -47,9 +47,7 @@ async fn assert_fixture_session_landed(home: &Path, project: &Path, transcript: 
         Some(1_790_352_001),
         "first conversational entry"
     );
-    // The rollout filename embeds the session UUID, so the sanitizer redacts
-    // it before persistence; the stored path names the file modulo that span.
-    assert_sanitized_path_text_eq(
+    assert_path_text_eq(
         session
             .transcript_path
             .as_deref()

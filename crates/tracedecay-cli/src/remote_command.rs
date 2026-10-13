@@ -25,61 +25,21 @@ use tracedecay_sdk::remote_client::{EnrolledRemoteClient, RemoteClientError};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
+use crate::cli::{RemoteAction, RemoteAuthorityArgs};
+
 pub const DEFAULT_REMOTE_TIMEOUT_SECS: u64 = 30;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RemoteProtocolArgs {
-    pub endpoint: String,
-    pub credential_file: PathBuf,
-    pub trust_root_file: Option<PathBuf>,
-    pub timeout_secs: u64,
-    pub request_file: PathBuf,
-    pub json: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RemoteCommand {
-    Status {
-        json: bool,
-    },
-    Enroll {
-        args: RemoteProtocolArgs,
-        enrollment_credential_file: PathBuf,
-    },
-    Join {
-        args: RemoteProtocolArgs,
-    },
-    Drain {
-        args: RemoteProtocolArgs,
-    },
-    Capture {
-        args: RemoteProtocolArgs,
-    },
-    Query {
-        args: RemoteProtocolArgs,
-    },
-    TransferFrame {
-        args: RemoteProtocolArgs,
-    },
-    Replay {
-        args: RemoteProtocolArgs,
-    },
-    Failover {
-        args: RemoteProtocolArgs,
-    },
-}
-
 #[tracing::instrument(name = "serve.remote.run", level = "trace", skip_all)]
-pub fn run(profile: &ProfileRoot, command: RemoteCommand) -> Result<()> {
-    match command {
-        RemoteCommand::Status { json } => run_status(profile, json),
-        RemoteCommand::Enroll {
-            args,
+pub fn run(profile: &ProfileRoot, action: RemoteAction) -> Result<()> {
+    match action {
+        RemoteAction::Status { json } => run_status(profile, json),
+        RemoteAction::Enroll {
+            authority,
             enrollment_credential_file,
-        } => run_enroll(args, enrollment_credential_file),
-        RemoteCommand::Join { args } => run_join(profile, args),
-        RemoteCommand::Drain { args } => run_drain(profile, args),
-        RemoteCommand::Capture { args } => {
+        } => run_enroll(authority, enrollment_credential_file),
+        RemoteAction::Join { authority } => run_join(profile, authority),
+        RemoteAction::Drain { authority } => run_drain(profile, authority),
+        RemoteAction::Capture { authority: args } => {
             let request = read_protocol_request(&args.request_file)?;
             let client = build_client(&args)?;
             emit_protocol_response(
@@ -90,7 +50,7 @@ pub fn run(profile: &ProfileRoot, command: RemoteCommand) -> Result<()> {
                 args.json,
             )
         }
-        RemoteCommand::Query { args } => {
+        RemoteAction::Query { authority: args } => {
             let request = read_protocol_request(&args.request_file)?;
             let client = build_client(&args)?;
             let response = {
@@ -105,7 +65,7 @@ pub fn run(profile: &ProfileRoot, command: RemoteCommand) -> Result<()> {
             };
             emit_query_response(&response, local_spool.as_ref(), args.json)
         }
-        RemoteCommand::TransferFrame { args } => {
+        RemoteAction::TransferFrame { authority: args } => {
             let request = read_protocol_request(&args.request_file)?;
             let client = build_client(&args)?;
             emit_protocol_response(
@@ -118,7 +78,7 @@ pub fn run(profile: &ProfileRoot, command: RemoteCommand) -> Result<()> {
                 args.json,
             )
         }
-        RemoteCommand::Replay { args } => {
+        RemoteAction::Replay { authority: args } => {
             let request = read_protocol_request(&args.request_file)?;
             let client = build_client(&args)?;
             emit_protocol_response(
@@ -129,7 +89,7 @@ pub fn run(profile: &ProfileRoot, command: RemoteCommand) -> Result<()> {
                 args.json,
             )
         }
-        RemoteCommand::Failover { args } => {
+        RemoteAction::Failover { authority: args } => {
             let request = read_protocol_request(&args.request_file)?;
             let client = build_client(&args)?;
             emit_protocol_response(
@@ -158,7 +118,7 @@ fn run_status(profile: &ProfileRoot, json: bool) -> Result<()> {
 }
 
 #[tracing::instrument(name = "serve.remote.enroll", level = "trace", skip_all)]
-fn run_enroll(args: RemoteProtocolArgs, enrollment_credential_file: PathBuf) -> Result<()> {
+fn run_enroll(args: RemoteAuthorityArgs, enrollment_credential_file: PathBuf) -> Result<()> {
     let request: RemoteProtocolRequestV1<EnrollmentRequestV1> =
         read_protocol_request(&args.request_file)?;
     let enrollment_credential =
@@ -179,7 +139,7 @@ fn run_enroll(args: RemoteProtocolArgs, enrollment_credential_file: PathBuf) -> 
 }
 
 #[tracing::instrument(name = "serve.remote.join", level = "trace", skip_all)]
-fn run_join(profile: &ProfileRoot, args: RemoteProtocolArgs) -> Result<()> {
+fn run_join(profile: &ProfileRoot, args: RemoteAuthorityArgs) -> Result<()> {
     let json = args.json;
     let (request, credential) = node_operation_request(args)?;
     let discovery = tracedecay::daemon::live_remote_join(profile, &request, &credential)?;
@@ -199,7 +159,7 @@ fn run_join(profile: &ProfileRoot, args: RemoteProtocolArgs) -> Result<()> {
 }
 
 #[tracing::instrument(name = "serve.remote.drain", level = "trace", skip_all)]
-fn run_drain(profile: &ProfileRoot, args: RemoteProtocolArgs) -> Result<()> {
+fn run_drain(profile: &ProfileRoot, args: RemoteAuthorityArgs) -> Result<()> {
     let json = args.json;
     let (request, credential) = node_operation_request(args)?;
     let drained = tracedecay::daemon::live_remote_drain(profile, &request, &credential)?;
@@ -216,7 +176,7 @@ fn run_drain(profile: &ProfileRoot, args: RemoteProtocolArgs) -> Result<()> {
 
 /// The node operation request and enrollment credential `args` name.
 fn node_operation_request(
-    args: RemoteProtocolArgs,
+    args: RemoteAuthorityArgs,
 ) -> Result<(tracedecay::daemon::RemoteNodeJoinRequestV1, Vec<u8>)> {
     if args.timeout_secs == 0 {
         return Err(TraceDecayError::Config {
@@ -248,7 +208,7 @@ fn node_operation_request(
 }
 
 #[tracing::instrument(name = "serve.remote.client", level = "trace", skip_all)]
-fn build_client(args: &RemoteProtocolArgs) -> Result<EnrolledRemoteClient> {
+fn build_client(args: &RemoteAuthorityArgs) -> Result<EnrolledRemoteClient> {
     if args.timeout_secs == 0 {
         return Err(TraceDecayError::Config {
             message: "Remote Brain --timeout-secs must be greater than zero".to_owned(),
@@ -580,7 +540,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        RemoteProtocolArgs, build_client, canonical_json_line, emit_protocol_response,
+        RemoteAuthorityArgs, build_client, canonical_json_line, emit_protocol_response,
         render_protocol_response,
     };
     use tracedecay_contracts::remote::protocol::{
@@ -770,7 +730,7 @@ mod tests {
 
     #[test]
     fn build_client_rejects_a_trust_root_for_a_local_daemon_endpoint() {
-        let error = build_client(&RemoteProtocolArgs {
+        let error = build_client(&RemoteAuthorityArgs {
             endpoint: "http://127.0.0.1:39181/remote/".to_owned(),
             credential_file: PathBuf::from("/this/file/must-not-be-read.bin"),
             trust_root_file: Some(PathBuf::from("/this/file/must-not-be-read.pem")),
@@ -789,7 +749,7 @@ mod tests {
 
     #[test]
     fn build_client_rejects_zero_timeout_before_reading_files() {
-        let error = build_client(&RemoteProtocolArgs {
+        let error = build_client(&RemoteAuthorityArgs {
             endpoint: "https://brain.example/remote/".to_owned(),
             credential_file: PathBuf::from("/this/file/must-not-be-read.bin"),
             trust_root_file: None,

@@ -286,6 +286,53 @@ fn central_authority_does_not_promote_unprefixed_natural_language() {
     );
 }
 
+fn identifier_literals(query: &str) -> Vec<String> {
+    let authority = CentralExactAdmissionAuthorityV1::new(id("exact-rules.v1"));
+    let query_view = EphemeralSanitizedQueryViewV1::sanitize(
+        query,
+        id::<SanitizerRevision>("query-sanitizer.v1"),
+        id::<QueryNormalizationRevision>("query-normalization.v1"),
+    )
+    .expect("query sanitizes");
+    authority
+        .parse_literals(&query_view, &base_request(16))
+        .into_iter()
+        .filter(|literal| literal.field == ExactFieldV1::Identifier)
+        .map(|literal| String::from_utf8(literal.original_bytes).expect("utf8"))
+        .collect()
+}
+
+#[test]
+fn central_authority_admits_the_identifier_a_query_of_words_spells() {
+    assert_eq!(
+        identifier_literals("exact admission proof"),
+        [
+            "exact",
+            "admission",
+            "proof",
+            "exact_admission_proof",
+            "exactAdmissionProof",
+            "ExactAdmissionProof",
+        ]
+    );
+    assert_eq!(
+        identifier_literals("admission proof path:src/lib.rs"),
+        ["admission", "proof"],
+        "a typed atom is not a word of a spelled identifier"
+    );
+    assert_eq!(
+        identifier_literals("admission \"proof\""),
+        ["admission"],
+        "a quoted atom is not a word of a spelled identifier"
+    );
+}
+
+/// One literal's specificity share when every request literal is equally
+/// specific.
+fn literal_share(request: &ExactLaneRequest<'_>) -> u64 {
+    1_000_000 / request.literals.len() as u64
+}
+
 /// Build one exact candidate/evidence pair whose proof is minted by the
 /// central authority for `request.literals[literal_index]`.
 fn exact_pair(
@@ -336,6 +383,7 @@ fn exact_pair(
         matched_literals: vec![literal],
         admission_proof: proof,
         source_role: RetrievalSourceRoleV1::default(),
+        specificity_micros: literal_share(request),
     };
     (candidate, evidence)
 }
@@ -538,6 +586,7 @@ fn with_extra_literal(
     evidence
         .matched_literals
         .push(request.literals[literal_index].clone());
+    evidence.specificity_micros += literal_share(request);
     (candidate, evidence)
 }
 
@@ -565,10 +614,11 @@ fn exact_lane_enforces_budget_cutoff_with_typed_coverage_and_deterministic_conti
     assert_eq!(first.coverage.examined, 3);
     assert_eq!(first.coverage.eligible, 3);
     assert_eq!(first.coverage.capped, 1);
-    // occ.b matched both literals (2.0 fixed-point) and outranks the
-    // single-literal occurrences; ties break on stable occurrence identity.
+    // occ.b matched both literals (the query's full specificity) and
+    // outranks the single-literal occurrences; ties break on stable
+    // occurrence identity.
     result_order(&first, &["occ.b", "occ.a"]);
-    assert_eq!(first.candidates[0].raw_score, FixedPointScore(2_000_000));
+    assert_eq!(first.candidates[0].raw_score, FixedPointScore(1_000_000));
     let continuation = first.continuation.expect("checkpoint emitted");
     assert!(!continuation.exhausted);
 
@@ -700,7 +750,7 @@ fn exact_lane_ranks_production_definitions_ahead_of_stronger_test_references() {
     let result = complete_batch(lane.retrieve_exact(&request).expect("exact retrieval"));
 
     result_order(&result, &["occ.z"]);
-    assert_eq!(result.candidates[0].raw_score, FixedPointScore(1_000_000));
+    assert_eq!(result.candidates[0].raw_score, FixedPointScore(500_000));
     assert_eq!(
         result.candidates[0].source_role,
         RetrievalSourceRoleV1::ProductionDefinition
