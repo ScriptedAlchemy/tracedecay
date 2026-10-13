@@ -12,7 +12,6 @@
 //! decoded here.
 
 use std::io::Read;
-use std::sync::Arc;
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, Uri, header};
@@ -64,7 +63,7 @@ impl StaticDashboardAssets {
 /// It owns `/`, `/static/{*tail}`, and the fallback for client-side routes.
 /// `/api` and `/api/**` deliberately answer `404` from the fallback, so a
 /// mistyped or unavailable API path never becomes a successful HTML response.
-pub fn static_dashboard_router(source: Arc<StaticDashboardAssets>) -> Router {
+pub fn static_dashboard_router(source: StaticDashboardAssets) -> Router {
     Router::new()
         .route("/", get(app_index))
         .route("/static/{*tail}", get(app_static))
@@ -73,10 +72,7 @@ pub fn static_dashboard_router(source: Arc<StaticDashboardAssets>) -> Router {
 }
 
 #[tracing::instrument(name = "api.http.assets", level = "trace", skip_all)]
-async fn app_index(
-    State(source): State<Arc<StaticDashboardAssets>>,
-    headers: HeaderMap,
-) -> Response {
+async fn app_index(State(source): State<StaticDashboardAssets>, headers: HeaderMap) -> Response {
     match source.asset_by_path("index.html") {
         Some(asset) => app_response(&headers, asset, source.cache_tag, CachePolicy::Revalidate),
         None => StatusCode::NOT_FOUND.into_response(),
@@ -85,7 +81,7 @@ async fn app_index(
 
 #[tracing::instrument(name = "api.http.static", level = "trace", skip_all)]
 async fn app_static(
-    State(source): State<Arc<StaticDashboardAssets>>,
+    State(source): State<StaticDashboardAssets>,
     headers: HeaderMap,
     Path(tail): Path<String>,
 ) -> Response {
@@ -103,7 +99,7 @@ async fn app_static(
 
 #[tracing::instrument(name = "api.http.spa", level = "trace", skip_all)]
 async fn app_spa_fallback(
-    State(source): State<Arc<StaticDashboardAssets>>,
+    State(source): State<StaticDashboardAssets>,
     headers: HeaderMap,
     uri: Uri,
 ) -> Response {
@@ -262,7 +258,6 @@ fn app_response(
 #[cfg(test)]
 mod tests {
     use std::io::Write;
-    use std::sync::Arc;
 
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode, header};
@@ -302,10 +297,10 @@ mod tests {
     }
 
     fn router() -> axum::Router {
-        static_dashboard_router(Arc::new(StaticDashboardAssets {
+        static_dashboard_router(StaticDashboardAssets {
             assets: ASSETS,
             cache_tag: "bundle.1",
-        }))
+        })
     }
 
     #[tokio::test]
@@ -432,10 +427,10 @@ mod tests {
             content_type: "text/html; charset=utf-8",
             encoding: StaticAssetEncoding::Gzip,
         }]));
-        let response = static_dashboard_router(Arc::new(StaticDashboardAssets {
+        let response = static_dashboard_router(StaticDashboardAssets {
             assets,
             cache_tag: "gz.1",
-        }))
+        })
         .oneshot(
             Request::builder()
                 .uri("/")
@@ -471,10 +466,10 @@ mod tests {
             content_type: "text/html; charset=utf-8",
             encoding: StaticAssetEncoding::Gzip,
         }]));
-        let response = static_dashboard_router(Arc::new(StaticDashboardAssets {
+        let response = static_dashboard_router(StaticDashboardAssets {
             assets,
             cache_tag: "gz.2",
-        }))
+        })
         .oneshot(
             Request::builder()
                 .uri("/")

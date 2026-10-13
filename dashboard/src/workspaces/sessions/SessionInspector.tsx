@@ -24,8 +24,7 @@
  * gap a reader might take for an omission.
  */
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { Link, useSearchParams } from 'react-router';
-import { ChevronLeft, ChevronRight, Waypoints } from 'lucide-react';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
 import {
   assertNever,
   LcmSessionPayloadV1Schema,
@@ -45,6 +44,7 @@ import { ReadSection, envelopeReadState, type ReadState } from '../../ui/ReadSec
 import { StateChip, type DomainStateKind } from '../../ui/StateChip';
 import { Fact, Legend, Meter, Readout } from '../../ui/instrument.tsx';
 import { formatStamp, splitCount } from '../../ui/format.ts';
+import { SessionPivots } from './SessionPivots.tsx';
 import { formatDurationSeconds } from '../loom/tracks.ts';
 import { tokenCountLabel } from './tokenLabel.ts';
 import {
@@ -99,9 +99,7 @@ export function SessionInspector({
           {selection.sessionId}
         </p>
         <IdentitySection identity={identity} onSelectProvider={onSelectProvider} />
-        {provider != null ? (
-          <LoomPivot provider={provider} sessionId={selection.sessionId} />
-        ) : null}
+        <SessionPivots session={{ provider, sessionId: selection.sessionId }} from="sessions" />
         <SessionTranscript sessionId={selection.sessionId} />
         <RelationsSection identity={identity} />
       </div>
@@ -332,30 +330,6 @@ function ExtentFacts({ extent }: { extent: ReturnType<typeof sessionExtent> }) {
     default:
       return assertNever(extent);
   }
-}
-
-/** The one cross-workspace pivot the shipping product exposes: Loom selects a
- * thread by its provider-qualified id. Global project scope rides along. */
-function LoomPivot({ provider, sessionId }: { provider: string; sessionId: string }) {
-  const [params] = useSearchParams();
-  const search = new URLSearchParams();
-  for (const key of ['scope', 'scopeLabel']) {
-    const value = params.get(key);
-    if (value !== null) search.set(key, value);
-  }
-  search.set('loomSession', JSON.stringify([provider, sessionId]));
-  return (
-    <Link
-      to={{ pathname: '/loom', search: `?${search.toString()}` }}
-      className="td-hit group self-start"
-      data-pivot="loom"
-    >
-      <span className={PAGER_BEZEL}>
-        <Waypoints aria-hidden size={11} />
-        Open in Loom
-      </span>
-    </Link>
-  );
 }
 
 /* ------------------------------------------------------------------------ *

@@ -13,7 +13,7 @@ use crate::restart_atomicity::{
     observation_source_cursor, open_project_session_db, set_projection_failure,
 };
 use crate::support::{
-    assert_metadata_path_eq, assert_sanitized_path_text_eq, create_git_repo_with_linked_worktree,
+    assert_metadata_path_eq, assert_path_text_eq, create_git_repo_with_linked_worktree,
     init_git_repo, setup,
 };
 
@@ -291,7 +291,7 @@ async fn kiro_workspace_location_projects_session_metadata() {
     ingest_global_sources_for_provider(&home, &db, &project, Some(SessionProvider::Kiro)).await;
 
     let session = db.get_session("kiro", "sess-location").await.unwrap();
-    assert_sanitized_path_text_eq(
+    assert_path_text_eq(
         session
             .transcript_path
             .as_deref()

@@ -27,9 +27,9 @@ use tracedecay_contracts::remote::{
     protocol::RemoteProtocolRequestV1,
     query::RemoteExactObservationQueryErrorV1,
     replay::{
-        RemoteReplayApplicationErrorV1, RemoteReplayCommitReceiptV1, RemoteReplayFrameLookupPortV1,
-        RemoteReplayPolicyDecisionV1, RemoteReplayPolicyEvidencePortV1,
-        RemoteReplayPolicyEvidenceV1, RemoteReplaySpoolPortV1,
+        RemoteReplayApplicationErrorV1, RemoteReplayCommitReceiptV1, RemoteReplayFindingV1,
+        RemoteReplayFrameLookupPortV1, RemoteReplayPolicyDecisionV1,
+        RemoteReplayPolicyEvidencePortV1, RemoteReplayPolicyEvidenceV1, RemoteReplaySpoolPortV1,
     },
     transfer::{
         RemoteFrameTransferDispositionV1, RemoteFrameTransferErrorV1, RemoteFrameTransferPortV1,
@@ -1192,6 +1192,45 @@ fn capture_enforces_the_registered_spool_event_bound() {
     assert_eq!(
         storage.capture_pending(&second),
         Err(RemoteCapturePersistenceErrorV1::Overflow)
+    );
+}
+
+#[test]
+fn abandoning_an_attempt_a_terminal_transition_already_released_succeeds() {
+    let fixture = fixture();
+    let storage = storage(&fixture);
+    let receipt = storage.capture_pending(&admitted()).unwrap();
+    let attempt = storage
+        .begin_replay_attempt(&receipt.event_id, UtcMicros(20))
+        .unwrap();
+    storage
+        .transition(RemoteReplayTransitionV1 {
+            event_id: receipt.event_id.clone(),
+            from: RemoteReplayStateV1::Pending,
+            to: RemoteReplayStateV1::Rejected,
+            replay_attempt: attempt,
+            observed_at: UtcMicros(21),
+            finding: Some(RemoteReplayFindingV1::EnrollmentRevoked),
+            receipt: None,
+        })
+        .unwrap();
+
+    assert_eq!(
+        storage.abandon_replay_attempt(&receipt.event_id, attempt),
+        Ok(())
+    );
+    assert_eq!(
+        storage.abandon_replay_attempt(&receipt.event_id, attempt + 1),
+        Err(RemoteCapturePersistenceErrorV1::Corruption),
+        "an attempt that never started is not this caller's to release"
+    );
+    assert_eq!(
+        storage.state(&receipt.event_id).unwrap(),
+        RemoteReplaySpoolStateV1 {
+            state: RemoteReplayStateV1::Rejected,
+            receipt: None,
+            last_attempt: attempt,
+        }
     );
 }
 

@@ -1,0 +1,21 @@
+{
+  "id": "learned_pricing_negative_reserve_stock",
+  "category": "learned_skill",
+  "hosts": [
+    "claude"
+  ],
+  "fixture": "main",
+  "status": "learned",
+  "prompt": "How does stock reservation work in this crate?",
+  "ground_truth": [
+    "reserve_stock",
+    "check_availability",
+    "stock"
+  ],
+  "max_tool_calls": 6,
+  "learned_skill": {
+    "workflow": "pricing_change_review",
+    "expected": false
+  },
+  "notes": "Near-neighbor negative: same crate, no pricing change, so the pricing-change-review skill must not fire. Prompt matches explore_reserve_stock."
+}

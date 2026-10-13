@@ -124,25 +124,6 @@ pub(super) fn validate_skill_writer_decision(output: &Value, proposals: &[Value]
     no_skill_needed_decision(output, proposals).map(|_| ())
 }
 
-pub async fn run_skill_writer_with_backend(
-    cg: &AutomationProjectContext,
-    config: &AutomationConfig,
-    configuration_revision_id: &ConfigurationRevisionId,
-    backend: &dyn AgentTaskBackend,
-    options: SkillWriterAutomationOptions,
-) -> AutomationRunResult<SkillWriterAutomationRun> {
-    let retrieval = unavailable_automation_retrieval("session_evidence_retrieval_unavailable");
-    run_skill_writer_with_backend_and_retrieval(
-        cg,
-        config,
-        configuration_revision_id,
-        backend,
-        retrieval.as_ref(),
-        options,
-    )
-    .await
-}
-
 /// Retained-settlement variant that preserves the caller's canonical session
 /// retrieval authority instead of silently reopening the production route.
 pub async fn run_skill_writer_with_backend_and_retrieval_for_retained_settlement(
@@ -168,29 +149,6 @@ pub async fn run_skill_writer_with_backend_and_retrieval_for_retained_settlement
     )
     .await;
     RetainedAutomationRun::new(result, settlement_guard)
-}
-
-pub async fn run_skill_writer_with_backend_and_retrieval(
-    cg: &AutomationProjectContext,
-    config: &AutomationConfig,
-    configuration_revision_id: &ConfigurationRevisionId,
-    backend: &dyn AgentTaskBackend,
-    retrieval: &dyn AutomationSessionRetrieval,
-    options: SkillWriterAutomationOptions,
-) -> AutomationRunResult<SkillWriterAutomationRun> {
-    run_skill_writer_with_backend_and_retrieval_publication(
-        cg,
-        config,
-        configuration_revision_id,
-        backend,
-        retrieval,
-        options,
-        AutomationRunPublication {
-            ledger: AutomationRunLedgerPublication::Immediate,
-            settlement_guard: None,
-        },
-    )
-    .await
 }
 
 async fn run_skill_writer_with_backend_and_retrieval_publication(
@@ -235,9 +193,8 @@ pub(super) struct SkillWriterStoreRuntime<'a> {
     pub(super) authority: CurationApplyAuthorityV1,
 }
 
-// The single funnel every skill-writer entry point (project and retained
-// settlement) flows through: one static run-lifetime span in the futures lane
-// so suspension and cancellation of long runs stay visible.
+// One static run-lifetime span in the futures lane so suspension and
+// cancellation of long skill-writer runs stay visible.
 #[tracing::instrument(name = "automation.run.skill_writer", level = "trace", skip_all)]
 async fn run_skill_writer_for_store_with_publication(
     runtime: SkillWriterStoreRuntime<'_>,

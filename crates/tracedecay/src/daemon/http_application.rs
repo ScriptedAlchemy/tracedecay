@@ -43,6 +43,7 @@ use tracedecay_daemon_service::remote_http_transport::{
 };
 use tracedecay_domain::{BrainNodeId, EnrollmentGrantV1, ProjectId};
 use tracedecay_rusqlite_runtime::remote::RemoteWriterPublicationErrorV1;
+use tracedecay_store_runtime::RemoteNodeOperatorErrorV1;
 
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -415,8 +416,15 @@ async fn provision_remote_node(
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => {
-            tracing::error!(%error, "remote node provision failed");
-            (StatusCode::CONFLICT, error.to_string()).into_response()
+            tracing::warn!(%error, "remote node provisioning refused");
+            let status = match error {
+                RemoteNodeOperatorErrorV1::InvalidRequest => StatusCode::BAD_REQUEST,
+                RemoteNodeOperatorErrorV1::BrainIdentityConflict
+                | RemoteNodeOperatorErrorV1::Conflict => StatusCode::CONFLICT,
+                RemoteNodeOperatorErrorV1::CapacityExceeded => StatusCode::TOO_MANY_REQUESTS,
+                RemoteNodeOperatorErrorV1::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+            };
+            (status, Json(serde_json::json!({ "code": error }))).into_response()
         }
     }
 }

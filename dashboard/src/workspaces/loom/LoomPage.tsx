@@ -1,12 +1,13 @@
-import { useQuery } from '@tanstack/react-query';
 import { useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router';
 import type { ReactNode } from 'react';
 import { Waypoints } from 'lucide-react';
-import { fetchEnvelope, type EnvelopeResult } from '../../data/query/envelope.ts';
+import type { EnvelopeResult } from '../../data/query/envelope.ts';
+import { useLcmTimeline, useSubagentTree } from '../../data/query/sessionReads.ts';
 import { envelopePayload, useEnvelope } from '../../data/query/useEnvelope.ts';
-import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
 import type { DashboardEnvelopeV1 } from '../../contracts/generated.ts';
+import { DEFAULT_TIMELINE_WINDOW } from '../sessions/model.ts';
+import { SessionPivots } from '../sessions/SessionPivots.tsx';
 import { StateChip, type DomainStateKind } from '../../ui/StateChip';
 import { Legend, Panel, ReadoutBar, WorkspaceHeader } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn';
@@ -32,6 +33,8 @@ import { useReducedMotion } from '../../viz/trace/reducedMotion.ts';
 import { BranchNavigator } from './BranchNavigator.tsx';
 import {
   LOOM_PARAMS,
+  parseLoomSession,
+  resolveLoomSession,
   parseHiddenKinds,
   parseLaneSet,
   parseWindow,
@@ -46,10 +49,8 @@ import { ThreadChain } from './ThreadChain.tsx';
 import { clampWindow, formatDurationSeconds, formatMoment, isFitted } from './tracks.ts';
 import { useLoomPlayback } from './useLoomPlayback.ts';
 import {
-  AnalyticsSubagentTreePayloadV1Schema,
   type AnalyticsSubagentTreePayloadV1,
   LcmSessionPayloadV1Schema,
-  LcmTimelinePayloadV1Schema,
   type LoomSourceStatusV1,
   type LoomTemporalPayloadV1,
   LoomTemporalPayloadV1Schema,
@@ -72,25 +73,13 @@ import {
  * it is graded inferred.
  */
 export function LoomPage() {
-  const scope = useScope((state) => state.scope);
-  const temporal = useQuery({
-    queryKey: ['loom', 'temporal', scopeKey(scope)],
-    queryFn: () =>
-      fetchEnvelope<LoomTemporalPayloadV1>(
-        scopedUrl(scope, '/api/loom/temporal?limit=200'),
-        LoomTemporalPayloadV1Schema,
-      ),
-  });
-  const timeline = useEnvelope(
-    ['loom', 'timeline'],
-    '/api/plugins/hermes-lcm/timeline',
-    LcmTimelinePayloadV1Schema,
+  const temporal = useEnvelope(
+    ['loom', 'temporal'],
+    '/api/loom/temporal?limit=200',
+    LoomTemporalPayloadV1Schema,
   );
-  const hierarchy = useEnvelope(
-    ['loom', 'hierarchy'],
-    '/api/plugins/analytics/subagent-tree',
-    AnalyticsSubagentTreePayloadV1Schema,
-  );
+  const timeline = useLcmTimeline('day', DEFAULT_TIMELINE_WINDOW);
+  const hierarchy = useSubagentTree();
   const proximity = useLoomProximity();
   const [params, setParams] = useSearchParams();
   const selectedId = params.get(LOOM_PARAMS.session);
@@ -177,12 +166,11 @@ function TemporalBody({
   const data = envelope.payload;
   const rows = data.sessions ?? [];
 
-  const selectedLane = useMemo(() => {
-    const row = rows.find(
-      (session) => JSON.stringify([session.provider || 'unknown', session.session_id]) === selectedId,
-    );
-    return row ? { id: selectedId!, sessionId: row.session_id } : null;
-  }, [rows, selectedId]);
+  const selection = useMemo(() => resolveLoomSession(rows, parseLoomSession(selectedId)), [rows, selectedId]);
+  const selectedLane = useMemo(
+    () => (selection.kind === 'lane' ? { id: selection.laneId, sessionId: selection.row.session_id } : null),
+    [selection],
+  );
 
   const chain = useEnvelope(
     ['loom', 'chain', selectedLane?.id ?? 'none'],
@@ -414,11 +402,21 @@ function TemporalBody({
         tabIndex={0}
         className={cn('flex min-h-0 flex-1 flex-col gap-2 overflow-auto px-3 py-1 [scrollbar-gutter:stable]')}
       >
-        {selectedId && !selectedLane ? (
-          <StateChip
-            kind="unavailable"
-            detail="Selected session is outside this loaded page; choose a retained session."
-          />
+        {selection.kind === 'outside_page' || selection.kind === 'ambiguous' ? (
+          <div className="flex flex-wrap items-center gap-2">
+            {selection.kind === 'outside_page' ? (
+              <StateChip
+                kind="unavailable"
+                detail="Selected session is outside this loaded page; choose a retained session."
+              />
+            ) : (
+              <StateChip
+                kind="conflicting"
+                detail={`Linked session ${selection.selection.sessionId} names ${selection.count} sessions on this loaded page; choose one in the field.`}
+              />
+            )}
+            <SessionPivots session={selection.selection} from="loom" />
+          </div>
         ) : null}
 
         {projection.lanes.length === 0 ? (
@@ -467,6 +465,12 @@ function TemporalBody({
               is drawn.
             </p>
 
+            {selection.kind === 'lane' ? (
+              <SessionPivots
+                session={{ provider: selection.row.provider, sessionId: selection.row.session_id }}
+                from="loom"
+              />
+            ) : null}
             {selectedJourneyLane ? (
               <ThreadChain
                 thread={selectedJourneyLane}
