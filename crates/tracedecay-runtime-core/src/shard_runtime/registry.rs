@@ -39,6 +39,8 @@ use super::shard::ShardRuntime;
 use super::telemetry::{RuntimeRegistryInventory, RuntimeRegistryInventoryEntry};
 use super::utc_now;
 use crate::cancellation::CancellationToken;
+use crate::operation_task_owner::RuntimeOperationTaskOwnerV1;
+use asupersync::runtime::RuntimeHandle;
 
 #[cfg(test)]
 pub(crate) use attachment::EmptyPhysicalRuntimeAttachment;
@@ -921,6 +923,7 @@ impl StoreRuntimeClientLease {
 
     pub async fn run_bounded_incremental_compaction(
         &self,
+        cx: &asupersync::Cx,
         max_pages: u64,
         authority: crate::db::DatabaseAuthority,
     ) -> Result<(), StoreRuntimeRegistryFailure> {
@@ -947,7 +950,7 @@ impl StoreRuntimeClientLease {
         });
         self.inner
             .attachment
-            .run_bounded_incremental_compaction(max_pages, authority)
+            .run_bounded_incremental_compaction(cx, max_pages, authority)
             .await?;
         self.validate_opened_file_identity("complete registered incremental compaction")?;
         Ok(())
@@ -955,6 +958,7 @@ impl StoreRuntimeClientLease {
 
     pub async fn run_checkpoint(
         &self,
+        cx: &asupersync::Cx,
         request: tracedecay_rusqlite_runtime::CheckpointRequest,
         authority: crate::db::DatabaseAuthority,
     ) -> Result<tracedecay_rusqlite_runtime::CheckpointOutcome, StoreRuntimeRegistryFailure> {
@@ -968,7 +972,7 @@ impl StoreRuntimeClientLease {
         let outcome = self
             .inner
             .attachment
-            .run_checkpoint(request, authority)
+            .run_checkpoint(cx, request, authority)
             .await?;
         self.validate_opened_file_identity("complete registered checkpoint")?;
         Ok(outcome)
@@ -1071,6 +1075,10 @@ impl StoreRuntimeClientLease {
         probe: Arc<dyn tracedecay_store::RuntimeRequestProbeV1>,
         authority: crate::db::DatabaseAuthority,
     ) -> Result<tracedecay_store::RuntimeSubmitOutcomeV1, StoreRuntimeRegistryFailure> {
+        let cx =
+            crate::native_runtime::cx().ok_or(StoreRuntimeRegistryFailure::RuntimeUnavailable {
+                operation: "submit registered runtime write",
+            })?;
         if request.binding() != self.binding() {
             return Err(StoreRuntimeRegistryFailure::RuntimeBindingMismatch {
                 expected: Box::new(self.binding().clone()),
@@ -1086,7 +1094,7 @@ impl StoreRuntimeClientLease {
         });
         self.inner
             .attachment
-            .dispatch_submit(request, probe, authority)
+            .dispatch_submit(&cx, request, probe, authority)
             .await
     }
 
@@ -1134,6 +1142,12 @@ impl fmt::Debug for StoreRuntimeClientLease {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StoreRuntimeRegistryFailure {
+    WaitCancelled {
+        operation: &'static str,
+    },
+    RuntimeUnavailable {
+        operation: &'static str,
+    },
     ResetRequired {
         authority: String,
         reason: String,
@@ -1364,7 +1378,7 @@ struct FaultedRuntime {
 struct DestructivePathReservation {
     root: PathBuf,
     database_paths: Vec<PathBuf>,
-    released: tokio::sync::watch::Sender<bool>,
+    released: asupersync::channel::watch::Sender<bool>,
 }
 
 struct RetainedGraphPublication {
@@ -1448,6 +1462,7 @@ struct StoreRuntimeRegistryInner {
     /// the store runtime and the first place cross-shard queueing shows up.
     state: std::sync::Mutex<RegistryState>,
     open_cancellation: CancellationToken,
+    operations: RuntimeOperationTaskOwnerV1,
 }
 
 #[derive(Clone)]
@@ -1457,35 +1472,49 @@ pub struct StoreRuntimeRegistry {
 
 impl StoreRuntimeRegistry {
     pub fn new(
+        runtime: RuntimeHandle,
         resolver: Arc<dyn StoreRuntimeResolver>,
         publisher: Arc<dyn ShardRuntimePublisher>,
-    ) -> Self {
-        Self {
-            inner: Arc::new(StoreRuntimeRegistryInner {
-                resolver,
-                publisher,
-                config: StoreRuntimeRegistryConfig::default(),
-                state: Mutex::new(RegistryState::default()),
-                open_cancellation: CancellationToken::new(),
-            }),
-        }
+    ) -> Result<Self, StoreRuntimeRegistryFailure> {
+        Self::with_config(
+            runtime,
+            resolver,
+            publisher,
+            StoreRuntimeRegistryConfig::default(),
+        )
     }
 
     pub fn with_config(
+        runtime: RuntimeHandle,
         resolver: Arc<dyn StoreRuntimeResolver>,
         publisher: Arc<dyn ShardRuntimePublisher>,
         config: StoreRuntimeRegistryConfig,
     ) -> Result<Self, StoreRuntimeRegistryFailure> {
-        Self::with_config_and_authority_epoch_floor(resolver, publisher, config, None)
+        Self::with_config_and_authority_epoch_floor(runtime, resolver, publisher, config, None)
     }
 
     pub(crate) fn with_config_and_authority_epoch_floor(
+        runtime: RuntimeHandle,
         resolver: Arc<dyn StoreRuntimeResolver>,
         publisher: Arc<dyn ShardRuntimePublisher>,
         config: StoreRuntimeRegistryConfig,
         authority_epoch_floor: Option<StoreAuthorityEpochV1>,
     ) -> Result<Self, StoreRuntimeRegistryFailure> {
         config.validate()?;
+        let operations = RuntimeOperationTaskOwnerV1::new(runtime).map_err(|error| match error {
+            crate::operation_task_owner::RuntimeOperationAdmissionError::BlockingPoolUnavailable =>
+                StoreRuntimeRegistryFailure::RuntimeUnavailable {
+                    operation: "initialize registered runtime settlement owner with a native blocking pool",
+                },
+            crate::operation_task_owner::RuntimeOperationAdmissionError::Spawn(asupersync::runtime::SpawnError::RuntimeUnavailable) =>
+                StoreRuntimeRegistryFailure::RuntimeUnavailable {
+                    operation: "initialize registered runtime settlement owner",
+                },
+            error => StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "initialize registered runtime settlement owner",
+                message: error.to_string(),
+            },
+        })?;
         if let Some(floor) = authority_epoch_floor {
             open::retain_authority_epoch_floor(floor);
         }
@@ -1496,6 +1525,7 @@ impl StoreRuntimeRegistry {
                 config,
                 state: Mutex::new(RegistryState::default()),
                 open_cancellation: CancellationToken::new(),
+                operations,
             }),
         })
     }

@@ -411,6 +411,7 @@ impl DatabaseWriteTransaction<'_> {
             transaction,
             guard,
             _client_guard,
+            ..
         } = self;
         let tracks_graph_generation = {
             let mut rows = transaction
@@ -502,6 +503,7 @@ impl DatabaseWriteTransaction<'_> {
             transaction,
             guard,
             _client_guard,
+            ..
         } = self;
         let transaction = transaction.rollback().await;
         drop(guard);

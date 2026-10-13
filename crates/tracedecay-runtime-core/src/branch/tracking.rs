@@ -96,7 +96,7 @@ mod default_branch_tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn detached_legacy_store_refuses_to_invent_default_metadata() {
         let (temp, project_root) = custom_default_repo();
         run_git(&project_root, &["checkout", "--detach", "HEAD"]);
@@ -259,16 +259,30 @@ pub async fn prepare_branch_tracking_in_layout(
 ) -> tracedecay_domain::errors::Result<BranchTrackingPreparation> {
     use crate::branch_meta;
 
+    let cx = crate::native_runtime::cx().ok_or_else(|| {
+        tracedecay_domain::errors::TraceDecayError::Config {
+            message: "branch tracking requires a native task context".into(),
+        }
+    })?;
     let _branch_lock = {
         let mut attempts = 0;
         loop {
+            cx.checkpoint().map_err(|error| {
+                tracedecay_domain::errors::TraceDecayError::Config {
+                    message: format!("branch tracking cancelled: {error}"),
+                }
+            })?;
             match try_acquire_branch_add_lock(tracedecay_dir) {
                 Ok(lock) => break lock,
                 Err(tracedecay_domain::errors::TraceDecayError::SyncLock { .. })
                     if attempts < BRANCH_LOCK_RETRY_ATTEMPTS =>
                 {
                     attempts += 1;
-                    tokio::time::sleep(BRANCH_LOCK_RETRY_INTERVAL).await;
+                    asupersync::time::sleep(
+                        asupersync::time::wall_now(),
+                        BRANCH_LOCK_RETRY_INTERVAL,
+                    )
+                    .await;
                 }
                 Err(tracedecay_domain::errors::TraceDecayError::SyncLock { .. }) => {
                     return Ok(BranchTrackingPreparation::Deferred);
@@ -342,7 +356,7 @@ pub async fn prepare_branch_tracking_in_layout(
 }
 
 #[cfg(test)]
-#[tokio::test]
+#[asupersync::test]
 async fn default_branch_bootstrap_persists_canonical_metadata() {
     let temp = tempfile::tempdir().unwrap();
     let project_root = temp.path().join("repo");

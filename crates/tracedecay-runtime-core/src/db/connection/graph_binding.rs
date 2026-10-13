@@ -261,7 +261,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn concurrent_identical_graph_runtime_binds_are_idempotent() {
         let directory = tempfile::tempdir().expect("graph binding directory");
         let database_path = directory.path().join("memory.db");
@@ -307,7 +307,7 @@ mod tests {
         assert!(Arc::ptr_eq(&operation.runtime, &runtime));
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn stamped_source_watermark_memo_serves_only_the_exact_lineage_stamp() {
         let directory = tempfile::tempdir().expect("watermark memo directory");
         let database_path = directory.path().join("memory.db");
@@ -342,7 +342,7 @@ mod tests {
         assert!(database.memory_graph_source_watermark_at(7).is_none());
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn graph_runtime_binding_rejects_the_right_shard_with_the_wrong_locator() {
         let directory = tempfile::tempdir().expect("graph locator binding directory");
         let database_path = directory.path().join("memory.db");
@@ -372,7 +372,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn bound_graph_runtime_does_not_retain_a_derived_store_or_graph_owner() {
         let directory = tempfile::tempdir().expect("weak graph binding directory");
         let database_path = directory.path().join("memory.db");
@@ -402,7 +402,7 @@ mod tests {
         assert!(weak_runtime.upgrade().is_none());
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn deferred_graph_proxy_resolves_once_activation_completes() {
         let directory = tempfile::tempdir().expect("deferred graph proxy directory");
         let database_path = directory.path().join("memory.db");
@@ -460,7 +460,7 @@ mod tests {
         assert!(resolved.shares_runtime_with(&deferred));
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn deferred_graph_proxy_stays_typed_without_activation_and_across_owner_drop() {
         let directory = tempfile::tempdir().expect("never-activated graph proxy directory");
         let database_path = directory.path().join("memory.db");
@@ -522,7 +522,7 @@ mod tests {
         assert_eq!(snapshot_calls.load(Ordering::Acquire), 0);
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn weak_graph_proxy_delegates_live_and_reports_absent_owner() {
         let directory = tempfile::tempdir().expect("weak graph proxy directory");
         let database_path = directory.path().join("memory.db");

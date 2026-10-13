@@ -85,6 +85,7 @@ impl RegisteredScopeSetStore {
         let binding = registered_binding(name);
         let locator = registered_locator(&binding);
         let writer = PersistentWriter::start(
+            &tracedecay_rusqlite_runtime::native_runtime::handle().expect("native runtime"),
             ExistingWriterLocator::new(binding.clone(), locator.clone(), path.clone()).unwrap(),
             AdmissionConfigV1::default(),
             NoTypedWrites,

@@ -114,7 +114,7 @@ async fn assert_reset_required_without_repair(path: &Path, mutation: &str) -> St
     reason.to_owned()
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn current_final_store_is_admitted_without_mutation() {
     let (_directory, path) = fresh_current_store().await;
     // Diagnostics install this same DDL when publishing their first result.
@@ -175,7 +175,7 @@ fn ledger_tables(path: &Path) -> Vec<String> {
 /// The runtime writer ledger is part of the exact shape a fresh store is
 /// created with. A store missing it, or still holding the retired
 /// idempotency table, is refused unchanged rather than upgraded.
-#[tokio::test]
+#[asupersync::test]
 async fn runtime_writer_ledger_is_part_of_the_final_shape() {
     let (_directory, path) = fresh_current_store().await;
     assert_eq!(
@@ -207,7 +207,7 @@ async fn runtime_writer_ledger_is_part_of_the_final_shape() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn automation_run_receipt_indexes_are_required_final_shape() {
     let (_directory, path) = fresh_current_store().await;
     for name in [
@@ -228,7 +228,7 @@ async fn automation_run_receipt_indexes_are_required_final_shape() {
     assert_reset_required_without_repair(&path, "missing automatic-run lookup index").await;
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn stamped_final_store_with_missing_or_tampered_required_shape_is_reset_required() {
     let (_directory, path) = fresh_current_store().await;
     tamper(&path, "DROP TABLE metadata;");

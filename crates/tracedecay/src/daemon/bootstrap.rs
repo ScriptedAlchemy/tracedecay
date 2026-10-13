@@ -77,6 +77,8 @@ async fn run_foreground_loopback(
     remote_tls: Option<RemoteBrainTlsConfig>,
 ) -> Result<()> {
     let bootstrap_started = Instant::now();
+    tracedecay_runtime_core::native_runtime::process_runtime()
+        .map_err(|message| TraceDecayError::Config { message })?;
     let profile_root = profile.data_dir().to_path_buf();
     let catalog_prewarm = tokio::task::spawn_blocking(prewarm_static_daemon_bootstrap_catalog);
     let requested = default_loopback_endpoint();
@@ -514,6 +516,8 @@ async fn run_foreground_unix(
     remote_tls: Option<RemoteBrainTlsConfig>,
 ) -> Result<()> {
     let bootstrap_started = Instant::now();
+    tracedecay_runtime_core::native_runtime::process_runtime()
+        .map_err(|message| TraceDecayError::Config { message })?;
     let profile_root = profile.data_dir().to_path_buf();
     let catalog_prewarm = tokio::task::spawn_blocking(prewarm_static_daemon_bootstrap_catalog);
     let endpoint = DaemonEndpoint::Unix(socket_path);

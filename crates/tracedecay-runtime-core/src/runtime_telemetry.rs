@@ -27,9 +27,9 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
+use asupersync::channel::watch;
 use serde::{Deserialize, Serialize};
 use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
-use tokio::sync::watch;
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
@@ -598,7 +598,7 @@ struct ProcessSampler {
     sample: ProcessSampleFn,
     refresh_interval: Duration,
     cache: Arc<Mutex<ProcessSampleCache>>,
-    completion_generation: watch::Sender<u64>,
+    completion_generation: Arc<watch::Sender<u64>>,
 }
 
 /// The cache critical sections only move small values, so a poisoned lock
@@ -610,7 +610,7 @@ fn lock_cache(cache: &Mutex<ProcessSampleCache>) -> MutexGuard<'_, ProcessSample
 
 impl ProcessSampler {
     fn new(sample: ProcessSampleFn, refresh_interval: Duration) -> Self {
-        let (completion_generation, _) = watch::channel(0);
+        let completion_generation = Arc::new(watch::channel(0).0);
         Self {
             sample,
             refresh_interval,
@@ -658,14 +658,28 @@ impl ProcessSampler {
     /// Read at a response boundary, waiting only within the bounded process
     /// sample completion window for a refresh this read observed in flight.
     async fn read_at_response_boundary(&self) -> ProcessTelemetry {
+        let Some(cx) = crate::native_runtime::cx() else {
+            return ProcessTelemetry::SampleFailed {
+                error: TraceDecayError::Config {
+                    message: "process telemetry response requires a native task context".into(),
+                }
+                .to_string(),
+            };
+        };
         let mut completion_generation = self.completion_generation.subscribe();
         self.read();
-        if lock_cache(&self.cache).sample_in_flight {
-            let _ = tokio::time::timeout(
+        let sample_in_flight = lock_cache(&self.cache).sample_in_flight;
+        if sample_in_flight
+            && let Ok(Err(error)) = asupersync::time::timeout(
+                asupersync::time::wall_now(),
                 PROCESS_SAMPLE_RESPONSE_WAIT_BOUND,
-                completion_generation.changed(),
+                completion_generation.changed(&cx),
             )
-            .await;
+            .await
+        {
+            return ProcessTelemetry::SampleFailed {
+                error: format!("process sample completion unavailable: {error}"),
+            };
         }
         self.read()
     }
@@ -698,9 +712,11 @@ impl ProcessSampler {
                 });
                 cache.sample_in_flight = false;
                 drop(cache);
-                completion_generation.send_modify(|generation| {
+                if let Err(error) = completion_generation.send_modify(|generation| {
                     *generation = generation.wrapping_add(1);
-                });
+                }) {
+                    tracing::error!(%error, "process sample completion channel closed");
+                }
             });
         if let Err(error) = spawned {
             let mut cache = lock_cache(&self.cache);
@@ -712,9 +728,11 @@ impl ProcessSampler {
             });
             cache.sample_in_flight = false;
             drop(cache);
-            self.completion_generation.send_modify(|generation| {
+            if let Err(error) = self.completion_generation.send_modify(|generation| {
                 *generation = generation.wrapping_add(1);
-            });
+            }) {
+                tracing::error!(%error, "process sample completion channel closed");
+            }
         }
     }
 }
@@ -1129,7 +1147,7 @@ mod tests {
         }
     }
 
-    #[tokio::test(flavor = "current_thread")]
+    #[asupersync::test(flavor = "current_thread")]
     async fn stale_response_waits_for_the_installed_sample_within_its_bound() {
         let samples = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&samples);
@@ -1159,7 +1177,8 @@ mod tests {
                 .expect("process uptime exceeds the stale window");
         }
 
-        let process = tokio::time::timeout(
+        let process = asupersync::time::timeout(
+            asupersync::time::wall_now(),
             PROCESS_SAMPLE_RESPONSE_WAIT_BOUND,
             sampler.read_at_response_boundary(),
         )

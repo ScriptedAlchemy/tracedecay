@@ -97,7 +97,7 @@ fn snapshot_ids(path: &std::path::Path) -> Vec<i64> {
         .collect()
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn live_backup_includes_wal_resident_rows_and_does_not_checkpoint_the_source() {
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("live.db");
@@ -123,7 +123,7 @@ async fn live_backup_includes_wal_resident_rows_and_does_not_checkpoint_the_sour
     drop(writer);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn live_backup_of_a_concurrent_wal_writer_is_a_contiguous_committed_prefix() {
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("live.db");
@@ -370,7 +370,7 @@ fn retiring_owned_staging_removes_the_complete_sqlite_family() {
 }
 
 #[cfg(unix)]
-#[tokio::test]
+#[asupersync::test]
 async fn live_backup_refuses_to_replace_destination_with_wal_sidecars() {
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("live.db");
@@ -402,7 +402,7 @@ async fn live_backup_refuses_to_replace_destination_with_wal_sidecars() {
 }
 
 #[cfg(unix)]
-#[tokio::test]
+#[asupersync::test]
 async fn live_backup_refuses_to_replace_destination_with_rollback_journal() {
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("live.db");
@@ -426,7 +426,7 @@ async fn live_backup_refuses_to_replace_destination_with_rollback_journal() {
     assert_eq!(fs::read(&journal).unwrap(), b"stale-hot-journal");
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn live_backup_of_wal_without_shm_does_not_write_the_source_directory() {
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("offline.db");
@@ -672,7 +672,7 @@ fn live_backup_deadline_interrupts_busy_locked_retries() {
     drop(writer);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn live_backup_of_a_checkpointed_family_does_not_require_sidecars() {
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("offline.db");
@@ -707,7 +707,7 @@ fn snapshot_ids_text(path: &std::path::Path) -> Vec<String> {
         .collect()
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn copied_snapshot_survives_absent_and_cleaned_writer_sidecars() {
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("source.db");
@@ -761,7 +761,7 @@ async fn copied_snapshot_survives_absent_and_cleaned_writer_sidecars() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn copied_snapshot_does_not_claim_freshness_after_the_source_changes() {
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("source.db");
@@ -799,7 +799,7 @@ async fn copied_snapshot_does_not_claim_freshness_after_the_source_changes() {
 }
 
 #[cfg(windows)]
-#[tokio::test]
+#[asupersync::test]
 async fn windows_live_wal_writer_survives_copy_mode_backup() {
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("live.db");

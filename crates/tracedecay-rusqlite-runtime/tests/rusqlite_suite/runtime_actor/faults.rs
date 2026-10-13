@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+use tracedecay_rusqlite_runtime::native_runtime;
 use tracedecay_rusqlite_runtime::{WriterActorError, WriterState};
 use tracedecay_store::{
     AdmissionConfigV1, CorruptionClassV1, OperationPriorityV1, RuntimeSubmitOutcomeV1,
@@ -40,6 +41,7 @@ fn binding_mismatches_are_typed_and_corrupt_replay_faults_closed() {
     assert_eq!(
         runtime()
             .block_on(first_writer.submit(
+                &native_runtime::cx().unwrap(),
                 wrong_incarnation.clone(),
                 TestProbe::fixed(&wrong_incarnation),
             ))
@@ -60,13 +62,21 @@ fn binding_mismatches_are_typed_and_corrupt_replay_faults_closed() {
     );
     assert!(matches!(
         runtime()
-            .block_on(first_writer.submit(wrong_epoch.clone(), TestProbe::fixed(&wrong_epoch)))
+            .block_on(first_writer.submit(
+                &native_runtime::cx().unwrap(),
+                wrong_epoch.clone(),
+                TestProbe::fixed(&wrong_epoch)
+            ))
             .unwrap(),
         RuntimeSubmitOutcomeV1::Fenced { .. }
     ));
     assert!(matches!(
         runtime()
-            .block_on(first_writer.submit(base.clone(), TestProbe::fixed(&base)))
+            .block_on(first_writer.submit(
+                &native_runtime::cx().unwrap(),
+                base.clone(),
+                TestProbe::fixed(&base)
+            ))
             .unwrap(),
         RuntimeSubmitOutcomeV1::Committed { .. }
     ));
@@ -93,7 +103,11 @@ fn binding_mismatches_are_typed_and_corrupt_replay_faults_closed() {
         ExecutorControl::default(),
     );
     assert!(matches!(
-        runtime().block_on(restarted.submit(replay.clone(), TestProbe::fixed(&replay))),
+        runtime().block_on(restarted.submit(
+            &native_runtime::cx().unwrap(),
+            replay.clone(),
+            TestProbe::fixed(&replay)
+        )),
         Err(WriterActorError::StorageFailure(
             StorageRuntimeErrorV1::Corrupt {
                 class: CorruptionClassV1::Authoritative
@@ -125,7 +139,11 @@ fn executor_panic_faults_the_actor_and_releases_the_pending_request() {
         },
     );
     assert!(matches!(
-        runtime().block_on(writer.submit(request.clone(), TestProbe::fixed(&request))),
+        runtime().block_on(writer.submit(
+            &native_runtime::cx().unwrap(),
+            request.clone(),
+            TestProbe::fixed(&request)
+        )),
         Err(WriterActorError::ReplyDropped)
     ));
 

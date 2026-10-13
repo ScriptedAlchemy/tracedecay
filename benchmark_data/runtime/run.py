@@ -490,10 +490,24 @@ def _run_capture(
             response_document = json.loads(response)
         except json.JSONDecodeError as exc:
             fail(f"tool command returned malformed JSON: {exc}")
-        if expected_symbol not in json.dumps(
-            response_document, ensure_ascii=False, sort_keys=True
+        if response_document.get("isError") is True or "error" in response_document:
+            fail("exact-symbol capture returned a tool error")
+        result = response_document.get("structuredContent")
+        if not isinstance(result, dict):
+            fail("exact-symbol capture returned no structured result")
+        matches = result.get("matches")
+        if (
+            result.get("name") != expected_symbol
+            or result.get("count") != 1
+            or not isinstance(matches, list)
+            or len(matches) != 1
+            or not isinstance(matches[0], dict)
+            or matches[0].get("name") != expected_symbol
+            or matches[0].get("line") != 15
+            or not isinstance(matches[0].get("file"), str)
+            or Path(matches[0]["file"]).parts[-2:] != ("src", "catalog.py")
         ):
-            fail(f"exact-symbol smoke response did not contain {expected_symbol}")
+            fail("exact-symbol capture did not return the fixture definition")
         daemon_survived = daemon.is_alive
         process_count = daemon.evidence.process_count
         resources_after = _process_observations(daemon.process.pid)

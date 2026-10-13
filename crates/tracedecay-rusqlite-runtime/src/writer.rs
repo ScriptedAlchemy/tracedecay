@@ -19,7 +19,11 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use tokio::sync::{mpsc, oneshot, watch};
+use asupersync::{
+    Budget, Cx,
+    channel::{mpsc, oneshot, watch},
+    runtime::RuntimeHandle,
+};
 use tracedecay_store::{
     AdmissionConfigV1, RuntimeCancellationStageV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1,
     RuntimeSubmitRequestV1, StorageRuntimeContractErrorV1, StorageRuntimeErrorV1,
@@ -162,8 +166,10 @@ impl CheckpointHandle {
             .as_ref()
             .ok_or(CheckpointControlError::Unavailable)?;
         sender.try_send(command).map_err(|error| match error {
-            mpsc::error::TrySendError::Full(_) => CheckpointControlError::Busy,
-            mpsc::error::TrySendError::Closed(_) => CheckpointControlError::Unavailable,
+            mpsc::SendError::Full(_) => CheckpointControlError::Busy,
+            mpsc::SendError::Disconnected(_) | mpsc::SendError::Cancelled(_) => {
+                CheckpointControlError::Unavailable
+            }
         })?;
         Ok(CheckpointTicket { response })
     }
@@ -221,11 +227,15 @@ pub struct CheckpointTicket {
 }
 
 impl CheckpointTicket {
-    pub async fn wait(self) -> Result<CheckpointOutcome, CheckpointControlError> {
+    pub async fn wait(mut self, cx: &Cx) -> Result<CheckpointOutcome, CheckpointControlError> {
         let result = self
             .response
+            .recv(cx)
             .await
-            .map_err(|_| CheckpointControlError::Unavailable)?
+            .map_err(|error| match error {
+                oneshot::RecvError::Cancelled => CheckpointControlError::Cancelled,
+                _ => CheckpointControlError::Unavailable,
+            })?
             .map_err(checkpoint_control_error)?;
         Ok(CheckpointOutcome::from_internal(result))
     }
@@ -233,6 +243,7 @@ impl CheckpointTicket {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CheckpointControlError {
+    Cancelled,
     Busy,
     Unavailable,
     BindingMismatch,
@@ -244,6 +255,7 @@ pub enum CheckpointControlError {
 impl fmt::Display for CheckpointControlError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Cancelled => formatter.write_str("checkpoint reply wait was cancelled"),
             Self::Busy => formatter.write_str("checkpoint control is busy"),
             Self::Unavailable => formatter.write_str("checkpoint control is unavailable"),
             Self::BindingMismatch => {
@@ -360,7 +372,7 @@ pub enum WriterStartError {
     /// SQLite difference.
     ConnectionPolicyFailed(String),
     CheckpointSetupFailed,
-    CheckpointSchedulerSetupFailed,
+    RuntimeUnavailable,
     OpenedDatabaseIdentity(OpenedDatabaseFileError),
     OpenedDatabaseIdentityMismatch {
         expected: u64,
@@ -396,9 +408,7 @@ impl fmt::Display for WriterStartError {
             Self::CheckpointSetupFailed => {
                 f.write_str("failed to initialize SQLite writer checkpoint policy")
             }
-            Self::CheckpointSchedulerSetupFailed => {
-                f.write_str("failed to initialize SQLite writer checkpoint scheduler")
-            }
+            Self::RuntimeUnavailable => f.write_str("SQLite writer runtime is unavailable"),
             Self::OpenedDatabaseIdentity(error) => {
                 write!(
                     f,
@@ -433,6 +443,7 @@ pub enum WriterActorError {
     ProbeBindingMismatch { field: &'static str },
     AuthorityDenied { stage: RuntimeWriteAuthorityStage },
     ReplyDropped,
+    WaitCancelled,
     StorageFailure(StorageRuntimeErrorV1),
     IncrementalVacuumFailed(String),
     InvalidWorkerOutcome(StorageRuntimeContractErrorV1),
@@ -450,6 +461,7 @@ impl fmt::Display for WriterActorError {
                 write!(f, "runtime write authority denied at {stage:?}")
             }
             Self::ReplyDropped => f.write_str("SQLite writer stopped before replying"),
+            Self::WaitCancelled => f.write_str("SQLite writer reply wait was cancelled"),
             Self::StorageFailure(error) => write!(f, "SQLite writer failed: {error}"),
             Self::IncrementalVacuumFailed(message) => {
                 write!(f, "SQLite incremental vacuum failed: {message}")
@@ -522,6 +534,7 @@ pub struct PersistentWriter {
 
 impl PersistentWriter {
     pub fn start<E>(
+        runtime: &RuntimeHandle,
         locator: ExistingWriterLocator,
         admission: AdmissionConfigV1,
         executor: E,
@@ -530,6 +543,7 @@ impl PersistentWriter {
         E: StorageOperationExecutor + Send + 'static,
     {
         Self::start_with_checkpoint_blockers(
+            runtime,
             locator,
             admission,
             executor,
@@ -538,6 +552,7 @@ impl PersistentWriter {
     }
 
     pub(crate) fn start_with_checkpoint_blockers<E>(
+        runtime: &RuntimeHandle,
         locator: ExistingWriterLocator,
         admission: AdmissionConfigV1,
         executor: E,
@@ -547,6 +562,7 @@ impl PersistentWriter {
         E: StorageOperationExecutor + Send + 'static,
     {
         Self::open(
+            runtime,
             locator,
             admission,
             RuntimeWriterPersistence::new(Box::new(executor)),
@@ -555,6 +571,7 @@ impl PersistentWriter {
     }
 
     fn open(
+        runtime: &RuntimeHandle,
         locator: ExistingWriterLocator,
         config: AdmissionConfigV1,
         persistence: RuntimeWriterPersistence<Box<dyn StorageOperationExecutor + Send>>,
@@ -592,7 +609,11 @@ impl PersistentWriter {
         let (checkpoint_pressure_tx, checkpoint_pressure) =
             watch::channel(CheckpointPressure::Open);
         let (started_tx, started_rx) = std_mpsc::sync_channel(1);
+        let cx = runtime
+            .try_request_cx_with_budget(Budget::INFINITE)
+            .map_err(|_| WriterStartError::RuntimeUnavailable)?;
         let worker = Worker {
+            cx,
             path: worker_open_path,
             #[cfg(unix)]
             canonical_path: path.clone(),
@@ -694,11 +715,17 @@ impl PersistentWriter {
 
     pub async fn submit(
         &self,
+        cx: &Cx,
         request: RuntimeSubmitRequestV1,
         probe: Arc<dyn RuntimeRequestProbeV1>,
     ) -> Result<RuntimeSubmitOutcomeV1, WriterActorError> {
-        self.submit_authorized(request, probe, Arc::new(UnrestrictedRuntimeWriteAuthority))
-            .await
+        self.submit_authorized(
+            cx,
+            request,
+            probe,
+            Arc::new(UnrestrictedRuntimeWriteAuthority),
+        )
+        .await
     }
 
     #[tracing::instrument(
@@ -708,6 +735,7 @@ impl PersistentWriter {
     )]
     pub async fn submit_authorized(
         &self,
+        cx: &Cx,
         request: RuntimeSubmitRequestV1,
         probe: Arc<dyn RuntimeRequestProbeV1>,
         authority: Arc<dyn RuntimeWriteAuthority>,
@@ -747,7 +775,7 @@ impl PersistentWriter {
         };
         let bytes = request.envelope().metadata.admission_bytes;
         self.telemetry.admitted(bytes);
-        let (reply, response) = oneshot::channel();
+        let (reply, mut response) = oneshot::channel();
         let accepted = AcceptedRequest::new(request.clone(), probe, authority, reply, permit);
         let send_result = {
             let sender = self
@@ -758,8 +786,10 @@ impl PersistentWriter {
                 Err((accepted, false))
             } else if let Some(sender) = sender.as_ref() {
                 sender.try_send(accepted).map_err(|error| match error {
-                    mpsc::error::TrySendError::Full(item) => (item, true),
-                    mpsc::error::TrySendError::Closed(item) => (item, false),
+                    mpsc::SendError::Full(item) => (item, true),
+                    mpsc::SendError::Disconnected(item) | mpsc::SendError::Cancelled(item) => {
+                        (item, false)
+                    }
                 })
             } else {
                 Err((accepted, false))
@@ -780,8 +810,9 @@ impl PersistentWriter {
             return Ok(outcome);
         }
         let outcome = response
+            .recv(cx)
             .await
-            .map_err(|_| WriterActorError::ReplyDropped)?
+            .map_err(writer_reply_error)?
             .map_err(WriterActorError::StorageFailure)?;
         outcome
             .validate_for(&request)
@@ -791,6 +822,7 @@ impl PersistentWriter {
 
     pub async fn bounded_incremental_vacuum(
         &self,
+        cx: &Cx,
         max_pages: u32,
         authority: Arc<dyn RuntimeWriteAuthority>,
     ) -> Result<(), WriterActorError> {
@@ -804,7 +836,7 @@ impl PersistentWriter {
                 "writer is unavailable".to_owned(),
             ));
         }
-        let (reply, response) = oneshot::channel();
+        let (reply, mut response) = oneshot::channel();
         let command = IncrementalVacuumCommand::new(max_pages, authority, reply);
         let send_result = {
             let sender = self
@@ -812,22 +844,22 @@ impl PersistentWriter {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if self.state() != WriterState::Ready {
-                Err(mpsc::error::TrySendError::Closed(command))
+                Err(mpsc::SendError::Disconnected(command))
             } else if let Some(sender) = sender.as_ref() {
                 sender.try_send(command)
             } else {
-                Err(mpsc::error::TrySendError::Closed(command))
+                Err(mpsc::SendError::Disconnected(command))
             }
         };
         send_result.map_err(|error| match error {
-            mpsc::error::TrySendError::Full(_) => {
+            mpsc::SendError::Full(_) => {
                 WriterActorError::IncrementalVacuumFailed("command channel is busy".to_owned())
             }
-            mpsc::error::TrySendError::Closed(_) => {
+            mpsc::SendError::Disconnected(_) | mpsc::SendError::Cancelled(_) => {
                 WriterActorError::IncrementalVacuumFailed("writer is unavailable".to_owned())
             }
         })?;
-        response.await.map_err(|_| WriterActorError::ReplyDropped)?
+        response.recv(cx).await.map_err(writer_reply_error)?
     }
 
     fn unavailable(&self) -> RuntimeSubmitOutcomeV1 {
@@ -904,4 +936,11 @@ fn admission_limits(config: &AdmissionConfigV1) -> Result<Limits, WriterStartErr
         config.background_batch.max_bytes,
     )
     .ok_or(WriterStartError::InvalidAdmissionLimits)
+}
+
+fn writer_reply_error(error: oneshot::RecvError) -> WriterActorError {
+    match error {
+        oneshot::RecvError::Cancelled => WriterActorError::WaitCancelled,
+        _ => WriterActorError::ReplyDropped,
+    }
 }
