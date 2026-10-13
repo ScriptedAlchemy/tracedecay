@@ -1025,24 +1025,37 @@ fn a_laptop_captures_offline_and_its_frames_reach_one_fenced_authority_until_rev
         "replayed frames leave the authority's pending spool"
     );
 
-    for observation in &observations {
-        let queried = node
-            .query(&query_request(&node_id, &grant.scope, &fence, observation))
+    let query_found = |node: &EnrolledRemoteClient, moment: &str| {
+        for observation in &observations {
+            let queried = node
+                .query(&query_request(&node_id, &grant.scope, &fence, observation))
+                .unwrap()
+                .result
+                .unwrap_or_else(|problem| {
+                    panic!("the authority answers the query {moment}: {problem:?}")
+                })
+                .outcome
+                .payload()
+                .cloned()
+                .expect("a query returns its result");
+            let RemoteExactObservationResultV1::Found(found) = queried.observation else {
+                panic!("the replayed observation is found {moment}: {queried:?}");
+            };
+            assert_eq!(
+                &found.observation, observation,
+                "the authority serves the exact observation the laptop captured offline"
+            );
+        }
+    };
+    query_found(&node, "after replay");
+
+    desktop.restart();
+    let node = desktop.client(ENROLLMENT_CREDENTIAL);
+    query_found(&node, "after a restart with no new commit");
+    let replay = |request_id: &str, event_id: &str| {
+        node.replay(&replay_request(request_id, &node_id, &fence, event_id))
             .unwrap()
-            .result
-            .unwrap_or_else(|problem| panic!("the authority answers the query: {problem:?}"))
-            .outcome
-            .payload()
-            .cloned()
-            .expect("a query returns its result");
-        let RemoteExactObservationResultV1::Found(found) = queried.observation else {
-            panic!("the replayed observation is found: {queried:?}");
-        };
-        assert_eq!(
-            &found.observation, observation,
-            "the authority serves the exact observation the laptop captured offline"
-        );
-    }
+    };
 
     let revocation = desktop.revoke(&node_id);
     assert_eq!(
