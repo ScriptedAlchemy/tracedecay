@@ -1,6 +1,6 @@
 //! Maintenance tick policy: continuation, cadence, and store-window selection.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Resume a bounded maintenance phase over the normal graph window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,31 +60,31 @@ impl MaintenanceTickOutcome {
     }
 }
 
-/// The maintenance loop parks on `tokio::time::sleep_until`, so every deadline
-/// it derives must be measured on the same clock the timer wheel uses.
-pub type CadenceInstant = tokio::time::Instant;
-
 /// Interval and retry-delay policy for the maintenance loop.
 #[derive(Debug)]
 pub struct MaintenanceCadence {
     interval: Duration,
     retry_delay: Duration,
-    not_before: Option<CadenceInstant>,
+    not_before: Option<Instant>,
     in_flight: bool,
 }
 
 impl MaintenanceCadence {
     #[must_use]
     pub fn new(interval: Duration) -> Self {
+        Self::with_retry_delay(interval, interval.min(Duration::from_mins(1)))
+    }
+
+    pub(crate) fn with_retry_delay(interval: Duration, retry_delay: Duration) -> Self {
         Self {
             interval,
-            retry_delay: interval.min(Duration::from_mins(1)),
+            retry_delay,
             not_before: None,
             in_flight: false,
         }
     }
 
-    pub fn reserve(&mut self, now: CadenceInstant) -> bool {
+    pub fn reserve(&mut self, now: Instant) -> bool {
         if self.in_flight || self.not_before.is_some_and(|not_before| now < not_before) {
             return false;
         }
@@ -92,11 +92,7 @@ impl MaintenanceCadence {
         true
     }
 
-    pub fn finish(
-        &mut self,
-        now: CadenceInstant,
-        outcome: MaintenanceTickOutcome,
-    ) -> CadenceInstant {
+    pub fn finish(&mut self, now: Instant, outcome: MaintenanceTickOutcome) -> Instant {
         self.in_flight = false;
         let delay = match outcome {
             MaintenanceTickOutcome::Complete => self.interval,
@@ -117,11 +113,7 @@ impl MaintenanceCadence {
     /// alone (its `finish` sets the next deadline); a deadline already
     /// nearer than that stays where it is.
     #[must_use]
-    pub fn pull_forward(
-        &mut self,
-        now: CadenceInstant,
-        deadline: CadenceInstant,
-    ) -> CadenceInstant {
+    pub fn pull_forward(&mut self, now: Instant, deadline: Instant) -> Instant {
         if self.in_flight {
             return deadline;
         }

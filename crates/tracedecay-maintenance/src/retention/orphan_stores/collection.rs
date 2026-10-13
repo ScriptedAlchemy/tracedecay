@@ -1,7 +1,9 @@
 //! Registered and unregistered orphan-store collection under the census fences.
 
-use std::future::Future;
+use std::future::{Future, poll_fn};
 use std::path::{Path, PathBuf};
+use std::pin::pin;
+use std::task::Poll;
 use std::time::Instant;
 
 use cap_std::fs::Dir;
@@ -9,6 +11,7 @@ use tracedecay_contracts::storage::is_retired_branch_store_path;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_private_fs::capability_dir::{remove_open_dir_all_nofollow, sync_directory};
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
+use tracedecay_runtime_core::native_runtime;
 
 use super::fence::{
     StoreContentFence, StoreDirectoryFence, capture_store_content_fence_in_dir_controlled,
@@ -76,16 +79,25 @@ impl<'a> CollectionControl<'a> {
         if let Some(completion) = self.completion() {
             return Err(completion);
         }
-        tokio::select! {
-            biased;
-            () = self.cancellation.cancelled() => Err(CollectionCompletionV1::Cancelled),
-            () = tokio::time::sleep_until(tokio::time::Instant::from_std(self.deadline.instant())) => {
-                Err(CollectionCompletionV1::DeadlineExceeded)
+        let mut cancelled = pin!(self.cancellation.cancelled());
+        let mut deadline = pin!(native_runtime::sleep_until(self.deadline.instant()));
+        let mut future = pin!(future);
+        poll_fn(|task| {
+            if cancelled.as_mut().poll(task).is_ready() {
+                return Poll::Ready(Err(CollectionCompletionV1::Cancelled));
             }
-            result = future => {
-                self.completion().map_or(Ok(result), Err)
+            // A result that lands past the deadline still loses through
+            // `completion`, so an already-ready future never arms a timer.
+            if let Poll::Ready(result) = future.as_mut().poll(task) {
+                return Poll::Ready(self.completion().map_or(Ok(result), Err));
             }
-        }
+            // An unavailable timer fails closed like an elapsed one.
+            deadline
+                .as_mut()
+                .poll(task)
+                .map(|_| Err(CollectionCompletionV1::DeadlineExceeded))
+        })
+        .await
     }
 }
 
