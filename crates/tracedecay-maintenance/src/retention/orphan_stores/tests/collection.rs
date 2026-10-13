@@ -5,7 +5,7 @@ use super::*;
 /// Seed a profile with one live store and one identity-drift orphan store, then
 /// prove the async sweep collects only the orphan and retires its registry row.
 #[cfg(unix)]
-#[tokio::test]
+#[asupersync::test]
 async fn registered_collection_refuses_same_second_directory_replacement() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
@@ -79,7 +79,7 @@ async fn registered_collection_refuses_same_second_directory_replacement() {
 /// collector must refuse it instead of deleting the link and retiring the
 /// registry row while its target payload survives without an owner.
 #[cfg(unix)]
-#[tokio::test]
+#[asupersync::test]
 async fn registered_collection_rejects_profile_contained_data_root_symlink() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
@@ -142,7 +142,7 @@ async fn registered_collection_rejects_profile_contained_data_root_symlink() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn relink_database_failure_rolls_back_manifest_and_registry() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
@@ -208,7 +208,7 @@ async fn relink_database_failure_rolls_back_manifest_and_registry() {
     assert_eq!(restored_manifest.project_id.as_deref(), Some("proj_old"));
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn durable_memory_rows_block_orphan_store_collection() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
@@ -265,7 +265,7 @@ async fn durable_memory_rows_block_orphan_store_collection() {
 
 /// The guard is schema-discovered, so current and future Memory V2 tables are
 /// protected without adding every table name to a second hand-maintained list.
-#[tokio::test]
+#[asupersync::test]
 async fn memory_v2_rows_block_orphan_store_collection() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
@@ -311,7 +311,7 @@ async fn memory_v2_rows_block_orphan_store_collection() {
 
 /// A durable memory table that exists but is empty must not block collection.
 /// Only an actual row does.
-#[tokio::test]
+#[asupersync::test]
 async fn empty_memory_table_does_not_block_collection() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
@@ -356,7 +356,7 @@ async fn empty_memory_table_does_not_block_collection() {
 // === Unregistered store directories =========================================
 
 #[cfg(unix)]
-#[tokio::test]
+#[asupersync::test]
 async fn unregistered_collection_refuses_same_second_directory_replacement() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
@@ -404,7 +404,7 @@ async fn unregistered_collection_refuses_same_second_directory_replacement() {
 /// symlink resolves back inside the profile. The physical `<profile>/projects`
 /// path, rather than canonicalized containment, is the destructive authority.
 #[cfg(unix)]
-#[tokio::test]
+#[asupersync::test]
 async fn unregistered_collection_rejects_profile_contained_data_root_symlink() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
@@ -518,7 +518,7 @@ fn delete_boundary_refuses_empty_directory_replacement() {
 /// Once the apply loop admits a finding, the payload-mtime fence is the first
 /// gate to read the admission control. A cancellation it observes is a typed
 /// interruption, never a per-store refusal or an implicit deletion permit.
-#[tokio::test]
+#[asupersync::test]
 async fn registered_collection_payload_fence_cancellation_is_terminal() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
@@ -545,7 +545,7 @@ async fn registered_collection_payload_fence_cancellation_is_terminal() {
     assert!(data_root.join("bucket/payload.bin").is_file());
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn unregistered_collection_payload_fence_deadline_is_distinct() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
@@ -584,7 +584,7 @@ async fn unregistered_collection_payload_fence_deadline_is_distinct() {
 
 /// A durable-memory guard applies to unregistered directories exactly as it
 /// does to registered orphan stores.
-#[tokio::test]
+#[asupersync::test]
 async fn sweep_unregistered_stores_never_deletes_durable_memory_rows() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
@@ -666,7 +666,7 @@ fn profile_file_names(root: &Path) -> Vec<String> {
 /// A manifestless unregistered directory holding only the retired branch-store
 /// layout is old data, not durable authority: its memory rows and sidecars do
 /// not protect it, and collection leaves no copy behind.
-#[tokio::test]
+#[asupersync::test]
 async fn sweep_unregistered_stores_collects_retired_branch_store_layout() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
@@ -699,7 +699,7 @@ async fn sweep_unregistered_stores_collects_retired_branch_store_layout() {
 /// the one whose exact registered root still has a live owner, which can
 /// still write into it, and collects the rest, including the store of a root
 /// that merely shares a prefix with the owned one.
-#[tokio::test]
+#[asupersync::test]
 async fn cold_store_page_keeps_a_removed_root_store_only_while_that_exact_root_has_an_owner() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
@@ -763,7 +763,7 @@ async fn cold_store_page_keeps_a_removed_root_store_only_while_that_exact_root_h
 /// stray `branches/*.db` is reported by Doctor, the maintenance cold-store
 /// orphan-collection page deletes it without a copy, Doctor is then clean, and
 /// the live store's own files are byte-identical.
-#[tokio::test]
+#[asupersync::test]
 async fn cold_store_page_deletes_retired_branch_store_and_doctor_is_clean() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
@@ -969,7 +969,7 @@ mod durable_inventory {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn a_store_whose_manifest_is_unreadable_is_never_reported_empty() {
         let profile = tempfile::tempdir().unwrap();
         let data_root = profile.path().join("stores/unreadable");
@@ -991,7 +991,7 @@ mod durable_inventory {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn a_pre_cancelled_durable_snapshot_reports_interrupted() {
         let profile = tempfile::tempdir().unwrap();
         let data_root = profile.path().join("stores/cancelled");
@@ -1016,7 +1016,7 @@ mod durable_inventory {
 }
 
 #[cfg(unix)]
-#[tokio::test]
+#[asupersync::test]
 async fn symlink_manifest_is_unverifiable_and_never_collected() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
@@ -1049,7 +1049,7 @@ async fn symlink_manifest_is_unverifiable_and_never_collected() {
 }
 
 #[cfg(unix)]
-#[tokio::test]
+#[asupersync::test]
 async fn symlink_graph_database_is_durable_data_protected() {
     let tmp = tempfile::TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
@@ -1083,4 +1083,23 @@ async fn symlink_graph_database_is_durable_data_protected() {
         CollectionFailureKind::DurableDataProtected
     );
     assert!(data_root.exists());
+}
+
+/// A store command still pending at the admission deadline loses the race at
+/// that deadline, not before and not when the command finally answers.
+#[asupersync::test]
+async fn a_pending_command_loses_the_race_at_its_deadline() {
+    let cancellation = CancellationToken::new();
+    let deadline = Instant::now() + Duration::from_millis(100);
+    let raced = asupersync::time::timeout(
+        asupersync::time::wall_now(),
+        Duration::from_secs(10),
+        CollectionControl::new(&cancellation, MonotonicDeadline::at(deadline))
+            .race(std::future::pending::<()>()),
+    )
+    .await
+    .expect("the admission deadline must end the race");
+
+    assert_eq!(raced, Err(CollectionCompletionV1::DeadlineExceeded));
+    assert!(Instant::now() >= deadline, "the race must not end early");
 }

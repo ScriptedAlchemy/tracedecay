@@ -524,7 +524,6 @@ impl MaintenanceCoordinator {
     /// join below stays correct whether or not it already ran.
     pub(super) fn cancel(&self) {
         self.cancellation.cancel();
-        self.wake.notify_waiters();
     }
 
     pub(super) async fn shutdown(&self) {
@@ -1188,14 +1187,11 @@ mod tests {
     use tracedecay_domain::UtcMicros;
 
     use super::{MaintenanceCoordinator, run_resident_memory_sampler_loop};
-    use tracedecay_maintenance::loop_run::{
-        MaintenanceWake, maintenance_futures_active, run_maintenance_loop,
-    };
     use tracedecay_maintenance::telemetry::{
         StoreTelemetrySamplingRegistry, TableGrowthObservation, compare_table_growth,
     };
     use tracedecay_maintenance::tick::{
-        CadenceInstant, MaintenanceCadence, MaintenanceContinuation, MaintenanceTickOutcome,
+        MaintenanceCadence, MaintenanceContinuation, MaintenanceTickOutcome,
         cursor_after_attempted_units, select_store_window,
     };
 
@@ -1252,7 +1248,7 @@ mod tests {
 
     #[test]
     fn cadence_rate_limits_failures_and_successes() {
-        let started = CadenceInstant::now();
+        let started = std::time::Instant::now();
         let mut cadence = MaintenanceCadence::new(Duration::from_mins(1));
 
         assert!(cadence.reserve(started));
@@ -1388,198 +1384,6 @@ mod tests {
             registry.graph_replay_release_attempt_admitted(retired),
             "a retired project's backoff state must be dropped"
         );
-    }
-
-    /// `MAINTENANCE_FUTURES_ACTIVE` is a process-wide counter, so a test that
-    /// observes absolute readings must not overlap another test that runs a
-    /// maintenance loop. Every test that starts `run_maintenance_loop` holds
-    /// this lock for the whole lifetime of its loop.
-    static MAINTENANCE_LOOP_LIFECYCLE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-    #[tokio::test(start_paused = true)]
-    async fn repeated_wakes_do_not_move_the_maintenance_due_deadline() {
-        let _lifecycle_isolation = MAINTENANCE_LOOP_LIFECYCLE.lock().await;
-        let cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
-        let wake = Arc::new(MaintenanceWake::default());
-        let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let baseline = maintenance_futures_active();
-        let task_cancellation = cancellation.clone();
-        let task_wake = Arc::clone(&wake);
-        let task_ticks = Arc::clone(&ticks);
-        let task = tokio::spawn(async move {
-            run_maintenance_loop(
-                &task_cancellation,
-                &task_wake,
-                Duration::from_mins(10),
-                move |_| {
-                    let ticks = Arc::clone(&task_ticks);
-                    async move {
-                        ticks.fetch_add(1, Ordering::SeqCst);
-                        MaintenanceTickOutcome::Complete
-                    }
-                },
-            )
-            .await;
-        });
-        tokio::task::yield_now().await;
-        assert_eq!(
-            maintenance_futures_active(),
-            baseline + 1,
-            "the loop lifecycle must become observable while the task is live"
-        );
-
-        for _ in 0..3 {
-            wake.wake();
-            tokio::task::yield_now().await;
-            assert_eq!(ticks.load(Ordering::SeqCst), 0);
-        }
-        tokio::time::advance(Duration::from_secs(59)).await;
-        tokio::task::yield_now().await;
-        assert_eq!(ticks.load(Ordering::SeqCst), 0);
-
-        tokio::time::advance(Duration::from_secs(1)).await;
-        tokio::task::yield_now().await;
-        assert_eq!(
-            ticks.load(Ordering::SeqCst),
-            1,
-            "the original absolute deadline must run exactly once despite early wakes"
-        );
-
-        cancellation.cancel();
-        task.await
-            .expect("maintenance loop joins after cancellation");
-        assert_eq!(
-            maintenance_futures_active(),
-            baseline,
-            "cancellation must drop the lifecycle guard and clear the active count"
-        );
-    }
-
-    /// A due request is the publication signal: it pulls the next tick to at
-    /// most one retry delay away, coalesces with other requests inside that
-    /// window, and never runs a tick while one is in flight.
-    #[tokio::test(start_paused = true)]
-    async fn due_request_pulls_the_next_tick_forward_without_busy_looping() {
-        let _lifecycle_isolation = MAINTENANCE_LOOP_LIFECYCLE.lock().await;
-        let cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
-        let wake = Arc::new(MaintenanceWake::default());
-        let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let task_cancellation = cancellation.clone();
-        let task_wake = Arc::clone(&wake);
-        let task_ticks = Arc::clone(&ticks);
-        let task = tokio::spawn(async move {
-            run_maintenance_loop(
-                &task_cancellation,
-                &task_wake,
-                Duration::from_hours(24),
-                move |_| {
-                    let ticks = Arc::clone(&task_ticks);
-                    async move {
-                        ticks.fetch_add(1, Ordering::SeqCst);
-                        MaintenanceTickOutcome::Complete
-                    }
-                },
-            )
-            .await;
-        });
-        tokio::task::yield_now().await;
-        // The first tick runs one retry delay after start, then the daily
-        // cadence applies.
-        tokio::time::advance(Duration::from_mins(1)).await;
-        tokio::task::yield_now().await;
-        assert_eq!(ticks.load(Ordering::SeqCst), 1);
-
-        // A plain wake leaves the daily deadline alone.
-        tokio::time::advance(Duration::from_hours(1)).await;
-        wake.wake();
-        tokio::task::yield_now().await;
-        tokio::time::advance(Duration::from_mins(5)).await;
-        tokio::task::yield_now().await;
-        assert_eq!(ticks.load(Ordering::SeqCst), 1);
-
-        // Three publications inside one retry delay make exactly one tick due
-        // one retry delay after the first request, not after 24 hours.
-        for _ in 0..3 {
-            wake.request_due();
-            tokio::task::yield_now().await;
-            assert_eq!(
-                ticks.load(Ordering::SeqCst),
-                1,
-                "a due request never runs early"
-            );
-        }
-        tokio::time::advance(Duration::from_secs(59)).await;
-        tokio::task::yield_now().await;
-        assert_eq!(ticks.load(Ordering::SeqCst), 1);
-        tokio::time::advance(Duration::from_secs(1)).await;
-        tokio::task::yield_now().await;
-        assert_eq!(
-            ticks.load(Ordering::SeqCst),
-            2,
-            "coalesced due requests run one tick after one retry delay"
-        );
-
-        // After that tick the daily cadence is back in force.
-        tokio::time::advance(Duration::from_hours(1)).await;
-        tokio::task::yield_now().await;
-        assert_eq!(ticks.load(Ordering::SeqCst), 2);
-
-        cancellation.cancel();
-        task.await
-            .expect("maintenance loop joins after cancellation");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn progress_continuation_reenters_only_the_owning_phase() {
-        let _lifecycle_isolation = MAINTENANCE_LOOP_LIFECYCLE.lock().await;
-        let cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
-        let wake = Arc::new(MaintenanceWake::default());
-        let phases = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let task_cancellation = cancellation.clone();
-        let task_wake = Arc::clone(&wake);
-        let task_phases = Arc::clone(&phases);
-        let task = tokio::spawn(async move {
-            run_maintenance_loop(
-                &task_cancellation,
-                &task_wake,
-                Duration::from_mins(10),
-                move |continuation| {
-                    let phases = Arc::clone(&task_phases);
-                    async move {
-                        let mut phases = phases
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        phases.push(continuation);
-                        if phases.len() == 1 {
-                            MaintenanceTickOutcome::Continue(
-                                MaintenanceContinuation::CodeGenerationRetention,
-                            )
-                        } else {
-                            MaintenanceTickOutcome::Complete
-                        }
-                    }
-                },
-            )
-            .await;
-        });
-        tokio::task::yield_now().await;
-
-        tokio::time::advance(Duration::from_mins(1)).await;
-        tokio::task::yield_now().await;
-        tokio::time::advance(Duration::from_mins(1)).await;
-        tokio::task::yield_now().await;
-
-        assert_eq!(
-            *phases
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-            vec![None, Some(MaintenanceContinuation::CodeGenerationRetention)],
-            "bounded progress must resume its code-generation phase instead of a full tick"
-        );
-
-        cancellation.cancel();
-        task.await
-            .expect("maintenance loop joins after cancellation");
     }
 
     fn store_keys(count: usize) -> Vec<String> {

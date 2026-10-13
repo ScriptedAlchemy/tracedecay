@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
+use tracedecay_runtime_core::native_runtime;
 
 #[cfg(test)]
 use super::collection::unbounded_deadline;
@@ -372,7 +373,7 @@ async fn inspect_store_leaf_cheap(
     }
     let profile_root = profile_root.to_path_buf();
     let data_root = data_root.to_path_buf();
-    tokio::task::spawn_blocking(move || inspect_store_leaf_cheap_sync(&profile_root, &data_root))
+    native_runtime::spawn_blocking(move || inspect_store_leaf_cheap_sync(&profile_root, &data_root))
         .await
         .map(Some)
         .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
@@ -401,7 +402,7 @@ async fn attach_lazy_content_fences(
                 Err(_) => StoreContentFence::Unverifiable,
             }
         } else {
-            tokio::task::spawn_blocking(move || {
+            native_runtime::spawn_blocking(move || {
                 capture_store_content_fence(&profile_root, &data_root)
                     .unwrap_or(StoreContentFence::Unverifiable)
             })
