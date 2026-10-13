@@ -2019,7 +2019,18 @@ exit 0
             ),
             "{record}"
         );
-        assert!(record["receipt"]["operation"].is_string(), "{record}");
+        let operation = match record["step"]["step"].as_str() {
+            Some("create_task" | "accept_proposal") => "use-case.work.mutate_graph",
+            Some("admit_execution") => "use-case.work.admit_execution",
+            Some("admit_placement") => "use-case.work.admit_placement",
+            _ => "use-case.work.start_attempt",
+        };
+        assert_eq!(record["receipt"]["operation"], operation, "{record}");
+        assert_eq!(record["receipt"]["outcome"], "completed", "{record}");
+        assert_eq!(
+            record["receipt"]["request_id"], record["request_id"],
+            "{record}"
+        );
     }
     let admitted_snapshot = |task: &str| {
         started
@@ -2162,6 +2173,14 @@ exit 0
         ],
         "{calls:?}"
     );
+    for (record, operation) in finished.iter().zip([
+        "use-case.work.synthesize",
+        "use-case.work.release_placement",
+        "use-case.work.release_placement",
+    ]) {
+        assert_eq!(record["receipt"]["operation"], operation, "{record}");
+        assert_eq!(record["receipt"]["outcome"], "completed", "{record}");
+    }
     let synthesized = &finished[0]["result"]["value"];
     assert_eq!(synthesized["synthesis"], "admitted", "{synthesized}");
     assert_eq!(
