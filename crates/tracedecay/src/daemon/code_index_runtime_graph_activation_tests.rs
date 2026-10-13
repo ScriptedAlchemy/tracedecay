@@ -19,9 +19,9 @@ use tracedecay_code_index_runtime::CodeGraphSeatRuntimePortV1;
 use tracedecay_code_index_runtime::code_index_executor::code_index_search_executor;
 use tracedecay_code_index_runtime::code_index_scheduler::{
     CodeGraphActivationAuthorityV1, CodeGraphActivationPolicyV1, CodeIndexDemandAdmissionV1,
-    CodeIndexOwnerSignalsV1, CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1,
-    CodeIndexWorktreeSchedulerV1, RetainedGraphRecoveryPauseV1, SharedCodeIndexBytePoolV1,
-    scoped_code_index_store_root,
+    CodeIndexIgnoredDependencyRequestV1, CodeIndexOwnerSignalsV1, CodeIndexReconcileOutcomeV1,
+    CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1, RetainedGraphRecoveryPauseV1,
+    SharedCodeIndexBytePoolV1, install_injected_catalog_warm_gate, scoped_code_index_store_root,
 };
 use tracedecay_code_index_runtime::mcp_admission::{
     CodeIndexMcpAdmissionUnavailableV1, CodeIndexMcpReadAdmissionV1, CodeIndexMcpReadGrantV1,
@@ -2738,6 +2738,159 @@ async fn a_refresh_refused_beside_the_serving_graph_publishes_under_status_polli
     );
 
     mount.shutdown().await;
+}
+
+struct ActiveAdmissionControl;
+
+impl tracedecay_code_index::production::CodeIndexExecutionControlV1 for ActiveAdmissionControl {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+
+    fn is_deadline_exceeded(&self) -> bool {
+        false
+    }
+}
+
+/// Admission answers "the generation advanced, retry", and that retry reads
+/// the successor's catalog, so the answer waits until the catalog serves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ignored_dependency_admission_answers_once_the_successor_catalog_serves() {
+    let fixture = GitFixture::new(&[
+        (".gitignore", "node_modules/\n"),
+        (
+            "src/app.ts",
+            "import type { PublicWidget } from \"pkg\";\nexport function GenerationAnchor(value: PublicWidget) { return value; }\n",
+        ),
+        (
+            "node_modules/pkg/index.d.ts",
+            "export interface PublicWidget { value: string }\n",
+        ),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let profile = TempDir::new().expect("profile root");
+    let profile_root = profile.path().join("profile");
+    let project_id = test_project_id();
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        fixture.path(),
+        project_id.as_str(),
+    )
+    .expect("project enrollment");
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+        .expect("profile identity");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        97,
+        "ignored dependency admission catalog warm",
+    )
+    .expect("daemon database scope");
+    let graph_runtime = Arc::new(
+        DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("graph runtime registry"),
+    );
+    let project_database = graph_runtime
+        .project_memory(project_id.clone(), [fixture.path().to_path_buf()])
+        .await
+        .expect("writable project database");
+    tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
+        &project_database,
+        "bind admission graph runtime",
+    )
+    .await
+    .expect("bound project graph runtime");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    registry
+        .mount_worktree_with_graph_runtime(
+            project_id,
+            fixture.path(),
+            store.path().to_path_buf(),
+            graph_runtime.code_graph_seat_port(),
+            project_database,
+            CodeGraphActivationPolicyV1::Enabled,
+            tracedecay_code_index_runtime::registry_default_index_path_policy(),
+        )
+        .await
+        .expect("mount admission fixture");
+    let reached = registry
+        .wait_for_readiness(
+            fixture.path(),
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessTargetV1::Ready,
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("readiness read");
+    assert!(
+        matches!(
+            reached,
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Reached { .. }
+        ),
+        "the baseline must serve its graph: {reached:?}"
+    );
+    // Building the request needs the decoded baseline, which a first index
+    // seats only on demand.
+    let mut signals = CodeIndexOwnerSignalsV1::subscribe(&registry, fixture.path()).await;
+    registry.request_complete_generation(fixture.path()).await;
+    let baseline = loop {
+        if let Some(baseline) = registry.latest_complete_fresh(fixture.path()).await {
+            break baseline;
+        }
+        signals
+            .changed()
+            .await
+            .expect("the registry outlives the test's owner signals");
+    };
+    let request =
+        CodeIndexIgnoredDependencyRequestV1::for_verified_import_for_test(&baseline, "pkg")
+            .expect("verified import row for pkg");
+    let catalog_warm = install_injected_catalog_warm_gate(&request.scope.worktree_id);
+
+    let admission_registry = registry.clone();
+    let admission_root = fixture.path().to_path_buf();
+    let mut admission = tokio::spawn(async move {
+        admission_registry
+            .index_verified_ignored_dependency(
+                &admission_root,
+                request,
+                Arc::new(ActiveAdmissionControl),
+                tokio::time::Instant::now() + DEFAULT_TOOL_REQUEST_DEADLINE,
+            )
+            .await
+    });
+    catalog_warm.wait_until_started().await;
+    tokio::select! {
+        biased;
+        answered = &mut admission => panic!(
+            "admission answered while the successor catalog was still warming: ok={}",
+            answered.is_ok_and(|outcome| outcome.is_ok())
+        ),
+        () = catalog_warm.wait_until_awaited() => catalog_warm.release(),
+    }
+    let outcome = admission
+        .await
+        .expect("admission task joins")
+        .expect("verified ignored dependency indexes");
+    let served = registry
+        .latest_complete_fresh(fixture.path())
+        .await
+        .expect("successor generation");
+    assert_eq!(
+        served.generation().manifest().generation_id,
+        outcome.generation_id
+    );
+    assert_eq!(
+        served
+            .interactive_graph_store()
+            .expect("admission seats a persistent graph")
+            .interactive_catalog_is_warm(),
+        Ok(true),
+        "a retry after admission reads a warm catalog"
+    );
+    registry.shutdown().await;
+    graph_runtime
+        .shutdown_memory_graph_reconciliation_tasks()
+        .await
+        .expect("join graph reconciliation tasks");
 }
 
 fn graph_request_context(scope: ResolvedScope, suffix: &str) -> RequestContext {

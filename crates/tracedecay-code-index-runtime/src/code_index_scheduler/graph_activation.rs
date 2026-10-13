@@ -45,6 +45,7 @@ struct InjectedActivationFaultsV1 {
     publication_deadlines: std::collections::BTreeSet<String>,
     terminal_failures: std::collections::BTreeSet<String>,
     gates: std::collections::BTreeMap<String, Arc<InjectedActivationGateStateV1>>,
+    catalog_warm_gates: std::collections::BTreeMap<String, Arc<InjectedActivationGateStateV1>>,
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -98,20 +99,27 @@ fn take_injected_count(
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
+#[derive(Default)]
 struct InjectedActivationGateStateV1 {
     started: tokio::sync::Notify,
     release: tokio::sync::Notify,
+    /// A caller began waiting for the gated catalog warm to settle.
+    awaited: tokio::sync::Notify,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 pub struct InjectedActivationGateV1 {
     state: Arc<InjectedActivationGateStateV1>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 impl InjectedActivationGateV1 {
     pub async fn wait_until_started(&self) {
         self.state.started.notified().await;
+    }
+
+    pub async fn wait_until_awaited(&self) {
+        self.state.awaited.notified().await;
     }
 
     pub fn release(&self) {
@@ -119,7 +127,7 @@ impl InjectedActivationGateV1 {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-helpers"))]
 impl Drop for InjectedActivationGateV1 {
     fn drop(&mut self) {
         self.release();
@@ -128,12 +136,21 @@ impl Drop for InjectedActivationGateV1 {
 
 #[cfg(test)]
 pub fn install_injected_activation_gate(worktree_id: &WorktreeId) -> InjectedActivationGateV1 {
-    let state = Arc::new(InjectedActivationGateStateV1 {
-        started: tokio::sync::Notify::new(),
-        release: tokio::sync::Notify::new(),
-    });
+    let state = Arc::<InjectedActivationGateStateV1>::default();
     injected_faults()
         .gates
+        .insert(worktree_id.as_str().to_owned(), Arc::clone(&state));
+    InjectedActivationGateV1 { state }
+}
+
+/// Holds the next persistent activation's background catalog warm for
+/// `worktree_id` before it builds, so a fixture can observe what serves while
+/// the successor's catalog is still warming.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn install_injected_catalog_warm_gate(worktree_id: &WorktreeId) -> InjectedActivationGateV1 {
+    let state = Arc::<InjectedActivationGateStateV1>::default();
+    injected_faults()
+        .catalog_warm_gates
         .insert(worktree_id.as_str().to_owned(), Arc::clone(&state));
     InjectedActivationGateV1 { state }
 }
@@ -528,7 +545,18 @@ impl CodeGraphActivationAuthorityV1 {
                     ))
                 })??;
                 if let Some(pending_catalog_warm) = pending_catalog_warm {
+                    #[cfg(any(test, feature = "test-helpers"))]
+                    let gate = injected_faults()
+                        .catalog_warm_gates
+                        .remove(worktree_id.as_str());
                     drop(tokio::task::spawn_blocking(move || {
+                        #[cfg(any(test, feature = "test-helpers"))]
+                        if let Some(gate) = gate {
+                            tokio::runtime::Handle::current().block_on(async {
+                                gate.started.notify_one();
+                                gate.release.notified().await;
+                            });
+                        }
                         if let Err(error) = pending_catalog_warm.run() {
                             tracing::warn!(
                                 error = %error,
