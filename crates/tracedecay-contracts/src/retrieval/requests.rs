@@ -240,6 +240,11 @@ pub struct HealthReadResult {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HealthDeltaRequest {
+    /// A prior result's after_cursor. A cursor recorded under another health
+    /// definition, or before definitions were recorded, is refused with
+    /// `application.health-delta.definition-mismatch` or
+    /// `application.health-delta.definition-unrecorded`; omit it to record a
+    /// new baseline.
     pub before_cursor: Option<String>,
     pub path_prefix: Option<String>,
     pub meta: RetrievalRequestMeta,
@@ -313,12 +318,6 @@ pub struct HealthDeltaResult {
     pub before_cursor: String,
     pub after_cursor: String,
     /// True when both points analyzed files and quality_signal did not drop.
-    /// Both points always share one health definition: a before_cursor
-    /// recorded under another definition, or before definitions were
-    /// recorded, is refused with
-    /// `application.health-delta.definition-mismatch` or
-    /// `application.health-delta.definition-unrecorded`; omit before_cursor to
-    /// record a new baseline.
     pub pass: bool,
     pub delta: i64,
     pub dimensions: BTreeMap<String, HealthDimensionDeltaV1>,

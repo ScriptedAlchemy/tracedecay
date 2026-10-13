@@ -134,9 +134,6 @@ fn health_delta_watermark(
     .map_err(|error| storage("failed to seal health-delta watermark", error))
 }
 
-/// Binds the cursor to the health definition as well as the scope and
-/// generation, so a new definition mints a fresh point at a generation an
-/// older binary already observed instead of reusing that point.
 fn health_delta_cursor(scope: &HealthDeltaScopeV1, generation: &str) -> Result<String> {
     let digest = canonical_sha256(&(
         "tracedecay.health-delta.cursor.v2",
@@ -284,7 +281,7 @@ async fn find_health_delta_point(
     port.read_exact(scope.scope_digest.as_str(), cursor)
         .await
         .map_err(|error| storage("failed to read health-delta observation", error))?
-        .map(|envelope| decode_health_delta_point(scope, envelope))
+        .map(|envelope| verify_health_delta_point(scope, envelope))
         .transpose()
 }
 
@@ -299,10 +296,7 @@ async fn load_health_delta_point(
         .ok_or(HealthDeltaError::UnknownCursor)
 }
 
-/// Verifies the stored point's watermark, then requires it to carry the
-/// current health definition, so no delta compares scores computed under two
-/// definitions.
-fn decode_health_delta_point(
+fn verify_health_delta_point(
     scope: &HealthDeltaScopeV1,
     envelope: ObservabilityEnvelopeV1,
 ) -> Result<HealthDeltaPointV1> {
@@ -390,9 +384,6 @@ fn health_dimension_deltas(
         .collect()
 }
 
-/// Compares two points of one scope and definition. Only two points that
-/// both analyzed files are comparable; an emptied scope fails instead of
-/// passing on the empty-graph score.
 fn health_delta_result(
     scope: HealthDeltaScopeV1,
     (before, before_cursor): (HealthDeltaPointV1, String),
@@ -725,7 +716,6 @@ mod tests {
         }
     }
 
-    /// The cursor a release before recorded health definitions minted.
     fn unlabeled_release_cursor(scope: &HealthDeltaScopeV1, generation: &str) -> String {
         let digest = canonical_sha256(&(
             "tracedecay.health-delta.cursor.v1",

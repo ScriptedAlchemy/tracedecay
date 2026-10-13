@@ -11,10 +11,6 @@ use super::queries::{GraphQueryManager, VerifiedHealthInputsV1};
 use super::scc::tarjan_scc;
 use tracedecay_domain::errors::Result;
 
-/// The health formula and input selection that produced a persisted
-/// health-delta point. A delta compares only points recorded under one
-/// definition. Bump it whenever a score, a denominator, or the inputs a scope
-/// selects change, and re-pin `the_health_definition_pins_its_scores`.
 pub const HEALTH_DEFINITION: &str = "health.2026-09-12";
 
 #[derive(Clone, Debug)]
@@ -893,16 +889,24 @@ mod panel_tests {
         let pinned = (
             super::HEALTH_DEFINITION,
             snapshot.quality_signal,
-            HealthDimension::ALL.map(|dimension| dimension.score_ppm(&snapshot)),
+            HealthDimension::ALL
+                .map(|dimension| (dimension.name(), dimension.score_ppm(&snapshot))),
         );
         assert_eq!(
             pinned,
             (
                 "health.2026-09-12",
                 7113,
-                [500_000, 866_667, 1_000_000, 638_889, 666_667, 866_667]
+                [
+                    ("acyclicity", 500_000),
+                    ("coverage_discipline", 866_667),
+                    ("depth", 1_000_000),
+                    ("equality", 638_889),
+                    ("modularity", 666_667),
+                    ("redundancy", 866_667),
+                ]
             ),
-            "a health score moved: bump HEALTH_DEFINITION and re-pin these values in the same change"
+            "a persisted health score or key moved: bump HEALTH_DEFINITION and re-pin these values in the same change"
         );
     }
 

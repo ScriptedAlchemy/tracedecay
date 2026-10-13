@@ -111,9 +111,6 @@ fn graph_query_failures_after_open_refuse_like_a_failed_open() {
     );
 }
 
-/// A before_cursor from another health definition reaches the caller as a
-/// cursor refusal that keeps its code and names the re-baseline action,
-/// instead of reading as unavailable evidence.
 #[test]
 fn health_delta_definition_refusals_keep_their_code_and_restart_without_cursor() {
     use crate::graph_health_delta::HealthDeltaError;

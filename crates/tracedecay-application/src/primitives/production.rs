@@ -321,8 +321,6 @@ fn refused<T>(
     )
 }
 
-/// A before_cursor the delta cannot compare is a cursor refusal, so the
-/// caller's legal action is to restart without it and record a new baseline.
 fn health_delta_outcome<T>(
     error: &crate::graph_health_delta::HealthDeltaError,
     finished_at: UtcMicros,
