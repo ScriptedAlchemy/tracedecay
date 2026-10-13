@@ -290,6 +290,9 @@ pub struct RemoteReplaySpoolStateV1 {
     pub state: RemoteReplayStateV1,
     pub receipt: Option<RemoteReplayCommitReceiptV1>,
     pub last_attempt: u64,
+    /// Why the last transition settled the frame as it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finding: Option<RemoteReplayFindingV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -798,24 +801,14 @@ fn replay_effect_envelope(
         // Answered like a retried transfer: the effect names the state the
         // original replay committed, and this request changed nothing.
         RemoteReplayOutcomeV1::AlreadyAcknowledged { receipt } => {
-            let committed = canonical_sha256(receipt)
-                .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;
-            let answered_at = clock
-                .now()
-                .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;
-            let execution = OperationReceipt::completed(
-                request.sent_at,
-                answered_at,
-                deadline,
-                OperationBudgetUsage {
-                    units_consumed: 1,
-                    bytes_consumed: 0,
-                    elapsed_micros: 0,
-                },
-            )
-            .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;
-            (committed.clone(), committed, execution)
+            settled_effect(&request, receipt, deadline, clock)?
         }
+        RemoteReplayOutcomeV1::AlreadyRefused { .. } => settled_effect(
+            &request,
+            &(&outcome.frame.event_id, &outcome.outcome),
+            deadline,
+            clock,
+        )?,
         _ => return Err(RemoteProtocolFailureV1::AuthorityUnavailable),
     };
     let event_digest = canonical_sha256(&(
@@ -873,6 +866,33 @@ fn replay_effect_envelope(
         outcome.policy.scope,
         effect,
     ))
+}
+
+/// The expected state, committed state, and execution of a request that found
+/// the frame settled: both states are the digest of `settled`.
+fn settled_effect(
+    request: &RemoteProtocolRequestV1<RemoteReplayRequestV1>,
+    settled: &impl Serialize,
+    deadline: Deadline,
+    clock: &dyn RemoteReplayClockPortV1,
+) -> Result<(ManifestDigest, ManifestDigest, OperationReceipt), RemoteProtocolFailureV1> {
+    let state =
+        canonical_sha256(settled).map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;
+    let answered_at = clock
+        .now()
+        .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;
+    let execution = OperationReceipt::completed(
+        request.sent_at,
+        answered_at,
+        deadline,
+        OperationBudgetUsage {
+            units_consumed: 1,
+            bytes_consumed: 0,
+            elapsed_micros: 0,
+        },
+    )
+    .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;
+    Ok((state.clone(), state, execution))
 }
 
 /// The expected state, committed state, and execution of a replay this request ran.
@@ -1023,10 +1043,15 @@ pub enum RemoteReplayOutcomeV1 {
     AlreadyAcknowledged {
         receipt: RemoteReplayCommitReceiptV1,
     },
+    /// An earlier replay refused the frame for good; this request committed nothing.
+    AlreadyRefused {
+        refusal: RemoteReplayRefusalV1,
+        finding: RemoteReplayFindingV1,
+    },
 }
 
 impl RemoteReplayOutcomeV1 {
-    /// This request's replay receipt; `None` when an earlier replay acknowledged the frame.
+    /// This request's replay receipt; `None` when an earlier replay settled the frame.
     pub fn into_operation_receipt(self) -> Option<RemoteReplayOperationReceiptV1> {
         match self {
             Self::Acknowledged {
@@ -1034,7 +1059,7 @@ impl RemoteReplayOutcomeV1 {
             }
             | Self::Rejected { operation_receipt }
             | Self::Quarantined { operation_receipt } => Some(operation_receipt),
-            Self::AlreadyAcknowledged { .. } => None,
+            Self::AlreadyAcknowledged { .. } | Self::AlreadyRefused { .. } => None,
         }
     }
 }
@@ -1058,10 +1083,7 @@ pub fn replay_remote_capture(
         .map_err(RemoteReplayApplicationErrorV1::Persistence)?;
     // A settled row is answered before an attempt opens: no transition would
     // close an attempt opened on it, so the next replay would see corruption.
-    if matches!(
-        spool_state.state,
-        RemoteReplayStateV1::Acknowledged | RemoteReplayStateV1::GarbageCollectionEligible
-    ) {
+    if spool_state.state.is_settled() {
         validate_scope_and_fence(frame, current_writer, caller_credential)?;
         authenticate_remote_request(
             authentication,
@@ -1074,6 +1096,12 @@ pub fn replay_remote_capture(
             observed_at,
         )
         .map_err(RemoteReplayApplicationErrorV1::Authentication)?;
+        if let Some(refusal) = RemoteReplayRefusalV1::of(spool_state.state) {
+            let finding = spool_state
+                .finding
+                .ok_or(RemoteReplayApplicationErrorV1::InvalidSpoolState)?;
+            return Ok(RemoteReplayOutcomeV1::AlreadyRefused { refusal, finding });
+        }
         let receipt = spool_state
             .receipt
             .ok_or(RemoteReplayApplicationErrorV1::ReceiptMissing)?;

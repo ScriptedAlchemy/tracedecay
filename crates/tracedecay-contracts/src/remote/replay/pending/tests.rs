@@ -254,6 +254,7 @@ impl Row {
             state: self.state,
             receipt: self.receipt.clone(),
             last_attempt: self.last_attempt,
+            finding: self.finding,
         }
     }
 }

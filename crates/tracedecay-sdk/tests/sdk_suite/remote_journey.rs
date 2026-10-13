@@ -927,6 +927,37 @@ fn a_joined_node_drains_offline_frames_in_order_to_its_authority() {
         }),
         "a resend repeats the same stop without replaying it"
     );
+    let single = node
+        .replay(&replay_request(
+            "request.remote-drain-replay-single",
+            &node_id,
+            &writer.authority.fence,
+            RemoteReplayRequestV1 {
+                event_id: captured[1]["event_id"].as_str().unwrap().to_owned(),
+            },
+        ))
+        .unwrap()
+        .result
+        .unwrap_or_else(|problem| {
+            panic!("a single replay of a refused frame is terminal, not retryable: {problem:?}")
+        })
+        .outcome
+        .payload()
+        .cloned()
+        .expect("a single replay returns its outcome");
+    assert_eq!(
+        single,
+        RemoteReplayOutcomeV1::AlreadyRefused {
+            refusal: RemoteReplayRefusalV1::Rejected,
+            finding: RemoteReplayFindingV1::StoreRefused,
+        },
+        "a single replay of a refused frame reports the stored finding"
+    );
+    assert_eq!(
+        desktop.status()["spool"]["pending_count"],
+        json!(0),
+        "a single replay of a refused frame leaves it settled"
+    );
 
     for fixture in [laptop, desktop] {
         let mut daemon = fixture.daemon;

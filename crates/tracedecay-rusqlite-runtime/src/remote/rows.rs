@@ -106,6 +106,7 @@ pub(super) fn decode_spool_state(
         state: parse_replay_state(row_text(&row, 0)?)?,
         receipt: optional_json(&row, 1)?,
         last_attempt: row_u64(&row, 2)?,
+        finding: optional_json(&row, 3)?,
     })
 }
 
