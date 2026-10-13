@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tracedecay_contracts::remote::auth::OpaqueRemoteCredential;
 use tracedecay_contracts::remote::capture::RemoteCapturePersistenceErrorV1;
 use tracedecay_contracts::remote::credential_admission::{
-    RemoteCredentialAdmissionPortV1, RemoteCredentialAdmissionServiceV1, RemoteCredentialClassV1,
+    RemoteCredentialAdmissionPortV1, RemoteCredentialAdmissionServiceV1, RemoteCredentialUseV1,
     RemoteSessionBoundProtocolBodyV1,
 };
 use tracedecay_contracts::remote::protocol::{
@@ -111,11 +111,13 @@ impl RemoteProtocolPortV1<RemoteFrameTransferRequestV1>
         );
         let session = match admission.admit_before_body(
             &credential,
-            tracedecay_contracts::remote::credential_admission::RemoteCredentialUseV1::TransferFrame,
+            RemoteCredentialUseV1::TransferFrame,
             tracedecay_contracts::clock::now_micros(),
         ) {
             Ok(session) => session,
-            Err(_) => return remote_authority_unavailable_response(request_id, observed_at, contract),
+            Err(_) => {
+                return remote_authority_unavailable_response(request_id, observed_at, contract);
+            }
         };
         if <RemoteFrameTransferRequestV1 as RemoteSessionBoundProtocolBodyV1>::bind_authenticated_session(
             &session, &request,
@@ -141,7 +143,7 @@ impl RemoteProtocolPortV1<RemoteFrameTransferRequestV1>
         }
         let registered = match self
             .credentials
-            .storage_for_presented(RemoteCredentialClassV1::Enrollment, &credential)
+            .storage_for_presented(RemoteCredentialUseV1::TransferFrame, &credential)
         {
             Ok(registered) => registered,
             Err(_) => {

@@ -51,6 +51,7 @@ mod crypto;
 mod enrollment;
 mod enrollment_lifecycle;
 mod identity;
+mod membership;
 mod policy;
 mod promotion_gate;
 mod recovery_authority;
@@ -152,6 +153,7 @@ impl Default for RemoteSpoolLimitsV1 {
 pub struct RemoteSqliteStorageV1 {
     retained: RetainedExactSqlCapability,
     binding: StoreRuntimeBindingV1,
+    member_brain: BrainId,
     keyring: Arc<dyn RemoteSpoolKeyringV1>,
     limits: RemoteSpoolLimitsV1,
 }
@@ -182,11 +184,12 @@ impl RemoteSqliteStorageV1 {
             return Err(RemoteSqliteStorageErrorV1::BindingMismatch);
         }
         validate_final_schema(retained.handle())?;
-        bind_node_identity(retained.handle(), &binding)?;
+        let member_brain = bind_node_identity(retained.handle(), &binding)?;
         adopt_runtime_binding(retained.handle(), &binding)?;
         Ok(Self {
             retained,
             binding,
+            member_brain,
             keyring,
             limits,
         })
@@ -199,17 +202,19 @@ impl RemoteSqliteStorageV1 {
         Self {
             retained: self.retained.clone(),
             binding: self.binding.clone(),
+            member_brain: self.member_brain.clone(),
             keyring,
             limits: self.limits,
         }
     }
 
     /// Attaches a newly mounted remote-node runtime and seeds its singleton
-    /// node identity after final-schema admission.
+    /// node identity, serving `member_brain`, after final-schema admission.
     #[tracing::instrument(name = "rusqlite.remote.provision", level = "trace", skip_all)]
     pub fn provision_retained_exact_sql(
         retained: RetainedExactSqlCapability,
         keyring: Arc<dyn RemoteSpoolKeyringV1>,
+        member_brain: &BrainId,
     ) -> Result<Self, RemoteSqliteStorageErrorV1> {
         let binding = retained.handle().binding().clone();
         if !matches!(
@@ -219,10 +224,11 @@ impl RemoteSqliteStorageV1 {
             return Err(RemoteSqliteStorageErrorV1::BindingMismatch);
         }
         validate_final_schema(retained.handle())?;
-        provision_node_identity(retained.handle(), &binding)?;
+        let member_brain = provision_node_identity(retained.handle(), &binding, member_brain)?;
         Ok(Self {
             retained,
             binding,
+            member_brain,
             keyring,
             limits: RemoteSpoolLimitsV1::default(),
         })
@@ -230,6 +236,18 @@ impl RemoteSqliteStorageV1 {
 
     pub fn binding(&self) -> &StoreRuntimeBindingV1 {
         &self.binding
+    }
+
+    /// The Brain whose enrollments, writer, and policy this store holds. It
+    /// differs from the binding's profile Brain only for a joined store.
+    pub fn member_brain(&self) -> &BrainId {
+        &self.member_brain
+    }
+
+    /// Whether this store is a node's copy of another profile's Brain rather
+    /// than a store this daemon serves as the authority.
+    pub fn is_joined(&self) -> bool {
+        self.member_brain != self.binding.shard_id.brain_id
     }
 
     fn handle(&self) -> &ExactSqlHandle {

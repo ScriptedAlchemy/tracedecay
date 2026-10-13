@@ -778,6 +778,14 @@ pub enum RemoteAction {
         #[arg(long, value_name = "FILE")]
         enrollment_credential_file: PathBuf,
     },
+    /// Make this profile the enrolled node of another profile's Brain. The
+    /// running daemon discovers the authority with the enrollment credential
+    /// (`--credential-file`) and adopts the enrollment the authority holds.
+    /// `--request-file` holds a `CurrentAuthorityRequestV1` protocol request.
+    Join {
+        #[command(flatten)]
+        authority: RemoteAuthorityArgs,
+    },
     /// Capture one observation into a node's offline spool while the
     /// authority is unreachable
     Capture {

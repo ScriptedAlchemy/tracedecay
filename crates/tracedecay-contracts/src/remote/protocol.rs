@@ -331,6 +331,28 @@ impl<T> RemoteProtocolResponseV1<T> {
     }
 }
 
+/// Current-authority discovery for the caller's own enrolled repository
+/// scope. The authority answers from its durable rows only to the enrolled
+/// holder of the presented credential.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CurrentAuthorityRequestV1 {
+    pub scope: RemoteRepositoryScopeV1,
+}
+
+impl RemoteProtocolBodyV1 for CurrentAuthorityRequestV1 {
+    fn validate_remote_protocol_body(
+        &self,
+        _sent_at: UtcMicros,
+    ) -> Result<(), ApplicationContractError> {
+        self.scope
+            .validate()
+            .map_err(|_| ApplicationContractError::InvalidIdentifier {
+                field: "remote authority discovery scope",
+            })
+    }
+}
+
 /// Public enrollment metadata. The opaque enrollment credential is accepted
 /// through `OpaqueRemoteCredential`, never this payload.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

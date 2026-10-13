@@ -316,6 +316,10 @@ impl DaemonHttpApplicationRegistry {
             )
             .route("/remote-nodes/provision", post(provision_remote_node))
             .route(
+                "/remote-nodes/join",
+                post(super::remote_join::join_remote_node),
+            )
+            .route(
                 "/remote-nodes/writer-authority",
                 post(publish_remote_writer_authority),
             )
@@ -415,18 +419,22 @@ async fn provision_remote_node(
     .await
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(error) => {
-            tracing::warn!(%error, "remote node provisioning refused");
-            let status = match error {
-                RemoteNodeOperatorErrorV1::InvalidRequest => StatusCode::BAD_REQUEST,
-                RemoteNodeOperatorErrorV1::BrainIdentityConflict
-                | RemoteNodeOperatorErrorV1::Conflict => StatusCode::CONFLICT,
-                RemoteNodeOperatorErrorV1::CapacityExceeded => StatusCode::TOO_MANY_REQUESTS,
-                RemoteNodeOperatorErrorV1::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
-            };
-            (status, Json(serde_json::json!({ "code": error }))).into_response()
-        }
+        Err(error) => remote_node_operator_refusal(error),
     }
+}
+
+pub(super) fn remote_node_operator_refusal(error: RemoteNodeOperatorErrorV1) -> Response {
+    tracing::warn!(%error, "remote node operator request refused");
+    let status = match error {
+        RemoteNodeOperatorErrorV1::InvalidRequest => StatusCode::BAD_REQUEST,
+        RemoteNodeOperatorErrorV1::BrainIdentityConflict | RemoteNodeOperatorErrorV1::Conflict => {
+            StatusCode::CONFLICT
+        }
+        RemoteNodeOperatorErrorV1::CapacityExceeded => StatusCode::TOO_MANY_REQUESTS,
+        RemoteNodeOperatorErrorV1::AuthorityUnavailable => StatusCode::BAD_GATEWAY,
+        RemoteNodeOperatorErrorV1::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    (status, Json(serde_json::json!({ "code": error }))).into_response()
 }
 
 async fn publish_remote_writer_authority(

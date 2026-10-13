@@ -12,7 +12,7 @@ use thiserror::Error;
 use tracedecay_contracts::remote::auth::OpaqueRemoteCredential;
 use tracedecay_contracts::remote::credential_admission::{
     RemoteCredentialAuthorityRecordV1, RemoteCredentialClassV1, RemoteCredentialLookupErrorV1,
-    RemoteCredentialLookupPortV1,
+    RemoteCredentialLookupPortV1, RemoteCredentialUseV1,
 };
 use tracedecay_contracts::remote::protocol::{
     RemoteProtocolFailureV1, RemoteProtocolResponseV1, remote_protocol_problem,
@@ -74,6 +74,8 @@ pub enum RemoteNodeOperatorErrorV1 {
     Conflict,
     #[error("remote node provisioning capacity is exhausted")]
     CapacityExceeded,
+    #[error("the remote authority did not answer discovery for this enrollment")]
+    AuthorityUnavailable,
     #[error("remote node store is unavailable")]
     Unavailable,
 }
@@ -201,7 +203,7 @@ impl DaemonRemoteCredentialAuthorityV1 {
         let mut failover_in_progress = false;
         let mut recovery_required = false;
         for node in state.nodes.values() {
-            match node.storage.status_at(&self.brain_id, now) {
+            match node.storage.status_at(node.storage.member_brain(), now) {
                 Ok(snapshot) => {
                     pending_count = pending_count.saturating_add(snapshot.pending_spool_items);
                     quarantined_count =
@@ -257,7 +259,8 @@ impl DaemonRemoteCredentialAuthorityV1 {
         node: &RegisteredRemoteNodeStoreV1,
         observed_at: UtcMicros,
     ) -> Result<CurrentRemoteAuthorityStateV1, RemoteSqliteStorageErrorV1> {
-        node.storage.authority_at(&self.brain_id, observed_at)
+        node.storage
+            .authority_at(node.storage.member_brain(), observed_at)
     }
 
     #[tracing::instrument(name = "daemon.remote.register_storage", level = "trace", skip_all)]
@@ -277,7 +280,7 @@ impl DaemonRemoteCredentialAuthorityV1 {
             .credential_registrations(self.maximum_credentials)
             .map_err(map_inventory_error)?;
         for registration in &registrations {
-            validate_registration(&self.brain_id, &node_id, registration)?;
+            validate_registration(storage.member_brain(), &node_id, registration)?;
         }
 
         let mut state = self
@@ -423,15 +426,22 @@ impl DaemonRemoteCredentialAuthorityV1 {
         Ok(registered)
     }
 
+    /// The store serving `use_case` for the presented credential. A joined
+    /// store is a node's copy of another profile's Brain, so it serves only
+    /// node-local offline capture and never answers as that Brain's authority.
     pub fn storage_for_presented(
         &self,
-        class: RemoteCredentialClassV1,
+        use_case: RemoteCredentialUseV1,
         presented: &OpaqueRemoteCredential,
     ) -> std::result::Result<RegisteredRemoteNodeStoreV1, RemoteCredentialLookupErrorV1> {
         let fingerprint = presented
             .credential_fingerprint()
             .map_err(|_| RemoteCredentialLookupErrorV1::NotFound)?;
-        self.storage_for_credential(class, &fingerprint)
+        let registered = self.storage_for_credential(use_case.credential_class(), &fingerprint)?;
+        if registered.storage.is_joined() && use_case != RemoteCredentialUseV1::CaptureOffline {
+            return Err(RemoteCredentialLookupErrorV1::NotFound);
+        }
+        Ok(registered)
     }
 
     pub fn cancel(&self) {
@@ -464,7 +474,7 @@ impl RemoteCredentialLookupPortV1 for DaemonRemoteCredentialAuthorityV1 {
             .storage
             .credential_by_fingerprint(class, fingerprint)?;
         validate_record_route(
-            &self.brain_id,
+            registered.storage.member_brain(),
             &registered.node_id,
             class,
             fingerprint,

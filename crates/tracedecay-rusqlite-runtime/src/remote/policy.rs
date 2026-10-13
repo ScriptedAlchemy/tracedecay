@@ -64,7 +64,7 @@ impl RemoteSqliteStorageV1 {
         Ok(())
     }
 
-    fn load_replay_policy(
+    pub(super) fn load_replay_policy(
         &self,
         scope: &RemoteRepositoryScopeV1,
     ) -> Result<RemoteReplayPolicyEvidenceV1, RemoteReplayApplicationErrorV1> {
