@@ -2626,7 +2626,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         super::CodeIndexWorkerPhaseV1::Working,
                     );
                     match activation {
-                        Ok(()) => {
+                        Ok(_background_catalog_warm) => {
                             next_seat_attempt_at = None;
                             seat_retry_backoff = ACTIVATION_RETRY_BACKOFF_FLOOR;
                             last_seat_conflict = None;
