@@ -389,11 +389,22 @@ impl RegisteredSchemaConvergenceMaintenance {
             drop(target);
             lock_registered_schema_convergence_statuses(&statuses).insert(task_shard_id, status);
         });
-        let task = tokio::spawn(tracing::Instrument::instrument(
+        match RetainedHookTaskJoin::spawn(tracing::Instrument::instrument(
             work,
             tracing::trace_span!("daemon.session_registry.schema_converge"),
-        ));
-        tasks.insert(shard_id, Arc::new(RetainedHookTaskJoin::new(task)));
+        )) {
+            Ok(task) => {
+                tasks.insert(shard_id, Arc::new(task));
+            }
+            Err(error) => {
+                lock_registered_schema_convergence_statuses(&self.statuses).insert(
+                    shard_id,
+                    RegisteredSchemaConvergenceStatus::Degraded {
+                        message: format!("registered schema convergence did not start: {error}"),
+                    },
+                );
+            }
+        }
     }
 
     /// Keep an aborted worker tracked until its future has dropped every client.
@@ -794,14 +805,9 @@ mod tests {
 
     use super::*;
 
-    // The held destructor below parks one worker thread for the whole test, and
-    // `begin_shutdown` injects both aborts at once. A worker drains
-    // `inject.len() / worker_threads + 1` notifications in one batch, so with two
-    // workers the one that blocks can also capture the second shard's abort into
-    // its local queue, where the surviving worker never gets notified to steal it
-    // and the second retirement hangs instead of running slowly. Four workers keep
-    // that batch at one task each and leave spare capacity for the blocked one.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    // The held destructor below parks one worker thread for the whole test, so
+    // the second shard's abort needs a spare worker to run on.
+    #[asupersync::test(flavor = "multi_thread", workers = 4)]
     async fn cancelled_shutdown_retains_incomplete_future_drop_and_independent_retirement() {
         struct HeldDrop {
             started: Arc<Notify>,
@@ -847,24 +853,25 @@ mod tests {
             release,
             dropped: Arc::clone(&dropped),
         };
-        let worker = tokio::spawn({
+        let worker = RetainedHookTaskJoin::spawn({
             let started = Arc::clone(&started);
             async move {
                 let _guard = guard;
                 started.notify_one();
                 std::future::pending::<()>().await;
             }
-        });
+        })
+        .expect("native worker");
         maintenance
             .tasks
             .lock()
             .unwrap()
-            .insert(first.clone(), Arc::new(RetainedHookTaskJoin::new(worker)));
+            .insert(first.clone(), Arc::new(worker));
         maintenance.tasks.lock().unwrap().insert(
             second.clone(),
-            Arc::new(RetainedHookTaskJoin::new(tokio::spawn(
-                std::future::pending::<()>(),
-            ))),
+            Arc::new(
+                RetainedHookTaskJoin::spawn(std::future::pending::<()>()).expect("native worker"),
+            ),
         );
         started.notified().await;
         let mut shutdown = Box::pin(maintenance.shutdown());
@@ -885,7 +892,8 @@ mod tests {
         })
         .await;
         assert!(!dropped.load(Ordering::Acquire));
-        tokio::time::timeout(
+        asupersync::time::timeout(
+            asupersync::time::wall_now(),
             std::time::Duration::from_secs(2),
             maintenance.retire(&second),
         )
@@ -898,7 +906,7 @@ mod tests {
         assert!(dropped.load(Ordering::Acquire));
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn shutdown_and_exact_retirement_preserve_failed_join() {
         let maintenance = RegisteredSchemaConvergenceMaintenance::new();
         let shard = StoreShardIdV1::profile_sessions(
@@ -906,18 +914,19 @@ mod tests {
             UserProfileId::try_from("profile.failed".to_owned()).unwrap(),
         );
         let started = Arc::new(Notify::new());
-        let worker = tokio::spawn({
+        let worker = RetainedHookTaskJoin::spawn({
             let started = Arc::clone(&started);
             async move {
                 started.notify_one();
                 panic!("convergence task failure");
             }
-        });
+        })
+        .expect("native worker");
         maintenance
             .tasks
             .lock()
             .unwrap()
-            .insert(shard.clone(), Arc::new(RetainedHookTaskJoin::new(worker)));
+            .insert(shard.clone(), Arc::new(worker));
         started.notified().await;
         let failure = maintenance
             .retire(&shard)

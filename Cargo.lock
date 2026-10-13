@@ -6596,7 +6596,6 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
- "tokio",
  "tracedecay-domain",
  "tracedecay-global-db",
  "tracedecay-privacy",
@@ -6833,7 +6832,6 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "thiserror",
- "tokio",
  "tracedecay-agent-hosts",
  "tracedecay-api",
  "tracedecay-application",
@@ -7173,6 +7171,7 @@ name = "tracedecay-store-runtime"
 version = "0.1.0"
 dependencies = [
  "asupersync",
+ "futures-util",
  "hex",
  "libc",
  "serde",
