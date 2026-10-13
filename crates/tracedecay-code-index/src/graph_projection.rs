@@ -604,6 +604,10 @@ impl CodeGraphProjectionStore {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner) = failure;
                 store.rewarming.store(false, AtomicOrdering::Release);
+                // A release after the warm's own settle leaves waiters that
+                // found this re-warm running asleep, and a re-pinned slot
+                // never settled the begin above; this settle covers both.
+                store.warm_clock.settle(WarmOwner::Engine, false);
             });
         if let Err(error) = spawned {
             *self
