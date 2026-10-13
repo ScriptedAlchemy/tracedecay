@@ -27,10 +27,7 @@ struct StatusCounts {
     rated_fact_count: u64,
 }
 
-/// D / ln(D): roughly how many bound items one bundled vector can superpose
-/// before cosine similarity degrades. Each fact is encoded into its own vector,
-/// so this bounds neither how many facts the store holds nor what recall finds.
-fn estimated_holographic_capacity() -> u64 {
+fn superposition_estimate_per_vector() -> u64 {
     let dimensions = HolographicEncoder::DIMENSIONS as f64;
     (dimensions / dimensions.ln()) as u64
 }
@@ -165,7 +162,7 @@ pub(super) async fn project_memory_status_tx(
         ProjectMemoryMemoryAlgebraV1::new(
             HolographicEncoder::ALGEBRA.to_owned(),
             HolographicEncoder::DIMENSIONS as u64,
-            estimated_holographic_capacity(),
+            superposition_estimate_per_vector(),
         )?,
         counts.trust[0],
         counts.trust[1],
@@ -188,6 +185,6 @@ pub(super) async fn project_memory_status_tx(
 mod tests {
     #[test]
     fn published_capacity_estimate_stays_at_the_2048_dimension_value() {
-        assert_eq!(super::estimated_holographic_capacity(), 268);
+        assert_eq!(super::superposition_estimate_per_vector(), 268);
     }
 }

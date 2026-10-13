@@ -37,8 +37,6 @@ pub struct HolographicQueryVector {
 
 impl HolographicEncoder {
     pub const DIMENSIONS: usize = 2048;
-    /// The algebra label memory status reports. Responses from releases before
-    /// this label carry `amari_fhrr` for the same bit-identical encoding.
     pub const ALGEBRA: &'static str = "map_c";
     pub const ROLE_CONTENT: &'static str = "__hrr_role_content__";
     pub const ROLE_ENTITY: &'static str = "__hrr_role_entity__";
@@ -215,7 +213,6 @@ fn normalize_coefficients(mut coefficients: Vec<f64>) -> Vec<f64> {
 /// Vectors below this norm compare as orthogonal to everything.
 const SIMILARITY_NORM_FLOOR: f64 = 1e-10;
 
-/// MAP-C binding: the componentwise product.
 fn bind(role: &[f64], value: &[f64]) -> Vec<f64> {
     role.iter()
         .zip(value)
