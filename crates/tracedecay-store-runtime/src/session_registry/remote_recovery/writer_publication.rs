@@ -13,7 +13,7 @@ use tracedecay_contracts::RequestId;
 use tracedecay_contracts::remote::capture::RemoteWriterAuthorityV1;
 use tracedecay_contracts::remote::query::RemoteQueryPolicyRecordV1;
 use tracedecay_contracts::remote::replay::RemoteReplayPolicyEvidenceV1;
-use tracedecay_domain::{BrainNodeId, ManifestDigest, UtcMicros, canonical_sha256};
+use tracedecay_domain::{BrainNodeId, ManifestDigest, UtcMicros};
 use tracedecay_rusqlite_runtime::remote::{
     RemoteRecoveryPhysicalEffectErrorV1, RemoteSqliteStorageV1, RemoteWriterPublicationErrorV1,
 };
@@ -99,13 +99,9 @@ fn seed_project_writer_fence(
     let (target_binding, _) = replay
         .target_descriptor(&project_id)
         .map_err(|_| RemoteWriterPublicationErrorV1::ProjectUnavailable)?;
-    let authority_key = canonical_sha256(&(
-        "tracedecay.remote-recovery-authority.v1",
-        &fence.brain_id,
-        &fence.shard_id,
-        &fence.generation_id,
-    ))
-    .map_err(|_| RemoteWriterPublicationErrorV1::InvalidWriter)?;
+    let authority_key = fence
+        .recovery_authority_key()
+        .map_err(|_| RemoteWriterPublicationErrorV1::InvalidWriter)?;
     let stored_fence = |replay: &DaemonRemoteReplayTransactionAuthorityV1| {
         replay
             .current_writer_fence(project_id.clone(), authority_key.clone())

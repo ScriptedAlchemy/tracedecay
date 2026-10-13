@@ -5,7 +5,7 @@ use tracedecay_contracts::RequestId;
 use tracedecay_contracts::remote::recovery::{
     RecoveryAuthorityExpectationV1, RemoteRecoveryInterruptionV1,
 };
-use tracedecay_domain::{ManifestDigest, canonical_sha256};
+use tracedecay_domain::{ManifestDigest, canonical_sha256, remote_recovery_authority_key};
 use tracedecay_rusqlite_runtime::remote::RemoteRecoveryPhysicalEffectErrorV1;
 use tracedecay_store::{
     RuntimeCancellationIdV1, RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1,
@@ -78,11 +78,10 @@ impl RuntimeRequestProbeV1 for RecoveryRuntimeProbeV1 {
 pub(super) fn authority_key(
     expected: &RecoveryAuthorityExpectationV1,
 ) -> Result<ManifestDigest, RemoteRecoveryPhysicalEffectErrorV1> {
-    canonical_sha256(&(
-        "tracedecay.remote-recovery-authority.v1",
+    remote_recovery_authority_key(
         &expected.brain_id,
         &expected.shard_id,
         &expected.generation_id,
-    ))
+    )
     .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)
 }

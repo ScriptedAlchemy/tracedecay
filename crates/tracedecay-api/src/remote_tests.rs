@@ -213,6 +213,7 @@ fn credential_authority() -> RemoteCredentialAdmissionServiceV1<OneCredentialAut
         capabilities: std::collections::BTreeSet::from([
             RemoteCapabilityV1::Query,
             RemoteCapabilityV1::Promote,
+            RemoteCapabilityV1::ServeAuthority,
         ]),
         scope: scope.clone(),
     };
