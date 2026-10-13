@@ -321,23 +321,25 @@ async fn cli_identity_off_executor(
     deadline: MonotonicDeadline,
     cancellation: &CancellationToken,
 ) -> GitRepositoryIdentityOutcome {
-    let Some(cx) = crate::native_runtime::cx() else {
-        return GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::SpawnFailed);
-    };
     // A running blocking task outlives an abandoned join, so the helper is
-    // killed through its token instead.
+    // killed through its token instead. The join is raced against the budget
+    // because a helper queued behind a full blocking pool checks neither
+    // bound until it starts.
     let abandoned = CancelOnDrop(cancellation.child_token());
     let helper_cancellation = abandoned.0.clone();
-    let directory = directory.to_path_buf();
-    match cx.spawn_blocking(move |_| cli_identity(&directory, deadline, &helper_cancellation)) {
-        Ok(mut helper) => helper
-            .join(&cx)
-            .await
-            .unwrap_or(GitRepositoryIdentityOutcome::Unknown(
-                GitDiscoveryUnknown::ProbeFailed,
+    let helper_directory = directory.to_path_buf();
+    within_discovery_budget(directory, deadline, cancellation, move |cx| async move {
+        match cx.spawn_blocking(move |_| {
+            cli_identity(&helper_directory, deadline, &helper_cancellation)
+        }) {
+            Ok(mut helper) => helper.join(&cx).await.ok(),
+            Err(_) => Some(GitRepositoryIdentityOutcome::Unknown(
+                GitDiscoveryUnknown::SpawnFailed,
             )),
-        Err(_) => GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::SpawnFailed),
-    }
+        }
+    })
+    .await
+    .unwrap_or_else(GitRepositoryIdentityOutcome::Unknown)
 }
 
 /// Cancels its token when dropped.
@@ -919,6 +921,57 @@ mod tests {
         assert!(
             elapsed >= DEFAULT_DISCOVERY_TIMEOUT + CLI_FALLBACK_HEADROOM,
             "the held CLI fallback must be granted its reserve after the authority: {elapsed:?}"
+        );
+    }
+
+    /// The Git CLI fallback can queue behind a full blocking pool, where it
+    /// observes neither the deadline nor cancellation. The caller's wait must
+    /// still end at its deadline.
+    #[asupersync::test(blocking = 1)]
+    async fn a_cli_fallback_queued_behind_a_full_pool_still_meets_its_deadline() {
+        let cx = Cx::current().expect("test task context");
+        let tmp = tempdir().unwrap();
+        let repository = tmp.path().join("repository");
+        fs::create_dir_all(&repository).unwrap();
+        run_git(&repository, &["init", "-b", "main", "--quiet"]);
+        crate::git_repository::unreadable_repository_discovery_for_test(
+            &repository,
+            Duration::from_millis(100),
+        );
+
+        let probed = repository.clone();
+        let mut discovery = cx
+            .spawn(move |_| async move {
+                discover_repository_identity(
+                    &probed,
+                    budget(Duration::from_millis(400)),
+                    &CancellationToken::new(),
+                )
+                .await
+            })
+            .expect("discovery task");
+        while crate::git_repository::repository_discovery_count_for_test(&repository) == 0 {
+            asupersync::runtime::yield_now().await;
+        }
+        // The walk holds the pool's only thread; this blocker queues next, so
+        // the CLI helper queues behind it.
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let _blocker = cx
+            .spawn_blocking(move |_| {
+                let _ = held.recv();
+            })
+            .expect("pool blocker");
+
+        let outcome =
+            asupersync::time::timeout(cx.now(), Duration::from_secs(5), discovery.join(&cx)).await;
+        drop(release);
+        crate::git_repository::reset_repository_discovery_for_test(&repository);
+
+        assert_eq!(
+            outcome
+                .expect("a queued CLI helper must not hold the caller past its deadline")
+                .expect("discovery join"),
+            GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::DeadlineExceeded)
         );
     }
 
