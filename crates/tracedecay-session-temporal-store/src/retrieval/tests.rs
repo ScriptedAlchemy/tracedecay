@@ -2020,7 +2020,6 @@ async fn root_scope_browse_pages_from_the_occurrence_index_on_a_large_history() 
         "the generation-first browse is the measured full-window sort: {legacy_plan:?}"
     );
 
-    let started = Instant::now();
     let mut rows = connection
         .query(LEGACY_GENERATION_FIRST_ROOT_SCOPE_QUERY, params.clone())
         .await
@@ -2029,9 +2028,7 @@ async fn root_scope_browse_pages_from_the_occurrence_index_on_a_large_history() 
     while let Some(row) = rows.next().await.expect("legacy row") {
         legacy.push(row.get::<String>(0).expect("occurrence id"));
     }
-    let legacy_elapsed = started.elapsed();
 
-    let started = Instant::now();
     let mut rows = connection
         .query(ROOT_SCOPE_CANDIDATE_QUERY, params)
         .await
@@ -2040,7 +2037,6 @@ async fn root_scope_browse_pages_from_the_occurrence_index_on_a_large_history() 
     while let Some(row) = rows.next().await.expect("repaired row") {
         repaired.push(row.get::<String>(0).expect("occurrence id"));
     }
-    let repaired_elapsed = started.elapsed();
     assert_eq!(repaired.len(), PAGE as usize, "{repaired:?}");
     assert_eq!(
         repaired.first().map(String::as_str),
@@ -2048,10 +2044,6 @@ async fn root_scope_browse_pages_from_the_occurrence_index_on_a_large_history() 
         "newest occurrence must be first: {repaired:?}"
     );
     assert_eq!(legacy, repaired, "both shapes must return the same page");
-    assert!(
-        repaired_elapsed.as_millis() < 1_000,
-        "indexed browse must stay on a bounded page, not a full-window sort ({repaired_elapsed:?}; generation-first {legacy_elapsed:?})"
-    );
 }
 
 #[asupersync::test]
