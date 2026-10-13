@@ -15,7 +15,7 @@ use tracedecay_contracts::remote::capture::{RemoteCaptureSequenceV1, RemoteWrite
 use tracedecay_contracts::remote::capture_protocol::RemoteCaptureRequestV1;
 use tracedecay_contracts::remote::protocol::{EnrollmentRequestV1, RemoteProtocolRequestV1};
 use tracedecay_contracts::remote::recovery::PromotionConfirmationV1;
-use tracedecay_contracts::remote::replay::RemoteReplayRequestV1;
+use tracedecay_contracts::remote::replay::{RemoteReplayPendingRequestV1, RemoteReplayRequestV1};
 use tracedecay_contracts::remote::transfer::RemoteFrameTransferRequestV1;
 use tracedecay_contracts::{
     AuthorityReceipt, CapabilityGrantId, Deadline, DisclosureClass, PolicyDecisionRef, RequestId,
@@ -164,7 +164,7 @@ fn remote_revoke_refuses_the_revoked_nodes_capture_transfer_and_replay() {
     .unwrap();
     let replay = RemoteProtocolRequestV1::new(
         RequestId::new("request.remote-cli-revoked-replay").unwrap(),
-        brain_id,
+        brain_id.clone(),
         node_id.clone(),
         1,
         Some(writer.authority.fence.clone()),
@@ -172,6 +172,16 @@ fn remote_revoke_refuses_the_revoked_nodes_capture_transfer_and_replay() {
         RemoteReplayRequestV1 {
             event_id: "remote.event.revoked-replay".to_owned(),
         },
+    )
+    .unwrap();
+    let replay_pending = RemoteProtocolRequestV1::new(
+        RequestId::new("request.remote-cli-revoked-replay-pending").unwrap(),
+        brain_id,
+        node_id.clone(),
+        1,
+        Some(writer.authority.fence.clone()),
+        sent_at,
+        RemoteReplayPendingRequestV1 {},
     )
     .unwrap();
     let operations = [
@@ -189,6 +199,11 @@ fn remote_revoke_refuses_the_revoked_nodes_capture_transfer_and_replay() {
             "replay",
             "request.remote-cli-revoked-replay",
             write_json_fixture(&fixture.home_path, "replay.json", &replay),
+        ),
+        (
+            "replay-pending",
+            "request.remote-cli-revoked-replay-pending",
+            write_json_fixture(&fixture.home_path, "replay-pending.json", &replay_pending),
         ),
     ];
     for (operation, _, request_path) in &operations {
