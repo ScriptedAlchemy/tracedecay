@@ -7,6 +7,10 @@ use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline
 use tracedecay_runtime_core::git_discovery::{
     GitDiscoveryUnknown, GitRepositoryIdentityOutcome, discover_repository_identity,
 };
+use tracedecay_runtime_core::git_repository::{
+    block_repository_discovery_for_test, hold_repository_discovery_clock_for_test,
+    reset_repository_discovery_for_test,
+};
 
 fn run_git(cwd: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -17,6 +21,9 @@ fn run_git(cwd: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} failed in {}", cwd.display());
 }
 
+/// A Tokio caller awaits discovery that runs on the native runtime: a
+/// saturated Tokio blocking pool does not hold up the walk, and the caller's
+/// cancellation still ends its wait while the walk is in flight.
 #[test]
 fn repository_discovery_can_be_cancelled_while_the_blocking_pool_is_busy() {
     let fixture = TempDir::new().expect("fixture");
@@ -38,6 +45,8 @@ fn repository_discovery_can_be_cancelled_while_the_blocking_pool_is_busy() {
             release_rx.recv().expect("release blocking task");
         });
         started_rx.recv().expect("blocking task started");
+        let mut walk = block_repository_discovery_for_test(&repository);
+        hold_repository_discovery_clock_for_test(&repository);
 
         let cancellation = CancellationToken::new();
         let discovery = discover_repository_identity(
@@ -49,30 +58,30 @@ fn repository_discovery_can_be_cancelled_while_the_blocking_pool_is_busy() {
         std::future::poll_fn(|context| {
             assert!(
                 std::future::Future::poll(discovery.as_mut(), context).is_pending(),
-                "repository discovery must wait while the blocking pool is busy"
+                "repository discovery must wait while its walk is parked"
             );
             std::task::Poll::Ready(())
         })
         .await;
-        assert!(
-            tracedecay_runtime_core::git_discovery::identity_resolution_elapsed(&repository)
-                .is_some(),
-            "repository discovery did not queue its authority resolution"
-        );
+        tokio::time::timeout(Duration::from_secs(10), walk.wait_entered())
+            .await
+            .expect("the walk must start while the Tokio blocking pool is saturated");
         cancellation.cancel();
         let outcome = discovery.await;
 
+        walk.release();
+        reset_repository_discovery_for_test(&repository);
         release_tx.send(()).expect("release blocking task");
         blocker.await.expect("blocking task joined");
         assert_eq!(
             outcome,
             GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::Cancelled),
-            "blocking-pool saturation must not delay cancellation"
+            "cancellation must end the wait while the walk is in flight"
         );
     });
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn bounded_discovery_distinguishes_repository_and_non_repository() {
     let fixture = TempDir::new().expect("fixture");
     let repository = fixture.path().join("repository");
@@ -107,7 +116,7 @@ async fn bounded_discovery_distinguishes_repository_and_non_repository() {
     ));
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn linked_worktree_identity_preserves_worktree_git_dir_and_common_dir() {
     let fixture = TempDir::new().expect("fixture");
     let repository = fixture.path().join("repository");
@@ -160,7 +169,7 @@ async fn linked_worktree_identity_preserves_worktree_git_dir_and_common_dir() {
     assert!(identity.git_dir.ends_with("worktrees/linked"));
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn cancellation_is_typed_before_discovery_work_starts() {
     let fixture = TempDir::new().expect("fixture");
     let cancellation = CancellationToken::new();
@@ -179,7 +188,7 @@ async fn cancellation_is_typed_before_discovery_work_starts() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn elapsed_deadline_is_typed_before_discovery_work_starts() {
     let fixture = TempDir::new().expect("fixture");
     let outcome = discover_repository_identity(
