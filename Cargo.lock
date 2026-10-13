@@ -6575,11 +6575,11 @@ dependencies = [
 name = "tracedecay-hooks"
 version = "0.1.0"
 dependencies = [
+ "asupersync",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "thiserror",
- "tokio",
  "tracedecay-domain",
  "tracedecay-framing",
  "tracedecay-private-fs",
