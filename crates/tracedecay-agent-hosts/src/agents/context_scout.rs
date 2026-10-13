@@ -1772,6 +1772,7 @@ mod tests {
     }
 
     fn model_execution() -> ContextScoutModelExecutionV1 {
+        warm_token_counter();
         ContextScoutModelExecutionV1::new(
             MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
             CancellationToken::new(),
