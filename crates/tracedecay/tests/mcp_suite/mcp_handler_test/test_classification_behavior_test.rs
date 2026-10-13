@@ -291,7 +291,9 @@ async fn reports_share_one_classification_and_keep_production_test_names_visible
 }
 
 /// One file per name-discovering runner, each holding a runner-discovered
-/// test beside a same-named helper the runner never invokes.
+/// test beside a same-named helper the runner never invokes. The XCTest
+/// sources sit under `ios/Tests/` because a root `Tests/` is the same
+/// directory as `tests/` on a case-insensitive filesystem.
 fn write_runner_sources(project: &Path) {
     for (path, source) in [
         (
@@ -325,11 +327,11 @@ fn write_runner_sources(project: &Path) {
             "class SaveTest < Minitest::Test\n  def test_saves\n  end\nend\n\nclass Saver\n  def test_saves\n  end\nend\n",
         ),
         (
-            "Tests/AppTests/AppTests.swift",
+            "ios/Tests/AppTests/AppTests.swift",
             "import XCTest\n\nclass AppTests: XCTestCase {\n    func testLaunch() {}\n}\n\nclass Launcher {\n    func testLaunch() {}\n}\n",
         ),
         (
-            "Tests/LegacyTests.m",
+            "ios/Tests/LegacyTests.m",
             "@implementation LegacyTests\n- (void)testLaunch {}\n@end\n\n@implementation LegacyLauncher\n- (void)testLaunch {}\n@end\n",
         ),
     ] {
@@ -364,8 +366,8 @@ async fn runners_discover_tests_by_file_and_owner_not_name_alone() {
             {"name": "TestHelper", "file": "tests/helper.go"},
             {"name": "helper", "file": "pkg/client_test.go"},
             {"name": "testFormat", "file": "src/test/java/FormatHelper.java"},
-            {"name": "testLaunch", "file": "Tests/AppTests/AppTests.swift"},
-            {"name": "testLaunch", "file": "Tests/LegacyTests.m"},
+            {"name": "testLaunch", "file": "ios/Tests/AppTests/AppTests.swift"},
+            {"name": "testLaunch", "file": "ios/Tests/LegacyTests.m"},
             {"name": "testSaves", "file": "tests/SaveTest.php"},
             {"name": "test_connects", "file": "tests/test_client.py"},
             {"name": "test_helper", "file": "tests/helper.py"},
