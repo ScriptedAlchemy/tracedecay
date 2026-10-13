@@ -7,7 +7,7 @@ use tracedecay_contracts::remote::auth::OpaqueRemoteCredential;
 use tracedecay_contracts::remote::composition::{
     PendingLocalEvidenceV1, PendingLocalUnavailableReasonV1, ShardCoverageStateV1,
 };
-use tracedecay_contracts::remote::credential_admission::RemoteCredentialClassV1;
+use tracedecay_contracts::remote::credential_admission::RemoteCredentialUseV1;
 use tracedecay_contracts::remote::protocol::{
     RemoteProtocolPortV1, RemoteProtocolRequestV1, RemoteProtocolResponseV1,
 };
@@ -61,7 +61,7 @@ impl RemoteProtocolPortV1<RemoteQueryRequestV1> for DaemonRemoteQueryProtocolPor
         let expected_shards = request.body.expected_shards.len();
         let response = match self
             .credentials
-            .storage_for_presented(RemoteCredentialClassV1::Enrollment, &credential)
+            .storage_for_presented(RemoteCredentialUseV1::Query, &credential)
         {
             Ok(registered) => {
                 let storage = Arc::new(registered.storage);

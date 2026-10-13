@@ -3,13 +3,14 @@
 //! The operator names the node they provisioned. Every enrollment that node
 //! holds is revoked durably; the node's later capture, transfer, and replay
 //! requests are refused with `EnrollmentRevoked` at credential admission.
+//! Grants the node never redeemed are spent, so they can no longer enroll it.
 
 use axum::extract::{Json, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_domain::{BrainNodeId, CredentialRevocationReceiptV1};
+use tracedecay_domain::{BrainNodeId, CredentialRevocationReceiptV1, EntityId};
 use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_rusqlite_runtime::remote::RemoteSqliteStorageErrorV1;
 
@@ -29,6 +30,10 @@ pub(super) struct RemoteNodeRevocationRequestV1 {
 #[serde(deny_unknown_fields)]
 pub struct RemoteNodeRevocationV1 {
     pub revocations: Vec<CredentialRevocationReceiptV1>,
+    /// Grants this request spent before the node redeemed them. A repeat
+    /// finds none left.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revoked_grants: Vec<EntityId>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -72,13 +77,31 @@ pub(super) async fn revoke_remote_node(
         Ok(None) => return RemoteNodeRevocationErrorV1::NodeNotRegistered.into_response(),
         Err(_) => return RemoteNodeRevocationErrorV1::Unavailable.into_response(),
     };
-    let node_id = request.node_id;
+    let node_id = request.node_id.clone();
     let revoked = tokio::task::spawn_blocking(move || {
-        storage.revoke_node_enrollments(&node_id, tracedecay_contracts::clock::now_micros())
+        let revoked_at = tracedecay_contracts::clock::now_micros();
+        // Grants first: an enrollment that consumes a grant concurrently is
+        // then already committed when the node's enrollments are revoked.
+        let revoked_grants = storage.revoke_node_grants(&node_id, revoked_at)?;
+        let revocations = storage.revoke_node_enrollments(&node_id, revoked_at)?;
+        Ok::<_, RemoteSqliteStorageErrorV1>(RemoteNodeRevocationV1 {
+            revocations,
+            revoked_grants,
+        })
     })
     .await;
     match revoked {
-        Ok(Ok(revocations)) => Json(RemoteNodeRevocationV1 { revocations }).into_response(),
+        Ok(Ok(revocation)) => {
+            if let Err(error) = runtime
+                .remote_credential_authority()
+                .refresh_storage(&request.node_id)
+            {
+                // The spent grants already fail lookup; only their stale
+                // routing entries remain until the next refresh.
+                tracing::warn!(%error, "remote credential index refresh after revocation failed");
+            }
+            Json(revocation).into_response()
+        }
         Ok(Err(error)) => {
             tracing::warn!(%error, "remote node revocation refused");
             match error {

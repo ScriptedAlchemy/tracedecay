@@ -5,7 +5,8 @@ use std::sync::Arc;
 use super::{
     capture::RemoteCaptureReceiptV1,
     capture_protocol::RemoteCaptureRequestV1,
-    protocol::RemoteProtocolPortV1,
+    discovery::RemoteAuthorityDiscoveryV1,
+    protocol::{CurrentAuthorityRequestV1, RemoteProtocolPortV1},
     query::{RemoteQueryRequestV1, RemoteQueryResultV1},
     recovery::{PromotionCasReceiptV1, PromotionConfirmationV1},
     replay::{RemoteReplayOutcomeV1, RemoteReplayRequestV1},
@@ -24,10 +25,15 @@ pub type RemoteQueryProtocolOwnerPortV1 =
 pub type RemotePromotionProtocolOwnerPortV1 =
     dyn RemoteProtocolPortV1<PromotionConfirmationV1, Output = PromotionCasReceiptV1> + Send + Sync;
 
+pub type RemoteAuthorityProtocolOwnerPortV1 = dyn RemoteProtocolPortV1<CurrentAuthorityRequestV1, Output = RemoteAuthorityDiscoveryV1>
+    + Send
+    + Sync;
+
 pub struct RemoteOperationProtocolPortsV1 {
     pub capture: Arc<RemoteCaptureProtocolOwnerPortV1>,
     pub replay: Arc<RemoteReplayProtocolOwnerPortV1>,
     pub frame_transfer: Arc<RemoteFrameTransferProtocolOwnerPortV1>,
     pub query: Arc<RemoteQueryProtocolOwnerPortV1>,
     pub promotion: Arc<RemotePromotionProtocolOwnerPortV1>,
+    pub authority: Arc<RemoteAuthorityProtocolOwnerPortV1>,
 }

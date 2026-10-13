@@ -778,6 +778,21 @@ pub enum RemoteAction {
         #[arg(long, value_name = "FILE")]
         enrollment_credential_file: PathBuf,
     },
+    /// Make this profile the enrolled node of another profile's Brain. The
+    /// running daemon discovers the authority with the enrollment credential
+    /// (`--credential-file`) and adopts the enrollment the authority holds.
+    /// `--request-file` holds a `CurrentAuthorityRequestV1` protocol request.
+    Join {
+        #[command(flatten)]
+        authority: RemoteAuthorityArgs,
+    },
+    /// Send this joined node's pending offline-capture frames, in sequence
+    /// order, to the owning authority. Takes the same arguments as `join`;
+    /// each frame is released only after the authority's receipt.
+    Drain {
+        #[command(flatten)]
+        authority: RemoteAuthorityArgs,
+    },
     /// Capture one observation into a node's offline spool while the
     /// authority is unreachable
     Capture {
@@ -804,8 +819,9 @@ pub enum RemoteAction {
         #[command(flatten)]
         authority: RemoteAuthorityArgs,
     },
-    /// Revoke every enrollment of a node this daemon provisioned, such as a
-    /// lost machine; its capture, transfer and replay are refused afterward
+    /// Revoke every enrollment and unredeemed grant of a node this daemon
+    /// provisioned, such as a lost machine; its enrollment, capture, transfer
+    /// and replay are refused afterward
     Revoke {
         /// Node identity the node was provisioned with
         #[arg(long, value_name = "NODE")]
