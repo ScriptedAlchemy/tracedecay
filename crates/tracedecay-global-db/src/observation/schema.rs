@@ -376,7 +376,7 @@ mod tests {
     /// A store written before the unified identity, holding a Claude row whose
     /// id was derived on `tracedecay.claude.observation.v1` and whose JSON
     /// still carries `idempotency_key`, is refused. The row is left unchanged.
-    #[tokio::test]
+    #[asupersync::test]
     async fn pre_unified_identity_rows_require_a_typed_reset() {
         let directory = tempfile::TempDir::new().unwrap();
         let path = directory.path().join("sessions.db");
@@ -454,7 +454,7 @@ mod tests {
 
     /// An empty store created before the marker has nothing to refuse. Admission
     /// records the marker and a later unified-identity row stays readable.
-    #[tokio::test]
+    #[asupersync::test]
     async fn empty_pre_marker_observation_store_adopts_the_unified_identity() {
         let directory = tempfile::TempDir::new().unwrap();
         let path = directory.path().join("sessions.db");
@@ -484,7 +484,7 @@ mod tests {
 
     /// A store this binary created keeps a unified-identity row and reads it
     /// back as that same id.
-    #[tokio::test]
+    #[asupersync::test]
     async fn fresh_observation_store_accepts_unified_identity_rows() {
         let directory = tempfile::TempDir::new().unwrap();
         let path = directory.path().join("sessions.db");
@@ -553,7 +553,7 @@ mod tests {
     /// A provenance row written before the shared-capture migration embeds the
     /// same capture twice; re-admission must split it into a shared row plus a
     /// slim reference and still hydrate the original documents for readers.
-    #[tokio::test]
+    #[asupersync::test]
     async fn embedded_repository_captures_are_split_into_the_shared_table_on_admission() {
         let directory = tempfile::TempDir::new().unwrap();
         let fixture = crate::tests::harness::open_registered_test_fixture(

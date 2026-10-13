@@ -1,6 +1,6 @@
 use super::*;
 
-#[tokio::test]
+#[asupersync::test]
 async fn fresh_temporal_schema_stores_and_searches_a_summary_node() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -59,7 +59,7 @@ async fn fresh_temporal_schema_stores_and_searches_a_summary_node() {
     assert!(rows.next().await.unwrap().is_none());
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn temporal_payload_manifest_schema_is_payload_global() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -171,7 +171,7 @@ async fn temporal_payload_manifest_schema_is_payload_global() {
 
 mod admission;
 
-#[tokio::test]
+#[asupersync::test]
 async fn temporal_schema_query_indexes_cover_exact_lookup_shapes() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -298,7 +298,7 @@ async fn temporal_schema_query_indexes_cover_exact_lookup_shapes() {
     }
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn temporal_schema_root_retrieval_indexes_cover_catalog_and_large_query_shapes() {
     const OCCURRENCE_ROOT_INDEX: &str = "idx_session_occurrences_root_generation_order";
     const SUMMARY_ROOT_INDEX: &str = "idx_session_summary_nodes_root_created_order";
@@ -604,7 +604,7 @@ async fn temporal_schema_root_retrieval_indexes_cover_catalog_and_large_query_sh
     }
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn temporal_schema_rejects_unexpected_indexes_without_dropping_them() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -657,7 +657,7 @@ async fn temporal_schema_rejects_unexpected_indexes_without_dropping_them() {
     }
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn temporal_schema_refuses_markerless_malformed_fts_without_mutation() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -715,7 +715,7 @@ async fn temporal_schema_refuses_markerless_malformed_fts_without_mutation() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn temporal_schema_rejects_missing_fts_without_rebuilding_it() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -787,7 +787,7 @@ async fn temporal_schema_rejects_missing_fts_without_rebuilding_it() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn temporal_schema_rejects_missing_graph_publication_authority_without_rebuilding_it() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");

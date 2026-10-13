@@ -29,7 +29,7 @@ fn assert_reset_required(result: Result<(), ConfigurationSchemaError>) {
     ));
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn same_named_table_with_extra_column_requires_reset() {
     let (_directory, connection) = final_connection().await;
     connection
@@ -40,7 +40,7 @@ async fn same_named_table_with_extra_column_requires_reset() {
     assert_reset_required(ensure_configuration_schema(&*connection, None).await);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn same_named_index_with_wrong_columns_requires_reset() {
     let (_directory, connection) = final_connection().await;
     connection
@@ -55,7 +55,7 @@ async fn same_named_index_with_wrong_columns_requires_reset() {
     assert_reset_required(ensure_configuration_schema(&*connection, None).await);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn trigger_string_literal_case_is_part_of_the_exact_definition() {
     let (_directory, connection) = final_connection().await;
     connection
@@ -73,7 +73,7 @@ async fn trigger_string_literal_case_is_part_of_the_exact_definition() {
     assert_reset_required(ensure_configuration_schema(&*connection, None).await);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn arbitrary_named_index_attached_to_configuration_table_requires_reset() {
     let (_directory, connection) = final_connection().await;
     connection
@@ -87,7 +87,7 @@ async fn arbitrary_named_index_attached_to_configuration_table_requires_reset() 
     assert_reset_required(ensure_configuration_schema(&*connection, None).await);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn stale_fresh_evidence_cannot_create_configuration_schema() {
     let directory = tempfile::tempdir().unwrap();
     let connection = tracedecay_runtime_core::db::engine::TestConnection::open(
@@ -124,7 +124,7 @@ async fn stale_fresh_evidence_cannot_create_configuration_schema() {
 /// The writer installs its ledger objects when the connection opens, before
 /// admission inspects the store. Empty ledger tables must not count against
 /// freshness.
-#[tokio::test]
+#[asupersync::test]
 async fn empty_writer_ledger_keeps_the_store_fresh() {
     let directory = tempfile::tempdir().unwrap();
     let connection = tracedecay_runtime_core::db::engine::TestConnection::open(
@@ -147,7 +147,7 @@ async fn empty_writer_ledger_keeps_the_store_fresh() {
 /// A store whose application tables are gone but whose writer ledger still
 /// holds commit receipts is not fresh: fresh admission would reinstall the
 /// schema while retaining a commit history that predates it.
-#[tokio::test]
+#[asupersync::test]
 async fn retained_writer_receipts_keep_the_store_non_fresh() {
     let directory = tempfile::tempdir().unwrap();
     let connection = tracedecay_runtime_core::db::engine::TestConnection::open(
@@ -187,7 +187,7 @@ async fn retained_writer_receipts_keep_the_store_non_fresh() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn non_fresh_store_missing_configuration_schema_is_unchanged() {
     let directory = tempfile::tempdir().unwrap();
     let connection = tracedecay_runtime_core::db::engine::TestConnection::open(
@@ -318,7 +318,7 @@ async fn count(connection: &impl QueryExecutor, sql: &str) -> i64 {
     rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn released_configuration_shape_is_admitted_and_converged_with_rows_intact() {
     let (_directory, connection) = released_connection().await;
     assert_eq!(
@@ -371,7 +371,7 @@ async fn released_configuration_shape_is_admitted_and_converged_with_rows_intact
         .expect("the converged store is the exact final shape");
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn prior_final_configuration_shape_drops_accepted_profiles_and_preserves_configuration_rows()
 {
     let (_directory, connection) = prior_final_connection().await;
@@ -402,7 +402,7 @@ async fn prior_final_configuration_shape_drops_accepted_profiles_and_preserves_c
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn pre_residue_final_configuration_shape_drops_all_semantic_tables() {
     let (_directory, connection) = pre_residue_final_connection().await;
     super::admit_configuration_schema(&*connection, None)
@@ -432,7 +432,7 @@ async fn pre_residue_final_configuration_shape_drops_all_semantic_tables() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn released_configuration_shape_with_credential_rows_stays_reset_required() {
     let (_directory, connection) = released_connection().await;
     connection
@@ -454,7 +454,7 @@ async fn released_configuration_shape_with_credential_rows_stays_reset_required(
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn writer_ledger_tables_do_not_deny_fresh_store_evidence() {
     let directory = tempfile::tempdir().unwrap();
     let connection = tracedecay_runtime_core::db::engine::TestConnection::open(

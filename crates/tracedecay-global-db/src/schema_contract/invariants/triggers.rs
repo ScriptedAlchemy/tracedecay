@@ -1696,7 +1696,7 @@ mod tests {
     /// A dropped guard and a same-name guard with a weakened body both break
     /// the contract; reinstalling restores enforcement, and an intact
     /// contract is reported as such without being rewritten.
-    #[tokio::test]
+    #[asupersync::test]
     async fn damaged_guard_triggers_are_detected_and_reinstalled() {
         let harness = RegisteredGlobalDbHarness::open("damaged-guard-triggers").await;
         let transaction = harness
@@ -1734,7 +1734,7 @@ mod tests {
     /// A store row carries the only binding between a physical store and the
     /// project that owns it. Letting `project_id` move would silently hand one
     /// user's sessions to another project, so the update is refused outright.
-    #[tokio::test]
+    #[asupersync::test]
     async fn store_project_identity_cannot_be_reparented() {
         let harness = RegisteredGlobalDbHarness::open("store-project-reparent").await;
         let transaction = harness
@@ -1768,7 +1768,7 @@ mod tests {
     /// graph scope cannot claim a store owned by another project and the
     /// projection queue cannot point at a sequence its observation does not
     /// have.
-    #[tokio::test]
+    #[asupersync::test]
     async fn cross_table_identity_constraints_reject_mismatched_rows() {
         let harness = RegisteredGlobalDbHarness::open("cross-table-identity").await;
         let transaction = harness
@@ -1842,7 +1842,7 @@ mod tests {
     /// A sanitization receipt is the proof that a payload was redacted before
     /// it was committed. Rewriting or deleting one would leave sanitized data
     /// with no binding evidence, so both are refused after commit.
-    #[tokio::test]
+    #[asupersync::test]
     async fn sanitization_receipts_are_immutable_after_commit() {
         let harness = RegisteredGlobalDbHarness::open("sanitization-receipt-immutability").await;
         let transaction = harness

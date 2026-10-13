@@ -1,6 +1,6 @@
 use super::harness::RegisteredGlobalDbHarness;
 
-#[tokio::test]
+#[asupersync::test]
 async fn registered_session_message_batch_executes_json_rowset_with_exact_provider_identity() {
     let harness = RegisteredGlobalDbHarness::open("session-message-identity-batch").await;
     let writer = harness.registered.writer_connection().unwrap();
@@ -42,7 +42,7 @@ async fn registered_session_message_batch_executes_json_rowset_with_exact_provid
     assert_eq!(existing, vec!["comp:b2"]);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn session_sync_journal_survives_remount_and_compare_and_swap() {
     let harness = RegisteredGlobalDbHarness::open("session-sync-journal").await;
     let source = tracedecay_domain::ObservationSourceIdentityV1::for_provider(
@@ -133,7 +133,7 @@ async fn session_sync_journal_survives_remount_and_compare_and_swap() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn session_sync_journal_cycle_bound_and_exact_delete_are_authoritative() {
     let harness = RegisteredGlobalDbHarness::open("session-sync-journal-cycle-bound").await;
     for suffix in ["a", "m", "z"] {
@@ -212,7 +212,7 @@ async fn session_sync_journal_cycle_bound_and_exact_delete_are_authoritative() {
 /// runtime materializes for a single exact-SQL query. The frontier listing
 /// must page and still return the complete scan; before it paged, every
 /// project open against such a profile degraded its full session upgrade.
-#[tokio::test]
+#[asupersync::test]
 async fn source_frontier_listing_pages_past_the_exact_sql_row_limit() {
     const ROWS: i64 = 10_001;
     let harness = RegisteredGlobalDbHarness::open("session-sync-frontier-pages").await;
@@ -254,7 +254,7 @@ async fn source_frontier_listing_pages_past_the_exact_sql_row_limit() {
 /// journal value in its own single-row query. Before that split, eight live
 /// multi-megabyte journals refused the whole page and recovery could never
 /// terminate them.
-#[tokio::test]
+#[asupersync::test]
 async fn incomplete_journal_page_survives_values_beyond_the_query_byte_budget() {
     let harness = RegisteredGlobalDbHarness::open("session-sync-journal-page-bytes").await;
     // Eight live journals of ~9 MiB each: materialized together, one 8-row
@@ -285,7 +285,7 @@ async fn incomplete_journal_page_survives_values_beyond_the_query_byte_budget() 
 /// A single journal value past the per-query byte budget is a genuine
 /// over-limit row: both the direct read and the recovery page must refuse it
 /// typed rather than truncate or mask it.
-#[tokio::test]
+#[asupersync::test]
 async fn single_over_limit_journal_value_still_refuses_typed() {
     let harness = RegisteredGlobalDbHarness::open("session-sync-journal-over-limit").await;
     let key = "session-sync.v1.oversized";
@@ -329,7 +329,7 @@ async fn single_over_limit_journal_value_still_refuses_typed() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn session_sync_recovery_reads_only_nonterminal_journals() {
     let harness = RegisteredGlobalDbHarness::open("session-sync-recovery-journals").await;
     for (key, value) in [

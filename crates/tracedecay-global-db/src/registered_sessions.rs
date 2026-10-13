@@ -227,7 +227,7 @@ mod tests {
         transaction.commit().await.unwrap();
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn cursor_ingest_authority_is_shared_and_provider_scoped() {
         let profile = TempDir::new().unwrap();
         let runtime = HostAdmissionTestRuntimeV1::profile(profile.path())
@@ -355,7 +355,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn coverage_status_names_refusals_and_skips_packed_reason_codes() {
         let profile = TempDir::new().unwrap();
         let runtime = HostAdmissionTestRuntimeV1::profile(profile.path())
@@ -404,7 +404,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn interleaved_session_activity_reads_use_covering_index() {
         let profile = TempDir::new().unwrap();
         let runtime = HostAdmissionTestRuntimeV1::profile(profile.path())

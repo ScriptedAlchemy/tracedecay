@@ -790,14 +790,13 @@ pub async fn validate_authority_rows_exhaustive(
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use asupersync::sync::Notify;
     use tempfile::TempDir;
-    use tokio::sync::{Notify, Semaphore};
 
     use super::{
         AUDIT_PAGE_ROWS, AuthorityInvariantTransactionProvider, FOREIGN_KEY_AUDIT_PROGRESS,
         INCOMPLETE_EXHAUSTIVE_PASS, OBSERVATION_AUDIT_PAGE_ROWS, ensure_authority_invariants,
         foreign_key_violation_exists_read_only, foreign_key_violation_exists_resumable,
-        global_db_operation_error,
     };
     use crate::global_db_operation_message;
     use crate::schema_contract::invariants::test_fixture::{
@@ -834,7 +833,7 @@ mod tests {
         pause_at: usize,
         calls: AtomicUsize,
         paused: Notify,
-        release: Semaphore,
+        release: Notify,
     }
 
     impl PausingTransactionProvider<'_> {
@@ -845,7 +844,7 @@ mod tests {
         }
 
         fn release(&self) {
-            self.release.add_permits(1);
+            self.release.notify_one();
         }
     }
 
@@ -857,11 +856,7 @@ mod tests {
             let call = self.calls.fetch_add(1, Ordering::AcqRel) + 1;
             if call == self.pause_at {
                 self.paused.notify_waiters();
-                self.release
-                    .acquire()
-                    .await
-                    .map_err(|error| global_db_operation_error(operation, error))?
-                    .forget();
+                self.release.notified().await;
             }
             self.database.begin_bulk_write_transaction(operation).await
         }
@@ -887,7 +882,7 @@ mod tests {
         (observation_rows, source_cursor_rows)
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn completed_audit_pages_survive_later_convergence_failure() {
         let (_directory, fixture) = open_registered().await;
         let transaction = fixture
@@ -945,7 +940,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn ordinary_write_completes_between_convergence_steps() {
         let (_directory, fixture) = open_registered().await;
         let transaction = fixture
@@ -968,31 +963,37 @@ mod tests {
             pause_at: 4,
             calls: AtomicUsize::new(0),
             paused: Notify::new(),
-            release: Semaphore::new(0),
+            release: Notify::new(),
         };
         let convergence = ensure_authority_invariants(&provider, true, false);
-        tokio::pin!(convergence);
-        tokio::select! {
-            result = &mut convergence => {
+        let mut convergence = std::pin::pin!(convergence);
+        let mut paused = std::pin::pin!(provider.wait_until_paused());
+        std::future::poll_fn(|context| {
+            if let std::task::Poll::Ready(result) = convergence.as_mut().poll(context) {
                 panic!("convergence completed before the controlled inter-step pause: {result:?}");
             }
-            () = provider.wait_until_paused() => {}
-        }
+            paused.as_mut().poll(context)
+        })
+        .await;
 
-        tokio::time::timeout(std::time::Duration::from_secs(3), async {
-            fixture
-                .database()
-                .writer_connection()
-                .expect("ordinary registered writer")
-                .execute(
-                    "INSERT INTO savings_ledger(
+        asupersync::time::timeout(
+            asupersync::time::wall_now(),
+            std::time::Duration::from_secs(3),
+            async {
+                fixture
+                    .database()
+                    .writer_connection()
+                    .expect("ordinary registered writer")
+                    .execute(
+                        "INSERT INTO savings_ledger(
                         ts, project_path, tool_name, before_tokens, after_tokens
                      ) VALUES (1, '/writer-availability', 'test', 2, 1)",
-                    (),
-                )
-                .await
-                .expect("ordinary write while convergence is between steps");
-        })
+                        (),
+                    )
+                    .await
+                    .expect("ordinary write while convergence is between steps");
+            },
+        )
         .await
         .expect("ordinary write must not wait for the full convergence pass");
 
@@ -1002,7 +1003,7 @@ mod tests {
             .expect("convergence resumes after ordinary admission");
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn stepped_convergence_preserves_single_transaction_checkpoint_result() {
         let (_directory, fixture) = open_registered().await;
         let transaction = fixture
@@ -1084,7 +1085,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn corruption_refuses_trust_after_durable_audit_progress() {
         let (_directory, fixture) = open_registered().await;
         let transaction = fixture
@@ -1141,7 +1142,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn foreign_key_audit_finds_violations_by_child_table() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("sessions.db");
@@ -1167,7 +1168,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn foreign_key_audit_resumes_after_last_durable_table() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("sessions.db");

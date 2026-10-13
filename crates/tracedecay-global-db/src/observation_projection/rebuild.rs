@@ -2692,7 +2692,7 @@ mod activation_tests {
             .unwrap();
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn overlap_reconciliation_pages_past_the_transport_row_cap() {
         const GENERATION: &str = "generation.session-overlap-paging";
         let harness = RegisteredGlobalDbHarness::open("session-overlap-paging").await;
@@ -2759,7 +2759,7 @@ mod activation_tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn activation_names_the_session_field_instead_of_a_message_collision() {
         let harness = RegisteredGlobalDbHarness::open("session-collision-field").await;
         let active = session(Some("/private/old-transcript.jsonl"), None);
@@ -2806,7 +2806,7 @@ mod activation_tests {
         assert_eq!(persisted, "/private/old-transcript.jsonl");
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn activation_merges_a_compatible_session_and_inserts_a_new_one() {
         let harness = RegisteredGlobalDbHarness::open("session-collision-merge").await;
         let active = session(None, None);
