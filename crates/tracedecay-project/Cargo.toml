@@ -52,6 +52,7 @@ test-transport = [
 ]
 
 [dependencies]
+asupersync.workspace = true
 # Only the `test-helpers` LCM fixture opens a raw connection.
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"], optional = true }
 serde_json = "1"
