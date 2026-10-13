@@ -527,7 +527,7 @@ pub async fn capture_pi_observations(
             let owned_convergence =
                 convergence.map(|(hub, consumer)| (hub.clone(), consumer.to_owned()));
             let (discovery, scan_budget) = tracing::Instrument::instrument(
-                tokio::task::spawn_blocking(move || {
+                crate::runtime::source::run_blocking(move || {
                     owned_source.discover(
                         &owned_project_root,
                         TranscriptDiscoveryBounds::from_discovered_units(MAX_DISCOVERY_CANDIDATES),
