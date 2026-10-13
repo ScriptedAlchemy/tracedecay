@@ -304,6 +304,7 @@ tracedecay-search-eval = { path = "../tracedecay-search-eval", optional = true }
 libc = "0.2"
 
 [dev-dependencies]
+asupersync.workspace = true
 tree-sitter = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }

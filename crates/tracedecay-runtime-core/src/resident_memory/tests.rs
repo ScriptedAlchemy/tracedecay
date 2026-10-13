@@ -724,7 +724,7 @@ fn a_refused_request_is_announced_once_a_release_makes_it_fit() {
     let [first, second, third, fourth] = held;
     drop(first);
     assert!(
-        !headroom.has_changed().unwrap(),
+        !headroom.has_changed(),
         "a release with nothing refused announces nothing"
     );
     let refill = authority
@@ -736,23 +736,23 @@ fn a_refused_request_is_announced_once_a_release_makes_it_fit() {
             requested,
         )
         .expect_err("a full ledger refuses");
-    assert!(!headroom.has_changed().unwrap());
+    assert!(!headroom.has_changed());
 
     let mut shrinking = second;
     shrinking.shrink_to(requested.get() - 1).unwrap();
     assert!(
-        !headroom.has_changed().unwrap(),
+        !headroom.has_changed(),
         "one byte back does not fit the refused quarter"
     );
     drop(third);
     assert!(
-        headroom.has_changed().unwrap(),
+        headroom.has_changed(),
         "the quarter the refused request needs is back"
     );
     assert_eq!(*headroom.borrow_and_update(), 1);
     drop(fourth);
     assert!(
-        !headroom.has_changed().unwrap(),
+        !headroom.has_changed(),
         "the waiter was satisfied; later releases wait for a new refusal"
     );
 
@@ -765,10 +765,10 @@ fn a_refused_request_is_announced_once_a_release_makes_it_fit() {
         )
         .expect_err("measured RSS leaves no room for the quarter");
     pressure.publish_observed_resident_bytes(observed);
-    assert!(!headroom.has_changed().unwrap());
+    assert!(!headroom.has_changed());
     pressure.publish_observed_resident_bytes(observed - 1);
     assert!(
-        headroom.has_changed().unwrap(),
+        headroom.has_changed(),
         "a sample that fits the refused quarter announces it"
     );
     drop((refill, shrinking));

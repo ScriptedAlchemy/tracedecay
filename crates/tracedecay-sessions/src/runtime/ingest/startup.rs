@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-use tokio::sync::watch;
+use asupersync::channel::watch;
 
 use super::authority::SessionIngestAuthority;
 use crate::observation::ObservationCancellation;
@@ -83,7 +83,7 @@ static STARTUP_USER_INGESTS: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 static STARTUP_USER_INGEST_RELEASED: LazyLock<watch::Sender<u64>> =
-    LazyLock::new(|| watch::Sender::new(0));
+    LazyLock::new(|| watch::channel(0).0);
 
 /// Signals that capacity a backpressured history pass reported waiting on may
 /// be available again: the profile sweep another pass held, the Codex
@@ -155,7 +155,8 @@ impl Drop for StartupUserIngestGuard {
         let refused = std::mem::take(&mut state.refused_while_running);
         drop(ingests);
         if refused {
-            STARTUP_USER_INGEST_RELEASED.send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+            let _ =
+                STARTUP_USER_INGEST_RELEASED.send_modify(|epoch| *epoch = epoch.wrapping_add(1));
         }
     }
 }

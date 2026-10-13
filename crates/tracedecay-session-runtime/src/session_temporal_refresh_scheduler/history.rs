@@ -5,8 +5,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use asupersync::channel::watch;
 use futures_util::future::select_all;
-use tokio::sync::watch;
 use tracedecay_runtime_core::config::ProfileRoot;
 
 use tracedecay_contracts::ProfileIdentityReadPort;
@@ -69,14 +69,19 @@ impl SessionHistoricalCapacityRelease {
         Self { signals }
     }
 
-    /// Resolves once any signal advances. A closed signal never releases.
+    /// Resolves once any signal advances. A closed signal never releases, and
+    /// neither does any signal while the native runtime is unavailable.
     pub async fn released(&mut self) {
         if self.signals.is_empty() {
             return std::future::pending().await;
         }
+        let Some(cx) = tracedecay_runtime_core::native_runtime::cx() else {
+            return std::future::pending().await;
+        };
+        let cx = &cx;
         let changes = self.signals.iter_mut().map(|signal| {
             Box::pin(async move {
-                if signal.changed().await.is_err() {
+                if signal.changed(cx).await.is_err() {
                     std::future::pending::<()>().await;
                 }
             })
