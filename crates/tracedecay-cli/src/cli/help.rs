@@ -218,6 +218,8 @@ Examples:
   tracedecay install --agent kimi --component context-mcp
   tracedecay install --agent opencode --component context-mcp
   tracedecay install --agent codex --automation  Also enable the automation loop
+  tracedecay install --agent cursor --catalog-profile compact
+                                                 Serve Cursor the compact tool list
   tracedecay install --agent hermes              Configure every existing Hermes profile
   tracedecay install --local                     Project-local config in cwd
 
