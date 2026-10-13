@@ -51,7 +51,7 @@ use tracedecay_domain::{
 };
 use tracedecay_store::{
     AdmissionConfigV1, RepositoryWritePayloadV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1,
-    StorageRuntimeErrorV1, StoreIncarnationV1, VerifiedStoreLocatorV1,
+    StorageRuntimeErrorV1, StoreAuthorityEpochV1, StoreIncarnationV1, VerifiedStoreLocatorV1,
 };
 
 mod transfer;
@@ -136,10 +136,19 @@ fn fixture_with_binding(binding: StoreRuntimeBindingV1) -> Fixture {
         )
         .unwrap();
     drop(connection);
-    let path = path.canonicalize().unwrap();
+    attach_fixture(directory, binding)
+}
+
+/// Attaches a runtime with `binding` to the store kept in `directory`.
+fn attach_fixture(directory: TempDir, binding: StoreRuntimeBindingV1) -> Fixture {
+    let path = directory
+        .path()
+        .join("remote.sqlite3")
+        .canonicalize()
+        .unwrap();
     let locator = VerifiedStoreLocatorV1::new(
         binding.shard_id.clone(),
-        StoreIncarnationV1::new(3).unwrap(),
+        binding.incarnation,
         LocatorDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
     );
     let writer = PersistentWriter::start(
@@ -164,6 +173,25 @@ fn fixture_with_binding(binding: StoreRuntimeBindingV1) -> Fixture {
         _readers: readers,
         handle,
     }
+}
+
+/// The same store after its daemon restarts: a later process attaches it
+/// under a new incarnation and authority epoch.
+fn restarted(fixture: Fixture) -> Fixture {
+    let Fixture {
+        _directory: directory,
+        _writer: writer,
+        _readers: readers,
+        handle,
+    } = fixture;
+    let mut binding = handle.binding().clone();
+    drop(handle);
+    drop(readers);
+    drop(writer);
+    binding.incarnation = StoreIncarnationV1::new(binding.incarnation.get() + 1).unwrap();
+    binding.authority_epoch =
+        StoreAuthorityEpochV1::new(binding.authority_epoch.get() + 1).unwrap();
+    attach_fixture(directory, binding)
 }
 
 fn spool_frame_count(fixture: &Fixture) -> u64 {
@@ -838,6 +866,72 @@ fn writer_authority_readers_report_an_unpublished_writer_as_typed_absence() {
             Ok(writer.clone()),
             Ok(writer.clone()),
         )
+    );
+}
+
+#[test]
+fn a_restarted_runtime_keeps_serving_the_published_writer() {
+    let fixture = fixture();
+    let writer = writer();
+    publish_writer(&storage(&fixture), &writer);
+    let capture = admitted();
+    storage(&fixture).capture_pending(&capture).unwrap();
+
+    let fixture = restarted(fixture);
+    let storage = storage(&fixture);
+    assert_eq!(
+        <RemoteSqliteStorageV1 as RemoteCapturePortV1>::current_writer_authority(&storage, &writer),
+        Ok(CurrentRemoteAuthorityStateV1::Available(
+            writer.authority.clone()
+        ))
+    );
+    assert_eq!(
+        storage
+            .query_authority_snapshot(&writer.scope, UtcMicros(11))
+            .map(|snapshot| snapshot.writer),
+        Ok(writer.clone())
+    );
+    let status = storage
+        .status_at(&writer.authority.fence.brain_id, UtcMicros(11))
+        .unwrap();
+    assert_eq!(
+        (status.authority, status.pending_spool_items),
+        (
+            CurrentRemoteAuthorityStateV1::Available(writer.authority),
+            1
+        ),
+        "the restarted daemon reads the writer and spool its predecessor wrote"
+    );
+
+    let mut foreign = remote_test_binding();
+    foreign.shard_id.scope = serde_json::from_value(json!({
+        "kind": "remote_node",
+        "node_id": "node.foreign"
+    }))
+    .unwrap();
+    fixture
+        .handle
+        .execute(
+            ExactSqlStatement::new(
+                "UPDATE remote_authorities SET runtime_binding_json = ?1".to_owned(),
+                vec![text(&serde_json::to_string(&foreign).unwrap())],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    drop(storage);
+    let fixture = restarted(fixture);
+    assert!(
+        matches!(
+            RemoteSqliteStorageV1::from_retained_exact_sql(
+                retained(&fixture),
+                Arc::new(TestKeyring(Arc::new(
+                    RemoteSpoolKeyV1::from_secret_bytes(7, vec![7; 32]).unwrap(),
+                ))),
+            ),
+            Err(RemoteSqliteStorageErrorV1::BindingMismatch)
+        ),
+        "a row bound to another shard is refused, never adopted"
     );
 }
 
