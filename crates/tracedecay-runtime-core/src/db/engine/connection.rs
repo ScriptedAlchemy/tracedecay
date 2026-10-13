@@ -1,3 +1,4 @@
+use asupersync::Budget;
 use std::{sync::Arc, time::Duration};
 
 use tracedecay_store::{OperationPriorityV1, StoreRuntimeBindingV1};
@@ -152,20 +153,27 @@ impl Connection {
         let runtime = Arc::clone(&self.runtime);
         // Once admitted, a batch continues through its first error even if its
         // caller stops waiting. Separate dispatches preserve writer interleaving.
-        tokio::spawn(async move {
-            let mut results = Vec::with_capacity(statements.len());
-            for (index, statement) in statements.into_iter().enumerate() {
-                let result = runtime
-                    .execute_async(statement)
-                    .await
-                    .map_err(Error::from)
-                    .map_err(|error| Error::statement_batch(index, error))?;
-                results.push(result.changed_rows as u64);
-            }
-            Ok(results)
-        })
-        .await
-        .map_err(join_error)?
+        let settlement = crate::native_runtime::handle()
+            .ok_or(Error::RuntimeContextUnavailable)?
+            .try_request_cx_with_budget(Budget::INFINITE)
+            .map_err(|error| Error::Runtime(format!("failed to admit SQL settlement: {error}")))?;
+        let mut task = settlement
+            .spawn(move |_cx| async move {
+                let mut results = Vec::with_capacity(statements.len());
+                for (index, statement) in statements.into_iter().enumerate() {
+                    let result = runtime
+                        .execute_async(statement)
+                        .await
+                        .map_err(Error::from)
+                        .map_err(|error| Error::statement_batch(index, error))?;
+                    results.push(result.changed_rows as u64);
+                }
+                Ok(results)
+            })
+            .map_err(|error| Error::Runtime(format!("failed to spawn SQL settlement: {error}")))?;
+        std::future::poll_fn(|context| task.poll_join(context))
+            .await
+            .map_err(join_error)?
     }
 
     pub async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
@@ -175,11 +183,15 @@ impl Connection {
         let statement = statement(sql, params)?;
         let runtime = Arc::clone(&self.runtime);
         let priority = self.read_priority;
-        let rows = tokio::task::spawn_blocking(move || {
-            runtime.query_with_priority(statement, priority, READER_WAIT)
-        })
-        .await
-        .map_err(join_error)??;
+        let cx = crate::native_runtime::cx().ok_or(Error::RuntimeContextUnavailable)?;
+        let rows = cx
+            .spawn_blocking(move |_cx| {
+                runtime.query_with_priority(statement, priority, READER_WAIT)
+            })
+            .map_err(|error| Error::Runtime(format!("failed to admit SQL reader: {error}")))?
+            .join(&cx)
+            .await
+            .map_err(join_error)??;
         Ok(Rows::from_exact(rows))
     }
 
@@ -201,7 +213,14 @@ impl Connection {
 
     pub async fn release_connection_memory(&self) -> Result<MemoryReleaseOutcome> {
         let runtime = Arc::clone(&self.runtime);
-        tokio::spawn(async move { runtime.release_connection_memory_async().await })
+        let owner = crate::native_runtime::handle().ok_or(Error::RuntimeContextUnavailable)?;
+        let settlement = owner
+            .try_request_cx_with_budget(Budget::INFINITE)
+            .map_err(|error| Error::Runtime(format!("failed to admit memory release: {error}")))?;
+        let mut task = settlement
+            .spawn(move |_cx| async move { runtime.release_connection_memory_async(&owner).await })
+            .map_err(|error| Error::Runtime(format!("failed to spawn memory release: {error}")))?;
+        std::future::poll_fn(|context| task.poll_join(context))
             .await
             .map_err(join_error)?
             .map_err(Into::into)
@@ -228,9 +247,12 @@ impl Connection {
     pub async fn read_snapshot(&self) -> Result<ReadSnapshot> {
         let runtime = Arc::clone(&self.runtime);
         let priority = self.read_priority;
-        tokio::task::spawn_blocking(move || {
+        let cx = crate::native_runtime::cx().ok_or(Error::RuntimeContextUnavailable)?;
+        cx.spawn_blocking(move |_cx| {
             runtime.begin_read_snapshot_with_priority(priority, READER_WAIT)
         })
+        .map_err(|error| Error::Runtime(format!("failed to admit SQL snapshot: {error}")))?
+        .join(&cx)
         .await
         .map_err(join_error)?
         .map(ReadSnapshot::from_runtime)
@@ -239,7 +261,12 @@ impl Connection {
 
     pub(crate) async fn health_read_snapshot(&self) -> Result<ReadSnapshot> {
         let runtime = Arc::clone(&self.runtime);
-        tokio::task::spawn_blocking(move || runtime.begin_health_read_snapshot(HEALTH_READER_WAIT))
+        let cx = crate::native_runtime::cx().ok_or(Error::RuntimeContextUnavailable)?;
+        cx.spawn_blocking(move |_cx| runtime.begin_health_read_snapshot(HEALTH_READER_WAIT))
+            .map_err(|error| {
+                Error::Runtime(format!("failed to admit SQL health snapshot: {error}"))
+            })?
+            .join(&cx)
             .await
             .map_err(join_error)?
             .map(ReadSnapshot::from_runtime)
@@ -298,7 +325,7 @@ impl Connection {
     }
 }
 
-fn join_error(error: tokio::task::JoinError) -> super::Error {
+fn join_error(error: asupersync::runtime::JoinError) -> super::Error {
     super::Error::Runtime(format!("exact SQL worker task failed: {error}"))
 }
 
@@ -331,7 +358,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn long_lease_entrypoint_requires_attached_write_authority() {
         let directory = tempfile::TempDir::new().unwrap();
         let plain =

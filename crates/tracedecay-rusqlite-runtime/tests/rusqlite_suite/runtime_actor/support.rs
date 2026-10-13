@@ -298,6 +298,7 @@ pub(crate) fn writer(
         LocatorDigest::new(digest('d')).unwrap(),
     );
     PersistentWriter::start(
+        &tracedecay_rusqlite_runtime::native_runtime::handle().expect("native runtime"),
         ExistingWriterLocator::new(binding, locator, database.path.clone()).unwrap(),
         config,
         MarkerExecutor { control },

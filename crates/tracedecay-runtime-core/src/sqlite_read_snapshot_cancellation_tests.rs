@@ -9,7 +9,7 @@ use tempfile::TempDir;
 
 use super::{SnapshotReadControl, family_state, open_foreign_in};
 
-#[tokio::test]
+#[asupersync::test]
 async fn foreign_snapshot_cancellation_interrupts_mid_capture() {
     // Bulk stays WAL-resident so cancel can land in copy or in the
     // progress_handler-backed journal_mode=DELETE fold. Either path must
@@ -46,7 +46,7 @@ async fn foreign_snapshot_cancellation_interrupts_mid_capture() {
     drop(writer);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn foreign_snapshot_cancellation_interrupts_the_wal_fold() {
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("live.db");

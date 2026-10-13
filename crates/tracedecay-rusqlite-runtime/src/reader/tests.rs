@@ -402,7 +402,7 @@ fn pinned_reader_accepts_an_equivalent_hard_link_spelling() {
 fn checkpoint_pressure_blocks_general_reads_but_preserves_health() {
     let store = TestStore::new();
     let (pressure_tx, pressure_rx) =
-        tokio::sync::watch::channel(crate::CheckpointPressure::BlockGeneral {
+        asupersync::channel::watch::channel(crate::CheckpointPressure::BlockGeneral {
             wal: crate::CheckpointWal {
                 frames: 64,
                 bytes: 256 * 1024 * 1024,
@@ -563,6 +563,7 @@ fn application_telemetry_port_reads_real_store_size() {
     let scope = telemetry_scope();
     let context = telemetry_context(scope.clone());
     let port = SqliteStoreSizeTelemetryPort::new(
+        crate::native_runtime::handle().expect("native runtime"),
         crate::exact_sql::ExactSqlHandle::attach_read_only(&pool),
         StoreKeyV1::new("reader.db").unwrap(),
         scope,
@@ -598,6 +599,7 @@ fn application_telemetry_wait_does_not_block_the_async_runtime() {
     let scope = telemetry_scope();
     let context = telemetry_context(scope.clone());
     let port = SqliteStoreSizeTelemetryPort::new(
+        crate::native_runtime::handle().expect("native runtime"),
         handle,
         StoreKeyV1::new("reader.db").unwrap(),
         scope,
@@ -640,6 +642,7 @@ fn application_telemetry_port_compares_table_payload_watermarks() {
     let scope = telemetry_scope();
     let context = telemetry_context(scope.clone());
     let port = SqliteStoreSizeTelemetryPort::new(
+        crate::native_runtime::handle().expect("native runtime"),
         crate::exact_sql::ExactSqlHandle::attach_read_only(&pool),
         StoreKeyV1::new("reader.db").unwrap(),
         scope,
@@ -693,6 +696,7 @@ fn application_telemetry_port_marks_new_table_baseline_pending() {
     let scope = telemetry_scope();
     let context = telemetry_context(scope.clone());
     let port = SqliteStoreSizeTelemetryPort::new(
+        crate::native_runtime::handle().expect("native runtime"),
         crate::exact_sql::ExactSqlHandle::attach_read_only(&pool),
         StoreKeyV1::new("reader.db").unwrap(),
         scope,
@@ -753,6 +757,7 @@ fn application_telemetry_port_reports_denied_table_growth_without_zero() {
     let scope = telemetry_scope();
     let context = telemetry_context(scope.clone());
     let port = SqliteStoreSizeTelemetryPort::new(
+        crate::native_runtime::handle().expect("native runtime"),
         crate::exact_sql::ExactSqlHandle::attach_read_only(&pool),
         StoreKeyV1::new("reader.db").unwrap(),
         scope,

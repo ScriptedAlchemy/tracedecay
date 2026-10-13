@@ -863,7 +863,7 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
     // project graph store until it is joined, and a restart opened beside it
     // cannot take the store's write lock.
     graph_runtime
-        .shutdown_terminal_tasks()
+        .shutdown_terminal_tasks(&tracedecay_runtime_core::native_runtime::cx().unwrap())
         .await
         .expect("join graph terminal tasks before restart");
     graph_runtime
@@ -1563,7 +1563,7 @@ async fn restart_with_published_graph_head(
     // The daemon's terminal order: the publication's staging sweep holds the
     // project graph store until it is joined.
     graph_runtime
-        .shutdown_terminal_tasks()
+        .shutdown_terminal_tasks(&tracedecay_runtime_core::native_runtime::cx().unwrap())
         .await
         .expect("join graph terminal tasks before restart");
     graph_runtime

@@ -358,7 +358,7 @@ pub mod registered_schema {
             );
         }
 
-        #[tokio::test]
+        #[asupersync::test]
         async fn registered_schema_transaction_revalidates_authority_during_atomic_batch() {
             let directory = tempfile::tempdir().unwrap();
             let authority = Arc::new(CountingSchemaAuthority {

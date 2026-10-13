@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[3]
 RUNNER = ROOT / "benchmark_data" / "runtime" / "run.py"
 
 
-def make_fake_binary(path: Path, *, tool_exit: int = 0) -> None:
+def make_fake_binary(path: Path, *, tool_exit: int = 0, tool_error: bool = False) -> None:
     path.write_text(
         textwrap.dedent(
             f"""\
@@ -70,9 +70,21 @@ def make_fake_binary(path: Path, *, tool_exit: int = 0) -> None:
                 if {tool_exit}:
                     print("forced tool failure", file=sys.stderr)
                     raise SystemExit({tool_exit})
+                if {tool_error}:
+                    print(json.dumps({{
+                        "isError": True,
+                        "content": [{{"type": "text", "text": "fixture_catalog failed"}}],
+                    }}))
+                    raise SystemExit(0)
                 print(json.dumps({{
                     "structuredContent": {{
-                        "symbols": [{{"name": "fixture_catalog"}}]
+                        "name": "fixture_catalog",
+                        "count": 1,
+                        "matches": [{{
+                            "name": "fixture_catalog",
+                            "file": "src/catalog.py",
+                            "line": 15,
+                        }}]
                     }},
                     "_meta": {{"duration_us": 123}}
                 }}, sort_keys=True))
@@ -181,6 +193,19 @@ def run_runner(
 
 
 class CaptureDispatchTest(unittest.TestCase):
+    def test_capture_rejects_tool_error_that_mentions_the_expected_symbol(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="runtime-capture-test-") as directory:
+            root = Path(directory)
+            binary = root / "fake-tracedecay"
+            make_fake_binary(binary, tool_error=True)
+            output = root / "capture.json"
+
+            result = run_runner("capture", "--binary", binary, "--output", output)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("exact-symbol capture returned a tool error", result.stderr)
+            self.assertFalse(output.exists())
+
     def test_capture_runs_owned_daemon_and_writes_valid_artifacts(self) -> None:
         with tempfile.TemporaryDirectory(prefix="runtime-capture-test-") as directory:
             root = Path(directory)

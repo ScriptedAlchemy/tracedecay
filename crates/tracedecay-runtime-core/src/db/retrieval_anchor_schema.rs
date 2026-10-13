@@ -274,7 +274,7 @@ mod tests {
         .expect("insert anchor");
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn installs_owner_bound_aliases_and_immutable_records() {
         let (_directory, conn) = connection().await;
         install_retrieval_anchor_schema(&conn, "test retrieval-anchor schema")
@@ -332,7 +332,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn alias_target_promotion_requires_exact_current_supersession() {
         let (_directory, conn) = connection().await;
         install_retrieval_anchor_schema(&conn, "install alias transition fixture")
@@ -393,7 +393,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn disposition_identity_is_owner_scoped() {
         let (_directory, conn) = connection().await;
         install_retrieval_anchor_schema(&conn, "test retrieval-anchor schema")

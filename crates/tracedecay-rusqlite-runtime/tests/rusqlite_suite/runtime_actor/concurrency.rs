@@ -1,5 +1,6 @@
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 
+use tracedecay_rusqlite_runtime::native_runtime;
 use tracedecay_store::{
     AdmissionConfigV1, CommitSequenceV1, OperationPriorityV1, RuntimeSubmitOutcomeV1,
     StoreCommitReceiptV1,
@@ -50,7 +51,11 @@ fn independent_shards_make_progress_on_distinct_threads_and_connections() {
     runtime().block_on(async {
         let task_writer = Arc::clone(&writer_a);
         let probe_a = TestProbe::fixed(&request_a);
-        let task_a = tokio::spawn(async move { task_writer.submit(request_a, probe_a).await });
+        let task_a = tokio::spawn(async move {
+            task_writer
+                .submit(&native_runtime::cx().unwrap(), request_a, probe_a)
+                .await
+        });
         tokio::task::yield_now().await;
         entered_rx.recv().unwrap();
 
@@ -58,7 +63,11 @@ fn independent_shards_make_progress_on_distinct_threads_and_connections() {
         // opens, so B can only commit on a thread and connection of its own.
         assert!(matches!(
             writer_b
-                .submit(request_b.clone(), TestProbe::fixed(&request_b))
+                .submit(
+                    &native_runtime::cx().unwrap(),
+                    request_b.clone(),
+                    TestProbe::fixed(&request_b)
+                )
                 .await
                 .unwrap(),
             RuntimeSubmitOutcomeV1::Committed {

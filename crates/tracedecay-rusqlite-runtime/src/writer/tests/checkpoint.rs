@@ -20,7 +20,7 @@ fn checkpoint_control_surfaces_typed_deadline_and_admission_signal() {
             checkpoint
                 .trigger(CheckpointRequest::new(CheckpointBlockers::default(), probe))
                 .unwrap()
-                .wait()
+                .wait(&cx())
                 .await
         })
         .unwrap();
@@ -65,7 +65,7 @@ fn checkpoint_rechecks_the_same_authority_before_publication() {
                     authority,
                 )
                 .unwrap()
-                .wait(),
+                .wait(&cx()),
         )
         .unwrap();
 
@@ -110,7 +110,7 @@ fn checkpoint_authority_loss_is_typed_and_never_published() {
             authority,
         );
         let error = match result {
-            Ok(ticket) => runtime.block_on(ticket.wait()).unwrap_err(),
+            Ok(ticket) => runtime.block_on(ticket.wait(&cx())).unwrap_err(),
             Err(error) => error,
         };
 
@@ -172,7 +172,7 @@ fn maintenance_checkpoint_uses_linear_permit_through_the_handle() {
         .build()
         .unwrap();
     runtime
-        .block_on(writer.submit(request.clone(), Arc::new(Probe::new(&request, None))))
+        .block_on(writer.submit(&cx(), request.clone(), Arc::new(Probe::new(&request, None))))
         .unwrap();
     let permit = ExclusiveMaintenancePermit::issue(
         MaintenanceOwnerId::new(1).unwrap(),
@@ -189,7 +189,7 @@ fn maintenance_checkpoint_uses_linear_permit_through_the_handle() {
                     CheckpointBlockers::default(),
                 ))
                 .unwrap()
-                .wait()
+                .wait(&cx())
                 .await
         })
         .unwrap();
@@ -236,7 +236,7 @@ fn maintenance_checkpoint_surfaces_blockers_without_faulting_writer() {
                     blockers.clone(),
                 ))
                 .unwrap()
-                .wait()
+                .wait(&cx())
                 .await
         })
         .unwrap_err();
@@ -279,6 +279,7 @@ fn maintenance_checkpoint_waits_for_product_writes_admitted_before_drain() {
                 .build()
                 .unwrap();
             runtime.block_on(first_writer.submit(
+                &cx(),
                 first_request.clone(),
                 Arc::new(Probe::new(&first_request, None)),
             ))
@@ -295,6 +296,7 @@ fn maintenance_checkpoint_waits_for_product_writes_admitted_before_drain() {
                 .build()
                 .unwrap();
             runtime.block_on(second_writer.submit(
+                &cx(),
                 second_request.clone(),
                 Arc::new(Probe::new(&second_request, None)),
             ))
@@ -306,7 +308,7 @@ fn maintenance_checkpoint_waits_for_product_writes_admitted_before_drain() {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let sender = sender.as_ref().expect("writer admission stays open");
-            sender.capacity() == sender.max_capacity()
+            sender.telemetry_snapshot(0).queued_messages == 0
         } {
             assert!(
                 std::time::Instant::now() < deadline,
@@ -336,7 +338,7 @@ fn maintenance_checkpoint_waits_for_product_writes_admitted_before_drain() {
         );
         let maintenance_waited = matches!(
             ticket.response.try_recv(),
-            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            Err(oneshot::TryRecvError::Empty)
         );
         release_tx.send(()).unwrap();
         assert!(matches!(
@@ -352,7 +354,7 @@ fn maintenance_checkpoint_waits_for_product_writes_admitted_before_drain() {
             .unwrap();
         if maintenance_waited {
             assert!(matches!(
-                runtime.block_on(ticket.wait()).unwrap(),
+                runtime.block_on(ticket.wait(&cx())).unwrap(),
                 CheckpointOutcome::Complete {
                     kind: CheckpointKind::Truncate,
                     ..

@@ -131,7 +131,7 @@ mod score_tests {
     use crate::fact_store::DatabaseFactStore;
     use tracedecay_store::ProjectMemoryFactStore;
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn lexical_eligibility_preserves_rounding_and_tokenless_scores() {
         let (_directory, database) = database().await;
         let store = DatabaseFactStore::new(&database);

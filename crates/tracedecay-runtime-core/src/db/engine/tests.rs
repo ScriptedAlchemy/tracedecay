@@ -49,7 +49,7 @@ fn params_preserve_order_nulls_and_owned_values() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn owned_rows_decode_the_engine_value_set() {
     let row = Row::from_values(vec![
         Value::Text("node".to_string()),
@@ -69,7 +69,7 @@ async fn owned_rows_decode_the_engine_value_set() {
     assert!(rows.next().await.unwrap().is_none());
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn dropping_unpolled_row_read_preserves_the_next_row() {
     let mut rows = Rows::from_rows(vec![Row::from_values(vec![Value::Integer(7)])]);
     drop(rows.next());
@@ -78,7 +78,7 @@ async fn dropping_unpolled_row_read_preserves_the_next_row() {
     assert!(rows.next().await.unwrap().is_none());
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn runtime_rows_preserve_column_metadata_without_materialized_rows() {
     let fixture = runtime_fixture();
     let assert_columns = |rows: &Rows| {
@@ -182,7 +182,9 @@ fn runtime_fixture() -> Fixture {
         StoreIncarnationV1::new(1).unwrap(),
         LocatorDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
     );
+    let runtime = asupersync::runtime::Runtime::current_handle().unwrap();
     let writer = PersistentWriter::start(
+        &runtime,
         ExistingWriterLocator::new(binding.clone(), locator.clone(), path.clone()).unwrap(),
         AdmissionConfigV1::default(),
         NoWrites,
@@ -204,7 +206,7 @@ fn runtime_fixture() -> Fixture {
     }
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn runtime_connection_and_transactions_preserve_sqlite_semantics() {
     let fixture = runtime_fixture();
     let connection = &fixture.connection;
@@ -434,7 +436,7 @@ async fn runtime_connection_and_transactions_preserve_sqlite_semantics() {
     assert!(connection.prepare("SELEC invalid syntax").await.is_err());
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn default_transaction_is_deferred_and_does_not_take_the_write_lock() {
     let fixture = runtime_fixture();
     let deferred = fixture.connection.transaction().await.unwrap();
@@ -448,7 +450,7 @@ async fn default_transaction_is_deferred_and_does_not_take_the_write_lock() {
     deferred.rollback().await.unwrap();
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn transaction_statement_batch_reports_the_exact_failed_statement() {
     let fixture = runtime_fixture();
     fixture
@@ -576,7 +578,7 @@ fn busy_or_locked_is_the_sqlite_lock_codes_not_their_text() {
     assert!(!Error::Runtime("exact SQL reader lane is busy".to_owned()).is_busy_or_locked());
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn returned_insert_ids_remain_bound_to_their_rows_after_reopen() {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("returned-ids.sqlite3");

@@ -4,7 +4,7 @@ use super::*;
 
 /// The retired code-symbol FTS triggers are absent from a fresh relational
 /// store. Symbol search is served from the verified Grafeo generation.
-#[tokio::test]
+#[asupersync::test]
 async fn code_symbol_fts_triggers_are_not_recreated() {
     let (conn, _dir) = create_raw_db().await;
 
