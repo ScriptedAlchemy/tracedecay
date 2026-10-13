@@ -1,16 +1,6 @@
 load("@rules_python//python:defs.bzl", "py_binary", "py_test")
 load("//scripts:bazel/rust_test.bzl", "rust_test")
 
-py_test(
-    name = "runtime_capture_dispatch_test",
-    size = "small",
-    srcs = ["//benchmark_data:runtime_python_sources"],
-    main = "//benchmark_data:runtime/tests/test_capture_dispatch.py",
-    data = ["//benchmark_data:runtime_capture_data"],
-    imports = [".."],
-    legacy_create_init = 0,
-)
-
 py_binary(
     name = "measure_unused_tool_context",
     srcs = ["measure-unused-tool-context.py"],
@@ -35,7 +25,6 @@ exports_files(
         "check-dashboard-bundle.py",
         "check-github-hosted-runners.py",
         "run-session-temporal-benchmark.sh",
-        "run-runtime-performance.sh",
         "test-check-github-hosted-runners.py",
         "test-gen-builds-default-alias.py",
         "test-measure-ranked-tail-trim.py",
