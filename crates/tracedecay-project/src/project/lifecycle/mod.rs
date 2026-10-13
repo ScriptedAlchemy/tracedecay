@@ -1019,7 +1019,7 @@ mod tests {
         (lifecycle, address)
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn context_scout_owner_survives_branch_reopen() {
         let root = tempfile::TempDir::new().expect("fixture root");
         let project = root.path().join("project");
@@ -1079,7 +1079,7 @@ mod tests {
         assert!(Arc::ptr_eq(&owner, &registered[0]));
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn read_only_open_does_not_resolve_writable_context_scout_owner() {
         let root = tempfile::TempDir::new().expect("fixture root");
         let project = root.path().join("project");
@@ -1112,7 +1112,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn project_open_accepts_a_normalized_alias_of_the_profile_authority() {
         let root = tempfile::TempDir::new().expect("fixture root");
         let project = root.path().join("project");
@@ -1136,7 +1136,7 @@ mod tests {
         opened.close();
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn nonempty_wrong_schema_read_only_open_returns_reset_required() {
         let root = tempfile::TempDir::new().expect("fixture root");
         let project = root.path().join("project");

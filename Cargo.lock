@@ -6833,7 +6833,6 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "thiserror",
- "tokio",
  "tracedecay-agent-hosts",
  "tracedecay-api",
  "tracedecay-application",
