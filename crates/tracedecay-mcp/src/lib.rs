@@ -96,8 +96,8 @@ pub use tools::{
     short_tool_name,
 };
 pub use tracedecay_mcp_catalog::{
-    ALWAYS_LOAD_META, MAX_RESPONSE_CHARS, McpCatalogError, ToolDefinition, cli_tool_definition,
-    context_description, context_warming_description, explore_call_budget,
+    ALWAYS_LOAD_META, MAX_RESPONSE_CHARS, McpCatalogError, ToolCategory, ToolDefinition,
+    cli_tool_definition, context_description, context_warming_description, explore_call_budget,
     format_capable_tool_names, get_tool_definitions, get_tool_definitions_ref,
     get_tool_definitions_with_budget, mcp_input_schema, project_catalog_discovery_scope,
     registered_project_reader_tool_names, tool_defaults_to_markdown,

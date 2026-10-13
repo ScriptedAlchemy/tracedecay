@@ -40,6 +40,7 @@
 //! separate exact administrative tools.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -74,8 +75,8 @@ use tracedecay_mcp::tool_errors::{mark_semantic_tool_error, tool_result_problem}
 use tracedecay_mcp::tools::binding::tool_dispatches_registered_project_reader;
 use tracedecay_mcp::tools::response_trailers::{account_tool_result, is_beside_result_block};
 use tracedecay_mcp::{
-    ALWAYS_LOAD_META, RESERVED_FLAGS_FOOTER, ToolDefinition, ToolResult, cli_tool_definition,
-    get_tool_definitions_ref, render_tool_cli_help, short_tool_name,
+    ALWAYS_LOAD_META, RESERVED_FLAGS_FOOTER, ToolCategory, ToolDefinition, ToolResult,
+    cli_tool_definition, get_tool_definitions_ref, render_tool_cli_help, short_tool_name,
 };
 use tracedecay_tool_catalog::{ApplicationSurfaceOperation, BindingSurface};
 
@@ -1290,9 +1291,13 @@ fn content_text_blocks(result_value: &Value) -> impl Iterator<Item = &str> {
 
 /// Print a grouped list of every available tool. Tools annotated as
 /// `alwaysLoad` come first since they're the most commonly used; everything
-/// else is alphabetized.
+/// else is grouped by [`ToolCategory`] and alphabetized within its group.
 fn print_tool_list(defs: &[ToolDefinition]) {
-    let mut groups: BTreeMap<&str, Vec<&ToolDefinition>> = BTreeMap::new();
+    print!("{}", render_tool_list(defs));
+}
+
+fn render_tool_list(defs: &[ToolDefinition]) -> String {
+    let mut groups: BTreeMap<Option<ToolCategory>, Vec<&ToolDefinition>> = BTreeMap::new();
     let mut always = Vec::new();
     for def in defs {
         let is_always = def
@@ -1305,92 +1310,68 @@ fn print_tool_list(defs: &[ToolDefinition]) {
             always.push(def);
             continue;
         }
-        let group = group_for(def);
-        groups.entry(group).or_default().push(def);
+        groups
+            .entry(ToolCategory::of(&def.name))
+            .or_default()
+            .push(def);
     }
 
-    println!(
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
         "Available tools ({}; TraceDecay {}), run `tracedecay tool <name> --help` for parameters, then",
         defs.len(),
         crate::product_runtime::PRODUCT_BUILD_VERSION
     );
-    println!("invoke with `tracedecay tool <name> --args '<json>'` (the same JSON arguments");
-    println!("object as the MCP tool; `--args -` reads a heredoc from stdin) or, for quick");
-    println!("scalar calls, `--key value` flags.\n");
+    let _ = writeln!(
+        out,
+        "invoke with `tracedecay tool <name> --args '<json>'` (the same JSON arguments"
+    );
+    let _ = writeln!(
+        out,
+        "object as the MCP tool; `--args -` reads a heredoc from stdin) or, for quick"
+    );
+    let _ = writeln!(out, "scalar calls, `--key value` flags.\n");
 
     if !always.is_empty() {
-        println!("[always-loaded]");
+        let _ = writeln!(out, "[always-loaded]");
         for def in &always {
-            println!(
+            let _ = writeln!(
+                out,
                 "  {:<32}  {}",
                 short_tool_name(&def.name),
                 first_line(&def.description)
             );
         }
-        println!();
+        let _ = writeln!(out);
     }
 
-    for (group, mut list) in groups {
+    for (category, mut list) in groups {
         list.sort_by_key(|d| d.name.clone());
-        println!("[{group}]");
+        let group = category.map_or("uncategorized", ToolCategory::label);
+        let _ = writeln!(out, "[{group}]");
         for def in list {
-            println!(
+            let _ = writeln!(
+                out,
                 "  {:<32}  {}",
                 short_tool_name(&def.name),
                 first_line(&def.description)
             );
         }
-        println!();
+        let _ = writeln!(out);
     }
 
-    println!("{RESERVED_FLAGS_FOOTER}");
+    let _ = writeln!(out, "{RESERVED_FLAGS_FOOTER}");
+    out
 }
 
 /// First line of a (possibly multi-line) description, truncated for layout.
 fn first_line(s: &str) -> String {
     let line = s.lines().next().unwrap_or("");
-    if line.len() > 90 {
-        format!("{}…", &line[..89])
+    if line.chars().count() > 90 {
+        format!("{}…", line.chars().take(89).collect::<String>())
     } else {
         line.to_string()
-    }
-}
-
-/// Best-effort categorisation by tool-name prefix. Matches how the codebase
-/// already groups handlers (`graph`, `info`, `git`, `health`, `edit`,
-/// `memory`). Tools that don't match any prefix fall under `other`.
-fn group_for(def: &ToolDefinition) -> &'static str {
-    let n = def.name.as_str();
-    if ApplicationSurfaceOperation::from_tool_name(n).is_some() {
-        "application"
-    } else if n == "tracedecay_str_replace"
-        || n == "tracedecay_multi_str_replace"
-        || n == "tracedecay_insert_at"
-        || n == "tracedecay_ast_grep_rewrite"
-        || n == "tracedecay_replace_symbol"
-        || n == "tracedecay_insert_at_symbol"
-        || n == "tracedecay_move_symbol"
-        || n == "tracedecay_rename_symbol"
-    {
-        "edit"
-    } else if n.starts_with("tracedecay_fact_store_")
-        || n == "tracedecay_fact_feedback"
-        || n == "tracedecay_memory_status"
-    {
-        "memory & session"
-    } else if n == "tracedecay_runtime" {
-        "health"
-    } else if n == "tracedecay_call_chain"
-        || n == "tracedecay_impact"
-        || n == "tracedecay_file_dependents"
-        || n == "tracedecay_similar"
-        || n == "tracedecay_rename_preview"
-    {
-        "graph"
-    } else if n == "tracedecay_run_affected_tests" {
-        "workflow"
-    } else {
-        "info"
     }
 }
 

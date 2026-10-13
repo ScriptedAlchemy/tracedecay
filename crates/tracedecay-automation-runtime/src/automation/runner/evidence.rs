@@ -22,7 +22,6 @@ use tracedecay_automation::analytics::{ToolUsageObservation, underused_tool_fami
 use tracedecay_automation::text::truncate_chars_for_prompt;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 use super::retrieval::{
     AutomationSessionRetrieval, AutomationTemporalRetrieval, automation_structural_refusal_skip,
@@ -858,11 +857,7 @@ pub(super) async fn build_skill_writer_evidence(
         .await?;
     }
     let skill_usage_summaries = summarize_skill_usage(&profile_root, &existing_skills).await?;
-    let stale_recommendations = stale_skill_recommendations(
-        &skill_usage_summaries,
-        current_timestamp(),
-        60 * 60 * 24 * 90,
-    );
+    let stale_recommendations = stale_skill_recommendations(&skill_usage_summaries);
     let underused_tool_families =
         underused_tool_family_signals(tool_usage.iter().map(|row| ToolUsageObservation {
             tool_names: row.tool_names.as_deref(),

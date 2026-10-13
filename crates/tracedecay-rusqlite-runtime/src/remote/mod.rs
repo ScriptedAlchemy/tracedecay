@@ -1196,7 +1196,7 @@ impl RemoteReplaySpoolPortV1 for RemoteSqliteStorageV1 {
                 self.handle()
                     .execute(statement(
                         "UPDATE remote_spool_frames SET attempt_started_at = NULL
-                 WHERE event_id = ?1 AND last_attempt = ?2 AND attempt_started_at IS NOT NULL",
+                 WHERE event_id = ?1 AND last_attempt = ?2",
                         vec![
                             text(event_id),
                             ExactSqlValue::Integer(

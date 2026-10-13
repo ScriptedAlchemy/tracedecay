@@ -82,7 +82,7 @@ pub(super) fn optimizer_recommendations(record: &AutomationRunLedgerRecord) -> V
             "id": "review_accepted_changes",
             "priority": "medium",
             "action": "Review accepted automation outputs and keep the unexecuted generated examples with the run artifact.",
-            "rationale": "Accepted items provide regression examples for future backend behavior.",
+            "rationale": "Validation policy admitted these items; their generated examples were not executed, so they do not show improved backend behavior.",
             "evidence_refs": ["feedback:model:accepted", "generated_evals:accepted"],
         })]
     } else {

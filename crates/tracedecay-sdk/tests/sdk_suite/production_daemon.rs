@@ -43,20 +43,20 @@ use tracedecay_sdk::client::{
 use tracedecay_sdk::operations::{TypedOperation, WorkflowGetDefinition, WorkflowListDefinitions};
 use tracedecay_sdk::remote_client::{EnrolledRemoteClient, RemoteClientError};
 
-const REMOTE_TLS_CERTIFICATE: &[u8] =
+pub(super) const REMOTE_TLS_CERTIFICATE: &[u8] =
     include_bytes!("../../../../tests/fixtures/remote_tls/localhost.crt.pem");
-const REMOTE_TLS_PRIVATE_KEY: &[u8] =
+pub(super) const REMOTE_TLS_PRIVATE_KEY: &[u8] =
     include_bytes!("../../../../tests/fixtures/remote_tls/localhost.key.pem");
-const REMOTE_TLS_ROOT_CERTIFICATE: &[u8] =
+pub(super) const REMOTE_TLS_ROOT_CERTIFICATE: &[u8] =
     include_bytes!("../../../../tests/fixtures/remote_tls/localhost-root.crt.pem");
-const REMOTE_TLS_ALTERNATE_CERTIFICATE: &[u8] =
+pub(super) const REMOTE_TLS_ALTERNATE_CERTIFICATE: &[u8] =
     include_bytes!("../../../../tests/fixtures/remote_tls/alternate.crt.pem");
-const REMOTE_TLS_ALTERNATE_PRIVATE_KEY: &[u8] =
+pub(super) const REMOTE_TLS_ALTERNATE_PRIVATE_KEY: &[u8] =
     include_bytes!("../../../../tests/fixtures/remote_tls/alternate.key.pem");
 const REMOTE_TLS_ALTERNATE_ROOT_CERTIFICATE: &[u8] =
     include_bytes!("../../../../tests/fixtures/remote_tls/alternate-root.crt.pem");
 
-struct Daemon {
+pub(super) struct Daemon {
     child: Child,
 }
 
@@ -1147,7 +1147,7 @@ fn join_observation(project_id: &str) -> DurableObservationV1 {
     .unwrap()
 }
 
-fn spawn_remote_daemon(
+pub(super) fn spawn_remote_daemon(
     binary: &Path,
     home: &Path,
     profile: &Path,
@@ -1183,7 +1183,7 @@ fn spawn_remote_daemon(
     (daemon, authority, remote_endpoint)
 }
 
-fn stop_daemon(daemon: &mut Daemon) {
+pub(super) fn stop_daemon(daemon: &mut Daemon) {
     if let Some(status) = daemon.child.try_wait().unwrap() {
         assert!(status.success(), "production daemon exited with {status}");
         return;
@@ -1212,12 +1212,12 @@ fn stop_daemon(daemon: &mut Daemon) {
     panic!("production Remote Brain daemon did not complete shutdown after SIGINT");
 }
 
-fn now_micros() -> UtcMicros {
+pub(super) fn now_micros() -> UtcMicros {
     let elapsed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     UtcMicros(i64::try_from(elapsed.as_micros()).unwrap())
 }
 
-fn remote_grant(
+pub(super) fn remote_grant(
     brain_id: BrainId,
     node_id: BrainNodeId,
     project_id: &str,
@@ -1244,7 +1244,7 @@ fn remote_grant(
     }
 }
 
-fn remote_admission(grant: &EnrollmentGrantV1) -> RemoteEnrollmentAdmissionEvidenceV1 {
+pub(super) fn remote_admission(grant: &EnrollmentGrantV1) -> RemoteEnrollmentAdmissionEvidenceV1 {
     let now = now_micros();
     let scope = ResolvedScope::new(
         grant.scope.project_id.clone(),
@@ -1281,7 +1281,7 @@ fn remote_admission(grant: &EnrollmentGrantV1) -> RemoteEnrollmentAdmissionEvide
     .unwrap()
 }
 
-fn replay_policy(scope: &RemoteRepositoryScopeV1) -> RemoteReplayPolicyEvidenceV1 {
+pub(super) fn replay_policy(scope: &RemoteRepositoryScopeV1) -> RemoteReplayPolicyEvidenceV1 {
     let digest = ManifestDigest::new(format!("sha256:{}", "d".repeat(64))).unwrap();
     RemoteReplayPolicyEvidenceV1 {
         scope: ResolvedScope::new(
@@ -1308,7 +1308,9 @@ fn replay_policy(scope: &RemoteRepositoryScopeV1) -> RemoteReplayPolicyEvidenceV
     }
 }
 
-fn enrollment_request(grant: &EnrollmentGrantV1) -> RemoteProtocolRequestV1<EnrollmentRequestV1> {
+pub(super) fn enrollment_request(
+    grant: &EnrollmentGrantV1,
+) -> RemoteProtocolRequestV1<EnrollmentRequestV1> {
     let sent_at = now_micros();
     RemoteProtocolRequestV1::new_initial_enrollment(
         RequestId::new("request.remote-sdk-production").unwrap(),
