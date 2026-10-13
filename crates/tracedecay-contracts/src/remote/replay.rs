@@ -37,6 +37,8 @@ use crate::{
 };
 use tracedecay_tool_catalog::{EffectClass, UseCaseId};
 
+mod pending;
+
 /// Secret-free replay selector. The authority loads the canonical admitted
 /// capture from its encrypted spool; callers cannot resubmit or alter payload.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
