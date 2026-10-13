@@ -519,6 +519,17 @@ fn faulty_adapter_repository_provenance_is_rejected() {
         .to_string(),
         "remote exact observation query receipt is mismatched"
     );
+    assert_eq!(
+        validate_returned_provenance(
+            &EvidenceAvailabilityV1::Unavailable,
+            None,
+            &observation_id,
+            &generation,
+            &expected_scope,
+        ),
+        Ok(()),
+        "a row without a repository capture reports its absence"
+    );
     let wrong_generation = ProjectionGenerationId::new("generation.other").unwrap();
     assert_eq!(
         validate_returned_provenance(
