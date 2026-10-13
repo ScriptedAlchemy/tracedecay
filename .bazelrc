@@ -57,6 +57,11 @@ test --test_output=errors
 # Rust's test harness starts a worker per available CPU. Account for that
 # pool so Bazel does not schedule several full-host suites at once.
 test --default_test_resources=cpu=HOST_CPUS
+# Keep test scratch space in memory. Bazel's hermetic /tmp otherwise sits
+# under the output base, so every fixture fsync (SQLite commits, code-index
+# publication) waits on the host disk. One multi-second host fsync stall then
+# freezes every concurrent fixture at once, past their readiness deadlines.
+test:linux --sandbox_tmpfs_path=/tmp
 
 # Blocking Clippy policy over every Rust target, matching
 # `cargo clippy --workspace --all-targets -- -D warnings`.
