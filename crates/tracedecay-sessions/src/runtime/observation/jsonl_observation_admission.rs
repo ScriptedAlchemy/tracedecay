@@ -1325,7 +1325,7 @@ async fn prepare_shared_jsonl_window_with_background_cpu(
     let task_cancellation = cancellation.clone();
     #[cfg(test)]
     let (preparation_file_identity, window_preparations) = (page.file_identity, jobs.len());
-    let prepared = tokio::task::spawn_blocking(move || {
+    let prepared = crate::runtime::source::run_blocking(move || {
         jobs.into_par_iter()
             .map(|(index, bytes, range)| {
                 if task_cancellation.is_cancelled() {
@@ -1478,7 +1478,7 @@ async fn shared_jsonl_page_with_frame_limit_and_cancellation(
         operation: operation_cancellation,
     } = cancellation;
     let identity_path = path.to_path_buf();
-    let (canonical_path, identity) = tokio::task::spawn_blocking(move || {
+    let (canonical_path, identity) = crate::runtime::source::run_blocking(move || {
         let canonical_path = std::fs::canonicalize(&identity_path).map_err(|source| {
             TranscriptIngestError::ScanIo {
                 operation: "resolve shared JSONL page identity",
@@ -1622,7 +1622,7 @@ async fn shared_jsonl_page_with_frame_limit_and_cancellation(
         }
     };
     let scan_path = path.to_path_buf();
-    let page = tokio::task::spawn_blocking(move || {
+    let page = crate::runtime::source::run_blocking(move || {
         build_shared_jsonl_page_with_frame_limit(
             scan_path,
             previous,

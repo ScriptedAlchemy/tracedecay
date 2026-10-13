@@ -1715,7 +1715,7 @@ mod reconcile_tests {
     }
 
     #[cfg(unix)]
-    #[tokio::test]
+    #[asupersync::test]
     async fn existing_registered_session_alias_is_reconciled_and_persisted() {
         let tmp = tempfile::TempDir::new().unwrap();
         let real = tmp.path().join("project");
@@ -1977,7 +1977,7 @@ mod reconcile_tests {
         assert_eq!(value["usage"]["input_tokens"], 1);
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn missing_message_is_an_output_collision_not_a_missing_session() {
         let mut fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../../tests/fixtures/provider_normalization/codex/agent_message.expected_envelope.json"

@@ -353,22 +353,30 @@ fn assert_expansion(fixture: &Fixture, expansion: &LcmExpandResponse) {
 }
 
 fn lcm_expansion(criterion: &mut Criterion) {
-    let tokio = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
+    let executor = asupersync::runtime::RuntimeBuilder::current_thread()
+        .blocking_threads(0, 512)
         .build()
         .expect("build benchmark runtime");
-    let fixture = tokio.block_on(build_fixture());
-    let preflight = tokio.block_on(expand(&fixture));
+    let fixture = executor.block_on(build_fixture());
+    let preflight = executor.block_on(expand(&fixture));
     assert_expansion(&fixture, &preflight);
 
     let mut group = criterion.benchmark_group("lcm_expansion");
     group.throughput(Throughput::Elements(SOURCE_COUNT as u64));
     group.bench_function("render_and_hydrate_summary_sources", |bencher| {
         bencher
-            .to_async(&tokio)
+            .to_async(BenchExecutor(&executor))
             .iter(|| async { black_box(expand(&fixture).await) });
     });
     group.finish();
+}
+
+struct BenchExecutor<'a>(&'a asupersync::runtime::Runtime);
+
+impl criterion::async_executor::AsyncExecutor for BenchExecutor<'_> {
+    fn block_on<T>(&self, future: impl Future<Output = T>) -> T {
+        self.0.block_on(future)
+    }
 }
 
 criterion_group!(benches, lcm_expansion);

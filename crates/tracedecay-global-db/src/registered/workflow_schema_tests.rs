@@ -129,7 +129,7 @@ async fn schema_snapshot(
     snapshot
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn partial_workflow_store_requires_reset_without_mutation() {
     assert_workflow_schema_reset_without_mutation(
         "CREATE TABLE workflow_schema (
@@ -143,7 +143,7 @@ async fn partial_workflow_store_requires_reset_without_mutation() {
     .await;
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn name_complete_workflow_store_with_missing_columns_requires_reset_without_mutation() {
     assert_workflow_schema_reset_without_mutation(
         "CREATE TABLE workflow_definitions (definition_id TEXT);
@@ -156,7 +156,7 @@ async fn name_complete_workflow_store_with_missing_columns_requires_reset_withou
     .await;
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn constraintless_workflow_lookalike_requires_reset_without_mutation() {
     assert_workflow_schema_reset_without_mutation(
         "CREATE TABLE workflow_definitions (
@@ -202,7 +202,7 @@ async fn constraintless_workflow_lookalike_requires_reset_without_mutation() {
     .await;
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn extra_workflow_schema_identity_requires_reset_without_mutation() {
     let mut schema = String::new();
     for table in WORKFLOW_TABLE_CONTRACTS_V1 {

@@ -51,7 +51,7 @@ async fn grow_pressured_wal(
     reader
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn pressured_checkpoint_reports_pinned_reader_and_reclaims_after_release() {
     let harness = RegisteredGlobalDbHarness::open("pressured-wal-checkpoint").await;
     let reader = grow_pressured_wal(&harness.registered).await;
@@ -111,7 +111,7 @@ async fn pressured_checkpoint_reports_pinned_reader_and_reclaims_after_release()
 /// A PASSIVE-busy WAL past the trigger stays a typed failure while pinned,
 /// and once the reader releases, the exclusive-maintenance truncation lane
 /// drains it to a zero-byte file.
-#[tokio::test]
+#[asupersync::test]
 async fn maintenance_truncate_drains_passive_busy_wal_to_zero_bytes() {
     crate::register_registered_schema_installer();
     let directory = tempfile::tempdir().unwrap();
@@ -203,7 +203,7 @@ async fn maintenance_truncate_drains_passive_busy_wal_to_zero_bytes() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn below_trigger_checkpoint_reports_measured_wal_bytes() {
     let harness = RegisteredGlobalDbHarness::open("below-trigger-checkpoint").await;
     harness

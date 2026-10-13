@@ -491,7 +491,7 @@ mod tests {
         rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn live_usage_replay_is_exactly_once_and_uncorrelated_evidence_is_excluded() {
         let directory = tempfile::tempdir().unwrap();
         let conn = open_registered_test_fixture(
@@ -562,7 +562,7 @@ mod tests {
     /// observation, receipt, sequence, and scope) but disagrees on the
     /// projected counters must still be rejected. This is the only branch that
     /// can hide such a row, so it is also the only branch that reads back.
-    #[tokio::test]
+    #[asupersync::test]
     async fn live_usage_replay_rejects_a_divergent_durable_row() {
         let directory = tempfile::tempdir().unwrap();
         let conn = open_registered_test_fixture(
@@ -608,7 +608,7 @@ mod tests {
         assert_eq!(count(&conn, "observation_provider_usage").await, 1);
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn rebuild_stages_and_activates_historical_usage() {
         let directory = tempfile::tempdir().unwrap();
         let conn = open_registered_test_fixture(
@@ -652,7 +652,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn provider_usage_trigger_rejects_receipt_identity_mismatch() {
         let directory = tempfile::tempdir().unwrap();
         let conn = open_registered_test_fixture(
@@ -699,7 +699,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn missing_projection_checkpoint_is_typed_unknown() {
         let harness = RegisteredGlobalDbHarness::open("provider-usage-missing-checkpoint").await;
         let scope = ObservationScopeV1::Project {
@@ -721,7 +721,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn published_checkpoint_with_no_exact_project_rows_is_known_empty() {
         let harness = RegisteredGlobalDbHarness::open("provider-usage-known-empty").await;
         let db = harness.registered.as_ref();
@@ -754,7 +754,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn exact_scope_reads_isolate_profile_and_same_session_projects() {
         let harness = RegisteredGlobalDbHarness::open("provider-usage-scope-isolation").await;
         let db = harness.registered.as_ref();
@@ -812,7 +812,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn pagination_uses_lookahead_and_pins_concurrent_appends_outside_the_scan() {
         let harness = RegisteredGlobalDbHarness::open("provider-usage-pagination").await;
         let db = harness.registered.as_ref();

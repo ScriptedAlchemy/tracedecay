@@ -33,7 +33,7 @@ fn topology_event(scope: &str, hint_id: &str, timestamp: i64) -> AnalyticsEventI
     }
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn accepted_events_mark_days_stale_and_rebuild_settles_only_its_exact_claim() {
     let harness = RegisteredGlobalDbHarness::open("observability-rollup-dirty-cas").await;
     let first_id = harness
@@ -119,7 +119,7 @@ async fn accepted_events_mark_days_stale_and_rebuild_settles_only_its_exact_clai
     assert_eq!(page.fragments.len(), 1);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn dirty_day_lease_is_exclusive_then_reclaimable_after_expiry() {
     let harness = RegisteredGlobalDbHarness::open("observability-rollup-dirty-lease").await;
     let watermark = harness
@@ -199,7 +199,7 @@ async fn dirty_day_lease_is_exclusive_then_reclaimable_after_expiry() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn empty_day_frontier_starts_after_mount_advances_atomically_and_recovers_publication() {
     let harness = RegisteredGlobalDbHarness::open("observability-rollup-empty-frontier").await;
     let frontier = harness
@@ -365,7 +365,7 @@ fn rebuild(
     }
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn internal_fragment_query_returns_canonical_merge_state_without_cell_suppression() {
     let harness = RegisteredGlobalDbHarness::open("observability-rollup-fragment").await;
     harness
@@ -398,7 +398,7 @@ async fn internal_fragment_query_returns_canonical_merge_state_without_cell_supp
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn capped_day_is_terminal_without_payload_until_a_new_source_marks_it_stale() {
     let harness = RegisteredGlobalDbHarness::open("observability-rollup-capped-day").await;
     let watermark = harness
@@ -469,7 +469,7 @@ async fn capped_day_is_terminal_without_payload_until_a_new_source_marks_it_stal
     assert!(stale.fragments.is_empty());
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn detail_compaction_is_bounded_exact_cas_and_generation_monotone() {
     let harness = RegisteredGlobalDbHarness::open("observability-rollup-detail-compaction").await;
     let mut publication = rebuild(
@@ -534,7 +534,7 @@ async fn detail_compaction_is_bounded_exact_cas_and_generation_monotone() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn rollup_rebuild_is_idempotent_version_monotone_and_late_correctable() {
     let harness = RegisteredGlobalDbHarness::open("observability-rollup-correction").await;
     let initial = rebuild(
@@ -624,7 +624,7 @@ async fn rollup_rebuild_is_idempotent_version_monotone_and_late_correctable() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn retention_expires_old_daily_fragments() {
     let harness = RegisteredGlobalDbHarness::open("observability-rollup-query-cap-retention").await;
     harness

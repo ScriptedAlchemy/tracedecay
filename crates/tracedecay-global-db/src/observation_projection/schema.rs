@@ -591,7 +591,7 @@ mod tests {
     /// A store at a pre-final projection shape is refused with the
     /// fresh-start remedy. This binary creates stores at the final shape and
     /// no longer steps an older one forward.
-    #[tokio::test]
+    #[asupersync::test]
     async fn legacy_projection_shape_is_refused_with_a_fresh_start_remedy() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("global.db");
@@ -631,7 +631,7 @@ mod tests {
     /// under its old name must converge on reopen: the old index is a derived
     /// object and is dropped, the partial replacement is built, and admission
     /// no longer refuses the store as missing its required index.
-    #[tokio::test]
+    #[asupersync::test]
     async fn non_partial_session_index_predecessor_is_replaced_on_reopen() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("global.db");
@@ -672,7 +672,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn performance_indexes_install_outside_schema_transaction() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("global.db");

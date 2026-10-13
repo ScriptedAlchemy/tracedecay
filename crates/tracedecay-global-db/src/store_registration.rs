@@ -92,7 +92,7 @@ pub async fn register_project_store(
     project_root: &Path,
     store_layout: &StoreLayout,
 ) -> Result<()> {
-    static REGISTRY_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    static REGISTRY_WRITE_LOCK: futures_util::lock::Mutex<()> = futures_util::lock::Mutex::new(());
 
     let project_id = store_layout.identity.project_id.as_deref().ok_or_else(|| {
         registry_registration_error("profile-sharded store has no project identity")

@@ -532,7 +532,7 @@ mod tests {
     /// page must still be audited end to end. The scan pages by rowid, so the
     /// audit has to keep reading past the first page, both to finish clean and
     /// to see a violation that lives beyond it.
-    #[tokio::test]
+    #[asupersync::test]
     async fn source_cursor_advance_audit_reads_past_the_first_page() {
         let harness = open_db().await;
         let transaction = harness
@@ -577,7 +577,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn source_cursor_advance_audit_resumes_from_durable_seek_position() {
         let harness = open_db().await;
         let transaction = harness
@@ -638,7 +638,7 @@ mod tests {
     /// `is_fresh` skips the row audits on the creating open, but a reopen
     /// (`is_fresh = false`) still runs the exhaustive audit and rejects
     /// corruption, the freshness fast path must be invisible on reopen.
-    #[tokio::test]
+    #[asupersync::test]
     async fn fresh_open_skips_row_audits_but_reopen_audits_exhaustively() {
         let harness = open_db().await;
         let transaction = harness
@@ -683,7 +683,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn bounded_and_exhaustive_reject_corrupt_session_cursor_keys() {
         let harness = open_db().await;
         let transaction = harness
@@ -708,7 +708,7 @@ mod tests {
             .await;
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn bounded_and_exhaustive_reject_corrupt_session_refresh_rows() {
         let harness = open_db().await;
         let transaction = harness
@@ -735,7 +735,7 @@ mod tests {
             .await;
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn bounded_and_exhaustive_reject_corrupt_session_generation_rows() {
         let harness = open_db().await;
         let transaction = harness
@@ -763,7 +763,7 @@ mod tests {
             .await;
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn bounded_and_exhaustive_reject_corrupt_session_ownership_rows() {
         let harness = open_db().await;
         let transaction = harness
@@ -828,7 +828,7 @@ mod tests {
         /// The digest column is what payload lookups key on. A row whose
         /// column names one payload while its JSON names another resolves to
         /// the wrong payload without ever failing a query.
-        #[tokio::test]
+        #[asupersync::test]
         async fn observation_authority_columns_are_cross_checked_against_json() {
             let (_directory, conn) = open_registered().await;
             let (observation, cursor) = authority_fixture(0, "observation-columns");
@@ -876,7 +876,7 @@ mod tests {
         /// The committed cursor travels beside the observation as the resume
         /// point for its source. If it disagrees with the observation's own
         /// range, resuming from it replays or skips the difference.
-        #[tokio::test]
+        #[asupersync::test]
         async fn committed_cursor_is_cross_checked_against_observation_evidence() {
             let (_directory, conn) = open_registered().await;
             let (observation, cursor) = authority_fixture(0, "committed-cursor");
@@ -925,7 +925,7 @@ mod tests {
         /// The sanitizer version column selects which sanitizer's guarantees a
         /// payload carries. A column that outruns the receipt JSON silently
         /// credits the payload with a contract it was never sanitized under.
-        #[tokio::test]
+        #[asupersync::test]
         async fn receipt_authority_columns_are_cross_checked_against_json() {
             let (_directory, conn) = open_registered().await;
             let (observation, _) = authority_fixture(0, "receipt-columns");
@@ -958,7 +958,7 @@ mod tests {
         /// Cursor rows are looked up by their `(source_json, scope_json)` key.
         /// A key naming a different scope than the cursor it stores hands the
         /// wrong source its resume point.
-        #[tokio::test]
+        #[asupersync::test]
         async fn source_cursor_authority_keys_are_cross_checked_against_json() {
             let (_directory, conn) = open_registered().await;
             let (_, cursor) = seed_observation(&conn, 0, "cursor-keys").await;
@@ -992,7 +992,7 @@ mod tests {
         /// An advance is what lets a frontier legitimately run past the last
         /// commit. A receipt-bearing reason with no receipt row is exactly the
         /// shape that would launder unreceipted progress into durable coverage.
-        #[tokio::test]
+        #[asupersync::test]
         async fn source_cursor_advance_authority_is_cross_checked() {
             let (_directory, conn) = open_registered().await;
             let (_, cursor) = seed_observation(&conn, 0, "advance-evidence").await;

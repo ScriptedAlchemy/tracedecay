@@ -611,7 +611,7 @@ mod tests {
         (directory, connection)
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn every_revision_owned_and_append_only_table_rejects_update_and_delete() {
         let (_directory, connection) = connection().await;
         connection
@@ -710,7 +710,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn legacy_configuration_shape_requires_reset_without_interpretation_or_repair() {
         let directory = tempfile::tempdir().unwrap();
         let connection = tracedecay_runtime_core::db::engine::TestConnection::open(
@@ -750,7 +750,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn malformed_final_configuration_shape_is_not_silently_repaired() {
         let (_directory, connection) = connection().await;
         connection
@@ -777,7 +777,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn foreign_configuration_format_marker_requires_reset() {
         let directory = tempfile::tempdir().unwrap();
         let connection = tracedecay_runtime_core::db::engine::TestConnection::open(

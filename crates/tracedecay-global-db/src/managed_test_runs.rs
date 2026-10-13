@@ -392,7 +392,7 @@ mod tests {
         VALUES ('run-released', 'file:///work/project', NULL, 1000, 1);
     ";
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn a_released_store_gains_document_digests_and_keeps_its_runs() {
         let harness = RegisteredGlobalDbHarness::open("managed-test-runs-digest-column").await;
         harness
@@ -426,7 +426,7 @@ mod tests {
         assert_eq!(recorded.start, start("run-new", 2_000));
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn a_started_run_settles_its_outcome_once_and_reads_back_newest_first() {
         let harness = RegisteredGlobalDbHarness::open("managed-test-runs-settle").await;
         let db = &harness.registered;

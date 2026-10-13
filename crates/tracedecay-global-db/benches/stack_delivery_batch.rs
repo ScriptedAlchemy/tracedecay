@@ -47,18 +47,23 @@ async fn seed_batch(
 }
 
 fn stack_delivery_batch(criterion: &mut Criterion) {
-    let tokio = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
+    let executor = asupersync::runtime::RuntimeBuilder::current_thread()
+        .blocking_threads(0, 512)
         .build()
         .unwrap();
     let profile = tempfile::tempdir().unwrap();
-    let runtime = tokio
+    let runtime = executor
         .block_on(RegisteredGlobalDbTestRuntime::profile(profile.path()))
         .unwrap();
     let database = runtime.profile_database();
     let cases = [1_usize, 64, 256]
         .into_iter()
-        .map(|batch_size| (batch_size, tokio.block_on(seed_batch(database, batch_size))))
+        .map(|batch_size| {
+            (
+                batch_size,
+                executor.block_on(seed_batch(database, batch_size)),
+            )
+        })
         .collect::<Vec<_>>();
 
     let mut group = criterion.benchmark_group("stack_delivery_host_pending_replay");
@@ -68,7 +73,7 @@ fn stack_delivery_batch(criterion: &mut Criterion) {
             BenchmarkId::from_parameter(batch_size),
             keys,
             |bencher, keys| {
-                bencher.to_async(&tokio).iter(|| async {
+                bencher.to_async(BenchExecutor(&executor)).iter(|| async {
                     database
                         .publish_github_stack_deliveries(PROJECT_ID, WATERMARK_ID, keys)
                         .await
@@ -78,6 +83,14 @@ fn stack_delivery_batch(criterion: &mut Criterion) {
         );
     }
     group.finish();
+}
+
+struct BenchExecutor<'a>(&'a asupersync::runtime::Runtime);
+
+impl criterion::async_executor::AsyncExecutor for BenchExecutor<'_> {
+    fn block_on<T>(&self, future: impl Future<Output = T>) -> T {
+        self.0.block_on(future)
+    }
 }
 
 criterion_group!(benches, stack_delivery_batch);

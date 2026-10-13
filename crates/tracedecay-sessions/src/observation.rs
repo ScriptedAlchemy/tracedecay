@@ -448,7 +448,7 @@ where
     /// the Git index. Running that inline on a runtime worker starves every
     /// other task sharing the worker, with enough concurrent ingest frames,
     /// every worker at once, so the accept loop and unrelated requests stop
-    /// making progress. Awaiting a `spawn_blocking` join handle keeps the
+    /// making progress. Running it on the native blocking pool keeps the
     /// worker free, and the background-CPU permit bounds how many of these
     /// spans run at once.
     #[tracing::instrument(
@@ -462,7 +462,7 @@ where
     ) -> Result<PreparedObservationCapture, ObservationApplicationError> {
         let sanitizer = self.sanitizer.clone();
         let background_cpu = self.background_cpu.clone();
-        tokio::task::spawn_blocking(move || match background_cpu {
+        crate::runtime::source::run_blocking(move || match background_cpu {
             Some(authority) => {
                 authority.with_permit(|| Self::prepare_capture_with_sanitizer(&sanitizer, request))
             }

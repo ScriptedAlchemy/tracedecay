@@ -27,7 +27,7 @@ use crate::tests::harness::{
 /// read and exercises repeated pagination against the fix.
 const UNOFFERED_RECORDS: i64 = 10_003;
 
-#[tokio::test]
+#[asupersync::test]
 async fn rewrite_completion_retires_unoffered_records_beyond_the_query_cap() {
     let harness = RegisteredGlobalDbHarness::open("source-rewrite-unoffered-cap").await;
     let source =
@@ -115,7 +115,7 @@ async fn table_count(conn: &impl QueryExecutor, sql: &str) -> i64 {
 /// records across pages and then fails inside
 /// `retire_source_record` with `ProvenanceCollision`. Removing the planted
 /// row and completing again retires every unoffered record for real.
-#[tokio::test]
+#[asupersync::test]
 async fn rewrite_completion_retires_projected_records_and_rolls_back_a_failed_attempt() {
     // More real projected records than one keyset page, so a failed attempt
     // leaves proven retirements to roll back on every page.

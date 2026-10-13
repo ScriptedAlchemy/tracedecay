@@ -43,7 +43,7 @@ fn refusal(provider: &str, session: &str, reason: &str, start: u64) -> IngestRef
     }
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn refusal_census_names_each_refused_record_and_skips_expected_dispositions() {
     let temporary = tempfile::TempDir::new().unwrap();
     let runtime = RegisteredGlobalDbTestRuntime::profile(temporary.path())
@@ -85,7 +85,7 @@ async fn refusal_census_names_each_refused_record_and_skips_expected_disposition
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn refusal_census_is_empty_without_refusals() {
     let temporary = tempfile::TempDir::new().unwrap();
     let runtime = RegisteredGlobalDbTestRuntime::profile(temporary.path())
@@ -107,7 +107,7 @@ async fn refusal_census_is_empty_without_refusals() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn unknown_reason_strings_stay_visible_as_opaque_fingerprints() {
     let temporary = tempfile::TempDir::new().unwrap();
     let runtime = RegisteredGlobalDbTestRuntime::profile(temporary.path())
@@ -138,7 +138,7 @@ async fn unknown_reason_strings_stay_visible_as_opaque_fingerprints() {
     }));
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn a_refusal_row_whose_source_no_longer_decodes_makes_the_census_unknown() {
     let temporary = tempfile::TempDir::new().unwrap();
     let runtime = RegisteredGlobalDbTestRuntime::profile(temporary.path())

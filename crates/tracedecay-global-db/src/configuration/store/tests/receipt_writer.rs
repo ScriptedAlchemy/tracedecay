@@ -256,7 +256,7 @@ fn require_committed(outcome: RuntimeSubmitOutcomeV1, step: &str) {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn configuration_commit_admission_rejects_a_foreign_audit_actor() {
     let root = root_revision();
     let (_directory, db, _owner) = publish_profile("profile-audit-binding.db").await;
@@ -312,7 +312,7 @@ async fn configuration_commit_admission_rejects_a_foreign_audit_actor() {
 /// A repository commit and a global-db commit of the same idempotency key are
 /// one receipt: each direction replays, and the row carries the store's
 /// desired-activation status plus a desired-state event.
-#[tokio::test]
+#[asupersync::test]
 async fn repository_and_store_configuration_commits_replay_exactly() {
     let root = root_revision();
     let (_directory, db, _owner) = publish_profile("profile-forward.db").await;
@@ -528,7 +528,7 @@ async fn repository_and_store_configuration_commits_replay_exactly() {
 /// A repository commit lands the same immutable projections the global-db
 /// writer writes: a snapshot carrying source bindings leaves a
 /// `configuration_source_bindings` row for the new revision.
-#[tokio::test]
+#[asupersync::test]
 async fn repository_commit_writes_configuration_projection_rows() {
     let root = root_revision();
     let (_directory, db, _owner) = publish_profile("profile-projections.db").await;
@@ -578,7 +578,7 @@ async fn repository_commit_writes_configuration_projection_rows() {
 /// A malformed stored activation row must stop the desired-state advance
 /// instead of being copied into a new event: both writers fail typed and
 /// leave no revision behind.
-#[tokio::test]
+#[asupersync::test]
 async fn both_writers_reject_a_malformed_stored_activation_row() {
     let root = root_revision();
     let (_directory, db, _owner) = publish_profile("profile-corrupt-activation.db").await;
@@ -647,7 +647,7 @@ async fn both_writers_reject_a_malformed_stored_activation_row() {
 /// The repository writer binds a plan commit to the stored plan: a commit
 /// naming a plan that was never saved is stale and writes nothing; once the
 /// plan exists, the same commit lands and appends its terminal event.
-#[tokio::test]
+#[asupersync::test]
 async fn repository_commit_requires_the_stored_change_plan() {
     let root = root_revision();
     let (_directory, db, _owner) = publish_profile("profile-plan-binding.db").await;
@@ -709,7 +709,7 @@ async fn repository_commit_requires_the_stored_change_plan() {
 /// A saved plan carrying an operation row outside the canonical contract is
 /// corrupt, not bound: both writers reject the commit instead of treating the
 /// extra payload as invisible.
-#[tokio::test]
+#[asupersync::test]
 async fn both_writers_reject_a_plan_with_extra_operation_rows() {
     let root = root_revision();
     let (_directory, db, _owner) = publish_profile("profile-extra-plan-ops.db").await;
