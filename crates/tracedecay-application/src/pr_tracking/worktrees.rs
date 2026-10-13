@@ -1165,6 +1165,28 @@ mod tests {
     }
 
     #[test]
+    fn branch_resolution_keeps_unavailable_git_retryable() {
+        let repo = tempfile::tempdir().unwrap();
+        let branch = "feature/resolve-unavailable";
+        init_manual_branch_repo(repo.path(), branch);
+
+        let error = resolve_branch_head(
+            repo.path(),
+            branch,
+            &PrCommandControlV1::with_timeout(Duration::ZERO),
+        )
+        .expect_err("unavailable Git cannot resolve a branch head");
+        assert!(
+            matches!(
+                &error,
+                ManualBranchActivationError::GitAuthorityUnavailable { .. }
+            ),
+            "unavailable Git must not be collapsed into a missing branch: {error}"
+        );
+        assert!(error.retryable());
+    }
+
+    #[test]
     fn manual_artifact_cleanup_accepts_absence_but_refuses_foreign_provenance() {
         let repo = tempfile::tempdir().unwrap();
         let branch = "feature/exact-cleanup";
