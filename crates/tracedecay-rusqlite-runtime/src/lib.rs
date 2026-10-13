@@ -18,6 +18,7 @@ pub mod runtime_ledger {
     pub use crate::ledger::{RETIRE_RUNTIME_EFFECTS_V1, RUNTIME_LEDGER_SCHEMA};
 }
 pub mod maintenance;
+pub mod native_runtime;
 mod operation;
 mod persistence;
 pub mod reader;

@@ -10,7 +10,7 @@ fn sanitize_dots_prevented() {
     assert_eq!(sanitize_branch_name("foo/../bar"), "foo_bar");
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn tracking_a_new_branch_publishes_metadata_without_creating_a_database() {
     let (_base, project_root, td) = setup_repo_with_meta();
     run_git(&project_root, &["branch", "feature/topic"]);
@@ -38,7 +38,7 @@ async fn tracking_a_new_branch_publishes_metadata_without_creating_a_database() 
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn rollback_prepared_tracking_preserves_a_newer_metadata_entry() {
     let (_base, project_root, td) = setup_repo_with_meta();
     run_git(&project_root, &["branch", "feature/topic"]);

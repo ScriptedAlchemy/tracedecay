@@ -2,6 +2,7 @@ use std::pin::pin;
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::task::{Context, Poll, Waker};
 
+use tracedecay_rusqlite_runtime::native_runtime;
 use tracedecay_store::{
     AdmissionConfigV1, BatchBudgetV1, CommitSequenceV1, OperationPriorityV1, QueueBudgetV1,
     RuntimeSubmitOutcomeV1, SaturationScopeV1, StoreCommitReceiptV1,
@@ -59,7 +60,11 @@ fn saturation_is_immediate_while_reserved_health_work_remains_admissible() {
     runtime().block_on(async {
         let first_writer = Arc::clone(&writer);
         let first_probe = TestProbe::fixed(&first);
-        let first_task = tokio::spawn(async move { first_writer.submit(first, first_probe).await });
+        let first_task = tokio::spawn(async move {
+            first_writer
+                .submit(&native_runtime::cx().unwrap(), first, first_probe)
+                .await
+        });
         tokio::task::yield_now().await;
         entered_rx.recv().unwrap();
 
@@ -72,7 +77,8 @@ fn saturation_is_immediate_while_reserved_health_work_remains_admissible() {
         );
         // Immediate means the overflow is refused on its first poll, without
         // ever waiting for the occupied queue to drain.
-        let outcome = match pin!(writer.submit(overflow.clone(), TestProbe::fixed(&overflow)))
+        let cx = native_runtime::cx().unwrap();
+        let outcome = match pin!(writer.submit(&cx, overflow.clone(), TestProbe::fixed(&overflow)))
             .poll(&mut Context::from_waker(Waker::noop()))
         {
             Poll::Ready(outcome) => outcome.unwrap(),
@@ -98,8 +104,11 @@ fn saturation_is_immediate_while_reserved_health_work_remains_admissible() {
         );
         let health_writer = Arc::clone(&writer);
         let health_probe = TestProbe::fixed(&health);
-        let health_task =
-            tokio::spawn(async move { health_writer.submit(health, health_probe).await });
+        let health_task = tokio::spawn(async move {
+            health_writer
+                .submit(&native_runtime::cx().unwrap(), health, health_probe)
+                .await
+        });
         release(&gate);
         assert!(matches!(
             first_task.await.unwrap().unwrap(),
@@ -157,7 +166,11 @@ fn foreground_request_uses_foreground_ceiling_when_background_ceiling_is_smaller
     let writer = writer(&database, &foreground, config, ExecutorControl::default());
 
     assert!(matches!(
-        runtime().block_on(writer.submit(foreground.clone(), TestProbe::fixed(&foreground),)),
+        runtime().block_on(writer.submit(
+            &native_runtime::cx().unwrap(),
+            foreground.clone(),
+            TestProbe::fixed(&foreground),
+        )),
         Ok(RuntimeSubmitOutcomeV1::Committed {
             receipt: StoreCommitReceiptV1 {
                 commit_sequence: CommitSequenceV1(1),
@@ -173,7 +186,11 @@ fn foreground_request_uses_foreground_ceiling_when_background_ceiling_is_smaller
         OperationPriorityV1::Background,
     );
     assert!(matches!(
-        runtime().block_on(writer.submit(background.clone(), TestProbe::fixed(&background))),
+        runtime().block_on(writer.submit(
+            &native_runtime::cx().unwrap(),
+            background.clone(),
+            TestProbe::fixed(&background)
+        )),
         Ok(RuntimeSubmitOutcomeV1::Saturated {
             scope: SaturationScopeV1::ShardBytes,
             ..

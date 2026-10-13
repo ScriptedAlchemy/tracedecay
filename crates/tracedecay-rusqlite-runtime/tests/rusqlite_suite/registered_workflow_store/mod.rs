@@ -95,6 +95,7 @@ impl RegisteredWorkflowStore {
         let binding = binding(name);
         let locator = locator(&binding);
         let writer = PersistentWriter::start(
+            &tracedecay_rusqlite_runtime::native_runtime::handle().expect("native runtime"),
             ExistingWriterLocator::new(binding.clone(), locator.clone(), path.clone())
                 .expect("workflow store writer locator"),
             AdmissionConfigV1::default(),

@@ -132,7 +132,7 @@ async fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
 
 /// Every stamp but the current one, including the released v34 and v35
 /// stores, is refused without mutation: nothing upgrades in place.
-#[tokio::test]
+#[asupersync::test]
 async fn a_store_at_another_schema_version_is_refused_with_a_fresh_start_remedy() {
     for stamped in [1_u32, 18, 24, 33, 34, 35, SCHEMA_VERSION + 1] {
         let (conn, _dir) = create_schema_db().await;
@@ -167,7 +167,7 @@ async fn a_store_at_another_schema_version_is_refused_with_a_fresh_start_remedy(
 /// The handoff grant store lives in the project session store: a fresh graph
 /// store has no copy of it, and a v38 store that still carries one is refused
 /// for reset rather than admitted or rewritten.
-#[tokio::test]
+#[asupersync::test]
 async fn the_graph_store_has_no_handoff_table_and_refuses_the_v38_shape_that_did() {
     let (fresh, _fresh_dir) = create_schema_db().await;
     assert!(!table_exists(&fresh, "handoff_open_grants_v1").await);
@@ -197,7 +197,7 @@ async fn the_graph_store_has_no_handoff_table_and_refuses_the_v38_shape_that_did
     assert_eq!(get_user_version(&v38).await, 38);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn the_former_v26_shape_is_refused_without_mutation() {
     let (conn, _dir) = create_raw_db().await;
     conn.execute_batch(
@@ -235,7 +235,7 @@ async fn the_former_v26_shape_is_refused_without_mutation() {
     assert!(!column_exists(&conn, "graph_publication_replay_v1", "expected_prior_head").await);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn a_current_stamp_with_retired_code_graph_tables_is_reset_required() {
     for retired in [
         "nodes",
@@ -270,7 +270,7 @@ async fn a_current_stamp_with_retired_code_graph_tables_is_reset_required() {
     }
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn a_current_stamp_with_retired_memory_projection_objects_is_reset_required() {
     for retired in [
         "memory_facts",
@@ -326,7 +326,7 @@ async fn a_current_stamp_with_retired_memory_projection_objects_is_reset_require
 /// v36 retired the semantic-vector staging family with dense code retrieval.
 /// A leftover object of that family on the current stamp is refused by the
 /// writer ladder and by the read-only verifier, and the refusal names it.
-#[tokio::test]
+#[asupersync::test]
 async fn a_retired_semantic_vector_staging_object_is_reset_required_on_every_stamp() {
     for (retired, ddl) in [
         (
@@ -379,7 +379,7 @@ async fn a_retired_semantic_vector_staging_object_is_reset_required_on_every_sta
     }
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn a_current_stamp_with_retired_memory_projection_columns_is_reset_required() {
     for retired in ["source_label", "projection_state", "vector_watermark_json"] {
         let (conn, _dir) = create_schema_db().await;
@@ -409,7 +409,7 @@ async fn a_current_stamp_with_retired_memory_projection_columns_is_reset_require
 
 /// Creation is atomic: an interrupted create leaves neither DDL nor a version
 /// stamp behind, and the retry still produces the full shape.
-#[tokio::test]
+#[asupersync::test]
 async fn interrupted_fresh_schema_rolls_back_ddl_and_version_before_retry() {
     let (conn, _dir) = create_raw_db().await;
     super::configure_fresh_auto_vacuum(&conn, "test interrupted fresh schema")
@@ -439,7 +439,7 @@ async fn interrupted_fresh_schema_rolls_back_ddl_and_version_before_retry() {
 /// The creation DDL installs the retained relational shape in one transaction:
 /// canonical memory, evidence assembly, external sources, and graph publication
 /// manifests, without recreating either superseded `SQLite` projection.
-#[tokio::test]
+#[asupersync::test]
 async fn fresh_creation_installs_every_stage_of_the_final_shape() {
     let (conn, _dir) = create_schema_db().await;
 
@@ -686,7 +686,7 @@ async fn digest_rows(conn: &Connection) -> Vec<(String, String)> {
     values
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn deleting_a_payload_drops_its_digest_and_digests_never_update() {
     let (conn, _dir) = create_schema_db().await;
     for (ordinal, content) in PAYLOAD_FIXTURE_CONTENTS.iter().enumerate() {
@@ -736,7 +736,7 @@ async fn deleting_a_payload_drops_its_digest_and_digests_never_update() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn the_content_digest_lookup_is_an_indexed_point_read() {
     let (conn, _dir) = create_schema_db().await;
     let mut rows = conn

@@ -35,17 +35,23 @@ impl ReadSnapshot {
         let runtime = Arc::clone(&self.runtime);
         let budget = self.budget;
         let statement = statement(sql, params)?;
-        let rows = tokio::task::spawn_blocking(move || {
-            runtime
-                .query_with_budget(statement, budget)
-                .map_err(super::Error::from)
-        })
-        .await
-        .map_err(join_error)??;
+        let cx = crate::native_runtime::cx().ok_or(super::Error::RuntimeContextUnavailable)?;
+        let rows = cx
+            .spawn_blocking(move |_cx| {
+                runtime
+                    .query_with_budget(statement, budget)
+                    .map_err(super::Error::from)
+            })
+            .map_err(|error| {
+                super::Error::Runtime(format!("failed to admit SQL snapshot query: {error}"))
+            })?
+            .join(&cx)
+            .await
+            .map_err(join_error)??;
         Ok(Rows::from_exact(rows))
     }
 }
 
-fn join_error(error: tokio::task::JoinError) -> super::Error {
+fn join_error(error: asupersync::runtime::JoinError) -> super::Error {
     super::Error::Runtime(format!("exact SQL read snapshot task failed: {error}"))
 }

@@ -1,6 +1,8 @@
+use std::future::Future;
 use std::sync::Arc;
 
-use tokio::sync::Mutex;
+use asupersync::Budget;
+use asupersync::sync::{Mutex, OwnedMutexGuard};
 
 use tracedecay_rusqlite_runtime::exact_sql::ExactSqlTransaction as RuntimeTransaction;
 
@@ -27,25 +29,42 @@ impl Transaction {
         }
     }
 
+    /// Runs one operation as native settlement that holds the transaction
+    /// gate. Dropping the caller's future detaches, never truncates, it.
+    async fn settle<T, F, Fut>(&self, operation: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(TransactionGate) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T>> + Send + 'static,
+    {
+        let runtime = Arc::clone(&self.runtime);
+        let settlement = crate::native_runtime::handle()
+            .ok_or(Error::RuntimeContextUnavailable)?
+            .try_request_cx_with_budget(Budget::INFINITE)
+            .map_err(|error| Error::Runtime(format!("failed to admit SQL settlement: {error}")))?;
+        let mut task = settlement
+            .spawn(move |cx| async move {
+                let gate = OwnedMutexGuard::lock(runtime, &cx).await.map_err(|error| {
+                    Error::Runtime(format!("SQL transaction gate failed: {error}"))
+                })?;
+                operation(gate).await
+            })
+            .map_err(|error| Error::Runtime(format!("failed to spawn SQL settlement: {error}")))?;
+        std::future::poll_fn(|context| task.poll_join(context))
+            .await
+            .map_err(join_error)?
+    }
+
     pub async fn execute<P>(&self, sql: &str, params: P) -> Result<u64>
     where
         P: IntoParams,
     {
-        let runtime = Arc::clone(&self.runtime);
         let statement = statement(sql, params)?;
-        tokio::spawn(async move {
-            runtime
-                .lock()
-                .await
-                .as_ref()
-                .ok_or(super::Error::TransactionClosed)?
-                .execute_async(statement)
-                .await
-                .map_err(super::Error::from)
+        self.settle(move |gate| async move {
+            let result = open(&gate)?.execute_async(statement).await?;
+            Ok(result.changed_rows as u64)
         })
         .await
-        .map_err(join_error)?
-        .map(|result| result.changed_rows as u64)
     }
 
     #[tracing::instrument(
@@ -54,14 +73,12 @@ impl Transaction {
         skip_all
     )]
     pub async fn execute_statements(&self, statements: Vec<WriteStatement>) -> Result<Vec<u64>> {
-        let runtime = Arc::clone(&self.runtime);
         let statements = statements
             .into_iter()
             .map(WriteStatement::into_exact)
             .collect::<Vec<_>>();
-        tokio::spawn(async move {
-            let runtime = runtime.lock().await;
-            let runtime = runtime.as_ref().ok_or(Error::TransactionClosed)?;
+        self.settle(move |gate| async move {
+            let runtime = open(&gate)?;
             let mut results = Vec::with_capacity(statements.len());
             for (index, statement) in statements.into_iter().enumerate() {
                 let result = runtime
@@ -74,46 +91,26 @@ impl Transaction {
             Ok(results)
         })
         .await
-        .map_err(join_error)?
     }
 
     pub async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
     where
         P: IntoParams,
     {
-        let runtime = Arc::clone(&self.runtime);
         let statement = statement(sql, params)?;
-        let rows = tokio::spawn(async move {
-            runtime
-                .lock()
-                .await
-                .as_ref()
-                .ok_or(super::Error::TransactionClosed)?
-                .query_async(statement)
-                .await
-                .map_err(super::Error::from)
+        self.settle(move |gate| async move {
+            Ok(Rows::from_exact(open(&gate)?.query_async(statement).await?))
         })
         .await
-        .map_err(join_error)??;
-        Ok(Rows::from_exact(rows))
     }
 
     pub async fn execute_batch(&self, sql: &str) -> Result<()> {
-        let runtime = Arc::clone(&self.runtime);
         let sql = sql.to_owned();
-        tokio::spawn(async move {
-            runtime
-                .lock()
-                .await
-                .as_ref()
-                .ok_or(super::Error::TransactionClosed)?
-                .execute_batch_async(sql)
-                .await
-                .map(|_| ())
-                .map_err(super::Error::from)
+        self.settle(move |gate| async move {
+            open(&gate)?.execute_batch_async(sql).await?;
+            Ok(())
         })
         .await
-        .map_err(join_error)?
     }
 
     /// Runs one query under the authority-revalidated policy, without the
@@ -122,98 +119,62 @@ impl Transaction {
     where
         P: IntoParams,
     {
-        let runtime = Arc::clone(&self.runtime);
         let statement = statement(sql, params)?;
-        let rows = tokio::spawn(async move {
-            runtime
-                .lock()
-                .await
-                .as_ref()
-                .ok_or(super::Error::TransactionClosed)?
-                .query_authority_revalidated_async(statement)
-                .await
-                .map_err(super::Error::from)
+        self.settle(move |gate| async move {
+            Ok(Rows::from_exact(
+                open(&gate)?
+                    .query_authority_revalidated_async(statement)
+                    .await?,
+            ))
         })
         .await
-        .map_err(join_error)??;
-        Ok(Rows::from_exact(rows))
     }
 
     /// Executes one separately authorized authority-revalidated batch without the ordinary
     /// statement deadline.
     pub async fn execute_authority_revalidated_batch(&self, sql: &str) -> Result<()> {
-        let runtime = Arc::clone(&self.runtime);
         let sql = sql.to_owned();
-        tokio::spawn(async move {
-            runtime
-                .lock()
-                .await
-                .as_ref()
-                .ok_or(super::Error::TransactionClosed)?
+        self.settle(move |gate| async move {
+            open(&gate)?
                 .execute_authority_revalidated_batch_async(sql)
-                .await
-                .map(|_| ())
-                .map_err(super::Error::from)
+                .await?;
+            Ok(())
         })
         .await
-        .map_err(join_error)?
     }
 
     pub async fn validate(&self, sql: &str) -> Result<()> {
-        let runtime = Arc::clone(&self.runtime);
         let statement = statement(sql, ())?;
-        tokio::spawn(async move {
-            runtime
-                .lock()
-                .await
-                .as_ref()
-                .ok_or(super::Error::TransactionClosed)?
-                .validate_async(statement)
-                .await
-                .map_err(super::Error::from)
-        })
-        .await
-        .map_err(join_error)?
+        self.settle(move |gate| async move { Ok(open(&gate)?.validate_async(statement).await?) })
+            .await
     }
 
     pub async fn commit(self) -> Result<()> {
-        let runtime = Arc::clone(&self.runtime);
-        tokio::spawn(async move {
-            let transaction = runtime
-                .lock()
-                .await
-                .take()
-                .ok_or(Error::TransactionClosed)?;
-            transaction
-                .commit_async()
-                .await
-                .map(|_| ())
-                .map_err(super::Error::from)
+        self.settle(|mut gate| async move {
+            let transaction = gate.take().ok_or(Error::TransactionClosed)?;
+            transaction.commit_async().await?;
+            Ok(())
         })
         .await
-        .map_err(join_error)?
     }
 
     pub async fn rollback(self) -> Result<()> {
-        let runtime = Arc::clone(&self.runtime);
-        tokio::spawn(async move {
-            let transaction = runtime
-                .lock()
-                .await
-                .take()
-                .ok_or(Error::TransactionClosed)?;
-            transaction
-                .rollback_async()
-                .await
-                .map(|_| ())
-                .map_err(super::Error::from)
+        self.settle(|mut gate| async move {
+            let transaction = gate.take().ok_or(Error::TransactionClosed)?;
+            transaction.rollback_async().await?;
+            Ok(())
         })
         .await
-        .map_err(join_error)?
     }
 }
 
-fn join_error(error: tokio::task::JoinError) -> super::Error {
+type TransactionGate = OwnedMutexGuard<Option<RuntimeTransaction>>;
+
+fn open(gate: &TransactionGate) -> Result<&RuntimeTransaction> {
+    gate.as_ref().ok_or(Error::TransactionClosed)
+}
+
+fn join_error(error: asupersync::runtime::JoinError) -> super::Error {
     super::Error::Runtime(format!("exact SQL transaction task failed: {error}"))
 }
 
@@ -235,7 +196,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn only_long_lease_transaction_exposes_authority_revalidated_batches() {
         let directory = tempfile::TempDir::new().unwrap();
         let connection = TestConnection::open_with_write_authority(

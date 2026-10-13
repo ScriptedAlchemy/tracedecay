@@ -16,12 +16,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rusqlite::TransactionBehavior;
-use tokio::{
-    runtime::Runtime,
-    sync::{mpsc, watch},
+use asupersync::{
+    Cx,
+    channel::{mpsc, watch},
 };
-use tracedecay_domain::process_heap::collect_idle_thread_heap_v1;
+use rusqlite::TransactionBehavior;
 use tracedecay_store::{
     AdmissionConfigV1, OperationPriorityV1, RuntimeBatchCompatibilityV1, RuntimeInterruptionV1,
     RuntimeRequestProbeV1, StoreOperationIdV1, StoreRuntimeBindingV1,
@@ -215,7 +214,8 @@ impl PendingBatchDwell {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn dwell_for_batch(
+fn dwell_for_batch(
+    cx: &Cx,
     mut pending: PendingBatchDwell,
     receiver: &mut mpsc::Receiver<AcceptedRequest>,
     exact_sql_receiver: &mut mpsc::Receiver<ExactSqlWriterCommand>,
@@ -234,29 +234,29 @@ async fn dwell_for_batch(
     checkpoint_closed: &mut bool,
 ) {
     loop {
-        if tokio::time::Instant::now() >= tokio::time::Instant::from_std(pending.window.deadline) {
+        let remaining = pending
+            .window
+            .deadline
+            .saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
             return;
         }
-        let wake = tokio::time::timeout_at(
-            tokio::time::Instant::from_std(pending.window.deadline),
-            wait_for_work(
-                receiver,
-                exact_sql_receiver,
-                incremental_vacuum_receiver,
-                checkpoint_receiver,
-                shutdown_receiver,
-                *input_closed,
-                *exact_sql_closed,
-                *incremental_vacuum_closed,
-                *checkpoint_closed,
-                None,
-            ),
-        )
-        .await
-        .ok();
-        let Some(wake) = wake else {
+        let wake = wait_for_work(
+            cx,
+            receiver,
+            exact_sql_receiver,
+            incremental_vacuum_receiver,
+            checkpoint_receiver,
+            shutdown_receiver,
+            *input_closed,
+            *exact_sql_closed,
+            *incremental_vacuum_closed,
+            *checkpoint_closed,
+            Some(pending.window.deadline),
+        );
+        if matches!(wake, WorkerWake::CheckpointRetry) {
             return;
-        };
+        }
         let interrupted = pending.interrupted();
         match wake {
             WorkerWake::Write(Some(item)) => {
@@ -298,6 +298,7 @@ async fn dwell_for_batch(
 }
 
 pub(super) struct Worker {
+    pub(super) cx: Cx,
     pub(super) path: PathBuf,
     #[cfg(unix)]
     pub(super) canonical_path: PathBuf,
@@ -423,14 +424,6 @@ impl Worker {
             Ok(checkpoint) => checkpoint,
             Err(_) => return self.fail_start(WriterStartError::CheckpointSetupFailed),
         };
-        let runtime = match tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .on_thread_park(collect_idle_thread_heap_v1)
-            .build()
-        {
-            Ok(runtime) => runtime,
-            Err(_) => return self.fail_start(WriterStartError::CheckpointSchedulerSetupFailed),
-        };
         #[cfg(any(unix, windows))]
         if let Some(opened_database) = self._opened_database.as_deref()
             && let Err(error) =
@@ -447,9 +440,9 @@ impl Worker {
         }
         let state = Arc::clone(&self.state);
         let telemetry = self.telemetry.clone();
-        if let Err(payload) = catch_unwind(AssertUnwindSafe(|| {
-            self.run_loop(checkpoint, page_cache, runtime)
-        })) {
+        if let Err(payload) =
+            catch_unwind(AssertUnwindSafe(|| self.run_loop(checkpoint, page_cache)))
+        {
             // The fault is otherwise invisible: every later request only sees
             // "writer unavailable". Name the panic so a faulted writer can be
             // traced from the process log.
@@ -476,7 +469,6 @@ impl Worker {
         mut self,
         mut checkpoint: WriterCheckpointController,
         mut page_cache: connection::WriterPageCache,
-        runtime: Runtime,
     ) {
         let mut queue = FairQueue::default();
         let mut inflight = HashMap::new();
@@ -538,7 +530,8 @@ impl Worker {
                 {
                     break;
                 }
-                let wake = runtime.block_on(wait_for_work(
+                let wake = wait_for_work(
+                    &self.cx,
                     &mut self.receiver,
                     &mut self.exact_sql_receiver,
                     &mut self.incremental_vacuum_receiver,
@@ -549,7 +542,7 @@ impl Worker {
                     incremental_vacuum_closed,
                     checkpoint_closed,
                     None,
-                ));
+                );
                 apply_wake(
                     wake,
                     &mut queue,
@@ -588,7 +581,8 @@ impl Worker {
                         .then(|| Instant::now() + HARD_CHECKPOINT_RETRY_INTERVAL);
                     continue;
                 }
-                let wake = runtime.block_on(wait_for_work(
+                let wake = wait_for_work(
+                    &self.cx,
                     &mut self.receiver,
                     &mut self.exact_sql_receiver,
                     &mut self.incremental_vacuum_receiver,
@@ -598,8 +592,8 @@ impl Worker {
                     exact_sql_closed,
                     incremental_vacuum_closed,
                     checkpoint_closed,
-                    Some(retry_due.saturating_duration_since(now)),
-                ));
+                    Some(*retry_due),
+                );
                 if matches!(wake, WorkerWake::CheckpointRetry) {
                     self.telemetry.checkpoint_hard_retry();
                     self.run_scheduled_checkpoint(&mut checkpoint);
@@ -704,7 +698,8 @@ impl Worker {
                 {
                     break;
                 }
-                let wake = runtime.block_on(wait_for_work(
+                let wake = wait_for_work(
+                    &self.cx,
                     &mut self.receiver,
                     &mut self.exact_sql_receiver,
                     &mut self.incremental_vacuum_receiver,
@@ -715,7 +710,7 @@ impl Worker {
                     incremental_vacuum_closed,
                     checkpoint_closed,
                     None,
-                ));
+                );
                 apply_wake(
                     wake,
                     &mut queue,
@@ -749,7 +744,8 @@ impl Worker {
                 {
                     let _span = tracing::trace_span!("rusqlite.writer.batch_dwell").entered();
                     {
-                        runtime.block_on(dwell_for_batch(
+                        dwell_for_batch(
+                            &self.cx,
                             pending,
                             &mut self.receiver,
                             &mut self.exact_sql_receiver,
@@ -766,7 +762,7 @@ impl Worker {
                             &mut exact_sql_closed,
                             &mut incremental_vacuum_closed,
                             &mut checkpoint_closed,
-                        ));
+                        );
                     }
                 };
                 // A probe cannot notify this actor directly, so every dwell
@@ -950,9 +946,9 @@ impl Worker {
     fn publish_checkpoint_result(&self, result: CheckpointResult) {
         self.telemetry.checkpoint(checkpoint_sample(&result));
         if let Some(pressure) = checkpoint_pressure_signal(&result) {
-            self.checkpoint_pressure.send_replace(pressure);
+            let _ = self.checkpoint_pressure.send(pressure);
         }
-        self.checkpoint_status.send_replace(CheckpointStatus {
+        let _ = self.checkpoint_status.send(CheckpointStatus {
             latest: Some(CheckpointOutcome::from_internal(result)),
         });
     }
@@ -1225,7 +1221,11 @@ mod auxiliary_scheduling_tests {
         time::{Duration, Instant},
     };
 
-    use tokio::sync::{mpsc, oneshot};
+    use asupersync::{
+        Budget,
+        channel::{mpsc, oneshot},
+        runtime::RuntimeBuilder,
+    };
     use tracedecay_store::{
         OperationPriorityV1, RuntimeCancellationIdentityV1, RuntimeDeadlineV1,
         RuntimeInterruptionV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, UnavailableReasonV1,
@@ -1363,9 +1363,9 @@ mod auxiliary_scheduling_tests {
         let telemetry = WriterTelemetry::default();
         let mut queue = FairQueue::default();
         let mut inflight = HashMap::new();
-        let (leader, leader_rx) =
+        let (leader, mut leader_rx) =
             accepted_request_with_reply("operation.duplicate-attach", "key.duplicate-attach");
-        let (follower, follower_rx) =
+        let (follower, mut follower_rx) =
             accepted_request_with_reply("operation.duplicate-attach", "key.duplicate-attach");
         assert!(enqueue(&mut queue, &mut inflight, leader, &telemetry));
         assert!(enqueue(&mut queue, &mut inflight, follower, &telemetry));
@@ -1379,13 +1379,10 @@ mod auxiliary_scheduling_tests {
             .expect("queued leader")
             .settle(Ok(outcome.clone()));
         assert_eq!(
-            leader_rx.blocking_recv().expect("leader reply"),
+            leader_rx.try_recv().expect("leader reply"),
             Ok(outcome.clone())
         );
-        assert_eq!(
-            follower_rx.blocking_recv().expect("follower reply"),
-            Ok(outcome)
-        );
+        assert_eq!(follower_rx.try_recv().expect("follower reply"), Ok(outcome));
     }
 
     #[test]
@@ -1393,9 +1390,9 @@ mod auxiliary_scheduling_tests {
         let telemetry = WriterTelemetry::default();
         let mut queue = FairQueue::default();
         let mut inflight = HashMap::new();
-        let (leader, leader_rx) =
+        let (leader, mut leader_rx) =
             accepted_request_with_reply("operation.inflight-attach", "key.inflight-attach");
-        let (follower, follower_rx) =
+        let (follower, mut follower_rx) =
             accepted_request_with_reply("operation.inflight-attach", "key.inflight-attach");
         assert!(enqueue(&mut queue, &mut inflight, leader, &telemetry));
         let mut selected = queue.drain_fair();
@@ -1408,13 +1405,10 @@ mod auxiliary_scheduling_tests {
         };
         executing.settle(Ok(outcome.clone()));
         assert_eq!(
-            leader_rx.blocking_recv().expect("leader reply"),
+            leader_rx.try_recv().expect("leader reply"),
             Ok(outcome.clone())
         );
-        assert_eq!(
-            follower_rx.blocking_recv().expect("follower reply"),
-            Ok(outcome)
-        );
+        assert_eq!(follower_rx.try_recv().expect("follower reply"), Ok(outcome));
     }
 
     #[test]
@@ -1422,14 +1416,14 @@ mod auxiliary_scheduling_tests {
         let telemetry = WriterTelemetry::default();
         let mut queue = FairQueue::default();
         let mut inflight = HashMap::new();
-        let (leader, leader_rx) =
+        let (leader, mut leader_rx) =
             accepted_request_with_reply("operation.duplicate-conflict", "key.leader");
-        let (conflict, conflict_rx) =
+        let (conflict, mut conflict_rx) =
             accepted_request_with_reply("operation.duplicate-conflict", "key.conflict");
         assert!(enqueue(&mut queue, &mut inflight, leader, &telemetry));
         assert!(!enqueue(&mut queue, &mut inflight, conflict, &telemetry));
         assert!(matches!(
-            conflict_rx.blocking_recv().expect("conflict reply"),
+            conflict_rx.try_recv().expect("conflict reply"),
             Err(tracedecay_store::StorageRuntimeErrorV1::DuplicateOperationInFlight {
                 operation_id
             }) if operation_id == "operation.duplicate-conflict"
@@ -1442,10 +1436,7 @@ mod auxiliary_scheduling_tests {
             .pop()
             .expect("leader remains queued")
             .settle(Ok(outcome.clone()));
-        assert_eq!(
-            leader_rx.blocking_recv().expect("leader reply"),
-            Ok(outcome)
-        );
+        assert_eq!(leader_rx.try_recv().expect("leader reply"), Ok(outcome));
     }
 
     #[test]
@@ -1492,9 +1483,17 @@ mod auxiliary_scheduling_tests {
         assert_eq!(later_rx.try_recv().expect("later reply"), Ok(later_outcome));
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn dwell_collects_a_compatible_arrival_before_dispatch() {
-        let enqueued_at = tokio::time::Instant::now().into_std();
+    #[test]
+    fn dwell_collects_a_compatible_arrival_before_dispatch() {
+        let runtime = RuntimeBuilder::current_thread().build().expect("runtime");
+        let cx = runtime
+            .handle()
+            .try_request_cx_with_budget(Budget::INFINITE)
+            .expect("context");
+        // The foreground window is at most 2 ms of wall time, which a loaded
+        // machine spends before the dwell starts. Stamping both requests in
+        // the future keeps the window open the way a paused clock did.
+        let enqueued_at = Instant::now() + Duration::from_secs(60);
         let mut config = tracedecay_store::AdmissionConfigV1::default();
         config.foreground_batch.max_operations = 2;
         config.validate().expect("valid foreground batch limit");
@@ -1514,12 +1513,11 @@ mod auxiliary_scheduling_tests {
         }
 
         let (write_tx, mut write_rx) = mpsc::channel(1);
-        tokio::time::advance(Duration::from_millis(1)).await;
         assert!(
             write_tx
                 .try_send(accepted_request(
                     1,
-                    tokio::time::Instant::now().into_std(),
+                    enqueued_at + Duration::from_millis(1),
                     OperationPriorityV1::Foreground,
                     false,
                 ))
@@ -1537,6 +1535,7 @@ mod auxiliary_scheduling_tests {
         let mut vacuum_closed = false;
         let mut checkpoint_closed = false;
         dwell_for_batch(
+            &cx,
             pending,
             &mut write_rx,
             &mut exact_sql_rx,
@@ -1553,8 +1552,7 @@ mod auxiliary_scheduling_tests {
             &mut exact_sql_closed,
             &mut vacuum_closed,
             &mut checkpoint_closed,
-        )
-        .await;
+        );
 
         let batches = build_batches(queue.drain_fair(), &config);
         assert_eq!(batches.len(), 1);

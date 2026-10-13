@@ -1,3 +1,4 @@
+use asupersync::{Budget, runtime::RuntimeHandle};
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
@@ -34,6 +35,7 @@ enum TableGrowthObservation {
 /// reader. The adapter is bound to one exact request scope and one store.
 #[derive(Clone)]
 pub struct SqliteStoreSizeTelemetryPort {
+    runtime: RuntimeHandle,
     handle: ExactSqlHandle,
     store: StoreKeyV1,
     scope: ResolvedScope,
@@ -44,12 +46,14 @@ pub struct SqliteStoreSizeTelemetryPort {
 impl SqliteStoreSizeTelemetryPort {
     #[must_use]
     pub fn new(
+        runtime: RuntimeHandle,
         handle: ExactSqlHandle,
         store: StoreKeyV1,
         scope: ResolvedScope,
         reader_wait: Duration,
     ) -> Self {
         Self {
+            runtime,
             handle: handle.read_only_clone(),
             store,
             scope,
@@ -70,6 +74,7 @@ impl SqliteStoreSizeTelemetryPort {
     #[must_use]
     pub fn for_scope(&self, scope: ResolvedScope) -> Self {
         Self {
+            runtime: self.runtime.clone(),
             handle: self.handle.clone(),
             store: self.store.clone(),
             scope,
@@ -83,6 +88,7 @@ impl SqliteStoreSizeTelemetryPort {
     #[must_use]
     pub fn rebind(&self, handle: ExactSqlHandle, scope: ResolvedScope) -> Self {
         Self {
+            runtime: self.runtime.clone(),
             handle: handle.read_only_clone(),
             store: self.store.clone(),
             scope,
@@ -116,11 +122,19 @@ impl SqliteStoreSizeTelemetryPort {
             let handle = self.handle.clone();
             let reader_wait = self.reader_wait;
             let context = context.clone();
-            let Ok(Ok(current)) = tokio::task::spawn_blocking(move || {
+            let Ok(cx) = self.runtime.try_request_cx_with_budget(Budget::INFINITE) else {
+                return TableGrowthTelemetryReadV1::Unknown {
+                    store: store.clone(),
+                };
+            };
+            let Ok(mut task) = cx.spawn_blocking(move |_| {
                 handle.table_size_telemetry(reader_wait, || interruption(&context))
-            })
-            .await
-            else {
+            }) else {
+                return TableGrowthTelemetryReadV1::Unknown {
+                    store: store.clone(),
+                };
+            };
+            let Ok(Ok(current)) = task.join(&cx).await else {
                 return TableGrowthTelemetryReadV1::Unknown {
                     store: store.clone(),
                 };
@@ -165,11 +179,19 @@ impl StoreSizeTelemetryPort for SqliteStoreSizeTelemetryPort {
             let handle = self.handle.clone();
             let reader_wait = self.reader_wait;
             let context = context.clone();
-            let Ok(Ok(sample)) = tokio::task::spawn_blocking(move || {
+            let Ok(cx) = self.runtime.try_request_cx_with_budget(Budget::INFINITE) else {
+                return StorageTelemetryReadV1::Unknown {
+                    store: store.clone(),
+                };
+            };
+            let Ok(mut task) = cx.spawn_blocking(move |_| {
                 handle.store_size_telemetry(reader_wait, || interruption(&context))
-            })
-            .await
-            else {
+            }) else {
+                return StorageTelemetryReadV1::Unknown {
+                    store: store.clone(),
+                };
+            };
+            let Ok(Ok(sample)) = task.join(&cx).await else {
                 return StorageTelemetryReadV1::Unknown {
                     store: store.clone(),
                 };

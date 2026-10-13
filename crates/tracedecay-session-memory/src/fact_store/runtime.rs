@@ -639,7 +639,7 @@ mod tests {
         .expect("a profile-memory shard mounts");
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn read_only_runtime_client_denies_submit_and_serves_typed_reads() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("readonly-runtime-client.db");

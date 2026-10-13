@@ -117,10 +117,11 @@ pub trait PhysicalRuntimeAttachment: Send + Sync {
     /// and before commit; no SQL or path crosses this port.
     fn run_bounded_incremental_compaction<'a>(
         &'a self,
+        cx: &'a asupersync::Cx,
         max_pages: u32,
         authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
     ) -> Pin<Box<dyn Future<Output = Result<(), StoreRuntimeRegistryFailure>> + Send + 'a>> {
-        let _ = (max_pages, authority);
+        let _ = (cx, max_pages, authority);
         Box::pin(async {
             Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
                 operation: "run bounded incremental compaction",
@@ -131,6 +132,7 @@ pub trait PhysicalRuntimeAttachment: Send + Sync {
 
     fn run_checkpoint<'a>(
         &'a self,
+        cx: &'a asupersync::Cx,
         request: tracedecay_rusqlite_runtime::CheckpointRequest,
         authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
     ) -> Pin<
@@ -144,7 +146,7 @@ pub trait PhysicalRuntimeAttachment: Send + Sync {
                 + 'a,
         >,
     > {
-        let _ = (request, authority);
+        let _ = (cx, request, authority);
         Box::pin(async {
             Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
                 operation: "run checkpoint",
@@ -155,6 +157,7 @@ pub trait PhysicalRuntimeAttachment: Send + Sync {
 
     fn dispatch_submit<'a>(
         &'a self,
+        cx: &'a asupersync::Cx,
         request: RuntimeSubmitRequestV1,
         probe: Arc<dyn RuntimeRequestProbeV1>,
         authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
@@ -165,7 +168,7 @@ pub trait PhysicalRuntimeAttachment: Send + Sync {
                 + 'a,
         >,
     > {
-        let _ = (request, probe, authority);
+        let _ = (cx, request, probe, authority);
         Box::pin(async {
             Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
                 operation: "dispatch submit",

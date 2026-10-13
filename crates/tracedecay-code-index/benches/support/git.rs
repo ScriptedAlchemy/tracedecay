@@ -194,6 +194,8 @@ impl PersistentGitGraph {
                 .expect("benchmark relational locator digest is valid"),
         );
         let writer = PersistentWriter::start(
+            &tracedecay_rusqlite_runtime::native_runtime::handle()
+                .expect("benchmark native runtime starts"),
             ExistingWriterLocator::new(
                 binding.clone(),
                 relational_locator.clone(),
