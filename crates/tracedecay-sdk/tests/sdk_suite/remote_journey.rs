@@ -1,6 +1,7 @@
 use std::fs;
 use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -8,8 +9,13 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay_contracts::remote::capture::{RemoteCaptureSequenceV1, RemoteWriterAuthorityV1};
 use tracedecay_contracts::remote::capture_protocol::RemoteCaptureRequestV1;
+use tracedecay_contracts::remote::composition::ExpectedRemoteShardV1;
 use tracedecay_contracts::remote::protocol::{CurrentAuthorityRequestV1, RemoteProtocolRequestV1};
+use tracedecay_contracts::remote::query::{
+    RemoteExactObservationResultV1, RemoteQueryOperationV1, RemoteQueryRequestV1,
+};
 use tracedecay_contracts::remote::recovery::PromotionConfirmationV1;
+use tracedecay_contracts::remote::replay::{RemoteReplayOutcomeV1, RemoteReplayRequestV1};
 use tracedecay_contracts::{ApplicationProblem, RequestId};
 use tracedecay_domain::{
     BrainId, BrainNodeId, ComponentVersion, DurableObservationV1, EnrollmentGrantV1, ObservationId,
@@ -41,7 +47,7 @@ struct RemoteDaemonFixture {
     local_base: String,
     local_token: String,
     remote: SocketAddr,
-    _scratch: TempDir,
+    scratch: TempDir,
 }
 
 impl RemoteDaemonFixture {
@@ -96,15 +102,29 @@ impl RemoteDaemonFixture {
             .as_str()
             .unwrap()
             .to_owned();
-        let local_base = format!(
-            "http://{}",
-            authority["http_application_endpoint"].as_str().unwrap()
-        );
-        let local_token = authority["auth_token"].as_str().unwrap().to_owned();
+        let fixture = Self {
+            daemon,
+            brain_id: BrainId::new(authority["brain_id"].as_str().unwrap()).unwrap(),
+            project_id,
+            local_base: format!(
+                "http://{}",
+                authority["http_application_endpoint"].as_str().unwrap()
+            ),
+            local_token: authority["auth_token"].as_str().unwrap().to_owned(),
+            remote,
+            scratch,
+        };
+        fixture.wait_until_project_serves();
+        fixture
+    }
+
+    /// The daemon mounts the project in the background and answers the typed
+    /// retryable `runtime_mounting` problem until it serves.
+    fn wait_until_project_serves(&self) {
         let client = Client::builder(ConnectionMode::local(
-            &local_base,
-            &project_id,
-            &local_token,
+            &self.local_base,
+            &self.project_id,
+            &self.local_token,
         ))
         .build()
         .unwrap();
@@ -112,8 +132,6 @@ impl RemoteDaemonFixture {
             json!({}),
         )
         .unwrap();
-        // The daemon mounts the new project in the background and answers the
-        // typed retryable `runtime_mounting` problem until it serves.
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
             match client.execute::<WorkflowListDefinitions>(&list) {
@@ -124,20 +142,61 @@ impl RemoteDaemonFixture {
                     std::thread::sleep(Duration::from_millis(50));
                 }
                 outcome => {
-                    outcome.expect("the daemon serves the project before any remote node exists");
+                    outcome.expect("the daemon serves the project");
                     break;
                 }
             }
         }
-        Self {
-            daemon,
-            brain_id: BrainId::new(authority["brain_id"].as_str().unwrap()).unwrap(),
-            project_id,
-            local_base,
-            local_token,
-            remote,
-            _scratch: scratch,
-        }
+    }
+
+    fn home(&self) -> PathBuf {
+        self.scratch.path().join("home")
+    }
+
+    fn profile(&self) -> PathBuf {
+        self.home().join(".tracedecay")
+    }
+
+    fn project(&self) -> PathBuf {
+        self.scratch.path().join("project")
+    }
+
+    /// Stops this daemon and starts a new one on the same profile. The new
+    /// process gets fresh local and remote listeners.
+    fn restart(&mut self) {
+        stop_daemon(&mut self.daemon);
+        fs::remove_file(self.profile().join("daemon-authority.json")).ok();
+        let (daemon, authority, remote) = spawn_remote_daemon(
+            &production_binary(),
+            &self.home(),
+            &self.profile(),
+            &self.project(),
+            &self.scratch.path().join("localhost.crt.pem"),
+            &self.scratch.path().join("localhost.key.pem"),
+        );
+        self.daemon = daemon;
+        assert_eq!(
+            authority["brain_id"].as_str(),
+            Some(self.brain_id.as_str()),
+            "a restart keeps the profile's Brain"
+        );
+        self.local_base = format!(
+            "http://{}",
+            authority["http_application_endpoint"].as_str().unwrap()
+        );
+        self.local_token = authority["auth_token"].as_str().unwrap().to_owned();
+        self.remote = remote;
+        self.wait_until_project_serves();
+    }
+
+    /// Runs `tracedecay remote revoke` against this daemon, as its operator.
+    fn revoke(&self, node_id: &BrainNodeId) -> Value {
+        let mut command = Command::new(production_binary());
+        command
+            .args(["remote", "revoke", "--json", "--node-id", node_id.as_str()])
+            .current_dir(self.project());
+        isolated(&mut command, &self.home(), &self.profile());
+        serde_json::from_slice(&run(&mut command)).unwrap()
     }
 
     fn remote_endpoint(&self) -> String {
@@ -779,4 +838,273 @@ fn a_joined_node_drains_offline_frames_in_order_to_its_authority() {
         let mut daemon = fixture.daemon;
         stop_daemon(&mut daemon);
     }
+}
+
+/// The #3656 Remote Brain job end to end on two spawned daemons: a laptop joins
+/// a desktop Brain, captures while the desktop is unreachable, keeps those
+/// frames across restarts of both daemons, drains them in order to the one
+/// fenced writer, replays and queries them there, and loses access when the
+/// desktop's operator revokes it without its pending frames being dropped.
+#[test]
+#[ignore = "requires a prebuilt production tracedecay daemon"]
+fn a_laptop_captures_offline_and_its_frames_reach_one_fenced_authority_until_revoked() {
+    let mut desktop = RemoteDaemonFixture::start("remote-qualification-desktop");
+    let mut laptop = RemoteDaemonFixture::start("remote-qualification-laptop");
+    let node_id = BrainNodeId::new("node.remote-qualification-laptop").unwrap();
+    let mut grant = remote_grant(
+        desktop.brain_id.clone(),
+        node_id.clone(),
+        &desktop.project_id,
+        &GRANT_CREDENTIAL,
+    );
+    grant.capabilities = [
+        RemoteCapabilityV1::CaptureOffline,
+        RemoteCapabilityV1::DiscoverAuthority,
+        RemoteCapabilityV1::TransferFrame,
+        RemoteCapabilityV1::Replay,
+        RemoteCapabilityV1::Query,
+    ]
+    .into_iter()
+    .collect();
+    desktop.provision_and_enroll(&grant);
+    let fence = writer_fence(&desktop.brain_id, 1, node_id.as_str());
+    let writer: RemoteWriterAuthorityV1 = serde_json::from_value(json!({
+        "project_id": desktop.project_id,
+        "scope": grant.scope,
+        "authority": {"fence": fence, "credential_revision": 1, "observed_at": now_micros()},
+    }))
+    .unwrap();
+    desktop.publish_writer(&node_id, &writer);
+    let brain_id = desktop.brain_id.clone();
+    let operate = |laptop: &RemoteDaemonFixture, operation: &str, endpoint: &str| {
+        laptop.node_operation(operation, endpoint, &brain_id, &node_id, &grant.scope)
+    };
+    let (status, joined) = operate(&laptop, "join", &desktop.remote_endpoint());
+    assert_eq!(status, reqwest::StatusCode::OK, "{joined}");
+    let (status, refused) = operate(&laptop, "join", &unreachable_endpoint());
+    assert_eq!(status, reqwest::StatusCode::BAD_GATEWAY, "{refused}");
+
+    let observations = [
+        observation(
+            &desktop.project_id,
+            "observation.remote-qualification-first",
+        ),
+        observation(
+            &desktop.project_id,
+            "observation.remote-qualification-second",
+        ),
+    ];
+    let mut previous_event_id = None;
+    let mut event_ids = Vec::new();
+    for (sequence, observation) in (1..).zip(&observations) {
+        let receipt = laptop
+            .local_client()
+            .capture(&capture_request(
+                &format!("request.remote-qualification-capture-{sequence}"),
+                &node_id,
+                &writer,
+                RemoteCaptureSequenceV1 {
+                    sequence,
+                    previous_event_id: previous_event_id.clone(),
+                },
+                observation.clone(),
+            ))
+            .unwrap()
+            .result
+            .expect("offline capture is admitted while the authority is unreachable")
+            .outcome
+            .payload()
+            .cloned()
+            .expect("an admitted capture returns its receipt");
+        previous_event_id = Some(receipt.event_id.clone());
+        event_ids.push(receipt.event_id);
+    }
+
+    laptop.restart();
+    assert_eq!(
+        laptop.status()["spool"]["pending_count"],
+        json!(2),
+        "the laptop keeps its offline frames across a restart"
+    );
+    desktop.restart();
+    let (status, drained) = operate(&laptop, "drain", &desktop.remote_endpoint());
+    assert_eq!(status, reqwest::StatusCode::OK, "{drained}");
+    assert_eq!(
+        drained["transferred"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|frame| (frame["event_id"].clone(), frame["sequence"].clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (json!(event_ids[0]), json!(1)),
+            (json!(event_ids[1]), json!(2))
+        ],
+        "the restarted authority acknowledges both frames in capture order"
+    );
+    assert_eq!(laptop.status()["spool"]["pending_count"], json!(0));
+
+    let node = desktop.client(ENROLLMENT_CREDENTIAL);
+    let replay = |request_id: &str, event_id: &str| {
+        node.replay(&replay_request(request_id, &node_id, &fence, event_id))
+            .unwrap()
+    };
+    for (index, event_id) in event_ids.iter().enumerate() {
+        let replayed = replay(
+            &format!("request.remote-qualification-replay-{index}"),
+            event_id,
+        );
+        let outcome = replayed
+            .result
+            .unwrap_or_else(|problem| {
+                panic!("the authority replays drained frame {index}: {problem:?}")
+            })
+            .outcome
+            .payload()
+            .cloned()
+            .expect("a replay returns its outcome");
+        let RemoteReplayOutcomeV1::Acknowledged { receipt, .. } = outcome else {
+            panic!("drained frame {index} is acknowledged: {outcome:?}");
+        };
+        assert_eq!(
+            (&receipt.event_id, &receipt.writer_fence),
+            (event_id, &fence),
+            "the frame commits under the one published writer fence"
+        );
+    }
+    assert_eq!(
+        desktop.status()["spool"]["pending_count"],
+        json!(0),
+        "replayed frames leave the authority's pending spool"
+    );
+
+    for observation in &observations {
+        let queried = node
+            .query(&query_request(&node_id, &grant.scope, &fence, observation))
+            .unwrap()
+            .result
+            .unwrap_or_else(|problem| panic!("the authority answers the query: {problem:?}"))
+            .outcome
+            .payload()
+            .cloned()
+            .expect("a query returns its result");
+        let RemoteExactObservationResultV1::Found(found) = queried.observation else {
+            panic!("the replayed observation is found: {queried:?}");
+        };
+        assert_eq!(
+            &found.observation, observation,
+            "the authority serves the exact observation the laptop captured offline"
+        );
+    }
+
+    let revocation = desktop.revoke(&node_id);
+    assert_eq!(
+        revocation["revocations"][0]["node_id"],
+        json!(node_id.as_str()),
+        "{revocation}"
+    );
+    let refused_as_revoked =
+        |authority: Value| authority["value"]["reason"] == "enrollment_revoked";
+    let replayed = replay("request.remote-qualification-replay-revoked", &event_ids[0]);
+    assert!(replayed.result.is_err());
+    assert!(
+        refused_as_revoked(serde_json::to_value(&replayed.authority).unwrap()),
+        "a revoked node cannot replay"
+    );
+    let queried = node
+        .query(&query_request(
+            &node_id,
+            &grant.scope,
+            &fence,
+            &observations[0],
+        ))
+        .unwrap();
+    assert!(queried.result.is_err());
+    assert!(
+        refused_as_revoked(serde_json::to_value(&queried.authority).unwrap()),
+        "a revoked node cannot query"
+    );
+
+    let (status, refused) = operate(&laptop, "join", &unreachable_endpoint());
+    assert_eq!(status, reqwest::StatusCode::BAD_GATEWAY, "{refused}");
+    laptop
+        .local_client()
+        .capture(&capture_request(
+            "request.remote-qualification-capture-3",
+            &node_id,
+            &writer,
+            RemoteCaptureSequenceV1 {
+                sequence: 3,
+                previous_event_id,
+            },
+            observation(
+                &desktop.project_id,
+                "observation.remote-qualification-third",
+            ),
+        ))
+        .unwrap()
+        .result
+        .expect("the laptop still captures offline after the authority revokes it");
+    let (status, refused) = operate(&laptop, "drain", &desktop.remote_endpoint());
+    assert_ne!(status, reqwest::StatusCode::OK, "{refused}");
+    assert_eq!(
+        laptop.status()["spool"]["pending_count"],
+        json!(1),
+        "a revoked drain keeps the frame pending instead of dropping it"
+    );
+
+    for fixture in [laptop, desktop] {
+        let mut daemon = fixture.daemon;
+        stop_daemon(&mut daemon);
+    }
+}
+
+fn replay_request(
+    request_id: &str,
+    node_id: &BrainNodeId,
+    fence: &RemoteWriterFenceV1,
+    event_id: &str,
+) -> RemoteProtocolRequestV1<RemoteReplayRequestV1> {
+    RemoteProtocolRequestV1::new(
+        RequestId::new(request_id).unwrap(),
+        fence.brain_id.clone(),
+        node_id.clone(),
+        1,
+        Some(fence.clone()),
+        now_micros(),
+        RemoteReplayRequestV1 {
+            event_id: event_id.to_owned(),
+        },
+    )
+    .unwrap()
+}
+
+fn query_request(
+    node_id: &BrainNodeId,
+    scope: &RemoteRepositoryScopeV1,
+    fence: &RemoteWriterFenceV1,
+    observation: &DurableObservationV1,
+) -> RemoteProtocolRequestV1<RemoteQueryRequestV1> {
+    RemoteProtocolRequestV1::new(
+        RequestId::new("request.remote-qualification-query").unwrap(),
+        fence.brain_id.clone(),
+        node_id.clone(),
+        1,
+        Some(fence.clone()),
+        now_micros(),
+        RemoteQueryRequestV1 {
+            schema_revision: 1,
+            scope: scope.clone(),
+            expected_shards: vec![ExpectedRemoteShardV1 {
+                brain_id: fence.brain_id.as_str().to_owned(),
+                shard_id: fence.shard_id.as_str().to_owned(),
+                generation_id: fence.generation_id.as_str().to_owned(),
+            }],
+            expected_authority: fence.clone(),
+            operation: RemoteQueryOperationV1::ExactObservation {
+                observation_id: observation.observation_id().clone(),
+            },
+        },
+    )
+    .unwrap()
 }
