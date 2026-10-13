@@ -60,15 +60,20 @@ impl RemoteCredentialUseV1 {
         }
     }
 
-    pub const fn required_capability(self) -> Option<RemoteCapabilityV1> {
+    /// A promoted node becomes the authority, so promotion also requires the
+    /// capability to serve as one.
+    pub const fn required_capabilities(self) -> &'static [RemoteCapabilityV1] {
         match self {
-            Self::InitialEnrollment => None,
-            Self::CaptureOffline => Some(RemoteCapabilityV1::CaptureOffline),
-            Self::TransferFrame => Some(RemoteCapabilityV1::TransferFrame),
-            Self::Replay => Some(RemoteCapabilityV1::Replay),
-            Self::Query => Some(RemoteCapabilityV1::Query),
-            Self::Promote => Some(RemoteCapabilityV1::Promote),
-            Self::DiscoverAuthority => Some(RemoteCapabilityV1::DiscoverAuthority),
+            Self::InitialEnrollment => &[],
+            Self::CaptureOffline => &[RemoteCapabilityV1::CaptureOffline],
+            Self::TransferFrame => &[RemoteCapabilityV1::TransferFrame],
+            Self::Replay => &[RemoteCapabilityV1::Replay],
+            Self::Query => &[RemoteCapabilityV1::Query],
+            Self::Promote => &[
+                RemoteCapabilityV1::Promote,
+                RemoteCapabilityV1::ServeAuthority,
+            ],
+            Self::DiscoverAuthority => &[RemoteCapabilityV1::DiscoverAuthority],
         }
     }
 }
@@ -585,9 +590,10 @@ where
             return Err(RemoteCredentialAdmissionErrorV1::Rejected);
         }
         validate_state(&record, observed_at)?;
-        if use_case
-            .required_capability()
-            .is_some_and(|capability| !record.capabilities().contains(&capability))
+        if !use_case
+            .required_capabilities()
+            .iter()
+            .all(|capability| record.capabilities().contains(capability))
         {
             return Err(RemoteCredentialAdmissionErrorV1::InsufficientCapability);
         }
