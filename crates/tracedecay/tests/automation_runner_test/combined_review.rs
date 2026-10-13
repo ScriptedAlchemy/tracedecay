@@ -5,7 +5,6 @@
 
 use crate::support::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tracedecay_automation_runtime::automation::runner::run_combined_review_with_backend_and_retrieval;
 #[cfg(feature = "test-transport")]
 use tracedecay_automation_runtime::automation::runner::run_combined_review_with_backend_and_retrieval_for_retained_settlement;
 use tracedecay_automation_runtime::automation::scheduler::AutomationTaskLock;
@@ -153,7 +152,7 @@ async fn combined_review_runner_records_both_tasks_from_one_backend_call() {
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
     let retrieval = CountingAutomationSessionRetrieval::new(&cg);
 
-    let dispatch = run_combined_review_with_backend_and_retrieval(
+    let dispatch = settle_combined_review(
         &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
@@ -398,7 +397,7 @@ async fn combined_review_commits_atomic_terminal_effects() {
     let backend = CombinedJsonBackend::new(combined_output_fixture());
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
 
-    let dispatch = run_combined_review_with_backend(
+    let dispatch = run_combined_review(
         &cg,
         &config,
         &run_control,
@@ -472,7 +471,7 @@ async fn combined_review_not_dispatched_when_only_one_task_is_due() {
     let backend = CombinedJsonBackend::new(combined_output_fixture());
     let retrieval = CountingAutomationSessionRetrieval::new(&cg);
 
-    let dispatch = run_combined_review_with_backend_and_retrieval(
+    let dispatch = settle_combined_review(
         &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
@@ -515,7 +514,7 @@ async fn combined_review_task_configuration_skips_before_retrieval_or_backend() 
         let backend = CombinedJsonBackend::new(combined_output_fixture());
         let retrieval = CountingAutomationSessionRetrieval::new(&cg);
 
-        let dispatch = run_combined_review_with_backend_and_retrieval(
+        let dispatch = settle_combined_review(
             &automation_project_context(&cg),
             &config,
             &test_configuration_revision(),
@@ -567,7 +566,7 @@ async fn combined_review_active_task_locks_skip_before_retrieval_or_backend() {
         let backend = CombinedJsonBackend::new(combined_output_fixture());
         let retrieval = CountingAutomationSessionRetrieval::new(&cg);
 
-        let dispatch = run_combined_review_with_backend_and_retrieval(
+        let dispatch = settle_combined_review(
             &automation_project_context(&cg),
             &config,
             &test_configuration_revision(),
@@ -607,7 +606,7 @@ async fn combined_review_respects_escape_hatch_flag() {
     let backend = CombinedJsonBackend::new(combined_output_fixture());
     let retrieval = CountingAutomationSessionRetrieval::new(&cg);
 
-    let dispatch = run_combined_review_with_backend_and_retrieval(
+    let dispatch = settle_combined_review(
         &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
@@ -649,18 +648,17 @@ async fn combined_review_terminal_evidence_matrix_has_zero_effects() {
         let backend = CombinedJsonBackend::new(combined_no_skill_needed_output());
         let retrieval = RejectedAutomationSessionRetrieval::new(reason);
 
-        let dispatch =
-            tracedecay_automation_runtime::automation::runner::run_combined_review_with_backend_and_retrieval(
-                &automation_project_context(&cg),
-                &config,
-                &test_configuration_revision(),
-                &backend,
-                &retrieval,
-                combined_options(&profile_root),
-                &test_automation_run_control(Arc::new(AtomicBool::new(false))),
-            )
-            .await
-            .unwrap();
+        let dispatch = settle_combined_review(
+            &automation_project_context(&cg),
+            &config,
+            &test_configuration_revision(),
+            &backend,
+            &retrieval,
+            combined_options(&profile_root),
+            &test_automation_run_control(Arc::new(AtomicBool::new(false))),
+        )
+        .await
+        .unwrap();
 
         let CombinedReviewDispatch::NotCombined {
             reason: actual_reason,
@@ -686,18 +684,17 @@ async fn combined_review_terminal_evidence_matrix_has_zero_effects() {
     let config = scheduler_config(Some(3600), None);
     let backend = CombinedJsonBackend::new(combined_no_skill_needed_output());
     let retrieval = EmptyAutomationSessionRetrieval::new();
-    let dispatch =
-        tracedecay_automation_runtime::automation::runner::run_combined_review_with_backend_and_retrieval(
-            &automation_project_context(&cg),
-            &config,
-            &test_configuration_revision(),
-            &backend,
-            &retrieval,
-            combined_options(&profile_root),
-            &test_automation_run_control(Arc::new(AtomicBool::new(false))),
-        )
-        .await
-        .unwrap();
+    let dispatch = settle_combined_review(
+        &automation_project_context(&cg),
+        &config,
+        &test_configuration_revision(),
+        &backend,
+        &retrieval,
+        combined_options(&profile_root),
+        &test_automation_run_control(Arc::new(AtomicBool::new(false))),
+    )
+    .await
+    .unwrap();
     let CombinedReviewDispatch::NotCombined { reason } = dispatch else {
         panic!("empty evidence must fall back, got {dispatch:?}");
     };
@@ -726,7 +723,7 @@ async fn combined_review_preserves_reflector_budget_stage_for_fallback() {
         tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1::RequestCandidateBytes,
     );
 
-    let dispatch = run_combined_review_with_backend_and_retrieval(
+    let dispatch = settle_combined_review(
         &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
@@ -769,7 +766,7 @@ async fn combined_review_preserves_skill_budget_stage_for_fallback() {
         tracedecay_contracts::retrieval::SessionRetrievalBudgetStageV1::ExecutionWorkExhausted,
     );
 
-    let dispatch = run_combined_review_with_backend_and_retrieval(
+    let dispatch = settle_combined_review(
         &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
@@ -808,7 +805,7 @@ async fn combined_review_records_failures_for_both_tasks_when_an_array_is_missin
     let config = scheduler_config(Some(3600), None);
     let backend = CombinedJsonBackend::new(json!({ "facts": [] }));
 
-    let dispatch = run_combined_review_with_backend(
+    let dispatch = run_combined_review(
         &cg,
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
@@ -872,7 +869,7 @@ async fn combined_skill_validation_exhaustion_preserves_atomic_no_write() {
     }));
     let run_control = test_automation_run_control(Arc::new(AtomicBool::new(false)));
 
-    let dispatch = run_combined_review_with_backend(
+    let dispatch = run_combined_review(
         &cg,
         &scheduler_config(Some(3600), None),
         &run_control,
@@ -924,7 +921,7 @@ async fn combined_review_records_noop_fallbacks_for_both_tasks_when_backend_fail
     };
     let backend = FailingBackend::new(AgentTaskKind::CombinedReview);
 
-    let dispatch = run_combined_review_with_backend(
+    let dispatch = run_combined_review(
         &cg,
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
@@ -983,7 +980,7 @@ async fn combined_review_interruption_reaches_validation_before_any_automatic_wr
     let interrupted = Arc::new(AtomicBool::new(true));
     let run_control = test_automation_run_control(Arc::clone(&interrupted));
 
-    let error = run_combined_review_with_backend(
+    let error = run_combined_review(
         &cg,
         &scheduler_config(Some(3600), None),
         &run_control,
@@ -1047,7 +1044,7 @@ async fn combined_review_falls_back_when_skill_deployment_is_pending() {
     };
 
     let homeless_context = cg.automation_project_context(None).unwrap();
-    let failed = match run_skill_writer_with_backend_and_retrieval(
+    let failed = match settle_skill_writer(
         &homeless_context,
         &config,
         &test_configuration_revision(),
@@ -1070,7 +1067,7 @@ async fn combined_review_falls_back_when_skill_deployment_is_pending() {
     );
 
     let backend = CombinedJsonBackend::new(combined_no_skill_needed_output());
-    let dispatch = run_combined_review_with_backend_and_retrieval(
+    let dispatch = settle_combined_review(
         &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
@@ -1097,7 +1094,7 @@ async fn combined_review_falls_back_when_skill_deployment_is_pending() {
 
     std::fs::create_dir_all(host_home.join(".claude")).unwrap();
     let deployed_skill = host_home.join(".claude/skills/combined-review/SKILL.md");
-    let retry = run_skill_writer_with_backend_and_retrieval(
+    let retry = settle_skill_writer(
         &automation_project_context(&cg),
         &config,
         &test_configuration_revision(),
