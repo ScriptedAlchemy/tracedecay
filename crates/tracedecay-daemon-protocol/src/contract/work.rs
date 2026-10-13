@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 use tracedecay_contracts::{
     AcceptWorkProposalRequestV1, AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1,
     AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, AdmittedWorkExecutionV1,
-    ApplicationOutcome, CancelWorkAttemptCommand, CreateWorkTaskRequestV1,
-    ExecutionTopologyMetricsRequestV1, ExecutionTopologyMetricsV1, ExecutionTopologyViewV1,
-    GenerateProposalRequest, GeneratedWorkProposal, PauseWorkRunCommand,
+    AdvanceWorkJobRequestV1, AdvanceWorkJobResultV1, ApplicationOutcome, CancelWorkAttemptCommand,
+    CreateWorkTaskRequestV1, ExecutionTopologyMetricsRequestV1, ExecutionTopologyMetricsV1,
+    ExecutionTopologyViewV1, GenerateProposalRequest, GeneratedWorkProposal, PauseWorkRunCommand,
     PrepareWorkDuplicateAdjudicationRequestV1, PrepareWorkProductMutationRequestV1,
     ReleaseWorkPlacementCommand, ResumeWorkAttemptsCommand, ResumeWorkRunCommand,
     RetryWorkAttemptCommandV1, ReviewWorkProposalRequestV1, StartWorkAttemptCommand,
@@ -62,6 +62,7 @@ pub enum WorkApplicationInvocationV1 {
     AdmitPlacement(AdmitWorkPlacementCommand),
     PlacementStatus(WorkPlacementStatusRequestV1),
     ReleasePlacement(ReleaseWorkPlacementCommand),
+    AdvanceJob(AdvanceWorkJobRequestV1),
 }
 
 impl WorkApplicationInvocationV1 {
@@ -99,6 +100,7 @@ impl WorkApplicationInvocationV1 {
             Self::AdmitPlacement(_) => "admit_placement",
             Self::PlacementStatus(_) => "placement_status",
             Self::ReleasePlacement(_) => "release_placement",
+            Self::AdvanceJob(_) => "advance_job",
         }
     }
 }
@@ -138,4 +140,5 @@ pub enum WorkApplicationOutcomeV1 {
     AdmitPlacement(ApplicationOutcome<WorkPlacementV1>),
     PlacementStatus(ApplicationOutcome<WorkPlacementReadingV1>),
     ReleasePlacement(ApplicationOutcome<WorkPlacementV1>),
+    AdvanceJob(ApplicationOutcome<AdvanceWorkJobResultV1>),
 }

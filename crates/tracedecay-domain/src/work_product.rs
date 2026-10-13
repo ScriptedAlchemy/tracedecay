@@ -855,6 +855,10 @@ impl WorkItemV1 {
         &self.input.hierarchy
     }
 
+    pub fn title(&self) -> &str {
+        &self.input.title
+    }
+
     pub fn dependencies(&self) -> &BTreeSet<TaskId> {
         &self.input.dependencies
     }

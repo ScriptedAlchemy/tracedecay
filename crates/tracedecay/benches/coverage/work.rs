@@ -23,6 +23,7 @@ pub(crate) fn verify_work_fixture(
         "tracedecay_work_retry_attempt"
             | "tracedecay_work_synthesize"
             | "tracedecay_work_adjudicate_duplicate"
+            | "tracedecay_work_advance_job"
     ) {
         return None;
     }
@@ -149,6 +150,41 @@ pub(crate) fn verify_work_fixture(
                         }])
                 {
                     return Err("synthesis did not admit the exact fixture artifact bytes, source identity, digest, and citation".to_owned());
+                }
+            }
+            "tracedecay_work_advance_job" => {
+                let job = args["job"]
+                    .as_str()
+                    .ok_or_else(|| "guided job fixture omitted its name".to_owned())?;
+                let expected_steps = [
+                    "create_task",
+                    "accept_proposal",
+                    "admit_execution",
+                    "admit_placement",
+                    "start_source",
+                ]
+                .map(|step| json!({"step": step, "task": "source"}));
+                let records = payload["performed"]
+                    .as_array()
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                let steps = records.iter().map(|record| &record["step"]);
+                if !steps.eq(expected_steps.iter())
+                    || records
+                        .iter()
+                        .any(|record| record["receipt"]["outcome"] != "completed")
+                    || payload["job"]["tasks"][0]["source"]
+                        != json!({
+                            "task_id": format!("task.{job}.source"),
+                            "run_id": format!("run.{job}.source"),
+                            "attempt_id": format!("attempt.{job}.source.source"),
+                        })
+                    || !matches!(
+                        payload["state"]["state"].as_str(),
+                        Some("advancing" | "waiting" | "completed")
+                    )
+                {
+                    return Err("guided job did not run each per-task Work operation once with its own completed receipt".to_owned());
                 }
             }
             _ => unreachable!(),
@@ -2316,6 +2352,38 @@ pub fn groups(ctx: &QueryContext, out: &mut Vec<ToolGroup>) {
                     capture: &[],
                     steps: cleanup_cancel_synth,
                 },
+            )
+        }),
+    ));
+    out.push(tg(
+        "tracedecay_work_advance_job",
+        fiveq(&|_| {
+            eqn(
+                "tracedecay_work_advance_job",
+                "first_call",
+                json!({
+                    "job": "bench-{{iter}}",
+                    "title": "Bench guided job",
+                    "base": {"reference": null, "commit": w.commit},
+                    "effect_state": "observational",
+                    "tasks": [{
+                        "key": "source",
+                        "title": "Bench guided source",
+                        "instructions": super::WORK_SOURCE_INSTRUCTIONS,
+                        "placement": {
+                            "kind": "no_managed_placement",
+                            "root": null,
+                            "network_free": true,
+                            "in_place_acknowledged": false,
+                        },
+                    }],
+                    "synthesis": {
+                        "task": "source",
+                        "output_name": "bench.synthesis",
+                        "instructions": super::WORK_SOURCE_INSTRUCTIONS,
+                    },
+                }),
+                no_primes,
             )
         }),
     ));
