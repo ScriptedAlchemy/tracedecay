@@ -427,6 +427,21 @@ fn list_call_relist(
     (first, answer, announced, relisted)
 }
 
+/// A call answer without the per-request identity and timing the daemon
+/// stamps on every answer.
+fn call_outcome(answer: &Value) -> Value {
+    let mut structured = answer["result"]["structuredContent"].clone();
+    if let Some(problem) = structured.get_mut("problem").and_then(Value::as_object_mut) {
+        problem.remove("request_id");
+        problem.remove("trace_id");
+    }
+    json!({
+        "error": answer["error"],
+        "is_error": answer["result"]["isError"],
+        "structured": structured,
+    })
+}
+
 /// `--catalog-profile=compact` changes what a session lists, never what it
 /// can call or what the daemon stores.
 #[tokio::test]
@@ -506,11 +521,12 @@ async fn compact_profile_withholds_work_and_workflow_tools_without_changing_auth
         "{withheld} starts withheld"
     );
     assert_eq!(
-        compact_answer["result"], default_answer["result"],
-        "a withheld tool called by name reaches the same daemon authority"
+        default_answer["result"]["structuredContent"]["problem"]["code"], "work.invalid_request",
+        "the empty call reaches the Work adapter: {default_answer}"
     );
     assert_eq!(
-        compact_answer["error"], default_answer["error"],
+        call_outcome(&compact_answer),
+        call_outcome(&default_answer),
         "a withheld tool called by name reaches the same daemon authority"
     );
     assert_eq!(announced, 1, "the called tool is announced once");

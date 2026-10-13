@@ -181,12 +181,13 @@ impl ToolSurface {
                     instructions.push_str(STUB_INSTRUCTIONS_NOTE);
                 }
                 if !self.withheld.is_empty() {
-                    instructions.push_str(&format!(
-                        "\n\nThis session uses the {} catalog profile and does not list \
-                         the tools it excludes. Every TraceDecay tool stays callable by \
-                         name, and a called tool joins the list.",
-                        self.catalog_profile
-                    ));
+                    instructions.push_str("\n\nThis session uses the ");
+                    instructions.push_str(&self.catalog_profile);
+                    instructions.push_str(
+                        " catalog profile and does not list the tools it excludes. Every \
+                         TraceDecay tool stays callable by name, and a called tool joins \
+                         the list.",
+                    );
                 }
             } else {
                 continue;

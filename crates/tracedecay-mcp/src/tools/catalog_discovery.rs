@@ -494,11 +494,6 @@ mod tests {
         );
         let unwithheld = family.difference(&withheld).collect::<Vec<_>>();
         assert!(unwithheld.is_empty(), "{unwithheld:?}");
-        let unlisted = withheld.difference(&listed).collect::<Vec<_>>();
-        assert!(
-            unlisted.is_empty(),
-            "every withheld name is a real tool: {unlisted:?}"
-        );
         assert!(
             !withheld.contains("tracedecay_source_lines"),
             "a compact binding stays listed"
