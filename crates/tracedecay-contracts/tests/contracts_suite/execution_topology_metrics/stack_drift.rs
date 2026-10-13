@@ -3,7 +3,7 @@ use tracedecay_domain::{
     DurationBucketV1, IntervalStateV1, StackDriftKindV1, WorkStackDriftObservedV1,
 };
 
-#[tokio::test]
+#[asupersync::test]
 async fn observed_open_stack_drift_publishes_its_bounded_age_cell() {
     let events = (0..5_u64)
         .map(|index| {
@@ -46,7 +46,7 @@ async fn observed_open_stack_drift_publishes_its_bounded_age_cell() {
     assert_eq!(cell.unavailable, None);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn delayed_open_observation_cannot_reopen_a_closed_drift_interval() {
     let mut events = Vec::new();
     for index in 0..5_u64 {

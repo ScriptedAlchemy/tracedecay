@@ -404,7 +404,7 @@ mod tests {
         (directory, conn)
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn load_session_provider_scope_uses_composite_session_order_index() {
         let (_directory, conn) = test_lcm_connection().await;
         let request = LcmLoadSessionRequest {

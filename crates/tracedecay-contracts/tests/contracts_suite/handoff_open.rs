@@ -264,7 +264,7 @@ fn token(fill: char) -> HandoffOpenToken {
     HandoffOpenToken::new(fill.to_string().repeat(48)).unwrap()
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn public_task_issue_derives_request_identity_and_fixed_expiry() {
     let issue_context = context("request.issue-task");
     let binding = task_binding(&issue_context);
@@ -295,7 +295,7 @@ async fn public_task_issue_derives_request_identity_and_fixed_expiry() {
     assert_eq!(*grant.expires_at(), EXPIRES_AT);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn issue_then_open_returns_only_the_bound_surface_and_atomic_receipt() {
     let issue_context = context("request.issue");
     let investigation = investigation_binding(&issue_context);
@@ -372,7 +372,7 @@ async fn issue_then_open_returns_only_the_bound_surface_and_atomic_receipt() {
     assert!(encoded.get("edit").is_none());
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn independently_authenticated_recipient_opens_without_reproducing_issuer_identity() {
     let issue_context = context_for_actor("request.issue-a-to-b", "actor.handoff.a");
     let recipient = ActorId::new("actor.handoff.b").unwrap();
@@ -423,7 +423,7 @@ async fn independently_authenticated_recipient_opens_without_reproducing_issuer_
     assert_eq!(opened.surface.task_id.as_str(), "task.handoff");
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn wrong_kind_scope_session_authority_expiry_and_replay_are_indistinguishable() {
     let issue_context = context("request.issue");
     let binding = investigation_binding(&issue_context);
@@ -531,7 +531,7 @@ async fn wrong_kind_scope_session_authority_expiry_and_replay_are_indistinguisha
     assert_eq!(replay, HandoffOpenError::NotFoundOrNotAuthorized);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn owner_version_is_rechecked_before_and_after_single_use_commit() {
     let issue_context = context("request.issue");
     let binding = task_binding(&issue_context);
@@ -580,7 +580,7 @@ fn token_debug_and_request_debug_never_expose_the_secret() {
 
 /// The enumeration answers the question the two `open_*` operations cannot:
 /// what has been handed to me that I have not taken up.
-#[tokio::test]
+#[asupersync::test]
 async fn enumeration_reports_open_consumed_and_expired_without_any_bearer() {
     let issue_context = context("request.issue-for-list");
     let binding = task_binding(&issue_context);
@@ -683,7 +683,7 @@ async fn enumeration_reports_open_consumed_and_expired_without_any_bearer() {
 }
 
 /// Listing is bounded by exactly what redemption is bounded by.
-#[tokio::test]
+#[asupersync::test]
 async fn enumeration_conceals_grants_the_caller_could_not_have_redeemed() {
     let issue_context = context("request.issue-scoped");
     let binding = task_binding(&issue_context);

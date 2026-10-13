@@ -59,7 +59,7 @@ async fn fetch_i64(conn: &TestConnection, sql: &str, params: impl IntoParams) ->
     rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn backfill_page_upserts_each_session_once_and_idles_without_work() {
     const ROWS: i64 = 300;
     let temp = tempfile::tempdir().unwrap();
@@ -348,7 +348,7 @@ async fn journaled_rewrite_cursor(conn: &TestConnection) -> Option<String> {
     .unwrap()
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn role_filter_range_rewrite_pages_in_background_without_blocking_admission() {
     const PAGE_ROWS: usize = 2;
     let temp = tempfile::tempdir().unwrap();
@@ -478,7 +478,7 @@ async fn role_filter_range_rewrite_pages_in_background_without_blocking_admissio
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn retained_queue_page_is_keyset_bounded_and_candidate_read_avoids_raw_corpus() {
     let temp = tempfile::tempdir().unwrap();
     let conn = TestConnection::open(&temp.path().join("sessions.db"));
@@ -578,7 +578,7 @@ async fn retained_queue_page_is_keyset_bounded_and_candidate_read_avoids_raw_cor
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn current_profiles_install_the_unreleased_queue_shape_in_place() {
     let temp = tempfile::tempdir().unwrap();
     let conn = TestConnection::open(&temp.path().join("sessions.db"));
@@ -732,7 +732,7 @@ async fn current_profiles_install_the_unreleased_queue_shape_in_place() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn protected_content_revision_requeues_a_current_session() {
     let temp = tempfile::tempdir().unwrap();
     let conn = TestConnection::open(&temp.path().join("sessions.db"));
@@ -814,7 +814,7 @@ async fn protected_content_revision_requeues_a_current_session() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn protection_progress_cannot_overwrite_a_concurrent_raw_rewind() {
     let temp = tempfile::tempdir().unwrap();
     let conn = TestConnection::open(&temp.path().join("sessions.db"));
@@ -872,7 +872,7 @@ async fn protection_progress_cannot_overwrite_a_concurrent_raw_rewind() {
     assert_eq!(refreshed.protection_frontier_store_id, 0);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn disjoint_raw_revisions_drain_as_distinct_restart_safe_work_items() {
     let temp = tempfile::tempdir().unwrap();
     let conn = TestConnection::open(&temp.path().join("sessions.db"));
@@ -982,7 +982,7 @@ async fn disjoint_raw_revisions_drain_as_distinct_restart_safe_work_items() {
 /// A store created after the role-aware filter owes no rewrite: ingest writes
 /// every interval under the current filter, so paging the corpus to re-derive
 /// them would be pure waste.
-#[tokio::test]
+#[asupersync::test]
 async fn a_fresh_store_opens_with_the_range_rewrite_already_retired() {
     let temp = tempfile::tempdir().unwrap();
     let conn = TestConnection::open(&temp.path().join("sessions.db"));
@@ -1055,7 +1055,7 @@ async fn parked_count(conn: &TestConnection) -> i64 {
     .await
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn parked_sessions_requeue_once_per_summarizer_binding_in_bounded_pages() {
     let temp = tempfile::tempdir().unwrap();
     let conn = parked_queue_store(&temp, &["parked-a", "parked-b", "parked-c"]).await;

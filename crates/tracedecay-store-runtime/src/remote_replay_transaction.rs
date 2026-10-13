@@ -8,10 +8,9 @@ use tracedecay_contracts::remote::replay::{
     RemoteReplayCommitReceiptV1, RemoteReplayFrameV1, RemoteReplayTransactionErrorV1,
     RemoteReplayTransactionOutcomeV1, RemoteReplayTransactionPortV1,
 };
-use tracedecay_domain::{
-    ManifestDigest, ObservationSourceCursorV1, ProjectionGenerationId, UtcMicros, canonical_sha256,
-};
+use tracedecay_domain::{ManifestDigest, ObservationSourceCursorV1, UtcMicros, canonical_sha256};
 use tracedecay_global_db::RegisteredGlobalDbWeakLeaseIssuerV1;
+use tracedecay_rusqlite_runtime::native_runtime;
 use tracedecay_rusqlite_runtime::remote::RemoteRecoveryPhysicalEffectErrorV1;
 use tracedecay_store::{
     AnchoredObservationWrite, CommandDigestV1, DurabilityClassV1, IdempotencyIdentityV1,
@@ -26,7 +25,7 @@ use tracedecay_store::{
 };
 
 const CHANNEL_CAPACITY: usize = 128;
-const PROJECTION_GENERATION: &str = "remote-replay.v1";
+const REPLAY_AUTHORITY_NAMESPACE: &str = "remote-replay.v1";
 
 #[derive(Clone)]
 struct ReplayTargetV1 {
@@ -69,7 +68,7 @@ pub struct DaemonRemoteReplayTransactionAuthorityV1 {
 }
 
 impl DaemonRemoteReplayTransactionAuthorityV1 {
-    pub fn new(runtime: tokio::runtime::Handle) -> Result<Self, String> {
+    pub fn new() -> Result<Self, String> {
         let targets = Arc::new(RwLock::new(BTreeMap::new()));
         let accepting = Arc::new(AtomicBool::new(true));
         let (sender, receiver) = mpsc::sync_channel(CHANNEL_CAPACITY);
@@ -86,7 +85,6 @@ impl DaemonRemoteReplayTransactionAuthorityV1 {
                             reply,
                         } => {
                             let outcome = execute_replay(
-                                &runtime,
                                 &worker_targets,
                                 &worker_accepting,
                                 &frame,
@@ -105,7 +103,6 @@ impl DaemonRemoteReplayTransactionAuthorityV1 {
                             reply,
                         } => {
                             let outcome = execute_fence_install(
-                                &runtime,
                                 &worker_targets,
                                 &project_id,
                                 *install,
@@ -122,12 +119,8 @@ impl DaemonRemoteReplayTransactionAuthorityV1 {
                             authority_key,
                             reply,
                         } => {
-                            let outcome = read_writer_fence(
-                                &runtime,
-                                &worker_targets,
-                                &project_id,
-                                &authority_key,
-                            );
+                            let outcome =
+                                read_writer_fence(&worker_targets, &project_id, &authority_key);
                             if reply.send(outcome).is_err() {
                                 tracing::debug!(
                                     "remote recovery caller ended before fence read delivery"
@@ -341,14 +334,13 @@ fn unavailable(
 }
 
 fn execute_fence_install(
-    tokio_runtime: &tokio::runtime::Handle,
     targets: &RwLock<BTreeMap<ProjectId, ReplayTargetV1>>,
     project_id: &ProjectId,
     install: RemoteWriterFenceInstallV1,
     interruption: Arc<dyn RuntimeRequestProbeV1>,
 ) -> Result<StoreCommitReceiptV1, RemoteRecoveryPhysicalEffectErrorV1> {
     let operation = "install remote writer fence";
-    let outcome = submit_fence_install(tokio_runtime, targets, project_id, install, interruption)
+    let outcome = submit_fence_install(targets, project_id, install, interruption)
         .map_err(|error| unavailable(operation, error))?;
     match outcome {
         RuntimeSubmitOutcomeV1::Committed { receipt }
@@ -370,7 +362,6 @@ fn execute_fence_install(
 }
 
 fn submit_fence_install(
-    tokio_runtime: &tokio::runtime::Handle,
     targets: &RwLock<BTreeMap<ProjectId, ReplayTargetV1>>,
     project_id: &ProjectId,
     install: RemoteWriterFenceInstallV1,
@@ -393,13 +384,11 @@ fn submit_fence_install(
         commit_started: AtomicBool::new(false),
     });
     let lease = issue_target_lease(&target)?;
-    tokio_runtime
-        .block_on(lease.runtime_client().dispatch_submit(request, probe))
+    native_runtime::block_on(lease.runtime_client().dispatch_submit(request, probe))?
         .map_err(|error| format!("registered remote fence dispatch failed: {error:?}"))
 }
 
 fn read_writer_fence(
-    tokio_runtime: &tokio::runtime::Handle,
     targets: &RwLock<BTreeMap<ProjectId, ReplayTargetV1>>,
     project_id: &ProjectId,
     authority_key: &ManifestDigest,
@@ -412,7 +401,7 @@ fn read_writer_fence(
         .cloned()
         .ok_or_else(|| unavailable(operation, "target is not registered"))?;
     let lease = issue_target_lease(&target).map_err(|error| unavailable(operation, error))?;
-    tokio_runtime.block_on(async move {
+    native_runtime::block_on(async move {
         let mut rows = lease
             .read_connection()
             .query(
@@ -449,6 +438,7 @@ fn read_writer_fence(
             .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
         Ok(Some((fence, frontier)))
     })
+    .unwrap_or_else(|error| Err(unavailable(operation, error)))
 }
 
 fn prepare_fence_request(
@@ -537,7 +527,6 @@ fn prepare_fence_request(
 
 #[tracing::instrument(name = "daemon.remote.replay.execute", level = "trace", skip_all)]
 fn execute_replay(
-    tokio_runtime: &tokio::runtime::Handle,
     targets: &RwLock<BTreeMap<ProjectId, ReplayTargetV1>>,
     accepting: &Arc<AtomicBool>,
     frame: &RemoteReplayFrameV1,
@@ -569,8 +558,8 @@ fn execute_replay(
     });
     let lease =
         issue_target_lease(&target).map_err(|_| RemoteReplayTransactionErrorV1::Unavailable)?;
-    let outcome = tokio_runtime
-        .block_on(lease.runtime_client().dispatch_submit(request, probe))
+    let outcome = native_runtime::block_on(lease.runtime_client().dispatch_submit(request, probe))
+        .map_err(|_| RemoteReplayTransactionErrorV1::Unavailable)?
         .map_err(|_| RemoteReplayTransactionErrorV1::Unavailable)?;
     map_submit_outcome(frame, current_writer, prepared.admission_bytes, outcome)
 }
@@ -608,11 +597,12 @@ fn prepare_request(
         position.end(),
     )
     .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?;
-    let projection_generation = ProjectionGenerationId::new(PROJECTION_GENERATION)
-        .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?;
+    // A replayed observation projects into the writer lineage's generation,
+    // the one remote reads expect it under.
+    let projection_generation = current_writer.authority.fence.generation_id.clone();
     let committed_at = tracedecay_contracts::clock::now_micros();
     let authorization =
-        build_observation_resolution_authorization_v1(&observation, PROJECTION_GENERATION)
+        build_observation_resolution_authorization_v1(&observation, REPLAY_AUTHORITY_NAMESPACE)
             .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?;
     let anchor = build_observation_retrieval_anchor(
         &observation,

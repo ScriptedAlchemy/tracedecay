@@ -46,7 +46,7 @@ struct CachedSessionTemporalHealth {
 // The cache aliases keep the lock type at the alias site so a later
 // contention-instrumented wrapper can land in one place.
 type SessionDoctorCacheLock<T> = std::sync::Mutex<T>;
-type SessionDoctorLaneLock<T> = tokio::sync::Mutex<T>;
+type SessionDoctorLaneLock<T> = futures_util::lock::Mutex<T>;
 
 type SessionTemporalHealthCacheCell =
     Arc<SessionDoctorLaneLock<Option<CachedSessionTemporalHealth>>>;
@@ -72,7 +72,7 @@ fn session_temporal_health_cache_cell(path: &Path) -> SessionTemporalHealthCache
     Arc::clone(
         cache
             .entry(path.to_path_buf())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None))),
+            .or_insert_with(|| Arc::new(SessionDoctorLaneLock::new(None))),
     )
 }
 
@@ -1300,7 +1300,7 @@ mod probe_tests {
     use crate::handle::SessionTemporalExec;
     use tracedecay_runtime_core::db::engine::TestConnection;
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn row_probe_reports_observed_findings_when_its_page_is_incomplete() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let connection = TestConnection::open(&tmp.path().join("doctor-page.db"));
@@ -1359,7 +1359,7 @@ mod probe_tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn a_failed_probe_naming_a_locked_table_is_partial_not_locked() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let connection = TestConnection::open(&tmp.path().join("doctor-locked-name.db"));
@@ -1410,7 +1410,7 @@ mod registered_tests {
     use crate::handle::{SessionTemporalAccess, SessionTemporalExec, SessionTemporalRegisteredDb};
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn oversized_session_temporal_store_still_reports_schema_findings() {
         const OLD_SYNCHRONOUS_HEALTH_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
         let harness =
@@ -1446,7 +1446,7 @@ mod registered_tests {
         }));
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn registered_doctor_reports_an_unbound_relation_graph_as_partial() {
         let harness =
             RegisteredGlobalDbHarness::open_without_relation_graph("doctor-unbound-relation-graph")
