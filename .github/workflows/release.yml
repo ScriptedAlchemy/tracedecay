@@ -259,10 +259,12 @@ jobs:
   verify-release:
     name: Verify immutable GitHub release
     needs: [validate-release, build]
+    # Both publishers (GitHub assets and the npm SDK) need this job, so a
+    # failed target stops them here.
     if: >-
       always() &&
       needs.validate-release.result == 'success' &&
-      needs.build.result != 'cancelled'
+      (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -313,14 +315,13 @@ jobs:
   publish-assets:
     name: Publish release assets
     needs: [validate-release, build, verify-release]
-    # Publish only a whole release (#3756): a failed target withholds every
-    # asset, and re-dispatching the tag rebuilds only the targets the release
-    # lacks. `skipped` means every asset is already published.
+    # Publish only a whole release (#3756): verify-release runs only when every
+    # target built or was already published, so a failed target withholds
+    # every asset. Re-dispatching the tag rebuilds only the missing targets.
     if: >-
       always() &&
       needs.validate-release.result == 'success' &&
-      needs.verify-release.result == 'success' &&
-      (needs.build.result == 'success' || needs.build.result == 'skipped')
+      needs.verify-release.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
