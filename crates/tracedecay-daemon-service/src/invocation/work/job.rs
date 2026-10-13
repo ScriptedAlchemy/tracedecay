@@ -6,7 +6,7 @@
 //! transport uses. A step therefore gets its own capability check, receipt,
 //! activity pulse, and typed refusal, exactly as a step-by-step caller would.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -436,9 +436,9 @@ fn create_change(
             task_id: task.task_id.clone(),
             hierarchy: hierarchy.clone(),
             title: task.title.clone(),
-            dependencies: Default::default(),
-            informational_relations: Default::default(),
-            causal_candidates: Default::default(),
+            dependencies: BTreeSet::default(),
+            informational_relations: BTreeSet::default(),
+            causal_candidates: BTreeSet::default(),
             acceptance_criteria: Vec::new(),
             effort: 1,
             scheduled_at: None,
