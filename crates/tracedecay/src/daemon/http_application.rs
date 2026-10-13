@@ -29,6 +29,7 @@ use tower::ServiceExt;
 use tracedecay_application::http_agent::http_agent;
 use tracedecay_contracts::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
 use tracedecay_contracts::remote::capture::RemoteWriterAuthorityV1;
+use tracedecay_contracts::remote::query::RemoteQueryPolicyRecordV1;
 use tracedecay_contracts::remote::replay::RemoteReplayPolicyEvidenceV1;
 use tracedecay_contracts::remote::status::RemoteOperationalStatusReadV1;
 use tracedecay_contracts::{
@@ -140,6 +141,7 @@ struct RemoteWriterAuthorityPublicationRequestV1 {
     node_id: BrainNodeId,
     writer: RemoteWriterAuthorityV1,
     replay_policy: RemoteReplayPolicyEvidenceV1,
+    query_policy: RemoteQueryPolicyRecordV1,
 }
 
 #[derive(Clone)]
@@ -454,6 +456,7 @@ async fn publish_remote_writer_authority(
             &request.node_id,
             request.writer,
             request.replay_policy,
+            request.query_policy,
         ),
         tracing::trace_span!("daemon.http.application.remote_writer_authority_publish"),
     )
