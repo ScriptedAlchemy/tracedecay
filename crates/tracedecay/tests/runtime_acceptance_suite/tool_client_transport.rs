@@ -5,7 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::{Arc, Barrier, mpsc};
+use std::sync::{Arc, Barrier, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -688,13 +688,21 @@ fn generic_tool_handles_concurrent_requests_without_crosstalk() {
 fn cancelling_generic_tool_reaps_child_and_closes_request() {
     let (_home, _project, _socket_dir, home, project, socket) = fixture();
     let (write_result_tx, write_result_rx) = mpsc::channel();
+    let (reaped_tx, reaped_rx) = mpsc::channel::<()>();
+    let reaped_rx = Mutex::new(reaped_rx);
     let (requests, server) = spawn_scripted_daemon(
         socket.clone(),
         &home,
         &project,
         1,
         move |mut stream, request, scope| {
-            std::thread::sleep(Duration::from_millis(200));
+            // Write only after the CLI is reaped: a fixed sleep raced the kill
+            // under load and wrote into a still-open socket.
+            reaped_rx
+                .lock()
+                .expect("reap signal lock")
+                .recv_timeout(LOCAL_TIMEOUT)
+                .expect("observe CLI reap");
             write_result_tx
                 .send(stream.write_all(&response_bytes(&request, scope, "after-cancel")))
                 .expect("publish post-cancel write");
@@ -714,6 +722,7 @@ fn cancelling_generic_tool_reaps_child_and_closes_request() {
     let status = child.wait().expect("reap cancelled CLI child");
     assert!(!status.success());
     assert!(child.try_wait().expect("poll reaped child").is_some());
+    reaped_tx.send(()).expect("publish CLI reap");
     let write_result = write_result_rx
         .recv_timeout(LOCAL_TIMEOUT)
         .expect("fake daemon observed cancellation");

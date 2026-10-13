@@ -7,7 +7,10 @@ use tracedecay_contracts::{
     MAX_WORK_ATTEMPT_CAPACITY_TASKS, WorkAttemptCapacityV1, WorkAttemptCapacityVerdictV1,
     WorkAttemptStorageError,
 };
-use tracedecay_domain::{TaskId, WorkAuthority, configuration::TopologyConcurrencyPolicyV1};
+use tracedecay_domain::{
+    TaskId, WorkAttemptV1, WorkAuthority, WorkProviderRouteV1,
+    configuration::TopologyConcurrencyPolicyV1,
+};
 
 use crate::exact_sql::ExactSqlValue;
 use crate::exact_sql::{ExactSqlError, ExactSqlRows};
@@ -159,18 +162,58 @@ fn sqlite_busy_or_locked(error: &ExactSqlError) -> bool {
     )
 }
 
+/// Refuses an attempt that would exceed the topology caps or the concurrency
+/// limit its own execution snapshot pins for its requested route.
 pub(crate) fn require_capacity(
     source: &impl RegisteredWorkQuery,
     authority: &WorkAuthority,
-    task_id: &TaskId,
+    attempt: &WorkAttemptV1,
     concurrency: &TopologyConcurrencyPolicyV1,
 ) -> Result<(), WorkAttemptStorageError> {
-    match capacity(source, authority, task_id, concurrency)?.verdict() {
-        WorkAttemptCapacityVerdictV1::Available => Ok(()),
-        WorkAttemptCapacityVerdictV1::Exhausted(_) => {
-            Err(WorkAttemptStorageError::CapacityExceeded)
-        }
+    if let WorkAttemptCapacityVerdictV1::Exhausted(_) =
+        capacity(source, authority, attempt.identity().task_id(), concurrency)?.verdict()
+    {
+        return Err(WorkAttemptStorageError::CapacityExceeded);
     }
+    let limit = attempt
+        .execution()
+        .execution_snapshot()
+        .limits()
+        .max_concurrency();
+    if route_active(source, authority, attempt.requested_route())? >= u64::from(limit) {
+        return Err(WorkAttemptStorageError::CapacityExceeded);
+    }
+    Ok(())
+}
+
+fn route_active(
+    source: &impl RegisteredWorkQuery,
+    authority: &WorkAuthority,
+    route: &WorkProviderRouteV1,
+) -> Result<u64, WorkAttemptStorageError> {
+    let params = vec![
+        ExactSqlValue::Text(authority.project_id().as_str().to_owned()),
+        ExactSqlValue::Text(route.provider_id().as_str().to_owned()),
+        ExactSqlValue::Text(route.route_id().as_str().to_owned()),
+    ];
+    let rows = coherent_capacity_query(|| {
+        let sql = format!(
+            "SELECT COUNT(*) FROM work_attempts_v1 AS attempt
+             WHERE attempt.project_id = ?1
+               AND json_extract(attempt.attempt_payload,
+                                '$.attempt.requested_route.provider_id') = ?2
+               AND json_extract(attempt.attempt_payload,
+                                '$.attempt.requested_route.route_id') = ?3
+               AND {ACTIVE_ATTEMPT_PREDICATE}"
+        );
+        registered_work_query(source, &sql, params.clone())
+    })
+    .map_err(|_| WorkAttemptStorageError::Unavailable)?;
+    rows.rows
+        .first()
+        .and_then(|row| exact_sql_integer(&row.values, 0))
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or(WorkAttemptStorageError::Unavailable)
 }
 
 #[cfg(test)]
