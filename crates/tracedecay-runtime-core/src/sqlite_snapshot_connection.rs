@@ -48,7 +48,7 @@ impl QueryExecutor for SnapshotConnection {
     where
         P: IntoParams,
     {
-        let cx = asupersync::Cx::current().ok_or(EngineError::RuntimeContextUnavailable)?;
+        let cx = crate::native_runtime::cx().ok_or(EngineError::RuntimeContextUnavailable)?;
         let params = params.into_params()?;
         let connection = Arc::clone(&self.connection);
         let sql = sql.to_owned();
@@ -92,7 +92,7 @@ impl Executor for SnapshotConnection {
     where
         P: IntoParams,
     {
-        let cx = asupersync::Cx::current().ok_or(EngineError::RuntimeContextUnavailable)?;
+        let cx = crate::native_runtime::cx().ok_or(EngineError::RuntimeContextUnavailable)?;
         let params = params.into_params()?;
         let connection = Arc::clone(&self.connection);
         let sql = sql.to_owned();
@@ -116,7 +116,7 @@ impl Executor for SnapshotConnection {
     }
 
     async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
-        let cx = asupersync::Cx::current().ok_or(EngineError::RuntimeContextUnavailable)?;
+        let cx = crate::native_runtime::cx().ok_or(EngineError::RuntimeContextUnavailable)?;
         let connection = Arc::clone(&self.connection);
         let sql = sql.to_owned();
         cx.spawn_blocking(move |_| {

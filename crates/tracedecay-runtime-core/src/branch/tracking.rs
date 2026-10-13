@@ -259,7 +259,7 @@ pub async fn prepare_branch_tracking_in_layout(
 ) -> tracedecay_domain::errors::Result<BranchTrackingPreparation> {
     use crate::branch_meta;
 
-    let cx = asupersync::Cx::current().ok_or_else(|| {
+    let cx = crate::native_runtime::cx().ok_or_else(|| {
         tracedecay_domain::errors::TraceDecayError::Config {
             message: "branch tracking requires a native task context".into(),
         }

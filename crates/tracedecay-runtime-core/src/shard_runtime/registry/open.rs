@@ -66,7 +66,7 @@ pub(crate) struct StoreRuntimeOpenJoin {
 
 impl StoreRuntimeOpenJoin {
     pub(super) async fn wait(mut self) -> StoreRuntimeOpenResult {
-        let Some(cx) = Cx::current() else {
+        let Some(cx) = crate::native_runtime::cx() else {
             return StoreRuntimeOpenResult::Failed(
                 StoreRuntimeRegistryFailure::RuntimeUnavailable {
                     operation: "wait for registered runtime open",
@@ -129,7 +129,7 @@ pub(super) enum OpenState {
 pub(super) struct OpeningRuntime {
     pub(super) binding: StoreRuntimeBindingV1,
     pub(super) attempt: u64,
-    pub(super) updates: watch::Sender<OpenState>,
+    pub(super) updates: Arc<watch::Sender<OpenState>>,
     pub(super) database_authority: Option<crate::db::DatabaseAuthority>,
     pub(super) expected_opened_file_identity: Option<u64>,
     pub(super) mode: StoreRuntimeOpenMode,
@@ -285,6 +285,7 @@ impl StoreRuntimeRegistry {
             let binding =
                 StoreRuntimeBindingV1::new(key.shard_id.clone(), key.incarnation, authority_epoch);
             let (updates, receiver) = watch::channel(OpenState::Opening);
+            let updates = Arc::new(updates);
             let eviction = if key.is_project_code_capacity_exempt() {
                 None
             } else {
@@ -402,7 +403,7 @@ impl StoreRuntimeRegistry {
 
     #[tracing::instrument(name = "runtime_core.registry.open", level = "trace", skip_all)]
     pub async fn open(&self, request: StoreRuntimeOpenRequest) -> StoreRuntimeOpenResult {
-        let Some(cx) = Cx::current() else {
+        let Some(cx) = crate::native_runtime::cx() else {
             return StoreRuntimeOpenResult::Failed(
                 StoreRuntimeRegistryFailure::RuntimeUnavailable {
                     operation: "open registered runtime",
@@ -688,7 +689,7 @@ struct OpenAttemptGuard {
     registry: StoreRuntimeRegistry,
     key: StoreRuntimeKey,
     attempt: u64,
-    updates: watch::Sender<OpenState>,
+    updates: Arc<watch::Sender<OpenState>>,
     armed: bool,
 }
 
@@ -697,7 +698,7 @@ impl OpenAttemptGuard {
         registry: StoreRuntimeRegistry,
         key: StoreRuntimeKey,
         attempt: u64,
-        updates: watch::Sender<OpenState>,
+        updates: Arc<watch::Sender<OpenState>>,
     ) -> Self {
         Self {
             registry,

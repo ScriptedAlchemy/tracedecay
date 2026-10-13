@@ -598,7 +598,7 @@ struct ProcessSampler {
     sample: ProcessSampleFn,
     refresh_interval: Duration,
     cache: Arc<Mutex<ProcessSampleCache>>,
-    completion_generation: watch::Sender<u64>,
+    completion_generation: Arc<watch::Sender<u64>>,
 }
 
 /// The cache critical sections only move small values, so a poisoned lock
@@ -610,7 +610,7 @@ fn lock_cache(cache: &Mutex<ProcessSampleCache>) -> MutexGuard<'_, ProcessSample
 
 impl ProcessSampler {
     fn new(sample: ProcessSampleFn, refresh_interval: Duration) -> Self {
-        let (completion_generation, _) = watch::channel(0);
+        let completion_generation = Arc::new(watch::channel(0).0);
         Self {
             sample,
             refresh_interval,
@@ -658,7 +658,7 @@ impl ProcessSampler {
     /// Read at a response boundary, waiting only within the bounded process
     /// sample completion window for a refresh this read observed in flight.
     async fn read_at_response_boundary(&self) -> ProcessTelemetry {
-        let Some(cx) = asupersync::Cx::current() else {
+        let Some(cx) = crate::native_runtime::cx() else {
             return ProcessTelemetry::SampleFailed {
                 error: TraceDecayError::Config {
                     message: "process telemetry response requires a native task context".into(),

@@ -12,16 +12,9 @@ use crate::git_repository::{GitRepositoryAuthority, GitRepositoryError};
 /// Missing/unborn repositories have no history. Unreadable history and paths that
 /// cannot be represented by the graph's string identity are errors, not zero churn.
 #[tracing::instrument(name = "runtime_core.git.file_churn", level = "trace", skip_all)]
-pub async fn file_churn(
-    cx: &asupersync::Cx,
-    project_root: &Path,
-    days: u32,
-) -> Result<HashMap<String, usize>> {
+pub async fn file_churn(project_root: &Path, days: u32) -> Result<HashMap<String, usize>> {
     let root = project_root.to_owned();
-    let mut task = cx
-        .spawn_blocking(move |_cx| read_file_churn(&root, days, &GitCommandBounds::default()))
-        .map_err(|error| churn_error(error.to_string()))?;
-    task.join(cx)
+    tokio::task::spawn_blocking(move || read_file_churn(&root, days, &GitCommandBounds::default()))
         .await
         .map_err(|error| churn_error(error.to_string()))?
 }
@@ -29,7 +22,6 @@ pub async fn file_churn(
 /// Like [`file_churn`], but the log is restricted to `paths`.
 /// An empty list reads nothing and returns an empty map.
 pub async fn file_churn_paths(
-    cx: &asupersync::Cx,
     project_root: &Path,
     days: u32,
     paths: &[String],
@@ -39,14 +31,11 @@ pub async fn file_churn_paths(
     }
     let root = project_root.to_owned();
     let paths = paths.to_vec();
-    let mut task = cx
-        .spawn_blocking(move |_cx| {
-            read_file_churn_paths(&root, days, &paths, &GitCommandBounds::default())
-        })
-        .map_err(|error| churn_error(error.to_string()))?;
-    task.join(cx)
-        .await
-        .map_err(|error| churn_error(error.to_string()))?
+    tokio::task::spawn_blocking(move || {
+        read_file_churn_paths(&root, days, &paths, &GitCommandBounds::default())
+    })
+    .await
+    .map_err(|error| churn_error(error.to_string()))?
 }
 
 fn churn_error(detail: impl Into<String>) -> TraceDecayError {

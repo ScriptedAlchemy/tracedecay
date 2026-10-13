@@ -6587,7 +6587,7 @@ dependencies = [
 name = "tracedecay-framing"
 version = "0.1.0"
 dependencies = [
- "asupersync",
+ "tokio",
  "tracing",
 ]
 
@@ -7042,6 +7042,7 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "thiserror",
+ "tokio",
  "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-store",

@@ -3,7 +3,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use asupersync::Cx;
 use asupersync::channel::watch;
 
 use tracedecay_store::{RuntimeMaintenanceStateV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
@@ -48,7 +47,7 @@ struct CloseReservation {
     key: StoreRuntimeKey,
     attempt: u64,
     owner: Arc<StoreRuntimeOwnerAttachment>,
-    completion: watch::Sender<Option<Result<ClosedStoreRuntime, StoreRuntimeRegistryFailure>>>,
+    completion: Arc<watch::Sender<Option<Result<ClosedStoreRuntime, StoreRuntimeRegistryFailure>>>>,
 }
 
 struct CloseAttemptGuard {
@@ -103,9 +102,10 @@ impl StoreRuntimeRegistry {
         skip_all
     )]
     pub async fn close_idle_for_shutdown(&self) -> Result<usize, StoreRuntimeRegistryFailure> {
-        let cx = Cx::current().ok_or(StoreRuntimeRegistryFailure::RuntimeUnavailable {
-            operation: "close idle registered runtimes for shutdown",
-        })?;
+        let cx =
+            crate::native_runtime::cx().ok_or(StoreRuntimeRegistryFailure::RuntimeUnavailable {
+                operation: "close idle registered runtimes for shutdown",
+            })?;
         self.cancel_and_join_opens_for_shutdown(&cx).await?;
         let (reservations, reserve_failure) = {
             let mut state = self.lock_state();
@@ -168,19 +168,6 @@ impl StoreRuntimeRegistry {
             .collect::<Vec<_>>();
         let closed = closes.len();
         let mut first_failure = reserve_failure;
-        if let Err(error) = self.inner.operations.shutdown(&cx).await {
-            first_failure.get_or_insert(match error {
-                crate::operation_task_owner::RuntimeOperationShutdownError::WaitCancelled => {
-                    StoreRuntimeRegistryFailure::WaitCancelled {
-                        operation: "drain registered runtime settlement tasks for shutdown",
-                    }
-                }
-                error => StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                    operation: "drain registered runtime settlement tasks for shutdown",
-                    message: error.to_string(),
-                },
-            });
-        }
         for (spawned, mut completion) in closes {
             if let Err(error) = spawned {
                 first_failure.get_or_insert(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
@@ -283,9 +270,10 @@ impl StoreRuntimeRegistry {
         authority: &DatabaseAuthority,
         stale_opened_file_identity: Option<u64>,
     ) -> Result<ClosedStoreRuntime, StoreRuntimeRegistryFailure> {
-        let cx = Cx::current().ok_or(StoreRuntimeRegistryFailure::RuntimeUnavailable {
-            operation: "close exact registered runtime",
-        })?;
+        let cx =
+            crate::native_runtime::cx().ok_or(StoreRuntimeRegistryFailure::RuntimeUnavailable {
+                operation: "close exact registered runtime",
+            })?;
         let reservation =
             self.reserve_exact_close(expected, authority, stale_opened_file_identity)?;
         let mut completion = reservation.completion.subscribe();
@@ -506,7 +494,7 @@ impl StoreRuntimeRegistry {
             });
         }
         let owner = ready.owner;
-        let (completion, _) = watch::channel(None);
+        let completion = Arc::new(watch::channel(None).0);
         state.entries.insert(
             key.clone(),
             RegistryEntry::Evicting(EvictingRuntime {

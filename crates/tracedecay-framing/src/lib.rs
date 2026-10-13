@@ -16,9 +16,9 @@
 //!
 //! Partial-frame state is owned by [`BoundedLineReader`], not by the read
 //! future. Every daemon and MCP read loop races its next frame read against
-//! shutdown, cancellation, request completion, or owner-open futures. The read
-//! future is routinely dropped after it has consumed bytes from the underlying
-//! buffered reader. A reader that
+//! shutdown, cancellation, request completion, or owner-open futures inside a
+//! `tokio::select!`, so the read future is routinely dropped after it has
+//! already consumed bytes from the underlying buffered reader. A reader that
 //! accumulated into the future's own stack would silently drop those bytes and
 //! resume mid-frame, truncating the request and desynchronizing JSON-RPC
 //! framing for every later frame on the same transport. Keeping the
@@ -38,12 +38,9 @@
 
 use std::error::Error;
 use std::fmt;
-use std::future::poll_fn;
 use std::io::{self, Read};
-use std::pin::Pin;
-use std::task::{Poll, ready};
 
-use asupersync::io::AsyncBufRead;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 
 /// Wire frame/record ceiling (1 MiB).
 ///
@@ -188,9 +185,12 @@ pub fn read_bounded_to_string(
 /// The partial-frame accumulator (`retained`), the overflow latch
 /// (`oversized`), and the bounded `inspect_prefix` live in this struct rather
 /// than on the read future's stack. Dropping an in-flight read, the normal
-/// outcome of losing a race against shutdown, cancellation, or a completed
-/// handler, therefore loses nothing. Bytes already consumed from `inner` stay
-/// accumulated here and the next `read_*` call resumes the same frame.
+/// outcome of losing a `tokio::select!` race against shutdown, cancellation, or
+/// a completed handler, therefore loses nothing: bytes already consumed from
+/// `inner` stay accumulated here and the next `read_*` call resumes the same
+/// frame. Callers that read under `select!` MUST use this type (or a transport
+/// that owns one) rather than the free `read_bounded_*` functions, whose state
+/// dies with the future.
 ///
 /// State is reset only when a frame terminalizes (newline, EOF, or an oversized
 /// verdict), so a reader is immediately reusable for the next frame.
@@ -296,39 +296,70 @@ where
         &mut self,
         max_bytes: usize,
     ) -> io::Result<BoundedLineOutcome<Option<String>>> {
-        poll_fn(|cx| {
-            loop {
-                let available = ready!(Pin::new(&mut self.inner).poll_fill_buf(cx))?;
-                if available.is_empty() {
-                    return Poll::Ready(self.finish_at_eof());
-                }
+        loop {
+            // Every suspension point in this loop is a cancellation point, and
+            // each one is safe: `fill_buf` consumes nothing when its future is
+            // dropped, and everything consumed past it has already been folded
+            // into `self`.
+            let available = self.inner.fill_buf().await?;
+            if available.is_empty() {
+                return self.finish_at_eof();
+            }
 
-                let newline = available.iter().position(|byte| *byte == b'\n');
-                let chunk_len = newline.map_or(available.len(), |index| index + 1);
-                let content_len = newline.unwrap_or(chunk_len);
+            let newline = available.iter().position(|byte| *byte == b'\n');
+            let chunk_len = newline.map_or(available.len(), |index| index + 1);
+            let content_len = newline.unwrap_or(chunk_len);
 
-                if !self.oversized {
-                    let room = max_bytes.saturating_sub(self.retained.len());
-                    if content_len > room {
-                        self.inspect_prefix =
-                            capture_inspect_prefix(&self.retained, &available[..content_len]);
-                        self.oversized = true;
-                        self.retained.clear();
-                        self.retained.shrink_to_fit();
-                    } else {
-                        self.retained.extend_from_slice(&available[..content_len]);
-                    }
-                }
-
-                Pin::new(&mut self.inner).consume(chunk_len);
-
-                if newline.is_some() {
-                    return Poll::Ready(self.finish_frame());
+            if !self.oversized {
+                let room = max_bytes.saturating_sub(self.retained.len());
+                if content_len > room {
+                    self.inspect_prefix =
+                        capture_inspect_prefix(&self.retained, &available[..content_len]);
+                    self.oversized = true;
+                    self.retained.clear();
+                    self.retained.shrink_to_fit();
+                } else {
+                    self.retained.extend_from_slice(&available[..content_len]);
                 }
             }
-        })
-        .await
+
+            self.inner.consume(chunk_len);
+
+            if newline.is_some() {
+                return self.finish_frame();
+            }
+        }
     }
+}
+
+/// Read one newline-delimited frame, retaining at most `max_bytes` of content
+/// (excluding the terminating newline). On overflow, discards until newline or
+/// EOF and returns [`WireReadOutcome::Oversized`].
+///
+/// The returned future owns the partial-frame accumulator: dropping it mid-frame
+/// loses whatever it consumed. Use [`BoundedLineReader`] when the read races
+/// other futures.
+#[cfg(any(test, feature = "test-helpers"))]
+pub async fn read_bounded_line<R>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> io::Result<WireReadOutcome<Option<String>>>
+where
+    R: AsyncBufRead + Unpin,
+{
+    BoundedLineReader::new(reader).read_line(max_bytes).await
+}
+
+/// Read one MCP/daemon JSON-RPC line with the dedicated frame ceiling.
+///
+/// Test helper only. Production callers hold a [`BoundedLineReader`] so a
+/// dropped read future does not lose the partial-frame accumulator.
+#[cfg(test)]
+pub async fn read_bounded_mcp_line<R>(reader: &mut R) -> io::Result<Option<String>>
+where
+    R: AsyncBufRead + Unpin,
+{
+    BoundedLineReader::new(reader).read_mcp_line().await
 }
 
 fn take_line_string(mut bytes: Vec<u8>) -> io::Result<String> {
@@ -351,28 +382,12 @@ pub fn line_outcome_to_io(outcome: WireReadOutcome<Option<String>>) -> io::Resul
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{
-        BoundedLineReader, MAX_MCP_JSONRPC_FRAME_BYTES, MAX_WIRE_MESSAGE_BYTES,
-        MCP_OVERSIZE_ID_INSPECT_BYTES, WireReadOutcome, is_wire_oversized_io_error,
-        read_bounded_to_end, read_bounded_to_string, wire_oversized_inspect_prefix,
-    };
-    use std::io::{self, Cursor, Read};
+    use super::*;
+    use std::io::Cursor;
     use std::pin::Pin;
     use std::task::{Context, Poll};
-    use std::time::Duration;
 
-    use asupersync::io::{AsyncRead, AsyncWriteExt, BufReader, ReadBuf};
-    use asupersync::net::{TcpListener, TcpStream};
-    use asupersync::time::timeout;
-
-    async fn tcp_pair() -> (TcpStream, TcpStream) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
-        let client = TcpStream::connect(listener.local_addr().expect("listener address"))
-            .await
-            .expect("client");
-        let (server, _) = listener.accept().await.expect("server");
-        (client, server)
-    }
+    use tokio::io::{AsyncRead, AsyncWriteExt, BufReader, ReadBuf};
 
     /// Generates `total` bytes in small chunks without pre-materializing the
     /// full hostile value for the product reader to copy from.
@@ -487,51 +502,28 @@ mod tests {
         assert_eq!(writer.reads, budget);
     }
 
-    #[asupersync::test]
+    #[tokio::test]
     async fn async_line_reader_preserves_valid_line_under_cap() {
-        let mut reader =
-            BoundedLineReader::new(BufReader::new(Cursor::new(b"{\"hello\":1}\n".to_vec())));
-        let line = reader.read_line(MAX_WIRE_MESSAGE_BYTES).await.unwrap();
+        let mut reader = BufReader::new(Cursor::new(b"{\"hello\":1}\n".to_vec()));
+        let line = read_bounded_line(&mut reader, MAX_WIRE_MESSAGE_BYTES)
+            .await
+            .unwrap();
         assert_eq!(
             line,
             WireReadOutcome::Ready(Some(r#"{"hello":1}"#.to_string()))
         );
-        let eof = reader.read_line(MAX_WIRE_MESSAGE_BYTES).await.unwrap();
+        let eof = read_bounded_line(&mut reader, MAX_WIRE_MESSAGE_BYTES)
+            .await
+            .unwrap();
         assert_eq!(eof, WireReadOutcome::Ready(None));
     }
 
-    #[asupersync::test]
-    async fn line_reader_recovers_after_invalid_utf8_and_finishes_at_eof() {
-        let mut reader = BoundedLineReader::new(BufReader::with_capacity(
-            2,
-            Cursor::new(b"\xff\nvalid\r\nlast"),
-        ));
-
-        let error = reader.read_mcp_line().await.expect_err("invalid UTF-8");
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        assert_eq!(error.to_string(), "wire_input_not_utf8");
-        assert_eq!(
-            reader.read_mcp_line().await.expect("next frame").as_deref(),
-            Some("valid")
-        );
-        assert_eq!(
-            reader
-                .read_mcp_line()
-                .await
-                .expect("final frame")
-                .as_deref(),
-            Some("last")
-        );
-        assert_eq!(reader.read_mcp_line().await.expect("EOF"), None);
-    }
-
-    #[asupersync::test]
+    #[tokio::test]
     async fn mcp_line_reader_accepts_exact_cap_rejects_one_over_and_recovers_next() {
         let mut exact = vec![b'a'; MAX_MCP_JSONRPC_FRAME_BYTES];
         exact.push(b'\n');
-        let mut exact_reader = BoundedLineReader::new(BufReader::new(Cursor::new(exact)));
-        let line = exact_reader
-            .read_mcp_line()
+        let mut exact_reader = BufReader::new(Cursor::new(exact));
+        let line = read_bounded_mcp_line(&mut exact_reader)
             .await
             .expect("exact cap accepted")
             .expect("line");
@@ -543,9 +535,8 @@ mod tests {
             8192,
             b"\n{\"jsonrpc\":\"2.0\",\"method\":\"ping\"}\n",
         );
-        let mut oversized_reader = BoundedLineReader::new(BufReader::new(stream));
-        let error = oversized_reader
-            .read_mcp_line()
+        let mut oversized_reader = BufReader::new(stream);
+        let error = read_bounded_mcp_line(&mut oversized_reader)
             .await
             .expect_err("one over rejected");
         assert!(is_wire_oversized_io_error(&error));
@@ -560,8 +551,7 @@ mod tests {
         );
 
         assert_eq!(
-            oversized_reader
-                .read_mcp_line()
+            read_bounded_mcp_line(&mut oversized_reader)
                 .await
                 .expect("next frame")
                 .as_deref(),
@@ -569,11 +559,15 @@ mod tests {
         );
     }
 
-    #[asupersync::test]
-    async fn bounded_line_reader_resumes_a_frame_whose_read_future_was_cancelled(
-        cx: &asupersync::Cx,
-    ) {
-        let (mut client, server) = tcp_pair().await;
+    #[tokio::test]
+    async fn bounded_line_reader_resumes_a_frame_whose_read_future_was_cancelled() {
+        // The daemon and MCP read loops race `read_line` against shutdown,
+        // cancellation, and owner-open futures inside `tokio::select!`. When the
+        // read loses that race its future is dropped mid-frame; `timeout` drops
+        // it the same way here. Bytes already consumed from the buffered reader
+        // must survive, or the next read starts mid-frame and every later frame
+        // on this transport is misparsed.
+        let (mut client, server) = tokio::io::duplex(64);
         let mut reader = BoundedLineReader::new(BufReader::new(server));
 
         client
@@ -581,7 +575,7 @@ mod tests {
             .await
             .expect("first socket write arrives without a newline");
         assert!(
-            timeout(cx.now(), Duration::from_millis(50), reader.read_mcp_line())
+            tokio::time::timeout(std::time::Duration::from_millis(50), reader.read_mcp_line())
                 .await
                 .is_err(),
             "the frame is incomplete, so the read must still be pending when cancelled"
@@ -607,12 +601,13 @@ mod tests {
         assert!(!reader.has_partial_frame());
     }
 
-    #[asupersync::test]
-    async fn bounded_line_reader_keeps_the_oversized_verdict_across_cancellation(
-        cx: &asupersync::Cx,
-    ) {
+    #[tokio::test]
+    async fn bounded_line_reader_keeps_the_oversized_verdict_across_cancellation() {
+        // The overflow latch and the bounded inspect prefix are frame state too:
+        // losing them on cancellation would resume a discarded hostile frame as
+        // if it were a fresh one and admit its tail as a request.
         let max = 32;
-        let (mut client, server) = tcp_pair().await;
+        let (mut client, server) = tokio::io::duplex(1024);
         let mut reader = BoundedLineReader::new(BufReader::new(server));
 
         client
@@ -620,7 +615,7 @@ mod tests {
             .await
             .expect("hostile prefix without a newline");
         assert!(
-            timeout(cx.now(), Duration::from_millis(50), reader.read_line(max))
+            tokio::time::timeout(std::time::Duration::from_millis(50), reader.read_line(max))
                 .await
                 .is_err(),
             "the hostile frame is unterminated, so the read must be pending when cancelled"

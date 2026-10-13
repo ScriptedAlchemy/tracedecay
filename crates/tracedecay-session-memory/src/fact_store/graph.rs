@@ -114,7 +114,8 @@ pub(super) async fn project_memory_graph(
     query: ProjectMemoryGraphQueryV1,
     read_control: &FactReadControl,
 ) -> FactStoreResult<ProjectMemoryGraphPageV1> {
-    let cx = Cx::current().ok_or(FactStoreError::GraphUnavailable)?;
+    let cx =
+        tracedecay_runtime_core::native_runtime::cx().ok_or(FactStoreError::GraphUnavailable)?;
     let owner = query.owner().clone();
     // This read verifies or reconciles, then reads through the same graph
     // owner as the post-write pass, so it is admitted through the same
@@ -377,7 +378,7 @@ pub(super) fn schedule_project_memory_graph_reconciliation(
         let Some(db) = weak_db.upgrade() else {
             return true;
         };
-        let Some(cx) = Cx::current() else {
+        let Some(cx) = tracedecay_runtime_core::native_runtime::cx() else {
             tracing::warn!("project memory reconciliation runtime is unavailable");
             return false;
         };

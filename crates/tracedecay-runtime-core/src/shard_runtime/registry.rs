@@ -1076,7 +1076,7 @@ impl StoreRuntimeClientLease {
         authority: crate::db::DatabaseAuthority,
     ) -> Result<tracedecay_store::RuntimeSubmitOutcomeV1, StoreRuntimeRegistryFailure> {
         let cx =
-            asupersync::Cx::current().ok_or(StoreRuntimeRegistryFailure::RuntimeUnavailable {
+            crate::native_runtime::cx().ok_or(StoreRuntimeRegistryFailure::RuntimeUnavailable {
                 operation: "submit registered runtime write",
             })?;
         if request.binding() != self.binding() {

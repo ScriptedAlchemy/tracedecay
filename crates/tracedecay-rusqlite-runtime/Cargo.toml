@@ -20,12 +20,16 @@ ring = "0.17.14"
 sha2 = "0.11.0"
 thiserror = "2"
 asupersync.workspace = true
+# Synchronous storage ports wait on the writer from Tokio daemon workers; see
+# `recv_writer_reply`.
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread"] }
 tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-contracts = { path = "../tracedecay-contracts" }
 tracedecay-store = { path = "../tracedecay-store" }
 tracing = "0.1"
 
 [dev-dependencies]
+tokio = { version = "1", default-features = false, features = ["macros", "rt", "rt-multi-thread", "sync", "test-util", "time"] }
 proptest = { version = "1.11.0", default-features = false, features = ["std"] }
 tempfile = "3"
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }

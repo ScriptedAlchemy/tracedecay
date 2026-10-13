@@ -154,13 +154,11 @@ impl Database {
     ///
     /// Writable handles opened for the same database share one `DatabaseInner`,
     /// so this guard coordinates MCP, dashboard, and automation mutations.
-    pub async fn writer(&self) -> Result<asupersync::sync::MutexGuard<'_, ()>> {
-        let cx = asupersync::Cx::current().ok_or_else(|| TraceDecayError::Config {
+    pub async fn writer(&self) -> Result<asupersync::sync::OwnedMutexGuard<()>> {
+        let cx = crate::native_runtime::cx().ok_or_else(|| TraceDecayError::Config {
             message: "database writer admission requires an Asupersync context".to_owned(),
         })?;
-        self.inner
-            .writer
-            .lock(&cx)
+        asupersync::sync::OwnedMutexGuard::lock(std::sync::Arc::clone(&self.inner.writer), &cx)
             .await
             .map_err(|error| TraceDecayError::Database {
                 message: format!("database writer admission failed: {error}"),
@@ -201,6 +199,7 @@ impl Database {
             _guard: guard,
             conn,
             _client_guard: self.client_guard(),
+            _database: std::marker::PhantomData,
         })
     }
 
@@ -272,6 +271,7 @@ impl Database {
             transaction,
             guard,
             _client_guard: self.client_guard(),
+            _database: std::marker::PhantomData,
         })
     }
 
@@ -299,6 +299,7 @@ impl Database {
             transaction,
             guard,
             _client_guard: self.client_guard(),
+            _database: std::marker::PhantomData,
         })
     }
 

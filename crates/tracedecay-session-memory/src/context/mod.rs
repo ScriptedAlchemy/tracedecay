@@ -11,8 +11,6 @@ use std::fmt;
 use std::future::Future;
 use std::task::Poll;
 
-use asupersync::Cx;
-
 use tracedecay_contracts::now_micros;
 use tracedecay_domain::{
     AccessPolicyDigest, ProjectId, RepositoryId, WorktreeId, sha256_hex_suffix,
@@ -353,7 +351,6 @@ impl RequestBudgets {
 pub enum RequestInterruption {
     Cancelled,
     DeadlineExceeded,
-    RuntimeUnavailable,
 }
 
 /// Composes immutable session admission authority into one application grant
@@ -436,12 +433,7 @@ where
         .min(context.grant().expires_at.0);
     let remaining_micros = terminal_at.saturating_sub(application_observed_at().0);
     let remaining_micros = u64::try_from(remaining_micros).unwrap_or(0);
-    let Some(cx) = Cx::current() else {
-        on_interruption();
-        return Err(RequestInterruption::RuntimeUnavailable);
-    };
     race_application_request_wait(
-        &cx,
         remaining_micros,
         cancellation.cancelled(),
         future,
@@ -467,19 +459,10 @@ pub async fn run_deadline_signal_interruptible<T>(
     }
     let remaining_micros = deadline.expires_at.0.saturating_sub(observed_at.0);
     let remaining_micros = u64::try_from(remaining_micros).unwrap_or(0);
-    let cx = Cx::current().ok_or(RequestInterruption::RuntimeUnavailable)?;
-    race_application_request_wait(
-        &cx,
-        remaining_micros,
-        cancellation.cancelled(),
-        future,
-        || {},
-    )
-    .await
+    race_application_request_wait(remaining_micros, cancellation.cancelled(), future, || {}).await
 }
 
 async fn race_application_request_wait<T>(
-    cx: &Cx,
     remaining_micros: u64,
     cancelled: impl std::future::Future<Output = ()>,
     future: impl std::future::Future<Output = T>,
@@ -487,7 +470,7 @@ async fn race_application_request_wait<T>(
 ) -> Result<T, RequestInterruption> {
     let mut cancelled = std::pin::pin!(cancelled);
     let mut deadline = std::pin::pin!(asupersync::time::sleep(
-        cx.now(),
+        asupersync::time::wall_now(),
         std::time::Duration::from_micros(remaining_micros),
     ));
     let mut future = std::pin::pin!(future);
@@ -850,7 +833,7 @@ mod tests {
     }
 
     #[asupersync::test]
-    async fn application_interruptible_observes_live_transport_cancellation(cx: &Cx) {
+    async fn application_interruptible_observes_live_transport_cancellation(cx: &asupersync::Cx) {
         let scope = project_identity().application_scope().unwrap();
         let application = application_context(
             scope.clone(),

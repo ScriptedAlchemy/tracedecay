@@ -3,7 +3,6 @@ use super::{
     DatabaseAuthorityRole, DatabaseHealth, DatabaseStorageTelemetryHandle, Result, TraceDecayError,
     database_checkpoint_probe, database_health,
 };
-use asupersync::Cx;
 
 impl Database {
     pub fn close(self) {
@@ -116,7 +115,7 @@ impl Database {
     }
 
     pub(crate) async fn checkpoint_unguarded(&self) -> Result<()> {
-        let cx = Cx::current().ok_or_else(|| TraceDecayError::Config {
+        let cx = crate::native_runtime::cx().ok_or_else(|| TraceDecayError::Config {
             message: "database checkpoint requires an Asupersync context".to_owned(),
         })?;
         let authority = self.write_authority()?;
@@ -191,7 +190,7 @@ impl Database {
     }
 
     async fn health_on_fresh_reader(&self, operation: &str) -> Result<DatabaseHealth> {
-        let cx = Cx::current().ok_or_else(|| TraceDecayError::Config {
+        let cx = crate::native_runtime::cx().ok_or_else(|| TraceDecayError::Config {
             message: "database health check requires an Asupersync context".to_owned(),
         })?;
         let queued_at = std::time::Instant::now();
@@ -254,7 +253,7 @@ impl Database {
         // and a worker rendezvous (each bounded below); run it on the blocking
         // pool so a busy store cannot capture an async executor thread.
         let runtime = self.client.runtime().clone();
-        let cx = Cx::current().ok_or_else(|| TraceDecayError::Config {
+        let cx = crate::native_runtime::cx().ok_or_else(|| TraceDecayError::Config {
             message: "store-size sampling requires an Asupersync context".to_owned(),
         })?;
         cx.spawn_blocking(move |_cx| runtime.storage_page_counts(std::time::Duration::from_secs(5)))
@@ -276,7 +275,7 @@ impl Database {
 
     /// Runs bounded incremental vacuum through the canonical writer lane.
     pub async fn run_incremental_vacuum(&self, pages: u64) -> Result<()> {
-        let cx = Cx::current().ok_or_else(|| TraceDecayError::Config {
+        let cx = crate::native_runtime::cx().ok_or_else(|| TraceDecayError::Config {
             message: "database compaction requires an Asupersync context".to_owned(),
         })?;
         let authority = self.write_authority()?;

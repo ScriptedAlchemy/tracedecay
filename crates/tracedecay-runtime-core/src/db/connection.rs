@@ -124,9 +124,10 @@ static DATABASE_HEALTH_GATE: OnceLock<asupersync::sync::Mutex<()>> = OnceLock::n
 /// lane. It is another capability over the same physical attachment, never a
 /// second path-derived `SQLite` open.
 pub struct DatabaseWriterConnection<'a> {
-    _guard: asupersync::sync::MutexGuard<'a, ()>,
+    _guard: asupersync::sync::OwnedMutexGuard<()>,
     conn: Connection,
     _client_guard: DatabaseClientGuardV1,
+    _database: std::marker::PhantomData<&'a Database>,
 }
 
 /// Driver-neutral writer facade held behind [`DatabaseWriterConnection`].
@@ -228,8 +229,9 @@ pub enum DatabaseMemoryTransaction<'a> {
 /// transaction commits, rolls back, or is dropped.
 pub struct DatabaseWriteTransaction<'a> {
     transaction: Transaction,
-    guard: asupersync::sync::MutexGuard<'a, ()>,
+    guard: asupersync::sync::OwnedMutexGuard<()>,
     _client_guard: DatabaseClientGuardV1,
+    _database: std::marker::PhantomData<&'a Database>,
 }
 
 fn database_checkpoint_probe() -> Result<DatabaseCheckpointProbe> {

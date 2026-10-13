@@ -135,7 +135,7 @@ impl<K: Eq + Hash, V> SingleFlightWeakRegistry<K, V> {
         Fut: std::future::Future<Output = std::result::Result<V, E>>,
         E: From<tracedecay_domain::errors::TraceDecayError>,
     {
-        let cx = asupersync::Cx::current().ok_or_else(|| {
+        let cx = crate::native_runtime::cx().ok_or_else(|| {
             tracedecay_domain::errors::TraceDecayError::Config {
                 message: "single-flight open requires a native task context".into(),
             }

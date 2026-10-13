@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use asupersync::{
     Budget, Cx,
-    runtime::{JoinError, Runtime, TaskHandle},
+    runtime::{JoinError, TaskHandle},
     sync::Notify,
 };
 
@@ -333,7 +333,7 @@ impl MemoryGraphReconciliationCoordinatorV1 {
         if state.retirement_reserved {
             return MemoryGraphReconciliationTaskScheduleV1::Retiring;
         }
-        let Some(runtime) = Runtime::current_handle() else {
+        let Some(runtime) = crate::native_runtime::handle() else {
             return MemoryGraphReconciliationTaskScheduleV1::RuntimeUnavailable;
         };
         let Ok(settlement) = runtime.try_request_cx_with_budget(Budget::INFINITE) else {
@@ -711,7 +711,7 @@ impl MemoryGraphReconciliationTaskOwnerV1 {
         {
             return Err(MemoryGraphReconciliationRetirementStartErrorV1::RetirementReserved);
         }
-        let runtime = Runtime::current_handle()
+        let runtime = crate::native_runtime::handle()
             .ok_or(MemoryGraphReconciliationRetirementStartErrorV1::RuntimeUnavailable)?;
         let settlement = runtime
             .try_request_cx_with_budget(Budget::INFINITE)

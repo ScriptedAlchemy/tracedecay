@@ -390,11 +390,6 @@ where
             Err(RequestInterruption::DeadlineExceeded) => {
                 return SessionRetrievalOutcome::TimedOut;
             }
-            Err(RequestInterruption::RuntimeUnavailable) => {
-                return SessionRetrievalOutcome::Unavailable(
-                    SessionRetrievalUnavailableCause::AuthorityAbsent,
-                );
-            }
         };
         match result {
             Ok(report) if expected_execution.validates_report(&report) => {

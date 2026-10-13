@@ -9,11 +9,11 @@ use tokio::sync::Mutex;
 use tracedecay_contracts::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
 use tracedecay_domain::{BrainNodeId, EnrollmentGrantV1};
 use tracedecay_graph_db::{GraphDbRegistry, GraphDbRegistryConfig};
+use tracedecay_runtime_core::RuntimeOperationTaskOwnerV1;
 use tracedecay_runtime_core::storage::{
     SESSIONS_DB_FILENAME, STORE_MANIFEST_FILENAME, profile_sharded_data_root, read_store_manifest,
     write_store_manifest_to_path,
 };
-use tracedecay_runtime_core::{Runtime, RuntimeOperationTaskOwnerV1};
 #[cfg(any(test, feature = "test-helpers"))]
 use tracedecay_rusqlite_runtime::remote::RemoteRecoverySqliteAuthorityV1;
 use tracedecay_rusqlite_runtime::remote::{
@@ -145,8 +145,11 @@ impl DaemonSessionRuntimeRegistryV1 {
         long_lived_session_maintenance: bool,
     ) -> Result<Self> {
         let operation_runtime =
-            Runtime::current_handle().ok_or_else(|| TraceDecayError::Config {
-                message: "session runtime registry requires a native execution runtime".to_owned(),
+            tracedecay_runtime_core::native_runtime::handle().ok_or_else(|| {
+                TraceDecayError::Config {
+                    message: "session runtime registry requires a native execution runtime"
+                        .to_owned(),
+                }
             })?;
         let operation_task_owner = Arc::new(
             RuntimeOperationTaskOwnerV1::new(operation_runtime.clone()).map_err(|error| {

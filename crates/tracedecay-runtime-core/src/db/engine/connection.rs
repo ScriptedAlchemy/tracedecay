@@ -1,4 +1,4 @@
-use asupersync::{Budget, Cx, runtime::Runtime};
+use asupersync::Budget;
 use std::{sync::Arc, time::Duration};
 
 use tracedecay_store::{OperationPriorityV1, StoreRuntimeBindingV1};
@@ -153,8 +153,7 @@ impl Connection {
         let runtime = Arc::clone(&self.runtime);
         // Once admitted, a batch continues through its first error even if its
         // caller stops waiting. Separate dispatches preserve writer interleaving.
-        let _caller = Cx::current().ok_or(Error::RuntimeContextUnavailable)?;
-        let settlement = Runtime::current_handle()
+        let settlement = crate::native_runtime::handle()
             .ok_or(Error::RuntimeContextUnavailable)?
             .try_request_cx_with_budget(Budget::INFINITE)
             .map_err(|error| Error::Runtime(format!("failed to admit SQL settlement: {error}")))?;
@@ -184,7 +183,7 @@ impl Connection {
         let statement = statement(sql, params)?;
         let runtime = Arc::clone(&self.runtime);
         let priority = self.read_priority;
-        let cx = Cx::current().ok_or(Error::RuntimeContextUnavailable)?;
+        let cx = crate::native_runtime::cx().ok_or(Error::RuntimeContextUnavailable)?;
         let rows = cx
             .spawn_blocking(move |_cx| {
                 runtime.query_with_priority(statement, priority, READER_WAIT)
@@ -214,8 +213,7 @@ impl Connection {
 
     pub async fn release_connection_memory(&self) -> Result<MemoryReleaseOutcome> {
         let runtime = Arc::clone(&self.runtime);
-        let _caller = Cx::current().ok_or(Error::RuntimeContextUnavailable)?;
-        let owner = Runtime::current_handle().ok_or(Error::RuntimeContextUnavailable)?;
+        let owner = crate::native_runtime::handle().ok_or(Error::RuntimeContextUnavailable)?;
         let settlement = owner
             .try_request_cx_with_budget(Budget::INFINITE)
             .map_err(|error| Error::Runtime(format!("failed to admit memory release: {error}")))?;
@@ -249,7 +247,7 @@ impl Connection {
     pub async fn read_snapshot(&self) -> Result<ReadSnapshot> {
         let runtime = Arc::clone(&self.runtime);
         let priority = self.read_priority;
-        let cx = Cx::current().ok_or(Error::RuntimeContextUnavailable)?;
+        let cx = crate::native_runtime::cx().ok_or(Error::RuntimeContextUnavailable)?;
         cx.spawn_blocking(move |_cx| {
             runtime.begin_read_snapshot_with_priority(priority, READER_WAIT)
         })
@@ -263,7 +261,7 @@ impl Connection {
 
     pub(crate) async fn health_read_snapshot(&self) -> Result<ReadSnapshot> {
         let runtime = Arc::clone(&self.runtime);
-        let cx = Cx::current().ok_or(Error::RuntimeContextUnavailable)?;
+        let cx = crate::native_runtime::cx().ok_or(Error::RuntimeContextUnavailable)?;
         cx.spawn_blocking(move |_cx| runtime.begin_health_read_snapshot(HEALTH_READER_WAIT))
             .map_err(|error| {
                 Error::Runtime(format!("failed to admit SQL health snapshot: {error}"))

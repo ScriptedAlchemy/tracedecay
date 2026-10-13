@@ -95,11 +95,30 @@ pub struct ExactSqlHandle {
     write_authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
 }
 
-/// Synchronous storage ports must be called from a blocking task or an OS thread.
+/// Waits for the serialized writer actor's reply without stalling the async
+/// worker that issued the command.
+///
+/// Every synchronous storage port in this workspace (`WorkAttemptStoragePort`,
+/// `WorkflowRunStoragePort`, and their siblings) reaches the writer through
+/// these one-shot replies, and the daemon calls those ports from Tokio tasks.
+/// A plain `recv_blocking` therefore parks a whole worker for as long as the
+/// writer's command queue takes to reach this command. On a small runtime two
+/// concurrent waits starve every other task on it, including the HTTP reads
+/// whose admitted deadline then expires. `block_in_place` hands the worker's
+/// run queue to another thread for the wait; it panics outside a multi-thread
+/// runtime, so the flavor is checked first and everything else
+/// (current-thread runtimes, plain threads) keeps the previous inline
+/// behavior. The remaining `block_in_place` panic case is a `LocalSet` on a
+/// multi-thread runtime, which this workspace does not use.
 fn recv_writer_reply<T>(
     response: async_channel::Receiver<T>,
 ) -> Result<T, async_channel::RecvError> {
-    response.recv_blocking()
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| response.recv_blocking())
+        }
+        _ => response.recv_blocking(),
+    }
 }
 
 impl ExactSqlHandle {

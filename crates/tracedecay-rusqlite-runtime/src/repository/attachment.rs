@@ -633,7 +633,7 @@ impl RepositoryRuntimePhysicalAttachment {
             .trigger_maintenance_authorized(request, authority)
             .map_err(RepositoryDispatchError::Checkpoint)?;
         ticket
-            .wait()
+            .wait(cx)
             .await
             .map_err(RepositoryDispatchError::Checkpoint)
     }

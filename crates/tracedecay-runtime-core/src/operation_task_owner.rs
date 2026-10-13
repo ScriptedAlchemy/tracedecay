@@ -51,14 +51,12 @@ impl Drop for RuntimeOperationTaskBatchV1 {
 }
 
 type ShutdownCompletion = Option<Result<(), RuntimeOperationShutdownError>>;
-type ShutdownPublication = Result<(), watch::SendError<ShutdownCompletion>>;
 
 enum RuntimeOperationTaskLifecycleV1 {
     Accepting,
     Fenced,
     Draining {
         completion: watch::Receiver<ShutdownCompletion>,
-        task: TaskHandle<ShutdownPublication>,
     },
 }
 
@@ -197,19 +195,18 @@ impl RuntimeOperationTaskOwnerV1 {
             } else {
                 state.lifecycle = RuntimeOperationTaskLifecycleV1::Fenced;
                 let (publish_completion, completion) = watch::channel(None);
-                let reaper_state = Arc::clone(&self.state);
-                let task = self
-                    .cx
-                    .spawn(move |cx| async move {
-                        let mut tasks = std::mem::take(
-                            &mut reaper_state
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .tasks,
-                        );
+                // The reaper owns the handles from the fence on, so dropping
+                // this owner cannot abort settlement that shutdown accepted.
+                let mut tasks = std::mem::take(&mut state.tasks.handles);
+                self.cx
+                    .spawn(move |_| async move {
                         let mut failures = Vec::new();
-                        while let Some((task_id, mut task)) = tasks.handles.pop_first() {
-                            if let Err(error) = task.join(&cx).await {
+                        while let Some((task_id, mut task)) = tasks.pop_first() {
+                            // `poll_join` never aborts the joined task when the
+                            // reaper itself is cancelled.
+                            if let Err(error) =
+                                std::future::poll_fn(|context| task.poll_join(context)).await
+                            {
                                 failures.push(RuntimeOperationTaskJoinFailure { task_id, error });
                             }
                         }
@@ -222,7 +219,6 @@ impl RuntimeOperationTaskOwnerV1 {
                     })
                     .map_err(RuntimeOperationShutdownError::ReaperAdmission)?;
                 state.lifecycle = RuntimeOperationTaskLifecycleV1::Draining {
-                    task,
                     completion: completion.clone(),
                 };
                 completion
@@ -252,10 +248,9 @@ impl Drop for RuntimeOperationTaskOwnerV1 {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let RuntimeOperationTaskLifecycleV1::Draining { task, .. } = &state.lifecycle {
-            task.abort();
+        if matches!(state.lifecycle, RuntimeOperationTaskLifecycleV1::Accepting) {
+            state.lifecycle = RuntimeOperationTaskLifecycleV1::Fenced;
         }
-        state.lifecycle = RuntimeOperationTaskLifecycleV1::Fenced;
         state.tasks.handles.values().for_each(TaskHandle::abort);
     }
 }

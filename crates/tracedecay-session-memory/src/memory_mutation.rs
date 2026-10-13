@@ -7,8 +7,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::Poll;
 use std::time::Duration;
 
-use asupersync::Cx;
-
 use tracedecay_contracts::{
     PreparedRetainedEffect, RequestAdmission, RetainedSurfaceExecutionContextV1,
     RetainedSurfaceExecutionErrorV1, effective_memory_deadline, now_micros,
@@ -130,14 +128,12 @@ where
         .ok_or(RetainedSurfaceExecutionErrorV1::TimedOut(
             tracedecay_contracts::CancellationStage::BeforeEffect,
         ))?;
-    let cx = Cx::current().ok_or_else(|| {
-        RetainedSurfaceExecutionErrorV1::unavailable(
-            "native memory execution context is unavailable",
-        )
-    })?;
     let mut future = std::pin::pin!(future);
     let mut cancelled = std::pin::pin!(context.cancellation_signal.cancelled());
-    let mut deadline = std::pin::pin!(asupersync::time::sleep(cx.now(), remaining));
+    let mut deadline = std::pin::pin!(asupersync::time::sleep(
+        asupersync::time::wall_now(),
+        remaining
+    ));
     let settlement = std::future::poll_fn(|task| {
         if let Poll::Ready(outcome) = future.as_mut().poll(task) {
             return Poll::Ready(Ok(outcome));

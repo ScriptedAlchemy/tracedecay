@@ -548,7 +548,7 @@ impl SnapshotSet {
         policy: SnapshotSourcePolicy,
         control: SnapshotReadControl,
     ) -> io::Result<Self> {
-        let cx = asupersync::Cx::current().ok_or_else(|| {
+        let cx = crate::native_runtime::cx().ok_or_else(|| {
             io::Error::other(tracedecay_domain::errors::TraceDecayError::Config {
                 message: "snapshot capture requires a native task context".into(),
             })
@@ -988,7 +988,7 @@ async fn finish_one(
     scratch: Arc<ScratchDirectory>,
     control: SnapshotReadControl,
 ) -> io::Result<SnapshotDatabase> {
-    let cx = asupersync::Cx::current().ok_or_else(|| {
+    let cx = crate::native_runtime::cx().ok_or_else(|| {
         io::Error::other(tracedecay_domain::errors::TraceDecayError::Config {
             message: "snapshot copy requires a native task context".into(),
         })

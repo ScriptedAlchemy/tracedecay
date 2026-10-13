@@ -32,7 +32,7 @@ const FOLD_INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(1);
     skip_all
 )]
 pub async fn materialize(path: &Path, control: SnapshotReadControl) -> io::Result<()> {
-    let cx = asupersync::Cx::current().ok_or_else(|| {
+    let cx = crate::native_runtime::cx().ok_or_else(|| {
         io::Error::other(tracedecay_domain::errors::TraceDecayError::Config {
             message: "snapshot materialization requires a native task context".into(),
         })

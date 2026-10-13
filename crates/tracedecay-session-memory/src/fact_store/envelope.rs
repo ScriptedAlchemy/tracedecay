@@ -4,7 +4,6 @@ use std::future::Future;
 use std::pin::Pin;
 
 use asupersync::channel::oneshot;
-use asupersync::runtime::Runtime;
 use asupersync::{Budget, Cx};
 
 use serde_json::Value;
@@ -32,9 +31,7 @@ where
     F: FnOnce(Cx) -> Fut + Send + 'static,
     Fut: Future<Output = FactStoreResult<T>> + Send + 'static,
 {
-    Cx::current()
-        .ok_or_else(|| storage_message(operation, "native execution context is unavailable"))?;
-    let runtime = Runtime::current_handle()
+    let runtime = tracedecay_runtime_core::native_runtime::handle()
         .ok_or_else(|| storage_message(operation, "native settlement runtime is unavailable"))?;
     let settlement_cx = runtime
         .try_request_cx_with_budget(Budget::INFINITE)

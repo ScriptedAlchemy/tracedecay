@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use asupersync::runtime::{Runtime, RuntimeHandle};
+use asupersync::runtime::RuntimeHandle;
 
 use tracedecay_rusqlite_runtime::repository::{
     RepositoryDispatchError, RepositoryPhysicalAttachmentFactory,
@@ -129,7 +129,7 @@ impl ShardRuntimePublisher for LifecycleShardRuntimePublisher {
     ) -> StoreRuntimeRegistryFuture<'_, Result<PublishedShardRuntime, StoreRuntimeRegistryFailure>>
     {
         Box::pin(async move {
-            let executor = Runtime::current_handle().ok_or(
+            let executor = crate::native_runtime::handle().ok_or(
                 StoreRuntimeRegistryFailure::RuntimeUnavailable {
                     operation: "publish physical registered runtime",
                 },

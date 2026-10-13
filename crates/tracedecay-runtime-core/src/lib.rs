@@ -105,6 +105,7 @@ pub mod git_open;
 pub mod git_repository;
 pub mod lifecycle_lease;
 pub mod logging;
+pub use tracedecay_rusqlite_runtime::native_runtime;
 pub mod operation_task_owner;
 pub mod os_str_bytes;
 pub mod path_safety;

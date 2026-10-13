@@ -1,4 +1,3 @@
-use asupersync::Cx;
 use std::sync::Arc;
 
 use tracedecay_rusqlite_runtime::exact_sql::ExactSqlReadSnapshot;
@@ -27,7 +26,7 @@ impl ReadSnapshot {
     {
         let runtime = Arc::clone(&self.runtime);
         let statement = statement(sql, params)?;
-        let cx = Cx::current().ok_or(super::Error::RuntimeContextUnavailable)?;
+        let cx = crate::native_runtime::cx().ok_or(super::Error::RuntimeContextUnavailable)?;
         let rows = cx
             .spawn_blocking(move |_cx| runtime.query(statement).map_err(super::Error::from))
             .map_err(|error| {

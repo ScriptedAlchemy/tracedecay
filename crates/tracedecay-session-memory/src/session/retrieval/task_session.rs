@@ -92,9 +92,6 @@ where
             Some(crate::context::RequestInterruption::DeadlineExceeded) => {
                 return Err(SessionExecutionAdmissionFailure::TimedOut);
             }
-            Some(crate::context::RequestInterruption::RuntimeUnavailable) => {
-                return Err(SessionExecutionAdmissionFailure::Unavailable);
-            }
             None => {}
         }
         let authorization = SessionScopeAuthorizationRequest::new(
@@ -129,9 +126,6 @@ where
             }
             Some(crate::context::RequestInterruption::DeadlineExceeded) => {
                 return Err(SessionExecutionAdmissionFailure::TimedOut);
-            }
-            Some(crate::context::RequestInterruption::RuntimeUnavailable) => {
-                return Err(SessionExecutionAdmissionFailure::Unavailable);
             }
             None => {}
         }
@@ -278,9 +272,6 @@ where
             }
             Err(RequestInterruption::Cancelled) => {
                 return TaskSessionRetrievalOutcomeV1::Cancelled;
-            }
-            Err(RequestInterruption::RuntimeUnavailable) => {
-                return TaskSessionRetrievalOutcomeV1::Unavailable;
             }
         };
         match result {

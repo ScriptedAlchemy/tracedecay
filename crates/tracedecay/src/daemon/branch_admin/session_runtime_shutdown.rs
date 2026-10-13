@@ -25,9 +25,11 @@ impl SessionRuntimeMemoryGraphReconciliationShutdownV1 {
     )]
     pub(in crate::daemon) async fn shutdown(&self) -> std::result::Result<(), String> {
         self.cancel();
+        let cx = tracedecay_runtime_core::native_runtime::cx()
+            .ok_or_else(|| "native execution runtime is unavailable".to_owned())?;
         let mut failures = Vec::new();
         for registry in &self.registries {
-            if let Err(error) = registry.shutdown_terminal_tasks().await {
+            if let Err(error) = registry.shutdown_terminal_tasks(&cx).await {
                 failures.push(error);
             }
             if let Err(error) = registry.shutdown_memory_graph_reconciliation_tasks().await {

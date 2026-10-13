@@ -19,15 +19,8 @@ use std::ffi::{OsStr, OsString};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-
-use asupersync::Cx;
-use asupersync::io::{AsyncReadExt, AsyncWriteExt};
-use asupersync::process::{Command as AsyncCommand, Output, Stdio as AsyncStdio};
-use std::future::{Future, poll_fn};
-use std::pin::pin;
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::OnceLock;
-use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use crate::cancellation::CancellationToken;
@@ -265,7 +258,7 @@ pub fn bounded_git_output(
     bounds: &GitCommandBounds,
 ) -> Result<Output, GitCommandError> {
     let program = try_git_program().map_err(GitCommandError::from)?;
-    let mut command = AsyncCommand::new(program);
+    let mut command = Command::new(program);
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("GIT_") {
             command.env_remove(&key);
@@ -287,7 +280,7 @@ pub fn bounded_git_output(
 /// and termination. [`bounded_git_output`] is the read-only Git wrapper that
 /// applies `TraceDecay`'s ambient-environment sanitization.
 pub fn bounded_command_output(
-    command: AsyncCommand,
+    command: Command,
     stdin: Option<&[u8]>,
     bounds: &GitCommandBounds,
 ) -> Result<Output, GitCommandError> {
@@ -307,11 +300,12 @@ pub fn bounded_command_output(
     std::thread::scope(|scope| {
         scope
             .spawn(move || {
-                let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_io()
+                    .enable_time()
                     .build()
-                    .map_err(|error| GitCommandError::Wait(std::io::Error::other(error)))?;
-                let cx = runtime.request_cx_with_budget(asupersync::Budget::INFINITE);
-                runtime.block_on(run_bounded_command(&cx, command, input, bounds))
+                    .map_err(GitCommandError::Wait)?;
+                runtime.block_on(run_bounded_command(command, input, bounds))
             })
             .join()
             .map_err(|_| {
@@ -330,35 +324,29 @@ pub(crate) fn run_interruptible<T>(
     interrupt: &std::sync::atomic::AtomicBool,
     work: impl FnOnce() -> T,
 ) -> Result<T, GitCommandError> {
-    let (finished, settled) = std::sync::mpsc::channel::<()>();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .map_err(GitCommandError::Wait)?;
+    let cancellation = bounds.cancel.clone();
+    let deadline = tokio::time::Instant::from_std(bounds.deadline);
+    let (finished, settled) = tokio::sync::oneshot::channel::<()>();
     std::thread::scope(|scope| {
         let watchdog = scope.spawn(move || {
-            loop {
-                let failure = if bounds
-                    .cancel
-                    .as_ref()
-                    .is_some_and(CancellationToken::is_cancelled)
-                {
-                    Some(GitCommandError::Cancelled)
-                } else if Instant::now() >= bounds.deadline {
-                    Some(GitCommandError::DeadlineExceeded)
-                } else {
-                    None
-                };
-                if let Some(error) = failure {
-                    interrupt.store(true, std::sync::atomic::Ordering::Release);
-                    return Some(error);
+            let fired = runtime.block_on(async {
+                tokio::select! {
+                    biased;
+                    () = wait_for_cancellation(cancellation) => Some(GitCommandError::Cancelled),
+                    () = tokio::time::sleep_until(deadline) => {
+                        Some(GitCommandError::DeadlineExceeded)
+                    }
+                    _ = settled => None,
                 }
-                match settled.recv_timeout(
-                    bounds
-                        .deadline
-                        .saturating_duration_since(Instant::now())
-                        .min(CHILD_WAIT_POLL_INTERVAL),
-                ) {
-                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                }
+            });
+            if fired.is_some() {
+                interrupt.store(true, std::sync::atomic::Ordering::Release);
             }
+            fired
         });
         let output = work();
         let _ = finished.send(());
@@ -372,184 +360,165 @@ pub(crate) fn run_interruptible<T>(
     })
 }
 
-async fn read_bounded_output(
-    mut reader: impl asupersync::io::AsyncRead + Unpin,
-    stream: &'static str,
-    limit: usize,
-) -> Result<Vec<u8>, GitCommandError> {
-    let mut bytes = Vec::with_capacity(limit.min(64 * 1024));
-    let mut buffer = [0u8; 8 * 1024];
-    loop {
-        let count = reader
-            .read(&mut buffer)
-            .await
-            .map_err(|source| GitCommandError::ReadOutput { stream, source })?;
-        if count == 0 {
-            return Ok(bytes);
-        }
-        if count > limit.saturating_sub(bytes.len()) {
-            return Err(GitCommandError::OutputLimitExceeded {
-                stream,
-                bound: limit,
-            });
-        }
-        bytes.extend_from_slice(&buffer[..count]);
-    }
+struct BoundedRead {
+    bytes: Vec<u8>,
+    exceeded: bool,
 }
 
-pub(crate) async fn run_bounded_command(
-    cx: &Cx,
-    mut command: AsyncCommand,
+async fn read_bounded_output(
+    mut reader: impl tokio::io::AsyncRead + Unpin,
+    stream: &'static str,
+    limit: usize,
+    limit_sender: tokio::sync::mpsc::UnboundedSender<(&'static str, usize)>,
+) -> std::io::Result<BoundedRead> {
+    use tokio::io::AsyncReadExt;
+
+    let mut bytes = Vec::with_capacity(limit.min(64 * 1024));
+    let mut buffer = [0u8; 8 * 1024];
+    let mut over_limit = false;
+    loop {
+        let count = reader.read(&mut buffer).await?;
+        if count == 0 {
+            break;
+        }
+        let remaining = limit.saturating_sub(bytes.len());
+        bytes.extend_from_slice(&buffer[..count.min(remaining)]);
+        if count > remaining && !over_limit {
+            over_limit = true;
+            let _ = limit_sender.send((stream, limit));
+        }
+    }
+    Ok(BoundedRead {
+        bytes,
+        exceeded: over_limit,
+    })
+}
+
+async fn join_reader(
+    reader: tokio::task::JoinHandle<std::io::Result<BoundedRead>>,
+    stream: &'static str,
+) -> Result<BoundedRead, GitCommandError> {
+    reader
+        .await
+        .map_err(|_| GitCommandError::ReadOutput {
+            stream,
+            source: std::io::Error::other("git output reader panicked"),
+        })?
+        .map_err(|source| GitCommandError::ReadOutput { stream, source })
+}
+
+async fn run_bounded_command(
+    command: Command,
     input: Option<Vec<u8>>,
     bounds: GitCommandBounds,
 ) -> Result<Output, GitCommandError> {
-    cx.checkpoint().map_err(|_| {
-        if cx.cancelled_by(asupersync::CancelKind::Deadline)
-            || cx.cancelled_by(asupersync::CancelKind::Timeout)
-        {
-            GitCommandError::DeadlineExceeded
-        } else {
-            GitCommandError::Cancelled
-        }
-    })?;
-    if bounds
-        .cancel
-        .as_ref()
-        .is_some_and(CancellationToken::is_cancelled)
-    {
-        return Err(GitCommandError::Cancelled);
-    }
-    if Instant::now() >= bounds.deadline {
-        return Err(GitCommandError::DeadlineExceeded);
-    }
+    use tokio::io::AsyncWriteExt;
+
+    let has_input = input.is_some();
+    let mut command = tokio::process::Command::from(command);
     let mut child = command
-        .stdin(if input.is_some() {
-            AsyncStdio::piped()
+        .stdin(if has_input {
+            Stdio::piped()
         } else {
-            AsyncStdio::null()
+            Stdio::null()
         })
-        .stdout(AsyncStdio::piped())
-        .stderr(AsyncStdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|error| GitCommandError::Unavailable(error.into()))?;
-    let stdout = child.stdout().ok_or_else(|| {
+        .map_err(GitCommandError::Unavailable)?;
+    let stdout = child.stdout.take().ok_or_else(|| {
         GitCommandError::Unavailable(std::io::Error::other("missing stdout pipe"))
     })?;
-    let stderr = child.stderr().ok_or_else(|| {
+    let stderr = child.stderr.take().ok_or_else(|| {
         GitCommandError::Unavailable(std::io::Error::other("missing stderr pipe"))
     })?;
-    let stdin = match input {
-        Some(input) => Some((
-            child.stdin().ok_or_else(|| {
+    let (limit_sender, mut limit_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let _limit_sender_guard = limit_sender.clone();
+    let stdout_reader = tokio::spawn(read_bounded_output(
+        stdout,
+        "stdout",
+        bounds.max_stdout_bytes,
+        limit_sender.clone(),
+    ));
+    let stderr_reader = tokio::spawn(read_bounded_output(
+        stderr,
+        "stderr",
+        bounds.max_stderr_bytes,
+        limit_sender,
+    ));
+    let input_writer = match input {
+        Some(input) => {
+            let mut stdin = child.stdin.take().ok_or_else(|| {
                 GitCommandError::Unavailable(std::io::Error::other("missing stdin pipe"))
-            })?,
-            input,
-        )),
+            })?;
+            Some(tokio::spawn(async move {
+                stdin.write_all(&input).await?;
+                stdin.shutdown().await
+            }))
+        }
         None => None,
     };
 
-    // One future owns all pipes. Cancellation closes them before the child is
-    // reaped, including pipes inherited by descendants after the child exits.
-    let outcome = {
-        let mut stdout_reader = pin!(read_bounded_output(
-            stdout,
-            "stdout",
-            bounds.max_stdout_bytes
-        ));
-        let mut stderr_reader = pin!(read_bounded_output(
-            stderr,
-            "stderr",
-            bounds.max_stderr_bytes
-        ));
-        let mut input_writer = pin!(async move {
-            if let Some((mut stdin, input)) = stdin {
-                stdin.write_all(&input).await?;
-                stdin.shutdown().await?;
-            }
-            Ok::<(), std::io::Error>(())
-        });
-        let mut wait = pin!(child.wait_async(cx));
-        let mut cancelled = pin!(wait_for_cancellation(bounds.cancel));
-        let mut deadline = pin!(asupersync::time::sleep(
-            asupersync::time::wall_now(),
-            bounds.deadline.saturating_duration_since(Instant::now()),
-        ));
-        let mut status = None;
-        let mut stdout = None;
-        let mut stderr = None;
-        let mut written = None;
-        poll_fn(|task| {
-            cx.checkpoint().map_err(|_| {
-                if cx.cancelled_by(asupersync::CancelKind::Deadline)
-                    || cx.cancelled_by(asupersync::CancelKind::Timeout)
-                {
-                    GitCommandError::DeadlineExceeded
-                } else {
-                    GitCommandError::Cancelled
-                }
-            })?;
-            if cancelled.as_mut().poll(task).is_ready() {
-                return Poll::Ready(Err(GitCommandError::Cancelled));
-            }
-            if deadline.as_mut().poll(task).is_ready() {
-                return Poll::Ready(Err(GitCommandError::DeadlineExceeded));
-            }
-            if status.is_none() {
-                if let Poll::Ready(result) = wait.as_mut().poll(task) {
-                    status = Some(result.map_err(|error| GitCommandError::Wait(error.into()))?);
-                }
-            }
-            if stdout.is_none() {
-                if let Poll::Ready(result) = stdout_reader.as_mut().poll(task) {
-                    stdout = Some(result?);
-                }
-            }
-            if stderr.is_none() {
-                if let Poll::Ready(result) = stderr_reader.as_mut().poll(task) {
-                    stderr = Some(result?);
-                }
-            }
-            if written.is_none() {
-                if let Poll::Ready(result) = input_writer.as_mut().poll(task) {
-                    written = Some(result);
-                }
-            }
-            if status.is_some() && stdout.is_some() && stderr.is_some() && written.is_some() {
-                if let (Some(status), Some(stdout), Some(stderr), Some(written)) =
-                    (status.take(), stdout.take(), stderr.take(), written.take())
-                {
-                    if status.success() {
-                        written.map_err(GitCommandError::WriteInput)?;
-                    }
-                    return Poll::Ready(Ok(Output {
-                        status,
-                        stdout,
-                        stderr,
-                    }));
-                }
-            }
-            Poll::Pending
-        })
-        .await
+    let cancellation = bounds.cancel.clone();
+    let deadline = tokio::time::Instant::from_std(bounds.deadline);
+    let process_outcome = tokio::select! {
+        status = child.wait() => status.map_err(GitCommandError::Wait),
+        () = wait_for_cancellation(cancellation.clone()) => Err(GitCommandError::Cancelled),
+        () = tokio::time::sleep_until(deadline) => Err(GitCommandError::DeadlineExceeded),
+        exceeded = limit_receiver.recv() => {
+            let (stream, bound) = exceeded.unwrap_or((
+                "output",
+                bounds.max_stdout_bytes.max(bounds.max_stderr_bytes),
+            ));
+            Err(GitCommandError::OutputLimitExceeded { stream, bound })
+        }
     };
-    if outcome.is_err() && child.id().is_some() {
-        if let Err(error) = child.kill() {
-            tracing::debug!(%error, "failed to terminate bounded Git child");
-        }
-        // Reaping must complete after cancellation. Mask only each poll so
-        // native timer waits retain their delay while the child is reaped.
-        let mut reaped = pin!(child.wait_async(cx));
-        if let Err(error) = poll_fn(|task| {
-            let _current = Cx::set_current(Some(cx.clone()));
-            cx.masked(|| reaped.as_mut().poll(task))
-        })
-        .await
-        {
-            tracing::debug!(%error, "failed to reap bounded Git child");
-        }
+
+    if process_outcome.is_err() {
+        terminate_child(&mut child).await;
     }
-    outcome
+    let status = process_outcome?;
+    // Draining stays under the same deadline and cancellation as the process:
+    // a descendant that inherited the child's stdout keeps the pipe open after
+    // the child itself has exited, and waiting for that EOF unbounded would
+    // outlive the caller's deadline. The reader tasks are dropped with this
+    // runtime, which closes our pipe ends.
+    let drained = async {
+        if let Some(writer) = input_writer {
+            let written = writer.await.map_err(|error| {
+                GitCommandError::WriteInput(std::io::Error::other(error.to_string()))
+            })?;
+            if status.success() {
+                written.map_err(GitCommandError::WriteInput)?;
+            }
+        }
+        let stdout = join_reader(stdout_reader, "stdout").await?;
+        let stderr = join_reader(stderr_reader, "stderr").await?;
+        Ok::<_, GitCommandError>((stdout, stderr))
+    };
+    let (stdout, stderr) = tokio::select! {
+        drained = drained => drained?,
+        () = wait_for_cancellation(cancellation) => return Err(GitCommandError::Cancelled),
+        () = tokio::time::sleep_until(deadline) => return Err(GitCommandError::DeadlineExceeded),
+    };
+    if stdout.exceeded {
+        return Err(GitCommandError::OutputLimitExceeded {
+            stream: "stdout",
+            bound: bounds.max_stdout_bytes,
+        });
+    }
+    if stderr.exceeded {
+        return Err(GitCommandError::OutputLimitExceeded {
+            stream: "stderr",
+            bound: bounds.max_stderr_bytes,
+        });
+    }
+    Ok(Output {
+        status,
+        stdout: stdout.bytes,
+        stderr: stderr.bytes,
+    })
 }
 
 async fn wait_for_cancellation(cancel: Option<CancellationToken>) {
@@ -557,6 +526,11 @@ async fn wait_for_cancellation(cancel: Option<CancellationToken>) {
         Some(cancel) => cancel.cancelled().await,
         None => std::future::pending().await,
     }
+}
+
+async fn terminate_child(child: &mut tokio::process::Child) {
+    let _ = child.start_kill();
+    let _ = child.wait().await;
 }
 
 /// Runs `git <args>` in `repo_root` and returns the trimmed stdout as a
@@ -647,7 +621,7 @@ fn git_command_at(repo_root: &Path, args: &[&str]) -> Result<Command, GitProgram
 
 #[derive(Debug)]
 enum ChildCaptureResult {
-    Completed(std::process::Output),
+    Completed(Output),
     Failed,
     TimedOut,
 }
