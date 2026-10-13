@@ -146,17 +146,19 @@ pub async fn handle_multi_root(
 /// The three multi-root tools are daemon-owned: they carry no application
 /// surface binding, so the binding table takes their contract from the
 /// multi-root capability catalog through this lookup.
+const MULTI_ROOT_TOOL_PREFIX: &str = "tracedecay_multi_root_";
+
+pub(crate) fn multi_root_tool_name(operation: MultiRootApplicationOperation) -> String {
+    format!("{MULTI_ROOT_TOOL_PREFIX}{}", operation.operation_key())
+}
+
 pub(crate) fn multi_root_operation_for_tool(
     tool_name: &str,
 ) -> Option<MultiRootApplicationOperation> {
-    match tool_name {
-        "tracedecay_multi_root_scope_set_read" => Some(MultiRootApplicationOperation::ScopeSetRead),
-        "tracedecay_multi_root_scope_set_compare_and_swap" => {
-            Some(MultiRootApplicationOperation::ScopeSetCompareAndSwap)
-        }
-        "tracedecay_multi_root_execute" => Some(MultiRootApplicationOperation::Execute),
-        _ => None,
-    }
+    let key = tool_name.strip_prefix(MULTI_ROOT_TOOL_PREFIX)?;
+    MultiRootApplicationOperation::ALL
+        .into_iter()
+        .find(|operation| operation.operation_key() == key)
 }
 
 fn render_response(

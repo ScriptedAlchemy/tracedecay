@@ -1278,7 +1278,7 @@ async fn authenticated_remote_node_provisioning_creates_and_registers_first_stor
     assert_eq!(status(&unenrolled_revocation), StatusCode::OK);
     assert_eq!(
         json_body(&unenrolled_revocation),
-        serde_json::json!({ "revocations": [] })
+        serde_json::json!({ "revocations": [], "revoked_grants": [grant.grant_id] })
     );
 
     service.shutdown().await.expect("shutdown HTTP service");

@@ -21,6 +21,9 @@ use tracedecay_runtime_core::test_executable::write_executable_script;
 use crate::isolated_profile::{apply_isolated_profile_env, hermetic_path};
 
 #[cfg(unix)]
+#[path = "host_lifecycle_cli_acceptance/catalog_profile.rs"]
+mod catalog_profile;
+#[cfg(unix)]
 #[path = "host_lifecycle_cli_acceptance/exact_restore.rs"]
 mod exact_restore;
 #[cfg(unix)]

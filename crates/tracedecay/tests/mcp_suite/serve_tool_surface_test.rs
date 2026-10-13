@@ -9,14 +9,16 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use tracedecay_api::{WorkOperation, WorkflowOperation};
 use tracedecay_tokenizer::count_ordinary_tokens;
 
 use crate::common::{self, TestChildProcess, tracedecay_command_with_home};
-use crate::serve_harness::{ServeSession, init_project_with_file, json_rpc_response};
+use crate::serve_harness::{ServeSession, init_project_with_file, json_rpc_response, profile_root};
 
 const LIST_CHANGED: &str = "notifications/tools/list_changed";
 const ALWAYS_LOAD: &str = "anthropic/alwaysLoad";
 const FULL_TOOL_LIST: &str = "--full-tool-list";
+const COMPACT_PROFILE: &str = "--catalog-profile=compact";
 const SERVE_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn serve_command(home: &Path, project: &Path, extra_args: &[&str]) -> std::process::Command {
@@ -338,4 +340,230 @@ async fn plain_mcp_client_calls_a_stub_and_receives_its_schema() {
         third["result"]["tools"].as_array().expect("tools"),
         "tracedecay_impact",
     )));
+}
+
+/// Work and Workflow (handoff included) tool names from their operation
+/// tables, independent of the catalog profile filter under test.
+fn work_and_workflow_tool_names() -> BTreeSet<String> {
+    let names: BTreeSet<String> = WorkOperation::ALL
+        .into_iter()
+        .map(|operation| format!("tracedecay_work_{}", operation.operation_key()))
+        .chain(
+            WorkflowOperation::ALL
+                .into_iter()
+                .map(|operation| format!("tracedecay_workflow_{}", operation.operation_key())),
+        )
+        .collect();
+    assert!(
+        names.contains("tracedecay_workflow_handoff_issue"),
+        "handoff is a Workflow operation: {names:?}"
+    );
+    names
+}
+
+fn is_work_or_workflow_name(name: &str) -> bool {
+    name.starts_with("tracedecay_work_") || name.starts_with("tracedecay_workflow_")
+}
+
+/// The profile's `config.toml` bytes and every path under its data directory.
+fn profile_state(home: &Path) -> (Option<Vec<u8>>, BTreeSet<std::path::PathBuf>) {
+    let root = profile_root(home);
+    let config = std::fs::read(root.join("config.toml")).ok();
+    let mut files = BTreeSet::new();
+    let mut pending = vec![root.clone()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap_or_else(|error| {
+            panic!("read {}: {error}", dir.display());
+        }) {
+            let path = entry.expect("profile entry").path();
+            if path.is_dir() {
+                pending.push(path.clone());
+            }
+            files.insert(path.strip_prefix(&root).expect("under root").to_path_buf());
+        }
+    }
+    (config, files)
+}
+
+/// Lists past the readiness read, calls `tool` by name, and re-lists. Returns
+/// the first list, the call answer, the `list_changed` frames seen from the
+/// call through the re-list, and the re-list.
+fn list_call_relist(
+    mut session: ServeSession,
+    tool: &str,
+) -> (Vec<Value>, Value, usize, Vec<Value>) {
+    let initialized = session.request(initialize());
+    assert!(initialized.get("error").is_none(), "{initialized}");
+    session.send(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
+    session.await_project_ready();
+    let first = session.request(tools_list(2))["result"]["tools"]
+        .as_array()
+        .expect("tools")
+        .clone();
+    session.send(&tool_call(3, tool, &json!({})));
+    let mut frames = session.wait_until(|frames| {
+        frames.iter().any(|frame| frame["id"] == 3)
+            && frames.iter().any(|frame| frame["method"] == LIST_CHANGED)
+    });
+    session.send(&tools_list(4));
+    frames.extend(session.wait_until(|frames| frames.iter().any(|frame| frame["id"] == 4)));
+    let answer = frames
+        .iter()
+        .find(|frame| frame["id"] == 3)
+        .expect("call answer")
+        .clone();
+    let announced = frames
+        .iter()
+        .filter(|frame| frame["method"] == LIST_CHANGED)
+        .count();
+    let relisted = frames
+        .iter()
+        .find(|frame| frame["id"] == 4)
+        .expect("re-list")["result"]["tools"]
+        .as_array()
+        .expect("tools")
+        .clone();
+    drop(session.finish(SERVE_TIMEOUT));
+    (first, answer, announced, relisted)
+}
+
+/// A call answer without the per-request identity and timing the daemon
+/// stamps on every answer.
+fn call_outcome(answer: &Value) -> Value {
+    let mut structured = answer["result"]["structuredContent"].clone();
+    if let Some(problem) = structured.get_mut("problem").and_then(Value::as_object_mut) {
+        problem.remove("request_id");
+        problem.remove("trace_id");
+    }
+    json!({
+        "error": answer["error"],
+        "is_error": answer["result"]["isError"],
+        "structured": structured,
+    })
+}
+
+/// `--catalog-profile=compact` changes what a session lists, never what it
+/// can call or what the daemon stores.
+#[tokio::test]
+async fn compact_profile_withholds_work_and_workflow_tools_without_changing_authority() {
+    let home = TempDir::new().unwrap();
+    let project = init_project_with_file(home.path(), "pub fn catalog_profile_marker() {}\n").await;
+    let _daemon = common::spawn_tracedecay_daemon(home.path());
+    let oracle = work_and_workflow_tool_names();
+
+    let default = run_serve(
+        home.path(),
+        project.path(),
+        &[],
+        &[initialize(), tools_list(2)],
+    );
+    assert!(default.status.success(), "{default:?}");
+    let default_names = ServedList::from_stdout(&default.stdout, 2).names();
+    let unlisted: Vec<&String> = oracle.difference(&default_names).collect();
+    assert!(
+        unlisted.is_empty(),
+        "the default profile lists every Work and Workflow tool: {unlisted:?}"
+    );
+
+    for extra in [
+        &[COMPACT_PROFILE][..],
+        &[COMPACT_PROFILE, FULL_TOOL_LIST][..],
+    ] {
+        let compact = run_serve(
+            home.path(),
+            project.path(),
+            extra,
+            &[initialize(), tools_list(2)],
+        );
+        assert!(compact.status.success(), "{extra:?}: {compact:?}");
+        let compact_names = ServedList::from_stdout(&compact.stdout, 2).names();
+        let leaked: Vec<&String> = compact_names
+            .iter()
+            .filter(|name| is_work_or_workflow_name(name))
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "{extra:?} must list no Work or Workflow tool: {leaked:?}"
+        );
+        assert!(
+            !compact_names.is_empty() && compact_names.is_subset(&default_names),
+            "{extra:?} lists a non-empty subset of the default list: {compact_names:?}"
+        );
+        assert!(
+            compact_names.len() < default_names.len(),
+            "{extra:?} must list fewer tools than the default"
+        );
+    }
+
+    let withheld = "tracedecay_work_views";
+    let read_only = tool_named(
+        &ServedList::from_stdout(&default.stdout, 2).tools,
+        withheld,
+    )["annotations"]["readOnlyHint"]
+        .clone();
+    assert_eq!(read_only, json!(true), "{withheld} must be a read");
+    let (_, default_answer, _, _) = list_call_relist(
+        ServeSession::start(serve_command(home.path(), project.path(), &[])),
+        withheld,
+    );
+
+    let before = profile_state(home.path());
+    let (first, compact_answer, announced, relisted) = list_call_relist(
+        ServeSession::start(serve_command(
+            home.path(),
+            project.path(),
+            &[COMPACT_PROFILE],
+        )),
+        withheld,
+    );
+    assert!(
+        first.iter().all(|tool| tool["name"] != withheld),
+        "{withheld} starts withheld"
+    );
+    assert_eq!(
+        default_answer["result"]["structuredContent"]["problem"]["code"], "work.invalid_request",
+        "the empty call reaches the Work adapter: {default_answer}"
+    );
+    assert_eq!(
+        call_outcome(&compact_answer),
+        call_outcome(&default_answer),
+        "a withheld tool called by name reaches the same daemon authority"
+    );
+    assert_eq!(announced, 1, "the called tool is announced once");
+    assert!(
+        has_full_schema(tool_named(&relisted, withheld)),
+        "the re-list after list_changed carries the full schema"
+    );
+    assert!(
+        relisted
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .filter(|name| is_work_or_workflow_name(name))
+            .all(|name| name == withheld),
+        "only the called tool joins the list"
+    );
+    assert_eq!(
+        profile_state(home.path()),
+        before,
+        "selecting a catalog profile stores nothing"
+    );
+}
+
+#[test]
+fn an_unknown_catalog_profile_fails_before_serving() {
+    let home = TempDir::new().unwrap();
+    let output = tracedecay_command_with_home(home.path())
+        .args(["serve", "--catalog-profile=bogus"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run tracedecay serve");
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(r#"unknown catalog profile "bogus""#)
+            && ["default", "compact", "administrative", "host-limited"]
+                .iter()
+                .all(|name| stderr.contains(name)),
+        "{stderr}"
+    );
 }

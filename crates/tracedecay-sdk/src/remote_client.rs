@@ -13,10 +13,14 @@ use serde::{Serialize, de::DeserializeOwned};
 use tracedecay_api::remote::REMOTE_ENROLLMENT_CREDENTIAL_HEADER;
 use tracedecay_contracts::remote::capture::RemoteCaptureReceiptV1;
 use tracedecay_contracts::remote::capture_protocol::RemoteCaptureRequestV1;
+use tracedecay_contracts::remote::discovery::{
+    RemoteAuthorityDiscoveryV1, remote_authority_result_contract_v1,
+};
 use tracedecay_contracts::remote::protocol::{
-    EnrollmentRequestV1, REMOTE_PROTOCOL_VERSION_V1, RemoteProtocolBodyV1, RemoteProtocolRequestV1,
-    RemoteProtocolResponseV1, remote_capture_result_contract_v1,
-    remote_enrollment_result_contract_v1, remote_replay_result_contract_v1,
+    CurrentAuthorityRequestV1, EnrollmentRequestV1, REMOTE_PROTOCOL_VERSION_V1,
+    RemoteProtocolBodyV1, RemoteProtocolRequestV1, RemoteProtocolResponseV1,
+    remote_capture_result_contract_v1, remote_enrollment_result_contract_v1,
+    remote_replay_result_contract_v1,
 };
 use tracedecay_contracts::remote::query::{
     RemoteQueryRequestV1, RemoteQueryResultV1, remote_exact_observation_query_result_contract_v1,
@@ -282,6 +286,23 @@ impl EnrolledRemoteClient {
         )
     }
 
+    /// Reads the current authority for the caller's own enrolled scope: the
+    /// writer, the capture policy, and the authority's committed enrollment.
+    pub fn discover_authority(
+        &self,
+        request: &RemoteProtocolRequestV1<CurrentAuthorityRequestV1>,
+    ) -> Result<RemoteProtocolResponseV1<RemoteAuthorityDiscoveryV1>, RemoteClientError> {
+        self.execute_authenticated(
+            "authority",
+            request,
+            remote_authority_result_contract_v1().map_err(protocol_error)?,
+            RemoteSuccessKind::Result,
+            |discovery: &RemoteAuthorityDiscoveryV1| {
+                discovery.enrollment.enrollment.scope == request.body.scope
+            },
+        )
+    }
+
     pub fn failover(
         &self,
         request: &RemoteProtocolRequestV1<PromotionConfirmationV1>,
@@ -406,6 +427,7 @@ fn protocol_error(error: impl fmt::Display) -> RemoteClientError {
 enum RemoteSuccessKind {
     Evidence,
     Effect,
+    Result,
 }
 
 fn decode_typed_response<T: Clone + DeserializeOwned>(
@@ -513,6 +535,9 @@ fn canonical_success_valid<T: Clone>(
                     effect.payload.clone(),
                 )
                 .is_ok()
+        }
+        (ApplicationOutcome::Result(payload), RemoteSuccessKind::Result) => {
+            validate_payload(payload)
         }
         _ => false,
     }

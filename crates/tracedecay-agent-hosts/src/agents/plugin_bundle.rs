@@ -88,7 +88,11 @@ pub(crate) fn stamp_manifest_version_with(
 ///   literally (`plugin-tracedecay-graph` looked like a bare "graph" entry).
 /// - Kimi uses `tracedecay` in session/user `mcp.json` (not the plugin
 ///   manifest), so the installer rewrites that external registration.
-pub(crate) fn set_mcp_command(raw: &str, bin: &str) -> Result<String> {
+pub(crate) fn set_mcp_command(
+    raw: &str,
+    bin: &str,
+    serve_args: &super::serve_args::ServeArgs,
+) -> Result<String> {
     let mut mcp: serde_json::Value = serde_json::from_str(raw)?;
     let servers = mcp
         .get_mut("mcpServers")
@@ -106,7 +110,7 @@ pub(crate) fn set_mcp_command(raw: &str, bin: &str) -> Result<String> {
                 .to_string(),
         });
     };
-    servers
+    let server = servers
         .get_mut(key)
         .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("plugin MCP config is missing mcpServers.{key}"),
@@ -114,8 +118,15 @@ pub(crate) fn set_mcp_command(raw: &str, bin: &str) -> Result<String> {
         .as_object_mut()
         .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("plugin MCP config mcpServers.{key} must be an object"),
-        })?
-        .insert("command".to_string(), serde_json::json!(bin));
+        })?;
+    server.insert("command".to_string(), serde_json::json!(bin));
+    let args = server
+        .get_mut("args")
+        .and_then(|value| value.as_array_mut())
+        .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("plugin MCP config mcpServers.{key} is missing args"),
+        })?;
+    serve_args.splice(args)?;
     // The explorer is a Node adapter that spawns the same resolved CLI.
     // Pin both legs of the connection so a host's PATH cannot change authority.
     if let Some(explorer) = servers.get_mut("tracedecay-explorer") {
@@ -480,6 +491,7 @@ mod tests {
         let tracedecay = set_mcp_command(
             r#"{"mcpServers":{"tracedecay":{"type":"stdio","command":"tracedecay","args":["serve"]}}}"#,
             "/abs/tracedecay",
+            &super::super::serve_args::ServeArgs::default(),
         )
         .unwrap();
         let tracedecay: serde_json::Value = serde_json::from_str(&tracedecay).unwrap();
@@ -492,6 +504,7 @@ mod tests {
         let graph = set_mcp_command(
             r#"{"mcpServers":{"graph":{"type":"stdio","command":"tracedecay","args":["serve"]}}}"#,
             "/abs/tracedecay",
+            &super::super::serve_args::ServeArgs::default(),
         )
         .unwrap();
         let graph: serde_json::Value = serde_json::from_str(&graph).unwrap();
@@ -501,7 +514,12 @@ mod tests {
 
     #[test]
     fn set_mcp_command_rejects_missing_server_key() {
-        let err = set_mcp_command(r#"{"mcpServers":{}}"#, "/abs/tracedecay").unwrap_err();
+        let err = set_mcp_command(
+            r#"{"mcpServers":{}}"#,
+            "/abs/tracedecay",
+            &super::super::serve_args::ServeArgs::default(),
+        )
+        .unwrap_err();
         assert!(
             err.to_string()
                 .contains("mcpServers.tracedecay or mcpServers.graph"),

@@ -130,7 +130,10 @@ pub(crate) fn chatgpt_staged_plugin_dir(home: &Path) -> PathBuf {
 /// The `graph` server entry in `mcp.json` is pointed at the resolved
 /// tracedecay binary; `tracedecay-explorer` keeps its `node` launch, the
 /// extension requires a Node runtime the host supplies.
-pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'static str, String)>> {
+pub(crate) fn rendered_plugin_files(
+    tracedecay_bin: &str,
+    serve_args: &super::serve_args::ServeArgs,
+) -> Result<Vec<(&'static str, String)>> {
     super::plugin_bundle::chatgpt_files()?
         .into_iter()
         .map(|(relative, contents)| {
@@ -139,7 +142,7 @@ pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'stati
                     super::plugin_bundle::stamp_manifest_version(&contents)?
                 }
                 CHATGPT_MCP_RELATIVE => {
-                    super::plugin_bundle::set_mcp_command(&contents, tracedecay_bin)?
+                    super::plugin_bundle::set_mcp_command(&contents, tracedecay_bin, serve_args)?
                 }
                 _ => contents,
             };

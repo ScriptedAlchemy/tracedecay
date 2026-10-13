@@ -17,12 +17,22 @@
 //! `--full-tool-list` serves the daemon's catalog unchanged, for hosts that
 //! defer schemas natively and keep the `alwaysLoad` tools loaded. Each served
 //! list logs a SHA-256 of the sorted tool names, the roster that session saw.
+//!
+//! Names leave the list only when the host opts in with
+//! `--catalog-profile`: a profile other than `default` omits the tools it
+//! excludes. An omitted tool stays callable exactly like a stub: the call is
+//! forwarded unchanged and the daemon still dispatches it under the default
+//! profile, the tool joins this session's list with its full schema, and
+//! `list_changed` is announced. The profile decides which names are listed;
+//! `--full-tool-list` decides whether listed tools carry full schemas.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
+use tracedecay_contracts::catalog_composition::CatalogProfileName;
 use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_mcp::tools::catalog_discovery::catalog_profile_withheld_tool_names;
 use tracedecay_mcp::{ALWAYS_LOAD_META, JsonRpcRequest};
 use tracedecay_runtime_core::logging::log_daemon_event;
 
@@ -62,24 +72,59 @@ const STUB_INSTRUCTIONS_NOTE: &str = "\n\nThis session lists the most-used tools
 #[derive(Debug)]
 pub(crate) struct ToolSurface {
     stub_deferred_tools: bool,
-    /// The daemon's full definition of each tool the last list stubbed.
-    stubbed: BTreeMap<String, Value>,
+    catalog_profile: String,
+    /// Names the selected catalog profile does not list.
+    withheld: BTreeSet<String>,
+    /// The daemon's full definition of each tool the last list stubbed or
+    /// withheld; calling one by name loads it.
+    deferred: BTreeMap<String, Value>,
     loaded: BTreeSet<String>,
     last_roster_sha256: Option<String>,
 }
 
 impl ToolSurface {
-    pub(crate) fn new(full_tool_list: bool) -> Self {
+    /// `profile` `None` serves the default profile without composing the
+    /// catalog. A profile whose withheld names cannot be composed is a
+    /// configuration error, never a silent default list.
+    pub(crate) fn new(full_tool_list: bool, profile: Option<&CatalogProfileName>) -> Result<Self> {
+        let (catalog_profile, withheld) = match profile {
+            None => ("default".to_owned(), BTreeSet::new()),
+            Some(profile) => (
+                profile.name().to_owned(),
+                catalog_profile_withheld_tool_names(profile).map_err(|error| {
+                    TraceDecayError::Config {
+                        message: format!(
+                            "catalog profile {} cannot be served: {error}",
+                            profile.name()
+                        ),
+                    }
+                })?,
+            ),
+        };
+        Ok(Self::with_withheld(
+            full_tool_list,
+            catalog_profile,
+            withheld,
+        ))
+    }
+
+    fn with_withheld(
+        full_tool_list: bool,
+        catalog_profile: String,
+        withheld: BTreeSet<String>,
+    ) -> Self {
         Self {
             stub_deferred_tools: !full_tool_list,
-            stubbed: BTreeMap::new(),
+            catalog_profile,
+            withheld,
+            deferred: BTreeMap::new(),
             loaded: BTreeSet::new(),
             last_roster_sha256: None,
         }
     }
 
-    /// Stubs deferred tools in the daemon's `tools/list` answer, and adds the
-    /// stub note to the `initialize` instructions.
+    /// Withholds and stubs deferred tools in the daemon's `tools/list`
+    /// answer, and adds the matching notes to the `initialize` instructions.
     pub(super) fn rewrite(&mut self, request: Option<&JsonRpcRequest>, responses: &mut [String]) {
         let Some(request) = request else {
             return;
@@ -98,25 +143,52 @@ impl ToolSurface {
                 .pointer_mut("/result/tools")
                 .and_then(Value::as_array_mut)
             {
-                if self.stub_deferred_tools {
-                    self.stubbed.clear();
-                    for tool in tools.iter_mut() {
-                        if !always_loaded(tool)
-                            && let Some((name, stubbed)) = stub(tool)
-                            && !self.loaded.contains(&name)
-                        {
-                            self.stubbed.insert(name, std::mem::replace(tool, stubbed));
+                let (mut stubbed, mut withheld) = (0_usize, 0_usize);
+                if self.stub_deferred_tools || !self.withheld.is_empty() {
+                    self.deferred.clear();
+                    tools.retain_mut(|tool| {
+                        let Some(name) = tool.get("name").and_then(Value::as_str) else {
+                            return true;
+                        };
+                        if self.loaded.contains(name) {
+                            return true;
                         }
-                    }
+                        if self.withheld.contains(name) {
+                            withheld += 1;
+                            let name = name.to_owned();
+                            self.deferred.insert(name, tool.take());
+                            return false;
+                        }
+                        if self.stub_deferred_tools
+                            && !always_loaded(tool)
+                            && let Some((name, stub_definition)) = stub(tool)
+                        {
+                            stubbed += 1;
+                            self.deferred
+                                .insert(name, std::mem::replace(tool, stub_definition));
+                        }
+                        true
+                    });
                 }
-                self.log_roster(tools);
+                self.log_roster(tools, stubbed, withheld);
             } else if let Some(Value::String(instructions)) =
                 message.pointer_mut("/result/instructions")
             {
-                if !self.stub_deferred_tools {
+                if !self.stub_deferred_tools && self.withheld.is_empty() {
                     continue;
                 }
-                instructions.push_str(STUB_INSTRUCTIONS_NOTE);
+                if self.stub_deferred_tools {
+                    instructions.push_str(STUB_INSTRUCTIONS_NOTE);
+                }
+                if !self.withheld.is_empty() {
+                    instructions.push_str("\n\nThis session uses the ");
+                    instructions.push_str(&self.catalog_profile);
+                    instructions.push_str(
+                        " catalog profile and does not list the tools it excludes. Every \
+                         TraceDecay tool stays callable by name, and a called tool joins \
+                         the list.",
+                    );
+                }
             } else {
                 continue;
             }
@@ -124,10 +196,10 @@ impl ToolSurface {
         }
     }
 
-    /// For a call to a tool the host still sees as a stub: appends the full
-    /// input schema to an error result or JSON-RPC refusal, and on the first
-    /// such call puts the schema on the list and announces `list_changed` so
-    /// the host re-lists.
+    /// For a call to a tool the host still sees as a stub or does not list:
+    /// appends the full input schema to an error result or JSON-RPC refusal,
+    /// and on the first such call puts the full definition on the list and
+    /// announces `list_changed` so the host re-lists.
     pub(super) fn hydrate_called_stub(
         &mut self,
         request: Option<&JsonRpcRequest>,
@@ -144,7 +216,7 @@ impl ToolSurface {
         else {
             return;
         };
-        let Some(definition) = self.stubbed.get(name) else {
+        let Some(definition) = self.deferred.get(name) else {
             return;
         };
         if let Some(schema) = definition.get("inputSchema") {
@@ -183,7 +255,7 @@ impl ToolSurface {
         }
     }
 
-    fn log_roster(&mut self, tools: &[Value]) {
+    fn log_roster(&mut self, tools: &[Value], stubbed: usize, withheld: usize) {
         let roster = roster_sha256(tools);
         if self.last_roster_sha256.as_deref() == Some(&roster) {
             return;
@@ -193,7 +265,9 @@ impl ToolSurface {
             &[
                 ("sha256", roster.clone()),
                 ("tools", tools.len().to_string()),
-                ("stubbed", self.stubbed.len().to_string()),
+                ("stubbed", stubbed.to_string()),
+                ("catalog_profile", self.catalog_profile.clone()),
+                ("withheld", withheld.to_string()),
             ],
         );
         self.last_roster_sha256 = Some(roster);
@@ -313,7 +387,7 @@ mod tests {
 
     #[test]
     fn stubs_keep_every_name_and_only_always_loaded_tools_keep_schemas() {
-        let tools = served(&mut ToolSurface::new(false));
+        let tools = served(&mut ToolSurface::new(false, None).expect("surface"));
         assert_eq!(tools[0]["name"], "tracedecay_grep");
         assert!(has_full_schema(&tools[0]), "{tools:?}");
         assert_eq!(tools[1]["name"], "tracedecay_impact");
@@ -327,7 +401,7 @@ mod tests {
 
     #[test]
     fn calling_a_stub_loads_its_schema_once_and_announces_it() {
-        let mut surface = ToolSurface::new(false);
+        let mut surface = ToolSurface::new(false, None).expect("surface");
         served(&mut surface);
         assert_eq!(
             hydrate(&mut surface, "tracedecay_grep", false).len(),
@@ -357,7 +431,7 @@ mod tests {
                 .as_str()
                 .map(str::to_owned)
         };
-        let mut surface = ToolSurface::new(false);
+        let mut surface = ToolSurface::new(false, None).expect("surface");
         served(&mut surface);
         assert_eq!(hydrate(&mut surface, "tracedecay_impact", false).len(), 2);
         let frames = hydrate(&mut surface, "tracedecay_impact", true);
@@ -387,7 +461,7 @@ mod tests {
                 }})
             )]
         };
-        let mut surface = ToolSurface::new(false);
+        let mut surface = ToolSurface::new(false, None).expect("surface");
         served(&mut surface);
         let mut responses = refusal();
         surface.hydrate_called_stub(Some(&call("tracedecay_impact")), &mut responses);
@@ -413,7 +487,7 @@ mod tests {
 
     #[test]
     fn calling_a_name_never_listed_loads_nothing() {
-        let mut surface = ToolSurface::new(false);
+        let mut surface = ToolSurface::new(false, None).expect("surface");
         served(&mut surface);
         assert_eq!(
             hydrate(&mut surface, "tracedecay_not_cataloged", true).len(),
@@ -423,13 +497,85 @@ mod tests {
 
     #[test]
     fn full_tool_list_serves_the_catalog_unchanged() {
-        let mut surface = ToolSurface::new(true);
+        let mut surface = ToolSurface::new(true, None).expect("surface");
         let mut responses = listing();
         surface.rewrite(Some(&tools_list()), &mut responses);
         let served: Value = serde_json::from_str(&responses[0]).expect("json");
         let daemon: Value = serde_json::from_str(&listing()[0]).expect("json");
         assert_eq!(served, daemon);
         assert_eq!(hydrate(&mut surface, "tracedecay_impact", true).len(), 1);
+    }
+
+    fn withholding_impact(full_tool_list: bool) -> ToolSurface {
+        ToolSurface::with_withheld(
+            full_tool_list,
+            "compact".to_owned(),
+            BTreeSet::from(["tracedecay_impact".to_owned()]),
+        )
+    }
+
+    fn names(tools: &[Value]) -> Vec<&str> {
+        tools
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect()
+    }
+
+    #[test]
+    fn a_withheld_tool_is_unlisted_until_called_then_served_in_full() {
+        for full_tool_list in [false, true] {
+            let mut surface = withholding_impact(full_tool_list);
+            assert_eq!(names(&served(&mut surface)), ["tracedecay_grep"]);
+            let frames = hydrate(&mut surface, "tracedecay_impact", true);
+            assert_eq!(frames.len(), 2, "{frames:?}");
+            assert_eq!(frames[1]["method"], TOOL_LIST_CHANGED);
+            assert!(
+                frames[0]["result"]["content"][1]["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains(r#""node_id""#)),
+                "a rejected call carries the schema: {frames:?}"
+            );
+            let tools = served(&mut surface);
+            assert_eq!(names(&tools), ["tracedecay_grep", "tracedecay_impact"]);
+            let daemon: Value = serde_json::from_str(&listing()[0]).expect("json");
+            assert_eq!(
+                tools[1], daemon["result"]["tools"][1],
+                "a called withheld tool is served as the daemon defines it"
+            );
+            assert_eq!(hydrate(&mut surface, "tracedecay_impact", true).len(), 1);
+        }
+    }
+
+    #[test]
+    fn initialize_names_the_profile_only_when_it_withholds_tools() {
+        let initialize = || {
+            vec![format!(
+                "{}\n",
+                json!({"jsonrpc": "2.0", "id": 1, "result": {"instructions": "Base."}})
+            )]
+        };
+        let instructions = |surface: &mut ToolSurface| {
+            let mut responses = initialize();
+            surface.rewrite(
+                Some(&request(
+                    &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"}),
+                )),
+                &mut responses,
+            );
+            let message: Value = serde_json::from_str(&responses[0]).expect("json");
+            message["result"]["instructions"]
+                .as_str()
+                .expect("instructions")
+                .to_owned()
+        };
+        let full_default = instructions(&mut ToolSurface::new(true, None).expect("surface"));
+        assert_eq!(full_default, "Base.");
+        let compact = instructions(&mut withholding_impact(true));
+        assert!(
+            compact.starts_with("Base.\n\nThis session uses the compact catalog profile")
+                && compact.contains("callable by name"),
+            "{compact}"
+        );
     }
 
     #[test]

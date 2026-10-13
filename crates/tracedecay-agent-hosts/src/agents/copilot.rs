@@ -18,13 +18,13 @@
 //!   only observes it: an entry there is reported, its absence is
 //!   informational, because no TraceDecay command could clear it.
 //!
-//! The launch arguments both spellings use live in one place
-//! (`MCP_SERVER_ARGS`) so the CLI-driven registration and the
-//! TraceDecay-owned readback cannot drift apart.
+//! The launch arguments come from [`ServeArgs`], so the CLI-driven
+//! registration and the lifecycle readback cannot drift apart.
 
 use std::path::{Path, PathBuf};
 use tracedecay_runtime_core::config::ProfileRoot;
 
+use super::serve_args::ServeArgs;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::{
@@ -44,13 +44,6 @@ const COPILOT_CLI_LIFECYCLE: &str = "GitHub Copilot MCP registry lifecycle";
 /// The two are the same string by Copilot's own contract, so the doctor and
 /// the peer-preservation guard below keep reading `mcpServers.tracedecay`.
 const COPILOT_MCP_SERVER_NAME: &str = "tracedecay";
-
-/// Arguments the tracedecay MCP server is launched with.
-///
-/// Shared by the CLI-driven registration (the trailing `-- <command> <args…>`
-/// words) and by the doctor readback that verifies what actually landed, so
-/// the two spellings of the same server cannot drift apart.
-const MCP_SERVER_ARGS: &[&str] = &["serve"];
 
 pub struct CopilotIntegration;
 
@@ -117,7 +110,10 @@ impl AgentIntegration for CopilotIntegration {
         if component != super::host_bundle::HostComponentV1::ContextMcp {
             return super::host_bundle::HostBundleRegistrationStateV1::Missing;
         }
-        copilot_context_mcp_registration_state(&ctx.home)
+        copilot_context_mcp_registration_state(
+            &ctx.home,
+            &ctx.catalog_profiles.serve_args(self.id()),
+        )
     }
 
     /// Mutable registration paths for the exact selected components.
@@ -154,7 +150,12 @@ impl AgentIntegration for CopilotIntegration {
     ) -> Result<()> {
         if components.contains(&super::host_bundle::HostComponentV1::ContextMcp) {
             let copilot_cli = require_copilot_cli()?;
-            copilot_mcp_add_with(&copilot_cli, &ctx.home, &ctx.tracedecay_bin)?;
+            copilot_mcp_add_with(
+                &copilot_cli,
+                &ctx.home,
+                &ctx.tracedecay_bin,
+                &ctx.serve_args,
+            )?;
         }
         Ok(())
     }
@@ -280,6 +281,7 @@ fn copilot_cli_mcp_config_path(home: &Path) -> PathBuf {
 
 fn copilot_context_mcp_registration_state(
     home: &Path,
+    serve_args: &ServeArgs,
 ) -> super::host_bundle::HostBundleRegistrationStateV1 {
     let Ok(config_bytes) = std::fs::read(copilot_cli_mcp_config_path(home)) else {
         return super::host_bundle::HostBundleRegistrationStateV1::Missing;
@@ -297,7 +299,7 @@ fn copilot_context_mcp_registration_state(
         .get("command")
         .and_then(serde_json::Value::as_str)
         .is_some_and(|command| !command.is_empty());
-    if command_is_present && server_args_are_current(server) {
+    if command_is_present && serve_args.matches_json(server.get("args"), &[]) {
         super::host_bundle::HostBundleRegistrationStateV1::Current
     } else {
         super::host_bundle::HostBundleRegistrationStateV1::Repairable
@@ -321,14 +323,19 @@ fn require_copilot_cli() -> Result<PathBuf> {
 /// Copilot's non-interactive form is
 /// `copilot mcp add <name> [-e KEY=VALUE] -- <command> <args…>`: everything
 /// after the `--` separator is the server's launch command line, so the
-/// command and [`MCP_SERVER_ARGS`] are passed as plain trailing words rather
+/// command and its [`ServeArgs`] are passed as plain trailing words rather
 /// than as repeated flags. No `-e` pairs are passed; the tracedecay server
 /// needs no registry-supplied environment.
 ///
 /// Split from the trait method so tests can supply a fake CLI and an isolated
 /// `HOME` without mutating the process environment.
 #[tracing::instrument(name = "copilot_mcp_install", level = "trace", skip_all)]
-fn copilot_mcp_add_with(copilot_cli: &Path, home: &Path, tracedecay_bin: &str) -> Result<()> {
+fn copilot_mcp_add_with(
+    copilot_cli: &Path,
+    home: &Path,
+    tracedecay_bin: &str,
+    serve_args: &ServeArgs,
+) -> Result<()> {
     let config_path = copilot_cli_mcp_config_path(home);
     let previous_registration =
         if super::mcp_config_has_tracedecay(&config_path, "mcpServers", load_json_file) {
@@ -349,7 +356,8 @@ fn copilot_mcp_add_with(copilot_cli: &Path, home: &Path, tracedecay_bin: &str) -
         copilot_mcp_remove_with(copilot_cli, home)?;
     }
     let mut args = vec!["mcp", "add", COPILOT_MCP_SERVER_NAME, "--", tracedecay_bin];
-    args.extend(MCP_SERVER_ARGS.iter().copied());
+    let launch = serve_args.to_vec(&[]);
+    args.extend(launch.iter().map(String::as_str));
     let result = run_mcp_registry_step(copilot_cli, &args, home);
     let Err(add_error) = result else {
         return Ok(());
@@ -419,19 +427,13 @@ fn run_mcp_registry_step(copilot_cli: &Path, args: &[&str], home: &Path) -> Resu
 
 // Healthcheck helpers
 
-/// True when a registered server's `args` array carries every argument in
-/// [`MCP_SERVER_ARGS`].
-///
-/// Binding the doctor's expectation to the same constant the CLI invocation
-/// spells is what keeps the two from drifting: changing the launch arguments
-/// cannot silently leave the readback checking a stale word.
+/// True when a registered server launches `serve`, whatever catalog profile it
+/// selects: the doctor reports presence, the lifecycle probe exactness.
 fn server_args_are_current(server: &serde_json::Map<String, serde_json::Value>) -> bool {
-    let Some(args) = server.get("args").and_then(|value| value.as_array()) else {
-        return false;
-    };
-    MCP_SERVER_ARGS
-        .iter()
-        .all(|expected| args.iter().any(|arg| arg.as_str() == Some(*expected)))
+    server
+        .get("args")
+        .and_then(|value| value.as_array())
+        .is_some_and(|args| args.iter().any(|arg| arg.as_str() == Some("serve")))
 }
 
 /// Observation only: no TraceDecay lifecycle writes VS Code's settings (see

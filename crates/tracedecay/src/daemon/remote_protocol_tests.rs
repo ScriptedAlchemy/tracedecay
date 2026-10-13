@@ -315,3 +315,168 @@ async fn mounted_node_populates_exact_prebody_credential_route_and_shutdown_canc
         Err(RemoteCredentialAdmissionErrorV1::Unavailable)
     );
 }
+
+fn joined_discovery(
+    brain_id: tracedecay_domain::BrainId,
+    node_id: BrainNodeId,
+    secret: &[u8],
+) -> tracedecay_contracts::remote::discovery::RemoteAuthorityDiscoveryV1 {
+    let mut grant = grant(brain_id, node_id, &[3_u8; 32]);
+    grant.capabilities = [
+        RemoteCapabilityV1::CaptureOffline,
+        RemoteCapabilityV1::DiscoverAuthority,
+    ]
+    .into_iter()
+    .collect();
+    let enrollment = tracedecay_domain::EnrollmentCredentialRecordV1 {
+        enrollment_id: EntityId::new("enrollment.remote-joined").expect("enrollment identity"),
+        brain_id: grant.brain_id.clone(),
+        node_id: grant.node_id.clone(),
+        fingerprint: RemoteCredentialFingerprintV1::from_secret(secret)
+            .expect("credential fingerprint"),
+        revision: 1,
+        issued_at: UtcMicros(10),
+        expires_at: UtcMicros(100),
+        revoked_at: None,
+        capabilities: grant.capabilities.clone(),
+        scope: grant.scope.clone(),
+    };
+    let receipt = tracedecay_contracts::remote::auth::RemoteEnrollmentCommitReceiptV1 {
+        admission: admission(&grant),
+        prior_grant_digest: canonical_sha256(&grant).expect("grant digest"),
+        input_digest: ManifestDigest::new(format!("sha256:{}", "e".repeat(64)))
+            .expect("input digest"),
+        committed_state_digest: canonical_sha256(&enrollment).expect("enrollment digest"),
+        consumed_at: enrollment.issued_at,
+        budget: tracedecay_contracts::OperationBudgetUsage {
+            units_consumed: 1,
+            bytes_consumed: 1,
+            elapsed_micros: 0,
+        },
+        enrollment,
+    };
+    let writer: tracedecay_contracts::remote::capture::RemoteWriterAuthorityV1 =
+        serde_json::from_value(serde_json::json!({
+            "project_id": grant.scope.project_id,
+            "scope": grant.scope,
+            "authority": {
+                "fence": {
+                    "brain_id": grant.brain_id,
+                    "shard_id": "shard.remote-joined",
+                    "generation_id": "generation.remote-joined",
+                    "placement_revision": 1,
+                    "authority_epoch": 1,
+                    "authority_node_id": grant.node_id,
+                },
+                "credential_revision": 1,
+                "observed_at": 10,
+            },
+        }))
+        .expect("writer authority");
+    tracedecay_contracts::remote::discovery::RemoteAuthorityDiscoveryV1 {
+        policy: replay_policy(&grant.scope),
+        writer,
+        enrollment: receipt,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn joined_node_store_serves_only_offline_capture_for_its_member_brain() {
+    let temporary = tempfile::tempdir().expect("temporary profile parent");
+    let profile_root = temporary.path().join("profile");
+    #[cfg(unix)]
+    let endpoint =
+        tracedecay_daemon_protocol::DaemonEndpoint::Unix(profile_root.join("remote-joined.sock"));
+    #[cfg(not(unix))]
+    let endpoint = tracedecay_daemon_protocol::default_loopback_endpoint();
+    let daemon_authority = tracedecay_daemon_identity::authority::DaemonAuthority::acquire(
+        &profile_root,
+        &endpoint,
+        "test",
+    )
+    .expect("daemon authority");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        daemon_authority.record().epoch,
+        "remote node join",
+    )
+    .expect("daemon database scope");
+    let identity = daemon_authority.profile_identity().clone();
+    let registry = DaemonSessionRuntimeRegistryV1::open(identity.clone())
+        .await
+        .expect("session runtime registry");
+    let credentials = registry.remote_credential_authority();
+    let authority_brain =
+        tracedecay_domain::BrainId::new("brain.remote-joined-authority").expect("brain identity");
+    let node_id = BrainNodeId::new("node.remote-joined").expect("node identity");
+    let secret = [13_u8; 32];
+    let presented = || OpaqueRemoteCredential::new(secret).expect("opaque credential");
+
+    assert_eq!(
+        registry
+            .join_remote_node(&joined_discovery(
+                identity.brain_id().clone(),
+                node_id.clone(),
+                &secret,
+            ))
+            .await,
+        Err(tracedecay_store_runtime::RemoteNodeOperatorErrorV1::BrainIdentityConflict),
+        "joining the profile's own Brain is provisioning's job, never a join"
+    );
+
+    let discovery = joined_discovery(authority_brain.clone(), node_id.clone(), &secret);
+    for attempt in ["join", "rerun"] {
+        registry
+            .join_remote_node(&discovery)
+            .await
+            .unwrap_or_else(|error| panic!("{attempt}: {error}"));
+    }
+    let joined = credentials
+        .storage_for_presented(RemoteCredentialUseV1::CaptureOffline, &presented())
+        .expect("the joined store serves node-local offline capture");
+    assert_eq!(joined.storage.member_brain(), &authority_brain);
+    assert_eq!(&joined.binding.shard_id.brain_id, identity.brain_id());
+    for use_case in [
+        RemoteCredentialUseV1::TransferFrame,
+        RemoteCredentialUseV1::Replay,
+        RemoteCredentialUseV1::Query,
+        RemoteCredentialUseV1::Promote,
+        RemoteCredentialUseV1::DiscoverAuthority,
+    ] {
+        assert!(
+            credentials
+                .storage_for_presented(use_case, &presented())
+                .is_err(),
+            "a joined store must never answer {use_case:?} as its Brain's authority"
+        );
+    }
+    let session = RemoteCredentialAdmissionServiceV1::new(
+        tracedecay_store_runtime::DaemonRemoteCredentialLookupV1::new(Arc::clone(&credentials)),
+    )
+    .admit_before_body(
+        &presented(),
+        RemoteCredentialUseV1::CaptureOffline,
+        UtcMicros(20),
+    )
+    .expect("the adopted enrollment admits the node's own credential");
+    assert_eq!(
+        (session.brain_id(), session.node_id()),
+        (&authority_brain, &node_id)
+    );
+
+    let mut rival = discovery.clone();
+    rival.enrollment.enrollment.expires_at = UtcMicros(90);
+    assert_eq!(
+        registry.join_remote_node(&rival).await,
+        Err(tracedecay_store_runtime::RemoteNodeOperatorErrorV1::Conflict),
+        "a different record for the adopted enrollment never replaces it"
+    );
+    let own = grant(identity.brain_id().clone(), node_id, &[14_u8; 32]);
+    assert_eq!(
+        registry
+            .provision_remote_node(own.clone(), admission(&own))
+            .await,
+        Err(tracedecay_store_runtime::RemoteNodeOperatorErrorV1::BrainIdentityConflict),
+        "a joined node store never becomes a hosted one"
+    );
+}

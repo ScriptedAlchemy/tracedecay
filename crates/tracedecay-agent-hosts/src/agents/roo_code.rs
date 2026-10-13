@@ -50,7 +50,10 @@ impl AgentIntegration for RooCodeIntegration {
         if component != super::host_bundle::HostComponentV1::ContextMcp {
             return super::host_bundle::HostBundleRegistrationStateV1::Missing;
         }
-        mcp_servers_registration_state(&roo_settings_path(&ctx.home))
+        mcp_servers_registration_state(
+            &roo_settings_path(&ctx.home),
+            &ctx.catalog_profiles.serve_args(self.id()),
+        )
     }
 
     fn is_detected(&self, home: &Path) -> bool {
@@ -86,7 +89,7 @@ impl AgentIntegration for RooCodeIntegration {
                 "mcpServers",
                 serde_json::json!({
                     "command": ctx.tracedecay_bin.clone(),
-                    "args": ["serve"],
+                    "args": ctx.serve_args.json(&[]),
                     "env": {},
                     "alwaysAllow": [],
                     "disabled": false

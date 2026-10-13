@@ -608,16 +608,28 @@ pub async fn deliver_save(
     project: &Path,
     paths: &[&str],
 ) {
-    let outcome = notify_hook_event(
-        profile,
-        project,
-        DaemonHookEvent::post_tool_use_edit(
-            HostIntegrationIdV1::Codex,
-            paths.iter().map(|path| (*path).to_owned()).collect(),
-            project.to_path_buf(),
+    // The acknowledgement is the event a following status read relies on, so
+    // wait for it within the journey's receipt bound rather than the host
+    // hook's latency bound.
+    let outcome = tokio::time::timeout(
+        RECEIPT_TIMEOUT,
+        notify_hook_event(
+            profile,
+            project,
+            DaemonHookEvent::post_tool_use_edit(
+                HostIntegrationIdV1::Codex,
+                paths.iter().map(|path| (*path).to_owned()).collect(),
+                project.to_path_buf(),
+            ),
         ),
     )
-    .await;
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "the daemon never acknowledged the hook event; daemon_log={}",
+            daemon_log_for_failure()
+        )
+    });
     assert_eq!(
         outcome,
         HookEventNotifyOutcomeV1::Delivered,
