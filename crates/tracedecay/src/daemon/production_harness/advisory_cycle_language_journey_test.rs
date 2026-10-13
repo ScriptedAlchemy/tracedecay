@@ -449,3 +449,76 @@ async fn disabled_context_scout_ends_the_hook_cycle_after_its_advisory_half() {
     );
     harness.shutdown().await;
 }
+
+/// Moves the project's Context Scout to `state` through the production
+/// configuration surface.
+async fn set_context_scout_state(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    state: &str,
+) {
+    let key = tracedecay_domain::configuration::CONTEXT_SCOUT_SETTINGS_SETTING_KEY;
+    let response = harness
+        .call_tool(
+            project,
+            "tracedecay_configuration_get",
+            json!({"key": key, "format": "json"}),
+        )
+        .await
+        .expect("configuration get");
+    let (refused, current) = tool_answer(&response);
+    assert!(!refused, "configuration get refused: {current}");
+    let setting = &current["outcome"]["value"]["payload"];
+    let mut value = setting["effective_value"].clone();
+    value["value"]["state"] = json!(state);
+    let response = harness
+        .call_tool(
+            project,
+            "tracedecay_configuration_set",
+            json!({
+                "layer": {"kind": "project", "project_id": current["scope"]["project_id"]},
+                "key": key,
+                "value": value,
+                "expected_revision": setting["revision_id"],
+                "idempotency_key": format!("context-scout.state.{state}"),
+                "format": "json",
+            }),
+        )
+        .await
+        .expect("configuration set");
+    let (refused, written) = tool_answer(&response);
+    assert!(!refused, "Context Scout {state} was refused: {written}");
+}
+
+/// Admits the same saved-edit boundary the way the replay sweep redrives
+/// owed producer work, until a run completes it. Returns the redrives that
+/// ran before completion, or `None` if it stayed owed past `max_redrives`.
+async fn redrives_until_completed(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    max_redrives: usize,
+) -> Option<usize> {
+    for redrives in 0..=max_redrives {
+        if hook_work_completes(harness, project, Some("src/lib.rs")).await {
+            return Some(redrives);
+        }
+    }
+    None
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hook_boundary_without_a_scout_session_is_not_redriven() {
+    let isolation = tempfile::TempDir::new().expect("production harness isolation");
+    let (harness, project) = settled_checkout_with_language_less_file(isolation.path()).await;
+
+    for state in ["paused", "active"] {
+        set_context_scout_state(&harness, &project, state).await;
+        assert_eq!(
+            redrives_until_completed(&harness, &project, 2).await,
+            Some(0),
+            "with Context Scout {state}, a boundary without a Scout session owes no Scout \
+             work; redriving it cannot produce a session"
+        );
+    }
+    harness.shutdown().await;
+}
