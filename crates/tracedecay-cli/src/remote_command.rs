@@ -20,7 +20,7 @@ use tracedecay_contracts::remote::status::{
     RemoteSpoolOperationalStatusV1,
 };
 use tracedecay_contracts::{ApplicationOutcome, RemoteListenerReadV1};
-use tracedecay_domain::CurrentRemoteAuthorityStateV1;
+use tracedecay_domain::{BrainNodeId, CurrentRemoteAuthorityStateV1};
 use tracedecay_sdk::remote_client::{EnrolledRemoteClient, RemoteClientError};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -60,6 +60,10 @@ pub enum RemoteCommand {
     },
     Failover {
         args: RemoteProtocolArgs,
+    },
+    Revoke {
+        node_id: String,
+        json: bool,
     },
 }
 
@@ -132,7 +136,44 @@ pub fn run(profile: &ProfileRoot, command: RemoteCommand) -> Result<()> {
                 args.json,
             )
         }
+        RemoteCommand::Revoke { node_id, json } => run_revoke(profile, &node_id, json),
     }
+}
+
+#[tracing::instrument(name = "serve.remote.revoke", level = "trace", skip_all)]
+fn run_revoke(profile: &ProfileRoot, node_id: &str, json: bool) -> Result<()> {
+    let node_id = BrainNodeId::new(node_id).map_err(|error| TraceDecayError::Config {
+        message: format!("Remote Brain --node-id is not a node identity: {error}"),
+    })?;
+    let revocation = tracedecay::daemon::live_remote_node_revocation(profile, &node_id)?;
+    if json {
+        print!("{}", canonical_json_line(&revocation)?);
+    } else {
+        print!("{}", render_revocation_human(&node_id, &revocation));
+    }
+    Ok(())
+}
+
+fn render_revocation_human(
+    node_id: &BrainNodeId,
+    revocation: &tracedecay::daemon::RemoteNodeRevocationV1,
+) -> String {
+    if revocation.revocations.is_empty() {
+        return format!("Node {node_id} holds no enrollments\n");
+    }
+    revocation
+        .revocations
+        .iter()
+        .map(|receipt| {
+            format!(
+                "Revoked enrollment {} on node {} (revision {} -> {})\n",
+                receipt.enrollment_id,
+                receipt.node_id,
+                receipt.prior_revision,
+                receipt.current_revision
+            )
+        })
+        .collect()
 }
 
 #[tracing::instrument(name = "serve.remote.status", level = "trace", skip_all)]

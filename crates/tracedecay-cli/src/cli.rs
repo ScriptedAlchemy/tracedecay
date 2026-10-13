@@ -795,6 +795,16 @@ pub enum RemoteAction {
         #[command(flatten)]
         authority: RemoteAuthorityArgs,
     },
+    /// Revoke every enrollment of a node this daemon provisioned, such as a
+    /// lost machine; its capture, transfer and replay are refused afterward
+    Revoke {
+        /// Node identity the node was provisioned with
+        #[arg(long, value_name = "NODE")]
+        node_id: String,
+        /// Emit one canonical JSON object and newline
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 impl From<RemoteAction> for crate::remote_command::RemoteCommand {
@@ -823,6 +833,7 @@ impl From<RemoteAction> for crate::remote_command::RemoteCommand {
             RemoteAction::Failover { authority } => Self::Failover {
                 args: authority.into(),
             },
+            RemoteAction::Revoke { node_id, json } => Self::Revoke { node_id, json },
         }
     }
 }
