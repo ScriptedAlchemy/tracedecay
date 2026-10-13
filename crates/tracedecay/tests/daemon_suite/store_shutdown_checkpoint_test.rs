@@ -759,8 +759,10 @@ const FIRST_MAINTENANCE_TICK: Duration = Duration::from_mins(1);
 /// A retention maintenance tick lists every mounted store before it works
 /// through them one unit at a time. An idle project it listed must still
 /// retire for capacity while the tick runs, so the open waiting on that
-/// capacity is admitted on its first attempt. The tick parks right after its
-/// listing for the whole retirement.
+/// capacity is admitted on its first attempt and serves a ready generation.
+/// The tick parks right after its listing for the whole retirement, on a
+/// one-unit background CPU budget: a tick that held that unit while parked
+/// would starve the indexing the retirement drains and the ninth project needs.
 #[tokio::test]
 async fn capacity_retirement_completes_while_a_maintenance_tick_runs() {
     let (environment, first) = IsolatedHome::new();
@@ -783,6 +785,7 @@ async fn capacity_retirement_completes_while_a_maintenance_tick_runs() {
     let daemon_started = Instant::now();
     let mut daemon = spawn_tracedecay_daemon_logged(environment.home(), &log_path, |command| {
         command.env("TRACEDECAY_TEST_HOLD_AFTER_MAINTENANCE_LISTING", &tick_hold);
+        command.env("TRACEDECAY_INDEX_WORKERS", "1");
     });
     let socket = daemon_socket_path(environment.home());
     for project in cached {
@@ -798,7 +801,6 @@ async fn capacity_retirement_completes_while_a_maintenance_tick_runs() {
     // Every cached project is idle, so the ninth open retires the least
     // recently used one, a store the parked tick listed.
     initialize_tracedecay(environment.home(), incoming);
-    fs::remove_file(&tick_hold).expect("release the parked maintenance tick");
     tracedecay_project::product_runtime::register_fixture_product_runtime();
     let incoming_handshake = tracedecay::daemon::handshake_for_current_client(
         environment.profile(),
@@ -809,6 +811,7 @@ async fn capacity_retirement_completes_while_a_maintenance_tick_runs() {
     )
     .expect("incoming project handshake");
     wait_for_readiness(&socket, &incoming_handshake, "ready", RECEIPT_TIMEOUT).await;
+    fs::remove_file(&tick_hold).expect("release the parked maintenance tick");
 
     let log = fs::read_to_string(&log_path).expect("daemon log");
     assert!(
