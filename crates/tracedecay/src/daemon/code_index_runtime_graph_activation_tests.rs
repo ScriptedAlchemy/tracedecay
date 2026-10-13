@@ -1041,8 +1041,16 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
     }
 
     let settled_context = graph_request_context(scope.clone(), "restart-settled");
-    let settled_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    // Publishing a rebuilt or repaired graph is background work with no
+    // latency bound, so the wait follows the worker's activity instead of a
+    // clock. Settlement is sampled before the observation, because a worker
+    // that had already settled cannot seat the graph afterwards.
+    let mut activity = registry
+        .subscribe_owner_activity(fixture.path())
+        .await
+        .expect("mounted owner activity");
     let (settled, settled_read) = loop {
+        let worker_settled = activity.pass_finished() && !activity.wake_pending();
         let observed = registry
             .latest_text_serving_freshness_for_scope(&scope)
             .await;
@@ -1067,15 +1075,16 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
             );
         }
         assert!(
-            std::time::Instant::now() <= settled_deadline,
-            "persistent graph generation did not become query-serving: text={:?}, graph={graph_read:?}",
+            !worker_settled,
+            "the worker settled without a query-serving persistent graph generation: \
+             text={:?}, graph={graph_read:?}",
             observed.as_ref().map(|(latest, current)| (
                 current,
                 latest.code_graph_serving_readiness(),
                 latest.interactive_graph_store().err(),
             ))
         );
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        activity.changed().await.expect("live owner activity");
     };
     if corrupt_graph {
         assert_eq!(
