@@ -352,6 +352,13 @@ fn writer_fence(brain_id: &BrainId, epoch: u64, node: &str) -> RemoteWriterFence
 }
 
 fn observation(project_id: &str, observation_id: &str) -> DurableObservationV1 {
+    observation_at(project_id, observation_id, 0)
+}
+
+/// An observation of the one journey source session at byte `start`. The
+/// project store advances that source's cursor on each commit, so every later
+/// observation of the session must start where the previous one ended.
+fn observation_at(project_id: &str, observation_id: &str, start: u64) -> DurableObservationV1 {
     let payload = json!({"kind": "assistant_message", "body": "remote journey observation"});
     let receipt = SanitizationReceiptV1::new(
         SanitizationReceiptRefV1::new(
@@ -375,7 +382,7 @@ fn observation(project_id: &str, observation_id: &str) -> DurableObservationV1 {
                 project_id: ProjectId::new(project_id).unwrap(),
             },
             ObservationSourceGenerationV1::new(1).unwrap(),
-            ObservationSourceRangeV1::new(0, 1).unwrap(),
+            ObservationSourceRangeV1::new(start, start + 1).unwrap(),
             ObservationOrderingDomainV1::SqliteRowId,
             ObservationId::new(observation_id).unwrap(),
         )
@@ -863,6 +870,9 @@ fn a_laptop_captures_offline_and_its_frames_reach_one_fenced_authority_until_rev
         RemoteCapabilityV1::TransferFrame,
         RemoteCapabilityV1::Replay,
         RemoteCapabilityV1::Query,
+        // The published fence names this node as the writer, and replay
+        // admits frames only under a writer enrolled to serve authority.
+        RemoteCapabilityV1::ServeAuthority,
     ]
     .into_iter()
     .collect();
@@ -885,13 +895,15 @@ fn a_laptop_captures_offline_and_its_frames_reach_one_fenced_authority_until_rev
     assert_eq!(status, reqwest::StatusCode::BAD_GATEWAY, "{refused}");
 
     let observations = [
-        observation(
+        observation_at(
             &desktop.project_id,
             "observation.remote-qualification-first",
+            0,
         ),
-        observation(
+        observation_at(
             &desktop.project_id,
             "observation.remote-qualification-second",
+            1,
         ),
     ];
     let mut previous_event_id = None;
@@ -1037,9 +1049,10 @@ fn a_laptop_captures_offline_and_its_frames_reach_one_fenced_authority_until_rev
                 sequence: 3,
                 previous_event_id,
             },
-            observation(
+            observation_at(
                 &desktop.project_id,
                 "observation.remote-qualification-third",
+                2,
             ),
         ))
         .unwrap()
