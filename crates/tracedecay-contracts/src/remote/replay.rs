@@ -290,7 +290,7 @@ pub struct RemoteReplaySpoolStateV1 {
     pub state: RemoteReplayStateV1,
     pub receipt: Option<RemoteReplayCommitReceiptV1>,
     pub last_attempt: u64,
-    /// Why the last transition settled the frame as it did.
+    /// The finding the last transition recorded, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finding: Option<RemoteReplayFindingV1>,
 }
