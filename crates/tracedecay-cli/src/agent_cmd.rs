@@ -3,6 +3,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tracedecay_runtime_core::config::ProfileRoot;
 
 use tracedecay_agent_hosts::agents::host_component_registration::CatalogHostComponentRegistrationAuthority;
+use tracedecay_agent_hosts::agents::serve_args::ServeArgs;
+use tracedecay_contracts::catalog_composition::CatalogProfileName;
 use tracedecay_session_memory::user_config::UserConfig;
 
 mod automation;
@@ -268,9 +270,20 @@ pub(crate) async fn handle_host_lifecycle_command(
     operation: HostBundleCliOperation,
     options: crate::cli::HostBundleCliOptions,
     no_dashboard: bool,
+    catalog_profile: Option<CatalogProfileName>,
     automation: Option<CodexAutomationInstall>,
 ) -> tracedecay_domain::errors::Result<HostLifecycleCompletion> {
     validate_codex_automation_flags(agent.as_deref(), automation)?;
+    if catalog_profile.is_some()
+        && let Some(agent) = agent.as_deref()
+        && matches!(agent, "hermes" | "pi")
+    {
+        return Err(tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!(
+                "{agent} registers no MCP server, so --catalog-profile does not apply"
+            ),
+        });
+    }
     if component_mutation_still_requires_yes(
         operation,
         options.component.is_some(),
@@ -384,15 +397,21 @@ pub(crate) async fn handle_host_lifecycle_command(
                 user_config.dashboard_enabled_for_agent(agent_id)
             }
         };
-        let mut result = run_host_component_lifecycle(
-            profile,
-            agent_id,
-            operation,
-            &options,
-            &home,
-            &lifecycle_root,
-            &ComponentSetApplyContext::resolved_with_dashboard(dashboard),
-        );
+        let serve_args = match (operation, &catalog_profile) {
+            (HostBundleCliOperation::Install, Some(name)) => Ok(ServeArgs::from(name.clone())),
+            _ => saved_serve_args(&user_config, agent_id),
+        };
+        let mut result = serve_args.map_err(Into::into).and_then(|serve_args| {
+            run_host_component_lifecycle(
+                profile,
+                agent_id,
+                operation,
+                &options,
+                &home,
+                &lifecycle_root,
+                &ComponentSetApplyContext::resolved_with(dashboard, serve_args),
+            )
+        });
         if matches!(result, Ok(HostLifecycleResult::Applied))
             && !options.dry_run
             && agent_id == "codex"
@@ -440,11 +459,23 @@ pub(crate) async fn handle_host_lifecycle_command(
                 user_config
                     .agent_dashboard_enabled
                     .insert(agent_id.clone(), !no_dashboard);
+                match catalog_profile.as_ref().map(CatalogProfileName::name) {
+                    None => {}
+                    Some("default") => {
+                        user_config.agent_catalog_profile.remove(agent_id);
+                    }
+                    Some(name) => {
+                        user_config
+                            .agent_catalog_profile
+                            .insert(agent_id.clone(), name.to_owned());
+                    }
+                }
             }
             // Removing one component leaves the rest of the host tracked.
             HostBundleCliOperation::Uninstall if options.component.is_none() => {
                 user_config.installed_agents.retain(|id| id != agent_id);
                 user_config.agent_dashboard_enabled.remove(agent_id);
+                user_config.agent_catalog_profile.remove(agent_id);
             }
             // A detected integration the profile config never tracked (rendered
             // by an older binary) is tracked once this pass has refreshed it.
@@ -563,6 +594,7 @@ fn run_host_component_lifecycle(
         options.component,
         now_unix,
         &context.tracedecay_bin,
+        &context.serve_args,
     )?
     .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {
         message: unsupported_host_component_set_message(agent_id),
@@ -618,7 +650,13 @@ fn canonical_host_component_set(
 > {
     let tracedecay_bin = tracedecay_agent_hosts::agents::which_tracedecay()
         .unwrap_or_else(|| "tracedecay".to_string());
-    canonical_host_component_set_with_tracedecay_bin(agent, component, now_unix, &tracedecay_bin)
+    canonical_host_component_set_with_tracedecay_bin(
+        agent,
+        component,
+        now_unix,
+        &tracedecay_bin,
+        &ServeArgs::default(),
+    )
 }
 
 fn component_is_not_applicable(agent: &str, component: crate::cli::HostBundleComponentArg) -> bool {
@@ -649,6 +687,7 @@ fn canonical_host_component_set_with_tracedecay_bin(
     component: Option<crate::cli::HostBundleComponentArg>,
     now_unix: u64,
     tracedecay_bin: &str,
+    serve_args: &ServeArgs,
 ) -> tracedecay_domain::errors::Result<
     Option<
         tracedecay_agent_hosts::agents::host_bundle_registry::VerifiedEmbeddedHostComponentSetV1,
@@ -673,6 +712,7 @@ fn canonical_host_component_set_with_tracedecay_bin(
         now_unix,
         tracedecay_bin,
         crate::product_runtime::PRODUCT_FULL_SHA,
+        serve_args,
     )
     .map(Some)
     .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
@@ -877,6 +917,7 @@ fn preview_canonical_component_set(
             request.lifecycle.operation,
             context.tracedecay_bin.clone(),
             context.dashboard,
+            context.serve_args.clone(),
         )?;
     tracedecay_agent_hosts::agents::host_bundle::dry_run_host_component_set_lifecycle_with_lifecycle_root_at(
         home,
@@ -896,23 +937,25 @@ fn preview_canonical_component_set(
 struct ComponentSetApplyContext {
     tracedecay_bin: String,
     dashboard: bool,
+    serve_args: ServeArgs,
 }
 
 impl ComponentSetApplyContext {
     /// The production context: the resolved installed binary, dashboard on.
     #[cfg(test)]
     fn resolved() -> Self {
-        Self::resolved_with_dashboard(true)
+        Self::resolved_with(true, ServeArgs::default())
     }
 
-    /// The production binary with the dashboard registration decided by the
-    /// caller, which is what the lifecycle commands pass through from
-    /// `--no-dashboard` and the per-agent dashboard policy.
-    fn resolved_with_dashboard(dashboard: bool) -> Self {
+    /// The production binary with the dashboard registration and launch args
+    /// decided by the caller, which is what the lifecycle commands pass through
+    /// from `--no-dashboard`, `--catalog-profile`, and the per-agent policies.
+    fn resolved_with(dashboard: bool, serve_args: ServeArgs) -> Self {
         Self {
             tracedecay_bin: tracedecay_agent_hosts::agents::which_tracedecay()
                 .unwrap_or_else(|| "tracedecay".to_string()),
             dashboard,
+            serve_args,
         }
     }
 
@@ -922,6 +965,7 @@ impl ComponentSetApplyContext {
         Self {
             tracedecay_bin: tracedecay_bin.to_string(),
             dashboard: true,
+            serve_args: ServeArgs::default(),
         }
     }
 }
@@ -940,6 +984,7 @@ fn apply_canonical_component_set(
     let ComponentSetApplyContext {
         tracedecay_bin,
         dashboard,
+        serve_args,
     } = context;
     let dashboard = *dashboard;
     let request = component_set_request(
@@ -966,6 +1011,7 @@ fn apply_canonical_component_set(
             request.lifecycle.operation,
             tracedecay_bin.to_string(),
             dashboard,
+            serve_args.clone(),
         )?;
     let preview = transaction
         .preview(
@@ -1047,6 +1093,27 @@ fn apply_canonical_component_set(
     Ok(HostLifecycleResult::Applied)
 }
 
+/// The launch args an agent's saved catalog profile selects; no entry is the
+/// default profile.
+fn saved_serve_args(
+    user_config: &UserConfig,
+    agent_id: &str,
+) -> tracedecay_domain::errors::Result<ServeArgs> {
+    let Some(name) = user_config.agent_catalog_profile.get(agent_id) else {
+        return Ok(ServeArgs::default());
+    };
+    let catalog =
+        tracedecay_daemon_service::application_surface::application_surface_binding_catalog_ref()
+            .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+            message: format!("catalog profiles are unavailable: {error}"),
+        })?;
+    ServeArgs::parse_saved(agent_id, name, catalog).map_err(|error| {
+        tracedecay_domain::errors::TraceDecayError::Config {
+            message: error.to_string(),
+        }
+    })
+}
+
 pub(crate) fn load_host_lifecycle_user_config(
     profile: &ProfileRoot,
 ) -> tracedecay_domain::errors::Result<UserConfig> {
@@ -1093,6 +1160,7 @@ pub(crate) async fn handle_project_local_lifecycle_command(
         tracedecay_bin,
         project_root: Some(project_path.clone()),
         dashboard: false,
+        serve_args: saved_serve_args(&load_host_lifecycle_user_config(profile)?, &agent_id)?,
     };
     // Project-local lifecycle installs the host's default component set:
     // Devin and Zed carry only the MCP registration, while Vibe also owns a
@@ -1285,19 +1353,23 @@ async fn reinstall_agent_integrations_with_persisted_dashboard_policies(
             );
             continue;
         }
-        let context = ComponentSetApplyContext {
-            tracedecay_bin: tracedecay_bin.to_string(),
-            dashboard: user_config.dashboard_enabled_for_agent(id),
-        };
-        let result = run_host_component_lifecycle(
-            profile,
-            id,
-            HostBundleCliOperation::Repair,
-            &options,
-            home,
-            &lifecycle_root,
-            &context,
-        );
+        let result = saved_serve_args(&user_config, id)
+            .map_err(Into::into)
+            .and_then(|serve_args| {
+                run_host_component_lifecycle(
+                    profile,
+                    id,
+                    HostBundleCliOperation::Repair,
+                    &options,
+                    home,
+                    &lifecycle_root,
+                    &ComponentSetApplyContext {
+                        tracedecay_bin: tracedecay_bin.to_string(),
+                        dashboard: user_config.dashboard_enabled_for_agent(id),
+                        serve_args,
+                    },
+                )
+            });
         summary.record(id, settle_host_lifecycle(result, false));
     }
     Ok(summary)
@@ -1310,6 +1382,7 @@ mod tests {
         Arc,
         atomic::{AtomicBool, Ordering},
     };
+    use tracedecay_agent_hosts::agents::serve_args::ServeArgs;
 
     use super::{
         CatalogHostComponentRegistrationAuthority, ComponentSetApplyContext,
@@ -1389,7 +1462,7 @@ mod tests {
             &super::resolved_lifecycle_root(
                 &tracedecay_runtime_core::config::ProfileRoot::under_home(home),
             ),
-            &ComponentSetApplyContext::resolved_with_dashboard(true),
+            &ComponentSetApplyContext::resolved_with(true, ServeArgs::default()),
         ) {
             Ok(HostLifecycleResult::Applied) => Ok(()),
             Ok(other) => panic!("{agent_id} did not apply its component set: {other:?}"),
@@ -1667,6 +1740,7 @@ mod tests {
             Some(crate::cli::HostBundleComponentArg::Core),
             0,
             KIRO_FIXTURE_BIN,
+            &ServeArgs::default(),
         )
         .unwrap()
         .unwrap();
@@ -2079,10 +2153,15 @@ mod tests {
         let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
         let lifecycle = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(home.path().join(".kiro")).unwrap();
-        let component_set =
-            canonical_host_component_set_with_tracedecay_bin("kiro", None, 0, KIRO_FIXTURE_BIN)
-                .unwrap()
-                .unwrap();
+        let component_set = canonical_host_component_set_with_tracedecay_bin(
+            "kiro",
+            None,
+            0,
+            KIRO_FIXTURE_BIN,
+            &ServeArgs::default(),
+        )
+        .unwrap()
+        .unwrap();
         let options = crate::cli::HostBundleCliOptions {
             component: None,
             dry_run: false,
@@ -2132,10 +2211,15 @@ mod tests {
         let lifecycle = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(home.path().join(".kiro")).unwrap();
 
-        let component_set =
-            canonical_host_component_set_with_tracedecay_bin("kiro", None, 0, KIRO_FIXTURE_BIN)
-                .unwrap()
-                .unwrap();
+        let component_set = canonical_host_component_set_with_tracedecay_bin(
+            "kiro",
+            None,
+            0,
+            KIRO_FIXTURE_BIN,
+            &ServeArgs::default(),
+        )
+        .unwrap()
+        .unwrap();
         apply_canonical_component_set(
             profile,
             "kiro",
@@ -2172,6 +2256,7 @@ mod tests {
                 profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
                 home: home.path().to_path_buf(),
                 project_path: project.path().to_path_buf(),
+                catalog_profiles: Default::default(),
             },
         );
         assert_eq!(counters.issues, 0);
@@ -2189,10 +2274,15 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
         let lifecycle = tempfile::tempdir().unwrap();
-        let component_set =
-            canonical_host_component_set_with_tracedecay_bin("kiro", None, 0, KIRO_FIXTURE_BIN)
-                .unwrap()
-                .unwrap();
+        let component_set = canonical_host_component_set_with_tracedecay_bin(
+            "kiro",
+            None,
+            0,
+            KIRO_FIXTURE_BIN,
+            &ServeArgs::default(),
+        )
+        .unwrap()
+        .unwrap();
         std::fs::create_dir_all(home.path().join(".kiro")).unwrap();
         let install_options = crate::cli::HostBundleCliOptions {
             component: None,
@@ -2278,10 +2368,15 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let profile = &tracedecay_runtime_core::config::ProfileRoot::under_home(home.path());
         let lifecycle = tempfile::tempdir().unwrap();
-        let component_set =
-            canonical_host_component_set_with_tracedecay_bin("kiro", None, 0, KIRO_FIXTURE_BIN)
-                .unwrap()
-                .unwrap();
+        let component_set = canonical_host_component_set_with_tracedecay_bin(
+            "kiro",
+            None,
+            0,
+            KIRO_FIXTURE_BIN,
+            &ServeArgs::default(),
+        )
+        .unwrap()
+        .unwrap();
         let result = apply_canonical_component_set(
             profile,
             "kiro",
@@ -2513,6 +2608,7 @@ mod tests {
             tracedecay_bin: "tracedecay".to_string(),
             project_root: None,
             dashboard: true,
+            serve_args: Default::default(),
         };
 
         integration
@@ -2667,10 +2763,15 @@ mod tests {
         std::fs::write(&user_path, user_bytes).unwrap();
         std::fs::write(&manifest_path, manifest_bytes.as_bytes()).unwrap();
 
-        let component_set =
-            canonical_host_component_set_with_tracedecay_bin("codex", None, 0, &tracedecay_bin)
-                .unwrap()
-                .unwrap();
+        let component_set = canonical_host_component_set_with_tracedecay_bin(
+            "codex",
+            None,
+            0,
+            &tracedecay_bin,
+            &ServeArgs::default(),
+        )
+        .unwrap()
+        .unwrap();
         let request =
             component_set_request(&component_set, HostBundleCliOperation::Repair, true, false)
                 .unwrap();
@@ -2768,6 +2869,7 @@ mod tests {
             Some(crate::cli::HostBundleComponentArg::ContextMcp),
             0,
             &tracedecay_bin,
+            &ServeArgs::default(),
         )
         .unwrap()
         .unwrap();
@@ -2776,6 +2878,7 @@ mod tests {
             Some(crate::cli::HostBundleComponentArg::Agent),
             0,
             &tracedecay_bin,
+            &ServeArgs::default(),
         )
         .unwrap()
         .unwrap();
@@ -2806,6 +2909,7 @@ mod tests {
             Some(crate::cli::HostBundleComponentArg::Core),
             0,
             &tracedecay_bin,
+            &ServeArgs::default(),
         )
         .unwrap()
         .unwrap();
@@ -2883,10 +2987,15 @@ mod tests {
             if let Some(bytes) = &existing {
                 std::fs::write(&mcp_path, bytes).unwrap();
             }
-            let component_set =
-                canonical_host_component_set_with_tracedecay_bin("kiro", None, 0, &tracedecay_bin)
-                    .unwrap()
-                    .unwrap();
+            let component_set = canonical_host_component_set_with_tracedecay_bin(
+                "kiro",
+                None,
+                0,
+                &tracedecay_bin,
+                &ServeArgs::default(),
+            )
+            .unwrap()
+            .unwrap();
 
             for operation in [
                 HostBundleCliOperation::Install,
@@ -3295,10 +3404,15 @@ mod tests {
         // `lifecycle` and requires an atomic rename.
         let lifecycle = host_cli_tempdir();
         let tracedecay_bin = "new-tracedecay";
-        let component_set =
-            canonical_host_component_set_with_tracedecay_bin("codex", None, 0, tracedecay_bin)
-                .unwrap()
-                .unwrap();
+        let component_set = canonical_host_component_set_with_tracedecay_bin(
+            "codex",
+            None,
+            0,
+            tracedecay_bin,
+            &ServeArgs::default(),
+        )
+        .unwrap()
+        .unwrap();
         let source_manifest = home
             .path()
             .join(".codex/plugins/tracedecay/.codex-plugin/plugin.json");

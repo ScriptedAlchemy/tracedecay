@@ -242,6 +242,7 @@ describe('KnowledgePage fact detail', () => {
     expect(await screen.findByText('full authoritative fact detail')).toBeTruthy();
     expect(screen.getByText('amari_fhrr')).toBeTruthy();
     expect(screen.getByText(/2,048 dimensions/)).toBeTruthy();
+    expect(screen.queryByText(/capacity|354,304/)).toBeNull();
     expect(
       calls.some((url) => url.includes('/api/plugins/holographic/fact/fact-project-7')),
     ).toBe(true);

@@ -27,6 +27,7 @@ use tracedecay_automation_runtime::automation::skill_targets::{
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
+use super::serve_args::ServeArgs;
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
     install_mcp_server_entry, load_json_file, mcp_config_has_tracedecay, safe_write_json_file,
@@ -49,9 +50,6 @@ const KIRO_AGENT_ALL_TOOLS: &str = "*";
 const KIRO_ALLOWED_BUILTIN_TOOLS: &str = "@builtin";
 const KIRO_ALLOWED_TRACEDECAY_TOOLS: &str = "@tracedecay";
 const KIRO_PROMPT_HOOK: &str = "hook-kiro-prompt-submit";
-
-/// Arguments the tracedecay MCP server is launched with.
-const MCP_SERVER_ARGS: &[&str] = &["serve"];
 
 /// A hook the managed Kiro agent registers. Kiro's documented hook entry
 /// schema is `command` plus an optional `matcher`, nothing else, so no
@@ -230,7 +228,7 @@ impl AgentIntegration for KiroIntegration {
                 skill_index_path.as_path(),
             ],
         )?;
-        install_mcp_server(&mcp_path, &ctx.tracedecay_bin)?;
+        install_mcp_server(&mcp_path, &ctx.tracedecay_bin, &ctx.serve_args)?;
         install_steering_rules(&steering)?;
         install_managed_agent(
             &agent_path,
@@ -329,7 +327,7 @@ impl AgentIntegration for KiroIntegration {
         if component != HostComponentV1::ContextMcp {
             return State::Missing;
         }
-        kiro_context_mcp_registration_state(&ctx.home)
+        kiro_context_mcp_registration_state(&ctx.home, &ctx.catalog_profiles.serve_args(self.id()))
     }
 
     fn is_detected(&self, home: &Path) -> bool {
@@ -363,7 +361,11 @@ impl AgentIntegration for KiroIntegration {
         ctx: &InstallContext,
     ) -> Result<()> {
         if components.contains(&super::host_bundle::HostComponentV1::ContextMcp) {
-            install_mcp_server(&mcp_config_path(&ctx.home), &ctx.tracedecay_bin)?;
+            install_mcp_server(
+                &mcp_config_path(&ctx.home),
+                &ctx.tracedecay_bin,
+                &ctx.serve_args,
+            )?;
         }
         Ok(())
     }
@@ -430,10 +432,10 @@ fn mcp_registry_has_tracedecay(path: &Path) -> bool {
 
 // Install helpers
 
-fn mcp_server_entry(tracedecay_bin: &str) -> serde_json::Value {
+fn mcp_server_entry(tracedecay_bin: &str, serve_args: &ServeArgs) -> serde_json::Value {
     json!({
         "command": tracedecay_bin,
-        "args": MCP_SERVER_ARGS,
+        "args": serve_args.json(&[]),
         "disabled": false
     })
 }
@@ -466,11 +468,11 @@ fn managed_agent_config(
 }
 
 /// Register the MCP server in a user- or workspace-level Kiro `mcp.json`.
-fn install_mcp_server(path: &Path, tracedecay_bin: &str) -> Result<()> {
+fn install_mcp_server(path: &Path, tracedecay_bin: &str, serve_args: &ServeArgs) -> Result<()> {
     install_mcp_server_entry(
         path,
         "mcpServers",
-        mcp_server_entry(tracedecay_bin),
+        mcp_server_entry(tracedecay_bin, serve_args),
         "Kiro",
         JsonConfigDialect::Json,
     )
@@ -620,6 +622,7 @@ fn is_owned_agent_config(config: &serde_json::Value) -> bool {
 
 fn kiro_context_mcp_registration_state(
     home: &Path,
+    serve_args: &ServeArgs,
 ) -> super::host_bundle::HostBundleRegistrationStateV1 {
     use super::host_bundle::HostBundleRegistrationStateV1 as State;
 
@@ -639,10 +642,7 @@ fn kiro_context_mcp_registration_state(
         .get("command")
         .and_then(serde_json::Value::as_str)
         .is_some_and(|command| !command.is_empty())
-        && server
-            .get("args")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|args| args.iter().any(|arg| arg.as_str() == Some("serve")))
+        && serve_args.matches_json(server.get("args"), &[])
         && server.get("disabled").and_then(serde_json::Value::as_bool) != Some(true);
     if mcp_current {
         State::Current

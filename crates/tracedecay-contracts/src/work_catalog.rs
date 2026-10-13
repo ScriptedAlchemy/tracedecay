@@ -614,12 +614,18 @@ fn work_manifest(
         terminal_states: TerminalStateContract::new(terminal_states(read_only))?,
         availability: AvailabilityContract::Available,
         binding_ids: vec![binding_id],
-        profile_eligibility: vec![
-            ProfileId::new("profile.default")
-                .map_err(|_| invalid_identity("profile_id", "work profile ID is not canonical"))?,
-        ],
+        profile_eligibility: work_profile_eligibility()?,
         required_features: Vec::new(),
     })
+}
+
+/// Catalog profiles every Work capability is eligible for. The manifests and
+/// the serve-time profile filter both read it, since Work tools are mounted
+/// outside the application catalog snapshot.
+pub fn work_profile_eligibility() -> Result<Vec<ProfileId>, CatalogValidationError> {
+    Ok(vec![ProfileId::new("profile.default").map_err(|_| {
+        invalid_identity("profile_id", "work profile ID is not canonical")
+    })?])
 }
 
 fn terminal_states(read_only: bool) -> Vec<TerminalState> {

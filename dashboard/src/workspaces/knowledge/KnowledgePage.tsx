@@ -582,7 +582,7 @@ function StoreReadouts({
         value={statusMemory ? statusMemory.algebra.name : '—'}
         note={
           statusMemory
-            ? `${statusMemory.algebra.hrr_dim.toLocaleString()} dimensions · estimated capacity ${statusMemory.algebra.estimated_capacity.toLocaleString()}`
+            ? `${statusMemory.algebra.hrr_dim.toLocaleString()} dimensions`
             : 'status has not answered'
         }
         className="max-sm:hidden"

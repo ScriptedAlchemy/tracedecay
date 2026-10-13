@@ -64,6 +64,11 @@ pub struct UserConfig {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub agent_dashboard_enabled: BTreeMap<String, bool>,
 
+    /// Per-agent catalog profile for the installed MCP registration, by short
+    /// name. A missing entry is the default profile; `default` is never stored.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub agent_catalog_profile: BTreeMap<String, String>,
+
     /// Version that last ran `install` or `reinstall`. Used to trigger a
     /// silent reinstall when the binary is upgraded.
     #[serde(default)]
@@ -105,6 +110,7 @@ impl Default for UserConfig {
             last_version_warning_at: 0,
             installed_agents: Vec::new(),
             agent_dashboard_enabled: BTreeMap::new(),
+            agent_catalog_profile: BTreeMap::new(),
             last_installed_version: String::new(),
             previous_version: String::new(),
             automation: AutomationConfig::default(),

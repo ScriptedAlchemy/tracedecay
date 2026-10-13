@@ -21,6 +21,7 @@ use serde_json::json;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 pub(super) use super::plugin_bundle::TRACEDECAY_BIN_PLACEHOLDER;
+use super::serve_args::ServeArgs;
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
     JsonConfigMutation, load_json_file, update_json_config_transactionally,
@@ -95,7 +96,10 @@ impl AgentIntegration for ClaudeIntegration {
         // longer ships; those survive artifact replacement and make the
         // loaded cache fail discovery after `plugin install` exits 0.
         remove_non_catalog_claude_marketplace_files(&ctx.home)?;
-        if !claude_plugin_is_natively_active(&ctx.home, Some(&ctx.tracedecay_bin))? {
+        if !claude_plugin_is_natively_active(
+            &ctx.home,
+            Some((&ctx.tracedecay_bin, &ctx.serve_args)),
+        )? {
             let claude = require_claude_cli()?;
             claude_plugin_activate_with(&claude, &ctx.home)?;
         }
@@ -178,7 +182,10 @@ impl AgentIntegration for ClaudeIntegration {
 
         match self.host_component_registration(component, ctx) {
             State::Current => {
-                match claude_plugin_is_natively_active(&ctx.home, Some(&install.tracedecay_bin)) {
+                match claude_plugin_is_natively_active(
+                    &ctx.home,
+                    Some((&install.tracedecay_bin, &install.serve_args)),
+                ) {
                     Ok(true) => State::Current,
                     Ok(false) => State::Repairable,
                     Err(_) => State::Corrupt,
@@ -272,9 +279,12 @@ impl AgentIntegration for ClaudeIntegration {
     }
 }
 
-fn claude_plugin_is_natively_active(home: &Path, tracedecay_bin: Option<&str>) -> Result<bool> {
+fn claude_plugin_is_natively_active(
+    home: &Path,
+    launch: Option<(&str, &ServeArgs)>,
+) -> Result<bool> {
     let active = claude_plugin_registration_is_active(home)?;
-    let cache_current = claude_loaded_cache_matches_rendered_bundle(home, tracedecay_bin)?;
+    let cache_current = claude_loaded_cache_matches_rendered_bundle(home, launch)?;
     Ok(active && cache_current)
 }
 
@@ -330,13 +340,13 @@ fn claude_current_cached_plugin_root(home: &Path) -> PathBuf {
 
 fn claude_loaded_cache_matches_rendered_bundle(
     home: &Path,
-    tracedecay_bin: Option<&str>,
+    launch: Option<(&str, &ServeArgs)>,
 ) -> Result<bool> {
     let cache_root = claude_current_cached_plugin_root(home);
     let source_root = plugin_deploy_dir(home);
-    let (expected, relatives) = match tracedecay_bin {
-        Some(tracedecay_bin) => {
-            let rendered = rendered_plugin_files(tracedecay_bin)?;
+    let (expected, relatives) = match launch {
+        Some((tracedecay_bin, serve_args)) => {
+            let rendered = rendered_plugin_files(tracedecay_bin, serve_args)?;
             let (digest, relatives) = super::rendered_bundle_content_digest(&rendered)?;
             (Some(digest), relatives)
         }
@@ -695,11 +705,14 @@ fn known_marketplaces_path(home: &Path) -> PathBuf {
 /// Canonical rendered Claude plugin inventory: the receipt-backed first-party
 /// catalog deploys exactly these bytes as the marketplace source, and the
 /// native-activation probe compares Claude's loaded cache against them.
-pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'static str, String)>> {
+pub(crate) fn rendered_plugin_files(
+    tracedecay_bin: &str,
+    serve_args: &ServeArgs,
+) -> Result<Vec<(&'static str, String)>> {
     claude_embedded_plugin_files()
         .into_iter()
         .map(|(relative, contents)| {
-            render_plugin_file(relative, contents, tracedecay_bin)
+            render_plugin_file(relative, contents, tracedecay_bin, serve_args)
                 .map(|rendered| (relative, rendered))
         })
         .collect()
@@ -710,11 +723,16 @@ pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'stati
 /// - `.lsp.json`: set the configured-language bridge command.
 /// - `.mcp.json`: set the server `command` to the absolute binary path.
 /// - `hooks/hooks.json`: replace the `__TRACEDECAY_BIN__` placeholder.
-fn render_plugin_file(relative: &str, contents: &str, tracedecay_bin: &str) -> Result<String> {
+fn render_plugin_file(
+    relative: &str,
+    contents: &str,
+    tracedecay_bin: &str,
+    serve_args: &ServeArgs,
+) -> Result<String> {
     match relative {
         ".claude-plugin/plugin.json" => stamp_plugin_version(contents),
         ".lsp.json" => set_lsp_command(contents, tracedecay_bin),
-        ".mcp.json" => set_mcp_command(contents, tracedecay_bin),
+        ".mcp.json" => super::plugin_bundle::set_mcp_command(contents, tracedecay_bin, serve_args),
         "hooks/hooks.json" => set_hook_commands(contents, tracedecay_bin),
         _ => Ok(contents.to_string()),
     }
@@ -735,7 +753,7 @@ fn set_lsp_command(raw: &str, tracedecay_bin: &str) -> Result<String> {
 /// Replace the `__TRACEDECAY_BIN__` placeholder in every hook `command` field
 /// via serde, so a binary path containing a JSON-special character (`"`, a
 /// control char) is escaped instead of producing invalid JSON. Mirrors
-/// [`set_mcp_command`]'s parse/set/re-serialize approach.
+/// `plugin_bundle::set_mcp_command`'s parse/set/re-serialize approach.
 fn set_hook_commands(raw: &str, tracedecay_bin: &str) -> Result<String> {
     let mut hooks: serde_json::Value = serde_json::from_str(raw)?;
     if let Some(events) = hooks.get_mut("hooks").and_then(|v| v.as_object_mut()) {
@@ -769,12 +787,6 @@ fn substitute_command_placeholder(value: &mut serde_json::Value, tracedecay_bin:
 /// Stamp the plugin manifest `version` with the crate version.
 fn stamp_plugin_version(raw: &str) -> Result<String> {
     super::plugin_bundle::stamp_manifest_version(raw)
-}
-
-/// Set the plugin `.mcp.json` server command to the resolved absolute binary
-/// path, so the plugin does not rely on `tracedecay` being on PATH.
-fn set_mcp_command(raw: &str, tracedecay_bin: &str) -> Result<String> {
-    super::plugin_bundle::set_mcp_command(raw, tracedecay_bin)
 }
 
 // Shared install helpers (permissions + CLAUDE.md)

@@ -15,6 +15,7 @@ use serde_json::json;
 use tracedecay_domain::errors::Result;
 
 use super::host_bundle::{HostBundleRegistrationStateV1, HostComponentV1};
+use super::serve_args::ServeArgs;
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
     McpDoctorLabels, install_mcp_server_entry, load_json_file, report_mcp_registration,
@@ -55,6 +56,7 @@ impl AgentIntegration for DevinIntegration {
         doctor_check_devin_registration(
             dc,
             &devin_mcp_config_path(&ctx.home),
+            &ctx.catalog_profiles.serve_args(self.id()),
             &McpDoctorLabels {
                 agent_id: "devin",
                 product: "Devin user configuration",
@@ -67,6 +69,7 @@ impl AgentIntegration for DevinIntegration {
             doctor_check_devin_registration(
                 dc,
                 &project_config,
+                &ctx.catalog_profiles.serve_args(self.id()),
                 &McpDoctorLabels {
                     agent_id: "devin",
                     product: "Devin project configuration",
@@ -85,7 +88,11 @@ impl AgentIntegration for DevinIntegration {
         if component != super::host_bundle::HostComponentV1::ContextMcp {
             return super::host_bundle::HostBundleRegistrationStateV1::Missing;
         }
-        devin_mcp_registration_state(&devin_mcp_config_path(&ctx.home), None)
+        devin_mcp_registration_state(
+            &devin_mcp_config_path(&ctx.home),
+            None,
+            &ctx.catalog_profiles.serve_args(self.id()),
+        )
     }
 
     fn host_component_registration_for_lifecycle(
@@ -100,6 +107,7 @@ impl AgentIntegration for DevinIntegration {
         devin_mcp_registration_state(
             &devin_mcp_config_path(&ctx.home),
             Some(&install.tracedecay_bin),
+            &install.serve_args,
         )
     }
 
@@ -188,6 +196,7 @@ impl AgentIntegration for DevinIntegration {
 fn devin_mcp_registration_state(
     config_path: &Path,
     expected_binary: Option<&str>,
+    serve_args: &ServeArgs,
 ) -> HostBundleRegistrationStateV1 {
     let Ok(bytes) = std::fs::read(config_path) else {
         return HostBundleRegistrationStateV1::Missing;
@@ -204,10 +213,7 @@ fn devin_mcp_registration_state(
         .is_some_and(|command| {
             expected_binary.map_or_else(|| !command.is_empty(), |expected| command == expected)
         });
-    let serves_tracedecay = server
-        .get("args")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|args| args.iter().any(|arg| arg.as_str() == Some("serve")));
+    let serves_tracedecay = serve_args.matches_json(server.get("args"), &[]);
     let disabled = server
         .get("disabled")
         .and_then(serde_json::Value::as_bool)
@@ -222,6 +228,7 @@ fn devin_mcp_registration_state(
 fn doctor_check_devin_registration(
     dc: &mut DoctorCounters,
     config_path: &Path,
+    serve_args: &ServeArgs,
     labels: &McpDoctorLabels<'_>,
 ) {
     if !config_path.exists() {
@@ -236,7 +243,8 @@ fn doctor_check_devin_registration(
     report_mcp_registration(
         dc,
         config_path,
-        devin_mcp_registration_state(config_path, None) == HostBundleRegistrationStateV1::Current,
+        devin_mcp_registration_state(config_path, None, serve_args)
+            == HostBundleRegistrationStateV1::Current,
         labels,
     );
 }
@@ -254,7 +262,7 @@ fn install_mcp_if_selected(
         "mcpServers",
         json!({
             "command": ctx.tracedecay_bin.clone(),
-            "args": ["serve"],
+            "args": ctx.serve_args.json(&[]),
             "env": {},
             "transport": "stdio",
         }),
@@ -285,7 +293,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            devin_mcp_registration_state(&config, None),
+            devin_mcp_registration_state(&config, None, &ServeArgs::default()),
             HostBundleRegistrationStateV1::Current
         );
     }
@@ -305,6 +313,7 @@ mod tests {
             profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             home: home.path().to_path_buf(),
             project_path: project.path().to_path_buf(),
+            catalog_profiles: Default::default(),
         };
         let install = InstallContext {
             profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
@@ -312,6 +321,7 @@ mod tests {
             tracedecay_bin: "/tmp/tracedecay".to_string(),
             project_root: None,
             dashboard: false,
+            serve_args: Default::default(),
         };
 
         assert_eq!(
@@ -343,6 +353,7 @@ mod tests {
                 profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
                 home: home.path().to_path_buf(),
                 project_path: project.path().to_path_buf(),
+                catalog_profiles: Default::default(),
             },
         );
 
@@ -370,6 +381,7 @@ mod tests {
             tracedecay_bin: "/tmp/tracedecay".to_string(),
             project_root: Some(project.path().to_path_buf()),
             dashboard: false,
+            serve_args: Default::default(),
         };
 
         let result = DevinIntegration.deactivate_project_host_component_registration(
@@ -407,6 +419,7 @@ mod tests {
             tracedecay_bin: "/tmp/tracedecay-a".to_string(),
             project_root: Some(project.path().to_path_buf()),
             dashboard: false,
+            serve_args: Default::default(),
         };
 
         DevinIntegration

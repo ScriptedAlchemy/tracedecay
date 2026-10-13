@@ -376,11 +376,11 @@ fn a_signed_out_kiro_cli_never_blocks_the_kiro_lifecycle() {
 /// canonical report from the sole daemon owner and counts its absence as an
 /// issue.
 #[cfg(unix)]
-struct ProfileDaemon(std::process::Child);
+pub(super) struct ProfileDaemon(std::process::Child);
 
 #[cfg(unix)]
 impl ProfileDaemon {
-    fn start(cli: &IsolatedCli) -> Self {
+    pub(super) fn start(cli: &IsolatedCli) -> Self {
         let mut command = cli.command(&["daemon", "run"]);
         command
             .env("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN", "1")

@@ -35,6 +35,7 @@ use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_domain::errors::Result;
 
 use super::host_bundle::HostComponentV1;
+use super::serve_args::ServeArgs;
 use super::{AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, load_json_file};
 
 mod extension;
@@ -78,7 +79,7 @@ impl AgentIntegration for GeminiIntegration {
     }
 
     fn activate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
-        if installed_extension_is_current(&ctx.home, Some(&ctx.tracedecay_bin)) {
+        if installed_extension_is_current(&ctx.home, Some(&ctx.tracedecay_bin), &ctx.serve_args) {
             return Ok(());
         }
         let gemini = require_gemini_cli()?;
@@ -145,7 +146,11 @@ impl AgentIntegration for GeminiIntegration {
         if !selects_extension(&[component]) {
             return super::host_bundle::HostBundleRegistrationStateV1::Missing;
         }
-        gemini_extension_registration_state(&ctx.home, None)
+        gemini_extension_registration_state(
+            &ctx.home,
+            None,
+            &ctx.catalog_profiles.serve_args(self.id()),
+        )
     }
 
     /// The lifecycle-aware twin: with an `InstallContext` the binary path in
@@ -163,6 +168,7 @@ impl AgentIntegration for GeminiIntegration {
             State::Current => gemini_extension_registration_state(
                 &ctx.home,
                 Some(install.tracedecay_bin.as_str()),
+                &install.serve_args,
             ),
             state => state,
         }
@@ -217,6 +223,7 @@ fn selects_extension(components: &[HostComponentV1]) -> bool {
 fn gemini_extension_registration_state(
     home: &Path,
     tracedecay_bin: Option<&str>,
+    serve_args: &ServeArgs,
 ) -> super::host_bundle::HostBundleRegistrationStateV1 {
     use super::host_bundle::HostBundleRegistrationStateV1 as State;
 
@@ -224,7 +231,7 @@ fn gemini_extension_registration_state(
         InstalledExtensionV1::Missing => State::Missing,
         InstalledExtensionV1::Unreadable => State::Corrupt,
         InstalledExtensionV1::Present(manifest) => {
-            if manifest_declares_current_server(&manifest, tracedecay_bin) {
+            if manifest_declares_current_server(&manifest, tracedecay_bin, serve_args) {
                 State::Current
             } else {
                 State::Repairable

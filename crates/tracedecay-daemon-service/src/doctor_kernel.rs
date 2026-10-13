@@ -124,6 +124,23 @@ async fn observation_authority_audit_ok(
 
 // === Host/agent integration conformance (Advisory family) ====================
 
+/// Every agent's saved catalog profile. `None` when a saved name no longer
+/// parses, since the receipt check cannot know which bytes install rendered.
+fn saved_catalog_profiles(
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
+) -> Option<tracedecay_agent_hosts::agents::serve_args::HostCatalogProfiles> {
+    let Ok(config) = tracedecay_session_memory::user_config::UserConfig::load(profile.data_dir())
+    else {
+        return Some(tracedecay_agent_hosts::agents::serve_args::HostCatalogProfiles::default());
+    };
+    let catalog = crate::application_surface::application_surface_binding_catalog_ref().ok()?;
+    tracedecay_agent_hosts::agents::serve_args::HostCatalogProfiles::parse(
+        &config.agent_catalog_profile,
+        catalog,
+    )
+    .ok()
+}
+
 fn host_integration_read_from_report(
     report: &tracedecay_agent_hosts::agents::host_bundle::HostBundleDoctorReportV1,
 ) -> HostIntegrationReadV1 {
@@ -1121,10 +1138,15 @@ pub fn production_doctor_report_reader(
                     host_profile
                         .home()
                         .map_or(HostIntegrationReadV1::Unsupported, |home| {
+                            let Some(catalog_profiles) = saved_catalog_profiles(&host_profile)
+                            else {
+                                return HostIntegrationReadV1::Unknown;
+                            };
                             let context = tracedecay_agent_hosts::agents::HealthcheckContext {
                                 home: home.to_path_buf(),
                                 profile: host_profile.clone(),
                                 project_path: host_project_root,
+                                catalog_profiles,
                             };
                             tracedecay_agent_hosts::agents::inspect_receipt_backed_host_components(
                                 &context,

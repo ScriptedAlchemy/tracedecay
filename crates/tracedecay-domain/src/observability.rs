@@ -467,6 +467,8 @@ pub struct HealthSnapshotObservedV1 {
     pub files_analyzed: u64,
     pub function_denominator: u64,
     pub dimensions: BTreeMap<String, HealthDimensionObservedV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition: Option<String>,
 }
 
 #[cfg(test)]

@@ -110,3 +110,35 @@ fn graph_query_failures_after_open_refuse_like_a_failed_open() {
         Ok(tracedecay_contracts::OperationTermination::Failed)
     );
 }
+
+#[test]
+fn health_delta_definition_refusals_keep_their_code_and_restart_without_cursor() {
+    use crate::graph_health_delta::HealthDeltaError;
+
+    for (error, code) in [
+        (
+            HealthDeltaError::DefinitionMismatch {
+                recorded: "health.2026-01-01".to_owned(),
+            },
+            "application.health-delta.definition-mismatch",
+        ),
+        (
+            HealthDeltaError::DefinitionUnrecorded,
+            "application.health-delta.definition-unrecorded",
+        ),
+    ] {
+        let outcome: RetrievalPortOutcome<QualifiedNamePrimitiveResult> =
+            health_delta_outcome(&error, UtcMicros(1));
+        let RetrievalPortOutcome::Refused(_, problem) = &outcome else {
+            panic!("{error} must refuse: {outcome:?}");
+        };
+        assert_eq!(problem.reason_code(), code, "{error}");
+        assert!(
+            problem
+                .legal_actions()
+                .contains(&tracedecay_contracts::LegalAction::RestartWithoutCursor),
+            "{error}: {:?}",
+            problem.legal_actions()
+        );
+    }
+}

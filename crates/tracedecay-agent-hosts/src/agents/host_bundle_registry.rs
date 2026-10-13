@@ -15,6 +15,7 @@ use super::host_bundle::{
     HostBundleVerificationAdapterV1, HostComponentSetEntryV1, HostComponentSetV1, HostComponentV1,
     HostKindV1, require_component_capabilities,
 };
+use super::serve_args::ServeArgs;
 
 pub const FIRST_PARTY_COMPONENT_CATALOG_VERSION: u64 = 1;
 const FIRST_PARTY_COMPONENT_SCHEMA_VERSION: u16 = 1;
@@ -249,6 +250,7 @@ pub fn verified_embedded_host_component_set(
         now_unix,
         &tracedecay_bin,
         generator_commit,
+        &ServeArgs::default(),
     )
 }
 
@@ -259,6 +261,7 @@ pub fn verified_embedded_host_component_set_with_tracedecay_bin(
     now_unix: u64,
     tracedecay_bin: &str,
     generator_commit: &str,
+    serve_args: &ServeArgs,
 ) -> Result<VerifiedEmbeddedHostComponentSetV1, HostBundleRegistryError> {
     if let Some(reason) = unsupported_host_component_set_reason(host) {
         return Err(HostBundleRegistryError::HostComponentSetUnavailable { host, reason });
@@ -285,6 +288,7 @@ pub fn verified_embedded_host_component_set_with_tracedecay_bin(
             now_unix,
             tracedecay_bin,
             generator_commit,
+            serve_args,
         )?;
         if !bundle
             .manifest
@@ -316,6 +320,7 @@ pub fn verified_embedded_host_bundle(
     component: HostComponentV1,
     now_unix: u64,
     generator_commit: &str,
+    serve_args: &ServeArgs,
 ) -> Result<VerifiedEmbeddedHostBundleV1, HostBundleRegistryError> {
     let tracedecay_bin = super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
     verified_embedded_host_bundle_with_tracedecay_bin(
@@ -324,6 +329,7 @@ pub fn verified_embedded_host_bundle(
         now_unix,
         &tracedecay_bin,
         generator_commit,
+        serve_args,
     )
 }
 
@@ -334,13 +340,20 @@ fn verified_embedded_host_bundle_with_tracedecay_bin(
     _now_unix: u64,
     tracedecay_bin: &str,
     generator_commit: &str,
+    serve_args: &ServeArgs,
 ) -> Result<VerifiedEmbeddedHostBundleV1, HostBundleRegistryError> {
     require_component_capabilities(host, component)
         .map_err(|_| HostBundleRegistryError::Incompatible)?;
     let host_descriptor = host.descriptor();
     let host_name = host_descriptor.slug();
     let component_name = component_name(component);
-    let assets = component_assets(host, component, tracedecay_bin, generator_commit)?;
+    let assets = component_assets(
+        host,
+        component,
+        tracedecay_bin,
+        generator_commit,
+        serve_args,
+    )?;
     let artifacts = assets
         .iter()
         .map(|(path, bytes)| HostBundleArtifactV1 {
@@ -429,6 +442,7 @@ fn component_assets(
     component: HostComponentV1,
     tracedecay_bin: &str,
     generator_commit: &str,
+    serve_args: &ServeArgs,
 ) -> Result<Vec<(String, Vec<u8>)>, HostBundleRegistryError> {
     // Use Hermes' canonical rendered inventory with the installed binary path.
     // Rendering the inventory with the `"__TRACEDECAY_BIN__"` sentinel
@@ -460,7 +474,7 @@ fn component_assets(
             HostComponentV1::Core | HostComponentV1::ContextMcp | HostComponentV1::OperatorMcp
         )
     {
-        let files = super::cursor::rendered_plugin_files(tracedecay_bin)
+        let files = super::cursor::rendered_plugin_files(tracedecay_bin, serve_args)
             .map_err(|_| HostBundleRegistryError::Incompatible)?;
         let mcp_only = component != HostComponentV1::Core;
         return Ok(files
@@ -485,7 +499,7 @@ fn component_assets(
             HostComponentV1::Core | HostComponentV1::ContextMcp | HostComponentV1::OperatorMcp
         )
     {
-        let files = super::codex::rendered_global_plugin_files(tracedecay_bin)
+        let files = super::codex::rendered_global_plugin_files(tracedecay_bin, serve_args)
             .map_err(|_| HostBundleRegistryError::Incompatible)?;
         let mcp_only = component != HostComponentV1::Core;
         return Ok(files
@@ -509,7 +523,7 @@ fn component_assets(
             HostComponentV1::Core | HostComponentV1::ContextMcp | HostComponentV1::OperatorMcp
         )
     {
-        let files = super::claude::rendered_plugin_files(tracedecay_bin)
+        let files = super::claude::rendered_plugin_files(tracedecay_bin, serve_args)
             .map_err(|_| HostBundleRegistryError::Incompatible)?;
         let mcp_only = component != HostComponentV1::Core;
         return Ok(files
@@ -529,7 +543,7 @@ fn component_assets(
     // through the integration's own renderer so the bytes the transaction
     // deploys are byte-identical to the ones doctor verifies.
     if (host, component) == (HostKindV1::ChatGpt, HostComponentV1::Core) {
-        let files = super::chatgpt::rendered_plugin_files(tracedecay_bin)
+        let files = super::chatgpt::rendered_plugin_files(tracedecay_bin, serve_args)
             .map_err(|_| HostBundleRegistryError::Incompatible)?;
         return Ok(files
             .into_iter()
@@ -570,7 +584,7 @@ fn component_assets(
     // ones staging writes and the doctor reads, two renderers here would let
     // an install and a repair disagree about what was staged.
     if (host, component) == (HostKindV1::Gemini, HostComponentV1::ContextMcp) {
-        let files = super::gemini::rendered_extension_files(tracedecay_bin)
+        let files = super::gemini::rendered_extension_files(tracedecay_bin, serve_args)
             .map_err(|_| HostBundleRegistryError::Incompatible)?;
         return Ok(files
             .into_iter()
@@ -613,7 +627,7 @@ fn component_assets(
                 super::plugin_bundle::stamp_manifest_version(&body)
                     .map_err(|_| HostBundleRegistryError::Incompatible)?
             } else {
-                render_compiled_asset(&body, tracedecay_bin)?
+                render_compiled_asset(&body, tracedecay_bin, serve_args)?
             };
             rendered.push((format!("{prefix}/{path}"), contents.into_bytes()));
         }
@@ -787,7 +801,7 @@ fn component_assets(
     files
         .into_iter()
         .map(|(path, body)| {
-            render_compiled_asset(body, tracedecay_bin)
+            render_compiled_asset(body, tracedecay_bin, serve_args)
                 .map(|rendered| (format!("{prefix}/{path}"), rendered.into_bytes()))
         })
         .collect()
@@ -796,12 +810,14 @@ fn component_assets(
 fn render_compiled_asset(
     body: &str,
     tracedecay_bin: &str,
+    serve_args: &ServeArgs,
 ) -> Result<String, HostBundleRegistryError> {
     let encoded =
         serde_json::to_string(tracedecay_bin).map_err(|_| HostBundleRegistryError::Incompatible)?;
     let hook = serde_json::to_string(&super::hook_command(tracedecay_bin, "hook-kimi-event"))
         .map_err(|_| HostBundleRegistryError::Incompatible)?;
-    let rendered = body
+    let rendered = serve_args
+        .render_quoted(body)
         .replace(
             &format!("\"{}\"", super::plugin_bundle::TRACEDECAY_BIN_PLACEHOLDER),
             &encoded,
@@ -840,6 +856,7 @@ mod tests {
             HostComponentV1::Agent,
             installed,
             crate::agents::TEST_GENERATOR_COMMIT,
+            &ServeArgs::default(),
         )
         .unwrap();
         let extension = assets
@@ -872,6 +889,7 @@ mod tests {
             0,
             &bin,
             crate::agents::TEST_GENERATOR_COMMIT,
+            &ServeArgs::default(),
         )
         .unwrap();
 
@@ -911,6 +929,7 @@ mod tests {
                     component,
                     0,
                     crate::agents::TEST_GENERATOR_COMMIT,
+                    &ServeArgs::default(),
                 )
                 .unwrap();
                 for artifact in &bundle.manifest.artifacts {
@@ -939,6 +958,7 @@ mod tests {
             0,
             &bin,
             crate::agents::TEST_GENERATOR_COMMIT,
+            &ServeArgs::default(),
         )
         .unwrap();
 
@@ -974,6 +994,7 @@ mod tests {
             HostComponentV1::Core,
             &installed,
             crate::agents::TEST_GENERATOR_COMMIT,
+            &ServeArgs::default(),
         )
         .unwrap();
         assert_eq!(assets.len(), 1);
@@ -1002,6 +1023,7 @@ mod tests {
             0,
             &bin,
             crate::agents::TEST_GENERATOR_COMMIT,
+            &ServeArgs::default(),
         )
         .unwrap();
 
@@ -1037,6 +1059,7 @@ mod tests {
             HostComponentV1::Core,
             &installed,
             crate::agents::TEST_GENERATOR_COMMIT,
+            &ServeArgs::default(),
         )
         .unwrap();
         let tools = assets
@@ -1072,6 +1095,7 @@ mod tests {
                     component,
                     0,
                     crate::agents::TEST_GENERATOR_COMMIT,
+                    &ServeArgs::default(),
                 )
                 .unwrap();
                 assert_eq!(bundle.manifest.catalog_digest, expected_catalog_digest);
@@ -1117,6 +1141,7 @@ mod tests {
                         component,
                         0,
                         crate::agents::TEST_GENERATOR_COMMIT,
+                        &ServeArgs::default(),
                     )
                     .unwrap()
                 })
@@ -1163,7 +1188,8 @@ mod tests {
                     host,
                     unsupported,
                     0,
-                    crate::agents::TEST_GENERATOR_COMMIT
+                    crate::agents::TEST_GENERATOR_COMMIT,
+                    &ServeArgs::default()
                 ),
                 Err(HostBundleRegistryError::Incompatible)
             );
@@ -1231,6 +1257,7 @@ mod tests {
             0,
             "/opt/tracedecay-distinct/bin/tracedecay",
             crate::agents::TEST_GENERATOR_COMMIT,
+            &ServeArgs::default(),
         )
         .unwrap();
         assert_eq!(bundle.contents.len(), 1);
@@ -1289,6 +1316,7 @@ mod tests {
             0,
             installed,
             crate::agents::TEST_GENERATOR_COMMIT,
+            &ServeArgs::default(),
         )
         .unwrap();
         assert_eq!(bundle.contents.len(), 1);
@@ -1351,9 +1379,14 @@ mod tests {
             0,
             installed,
             crate::agents::TEST_GENERATOR_COMMIT,
+            &ServeArgs::default(),
         )
         .unwrap();
-        let rendered = super::super::gemini::rendered_extension_files(installed).unwrap();
+        let rendered = super::super::gemini::rendered_extension_files(
+            installed,
+            &crate::agents::serve_args::ServeArgs::default(),
+        )
+        .unwrap();
         assert_eq!(bundle.contents.len(), rendered.len());
         for (relative, body) in rendered {
             let path = format!(
