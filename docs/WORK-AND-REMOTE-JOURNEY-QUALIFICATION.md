@@ -128,7 +128,7 @@ change.
 | Capture while offline | A join against an endpoint nothing listens on records the authority unreachable. Two captures on the laptop's own daemon are then admitted in sequence, each chained to the previous event. |
 | Restart | The laptop daemon restarts and still holds both frames pending. The desktop daemon restarts on its profile, keeps its Brain, and keeps serving the node. |
 | Ordered drain | `POST /remote-nodes/drain` sends both frames to the restarted desktop. The desktop acknowledges them in capture order, and the laptop's pending count drops to 0. |
-| Replay | Each drained frame replays on the desktop as `acknowledged`, committed under the published writer fence. The desktop's pending count drops to 0. |
+| Replay | One `/remote/replay/pending` call replays both drained frames in sequence order. Each is `acknowledged`, committed under the published writer fence, and the desktop's pending count drops to 0. Sending the call again reports the same commit receipts and replays nothing. |
 | Query | An exact-observation query on the desktop returns `found` for each frame, with the exact observation the laptop captured offline. |
 | Revoke | `tracedecay remote revoke --node-id` on the desktop revokes the node's enrollment. Replay and query then refuse with authority reason `enrollment_revoked`. |
 | No stranded frames | After revocation the laptop still captures offline. Its drain is refused, and the frame stays pending on the laptop instead of being dropped. |
@@ -165,8 +165,8 @@ replayed row that carries no repository capture.
 **Operator steps.** The desktop operator runs 3 commands: provision the
 node, publish the writer with its policies, and later revoke. The laptop
 operator runs 3: enroll, join, and drain. The laptop's agent captures
-offline with no operator step. Replay takes one call per drained frame, and
-query takes one call per observation.
+offline with no operator step. Replay takes one guided call for every
+drained frame (#3781), and query takes one call per observation.
 
 **Cost.** The journey passed in 4.8 s to 5.0 s of test time across three
 runs, including two daemon restarts. It made no provider request.
@@ -203,12 +203,14 @@ Brain therefore already runs without it, and no build split is needed for
 that. TLS identity, revocation, writer fences, ordered drain, pending
 encrypted frames, and replay receipts all stay.
 
-**Guided default path for Remote Brain: yes, for replay.** The remaining
-manual cost is one replay call per drained frame, each naming an event id
-from the drain response. One guided step that replays every drained frame
-in order through the same replay service would remove that threading and
-keep each frame's checks and receipt (#3781). Enrollment, join, and
-revocation are one command each and need no guided path.
+**Guided default path for Remote Brain: yes, for replay.** Replay used to
+take one call per drained frame, each naming an event id from the drain
+response. `POST /remote/replay/pending` (#3781) now replays every frame the
+authority holds for the caller's enrollment, in sequence order, through the
+same replay service, so each frame keeps its checks and receipt. It stops at
+the first refusal, and a resend converges without a second commit.
+Enrollment, join, and revocation are one command each and need no guided
+path.
 
 **Advanced grouping: use the catalog profiles that already exist.** The
 catalog already composes `profile.compact` (22 bindings) and
