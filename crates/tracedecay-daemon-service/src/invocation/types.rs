@@ -66,6 +66,11 @@ impl HookOrchestrationRequestV1 {
 pub enum HookOrchestrationWorkOutcomeV1 {
     Completed,
     RetryableFailure,
+    /// The boundary's remaining work needs a Context Scout session lifecycle
+    /// it does not have. Redriving cannot produce one, so the boundary
+    /// settles and parks at its session address until that session's next
+    /// hook carries a lifecycle, or a newer boundary supersedes it.
+    AwaitingLifecycle,
 }
 
 impl From<()> for HookOrchestrationWorkOutcomeV1 {
@@ -103,6 +108,9 @@ struct HookOrchestrationInFlightEntryV1 {
 struct HookOrchestrationInFlightV1 {
     addresses: BTreeMap<HookOrchestrationAddressV1, Arc<HookOrchestrationInFlightEntryV1>>,
     events: BTreeMap<HookOrchestrationEventKeyV1, Arc<HookOrchestrationInFlightEntryV1>>,
+    // ponytail: one parked boundary per session that never gains a lifecycle
+    // stays until the owner retires; cap it if session churn ever shows up.
+    parked: BTreeMap<HookOrchestrationAddressV1, HookOrchestrationRequestV1>,
 }
 
 struct HookOrchestrationTaskOwnerV1 {
@@ -184,8 +192,7 @@ impl BoundedHookOrchestratorV1 {
         })
     }
 
-    fn stable_address(request: &HookOrchestrationRequestV1) -> Option<HookOrchestrationAddressV1> {
-        let envelope = request.hook.envelope();
+    fn stable_address(envelope: &HookEventEnvelopeV2) -> Option<HookOrchestrationAddressV1> {
         canonical_sha256(&(
             "tracedecay.advisory-hook-address.v1",
             envelope.project_id,
@@ -239,15 +246,31 @@ impl BoundedHookOrchestratorV1 {
 
     #[tracing::instrument(name = "daemon.service.hooks.admit", level = "trace", skip_all)]
     pub fn admit(&self, request: HookOrchestrationRequestV1) -> HookOrchestrationAdmissionV1 {
-        match self.admit_with_cancellation(request) {
+        match self.admit_with_cancellation(request, false) {
             Ok(_) => HookOrchestrationAdmissionV1::Enqueued,
             Err(admission) => admission,
+        }
+    }
+
+    /// The session behind `envelope` now has a Context Scout lifecycle: the
+    /// boundary parked at its address for want of one runs again with it.
+    pub fn resume_parked(
+        &self,
+        envelope: &HookEventEnvelopeV2,
+        lifecycle: ContextScoutLifecycleAddressV1,
+    ) {
+        let parked = Self::stable_address(envelope)
+            .and_then(|address| self.in_flight.lock().ok()?.parked.get(&address).cloned());
+        if let Some(mut request) = parked {
+            request.lifecycle = Some(lifecycle);
+            let _ = self.admit_with_cancellation(request, true);
         }
     }
 
     fn admit_with_cancellation(
         &self,
         mut request: HookOrchestrationRequestV1,
+        resume: bool,
     ) -> Result<
         tracedecay_runtime_core::cancellation::CancellationToken,
         HookOrchestrationAdmissionV1,
@@ -262,7 +285,7 @@ impl BoundedHookOrchestratorV1 {
             envelope.event_id,
             request.explicit_request_id.clone(),
         );
-        let Some(address) = Self::stable_address(&request) else {
+        let Some(address) = Self::stable_address(envelope) else {
             return Err(HookOrchestrationAdmissionV1::Unavailable);
         };
         let Ok(mut task_owner) = self.task_owner.lock() else {
@@ -277,6 +300,15 @@ impl BoundedHookOrchestratorV1 {
             let Ok(mut in_flight) = self.in_flight.lock() else {
                 return Err(HookOrchestrationAdmissionV1::Unavailable);
             };
+            // A resume runs only the boundary still parked: a newer boundary
+            // at the address has already superseded it.
+            if resume
+                && !in_flight.parked.get(&address).is_some_and(|parked| {
+                    parked.hook.envelope().event_id == request.hook.envelope().event_id
+                })
+            {
+                return Err(HookOrchestrationAdmissionV1::Unavailable);
+            }
             if let Some(incumbent) = in_flight.events.get(&event).cloned() {
                 // The exact boundary is already running. Join it: one cycle
                 // terminates once and every joined admission observes that one
@@ -331,6 +363,7 @@ impl BoundedHookOrchestratorV1 {
                 superseded: std::sync::atomic::AtomicBool::new(false),
                 completions: StdMutex::new(completion.into_iter().collect()),
             });
+            in_flight.parked.remove(&address);
             in_flight
                 .addresses
                 .insert(address.clone(), Arc::clone(&operation));
@@ -367,6 +400,7 @@ impl BoundedHookOrchestratorV1 {
                 Self::settle_operation(&in_flight, &address, &operation, superseded);
                 return;
             }
+            let resumable = request.clone();
             let mut work_future = (work)(request, work_cancellation.clone());
             // Only completed or superseded work emits terminals. Owner-level
             // cancellation reports nothing: silence is a normal result, and an
@@ -403,6 +437,19 @@ impl BoundedHookOrchestratorV1 {
             let emit_terminal = match outcome {
                 Some(HookOrchestrationWorkOutcomeV1::Completed) => true,
                 Some(HookOrchestrationWorkOutcomeV1::RetryableFailure) => false,
+                Some(HookOrchestrationWorkOutcomeV1::AwaitingLifecycle) => {
+                    let mut in_flight = in_flight
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if in_flight
+                        .addresses
+                        .get(&address)
+                        .is_some_and(|current| Arc::ptr_eq(current, &operation))
+                    {
+                        in_flight.parked.insert(address.clone(), resumable);
+                    }
+                    true
+                }
                 None => {
                     drop(work_future);
                     operation
@@ -540,13 +587,20 @@ pub fn admit_registered_hook_orchestration(
     explicit: bool,
     completion: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
 ) -> HookOrchestrationAdmissionV1 {
+    // Any other hook of a session that now carries a lifecycle is the event a
+    // boundary parked for that session waits on.
     let Some(mut request) = HookOrchestrationRequestV1::from_envelope(
-        envelope,
+        envelope.clone(),
         &binding,
-        lifecycle,
+        lifecycle.clone(),
         configuration_revision,
         explicit,
     ) else {
+        if let Some(lifecycle) = lifecycle
+            && let Some(runtime) = registered_hook_orchestrator(&envelope)
+        {
+            runtime.resume_parked(&envelope, lifecycle);
+        }
         return HookOrchestrationAdmissionV1::UnsupportedTrigger;
     };
     let Some(runtime) = registered_hook_orchestrator(request.hook.envelope()) else {
@@ -609,7 +663,7 @@ pub(super) async fn run_registered_context_scout_request(
         })),
     };
     let operation_cancellation = runtime
-        .admit_with_cancellation(request)
+        .admit_with_cancellation(request, false)
         .map_err(|_| unavailable())?;
     let outcome = tokio::select! {
         biased;
