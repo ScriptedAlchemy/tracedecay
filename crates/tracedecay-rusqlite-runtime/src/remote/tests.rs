@@ -914,7 +914,7 @@ fn a_restarted_runtime_keeps_serving_the_published_writer() {
         .execute(
             ExactSqlStatement::new(
                 "UPDATE remote_authorities SET runtime_binding_json = ?1".to_owned(),
-                vec![text(&serde_json::to_string(&foreign).unwrap())],
+                vec![text(serde_json::to_string(&foreign).unwrap())],
             )
             .unwrap(),
         )
