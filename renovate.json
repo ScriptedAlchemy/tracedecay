@@ -3,6 +3,7 @@
   "extends": [
     "config:recommended"
   ],
+  "gitIgnoredAuthors": ["41898282+github-actions[bot]@users.noreply.github.com"],
   "customManagers": [
     {
       "description": "Bazel's pnpm pin tracks packageManager; the shared branch name keeps both bumps in one PR",
