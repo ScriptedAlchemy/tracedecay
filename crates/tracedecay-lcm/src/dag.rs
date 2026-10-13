@@ -913,7 +913,7 @@ mod lineage_tests {
             .expect("lineage count value")
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn shared_descendants_are_visited_once_per_root() {
         let mut vm_steps = BTreeMap::new();
         for layers in [4_usize, 12] {
@@ -954,7 +954,7 @@ mod lineage_tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn replay_covers_multiple_roots_stale_parents_and_cyclic_lineage() {
         let session_id = "mixed-lineage";
         let (_temp, conn) = lineage_store(session_id).await;

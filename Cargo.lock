@@ -6622,13 +6622,13 @@ dependencies = [
 name = "tracedecay-lcm"
 version = "0.1.0"
 dependencies = [
+ "asupersync",
  "regex",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
- "tokio",
  "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-privacy",
@@ -7066,6 +7066,7 @@ dependencies = [
 name = "tracedecay-session-temporal-store"
 version = "0.1.0"
 dependencies = [
+ "asupersync",
  "futures-util",
  "getrandom 0.2.17",
  "hex",
@@ -7074,7 +7075,6 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "thiserror",
- "tokio",
  "tracedecay-capture",
  "tracedecay-contracts",
  "tracedecay-domain",

@@ -814,7 +814,7 @@ mod tests {
         .expect("drop LCM schema version");
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn provider_status_reports_the_schema_version_read_failure() {
         let (_database_dir, conn) = test_lcm_connection().await;
         let storage = TempDir::new().expect("storage tempdir");
@@ -847,7 +847,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn aggregate_status_reports_the_schema_version_read_failure() {
         let (_database_dir, conn) = test_lcm_connection().await;
         let storage = TempDir::new().expect("storage tempdir");
@@ -871,7 +871,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn status_reports_an_unreadable_schema_version_instead_of_the_compiled_one() {
         let (_database_dir, conn) = test_lcm_connection().await;
         let storage = TempDir::new().expect("storage tempdir");
@@ -908,7 +908,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn status_groups_parked_and_failed_sessions_by_recorded_reason() {
         let (_database_dir, conn) = test_lcm_connection().await;
         let storage = TempDir::new().expect("storage tempdir");
@@ -1070,7 +1070,7 @@ mod tests {
         .expect("insert maintenance debt");
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn deep_status_reports_only_the_recorded_gc_status() {
         let (_database_dir, conn) = test_lcm_connection().await;
         let storage = TempDir::new().expect("storage tempdir");
@@ -1104,7 +1104,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn aggregate_status_sums_every_provider_in_batched_queries() {
         let (_database_dir, conn) = test_lcm_connection().await;
         let storage = TempDir::new().expect("storage tempdir");
@@ -1178,7 +1178,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn aggregate_status_work_is_provider_independent_across_thirty_runs() {
         let (_database_dir, conn) = test_lcm_connection().await;
         let storage = TempDir::new().expect("storage tempdir");
@@ -1213,7 +1213,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn shallow_status_marks_the_skipped_payload_census_partial() {
         let (_database_dir, conn) = test_lcm_connection().await;
         let storage = TempDir::new().expect("storage tempdir");
@@ -1232,7 +1232,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn store_status_pages_more_rows_than_runtime_materialization_limit() {
         let (_database_dir, conn) = test_lcm_connection().await;
         conn.execute(
@@ -1271,7 +1271,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn store_status_bounds_the_total_message_bytes_scanned() {
         const ROWS: i64 = 40;
         let (_database_dir, conn) = test_lcm_connection().await;
@@ -1352,7 +1352,7 @@ mod tests {
     /// budget the status reports the exact message count with a typed partial
     /// estimate and a resume cursor, never a truncated total presented as the
     /// whole store.
-    #[tokio::test]
+    #[asupersync::test]
     async fn store_status_reports_a_partial_token_estimate_beyond_the_scan_budget() {
         const ROWS: i64 = 900;
         const BUDGET: i64 = 512;
@@ -1388,7 +1388,7 @@ mod tests {
 
     /// The bound has to hold on the production entry point too, not only on the
     /// test-visible inner function.
-    #[tokio::test]
+    #[asupersync::test]
     async fn store_status_applies_the_production_scan_budget() {
         let (_database_dir, conn) = test_lcm_connection().await;
         seed_raw_messages(&conn, "session-production-budget", 600).await;
@@ -1405,7 +1405,7 @@ mod tests {
 
     /// The default health probe must not read message bodies. Token coverage
     /// is a typed unscanned partial; deep status still pays the budgeted scan.
-    #[tokio::test]
+    #[asupersync::test]
     async fn shallow_status_reports_unscanned_tokens_instead_of_reading_bodies() {
         let (_database_dir, conn) = test_lcm_connection().await;
         let storage = TempDir::new().expect("storage tempdir");
@@ -1446,7 +1446,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn payload_health_pages_more_rows_than_runtime_materialization_limit() {
         const ROWS: i64 = 10_001;
         let (_database_dir, conn) = test_lcm_connection().await;
@@ -1561,7 +1561,7 @@ mod tests {
     /// 1706-byte row on a 7.5 GB profile store. This holds the plan-shape
     /// contract between the rendered status SQL and
     /// [`schema::LCM_STATUS_PERFORMANCE_INDEX_SQL`].
-    #[tokio::test]
+    #[asupersync::test]
     async fn status_query_plans_never_scan_body_bearing_tables() {
         let (_database_dir, conn) = test_lcm_connection().await;
         for index in 0..3 {
@@ -1787,7 +1787,7 @@ mod tests {
     /// Run with e.g.
     /// `LCM_STATUS_PERF_ROWS=400000 cargo test -p tracedecay-lcm \
     ///  --profile perf -- --ignored measure_status_probe_cost --nocapture`.
-    #[tokio::test]
+    #[asupersync::test]
     #[ignore = "manual perf harness; seeds a large store and prints timings"]
     async fn measure_status_probe_cost_against_preindex_shape() {
         let rows = std::env::var("LCM_STATUS_PERF_ROWS")

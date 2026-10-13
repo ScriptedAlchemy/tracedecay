@@ -388,7 +388,7 @@ mod tests {
     use super::*;
     use tracedecay_runtime_core::db::engine::Executor;
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn introduced_occurrence_refs_span_more_than_one_exact_sql_page() {
         let dir = tempfile::TempDir::new().expect("occurrence dir");
         let conn = tracedecay_runtime_core::db::engine::TestConnection::open(
