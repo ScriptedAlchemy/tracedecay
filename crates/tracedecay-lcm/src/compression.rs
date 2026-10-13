@@ -2688,7 +2688,7 @@ mod authority_tests {
 
     /// A message without a real role is never stored (a fabricated role would
     /// enter identity hashes) but must not vanish from the replay output.
-    #[tokio::test]
+    #[asupersync::test]
     async fn role_less_message_replays_verbatim_without_storage() {
         let temp = tempfile::TempDir::new().expect("create lcm tempdir");
         let conn = tracedecay_runtime_core::db::engine::TestConnection::open(
@@ -2758,7 +2758,7 @@ mod authority_tests {
         assert_eq!(stored, 2, "role-less message must not be stored");
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn condensation_uses_only_available_nodes_from_the_active_generation() {
         let temp = tempfile::TempDir::new().expect("create lcm tempdir");
         let conn = tracedecay_runtime_core::db::engine::TestConnection::open(

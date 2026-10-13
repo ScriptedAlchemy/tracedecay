@@ -3,7 +3,7 @@ use tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION;
 use super::super::global_db_operation_error;
 use super::normalize_trigger_sql;
 use tracedecay_runtime_core::db::{
-    Database, DatabaseWriteTransaction,
+    Database, DatabaseEngineReadSnapshot, DatabaseWriteTransaction,
     engine::{Executor, QueryExecutor, params},
 };
 
@@ -146,14 +146,13 @@ pub(crate) trait AuthorityInvariantTransactionProvider {
         operation: &'static str,
     ) -> tracedecay_domain::errors::Result<DatabaseWriteTransaction<'_>>;
 
-    /// `Some` when this provider can scan one table's foreign keys without
-    /// holding the canonical writer. `None` keeps the check inside the
-    /// write step, which tests use and which blocks every other writer for
-    /// the whole scan.
-    async fn read_foreign_key_violation(
+    /// `Some` when this provider can run a whole-table audit read without
+    /// holding the canonical writer. `None` keeps the read inside a write
+    /// step, which tests use and which blocks every other writer for the
+    /// whole scan.
+    async fn convergence_snapshot(
         &self,
-        _table: &str,
-    ) -> tracedecay_domain::errors::Result<Option<bool>> {
+    ) -> tracedecay_domain::errors::Result<Option<DatabaseEngineReadSnapshot>> {
         Ok(None)
     }
 }
@@ -166,20 +165,18 @@ impl AuthorityInvariantTransactionProvider for Database {
         self.begin_bulk_write_transaction(operation).await
     }
 
-    async fn read_foreign_key_violation(
+    async fn convergence_snapshot(
         &self,
-        table: &str,
-    ) -> tracedecay_domain::errors::Result<Option<bool>> {
-        // A table-wide `pragma_foreign_key_check` is a read. Running it inside
-        // the write step reserves the canonical writer until the scan returns,
-        // so historical ingest and refresh cannot commit for the whole table.
-        let snapshot = self
-            .read_connection()
-            .background()
-            .read_snapshot()
+    ) -> tracedecay_domain::errors::Result<Option<DatabaseEngineReadSnapshot>> {
+        // A whole-table audit is one statement whose cost grows with the
+        // store. Under the request statement deadline it is interrupted at
+        // the same table on every open of a large store, so the exhaustive
+        // pass never completes and the store stays degraded.
+        self.read_connection()
+            .convergence_snapshot()
             .await
-            .map_err(audit_read_error)?;
-        Ok(Some(foreign_key_table_violates(&snapshot, table).await?))
+            .map(Some)
+            .map_err(audit_read_error)
     }
 }
 
@@ -459,7 +456,7 @@ async fn converge_authority_invariants(
         async |conn| {
             repair_projection_frontier(conn, checkpoint.projection_checkpoint).await?;
             if exhaustive {
-                validate_invariant_rows(conn).await
+                validate_invariant_rows(&ConvergenceReads(conn)).await
             } else {
                 validate_mutable_invariant_rows(conn).await
             }
@@ -537,8 +534,8 @@ async fn converge_authority_invariants(
             let Some(table) = table else {
                 break;
             };
-            let violation = match provider.read_foreign_key_violation(&table).await? {
-                Some(violation) => violation,
+            let violation = match provider.convergence_snapshot().await? {
+                Some(snapshot) => foreign_key_table_violates(&snapshot, &table).await?,
                 None => {
                     authority_invariant_step(
                         provider,
@@ -591,6 +588,25 @@ async fn converge_authority_invariants(
         },
     )
     .await
+}
+
+/// Reads for the exhaustive row audits. They stay inside the frontier
+/// repair's write step so a refusal rolls that repair back, and each is one
+/// whole-table statement that on a large store outlives the request
+/// statement deadline.
+struct ConvergenceReads<'a, 'b>(&'a DatabaseWriteTransaction<'b>);
+
+impl QueryExecutor for ConvergenceReads<'_, '_> {
+    async fn query<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> tracedecay_runtime_core::db::engine::Result<tracedecay_runtime_core::db::engine::Rows>
+    where
+        P: tracedecay_runtime_core::db::engine::IntoParams,
+    {
+        self.0.convergence_query(sql, params).await
+    }
 }
 
 pub(super) async fn validate_invariant_rows(

@@ -21,5 +21,5 @@ tracedecay-framing = { path = "../tracedecay-framing" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs" }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt", "sync"] }
+asupersync.workspace = true
 tracedecay-private-fs = { path = "../tracedecay-private-fs", features = ["test-helpers"] }

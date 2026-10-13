@@ -215,7 +215,7 @@ async fn canonical_session_connection(path: &std::path::Path) -> TestConnection 
     connection
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn session_context_filters_read_parent_and_workflow_only_from_grafeo() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let connection = canonical_session_connection(&directory.path().join("session.db")).await;
@@ -249,7 +249,7 @@ async fn session_context_filters_read_parent_and_workflow_only_from_grafeo() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn missing_summary_relation_projection_is_a_typed_read_failure() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let connection = canonical_source_connection(&directory.path().join("unavailable.db")).await;
@@ -274,7 +274,7 @@ async fn missing_summary_relation_projection_is_a_typed_read_failure() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn cancelled_summary_relation_read_preserves_temporal_cancellation() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let connection = canonical_source_connection(&directory.path().join("cancelled.db")).await;

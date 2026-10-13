@@ -21,9 +21,9 @@ use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::cancellation::CancellationToken;
@@ -451,27 +451,41 @@ fn supervise_child(
     bounds: &GitCommandBounds,
 ) -> Result<Output, GitCommandError> {
     let missing = |pipe| GitCommandError::Unavailable(std::io::Error::other(pipe));
+    let abandoned = AbandonOnReturn(Arc::new(AtomicBool::new(false)));
     let (sender, receiver) = mpsc::channel();
     let stdout = child
         .stdout
         .take()
         .ok_or_else(|| missing("missing stdout pipe"))?;
-    spawn_reader(stdout, "stdout", bounds.max_stdout_bytes, sender.clone())?;
+    spawn_reader(
+        stdout,
+        "stdout",
+        bounds.max_stdout_bytes,
+        sender.clone(),
+        Arc::clone(&abandoned.0),
+    )?;
     let stderr = child
         .stderr
         .take()
         .ok_or_else(|| missing("missing stderr pipe"))?;
-    spawn_reader(stderr, "stderr", bounds.max_stderr_bytes, sender.clone())?;
+    spawn_reader(
+        stderr,
+        "stderr",
+        bounds.max_stderr_bytes,
+        sender.clone(),
+        Arc::clone(&abandoned.0),
+    )?;
     if let Some(input) = input {
         let mut stdin = child
             .stdin
             .take()
             .ok_or_else(|| missing("missing stdin pipe"))?;
         let input = input.to_vec();
+        let abandoned = Arc::clone(&abandoned.0);
         std::thread::Builder::new()
             .name("tracedecay-git-stdin".into())
             .spawn(move || {
-                let written = stdin.write_all(&input);
+                let written = write_input(&mut stdin, &input, &abandoned);
                 drop(stdin);
                 let _ = sender.send(PipeEvent::Written(written));
             })
@@ -533,16 +547,116 @@ fn supervise_child(
     })
 }
 
+/// Raised on every return from [`supervise_child`]. A descendant can inherit a
+/// pipe and hold it open after the child exits; the pipe threads then stop and
+/// close our ends, so the descendant sees EOF or a broken pipe.
+struct AbandonOnReturn(Arc<AtomicBool>);
+
+impl Drop for AbandonOnReturn {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+#[cfg(unix)]
+trait PipeEnd: std::os::fd::AsFd + Send + 'static {}
+#[cfg(unix)]
+impl<T: std::os::fd::AsFd + Send + 'static> PipeEnd for T {}
+#[cfg(not(unix))]
+trait PipeEnd: Send + 'static {}
+#[cfg(not(unix))]
+impl<T: Send + 'static> PipeEnd for T {}
+
+#[cfg(unix)]
+fn set_nonblocking(pipe: &impl PipeEnd) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let fd = pipe.as_fd().as_raw_fd();
+    // SAFETY: `fd` is our open pipe end, borrowed for the call.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: as above; only our end's status flags change.
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Waits until `pipe` is ready, failing once the supervisor abandons it.
+#[cfg(unix)]
+fn await_pipe(pipe: &impl PipeEnd, writable: bool, abandoned: &AtomicBool) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let mut poll_fd = libc::pollfd {
+        fd: pipe.as_fd().as_raw_fd(),
+        events: if writable {
+            libc::POLLOUT
+        } else {
+            libc::POLLIN
+        },
+        revents: 0,
+    };
+    let timeout =
+        libc::c_int::try_from(CHILD_WAIT_POLL_INTERVAL.as_millis()).unwrap_or(libc::c_int::MAX);
+    while !abandoned.load(Ordering::Acquire) {
+        // SAFETY: `poll_fd` is one valid pollfd, exclusively borrowed for the call.
+        match unsafe { libc::poll(&raw mut poll_fd, 1, timeout) } {
+            0 => {}
+            -1 => {
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
+            }
+            _ => return Ok(()),
+        }
+    }
+    Err(std::io::Error::other("git supervisor abandoned the pipe"))
+}
+
+/// Windows child pipes cannot be polled; the blocking call that follows waits.
+#[cfg(not(unix))]
+fn await_pipe(_: &impl PipeEnd, _: bool, _: &AtomicBool) -> std::io::Result<()> {
+    Ok(())
+}
+
+fn retryable(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+    )
+}
+
+fn write_input(
+    stdin: &mut (impl Write + PipeEnd),
+    mut input: &[u8],
+    abandoned: &AtomicBool,
+) -> std::io::Result<()> {
+    #[cfg(unix)]
+    set_nonblocking(stdin)?;
+    while !input.is_empty() {
+        await_pipe(stdin, true, abandoned)?;
+        match stdin.write(input) {
+            Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+            Ok(written) => input = &input[written..],
+            Err(error) if retryable(&error) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 fn spawn_reader(
-    mut pipe: impl Read + Send + 'static,
+    mut pipe: impl Read + PipeEnd,
     stream: &'static str,
     limit: usize,
     sender: Sender<PipeEvent>,
+    abandoned: Arc<AtomicBool>,
 ) -> Result<(), GitCommandError> {
     std::thread::Builder::new()
         .name(format!("tracedecay-git-{stream}"))
         .spawn(move || {
-            let result = read_bounded_output(&mut pipe, stream, limit, &sender);
+            let result = read_bounded_output(&mut pipe, stream, limit, &sender, &abandoned);
             let _ = sender.send(PipeEvent::Read { stream, result });
         })
         .map(drop)
@@ -552,19 +666,23 @@ fn spawn_reader(
 /// Keeps draining past `limit` so an over-limit child never blocks on a full
 /// pipe before the supervisor kills it.
 fn read_bounded_output(
-    pipe: &mut impl Read,
+    pipe: &mut (impl Read + PipeEnd),
     stream: &'static str,
     limit: usize,
     sender: &Sender<PipeEvent>,
+    abandoned: &AtomicBool,
 ) -> std::io::Result<BoundedRead> {
+    #[cfg(unix)]
+    set_nonblocking(pipe)?;
     let mut bytes = Vec::with_capacity(limit.min(64 * 1024));
     let mut buffer = [0u8; 8 * 1024];
     let mut exceeded = false;
     loop {
+        await_pipe(pipe, false, abandoned)?;
         let count = match pipe.read(&mut buffer) {
             Ok(0) => break,
             Ok(count) => count,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if retryable(&error) => continue,
             Err(error) => return Err(error),
         };
         let remaining = limit.saturating_sub(bytes.len());

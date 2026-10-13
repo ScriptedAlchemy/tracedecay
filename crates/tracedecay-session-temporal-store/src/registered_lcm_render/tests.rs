@@ -111,7 +111,7 @@ fn summary_describe_request(node_id: &str) -> LcmDescribeRequest {
 /// lineage still names, so before this the registered render path aborted every
 /// summary older than the drop window with an ownership error. Rendering must
 /// survive and report the dropped source as retention-expired.
-#[tokio::test]
+#[asupersync::test]
 async fn registered_render_survives_retention_dropped_raw_sources() {
     let directory = tempdir().expect("temporary session store");
     let runtime = seeded_render_fixture(directory.path()).await;
@@ -191,7 +191,7 @@ async fn registered_render_survives_retention_dropped_raw_sources() {
 /// Absence is retention; presence under another session is still a disclosure
 /// boundary. A raw row that exists but belongs elsewhere must keep failing
 /// closed rather than riding the retention path.
-#[tokio::test]
+#[asupersync::test]
 async fn registered_render_still_refuses_a_foreign_session_summary_source() {
     let directory = tempdir().expect("temporary session store");
     let runtime = seeded_render_fixture(directory.path()).await;
@@ -235,7 +235,7 @@ async fn registered_render_still_refuses_a_foreign_session_summary_source() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn registered_metadata_rendering_matches_the_canonical_fixture() {
     let directory = tempdir().expect("temporary session store");
     let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -352,7 +352,7 @@ async fn registered_metadata_rendering_matches_the_canonical_fixture() {
     }
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn registered_metadata_rows_do_not_fabricate_full_raw_messages() {
     let directory = tempdir().expect("temporary session store");
     let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -394,7 +394,7 @@ async fn registered_metadata_rows_do_not_fabricate_full_raw_messages() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn session_describe_reports_the_message_not_an_empty_stub() {
     let directory = tempdir().expect("temporary session store");
     let runtime = seeded_render_fixture(directory.path()).await;

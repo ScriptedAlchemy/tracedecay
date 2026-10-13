@@ -6277,11 +6277,11 @@ dependencies = [
 name = "tracedecay-configuration"
 version = "0.1.0"
 dependencies = [
+ "asupersync",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
- "tokio",
  "tracedecay-automation",
  "tracedecay-contracts",
  "tracedecay-domain",
@@ -6297,6 +6297,7 @@ dependencies = [
 name = "tracedecay-contracts"
 version = "0.1.0"
 dependencies = [
+ "asupersync",
  "getrandom 0.2.17",
  "hex",
  "schemars",
@@ -6304,7 +6305,6 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "thiserror",
- "tokio",
  "tracedecay-domain",
  "tracedecay-policy",
  "tracedecay-tool-catalog",
@@ -6554,10 +6554,10 @@ dependencies = [
 name = "tracedecay-graph-query"
 version = "0.1.0"
 dependencies = [
+ "asupersync",
  "serde_json",
  "tempfile",
  "thiserror",
- "tokio",
  "tracedecay-code-extraction",
  "tracedecay-code-index",
  "tracedecay-contracts",
@@ -6575,11 +6575,11 @@ dependencies = [
 name = "tracedecay-hooks"
 version = "0.1.0"
 dependencies = [
+ "asupersync",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "thiserror",
- "tokio",
  "tracedecay-domain",
  "tracedecay-framing",
  "tracedecay-private-fs",
@@ -6622,13 +6622,13 @@ dependencies = [
 name = "tracedecay-lcm"
 version = "0.1.0"
 dependencies = [
+ "asupersync",
  "regex",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
- "tokio",
  "tracedecay-contracts",
  "tracedecay-domain",
  "tracedecay-privacy",
@@ -7066,6 +7066,7 @@ dependencies = [
 name = "tracedecay-session-temporal-store"
 version = "0.1.0"
 dependencies = [
+ "asupersync",
  "futures-util",
  "getrandom 0.2.17",
  "hex",
@@ -7074,7 +7075,6 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "thiserror",
- "tokio",
  "tracedecay-capture",
  "tracedecay-contracts",
  "tracedecay-domain",

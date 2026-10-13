@@ -240,6 +240,39 @@ fn authority_revalidated_batch_has_no_guessed_deadline_and_rechecks_authority() 
 }
 
 #[test]
+fn authority_revalidated_query_runs_past_the_statement_deadline() {
+    let fixture = fixture('a', 'a');
+    let clock = FakeClock::frozen();
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers)
+        .unwrap()
+        .with_write_authority(Arc::new(FakeClockAuthority {
+            clock: Arc::clone(&clock),
+            advance: Some((ExactSqlWriteIntent::Query, EXACT_SQL_EXECUTION_LIMIT / 2)),
+        }))
+        .unwrap();
+    let transaction = channel.begin_authorized_long_lease_immediate().unwrap();
+    let scan = statement(
+        "WITH RECURSIVE n(value) AS (
+             VALUES(1)
+             UNION ALL
+             SELECT value + 1 FROM n WHERE value < 10000
+         )
+         SELECT count(*) FROM n",
+        vec![],
+    );
+
+    let rows = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(transaction.query_authority_revalidated_async(scan))
+        .expect("an authority-revalidated query has no statement deadline");
+
+    assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(10_000)]);
+    assert!(clock.elapsed() > EXACT_SQL_EXECUTION_LIMIT * 2);
+    transaction.rollback().unwrap();
+}
+
+#[test]
 fn authority_loss_during_revalidated_batch_rolls_back_transaction() {
     let fixture = fixture('a', 'a');
     let base = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();

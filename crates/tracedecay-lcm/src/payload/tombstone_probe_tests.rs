@@ -166,7 +166,7 @@ fn unrelated_ref(index: usize) -> String {
     format!("payload_{index:064}.payload")
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn tombstone_probe_stops_at_the_first_confirmed_row() {
     let store = probe_store().await;
     let mut texts = Vec::with_capacity(SEEDED_ROWS);
@@ -198,7 +198,7 @@ async fn tombstone_probe_stops_at_the_first_confirmed_row() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn tombstone_probe_ignores_unrelated_payload_tombstones() {
     let store = probe_store().await;
     let texts = (0..SEEDED_ROWS)
@@ -220,7 +220,7 @@ async fn tombstone_probe_ignores_unrelated_payload_tombstones() {
     assert_eq!(counter.queries(), 1);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn tombstone_probe_keeps_the_text_authority_over_the_like_prefilter() {
     let store = probe_store().await;
     let texts = (0..DECOY_ROWS)
@@ -244,7 +244,7 @@ async fn tombstone_probe_keeps_the_text_authority_over_the_like_prefilter() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn expand_payload_still_reports_a_garbage_collected_payload() {
     let store = probe_store().await;
     seed_raw_messages(&store.conn, &[tombstone_text(TARGET_REF)]).await;

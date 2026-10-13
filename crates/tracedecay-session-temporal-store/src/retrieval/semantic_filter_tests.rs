@@ -226,7 +226,7 @@ fn canonical_source_filter_matches_provider_or_source_identity_before_ranking() 
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn semantic_filter_hydrates_compacted_content_and_rejects_missing_bodies() {
     let observation = canonical_observation(vec![CanonicalObservationFactV1::Message {
         role: CanonicalMessageRoleV1::User,
