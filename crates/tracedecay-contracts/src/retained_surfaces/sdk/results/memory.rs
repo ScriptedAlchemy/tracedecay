@@ -210,8 +210,14 @@ pub struct FactFeedbackResultV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryAlgebraV1 {
+    /// Vector algebra the fact encodings use. Current daemons report `map_c`;
+    /// earlier releases reported `amari_fhrr` for the same encoding.
     pub name: String,
+    /// Width of each encoded vector.
     pub hrr_dim: u64,
+    /// Heuristic D / ln(D) count of bound items one vector can superpose
+    /// before cosine similarity degrades. Each fact has its own vector, so
+    /// this is neither a limit on stored facts nor a recall guarantee.
     pub estimated_capacity: u64,
 }
 

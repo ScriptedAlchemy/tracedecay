@@ -1,7 +1,7 @@
 //! Holographic-memory dashboard API, backed by tracedecay's memory store.
 //!
 //! Canonical fact payloads come from the relational fact authority, verified
-//! memory topology comes from Grafeo, and FHRR vectors are derived on read.
+//! memory topology comes from Grafeo, and MAP-C vectors are derived on read.
 
 use std::collections::BTreeMap;
 
