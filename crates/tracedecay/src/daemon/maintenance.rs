@@ -658,9 +658,6 @@ impl MaintenanceCoordinator {
             );
             return MaintenanceTickOutcome::Retry;
         };
-        let Some(_background_cpu) = background_cpu.try_acquire() else {
-            return MaintenanceTickOutcome::Retry;
-        };
         administration
             .store_telemetry_sampling()
             .begin_retention_tick_log_window();
@@ -693,6 +690,11 @@ impl MaintenanceCoordinator {
         {
             let _ = crate::test_support::hold_after_maintenance_listing_for_test().await;
         }
+        // The listing copies in-memory mounts and is not CPU work, so a tick
+        // parked at the listing holds no background CPU unit.
+        let Some(_background_cpu) = background_cpu.try_acquire() else {
+            return MaintenanceTickOutcome::Retry;
+        };
         let (registered_projects, registry_listed) =
             match registered_project_stores(profile_root, profile_database).await {
                 Ok(stores) => (stores, true),
