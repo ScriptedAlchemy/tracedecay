@@ -248,9 +248,8 @@ pub(crate) enum ExecutionPolicy {
 /// on a large store such a scan cannot fit any fixed request deadline, and an
 /// audit interrupted at the same statement on every open never converges.
 /// Reader shutdown still interrupts a convergence statement.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExactSqlStatementBudget {
-    #[default]
     Request,
     Convergence,
 }

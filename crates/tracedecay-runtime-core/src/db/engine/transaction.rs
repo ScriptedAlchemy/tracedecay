@@ -116,6 +116,29 @@ impl Transaction {
         .map_err(join_error)?
     }
 
+    /// Runs one query under the authority-revalidated policy, without the
+    /// ordinary statement deadline.
+    pub async fn query_authority_revalidated<P>(&self, sql: &str, params: P) -> Result<Rows>
+    where
+        P: IntoParams,
+    {
+        let runtime = Arc::clone(&self.runtime);
+        let statement = statement(sql, params)?;
+        let rows = tokio::spawn(async move {
+            runtime
+                .lock()
+                .await
+                .as_ref()
+                .ok_or(super::Error::TransactionClosed)?
+                .query_authority_revalidated_async(statement)
+                .await
+                .map_err(super::Error::from)
+        })
+        .await
+        .map_err(join_error)??;
+        Ok(Rows::from_exact(rows))
+    }
+
     /// Executes one separately authorized authority-revalidated batch without the ordinary
     /// statement deadline.
     pub async fn execute_authority_revalidated_batch(&self, sql: &str) -> Result<()> {

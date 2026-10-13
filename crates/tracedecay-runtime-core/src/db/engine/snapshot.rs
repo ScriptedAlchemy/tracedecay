@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tracedecay_rusqlite_runtime::exact_sql::ExactSqlReadSnapshot;
+use tracedecay_rusqlite_runtime::exact_sql::{ExactSqlReadSnapshot, ExactSqlStatementBudget};
 
 use super::{IntoParams, Result, Rows, connection::statement};
 
@@ -11,13 +11,21 @@ pub struct ReadSnapshot {
     /// funnels all of them through it, so a single slow statement stalls the
     /// rest. The measured query path remains the stable boundary.
     runtime: Arc<ExactSqlReadSnapshot>,
+    budget: ExactSqlStatementBudget,
 }
 
 impl ReadSnapshot {
     pub(super) fn from_runtime(runtime: ExactSqlReadSnapshot) -> Self {
         Self {
             runtime: Arc::new(runtime),
+            budget: ExactSqlStatementBudget::Request,
         }
+    }
+
+    /// Every statement on this snapshot runs under `budget`.
+    #[must_use]
+    pub(crate) fn with_budget(self, budget: ExactSqlStatementBudget) -> Self {
+        Self { budget, ..self }
     }
 
     pub async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>
@@ -25,9 +33,12 @@ impl ReadSnapshot {
         P: IntoParams,
     {
         let runtime = Arc::clone(&self.runtime);
+        let budget = self.budget;
         let statement = statement(sql, params)?;
         let rows = tokio::task::spawn_blocking(move || {
-            runtime.query(statement).map_err(super::Error::from)
+            runtime
+                .query_with_budget(statement, budget)
+                .map_err(super::Error::from)
         })
         .await
         .map_err(join_error)??;

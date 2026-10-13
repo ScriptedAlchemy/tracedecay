@@ -20,7 +20,7 @@ use super::outcome::{ReaderAcquireError, interruption, map_worker_error, validat
 use super::{
     AvailableWorker, DEFERRED_SNAPSHOT_END_LIMIT, PoolInner, ReaderLane, SNAPSHOT_END_GRACE,
 };
-use crate::exact_sql::{ExactSqlError, ExactSqlRows, ExactSqlStatement};
+use crate::exact_sql::{ExactSqlError, ExactSqlRows, ExactSqlStatement, ExactSqlStatementBudget};
 
 struct Checkout<E: ReaderQueryExecutor> {
     inner: Arc<PoolInner<E>>,
@@ -201,7 +201,7 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
         self.checkout
             .worker
             .client
-            .execute_exact_sql_query(statement)
+            .execute_exact_sql_query(statement, ExactSqlStatementBudget::Request)
     }
 
     #[tracing::instrument(
@@ -223,6 +223,7 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
     pub(super) fn execute_active_exact_sql_query(
         &mut self,
         statement: ExactSqlStatement,
+        budget: ExactSqlStatementBudget,
     ) -> Result<ExactSqlRows, ExactSqlError> {
         if !self.snapshot_active {
             return Err(ExactSqlError::ReaderUnavailable(
@@ -232,7 +233,7 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
         self.checkout
             .worker
             .client
-            .execute_exact_sql_query(statement)
+            .execute_exact_sql_query(statement, budget)
     }
 
     #[tracing::instrument(name = "rusqlite.reader_lease.store_size", level = "trace", skip_all)]
