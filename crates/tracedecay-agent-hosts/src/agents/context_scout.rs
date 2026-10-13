@@ -3055,6 +3055,78 @@ mod tests {
         }
     }
 
+    /// Keeps the backend's failure reason, which the Scout outcome taxonomy
+    /// collapses (a spawn failure and a retryable error both read `Unavailable`).
+    #[cfg(feature = "token-counting")]
+    struct ErrorCapturingBackend {
+        inner: Arc<dyn tracedecay_automation_runtime::automation::backend::AgentTaskBackend>,
+        error: Mutex<Option<String>>,
+    }
+
+    #[cfg(feature = "token-counting")]
+    impl tracedecay_automation_runtime::automation::backend::AgentTaskBackend
+        for ErrorCapturingBackend
+    {
+        fn run_task(
+            &self,
+            request: &tracedecay_automation_runtime::automation::backend::AgentTaskRequest,
+        ) -> Result<
+            tracedecay_automation_runtime::automation::backend::AgentTaskResponse,
+            tracedecay_automation_runtime::automation::backend::AgentTaskError,
+        > {
+            let result = self.inner.run_task(request);
+            if let Err(error) = &result {
+                *self.error.lock().unwrap() = Some(error.to_string());
+            }
+            result
+        }
+
+        fn executable(&self) -> Option<&std::path::Path> {
+            self.inner.executable()
+        }
+    }
+
+    /// The prompt runner the composition root registers in
+    /// `tracedecay-project`'s `runtime_ports`; a test process has no root.
+    #[cfg(feature = "token-counting")]
+    fn eval_codex_prompt_runner(
+        prompt: &str,
+        config: &tracedecay_automation_runtime::ports::codex_app_server::SummaryConfig,
+        thread_source: &str,
+        response_schema: Option<&serde_json::Value>,
+    ) -> Result<
+        tracedecay_automation_runtime::ports::codex_app_server::Summary,
+        tracedecay_automation_runtime::automation::backend::AgentTaskError,
+    > {
+        use tracedecay_sessions::runtime::hosts::codex_app_server as sessions;
+        let config = sessions::CodexAppServerSummaryConfig {
+            codex_bin: config.codex_bin.to_string_lossy().into_owned(),
+            model: config.model.clone(),
+            timeout: config.timeout,
+        };
+        match response_schema {
+            Some(schema) => sessions::run_prompt_with_codex_app_server_response_schema(
+                prompt,
+                &config,
+                thread_source,
+                schema,
+            ),
+            None => sessions::run_prompt_with_codex_app_server(prompt, &config, thread_source),
+        }
+        .map(
+            |summary| tracedecay_automation_runtime::ports::codex_app_server::Summary {
+                text: summary.text,
+                model: summary.model,
+            },
+        )
+        .map_err(|error| {
+            tracedecay_automation_runtime::automation::backend::AgentTaskError::new(
+                error.class,
+                error.message,
+            )
+        })
+    }
+
     /// Measures factual drift of live Codex refinement over a synthetic
     /// diagnostic corpus about the `evals/agent_adoption/fixture` orders crate.
     ///
@@ -3089,6 +3161,7 @@ mod tests {
             eprintln!("skipped: set TRACEDECAY_SCOUT_LIVE_EVAL_CODEX to a codex executable");
             return;
         };
+        tracedecay_automation_runtime::ports::codex_app_server::register(eval_codex_prompt_runner);
         let executable = LcmSummarizerExecutableV1::configured(
             std::fs::canonicalize(codex).expect("TRACEDECAY_SCOUT_LIVE_EVAL_CODEX must exist"),
         )
@@ -3136,12 +3209,16 @@ mod tests {
         ];
         println!(
             "case\troute\tmodel_outcome\tdeterministic\trefined\tunsupported\tinput_tokens\t\
-             output_tokens\tcost_microusd\twall_ms"
+             output_tokens\tcost_microusd\twall_ms\tbackend_error"
         );
         for (name, category, text) in cases {
+            let recorder = Arc::new(ErrorCapturingBackend {
+                inner: Arc::clone(&backend),
+                error: Mutex::new(None),
+            });
             let model = ProposalCapturingModel {
                 inner: ProductionContextScoutModelAssistantV1::new(
-                    Arc::clone(&backend),
+                    Arc::clone(&recorder) as Arc<dyn AgentTaskBackend>,
                     ContextScoutModelBackendV1::CodexAppServer,
                 ),
                 proposal: Mutex::new(None),
@@ -3176,13 +3253,14 @@ mod tests {
             let usage =
                 |value: Option<u64>| value.map_or_else(|| "-".to_owned(), |v| v.to_string());
             println!(
-                "{name}\t{:?}\t{:?}\t{text}\t{refined}\t{}\t{}\t{}\t{}\t{wall_ms}",
+                "{name}\t{:?}\t{:?}\t{text}\t{refined}\t{}\t{}\t{}\t{}\t{wall_ms}\t{}",
                 selection.route,
                 selection.model_outcome,
                 unsupported.join(","),
                 usage(receipt.and_then(|receipt| receipt.input_tokens)),
                 usage(receipt.and_then(|receipt| receipt.output_tokens)),
                 usage(receipt.and_then(|receipt| receipt.estimated_cost_microusd)),
+                recorder.error.lock().unwrap().as_deref().unwrap_or("-"),
             );
             assert!(
                 matches!(
