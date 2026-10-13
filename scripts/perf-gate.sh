@@ -293,11 +293,12 @@ td() { td_project "$PERF_TARGET_REPO" "$1" "$2"; }
 # not enrolled" refusal, which is exactly what init goes on to fix. A refusal the
 # daemon routed still proves the request path serves, which is the whole claim
 # of this phase, so readiness means answered rather than succeeded. The CLI
-# prefixes every routed refusal with `daemon tool call failed`, so that marker
+# reports a routed refusal either as `daemon tool call failed` or as the tool's
+# typed refusal (`<tool> refused the request (<code>)`); either marker
 # separates an answer from a connection that never landed.
 daemon_answered_status() {
   td status '{"format":"json"}' >"$RUN_DIR/status-cold.json" 2>"$RUN_DIR/status.err" && return 0
-  grep -q 'daemon tool call failed' "$RUN_DIR/status.err"
+  grep -qE 'daemon tool call failed|refused the request' "$RUN_DIR/status.err"
 }
 
 until daemon_answered_status; do
