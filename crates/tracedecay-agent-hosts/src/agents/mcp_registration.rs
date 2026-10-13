@@ -10,6 +10,7 @@
 
 use std::path::Path;
 
+use super::serve_args::ServeArgs;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::DoctorCounters;
@@ -168,9 +169,11 @@ pub fn uninstall_mcp_server_entry(
 /// under a `mcpServers.tracedecay` object with `disabled` and `args` fields.
 ///
 /// A registration only counts as current when it is explicitly enabled and
-/// still launches `tracedecay serve`.
+/// launches exactly `serve_args`; an enabled entry selecting another catalog
+/// profile is repairable.
 pub fn mcp_servers_registration_state(
     settings_path: &Path,
+    serve_args: &ServeArgs,
 ) -> host_bundle::HostBundleRegistrationStateV1 {
     use host_bundle::HostBundleRegistrationStateV1 as State;
 
@@ -180,27 +183,36 @@ pub fn mcp_servers_registration_state(
     let Ok(settings) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
         return State::Corrupt;
     };
-    if settings
+    let enabled = settings
         .pointer("/mcpServers/tracedecay/disabled")
         .and_then(serde_json::Value::as_bool)
-        == Some(false)
-        && settings
-            .pointer("/mcpServers/tracedecay/args")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|args| args.iter().any(|arg| arg.as_str() == Some("serve")))
-    {
+        == Some(false);
+    let args = settings.pointer("/mcpServers/tracedecay/args");
+    if enabled && serve_args.matches_json(args, &[]) {
         State::Current
+    } else if enabled && launches_serve(args) {
+        State::Repairable
     } else {
         State::Missing
     }
 }
 
+/// Whether an `args` value launches `serve` under any catalog profile: a
+/// TraceDecay entry whose profile differs is repairable, not missing.
+pub(crate) fn launches_serve(args: Option<&serde_json::Value>) -> bool {
+    args.and_then(serde_json::Value::as_array)
+        .and_then(|args| args.first())
+        .and_then(serde_json::Value::as_str)
+        == Some("serve")
+}
+
 /// Registration state of one tracedecay MCP server entry that must launch
-/// `<command> serve`: `expected_binary` pins the command, `None` accepts any
+/// exactly `serve_args`: `expected_binary` pins the command, `None` accepts any
 /// non-empty one.
 pub(crate) fn serve_entry_registration_state(
     server: &serde_json::Value,
     expected_binary: Option<&str>,
+    serve_args: &ServeArgs,
 ) -> host_bundle::HostBundleRegistrationStateV1 {
     let command_matches = server
         .get("command")
@@ -208,10 +220,7 @@ pub(crate) fn serve_entry_registration_state(
         .is_some_and(|command| {
             expected_binary.map_or_else(|| !command.is_empty(), |expected| command == expected)
         });
-    let serves_tracedecay = server
-        .get("args")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|args| args.len() == 1 && args[0].as_str() == Some("serve"));
+    let serves_tracedecay = serve_args.matches_json(server.get("args"), &[]);
     if server.is_object() && command_matches && serves_tracedecay {
         host_bundle::HostBundleRegistrationStateV1::Current
     } else {

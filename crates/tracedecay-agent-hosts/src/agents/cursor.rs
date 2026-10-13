@@ -8,6 +8,7 @@ use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::{Value, json};
 
+use super::serve_args::ServeArgs;
 use tracedecay_domain::errors::Result;
 
 use super::host_bundle::{HostBundleRegistrationStateV1, HostComponentV1};
@@ -52,7 +53,7 @@ impl AgentIntegration for CursorIntegration {
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
         dc.section("Cursor integration");
-        doctor_check_plugin(dc, &ctx.home);
+        doctor_check_plugin(dc, &ctx.home, &ctx.catalog_profiles.serve_args(self.id()));
         doctor_check_native_extension(dc, &ctx.home);
         super::cursor_diagnostics::report_cursor_mcp_log_findings(dc, &ctx.home);
     }
@@ -262,7 +263,10 @@ fn stale_native_extension_dirs(home: &Path) -> Vec<String> {
 
 /// Canonical rendered Cursor plugin inventory the receipt-backed
 /// first-party catalog deploys.
-pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'static str, String)>> {
+pub(crate) fn rendered_plugin_files(
+    tracedecay_bin: &str,
+    serve_args: &ServeArgs,
+) -> Result<Vec<(&'static str, String)>> {
     embedded_plugin_files()
         .into_iter()
         .map(|(relative, contents)| {
@@ -270,7 +274,9 @@ pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'stati
                 ".cursor-plugin/plugin.json" => {
                     super::plugin_bundle::stamp_manifest_version(contents)?
                 }
-                "mcp.json" => super::plugin_bundle::set_mcp_command(contents, tracedecay_bin)?,
+                "mcp.json" => {
+                    super::plugin_bundle::set_mcp_command(contents, tracedecay_bin, serve_args)?
+                }
                 "hooks/hooks.json" => cursor_plugin_hooks(contents, tracedecay_bin)?,
                 _ => contents.to_string(),
             };
@@ -305,7 +311,7 @@ fn cursor_plugin_hooks(raw: &str, tracedecay_bin: &str) -> Result<String> {
 
 // Healthcheck helpers
 
-fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
+fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path, serve_args: &ServeArgs) {
     let plugin_dir = cursor_plugin_install_dir(home);
     let manifest_path = cursor_plugin_manifest_path(home);
     if !manifest_path.exists() {
@@ -336,12 +342,12 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
     {
         dc.warn(&message);
     }
-    doctor_check_plugin_mcp(dc, &plugin_dir.join("mcp.json"));
+    doctor_check_plugin_mcp(dc, &plugin_dir.join("mcp.json"), serve_args);
     doctor_check_plugin_hooks(dc, &plugin_dir.join("hooks/hooks.json"));
     doctor_check_plugin_rule(dc, &plugin_dir.join("rules/tracedecay.mdc"));
 }
 
-fn doctor_check_plugin_mcp(dc: &mut DoctorCounters, mcp_path: &Path) {
+fn doctor_check_plugin_mcp(dc: &mut DoctorCounters, mcp_path: &Path, serve_args: &ServeArgs) {
     if !mcp_path.exists() {
         dc.warn(&format!(
             "{} not found, run `tracedecay install --agent cursor`",
@@ -359,7 +365,7 @@ fn doctor_check_plugin_mcp(dc: &mut DoctorCounters, mcp_path: &Path) {
     if server["command"]
         .as_str()
         .is_some_and(|command| !command.is_empty())
-        && server["args"] == json!(["serve"])
+        && serve_args.matches_json(server.get("args"), &[])
     {
         dc.pass(&format!(
             "Cursor plugin MCP registered in {}",
@@ -508,7 +514,7 @@ mod tests {
 
     /// Writes the rendered bundle exactly as the component catalog deploys it.
     fn write_embedded_plugin(install_dir: &Path, tracedecay_bin: &str) -> Result<()> {
-        for (relative, rendered) in rendered_plugin_files(tracedecay_bin)? {
+        for (relative, rendered) in rendered_plugin_files(tracedecay_bin, &ServeArgs::default())? {
             super::super::safe_write_text_file(&install_dir.join(relative), &rendered)?;
         }
         Ok(())
@@ -629,6 +635,7 @@ mod tests {
                 profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
                 home: home.path().to_path_buf(),
                 project_path: project.path().to_path_buf(),
+                catalog_profiles: Default::default(),
             },
         );
         assert_eq!(doctor.issues, 0);
@@ -648,6 +655,7 @@ mod tests {
             0,
             tracedecay_bin,
             crate::agents::TEST_GENERATOR_COMMIT,
+            &crate::agents::serve_args::ServeArgs::default(),
         )
         .expect("the packaged Cursor Desktop component set must verify")
     }
@@ -806,6 +814,7 @@ mod tests {
                 profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
                 home: home.path().to_path_buf(),
                 project_path: project.path().to_path_buf(),
+                catalog_profiles: Default::default(),
             },
             lifecycle.path(),
             crate::agents::TEST_GENERATOR_COMMIT,

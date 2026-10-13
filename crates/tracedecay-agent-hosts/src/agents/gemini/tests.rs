@@ -23,7 +23,12 @@ use tracedecay_runtime_core::test_executable::write_executable_script;
 /// deploys it.
 fn stage_rendered_extension(home: &Path, tracedecay_bin: &str) -> PathBuf {
     let stage_dir = extension_stage_dir(home);
-    for (relative, rendered) in rendered_extension_files(tracedecay_bin).unwrap() {
+    for (relative, rendered) in rendered_extension_files(
+        tracedecay_bin,
+        &crate::agents::serve_args::ServeArgs::default(),
+    )
+    .unwrap()
+    {
         crate::agents::safe_write_text_file(&stage_dir.join(relative), &rendered).unwrap();
     }
     stage_dir
@@ -79,6 +84,7 @@ fn install_context(home: &Path, tracedecay_bin: &str) -> InstallContext {
         tracedecay_bin: tracedecay_bin.to_string(),
         project_root: None,
         dashboard: true,
+        serve_args: Default::default(),
     }
 }
 
@@ -91,7 +97,12 @@ fn read_json(path: &Path) -> serde_json::Value {
 fn simulate_host_install(home: &Path, tracedecay_bin: &str) {
     let installed = installed_extension_dir(home);
     std::fs::create_dir_all(&installed).unwrap();
-    for (relative, rendered) in rendered_extension_files(tracedecay_bin).unwrap() {
+    for (relative, rendered) in rendered_extension_files(
+        tracedecay_bin,
+        &crate::agents::serve_args::ServeArgs::default(),
+    )
+    .unwrap()
+    {
         std::fs::write(installed.join(relative), rendered).unwrap();
     }
 }
@@ -331,6 +342,7 @@ fn registration_state_follows_the_hosts_installed_extension() {
         profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
         home: home.path().to_path_buf(),
         project_path: home.path().to_path_buf(),
+        catalog_profiles: Default::default(),
     };
     stage_rendered_extension(home.path(), "/bin/tracedecay");
     assert!(
@@ -356,7 +368,8 @@ fn registration_state_follows_the_hosts_installed_extension() {
     );
     assert!(installed_extension_is_current(
         home.path(),
-        Some("/bin/tracedecay")
+        Some("/bin/tracedecay"),
+        &crate::agents::serve_args::ServeArgs::default(),
     ));
 
     // A relocated binary is only visible to the lifecycle-aware readback.
@@ -370,7 +383,8 @@ fn registration_state_follows_the_hosts_installed_extension() {
     );
     assert!(!installed_extension_is_current(
         home.path(),
-        Some("/relocated/tracedecay")
+        Some("/relocated/tracedecay"),
+        &crate::agents::serve_args::ServeArgs::default(),
     ));
 
     std::fs::write(installed_manifest_path(home.path()), b"{not json").unwrap();

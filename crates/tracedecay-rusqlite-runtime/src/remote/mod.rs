@@ -48,11 +48,14 @@ use tracedecay_contracts::{
 const READ_WAIT: Duration = Duration::from_secs(5);
 mod credential_admission;
 mod crypto;
+mod drain;
 mod enrollment;
 mod enrollment_lifecycle;
 mod identity;
+mod membership;
 mod policy;
 mod promotion_gate;
+mod reachability;
 mod recovery_authority;
 mod replay_authority;
 mod replay_recovery;
@@ -152,6 +155,7 @@ impl Default for RemoteSpoolLimitsV1 {
 pub struct RemoteSqliteStorageV1 {
     retained: RetainedExactSqlCapability,
     binding: StoreRuntimeBindingV1,
+    member_brain: BrainId,
     keyring: Arc<dyn RemoteSpoolKeyringV1>,
     limits: RemoteSpoolLimitsV1,
 }
@@ -182,11 +186,12 @@ impl RemoteSqliteStorageV1 {
             return Err(RemoteSqliteStorageErrorV1::BindingMismatch);
         }
         validate_final_schema(retained.handle())?;
-        bind_node_identity(retained.handle(), &binding)?;
+        let member_brain = bind_node_identity(retained.handle(), &binding)?;
         adopt_runtime_binding(retained.handle(), &binding)?;
         Ok(Self {
             retained,
             binding,
+            member_brain,
             keyring,
             limits,
         })
@@ -199,17 +204,19 @@ impl RemoteSqliteStorageV1 {
         Self {
             retained: self.retained.clone(),
             binding: self.binding.clone(),
+            member_brain: self.member_brain.clone(),
             keyring,
             limits: self.limits,
         }
     }
 
     /// Attaches a newly mounted remote-node runtime and seeds its singleton
-    /// node identity after final-schema admission.
+    /// node identity, serving `member_brain`, after final-schema admission.
     #[tracing::instrument(name = "rusqlite.remote.provision", level = "trace", skip_all)]
     pub fn provision_retained_exact_sql(
         retained: RetainedExactSqlCapability,
         keyring: Arc<dyn RemoteSpoolKeyringV1>,
+        member_brain: &BrainId,
     ) -> Result<Self, RemoteSqliteStorageErrorV1> {
         let binding = retained.handle().binding().clone();
         if !matches!(
@@ -219,10 +226,11 @@ impl RemoteSqliteStorageV1 {
             return Err(RemoteSqliteStorageErrorV1::BindingMismatch);
         }
         validate_final_schema(retained.handle())?;
-        provision_node_identity(retained.handle(), &binding)?;
+        let member_brain = provision_node_identity(retained.handle(), &binding, member_brain)?;
         Ok(Self {
             retained,
             binding,
+            member_brain,
             keyring,
             limits: RemoteSpoolLimitsV1::default(),
         })
@@ -230,6 +238,18 @@ impl RemoteSqliteStorageV1 {
 
     pub fn binding(&self) -> &StoreRuntimeBindingV1 {
         &self.binding
+    }
+
+    /// The Brain whose enrollments, writer, and policy this store holds. It
+    /// differs from the binding's profile Brain only for a joined store.
+    pub fn member_brain(&self) -> &BrainId {
+        &self.member_brain
+    }
+
+    /// Whether this store is a node's copy of another profile's Brain rather
+    /// than a store this daemon serves as the authority.
+    pub fn is_joined(&self) -> bool {
+        self.member_brain != self.binding.shard_id.brain_id
     }
 
     fn handle(&self) -> &ExactSqlHandle {
@@ -552,19 +572,31 @@ impl RemoteCapturePortV1 for RemoteSqliteStorageV1 {
         }
         let row = authority_row(
             self.handle(),
-            "authority_state_json, runtime_binding_json",
+            "authority_state_json, runtime_binding_json, writer_json",
             &writer.authority.fence.brain_id,
         )
         .map_err(map_authority_persistence_error)?;
-        let authority_json = row_text(&row, 0).map_err(map_persistence_error)?;
-        let binding_json = row_text(&row, 1).map_err(map_persistence_error)?;
-        let stored_binding: StoreRuntimeBindingV1 = serde_json::from_str(binding_json)
-            .map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)?;
+        let stored_binding: StoreRuntimeBindingV1 = decode_capture_column(&row, 1)?;
         if stored_binding != self.binding {
             return Err(RemoteCapturePersistenceErrorV1::Corruption);
         }
-        serde_json::from_str(authority_json)
-            .map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)
+        let authority: CurrentRemoteAuthorityStateV1 = decode_capture_column(&row, 0)?;
+        if let CurrentRemoteAuthorityStateV1::Unavailable {
+            reason: tracedecay_domain::RemoteAuthorityUnavailableReasonV1::AuthorityUnreachable,
+            observed_at,
+        } = authority
+        {
+            let stored_writer: RemoteWriterAuthorityV1 = decode_capture_column(&row, 2)?;
+            if stored_writer != *writer {
+                // Offline capture runs only under the writer the authority
+                // last published to this node.
+                return Ok(CurrentRemoteAuthorityStateV1::Unavailable {
+                    reason: tracedecay_domain::RemoteAuthorityUnavailableReasonV1::FenceUnverified,
+                    observed_at,
+                });
+            }
+        }
+        Ok(authority)
     }
 
     fn capture_pending(
@@ -780,7 +812,7 @@ impl RemoteSqliteStorageV1 {
                     return Ok(RemoteFrameTransferReceiptV1 {
                         event_id: request.event_id.clone(),
                         sequence: request.sequence.sequence,
-                        disposition: RemoteFrameTransferDispositionV1::AlreadyTransferred,
+                        disposition: RemoteFrameTransferDispositionV1::TransferredPending,
                     });
                 }
                 validate_previous_frame(&transaction, &capture).map_err(|error| match error {
@@ -856,6 +888,14 @@ impl RemoteFrameTransferPortV1 for RemoteSqliteStorageV1 {
     ) -> Result<RemoteFrameTransferReceiptV1, RemoteFrameTransferErrorV1> {
         self.transfer_pending_frame(request)
     }
+}
+
+fn decode_capture_column<T: serde::de::DeserializeOwned>(
+    row: &crate::exact_sql::ExactSqlRow,
+    index: usize,
+) -> Result<T, RemoteCapturePersistenceErrorV1> {
+    let json = row_text(row, index)?;
+    serde_json::from_str(json).map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)
 }
 
 fn map_transfer_persistence_error(

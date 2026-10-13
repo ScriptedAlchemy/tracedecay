@@ -8,16 +8,16 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay_contracts::remote::capture::{RemoteCaptureSequenceV1, RemoteWriterAuthorityV1};
 use tracedecay_contracts::remote::capture_protocol::RemoteCaptureRequestV1;
-use tracedecay_contracts::remote::protocol::RemoteProtocolRequestV1;
+use tracedecay_contracts::remote::protocol::{CurrentAuthorityRequestV1, RemoteProtocolRequestV1};
 use tracedecay_contracts::remote::recovery::PromotionConfirmationV1;
 use tracedecay_contracts::{ApplicationProblem, RequestId};
 use tracedecay_domain::{
     BrainId, BrainNodeId, ComponentVersion, DurableObservationV1, EnrollmentGrantV1, ObservationId,
     ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
     ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
-    PayloadReferenceV1, ProjectId, ProviderId, RemoteCapabilityV1, RemoteWriterFenceV1,
-    RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
-    SanitizerDispositionV1, SensitivityV1, SessionId,
+    PayloadReferenceV1, ProjectId, ProviderId, RemoteCapabilityV1, RemoteRepositoryScopeV1,
+    RemoteWriterFenceV1, RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1,
+    SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1, SessionId,
 };
 use tracedecay_sdk::client::{Client, ClientError, ConnectionMode};
 use tracedecay_sdk::operations::{TypedOperation, WorkflowListDefinitions};
@@ -140,6 +140,75 @@ impl RemoteDaemonFixture {
         }
     }
 
+    fn remote_endpoint(&self) -> String {
+        format!("https://{}/remote/", self.remote)
+    }
+
+    /// Runs the node operator `operation` (`join`, `drain`) on this daemon, as
+    /// `node_id` of the Brain whose authority serves `endpoint`.
+    fn node_operation(
+        &self,
+        operation: &str,
+        endpoint: &str,
+        brain_id: &BrainId,
+        node_id: &BrainNodeId,
+        scope: &RemoteRepositoryScopeV1,
+    ) -> (reqwest::StatusCode, Value) {
+        let discovery = RemoteProtocolRequestV1::new(
+            RequestId::new("request.remote-journey-join").unwrap(),
+            brain_id.clone(),
+            node_id.clone(),
+            1,
+            None,
+            now_micros(),
+            CurrentAuthorityRequestV1 {
+                scope: scope.clone(),
+            },
+        )
+        .unwrap();
+        let response = reqwest::blocking::Client::new()
+            .post(format!("{}/remote-nodes/{operation}", self.local_base))
+            .bearer_auth(&self.local_token)
+            .header(reqwest::header::ORIGIN, &self.local_base)
+            .header(
+                REMOTE_ENROLLMENT_CREDENTIAL_HEADER,
+                &ENROLLMENT_CREDENTIAL[..],
+            )
+            .json(&json!({
+                "endpoint": endpoint,
+                "trust_root_pem": std::str::from_utf8(REMOTE_TLS_ROOT_CERTIFICATE).unwrap(),
+                "timeout_secs": 5,
+                "discovery": discovery,
+            }))
+            .send()
+            .unwrap();
+        (response.status(), response.json().unwrap())
+    }
+
+    /// The node client served on this daemon's own loopback surface, where
+    /// a joined node captures.
+    fn local_client(&self) -> EnrolledRemoteClient {
+        EnrolledRemoteClient::new_local_daemon(
+            format!("{}/remote/", self.local_base),
+            ENROLLMENT_CREDENTIAL,
+            Duration::from_secs(30),
+        )
+        .unwrap()
+    }
+
+    fn status(&self) -> Value {
+        let status: Value = reqwest::blocking::Client::new()
+            .get(format!("{}/remote-status", self.local_base))
+            .bearer_auth(&self.local_token)
+            .header(reqwest::header::ORIGIN, &self.local_base)
+            .send()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert_eq!(status["kind"], "observed", "{status}");
+        status["status"].clone()
+    }
+
     fn local_post(&self, path: &str, body: &Value) -> (reqwest::StatusCode, String) {
         let response = reqwest::blocking::Client::new()
             .post(format!("{}{path}", self.local_base))
@@ -153,16 +222,7 @@ impl RemoteDaemonFixture {
     }
 
     fn status_authority(&self) -> Value {
-        let status: Value = reqwest::blocking::Client::new()
-            .get(format!("{}/remote-status", self.local_base))
-            .bearer_auth(&self.local_token)
-            .header(reqwest::header::ORIGIN, &self.local_base)
-            .send()
-            .unwrap()
-            .json()
-            .unwrap();
-        assert_eq!(status["kind"], "observed", "{status}");
-        status["status"]["authority"].clone()
+        self.status()["authority"].clone()
     }
 
     fn client(&self, credential: [u8; 32]) -> EnrolledRemoteClient {
@@ -199,6 +259,15 @@ impl RemoteDaemonFixture {
         );
         assert_eq!(status, reqwest::StatusCode::NO_CONTENT, "{body}");
     }
+}
+
+const REMOTE_ENROLLMENT_CREDENTIAL_HEADER: &str = "x-tracedecay-enrollment-credential";
+
+/// An authority endpoint on a loopback port nothing listens on, as a node
+/// cut off from its authority sees it.
+fn unreachable_endpoint() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    format!("https://{}/remote/", listener.local_addr().unwrap())
 }
 
 fn authority_without_observed_at(mut authority: Value) -> Value {
@@ -439,4 +508,275 @@ fn protocol_envelopes_report_the_status_authority_through_publication_and_failov
 
     let mut daemon = fixture.daemon;
     stop_daemon(&mut daemon);
+}
+
+#[test]
+#[ignore = "requires a prebuilt production tracedecay daemon"]
+fn a_joined_node_captures_offline_only_while_its_authority_is_unreachable() {
+    let desktop = RemoteDaemonFixture::start("remote-offline-desktop");
+    let laptop = RemoteDaemonFixture::start("remote-offline-laptop");
+    let node_id = BrainNodeId::new("node.remote-offline-laptop").unwrap();
+    let mut grant = remote_grant(
+        desktop.brain_id.clone(),
+        node_id.clone(),
+        &desktop.project_id,
+        &GRANT_CREDENTIAL,
+    );
+    grant.capabilities = [
+        RemoteCapabilityV1::CaptureOffline,
+        RemoteCapabilityV1::DiscoverAuthority,
+    ]
+    .into_iter()
+    .collect();
+    desktop.provision_and_enroll(&grant);
+    let writer: RemoteWriterAuthorityV1 = serde_json::from_value(json!({
+        "project_id": desktop.project_id,
+        "scope": grant.scope,
+        "authority": {
+            "fence": writer_fence(&desktop.brain_id, 1, node_id.as_str()),
+            "credential_revision": 1,
+            "observed_at": now_micros(),
+        },
+    }))
+    .unwrap();
+    desktop.publish_writer(&node_id, &writer);
+    let join = |endpoint: &str| {
+        laptop.node_operation("join", endpoint, &desktop.brain_id, &node_id, &grant.scope)
+    };
+    let (status, joined) = join(&desktop.remote_endpoint());
+    assert_eq!(status, reqwest::StatusCode::OK, "{joined}");
+    let project_id = desktop.project_id.clone();
+    let capture = |request_id: &str, writer: &RemoteWriterAuthorityV1, sequence| {
+        laptop
+            .local_client()
+            .capture(&capture_request(
+                request_id,
+                &node_id,
+                writer,
+                sequence,
+                observation(&project_id, "observation.remote-offline"),
+            ))
+            .expect("the laptop answers the node credential with a protocol response")
+    };
+    let first = RemoteCaptureSequenceV1 {
+        sequence: 1,
+        previous_event_id: None,
+    };
+    let online = capture("request.remote-offline-online", &writer, first.clone());
+    assert!(
+        matches!(
+            &online.result,
+            Err(problem) if matches!(
+                problem.problem.source(),
+                ApplicationProblem::Conflict { diagnostic, .. }
+                    if diagnostic.code == "remote.authority_reachable"
+            )
+        ),
+        "capture is refused while the authority answers: {:?}",
+        online.result
+    );
+
+    let (status, refused) = join(&unreachable_endpoint());
+    assert_eq!(
+        (status, refused),
+        (
+            reqwest::StatusCode::BAD_GATEWAY,
+            json!({"code": "authority_unreachable"})
+        )
+    );
+    let offline_status = laptop.status();
+    assert_eq!(
+        (
+            &offline_status["authority"]["state"],
+            &offline_status["authority"]["value"]["reason"],
+        ),
+        (&json!("unavailable"), &json!("authority_unreachable")),
+        "{offline_status}"
+    );
+
+    let mut moved_writer = writer.clone();
+    moved_writer.authority.fence = writer_fence(&desktop.brain_id, 2, node_id.as_str());
+    let unfenced = capture(
+        "request.remote-offline-unfenced",
+        &moved_writer,
+        first.clone(),
+    );
+    assert!(
+        unfenced.result.is_err(),
+        "offline capture runs only under the writer the authority last published"
+    );
+    let offline = capture("request.remote-offline-captured", &writer, first);
+    let receipt = offline
+        .result
+        .expect("offline capture is admitted while the authority is unreachable")
+        .outcome
+        .payload()
+        .cloned()
+        .expect("an admitted capture returns its receipt");
+    assert_eq!(receipt.sequence, 1);
+    assert_eq!(
+        serde_json::to_value(&offline.authority).unwrap()["state"],
+        json!("unavailable")
+    );
+    assert_eq!(
+        laptop.status()["spool"]["pending_count"],
+        json!(1),
+        "the frame waits in the laptop's spool"
+    );
+
+    let (status, rejoined) = join(&desktop.remote_endpoint());
+    assert_eq!(status, reqwest::StatusCode::OK, "{rejoined}");
+    assert_eq!(
+        laptop.status_authority(),
+        json!({"state": "available", "value": writer.authority}),
+        "a successful discovery records the authority as reachable again"
+    );
+    let reachable = capture(
+        "request.remote-offline-reachable",
+        &writer,
+        RemoteCaptureSequenceV1 {
+            sequence: 2,
+            previous_event_id: Some(receipt.event_id),
+        },
+    );
+    assert!(
+        matches!(
+            &reachable.result,
+            Err(problem) if matches!(
+                problem.problem.source(),
+                ApplicationProblem::Conflict { diagnostic, .. }
+                    if diagnostic.code == "remote.authority_reachable"
+            )
+        ),
+        "capture is refused again once the authority answers: {:?}",
+        reachable.result
+    );
+
+    for fixture in [laptop, desktop] {
+        let mut daemon = fixture.daemon;
+        stop_daemon(&mut daemon);
+    }
+}
+
+#[test]
+#[ignore = "requires a prebuilt production tracedecay daemon"]
+fn a_joined_node_drains_offline_frames_in_order_to_its_authority() {
+    let desktop = RemoteDaemonFixture::start("remote-drain-desktop");
+    let laptop = RemoteDaemonFixture::start("remote-drain-laptop");
+    let node_id = BrainNodeId::new("node.remote-drain-laptop").unwrap();
+    let mut grant = remote_grant(
+        desktop.brain_id.clone(),
+        node_id.clone(),
+        &desktop.project_id,
+        &GRANT_CREDENTIAL,
+    );
+    grant.capabilities = [
+        RemoteCapabilityV1::CaptureOffline,
+        RemoteCapabilityV1::DiscoverAuthority,
+        RemoteCapabilityV1::TransferFrame,
+    ]
+    .into_iter()
+    .collect();
+    desktop.provision_and_enroll(&grant);
+    let writer: RemoteWriterAuthorityV1 = serde_json::from_value(json!({
+        "project_id": desktop.project_id,
+        "scope": grant.scope,
+        "authority": {
+            "fence": writer_fence(&desktop.brain_id, 1, node_id.as_str()),
+            "credential_revision": 1,
+            "observed_at": now_micros(),
+        },
+    }))
+    .unwrap();
+    desktop.publish_writer(&node_id, &writer);
+    let operate = |operation: &str, endpoint: &str| {
+        laptop.node_operation(
+            operation,
+            endpoint,
+            &desktop.brain_id,
+            &node_id,
+            &grant.scope,
+        )
+    };
+    let (status, joined) = operate("join", &desktop.remote_endpoint());
+    assert_eq!(status, reqwest::StatusCode::OK, "{joined}");
+    let (status, refused) = operate("join", &unreachable_endpoint());
+    assert_eq!(status, reqwest::StatusCode::BAD_GATEWAY, "{refused}");
+    let mut previous_event_id = None;
+    let mut captured = Vec::new();
+    for (sequence, observation_id) in [
+        (1, "observation.remote-drain-first"),
+        (2, "observation.remote-drain-second"),
+    ] {
+        let receipt = laptop
+            .local_client()
+            .capture(&capture_request(
+                &format!("request.remote-drain-capture-{sequence}"),
+                &node_id,
+                &writer,
+                RemoteCaptureSequenceV1 {
+                    sequence,
+                    previous_event_id: previous_event_id.clone(),
+                },
+                observation(&desktop.project_id, observation_id),
+            ))
+            .unwrap()
+            .result
+            .expect("offline capture is admitted while the authority is unreachable")
+            .outcome
+            .payload()
+            .cloned()
+            .expect("an admitted capture returns its receipt");
+        previous_event_id = Some(receipt.event_id.clone());
+        captured.push(json!({
+            "event_id": receipt.event_id,
+            "sequence": sequence,
+            "disposition": "transferred_pending",
+        }));
+    }
+    let (status, unreachable) = operate("drain", &unreachable_endpoint());
+    assert_eq!(
+        (status, unreachable),
+        (
+            reqwest::StatusCode::BAD_GATEWAY,
+            json!({"code": "authority_unreachable"})
+        )
+    );
+    assert_eq!(
+        laptop.status()["spool"]["pending_count"],
+        json!(2),
+        "frames stay pending until the authority acknowledges them"
+    );
+
+    let drain = || operate("drain", &desktop.remote_endpoint());
+    let (status, drained) = drain();
+    assert_eq!(status, reqwest::StatusCode::OK, "{drained}");
+    assert_eq!(
+        drained,
+        json!({"transferred": captured}),
+        "the authority acknowledges every frame once, in sequence order"
+    );
+    assert_eq!(
+        laptop.status()["spool"]["pending_count"],
+        json!(0),
+        "acknowledged frames leave the laptop's pending spool"
+    );
+    assert_eq!(
+        desktop.status()["spool"]["pending_count"],
+        json!(2),
+        "the authority holds both frames pending replay"
+    );
+
+    let (status, again) = drain();
+    assert_eq!(
+        (status, again),
+        (reqwest::StatusCode::OK, json!({"transferred": []})),
+        "a second drain sends nothing"
+    );
+    assert_eq!(desktop.status()["spool"]["pending_count"], json!(2));
+
+    for fixture in [laptop, desktop] {
+        let mut daemon = fixture.daemon;
+        stop_daemon(&mut daemon);
+    }
 }

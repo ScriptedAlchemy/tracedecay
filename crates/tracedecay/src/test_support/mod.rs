@@ -67,6 +67,17 @@ pub async fn hold_after_unserved_owner_check_for_test() -> Result<()> {
     .await
 }
 
+/// Park a retention maintenance tick after it listed the mounted stores and
+/// before it runs any store unit, when
+/// `TRACEDECAY_TEST_HOLD_AFTER_MAINTENANCE_LISTING` names a file.
+pub async fn hold_after_maintenance_listing_for_test() -> Result<()> {
+    hold_for_test(
+        "TRACEDECAY_TEST_HOLD_AFTER_MAINTENANCE_LISTING",
+        b"maintenance-listing",
+    )
+    .await
+}
+
 /// Releases `store`'s interactive catalog once nothing holds it. `Busy` means
 /// ask again later: after a test drops its own readers, a background catalog
 /// warm or residency pass can still hold the catalog for a moment.

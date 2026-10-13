@@ -53,7 +53,10 @@ impl AgentIntegration for ClineIntegration {
         if component != super::host_bundle::HostComponentV1::ContextMcp {
             return super::host_bundle::HostBundleRegistrationStateV1::Missing;
         }
-        mcp_servers_registration_state(&cline_mcp_settings_path(&ctx.home))
+        mcp_servers_registration_state(
+            &cline_mcp_settings_path(&ctx.home),
+            &ctx.catalog_profiles.serve_args(self.id()),
+        )
     }
 
     fn is_detected(&self, home: &Path) -> bool {
@@ -89,7 +92,7 @@ impl AgentIntegration for ClineIntegration {
                 "mcpServers",
                 serde_json::json!({
                     "command": ctx.tracedecay_bin.clone(),
-                    "args": ["serve"],
+                    "args": ctx.serve_args.json(&[]),
                     "env": {},
                     "disabled": false,
                     "autoApprove": []

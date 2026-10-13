@@ -51,6 +51,7 @@ mod tests {
             tracedecay_bin: tracedecay_bin.to_string(),
             project_root: None,
             dashboard,
+            serve_args: Default::default(),
         }
     }
 

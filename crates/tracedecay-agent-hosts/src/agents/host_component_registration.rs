@@ -96,6 +96,7 @@ impl CatalogHostComponentRegistrationAuthority {
             operation,
             tracedecay_bin,
             true,
+            crate::agents::serve_args::ServeArgs::default(),
         )
     }
 
@@ -106,6 +107,7 @@ impl CatalogHostComponentRegistrationAuthority {
         operation: crate::agents::host_bundle::HostBundleLifecycleOpV1,
         tracedecay_bin: String,
         dashboard: bool,
+        serve_args: crate::agents::serve_args::ServeArgs,
     ) -> tracedecay_domain::errors::Result<Self> {
         let project_path = std::env::current_dir().map_err(|error| {
             tracedecay_domain::errors::TraceDecayError::Config {
@@ -113,6 +115,8 @@ impl CatalogHostComponentRegistrationAuthority {
             }
         })?;
         let integration = crate::agents::get_integration(agent_id)?;
+        let catalog_profiles =
+            crate::agents::serve_args::HostCatalogProfiles::only(agent_id, serve_args.clone());
         Ok(Self {
             integration,
             context: crate::agents::InstallContext {
@@ -121,11 +125,13 @@ impl CatalogHostComponentRegistrationAuthority {
                 tracedecay_bin,
                 project_root: None,
                 dashboard,
+                serve_args,
             },
             health_context: crate::agents::HealthcheckContext {
                 home: home.to_path_buf(),
                 profile: profile.clone(),
                 project_path,
+                catalog_profiles,
             },
             operation,
             should_apply: false,
