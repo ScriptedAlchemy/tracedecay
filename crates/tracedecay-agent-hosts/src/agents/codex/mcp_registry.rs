@@ -585,13 +585,13 @@ fi
 /bin/mv "$config.next" "$config"
 exit 0"#;
 
-    /// One receipt-backed component-set transaction for a Codex MCP-only
-    /// selection, through the production registration authority.
+    /// One receipt-backed component-set transaction for a Codex selection,
+    /// through the production registration authority.
     #[cfg(unix)]
-    fn run_mcp_only_selection(
+    fn run_codex_selection(
         home: &Path,
         lifecycle: &Path,
-        selection: HostComponentV1,
+        selection: &[HostComponentV1],
         operation: crate::agents::host_bundle::HostBundleLifecycleOpV1,
         operation_id: u8,
         tracedecay_bin: &str,
@@ -604,7 +604,7 @@ exit 0"#;
         let selected =
             crate::agents::host_bundle_registry::verified_embedded_host_component_set_with_tracedecay_bin(
                 HostKindV1::Codex,
-                &[selection],
+                selection,
                 0,
                 tracedecay_bin,
                 crate::agents::TEST_GENERATOR_COMMIT,
@@ -683,10 +683,10 @@ exit 0"#;
         let operator = "[mcp_servers.other]\ncommand = \"other\"\n\n";
         std::fs::write(&config_path, operator).unwrap();
 
-        run_mcp_only_selection(
+        run_codex_selection(
             home.path(),
             lifecycle.path(),
-            HostComponentV1::ContextMcp,
+            &[HostComponentV1::ContextMcp],
             HostBundleLifecycleOpV1::Install,
             50,
             BIN,
@@ -698,10 +698,10 @@ exit 0"#;
             toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
         assert_eq!(server_command(&config, "tracedecay"), Some(BIN));
 
-        run_mcp_only_selection(
+        run_codex_selection(
             home.path(),
             lifecycle.path(),
-            HostComponentV1::ContextMcp,
+            &[HostComponentV1::ContextMcp],
             HostBundleLifecycleOpV1::Uninstall,
             51,
             BIN,
@@ -753,10 +753,10 @@ exit 0"#;
         let operator = "[mcp_servers.other]\ncommand = \"other\"\n\n";
         std::fs::write(&config_path, operator).unwrap();
 
-        run_mcp_only_selection(
+        run_codex_selection(
             home.path(),
             lifecycle.path(),
-            HostComponentV1::OperatorMcp,
+            &[HostComponentV1::OperatorMcp],
             HostBundleLifecycleOpV1::Install,
             60,
             OLD_BIN,
@@ -764,10 +764,10 @@ exit 0"#;
         .unwrap();
         assert!(live_receipt(lifecycle.path(), HostComponentV1::OperatorMcp).is_some());
 
-        run_mcp_only_selection(
+        run_codex_selection(
             home.path(),
             lifecycle.path(),
-            HostComponentV1::ContextMcp,
+            &[HostComponentV1::ContextMcp],
             HostBundleLifecycleOpV1::Update,
             61,
             NEW_BIN,
@@ -781,10 +781,10 @@ exit 0"#;
         assert!(live_receipt(lifecycle.path(), HostComponentV1::OperatorMcp).is_none());
         assert!(live_receipt(lifecycle.path(), HostComponentV1::ContextMcp).is_some());
 
-        run_mcp_only_selection(
+        run_codex_selection(
             home.path(),
             lifecycle.path(),
-            HostComponentV1::ContextMcp,
+            &[HostComponentV1::ContextMcp],
             HostBundleLifecycleOpV1::Uninstall,
             62,
             NEW_BIN,
@@ -835,10 +835,10 @@ exit 0"#
             std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
             std::fs::write(&config_path, operator).unwrap();
 
-            run_mcp_only_selection(
+            run_codex_selection(
                 home.path(),
                 lifecycle.path(),
-                HostComponentV1::ContextMcp,
+                &[HostComponentV1::ContextMcp],
                 HostBundleLifecycleOpV1::Install,
                 70,
                 "/opt/tracedecay/bin/tracedecay",
@@ -862,5 +862,59 @@ exit 0"#
                 "{region}"
             );
         }
+    }
+
+    /// A plugin-bearing install over an MCP-only one retires the standalone
+    /// server before `codex plugin add`. When that activation fails, the
+    /// refusal restores the standalone server and the operator's peer server
+    /// byte for byte and records no owner.
+    #[cfg(unix)]
+    #[test]
+    fn refused_plugin_bearing_install_restores_the_retired_standalone_server() {
+        use crate::agents::host_bundle::HostBundleLifecycleOpV1;
+
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let bin_dir = tempfile::tempdir().unwrap();
+        let log = bin_dir.path().join("invocations.log");
+        fake_codex_cli(
+            &bin_dir.path().join("codex"),
+            &log,
+            &format!(
+                "if [ \"$1 $2\" = \"plugin add\" ]; then exit 1; fi\n{FAKE_TABLE_SCOPED_REGISTRY_BODY}"
+            ),
+        );
+        let _codex_cli =
+            tracedecay_runtime_core::config::HostProgramSearchPathGuard::set(bin_dir.path());
+        let config_path = codex_config_path(home.path());
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        let operator = "[mcp_servers.other]\ncommand = \"other\"\n\n\
+                        [mcp_servers.tracedecay]\ncommand = \"/opt/tracedecay/bin/tracedecay\"\n\
+                        args = [\"serve\"]\n";
+        std::fs::write(&config_path, operator).unwrap();
+
+        run_codex_selection(
+            home.path(),
+            lifecycle.path(),
+            &[HostComponentV1::Core, HostComponentV1::ContextMcp],
+            HostBundleLifecycleOpV1::Install,
+            80,
+            "/opt/tracedecay/bin/tracedecay",
+        )
+        .expect_err("a failed plugin activation refuses the install");
+
+        let invocations = recorded_invocations(&log);
+        assert_eq!(
+            invocations.first().map(String::as_str),
+            Some("mcp remove tracedecay")
+        );
+        assert!(
+            invocations
+                .iter()
+                .any(|call| call.starts_with("plugin add"))
+        );
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), operator);
+        assert!(live_receipt(lifecycle.path(), HostComponentV1::ContextMcp).is_none());
+        assert!(live_receipt(lifecycle.path(), HostComponentV1::Core).is_none());
     }
 }
