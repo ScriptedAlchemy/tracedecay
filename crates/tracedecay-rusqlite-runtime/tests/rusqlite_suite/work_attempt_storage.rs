@@ -917,10 +917,6 @@ fn route(route_id: &str) -> WorkProviderRouteV1 {
 /// Generous enough that topology-focused tests never meet the route limit.
 const FIXTURE_ROUTE_CONCURRENCY: u32 = 64;
 
-fn execution_snapshot() -> WorkExecutionSnapshot {
-    execution_snapshot_on(requested_route(), FIXTURE_ROUTE_CONCURRENCY)
-}
-
 fn execution_snapshot_on(
     route: WorkProviderRouteV1,
     max_concurrency: u32,
