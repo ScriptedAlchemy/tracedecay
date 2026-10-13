@@ -41,6 +41,7 @@ use tracedecay_global_db::{
     MAX_GITHUB_STACK_DELIVERY_BATCH_V1, RegisteredGlobalDb, RegisteredGlobalDbLeaseV1,
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::native_runtime;
 
 use super::registry::DaemonProjectNativeIntegrationService;
 use super::store::SharedDaemonNativeIntegrationStore;
@@ -95,40 +96,14 @@ impl DaemonStackDeliveryStoreV1 {
     fn open(database: RegisteredGlobalDbLeaseV1, project_id: &ProjectId) -> Result<Self, String> {
         let project_id = project_id.as_str().to_owned();
         let (commands, receiver) = sync_channel(STACK_DELIVERY_STORE_ACTOR_CAPACITY);
-        let (ready, started) = sync_channel::<Result<(), String>>(1);
         let worker = std::thread::Builder::new()
             .name("tracedecay-github-stack-delivery-store".to_owned())
-            .spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(|error| format!("start stack delivery actor: {error}"));
-                let Ok(runtime) = runtime else {
-                    let _ = ready.send(Err("start stack delivery actor".to_owned()));
-                    return;
-                };
-                if ready.send(Ok(())).is_err() {
-                    return;
-                }
-                run_delivery_store_actor(&runtime, &database, &project_id, &receiver);
-            })
+            .spawn(move || run_delivery_store_actor(&database, &project_id, &receiver))
             .map_err(|error| format!("spawn stack delivery actor: {error}"))?;
-        match started.recv_timeout(STACK_DELIVERY_STORE_ACTOR_TIMEOUT) {
-            Ok(Ok(())) => Ok(Self {
-                commands: Mutex::new(Some(commands)),
-                worker: Mutex::new(Some(worker)),
-            }),
-            Ok(Err(error)) => {
-                drop(commands);
-                let _ = worker.join();
-                Err(error)
-            }
-            Err(_) => {
-                drop(commands);
-                let _ = worker.join();
-                Err("start stack delivery actor timed out".to_owned())
-            }
-        }
+        Ok(Self {
+            commands: Mutex::new(Some(commands)),
+            worker: Mutex::new(Some(worker)),
+        })
     }
 
     fn submit<T>(&self, make: impl FnOnce(StoreReply<T>) -> StoreCommand) -> Result<T, String> {
@@ -273,8 +248,11 @@ impl Drop for DaemonStackDeliveryStoreV1 {
     }
 }
 
+fn settle<T>(operation: impl Future<Output = Result<T, String>>) -> Result<T, String> {
+    native_runtime::block_on(operation)?
+}
+
 fn run_delivery_store_actor(
-    runtime: &tokio::runtime::Runtime,
     database: &RegisteredGlobalDb,
     project_id: &str,
     receiver: &Receiver<StoreCommand>,
@@ -282,72 +260,61 @@ fn run_delivery_store_actor(
     while let Ok(command) = receiver.recv() {
         match command {
             StoreCommand::Append(record, recipients, reply) => {
-                let _ = reply.send(
-                    runtime.block_on(database.append_github_stack_signal(*record, recipients)),
-                );
+                let _ = reply.send(settle(
+                    database.append_github_stack_signal(*record, recipients),
+                ));
             }
             StoreCommand::Pending(reply) => {
-                let _ = reply.send(runtime.block_on(database.pending_github_stack_deliveries(
+                let _ = reply.send(settle(database.pending_github_stack_deliveries(
                     project_id,
                     MAX_GITHUB_STACK_DELIVERY_BATCH_V1,
                 )));
             }
             StoreCommand::Publish(watermark, deliveries, reply) => {
-                let _ = reply.send(runtime.block_on(database.publish_github_stack_deliveries(
+                let _ = reply.send(settle(database.publish_github_stack_deliveries(
                     project_id,
                     &watermark,
                     &deliveries,
                 )));
             }
             StoreCommand::Acknowledge(watermark, deliveries, reply) => {
-                let _ = reply.send(
-                    runtime.block_on(database.acknowledge_github_stack_deliveries(
-                        project_id,
-                        &watermark,
-                        &deliveries,
-                    )),
-                );
+                let _ = reply.send(settle(database.acknowledge_github_stack_deliveries(
+                    project_id,
+                    &watermark,
+                    &deliveries,
+                )));
             }
             StoreCommand::Signal(signal_id, reply) => {
-                let _ = reply
-                    .send(runtime.block_on(database.github_stack_signal(project_id, &signal_id)));
+                let _ = reply.send(settle(database.github_stack_signal(project_id, &signal_id)));
             }
             StoreCommand::OldestPending(scope_digest, recipient, reply) => {
-                let _ = reply.send(runtime.block_on(
-                    database.oldest_host_pending_github_stack_delivery(
-                        project_id,
-                        &scope_digest,
-                        &recipient,
-                    ),
-                ));
+                let _ = reply.send(settle(database.oldest_host_pending_github_stack_delivery(
+                    project_id,
+                    &scope_digest,
+                    &recipient,
+                )));
             }
             StoreCommand::RecipientState(signal_id, recipient, reply) => {
-                let _ = reply.send(runtime.block_on(
+                let _ = reply.send(settle(
                     database.github_stack_recipient_state(project_id, &signal_id, &recipient),
                 ));
             }
             StoreCommand::AuthorizationLost(signal_id, recipient, reply) => {
-                let _ = reply.send(
-                    runtime.block_on(database.record_github_stack_authorization_loss(
-                        project_id, &signal_id, &recipient,
-                    )),
-                );
+                let _ = reply.send(settle(database.record_github_stack_authorization_loss(
+                    project_id, &signal_id, &recipient,
+                )));
             }
             StoreCommand::HostAcknowledge(signal_id, recipient, reply) => {
-                let _ = reply.send(
-                    runtime.block_on(database.acknowledge_github_stack_host_delivery(
-                        project_id, &signal_id, &recipient,
-                    )),
-                );
+                let _ = reply.send(settle(database.acknowledge_github_stack_host_delivery(
+                    project_id, &signal_id, &recipient,
+                )));
             }
             StoreCommand::PendingHost(scope_digest, reply) => {
-                let _ = reply.send(runtime.block_on(
-                    database.pending_host_github_stack_deliveries(
-                        project_id,
-                        &scope_digest,
-                        MAX_GITHUB_STACK_DELIVERY_BATCH_V1,
-                    ),
-                ));
+                let _ = reply.send(settle(database.pending_host_github_stack_deliveries(
+                    project_id,
+                    &scope_digest,
+                    MAX_GITHUB_STACK_DELIVERY_BATCH_V1,
+                )));
             }
         }
     }
