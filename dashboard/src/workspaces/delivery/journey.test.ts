@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { DeliveryOverviewV1 } from '../../contracts/generated.ts';
 import { HEAD_ALPHA, INBOX, OVERVIEW_ALPHA, OVERVIEW_LOCAL_ONLY, T0 } from '../../test/deliveryFixtures.ts';
+import type { DashboardScope } from '../../data/scope/store.ts';
 import { JOURNEY_LANES, buildJourney, laneServes } from './journey.ts';
+
+const ALL_PROJECTS: DashboardScope = { kind: 'all' };
 
 const ROW_42 = INBOX.pull_requests[0]!;
 const EDGES_42 = INBOX.membership_edges.filter(
@@ -10,7 +13,7 @@ const EDGES_42 = INBOX.membership_edges.filter(
 
 describe('buildJourney', () => {
   it('joins every lane from its own authority with source class and grade', () => {
-    const model = buildJourney(OVERVIEW_ALPHA, { row: ROW_42, edges: EDGES_42 });
+    const model = buildJourney(OVERVIEW_ALPHA, { row: ROW_42, edges: EDGES_42 }, ALL_PROJECTS);
     expect(model.lanes.map((lane) => lane.id)).toEqual([...JOURNEY_LANES]);
     const byLane = new Map(model.lanes.map((lane) => [lane.id, lane]));
 
@@ -55,7 +58,7 @@ describe('buildJourney', () => {
         },
       },
     };
-    const lane = buildJourney(overview, { row: ROW_42, edges: EDGES_42 }).lanes.find(
+    const lane = buildJourney(overview, { row: ROW_42, edges: EDGES_42 }, ALL_PROJECTS).lanes.find(
       (candidate) => candidate.id === 'pull_request',
     )!;
     expect(lane.episodes.slice(1).map((episode) => [episode.label, episode.detail])).toEqual([
@@ -68,7 +71,7 @@ describe('buildJourney', () => {
   });
 
   it('places membership-joined records in the undated gutter with their own grade', () => {
-    const model = buildJourney(OVERVIEW_ALPHA, { row: ROW_42, edges: EDGES_42 });
+    const model = buildJourney(OVERVIEW_ALPHA, { row: ROW_42, edges: EDGES_42 }, ALL_PROJECTS);
     const byLane = new Map(model.lanes.map((lane) => [lane.id, lane]));
     expect(byLane.get('objective')!.episodes).toHaveLength(1);
     expect(byLane.get('objective')!.episodes[0]).toMatchObject({
@@ -86,6 +89,22 @@ describe('buildJourney', () => {
     expect(model.undated).toBe(4);
   });
 
+  it('links a session in the project scope the reader is in', () => {
+    const model = buildJourney(
+      OVERVIEW_ALPHA,
+      { row: ROW_42, edges: EDGES_42 },
+      { kind: 'project', projectId: 'project.alpha', label: 'Alpha', activation: 'active' },
+    );
+    const href = model.lanes.find((lane) => lane.id === 'sessions')!.episodes[0]!.href!;
+    const url = new URL(href, 'http://dashboard.test');
+    expect(url.pathname).toBe('/loom');
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      scope: 'project.alpha',
+      scopeLabel: 'Alpha',
+      loomSession: 'session.alpha.1',
+    });
+  });
+
   it('keeps an unjoined lane as a typed absence, not an empty success', () => {
     const model = buildJourney(
       {
@@ -97,6 +116,7 @@ describe('buildJourney', () => {
         },
       },
       { row: ROW_42, edges: [] },
+      ALL_PROJECTS,
     );
     const agents = model.lanes.find((lane) => lane.id === 'agents')!;
     expect(agents.state).toMatchObject({
@@ -113,7 +133,7 @@ describe('buildJourney', () => {
   });
 
   it("puts per-agent token and tool-call counts on the pull request's branch", () => {
-    const model = buildJourney(OVERVIEW_ALPHA, { row: ROW_42, edges: [] });
+    const model = buildJourney(OVERVIEW_ALPHA, { row: ROW_42, edges: [] }, ALL_PROJECTS);
     const agents = model.lanes.find((lane) => lane.id === 'agents')!;
     expect(agents.state.kind).toBe('served');
     expect(agents.episodes.map((episode) => [episode.label, episode.detail, episode.grade])).toEqual([
@@ -128,7 +148,7 @@ describe('buildJourney', () => {
     const model = buildJourney(OVERVIEW_ALPHA, {
       row: { ...ROW_42, branch_ref: 'refs/heads/feature/retry' },
       edges: [],
-    });
+    }, ALL_PROJECTS);
     const agents = model.lanes.find((lane) => lane.id === 'agents')!;
     expect(agents.episodes).toEqual([]);
     expect(agents.state.kind).toBe('unavailable');
@@ -143,6 +163,7 @@ describe('buildJourney', () => {
         agent_usage: { state: 'partial', value: { ...usage!, usage_coverage: 'unavailable', truncated: true } },
       },
       { row: ROW_42, edges: [] },
+      ALL_PROJECTS,
     );
     const agents = model.lanes.find((lane) => lane.id === 'agents')!;
     expect(agents.state).toEqual({
@@ -157,7 +178,7 @@ describe('buildJourney', () => {
     const model = buildJourney(OVERVIEW_ALPHA, {
       row: INBOX.pull_requests[1]!,
       edges: [],
-    });
+    }, ALL_PROJECTS);
     expect(model.gaps).toHaveLength(1);
     expect(model.gaps[0]).toMatch(/#43 is not among the 1 head-bound provider items/);
     expect(model.lanes.find((lane) => lane.id === 'pull_request')!.episodes).toEqual([]);
@@ -168,14 +189,14 @@ describe('buildJourney', () => {
       ...OVERVIEW_ALPHA,
       commits: { state: 'stale', value: OVERVIEW_ALPHA.commits.state === 'ready' ? OVERVIEW_ALPHA.commits.value : { items: [], truncated: false } },
     };
-    const model = buildJourney(stale, { row: ROW_42, edges: [] });
+    const model = buildJourney(stale, { row: ROW_42, edges: [] }, ALL_PROJECTS);
     const commits = model.lanes.find((lane) => lane.id === 'commits')!;
     expect(commits.state.kind).toBe('stale');
     expect(commits.episodes.every((episode) => episode.grade === 'stale')).toBe(true);
   });
 
   it('leaves provider lanes typed when only local Git is available', () => {
-    const model = buildJourney(OVERVIEW_LOCAL_ONLY, { row: ROW_42, edges: [] });
+    const model = buildJourney(OVERVIEW_LOCAL_ONLY, { row: ROW_42, edges: [] }, ALL_PROJECTS);
     const kinds = Object.fromEntries(model.lanes.map((lane) => [lane.id, lane.state.kind]));
     expect(kinds).toMatchObject({
       commits: 'served',

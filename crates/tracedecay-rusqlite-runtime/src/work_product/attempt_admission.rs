@@ -322,6 +322,7 @@ fn map_attempt_error(error: WorkAttemptStorageError) -> AdmissionError {
     match error {
         WorkAttemptStorageError::NotFoundOrNotAuthorized => AdmissionError::NotFoundOrNotAuthorized,
         WorkAttemptStorageError::CapacityExceeded => AdmissionError::CapacityExceeded,
+        WorkAttemptStorageError::PlacementRootConflict => AdmissionError::PlacementRootConflict,
         WorkAttemptStorageError::AttemptConflict
         | WorkAttemptStorageError::RunAdmissionConflict
         | WorkAttemptStorageError::ReservationFenced

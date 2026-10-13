@@ -2198,31 +2198,20 @@ fn serving_graph_owners(
         .collect()
 }
 
-/// Status reads the generation census and freshness on every poll. Neither
-/// needs the graph resident, so neither renews the residency lease that keeps
-/// it resident; a graph read does.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn status_polls_let_the_graph_lease_lapse_and_graph_reads_renew_it() {
-    const POLL: Duration = Duration::from_millis(250);
-    let fixture = GitFixture::new(ALPHA_LIB_V1);
-    let store = TempDir::new().expect("store root");
-    let owners = Arc::new(ResidentOwnersV1::new(RESIDENT_OWNER_IDLE_WINDOW_V1));
-    let mount = PersistentGraphMountV1::mount(
-        CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1)
-            .with_resident_owners(Arc::clone(&owners)),
-        &fixture,
-        &store,
-        "status polls leave the graph lease",
-    )
-    .await;
+/// The initial publisher releases its graph when it parks. A test that reads
+/// or releases the graph itself waits for that release first, so the two
+/// never take the same owners concurrently.
+async fn initial_publisher_parks_and_releases_its_graph(
+    mount: &PersistentGraphMountV1,
+    fixture: &GitFixture,
+    owners: &ResidentOwnersV1,
+) {
     let mut activity = mount
         .registry
         .subscribe_owner_activity(fixture.path())
         .await
         .expect("mounted owner activity");
     let mut headroom = owners.subscribe_headroom();
-    // The initial publisher releases its graph when it parks. Measure the
-    // read lease after that release, rather than racing the publisher's tail.
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if activity.worker_phase()
@@ -2244,6 +2233,28 @@ async fn status_polls_let_the_graph_lease_lapse_and_graph_reads_renew_it() {
     })
     .await
     .expect("initial publisher parks and releases its graph");
+}
+
+/// Status reads the generation census and freshness on every poll. Neither
+/// needs the graph resident, so neither renews the residency lease that keeps
+/// it resident; a graph read does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn status_polls_let_the_graph_lease_lapse_and_graph_reads_renew_it() {
+    const POLL: Duration = Duration::from_millis(250);
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let owners = Arc::new(ResidentOwnersV1::new(RESIDENT_OWNER_IDLE_WINDOW_V1));
+    let mount = PersistentGraphMountV1::mount(
+        CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1)
+            .with_resident_owners(Arc::clone(&owners)),
+        &fixture,
+        &store,
+        "status polls leave the graph lease",
+    )
+    .await;
+    // Measure the read lease after the publisher's own release, rather than
+    // racing the publisher's tail.
+    initial_publisher_parks_and_releases_its_graph(&mount, &fixture, &owners).await;
     let graph_idle_for = || {
         let report = owners.report(std::time::Instant::now());
         assert!(
@@ -2332,6 +2343,7 @@ async fn an_idle_release_reports_warming_until_a_read_restores_the_graph() {
         "idle release reports warming",
     )
     .await;
+    initial_publisher_parks_and_releases_its_graph(&mount, &fixture, &owners).await;
     let port = project_code_graph_projection_read_port(
         mount.registry.clone(),
         fixture.path().to_path_buf(),

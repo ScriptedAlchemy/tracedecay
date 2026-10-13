@@ -72,7 +72,8 @@ pub struct ByQualifiedNameResultV1(pub Vec<PrimitiveSymbolLocationV1>);
 pub struct SymbolSelectorSurfaceRequestV1 {
     /// Look up a single node by its ID instead of qualified_name.
     pub node_id: Option<String>,
-    /// The exact qualified name (or short name) to look up.
+    /// The exact, case-sensitive qualified name to look up. A bare short name
+    /// does not match; resolve it with find_exact_symbol first.
     pub qualified_name: Option<String>,
 }
 

@@ -322,7 +322,7 @@ async fn analytics_ingest_is_idempotent_and_accepts_bare_skill_name_rows() {
 }
 
 #[tokio::test]
-async fn stale_scoring_explains_archive_candidates_and_exclusions() {
+async fn stale_scoring_treats_unmeasured_use_as_unknown_and_keeps_exclusions() {
     let temp = tempfile::tempdir().unwrap();
     let profile_root = temp.path().join("profile");
     let stale_skill = create_managed_skill(
@@ -366,21 +366,29 @@ async fn stale_scoring_explains_archive_candidates_and_exclusions() {
     let summaries = summarize_skill_usage(&profile_root, &[stale_skill, pinned, user_skill])
         .await
         .unwrap();
-    let recommendations = stale_skill_recommendations(&summaries, 10_000, 1_000);
+    let recommendations = stale_skill_recommendations(&summaries);
 
-    let stale = recommendations
+    let viewed_long_ago = recommendations
         .iter()
         .find(|recommendation| recommendation.skill_id == "stale-skill")
         .unwrap();
-    assert!(stale.stale);
-    assert_eq!(stale.recommendation, "archive_candidate");
-    assert!(stale.reason.contains("no recorded uses or patches"));
-    assert!(
-        stale
-            .evidence
-            .iter()
-            .any(|entry| entry == "provenance_source=automation_run")
-    );
+    assert!(!viewed_long_ago.stale);
+    assert_eq!(viewed_long_ago.recommendation, "keep");
+    assert!(viewed_long_ago.reason.contains("unknown, not stale"));
+    for expected in [
+        "views=1",
+        "uses=0",
+        "use_telemetry=unobserved",
+        "provenance_source=automation_run",
+    ] {
+        assert!(
+            viewed_long_ago
+                .evidence
+                .iter()
+                .any(|entry| entry == expected),
+            "missing {expected}: {viewed_long_ago:?}"
+        );
+    }
 
     let pinned = recommendations
         .iter()

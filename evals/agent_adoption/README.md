@@ -16,6 +16,8 @@ evals/agent_adoption/
   run.sh               # runner: build+index fixtures, seed facts, drive agents, grade
   grade.py             # deterministic grader + normalizer + neutrality lint + channels + hint-drift guard
   selftest.py          # offline grader self-tests (no agents, no tokens)
+  learned_skills/<workflow>/  # generation sessions, manual skill, generated skill (see below)
+  generate_learned_skill.sh   # runs the production skill writer on a workflow's sessions
   README.md
 ```
 
@@ -80,8 +82,11 @@ paths, so do **not** commit run artifacts.
 | `SCENARIO_TIMEOUT` | `240` | per scenario wall-clock seconds |
 | `REPS` | `1` | repetitions per scenario x host x model x condition cell; `>1` suffixes transcripts with `__r<N>` and the grader pools the repetitions, so a cell of n=15 gives a usable exact-binomial interval instead of a single draw |
 | `PARALLEL` | `1` | concurrent live agent runs; scenarios are read-only against shared fixtures and each `claude` process spawns its own MCP server, so `4` is a safe default for high-rep cells |
+| `REPEATED_QUERY_HINTS` | `off` | `on` turns on the profile setting `user.repeated_query_hints.v1` for the eval's isolated profile before any agent launches, and suffixes transcripts with `__qhints`; see "Repeated-query hints on vs off" |
 | `TRACEDECAY_BIN` | candidate branch (live) | explicit tracedecay binary override |
 | `EVAL_OUT` | unset | dir to copy scoreboard + report into |
+| `LEARNED_SKILL_WORKFLOW` | unset | run only that workflow's held-out scenarios, once per variant, on `full` |
+| `LEARNED_SKILL_VARIANTS` | `none generated manual` | learned-skill variants to compare |
 
 ### Cost expectations
 
@@ -333,6 +338,55 @@ Host-specific MCP tool names collapse to canonical form, e.g.
 Successful exits that contain neither a parsed tool call nor a final answer are
 recorded as `unparseable_empty` invalid runs and excluded from aggregates.
 
+## Repeated-query hints on vs off
+
+The optional repeated-query hint (off by default) appends one result block
+starting `tracedecay_repeated_query:` when a call nearly repeats a recent call
+to the same tool. With `REPEATED_QUERY_HINTS=on`, `run.sh` sets
+`user.repeated_query_hints.v1` through `tracedecay tool configuration_set` on
+the isolated profile, reads it back, and aborts (exit 4) if either step fails,
+for example on a binary that does not register the key. Run and record both
+settings on the same scenarios:
+
+```sh
+TRACEDECAY_AGENT_EVALS=1 HOSTS=claude CLAUDE_MODELS=sonnet REPS=4 \
+  SCENARIOS="loop_absent_stock_release narrow_availability_call_chain" \
+  REPEATED_QUERY_HINTS=on evals/agent_adoption/run.sh
+# then the same command with REPEATED_QUERY_HINTS=off
+```
+
+`loop_absent_stock_release` asks for behavior the fixture lacks, so agents tend
+to re-query with variants. `narrow_availability_call_chain` needs several
+related caller queries, so a hint there is a false-positive opportunity. The
+`__qhints` suffix keeps the two runs' transcripts apart, so one grade covers
+both:
+
+```sh
+merged="$(mktemp -d)"
+cp <off-run-dir>/*__*.stdout.jsonl <off-run-dir>/*__*.meta.json \
+   <on-run-dir>/*__*.stdout.jsonl <on-run-dir>/*__*.meta.json "$merged"
+python3 evals/agent_adoption/grade.py --run-dir "$merged"
+```
+
+Each scoreboard result carries `repeated_query_hints`, `cost` (Claude
+`total_cost_usd`, `num_turns`, and input/output/cache tokens; Codex tokens
+only; unreported fields stay `null`), and `repeated_query_hint_next_steps`:
+one entry per hint block, naming the next tool call or `answer`.
+`cost_and_hints` and the report's **Outcome, cost, and repeated-query hints**
+table put the `hints-on` and `hints-off` cells of each host/model and
+condition side by side. Read outcome first, then cost and turns. A hint
+helped when hints-on keeps or raises outcome at lower cost on the loop
+scenario; on the narrowing scenario any hint is a false positive, and a lower
+outcome or extra cost there is harm. `after hint` shows whether agents
+changed course (a different tool or an answer) or repeated the same tool. At
+`REPS=4`, read differences as direction, not significance; check transcripts
+before claiming either way.
+
+Use Claude for this comparison. The hint is added by `tracedecay serve`, and
+Codex in this harness reaches TraceDecay through the `tracedecay-explorer`
+extension and the shell instead: 12 Codex runs of these two scenarios made no
+`serve` call, so no hint could fire in either setting.
+
 ## Adding a scenario
 
 1. Drop a new `scenarios/<id>.json` following the schema above.
@@ -415,3 +469,72 @@ before scheduling the existing runner with that directory and a pinned candidate
 binary. Use bounded host/model/condition selections. Validation of proposed
 cases is not a live routing result; retain the resulting transcripts and task
 outcomes before claiming effectiveness.
+
+## Learned-skill qualification
+
+This mode asks whether a skill learned from repeated corrections helps on new
+prompts. Each workflow pack under `learned_skills/<workflow>/` holds:
+
+* `sessions/*.jsonl`, synthetic Claude Code sessions in which the user corrects
+  the agent the same way several times. They are the skill writer's evidence.
+* `manual/<slug>/SKILL.md`, a hand-written skill for the same workflow.
+* `generated/`, the skill writer's output: `skill.json`, `<slug>/SKILL.md`, and
+  `PROVENANCE.json` (run id, writer prompt version, backend, model, date,
+  validation decisions, artifact kinds). It exists only after a real generation
+  run. Never write it by hand.
+
+Held-out scenarios carry `"status": "learned"` and
+`"learned_skill": {"workflow": ..., "expected": true|false}`. The default run
+skips them. The lint fails when a held-out prompt overlaps a generation session
+prompt, so the evaluation never scores a skill on its own evidence.
+
+Generate the skill once, then compare the variants:
+
+```sh
+# Dry run: configures automation (left disabled), imports the sessions, prints the plan.
+TRACEDECAY_BIN=<binary> evals/agent_adoption/generate_learned_skill.sh pricing_change_review
+# Live: one codex writer turn, plus at most one repair turn.
+TRACEDECAY_AGENT_EVALS=1 TRACEDECAY_BIN=<binary> \
+  evals/agent_adoption/generate_learned_skill.sh pricing_change_review
+
+TRACEDECAY_AGENT_EVALS=1 TRACEDECAY_BIN=<binary> LEARNED_SKILL_WORKFLOW=pricing_change_review \
+  CLAUDE_MODELS=opus REPS=5 PARALLEL=4 evals/agent_adoption/run.sh
+```
+
+Generation reuses `run.sh`'s isolated daemon. It binds the codex executable
+through `configuration_set`, enables only the skill writer, and copies codex
+`auth.json` read-only into the throwaway profile. Automation is enabled only
+after the writer's evidence query finds the imported sessions. The query needs
+all of its terms in one message, which is why each session ends with the user
+naming the repeated correction pattern.
+
+The variant run makes `scenarios x variants x CLAUDE_MODELS x REPS` Claude
+runs. `none` installs nothing. `generated` and `manual` install their
+`SKILL.md` into a per-variant `$HOME/.claude/skills/<slug>/`, the directory
+production materialization writes to. A variant without a `SKILL.md` is skipped
+with a notice. Transcripts end in `__v-<variant>`.
+
+The report's learned-skill table gives, per variant and model:
+
+* `outcome`, the ground-truth fragment check. It does not depend on the skill or
+  on the agent's claims.
+* Routing as tp/fn/fp/tn. A hit is a Skill call naming the variant's slug. A
+  `none` variant, or a host without normalized Skill events (Codex), counts as
+  `unknown` and stays out of those four counts. Invocation is a proxy for
+  adoption, not proof the skill helped.
+* Tokens, USD, and duration as the host reported them. Means exclude a value
+  the host did not report, and the `tokens unknown` column counts those runs.
+  `scoreboard.json` also keeps per-run turns and cache token splits.
+* Tool calls, corrections (tool errors plus repeated identical calls inside one
+  headless turn, since no human turns exist), and review cost (final-answer
+  words).
+
+The table ranks nothing and prints no verdict. Read it with `n` and the invalid
+count beside every rate.
+
+Both live steps need current host logins. The runner copies the Claude
+credential read-only, so a copied login whose access token has already expired
+fails every run with `authentication_failed`; those runs land in the invalid
+count, not in the outcome columns. Refresh the login with an interactive
+`claude` session first. Generation stops with the backend's error when the
+codex account is over its usage limit.

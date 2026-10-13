@@ -38,7 +38,7 @@ pub mod writer_gate;
 pub use remote_credentials::{
     DaemonRemoteCredentialAuthorityV1, DaemonRemoteCredentialLookupV1,
     DaemonRemoteCredentialRegistryErrorV1, MAX_REGISTERED_REMOTE_NODES,
-    RegisteredRemoteNodeStoreV1,
+    RegisteredRemoteNodeStoreV1, RemoteNodeOperatorErrorV1,
 };
 pub use remote_frame_transfer::DaemonRemoteFrameTransferProtocolPortV1;
 pub use remote_query::DaemonRemoteExactObservationQueryPortV1;

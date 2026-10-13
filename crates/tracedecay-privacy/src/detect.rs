@@ -512,10 +512,14 @@ pub(super) fn is_semantically_sensitive_key(key: &NormalizedSensitiveKey) -> boo
         .any(|compound| separated.ends_with(compound))
 }
 
+/// `locators` name string values that hold filesystem paths: credential
+/// patterns still apply to them, the entropy heuristic does not, because a
+/// path's directory and file names join into one token that reads as random.
 #[tracing::instrument(name = "runtime_core.privacy.redact_values", level = "trace", skip_all)]
 pub(crate) fn redact_sensitive_values(
     mut payload: Value,
     sensitive_keys: &BTreeSet<String>,
+    locators: &[Vec<JsonPathSegment>],
 ) -> Result<DetectionResult, DetectionError> {
     let patterns = credential_patterns()?;
     let mut findings = Vec::new();
@@ -545,6 +549,15 @@ pub(crate) fn redact_sensitive_values(
                 true
             }
             JsonVisitMut::SensitiveValue(_, _) => false,
+            JsonVisitMut::String(text) if locators.iter().any(|locator| locator == path) => {
+                redact_credentials(
+                    text,
+                    &structural_location(path),
+                    patterns,
+                    &mut findings,
+                    SanitizationActionV1::Redacted,
+                )
+            }
             JsonVisitMut::String(text) => redact_text(
                 text,
                 &structural_location(path),
@@ -634,7 +647,7 @@ pub fn sanitize_memory_fact_payload(
     .into_iter()
     .map(normalize_key)
     .collect();
-    let detected = redact_sensitive_values(payload, &sensitive_keys)?;
+    let detected = redact_sensitive_values(payload, &sensitive_keys, &[])?;
     if !detected.quarantine_findings.is_empty() {
         return Ok(MemoryFactSanitizationV1::Quarantined);
     }
@@ -695,6 +708,17 @@ pub(super) fn redact_text(
     findings: &mut Vec<SanitizationFindingV1>,
     action: SanitizationActionV1,
 ) -> bool {
+    let credentials = redact_credentials(text, path, patterns, findings, action);
+    redact_high_entropy(text, path, findings, action) || credentials
+}
+
+fn redact_credentials(
+    text: &mut String,
+    path: &str,
+    patterns: &CredentialPatternSet,
+    findings: &mut Vec<SanitizationFindingV1>,
+    action: SanitizationActionV1,
+) -> bool {
     let mut candidates = Vec::new();
     for (pattern, ranges) in patterns.matched_ranges(text) {
         let (detector, confidence, replacement) = pattern_metadata(pattern.kind());
@@ -740,17 +764,25 @@ pub(super) fn redact_text(
         replacements.push(candidate);
     }
 
-    let mut changed = !replacements.is_empty();
+    let changed = !replacements.is_empty();
     for (range, detector, confidence, replacement, _) in replacements.into_iter().rev() {
         text.replace_range(range, replacement);
         findings.push(SanitizationFindingV1::new(
             detector, path, confidence, action,
         ));
     }
+    changed
+}
 
+fn redact_high_entropy(
+    text: &mut String,
+    path: &str,
+    findings: &mut Vec<SanitizationFindingV1>,
+    action: SanitizationActionV1,
+) -> bool {
     let ranges = high_entropy_ranges(text);
-    if !ranges.is_empty() {
-        changed = true;
+    let changed = !ranges.is_empty();
+    if changed {
         // The score is read before the tokens are replaced, and reports the
         // strongest evidence in this text rather than an average that a single
         // long low-entropy run could dilute.

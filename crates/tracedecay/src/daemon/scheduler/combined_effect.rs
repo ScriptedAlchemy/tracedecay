@@ -806,7 +806,6 @@ mod tests {
     use tracedecay_automation_runtime::automation::runner::{
         AutomationSessionRetrieval, AutomationSessionRetrievalFuture, AutomationTemporalRetrieval,
         CombinedReviewAutomationOptions, RetainedAutomationSettlementDisposition,
-        run_skill_writer_with_backend_and_retrieval,
     };
     use tracedecay_contracts::{
         CancellationSignal, ObservabilityHorizonV1, ObservabilityQueryPort, ObservabilityQueryV1,
@@ -820,6 +819,7 @@ mod tests {
         AutomationEffectAdmission, CombinedEffectAdmission, CombinedEffectOutcome, DaemonEngine,
         TraceDecay, prepare_combined_effects, run_combined_scheduler_effect,
         run_session_reflector_with_backend_and_retrieval_for_retained_settlement,
+        run_skill_writer_with_backend_and_retrieval_for_retained_settlement,
         scheduler_automation_effect,
     };
     use tracedecay_daemon_service::daemon_owned_project_source_access_at;
@@ -1210,20 +1210,60 @@ mod tests {
             .expect("compose project automation context");
 
         let prior_skill_run_id = "combined-partial-replay-prior-skill";
-        let prior_skill = run_skill_writer_with_backend_and_retrieval(
+        let prior_skill_options =
+            tracedecay_automation_runtime::automation::runner::SkillWriterAutomationOptions {
+                trigger: AutomationTrigger::Scheduler,
+                run_id: Some(prior_skill_run_id.to_owned()),
+                ..options.skill_writer.clone()
+            };
+        let AutomationEffectAdmission::Execute(prior_skill_authority) =
+            scheduler_automation_effect(
+                &fixture.engine,
+                fixture.memory.as_ref(),
+                &parent_control,
+                &fixture.project_root,
+                &fixture.dashboard_root,
+                Some(prior_skill_run_id),
+                fixture.configuration_digest.clone(),
+                |run_id| {
+                    tracedecay_automation_runtime::automation::effect_runtime::skill_writer_run_request(
+                        run_id,
+                        &prior_skill_options,
+                    )
+                },
+            )
+            .await
+            .expect("reserve prior skill writer")
+            .0
+        else {
+            panic!("prior skill writer fixture must start as Execute")
+        };
+        let prior_skill_run = run_skill_writer_with_backend_and_retrieval_for_retained_settlement(
             &automation_context,
             &config,
             &fixture.configuration_revision_id,
             &backend,
             &retrieval,
-            tracedecay_automation_runtime::automation::runner::SkillWriterAutomationOptions {
-                trigger: AutomationTrigger::Scheduler,
-                run_id: Some(prior_skill_run_id.to_owned()),
-                ..options.skill_writer.clone()
-            },
+            prior_skill_options.clone(),
         )
-        .await
-        .expect("publish prior exact scheduler skip");
+        .await;
+        let RetainedAutomationSettlementDisposition::Current {
+            result: Ok(prior_skill),
+            settlement_guard,
+        } = prior_skill_run.into_settlement_disposition()
+        else {
+            panic!("prior exact scheduler skip must be a current retained terminal")
+        };
+        prior_skill_authority
+            .start_deferred_run_settlement_observed(
+                prior_skill.ledger_record.clone(),
+                prior_skill.committed_receipt.clone(),
+                settlement_guard,
+                None,
+            )
+            .wait()
+            .await
+            .expect("publish prior exact scheduler skip");
         assert_eq!(
             prior_skill.ledger_record.status,
             AutomationRunStatus::Skipped

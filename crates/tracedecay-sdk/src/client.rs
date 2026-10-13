@@ -789,7 +789,7 @@ fn media_type(headers: &HeaderMap) -> Option<&str> {
 ///
 /// The caller supplies the message for a body that claims to be a problem but
 /// carries no value, because only the caller knows which surface it read.
-fn problem_error(body: &Value, status: u16, missing_value: &'static str) -> ClientError {
+pub(crate) fn problem_error(body: &Value, status: u16, missing_value: &'static str) -> ClientError {
     let Some(envelope) = body.get("value").cloned() else {
         return protocol(status, missing_value);
     };

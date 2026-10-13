@@ -44,22 +44,31 @@ impl RemoteSqliteStorageV1 {
         let pending_spool_items = count(&row, 0)?;
         let quarantined_spool_items = count(&row, 1)?;
         let has_sequence_gap = count(&row, 2)? != 0;
-        let authority = match load_authority_state(self.handle(), brain_id) {
-            Ok(authority) => authority,
-            Err(RemoteSqliteStorageErrorV1::WriterAuthorityUnpublished) => {
-                CurrentRemoteAuthorityStateV1::Unavailable {
-                    reason: tracedecay_domain::RemoteAuthorityUnavailableReasonV1::WriterAuthorityUnpublished,
-                    observed_at,
-                }
-            }
-            Err(error) => return Err(error),
-        };
         Ok(RemoteStorageStatusSnapshotV1 {
             pending_spool_items,
             quarantined_spool_items,
             has_sequence_gap,
-            authority,
+            authority: self.authority_at(brain_id, observed_at)?,
         })
+    }
+
+    /// Current writer authority for `brain_id`. A never-published writer is
+    /// the typed `Unavailable { WriterAuthorityUnpublished }` state observed
+    /// at `observed_at`, not a storage error.
+    pub fn authority_at(
+        &self,
+        brain_id: &BrainId,
+        observed_at: UtcMicros,
+    ) -> Result<CurrentRemoteAuthorityStateV1, RemoteSqliteStorageErrorV1> {
+        match load_authority_state(self.handle(), brain_id) {
+            Err(RemoteSqliteStorageErrorV1::WriterAuthorityUnpublished) => {
+                Ok(CurrentRemoteAuthorityStateV1::Unavailable {
+                    reason: tracedecay_domain::RemoteAuthorityUnavailableReasonV1::WriterAuthorityUnpublished,
+                    observed_at,
+                })
+            }
+            authority => authority,
+        }
     }
 }
 

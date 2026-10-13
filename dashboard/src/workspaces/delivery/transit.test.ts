@@ -11,7 +11,7 @@ const [PR42, PR43] = INBOX.pull_requests as [
 
 function transit(row: typeof PR42, overview: typeof OVERVIEW_ALPHA | null) {
   const edges = edgesFor(INBOX, row);
-  return buildTransit(row, edges, overview === null ? null : buildJourney(overview, { row, edges }));
+  return buildTransit(row, edges, overview === null ? null : buildJourney(overview, { row, edges }, { kind: 'all' }));
 }
 
 describe('buildTransit', () => {

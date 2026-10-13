@@ -35,6 +35,7 @@ use super::{
     StoreRuntimeRegistry, StoreRuntimeResolver, bind_ready_project_memory_graph, open_runtime,
     open_runtime_with_presence, registry_open_error, runtime_incarnation, session_registry_error,
 };
+use crate::RemoteNodeOperatorErrorV1;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_global_db::register_registered_schema_installer;
 use tracedecay_global_db::schema_contract::registered_schema_admission_digest;
@@ -934,32 +935,46 @@ impl DaemonSessionRuntimeRegistryV1 {
         &self,
         grant: EnrollmentGrantV1,
         admission: RemoteEnrollmentAdmissionEvidenceV1,
-    ) -> Result<()> {
-        grant.validate().map_err(|error| {
-            session_registry_error("provision Remote Brain node", error.to_string())
-        })?;
-        admission.validate_for(&grant).map_err(|error| {
-            session_registry_error("authenticate Remote Brain provisioning", error.to_string())
-        })?;
+    ) -> std::result::Result<(), RemoteNodeOperatorErrorV1> {
+        grant
+            .validate()
+            .map_err(|_| RemoteNodeOperatorErrorV1::InvalidRequest)?;
+        admission
+            .validate_for(&grant)
+            .map_err(|_| RemoteNodeOperatorErrorV1::InvalidRequest)?;
         if &grant.brain_id != self.identity.brain_id() {
-            return Err(session_registry_error(
-                "provision Remote Brain node",
-                "grant brain identity does not match the profile authority".to_owned(),
-            ));
+            return Err(RemoteNodeOperatorErrorV1::BrainIdentityConflict);
         }
         let keyring: Arc<dyn RemoteSpoolKeyringV1> = Arc::new(UnavailableRemoteSpoolKeyringV1);
         let storage = self
             .mount_remote_node_storage(grant.node_id.clone(), keyring, true)
-            .await?;
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "remote node store mount failed during provisioning");
+                RemoteNodeOperatorErrorV1::Unavailable
+            })?;
         storage
             .store_enrollment_grant(&grant, &admission)
-            .map_err(|error| {
-                session_registry_error("publish Remote Brain enrollment grant", error.to_string())
+            .map_err(|error| match error {
+                RemoteSqliteStorageErrorV1::Corruption => RemoteNodeOperatorErrorV1::Conflict,
+                error => {
+                    tracing::warn!(%error, "remote enrollment grant persistence failed");
+                    RemoteNodeOperatorErrorV1::Unavailable
+                }
             })?;
         self.remote_credential_authority
             .refresh_storage(&grant.node_id)
-            .map_err(|error| {
-                session_registry_error("register Remote Brain enrollment grant", error.to_string())
+            .map_err(|error| match error {
+                crate::DaemonRemoteCredentialRegistryErrorV1::IdentityConflict => {
+                    RemoteNodeOperatorErrorV1::Conflict
+                }
+                crate::DaemonRemoteCredentialRegistryErrorV1::CapacityExceeded => {
+                    RemoteNodeOperatorErrorV1::CapacityExceeded
+                }
+                error => {
+                    tracing::warn!(%error, "remote enrollment grant registration failed");
+                    RemoteNodeOperatorErrorV1::Unavailable
+                }
             })
     }
 

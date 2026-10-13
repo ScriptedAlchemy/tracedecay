@@ -2,13 +2,21 @@
 //!
 //! The serve proxy lives exactly as long as one host MCP connection, while it
 //! opens a fresh daemon connection per request, so this window is per session
-//! without any daemon state. A call whose query words overlap an earlier call
-//! to the same tool among the last [`WINDOW`] calls by more than 60% (Jaccard)
-//! gets one advisory text block appended to its result. The hint never blocks
-//! a call, never changes existing content, and is on only when the profile
-//! setting [`USER_REPEATED_QUERY_HINTS_SETTING_KEY`] is true. A call already
-//! answered with a repeat-read pointer names its identical earlier call there,
-//! so its hint considers only earlier calls with different arguments.
+//! without any daemon state. A call is compared with the earlier calls to the
+//! same tool and `project_selector` among the last [`WINDOW`] calls, and gets
+//! one advisory text block appended to its result when its query words
+//! overlap one of them by more than 60% (Jaccard). The hint never blocks a
+//! call, never changes existing content, and is on only when the profile
+//! setting [`USER_REPEATED_QUERY_HINTS_SETTING_KEY`] is true.
+//!
+//! Query words come from string arguments outside [`PRESENTATION_KEYS`] and
+//! the selector, and a call that differs from an earlier one only in those
+//! keys or in numbers asks the same question at another page, bound, or
+//! presentation, so it is never flagged. An identical call is flagged only
+//! when both calls returned the same successful answer, so a re-run after an
+//! edit, a re-index, or a failure is verification rather than a loop; a call
+//! answered with a repeat-read pointer already names its identical earlier
+//! call there.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::fmt;
@@ -19,17 +27,47 @@ use tracedecay_domain::canonical_json_value;
 use tracedecay_domain::configuration::USER_REPEATED_QUERY_HINTS_SETTING_KEY;
 use tracedecay_mcp::JsonRpcRequest;
 
+use super::repeat_reads::answer_digest;
+
 /// How many earlier calls of any tool a new call is compared against.
 const WINDOW: usize = 6;
 const HINT_PREFIX: &str = "tracedecay_repeated_query:";
 const MAX_QUOTED_ARGUMENT_CHARS: usize = 200;
+/// Argument keys, at any depth, that page or render an answer rather than say
+/// what is asked.
+const PRESENTATION_KEYS: &[&str] = &["after", "cursor", "format", "order", "projection"];
+/// The argument naming the project a call asks about.
+const SCOPE_KEY: &str = "project_selector";
 
 /// One earlier `tools/call` of this session.
 struct RecentCall {
     tool: String,
+    /// Canonical JSON of the `project_selector` argument, empty when absent.
+    scope: String,
     words: BTreeSet<String>,
-    /// Canonical JSON of the call arguments, used only to name the call.
+    /// Canonical JSON of the arguments without presentation keys, numbers,
+    /// or nulls.
+    skeleton: String,
+    /// Canonical JSON of the call arguments.
     arguments: String,
+    /// Digest of the successful answer; `None` for a failed call.
+    answer: Option<String>,
+}
+
+impl RecentCall {
+    /// The overlap that makes this call a near repeat of `earlier`, if any;
+    /// `pointed` says this call was answered with a repeat-read pointer.
+    fn repeats(&self, earlier: &Self, pointed: bool) -> Option<Overlap> {
+        let comparable = if earlier.tool != self.tool || earlier.scope != self.scope {
+            false
+        } else if earlier.arguments == self.arguments {
+            !pointed && self.answer.is_some() && self.answer == earlier.answer
+        } else {
+            earlier.skeleton != self.skeleton
+        };
+        let overlap = Overlap::between(&earlier.words, &self.words);
+        (comparable && overlap.is_repeat()).then_some(overlap)
+    }
 }
 
 /// Jaccard overlap of two word sets as the exact ratio `shared / union`.
@@ -88,8 +126,8 @@ impl fmt::Display for Hint {
             formatter,
             "{HINT_PREFIX} this {tool} call shares {percent}% of its query words with the {tool} \
              call {calls_back} {calls} earlier in this session (arguments {quoted}). If that \
-             result did not answer the question, change the query or the approach rather than \
-             repeating it. Experimental hint, disable with {USER_REPEATED_QUERY_HINTS_SETTING_KEY}."
+             result did not answer the question, try a different tool or approach rather than \
+             another variant of this query. Experimental hint, disable with {USER_REPEATED_QUERY_HINTS_SETTING_KEY}."
         )
     }
 }
@@ -125,33 +163,35 @@ impl RepeatedQueries {
         let Some((id, tool, arguments)) = request.and_then(tool_call) else {
             return;
         };
-        let Some(hint) = self.observe(tool, arguments, pointed) else {
+        let response = responses.iter_mut().find_map(|line| {
+            let message = serde_json::from_str::<Value>(line).ok()?;
+            (message.get("id") == Some(id)).then_some((line, message))
+        });
+        let answer = response
+            .as_ref()
+            .and_then(|(_, message)| answer_digest(message.get("result")?))
+            .map(|(digest, _)| digest);
+        let Some(hint) = self.observe(tool, arguments, answer, pointed) else {
             return;
         };
-        for line in responses.iter_mut() {
-            let Ok(mut message) = serde_json::from_str::<Value>(line) else {
-                continue;
-            };
-            if message.get("id") != Some(id) {
-                continue;
-            }
-            // A failed call is not an unanswered query: its result already
-            // reports the failure, so a hint would misreport it.
-            if message
-                .pointer("/result/isError")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                return;
-            }
-            if let Some(content) = message
-                .pointer_mut("/result/content")
-                .and_then(Value::as_array_mut)
-            {
-                content.push(json!({ "type": "text", "text": hint.to_string() }));
-                *line = format!("{message}\n");
-            }
+        let Some((line, mut message)) = response else {
             return;
+        };
+        // A failed call is not an unanswered query: its result already
+        // reports the failure, so a hint would misreport it.
+        if message
+            .pointer("/result/isError")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        if let Some(content) = message
+            .pointer_mut("/result/content")
+            .and_then(Value::as_array_mut)
+        {
+            content.push(json!({ "type": "text", "text": hint.to_string() }));
+            *line = format!("{message}\n");
         }
     }
 
@@ -164,19 +204,32 @@ impl RepeatedQueries {
         }
     }
 
-    fn observe(&mut self, tool: &str, arguments: &Value, pointed: bool) -> Option<Hint> {
+    fn observe(
+        &mut self,
+        tool: &str,
+        arguments: &Value,
+        answer: Option<String>,
+        pointed: bool,
+    ) -> Option<Hint> {
         let call = RecentCall {
             tool: tool.to_owned(),
+            scope: arguments
+                .get(SCOPE_KEY)
+                .map(canonical_json_value)
+                .transpose()
+                .ok()?
+                .unwrap_or_default(),
             words: query_words(arguments),
+            skeleton: canonical_json_value(&skeleton(arguments)).ok()?,
             arguments: canonical_json_value(arguments).ok()?,
+            answer,
         };
         let mut best: Option<(usize, &RecentCall, Overlap)> = None;
         for (calls_back, earlier) in (1..).zip(self.recent.iter().rev()) {
-            if earlier.tool != call.tool || (pointed && earlier.arguments == call.arguments) {
+            let Some(overlap) = call.repeats(earlier, pointed) else {
                 continue;
-            }
-            let overlap = Overlap::between(&earlier.words, &call.words);
-            if overlap.is_repeat() && best.is_none_or(|(_, _, best)| overlap.exceeds(best)) {
+            };
+            if best.is_none_or(|(_, _, best)| overlap.exceeds(best)) {
                 best = Some((calls_back, earlier, overlap));
             }
         }
@@ -205,31 +258,52 @@ fn tool_call(request: &JsonRpcRequest) -> Option<(&Value, &str, &Value)> {
     Some((id, tool, params.get("arguments").unwrap_or(&Value::Null)))
 }
 
-/// Lowercased words of every string and number in `arguments`; object keys
-/// name parameters rather than the query, so they are skipped.
-fn query_words(arguments: &Value) -> BTreeSet<String> {
-    fn insert(text: &str, words: &mut BTreeSet<String>) {
-        words.extend(
-            text.split(|c: char| !c.is_alphanumeric() && c != '_')
-                .filter(|word| !word.is_empty())
-                .map(str::to_owned),
-        );
+fn is_presentation(key: &str) -> bool {
+    PRESENTATION_KEYS.contains(&key)
+}
+
+/// `arguments` without presentation keys, numbers, or nulls: two calls with
+/// one skeleton ask one question at another page, bound, or presentation.
+fn skeleton(value: &Value) -> Value {
+    match value {
+        Value::Object(fields) => fields
+            .iter()
+            .filter(|(key, field)| {
+                !is_presentation(key) && !matches!(field, Value::Number(_) | Value::Null)
+            })
+            .map(|(key, field)| (key.clone(), skeleton(field)))
+            .collect(),
+        Value::Array(items) => items.iter().map(skeleton).collect(),
+        Value::Number(_) => Value::Null,
+        other => other.clone(),
     }
+}
+
+/// Lowercased words of every string in `arguments` outside presentation keys
+/// and the project selector; object keys name parameters rather than the
+/// query, so they are skipped.
+fn query_words(arguments: &Value) -> BTreeSet<String> {
     fn collect(value: &Value, words: &mut BTreeSet<String>) {
         match value {
-            Value::String(text) => insert(&text.to_lowercase(), words),
-            Value::Number(number) => insert(&number.to_string(), words),
+            Value::String(text) => words.extend(
+                text.to_lowercase()
+                    .split(|c: char| !c.is_alphanumeric() && c != '_')
+                    .filter(|word| !word.is_empty())
+                    .map(str::to_owned),
+            ),
             Value::Array(items) => {
                 for item in items {
                     collect(item, words);
                 }
             }
             Value::Object(fields) => {
-                for field in fields.values() {
-                    collect(field, words);
+                for (key, field) in fields {
+                    if !is_presentation(key) && key != SCOPE_KEY {
+                        collect(field, words);
+                    }
                 }
             }
-            Value::Bool(_) | Value::Null => {}
+            Value::Number(_) | Value::Bool(_) | Value::Null => {}
         }
     }
     let mut words = BTreeSet::new();
@@ -239,6 +313,8 @@ fn query_words(arguments: &Value) -> BTreeSet<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use super::*;
 
     fn enabled() -> RepeatedQueries {
@@ -258,6 +334,8 @@ mod tests {
         .expect("request")
     }
 
+    /// The same answer text for every call, so an identical repeat is an
+    /// unchanged answer.
     fn answer(id: i64) -> Vec<String> {
         vec![format!(
             "{}\n",
@@ -265,7 +343,7 @@ mod tests {
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": {
-                    "content": [{"type": "text", "text": format!("answer {id}")}],
+                    "content": [{"type": "text", "text": "the proxy session window answer"}],
                     "structuredContent": {"rows": [id, "x"]},
                 },
             })
@@ -489,17 +567,18 @@ mod tests {
     }
 
     #[test]
-    fn query_words_are_lowercased_value_leaves_split_on_non_word_characters() {
+    fn query_words_are_lowercased_string_leaves_outside_presentation_and_scope() {
         let words = query_words(&json!({
             "Query": "Foo::bar_baz  qux-Quux",
             "paths": ["src/Lib.rs", {"nested_key": 42}],
             "ratio": 1.5,
             "flag": true,
             "none": null,
+            "format": "markdown",
+            "meta": {"cursor": "Y3Vyc29y", "order": "source_position", "projection": "evidence"},
+            "project_selector": {"project_id": "orders"},
         }));
-        let expected = [
-            "1", "42", "5", "bar_baz", "foo", "lib", "quux", "qux", "rs", "src",
-        ];
+        let expected = ["bar_baz", "foo", "lib", "quux", "qux", "rs", "src"];
         assert_eq!(
             words.iter().map(String::as_str).collect::<Vec<_>>(),
             expected
@@ -539,9 +618,24 @@ mod tests {
         );
         assert_eq!(repeat, failed(2), "an isError result is never rewritten");
 
-        let answered = served(&mut queries, &call(3, "tracedecay_search", &args), 3);
+        let retry = served(&mut queries, &call(3, "tracedecay_search", &args), 3);
+        assert_eq!(
+            retry,
+            answer(3),
+            "a successful retry of a failed call is not a loop"
+        );
+
+        let mut queries = enabled();
+        let mut first = failed(1);
+        queries.rewrite(
+            Some(&call(1, "tracedecay_search", &args)),
+            &mut first,
+            false,
+        );
+        let rephrased = json!({"query": "failing search again"});
+        let answered = served(&mut queries, &call(2, "tracedecay_search", &rephrased), 2);
         assert!(
-            hints(&answered)[0].contains("1 call earlier"),
+            hints(&answered)[0].contains(r#"(arguments {"query":"failing search"})"#),
             "a failed call still counts as a recent call: {answered:?}"
         );
     }
@@ -605,7 +699,8 @@ mod tests {
         queries.rewrite(Some(&list), &mut listing, false);
         assert_eq!(listing, answer(3));
 
-        let after_errors = served(&mut queries, &call(4, "tracedecay_search", &args), 4);
+        let rephrased = json!({"query": "failing search again"});
+        let after_errors = served(&mut queries, &call(4, "tracedecay_search", &rephrased), 4);
         assert!(
             hints(&after_errors)[0].contains("1 call earlier"),
             "an errored call is still recorded: {after_errors:?}"
@@ -627,5 +722,414 @@ mod tests {
         assert_eq!(quoted.chars().count(), MAX_QUOTED_ARGUMENT_CHARS + 3);
         assert!(quoted.starts_with(r#"{"query":"éé"#), "{quoted}");
         assert!(quoted.ends_with("é..."), "{quoted}");
+    }
+
+    /// What the final call of a corpus case should get: `Useful` and `Missed`
+    /// cases are loops, `Quiet` and `KnownFalsePositive` cases are legitimate
+    /// work; `Missed` and `KnownFalsePositive` record the heuristic's ceiling.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    enum Label {
+        Useful,
+        Quiet,
+        KnownFalsePositive,
+        Missed,
+    }
+
+    impl Label {
+        /// The label a case earns from whether its final call drew a hint.
+        fn observed(self, hinted: bool) -> Self {
+            match (self, hinted) {
+                (Self::Useful | Self::Missed, true) => Self::Useful,
+                (Self::Useful | Self::Missed, false) => Self::Missed,
+                (Self::Quiet | Self::KnownFalsePositive, true) => Self::KnownFalsePositive,
+                (Self::Quiet | Self::KnownFalsePositive, false) => Self::Quiet,
+            }
+        }
+    }
+
+    struct Step {
+        tool: &'static str,
+        arguments: &'static str,
+        answer: &'static str,
+        is_error: bool,
+    }
+
+    const fn ok(tool: &'static str, arguments: &'static str, answer: &'static str) -> Step {
+        Step {
+            tool,
+            arguments,
+            answer,
+            is_error: false,
+        }
+    }
+
+    struct Case {
+        name: &'static str,
+        class: &'static str,
+        steps: &'static [Step],
+        label: Label,
+    }
+
+    const SEARCH: &str = "tracedecay_search";
+    const STOCK: &str = "reserve_stock in src/orders.rs holds warehouse stock for each order line";
+    const ROLLBACK: &str =
+        "release_stock in src/orders.rs returns held stock when an order is cancelled";
+    const TOTALS: &str = "compute_total in src/pricing.rs sums line prices then applies tax";
+    const CALLERS: &str = "checkout and invoice_preview call compute_total";
+    const CALLERS_PAGE_2: &str = "refund_quote and cart_summary call compute_total";
+
+    /// Synthetic sessions over the agent-adoption orders fixture. The label is
+    /// what the final call should get; a heuristic change that moves a case
+    /// must move its label and the totals below with it.
+    const CORPUS: &[Case] = &[
+        Case {
+            name: "identical_search_same_answer",
+            class: "stuck loop",
+            steps: &[
+                ok(SEARCH, r#"{"query":"where is stock reserved"}"#, STOCK),
+                ok(SEARCH, r#"{"query":"where is stock reserved"}"#, STOCK),
+            ],
+            label: Label::Useful,
+        },
+        Case {
+            name: "rephrased_search_circling",
+            class: "stuck loop",
+            steps: &[
+                ok(SEARCH, r#"{"query":"where is stock reserved"}"#, STOCK),
+                ok(SEARCH, r#"{"query":"where is the stock reserved"}"#, STOCK),
+            ],
+            label: Label::Useful,
+        },
+        Case {
+            name: "identical_grep_with_selector",
+            class: "stuck loop",
+            steps: &[
+                ok(
+                    "tracedecay_grep",
+                    r#"{"pattern":"reserve_stock","project_selector":{"project_id":"orders-fixture"}}"#,
+                    STOCK,
+                ),
+                ok(
+                    "tracedecay_grep",
+                    r#"{"pattern":"reserve_stock","project_selector":{"project_id":"orders-fixture"}}"#,
+                    STOCK,
+                ),
+            ],
+            label: Label::Useful,
+        },
+        Case {
+            name: "identical_body_three_calls_back",
+            class: "stuck loop",
+            steps: &[
+                ok(
+                    "tracedecay_source_body",
+                    r#"{"node_id":"fn:src/orders.rs:reserve_stock"}"#,
+                    STOCK,
+                ),
+                ok(
+                    "tracedecay_callers",
+                    r#"{"node_id":"fn:src/orders.rs:reserve_stock"}"#,
+                    "place_order and backorder_retry call reserve_stock",
+                ),
+                ok("tracedecay_grep", r#"{"pattern":"held_stock"}"#, STOCK),
+                ok(
+                    "tracedecay_source_body",
+                    r#"{"node_id":"fn:src/orders.rs:reserve_stock"}"#,
+                    STOCK,
+                ),
+            ],
+            label: Label::Useful,
+        },
+        Case {
+            name: "stemmed_context_rephrase",
+            class: "stuck loop",
+            steps: &[
+                ok(
+                    "tracedecay_context",
+                    r#"{"task":"explain how orders reserve warehouse stock"}"#,
+                    STOCK,
+                ),
+                ok(
+                    "tracedecay_context",
+                    r#"{"task":"explain how an order reserves warehouse stock"}"#,
+                    STOCK,
+                ),
+            ],
+            label: Label::Missed,
+        },
+        Case {
+            name: "narrow_by_path_glob",
+            class: "narrowing",
+            steps: &[
+                ok("tracedecay_grep", r#"{"pattern":"reserve_stock"}"#, STOCK),
+                ok(
+                    "tracedecay_grep",
+                    r#"{"pattern":"reserve_stock","path_glob":"src/orders/**"}"#,
+                    STOCK,
+                ),
+            ],
+            label: Label::Quiet,
+        },
+        Case {
+            name: "narrow_by_added_term",
+            class: "narrowing",
+            steps: &[
+                ok(SEARCH, r#"{"query":"stock reservation"}"#, STOCK),
+                ok(
+                    SEARCH,
+                    r#"{"query":"stock reservation rollback"}"#,
+                    ROLLBACK,
+                ),
+            ],
+            label: Label::KnownFalsePositive,
+        },
+        Case {
+            name: "narrow_with_shared_selector_and_format",
+            class: "narrowing",
+            steps: &[
+                ok(
+                    SEARCH,
+                    r#"{"query":"stock reservation","project_selector":{"project_id":"orders-fixture"},"format":"markdown"}"#,
+                    STOCK,
+                ),
+                ok(
+                    SEARCH,
+                    r#"{"query":"stock rollback","project_selector":{"project_id":"orders-fixture"},"format":"markdown"}"#,
+                    ROLLBACK,
+                ),
+            ],
+            label: Label::Quiet,
+        },
+        Case {
+            name: "next_page_by_cursor",
+            class: "pagination",
+            steps: &[
+                ok(
+                    SEARCH,
+                    r#"{"query":"order total computation tax","limit":5}"#,
+                    TOTALS,
+                ),
+                ok(
+                    SEARCH,
+                    r#"{"query":"order total computation tax","limit":5,"cursor":"b3BhcXVlLWN1cnNvci0x"}"#,
+                    "apply_tax in src/tax.rs rounds each line before compute_total sums it",
+                ),
+                ok(
+                    SEARCH,
+                    r#"{"query":"order total computation tax","limit":5,"cursor":"b3BhcXVlLWN1cnNvci0y"}"#,
+                    "tax_rate in src/tax.rs looks up the rate for the shipping region",
+                ),
+            ],
+            label: Label::Quiet,
+        },
+        Case {
+            name: "callers_next_page_meta_cursor",
+            class: "pagination",
+            steps: &[
+                ok(
+                    "tracedecay_callers",
+                    r#"{"node_id":"fn:src/pricing.rs:compute_total","meta":{"cursor":null,"order":"source_position","projection":"evidence"}}"#,
+                    CALLERS,
+                ),
+                ok(
+                    "tracedecay_callers",
+                    r#"{"node_id":"fn:src/pricing.rs:compute_total","meta":{"cursor":"Y3Vyc29yLTI","order":"source_position","projection":"evidence"}}"#,
+                    CALLERS_PAGE_2,
+                ),
+            ],
+            label: Label::Quiet,
+        },
+        Case {
+            name: "same_query_other_project",
+            class: "changed scope",
+            steps: &[
+                ok(
+                    SEARCH,
+                    r#"{"query":"who calls compute total","project_selector":{"project_id":"orders"}}"#,
+                    CALLERS,
+                ),
+                ok(
+                    SEARCH,
+                    r#"{"query":"who calls compute total","project_selector":{"project_id":"billing"}}"#,
+                    "invoice_run in src/billing.rs calls compute_total",
+                ),
+            ],
+            label: Label::Quiet,
+        },
+        Case {
+            name: "widened_caller_depth",
+            class: "changed scope",
+            steps: &[
+                ok(
+                    "tracedecay_callers",
+                    r#"{"node_id":"fn:src/pricing.rs:compute_total","maximum_depth":1}"#,
+                    CALLERS,
+                ),
+                ok(
+                    "tracedecay_callers",
+                    r#"{"node_id":"fn:src/pricing.rs:compute_total","maximum_depth":3}"#,
+                    "checkout, invoice_preview, and their http handlers call compute_total",
+                ),
+            ],
+            label: Label::Quiet,
+        },
+        Case {
+            name: "other_branch_same_query",
+            class: "changed generation",
+            steps: &[
+                ok(
+                    "tracedecay_branch_search",
+                    r#"{"branch":"main","query":"apply_discount"}"#,
+                    "apply_discount in src/pricing.rs takes a percentage",
+                ),
+                ok(
+                    "tracedecay_branch_search",
+                    r#"{"branch":"feature/pricing-notes","query":"apply_discount"}"#,
+                    "apply_discount in src/pricing.rs takes a discount rule",
+                ),
+            ],
+            label: Label::Quiet,
+        },
+        Case {
+            name: "identical_search_after_reindex",
+            class: "changed generation",
+            steps: &[
+                ok(SEARCH, r#"{"query":"where is stock reserved"}"#, STOCK),
+                ok(
+                    SEARCH,
+                    r#"{"query":"where is stock reserved"}"#,
+                    "reserve_stock moved to src/inventory.rs and holds stock per warehouse",
+                ),
+            ],
+            label: Label::Quiet,
+        },
+        Case {
+            name: "diagnostics_after_edit",
+            class: "repeated verification",
+            steps: &[
+                ok(
+                    "tracedecay_diagnostics",
+                    r#"{"path":"src/orders.rs"}"#,
+                    "error E0308 in src/orders.rs line 42 expected u32 found i64",
+                ),
+                ok(
+                    "tracedecay_str_replace",
+                    r#"{"path":"src/orders.rs","old_str":"let held: i64","new_str":"let held: u32"}"#,
+                    "replaced one occurrence in src/orders.rs",
+                ),
+                ok(
+                    "tracedecay_diagnostics",
+                    r#"{"path":"src/orders.rs"}"#,
+                    "no diagnostics reported for src/orders.rs",
+                ),
+            ],
+            label: Label::Quiet,
+        },
+        Case {
+            name: "test_results_unchanged",
+            class: "repeated verification",
+            steps: &[
+                ok(
+                    "tracedecay_test_results",
+                    r#"{"filter":"orders"}"#,
+                    "orders tests failed reserve_stock_holds_stock assertion",
+                ),
+                ok(
+                    "tracedecay_test_results",
+                    r#"{"filter":"orders"}"#,
+                    "orders tests failed reserve_stock_holds_stock assertion",
+                ),
+            ],
+            label: Label::Useful,
+        },
+        Case {
+            name: "retry_after_failure",
+            class: "repeated verification",
+            steps: &[
+                Step {
+                    tool: SEARCH,
+                    arguments: r#"{"query":"where is stock reserved"}"#,
+                    answer: "project orders-fixture is still opening, retry shortly",
+                    is_error: true,
+                },
+                ok(SEARCH, r#"{"query":"where is stock reserved"}"#, STOCK),
+            ],
+            label: Label::Quiet,
+        },
+        Case {
+            name: "json_after_markdown",
+            class: "changed presentation",
+            steps: &[
+                ok(
+                    SEARCH,
+                    r#"{"query":"order total computation tax","format":"markdown"}"#,
+                    TOTALS,
+                ),
+                ok(
+                    SEARCH,
+                    r#"{"query":"order total computation tax","format":"json"}"#,
+                    r#"{"results":[{"name":"compute_total","path":"src/pricing.rs"}]}"#,
+                ),
+            ],
+            label: Label::Quiet,
+        },
+    ];
+
+    const CORPUS_TOTALS: [(Label, usize); 4] = [
+        (Label::Useful, 5),
+        (Label::Quiet, 11),
+        (Label::KnownFalsePositive, 1),
+        (Label::Missed, 1),
+    ];
+
+    fn response(id: i64, text: &str, is_error: bool) -> Vec<String> {
+        vec![format!(
+            "{}\n",
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {"content": [{"type": "text", "text": text}], "isError": is_error},
+            })
+        )]
+    }
+
+    #[test]
+    fn the_outcome_corpus_matches_every_label() {
+        let mut table = String::from("name | class | label | observed | hint\n");
+        let mut mismatches = Vec::new();
+        let mut totals = std::collections::BTreeMap::<Label, usize>::new();
+        for case in CORPUS {
+            let mut queries = enabled();
+            let mut last = Vec::new();
+            for (id, step) in (1..).zip(case.steps) {
+                let arguments: Value = serde_json::from_str(step.arguments).expect("arguments");
+                let mut lines = response(id, step.answer, step.is_error);
+                queries.rewrite(Some(&call(id, step.tool, &arguments)), &mut lines, false);
+                last = lines;
+            }
+            let hint = hints(&last).pop();
+            let observed = case.label.observed(hint.is_some());
+            let overlap = hint
+                .as_deref()
+                .and_then(|hint| hint.split(" of its query words").next())
+                .and_then(|clause| clause.rsplit(' ').next())
+                .unwrap_or("-");
+            writeln!(
+                table,
+                "{} | {} | {:?} | {observed:?} | {overlap}",
+                case.name, case.class, case.label
+            )
+            .expect("table row");
+            if observed != case.label {
+                mismatches.push(case.name);
+            }
+            *totals.entry(observed).or_default() += 1;
+        }
+        assert!(mismatches.is_empty(), "mismatched {mismatches:?}\n{table}");
+        assert_eq!(
+            totals.into_iter().collect::<Vec<_>>(),
+            CORPUS_TOTALS.to_vec(),
+            "\n{table}"
+        );
     }
 }

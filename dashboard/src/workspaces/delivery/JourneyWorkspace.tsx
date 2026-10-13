@@ -4,6 +4,7 @@ import type {
   DeliveryMembershipEdgeV1,
   DeliveryOverviewV1,
 } from '../../contracts/generated.ts';
+import { useScope } from '../../data/scope/store.ts';
 import { ReadSection } from '../../ui/ReadSection.tsx';
 import { StateChip } from '../../ui/StateChip.tsx';
 import { ReadoutBar } from '../../ui/instrument.tsx';
@@ -71,7 +72,8 @@ function JourneyBody({
   overview: DeliveryOverviewV1;
 }) {
   const { navigate, location } = context;
-  const model = useMemo(() => buildJourney(overview, { row, edges }), [overview, row, edges]);
+  const scope = useScope((state) => state.scope);
+  const model = useMemo(() => buildJourney(overview, { row, edges }, scope), [overview, row, edges, scope]);
   const transit = useMemo(() => buildTransit(row, edges, model), [row, edges, model]);
   const selected = model.episodes.find((episode) => episode.id === location.episode) ?? null;
   const project = projectFor(context.inbox, row.project_id);

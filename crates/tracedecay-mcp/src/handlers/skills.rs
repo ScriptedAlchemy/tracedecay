@@ -28,7 +28,6 @@ use crate::handlers::graph::graph_tool_completion;
 use crate::handlers::support::decode_primitive_request;
 
 const SKILL_ANALYTICS_IMPORT_LIMIT: usize = 10_000;
-const STALE_SKILL_AFTER_SECS: i64 = 60 * 60 * 24 * 90;
 
 /// The profile and project authorities a managed-skill read runs under.
 pub struct SkillReadAuthority<'a> {
@@ -82,12 +81,10 @@ pub async fn compute_skill_list(
         skills.retain(|skill| skill.metadata.state == state);
     }
     let usage_summaries = summarize_skill_usage(profile_root, &skills).await?;
-    let now = tracedecay_runtime_core::tracedecay::current_timestamp();
-    let mut stale: BTreeMap<String, _> =
-        stale_skill_recommendations(&usage_summaries, now, STALE_SKILL_AFTER_SECS)
-            .into_iter()
-            .map(|recommendation| (recommendation.skill_id.clone(), recommendation))
-            .collect();
+    let mut stale: BTreeMap<String, _> = stale_skill_recommendations(&usage_summaries)
+        .into_iter()
+        .map(|recommendation| (recommendation.skill_id.clone(), recommendation))
+        .collect();
     let mut improvements: BTreeMap<String, _> = skill_improvement_recommendations(&usage_summaries)
         .into_iter()
         .map(|recommendation| (recommendation.skill_id.clone(), recommendation))
@@ -165,13 +162,9 @@ pub async fn compute_skill_view(
     )
     .await?;
     let usage_summary = summarize_skill_usage_for(profile_root, &skill).await?;
-    let stale_recommendation = stale_skill_recommendations(
-        std::slice::from_ref(&usage_summary),
-        tracedecay_runtime_core::tracedecay::current_timestamp(),
-        STALE_SKILL_AFTER_SECS,
-    )
-    .into_iter()
-    .next();
+    let stale_recommendation = stale_skill_recommendations(std::slice::from_ref(&usage_summary))
+        .into_iter()
+        .next();
     let improvement_recommendation =
         skill_improvement_recommendations(std::slice::from_ref(&usage_summary))
             .into_iter()
