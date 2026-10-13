@@ -22,6 +22,7 @@ use serde_json::{Value, json};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
+use super::serve_args::ServeArgs;
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
     TextFileMutation, load_json_file, safe_write_text_file, update_text_file_transactionally,
@@ -83,7 +84,7 @@ impl AgentIntegration for OpenCodeIntegration {
                 agents_md.as_path(),
             ],
         )?;
-        install_mcp_server(&mcp_path, &ctx.tracedecay_bin)?;
+        install_mcp_server(&mcp_path, &ctx.tracedecay_bin, &ctx.serve_args)?;
         install_opencode_plugin(&plugin_path, &ctx.tracedecay_bin)?;
         install_prompt_rules(&agents_md)?;
         super::install_managed_skill_prompt_index(
@@ -169,14 +170,23 @@ impl AgentIntegration for OpenCodeIntegration {
         } else {
             None
         };
-        let mcp_current = config
-            .as_ref()
-            .and_then(|config| config.pointer(&format!("{MCP_SERVER_POINTER}/command")))
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|args| args.iter().any(|arg| arg.as_str() == Some("serve")));
         if component == HostComponentV1::ContextMcp {
-            return if mcp_current {
+            let command = config
+                .as_ref()
+                .and_then(|config| config.pointer(&format!("{MCP_SERVER_POINTER}/command")));
+            let launches_serve = command
+                .and_then(serde_json::Value::as_array)
+                .and_then(|argv| argv.get(1))
+                .and_then(serde_json::Value::as_str)
+                == Some("serve");
+            return if ctx
+                .catalog_profiles
+                .serve_args(self.id())
+                .matches_command_json(command)
+            {
                 State::Current
+            } else if launches_serve {
+                State::Repairable
             } else {
                 State::Missing
             };
@@ -263,6 +273,7 @@ impl AgentIntegration for OpenCodeIntegration {
         install_mcp_server(
             &opencode_config_path(&ctx.home, &ctx.profile),
             &ctx.tracedecay_bin,
+            &ctx.serve_args,
         )
     }
 
@@ -279,6 +290,7 @@ impl AgentIntegration for OpenCodeIntegration {
             install_mcp_server(
                 &opencode_config_path(&ctx.home, &ctx.profile),
                 &ctx.tracedecay_bin,
+                &ctx.serve_args,
             )?;
         } else if core {
             remove_legacy_lsp_registration(&opencode_config_path(&ctx.home, &ctx.profile))?;
@@ -655,10 +667,15 @@ fn remove_opencode_plugin(path: &Path) -> Result<()> {
     level = "trace",
     skip_all
 )]
-fn install_mcp_server(config_path: &Path, tracedecay_bin: &str) -> Result<()> {
+fn install_mcp_server(
+    config_path: &Path,
+    tracedecay_bin: &str,
+    serve_args: &ServeArgs,
+) -> Result<()> {
     let outcome = update_text_file_transactionally(config_path, |existing: &str| {
         let before = JsonConfigDialect::Json.parse_for_edit(config_path, existing)?;
-        let config = merge_mcp_registration(config_path, before.clone(), tracedecay_bin)?;
+        let config =
+            merge_mcp_registration(config_path, before.clone(), tracedecay_bin, serve_args)?;
         if config == before {
             return Ok((
                 McpRegistrationOutcome::Unchanged,
@@ -687,6 +704,7 @@ fn merge_mcp_registration(
     config_path: &Path,
     mut config: serde_json::Value,
     tracedecay_bin: &str,
+    serve_args: &ServeArgs,
 ) -> Result<serde_json::Value> {
     // Snapshot the host-recorded plugin registration before touching anything,
     // so the write below can be proven not to have created, altered, or
@@ -726,7 +744,7 @@ fn merge_mcp_registration(
         "tracedecay".to_string(),
         json!({
             "type": "local",
-            "command": [tracedecay_bin, "serve"]
+            "command": serve_args.command_json(tracedecay_bin)
         }),
     );
 
@@ -964,6 +982,7 @@ mod tests {
             home: home.path().to_path_buf(),
             profile: profile.clone(),
             project_path: home.path().to_path_buf(),
+            catalog_profiles: Default::default(),
         };
 
         assert_eq!(
@@ -990,6 +1009,7 @@ mod tests {
             tracedecay_bin: "/usr/bin/tracedecay".to_string(),
             project_root: None,
             dashboard: false,
+            serve_args: Default::default(),
         };
         OpenCodeIntegration
             .activate_deployed_host_component_registration(&[HostComponentV1::Core], &install)
@@ -1021,6 +1041,7 @@ mod tests {
             home: home.path().to_path_buf(),
             profile: profile.clone(),
             project_path: home.path().to_path_buf(),
+            catalog_profiles: Default::default(),
         };
         assert_eq!(
             OpenCodeIntegration.host_component_registration(HostComponentV1::Core, &ctx),
@@ -1183,7 +1204,12 @@ mod tests {
         )
         .unwrap();
 
-        install_mcp_server(&config_path, "/usr/bin/tracedecay").unwrap();
+        install_mcp_server(
+            &config_path,
+            "/usr/bin/tracedecay",
+            &crate::agents::serve_args::ServeArgs::default(),
+        )
+        .unwrap();
 
         let config = crate::agents::load_json_file_strict(&config_path).unwrap();
         assert_eq!(
@@ -1219,7 +1245,11 @@ mod tests {
         let config_path = home.path().join("opencode.json");
         let mut facts = Vec::new();
         crate::agents::recorded_lifecycle(home.path(), &mut facts, false, || {
-            install_mcp_server(&config_path, "/usr/bin/tracedecay")
+            install_mcp_server(
+                &config_path,
+                "/usr/bin/tracedecay",
+                &crate::agents::serve_args::ServeArgs::default(),
+            )
         })
         .unwrap();
         assert!(
@@ -1419,6 +1449,7 @@ mod tests {
             tracedecay_bin: "/usr/bin/tracedecay".to_string(),
             project_root: Some(project.path().to_path_buf()),
             dashboard: false,
+            serve_args: Default::default(),
         };
 
         let error = OpenCodeIntegration

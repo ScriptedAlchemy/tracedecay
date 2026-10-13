@@ -69,6 +69,7 @@ fn healthcheck_skips_steering_when_legacy_file_is_absent() {
             profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             home: home.path().to_path_buf(),
             project_path: home.path().to_path_buf(),
+            catalog_profiles: Default::default(),
         },
     );
 
@@ -96,6 +97,7 @@ fn global_activate_does_not_create_missing_legacy_steering() {
                 tracedecay_bin: "/bin/tracedecay".to_string(),
                 project_root: None,
                 dashboard: false,
+                serve_args: Default::default(),
             },
         )
         .expect("MCP-only activate must succeed without a steering file");
@@ -314,6 +316,7 @@ fn install_context(home: &Path, tracedecay_bin: &str) -> InstallContext {
         tracedecay_bin: tracedecay_bin.to_string(),
         project_root: None,
         dashboard: false,
+        serve_args: Default::default(),
     }
 }
 
@@ -403,6 +406,7 @@ fn kiro_component_set() -> crate::agents::host_bundle_registry::VerifiedEmbedded
         0,
         "/bin/tracedecay",
         crate::agents::TEST_GENERATOR_COMMIT,
+        &crate::agents::serve_args::ServeArgs::default(),
     )
     .expect("the embedded Kiro component set must verify")
 }
@@ -514,6 +518,7 @@ fn detected_kiro_without_a_tracedecay_server_is_a_single_optional_warning() {
             profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             home: home.path().to_path_buf(),
             project_path: home.path().to_path_buf(),
+            catalog_profiles: Default::default(),
         },
     );
 
@@ -535,6 +540,7 @@ fn malformed_kiro_mcp_config_remains_a_doctor_failure() {
             profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             home: home.path().to_path_buf(),
             project_path: home.path().to_path_buf(),
+            catalog_profiles: Default::default(),
         },
     );
 
@@ -568,6 +574,7 @@ fn an_empty_kiro_mcp_config_is_a_doctor_failure() {
             profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             home: home.path().to_path_buf(),
             project_path: home.path().to_path_buf(),
+            catalog_profiles: Default::default(),
         },
     );
 

@@ -330,6 +330,7 @@ fn explicit_agent_config_commands_skip_startup_maintenance() {
         no_dashboard: false,
         automation: false,
         git_hook: false,
+        catalog_profile: None,
     }));
     assert!(should_skip_startup_maintenance(&Commands::Reinstall {
         local: false,
@@ -549,6 +550,7 @@ fn agent_install_health_check_is_selective() {
         no_dashboard: false,
         automation: false,
         git_hook: false,
+        catalog_profile: None,
     }));
     assert!(should_skip_agent_install_check(&Commands::Reinstall {
         local: false,
@@ -795,4 +797,32 @@ fn serve_selects_a_catalog_profile_by_its_short_name() {
             .contains(r#"unknown catalog profile "profile.compact""#),
         "{error}"
     );
+}
+
+#[test]
+fn every_launch_an_install_writes_parses_as_that_serve_profile() {
+    let catalog =
+        tracedecay_daemon_service::application_surface::application_surface_binding_catalog_ref()
+            .expect("binding catalog");
+    for name in ["default", "compact", "administrative", "host-limited"] {
+        let profile =
+            tracedecay_contracts::catalog_composition::CatalogProfileName::parse(catalog, name)
+                .expect("catalog profile");
+        let written =
+            tracedecay_agent_hosts::agents::serve_args::ServeArgs::from(profile).to_vec(&[]);
+        let cli = Cli::try_parse_from(iter::once("tracedecay".to_owned()).chain(written.clone()))
+            .unwrap_or_else(|error| panic!("{written:?} must parse: {error}"));
+        let Some(Commands::Serve {
+            catalog_profile, ..
+        }) = cli.command
+        else {
+            panic!("{written:?} must be a serve command");
+        };
+        let expected = (name != "default").then_some(name);
+        assert_eq!(
+            catalog_profile.as_ref().map(|profile| profile.name()),
+            expected,
+            "{written:?}"
+        );
+    }
 }
