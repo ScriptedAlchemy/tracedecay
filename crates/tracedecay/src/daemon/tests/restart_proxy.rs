@@ -1092,7 +1092,7 @@ async fn disconnected_client_does_not_outlive_a_daemon_that_never_answers() {
             None,
             &mut transport,
             Some(std::time::Duration::from_millis(250)),
-            super::super::tool_surface::ToolSurface::new(true),
+            super::super::tool_surface::ToolSurface::new(true, None).expect("tool surface"),
             tokio::sync::watch::channel(false).1,
         )
         .await
@@ -1275,7 +1275,7 @@ async fn requests_through_proxy(
             None,
             &mut transport,
             None,
-            super::super::tool_surface::ToolSurface::new(false),
+            super::super::tool_surface::ToolSurface::new(false, None).expect("tool surface"),
             tokio::sync::watch::channel(repeated_query_hints).1,
         )
         .await
