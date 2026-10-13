@@ -14,7 +14,7 @@ use tracedecay_runtime_core::config::ProfileRoot;
 use tracedecay_rusqlite_runtime::remote::RemoteSqliteStorageErrorV1;
 
 use super::http_application::{
-    DaemonHttpApplicationRegistry, live_local_http, remote_status_daemon_unavailable,
+    DaemonHttpApplicationRegistry, live_daemon_unavailable, live_local_http,
 };
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -109,7 +109,7 @@ pub fn live_remote_node_revocation(
         .send_json(RemoteNodeRevocationRequestV1 {
             node_id: node_id.clone(),
         })
-        .map_err(|_| remote_status_daemon_unavailable(profile))?;
+        .map_err(|_| live_daemon_unavailable(profile))?;
     let status = response.status().as_u16();
     if status != 200 {
         let body = response.body_mut().read_to_string().unwrap_or_default();

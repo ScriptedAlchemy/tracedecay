@@ -494,7 +494,7 @@ pub fn live_remote_operational_status(
         .header("Authorization", format!("Bearer {auth_token}"))
         .header("Origin", origin)
         .call()
-        .map_err(|_| remote_status_daemon_unavailable(profile))?;
+        .map_err(|_| live_daemon_unavailable(profile))?;
     if response.status().as_u16() != 200 {
         return Err(TraceDecayError::Config {
             message: format!(
@@ -542,7 +542,7 @@ pub(super) fn live_local_http(
     ))
 }
 
-pub(super) fn remote_status_daemon_unavailable(
+pub(super) fn live_daemon_unavailable(
     profile: &tracedecay_runtime_core::config::ProfileRoot,
 ) -> TraceDecayError {
     match tracedecay_daemon_control::default_socket_path(profile.data_dir()) {
