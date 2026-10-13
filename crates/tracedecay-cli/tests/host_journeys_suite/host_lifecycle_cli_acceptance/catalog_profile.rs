@@ -124,8 +124,6 @@ fn catalog_profile_survives_every_lifecycle_on_every_host() {
     let cli = IsolatedCli::new();
     seed_operator_home(cli.home.path());
     install_fake_native_hosts(&cli.bin_dir);
-    fs::write(cli.project.path().join("lib.rs"), "fn probe() {}\n").unwrap();
-    run_phase(&cli, "project", &["init"], false);
     // Hermes and Pi register no MCP launch, so they have no profile to carry.
     let hosts = RECEIPT_BACKED_HOST_KINDS
         .into_iter()
@@ -147,8 +145,10 @@ fn catalog_profile_survives_every_lifecycle_on_every_host() {
             &["install", "--agent", id, "--catalog-profile", "compact"],
             *id == "kimi",
         );
+        // Kimi waits on the operator's activation step, so this pass writes
+        // no launch for it.
         assert!(
-            flagged_count(&cli) > before,
+            *id == "kimi" || flagged_count(&cli) > before,
             "{id}: switching an installed default to compact wrote no compact launch"
         );
     }
@@ -210,7 +210,7 @@ fn install_rejects_a_catalog_profile_before_writing() {
                 "--catalog-profile",
                 "compact",
             ][..],
-            "cannot be used with '--local'",
+            "'--local' cannot be used with '--catalog-profile",
         ),
         (
             &[

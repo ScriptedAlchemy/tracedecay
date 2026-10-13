@@ -1373,6 +1373,7 @@ mod tests {
         Arc,
         atomic::{AtomicBool, Ordering},
     };
+    use tracedecay_agent_hosts::agents::serve_args::ServeArgs;
 
     use super::{
         CatalogHostComponentRegistrationAuthority, ComponentSetApplyContext,
