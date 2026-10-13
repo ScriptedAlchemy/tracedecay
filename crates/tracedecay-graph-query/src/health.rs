@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::BuildHasher;
 
-use super::queries::GraphQueryManager;
+use super::queries::{GraphQueryManager, VerifiedHealthInputsV1};
 use super::scc::tarjan_scc;
 use tracedecay_domain::errors::Result;
 
@@ -36,6 +36,113 @@ pub struct VerifiedHealthSnapshotV1 {
     pub skip_coverage_count: usize,
 }
 
+impl VerifiedHealthSnapshotV1 {
+    pub fn no_evidence(&self, dimension: HealthDimension) -> Option<NoEvidence> {
+        dimension.no_evidence(dimension.denominator(self), self.files_analyzed as u64)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HealthDimension {
+    Acyclicity,
+    CoverageDiscipline,
+    Depth,
+    Equality,
+    Modularity,
+    Redundancy,
+}
+
+impl HealthDimension {
+    pub const ALL: [Self; 6] = [
+        Self::Acyclicity,
+        Self::CoverageDiscipline,
+        Self::Depth,
+        Self::Equality,
+        Self::Modularity,
+        Self::Redundancy,
+    ];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Acyclicity => "acyclicity",
+            Self::CoverageDiscipline => "coverage_discipline",
+            Self::Depth => "depth",
+            Self::Equality => "equality",
+            Self::Modularity => "modularity",
+            Self::Redundancy => "redundancy",
+        }
+    }
+
+    pub const fn score(self, snapshot: &VerifiedHealthSnapshotV1) -> f64 {
+        match self {
+            Self::Acyclicity => snapshot.acyclicity,
+            Self::CoverageDiscipline => snapshot.coverage_discipline,
+            Self::Depth => snapshot.depth,
+            Self::Equality => snapshot.equality,
+            Self::Modularity => snapshot.modularity,
+            Self::Redundancy => snapshot.redundancy,
+        }
+    }
+
+    pub fn denominator(self, snapshot: &VerifiedHealthSnapshotV1) -> Option<u64> {
+        let count = match self {
+            Self::Acyclicity => snapshot.total_edges,
+            Self::Depth => snapshot.max_chain,
+            Self::Equality => snapshot.complexity_files,
+            Self::Modularity => snapshot.modularity_components,
+            Self::Redundancy | Self::CoverageDiscipline => snapshot.total_fns,
+        } as u64;
+        (count > 0).then_some(count)
+    }
+
+    pub fn no_evidence(self, denominator: Option<u64>, files_analyzed: u64) -> Option<NoEvidence> {
+        if files_analyzed == 0 {
+            return Some(NoEvidence::NoFiles);
+        }
+        match self {
+            Self::Acyclicity => denominator
+                .is_none()
+                .then_some(NoEvidence::NoDependencyEdges),
+            Self::Depth => denominator
+                .is_none()
+                .then_some(NoEvidence::NoDependencyChain),
+            Self::Equality => {
+                (denominator.unwrap_or(0) < 2).then_some(NoEvidence::FewerThanTwoComplexityFiles)
+            }
+            Self::Modularity if files_analyzed < 2 => Some(NoEvidence::FewerThanTwoFiles),
+            Self::Modularity => denominator.is_none().then_some(NoEvidence::NoComponents),
+            Self::Redundancy | Self::CoverageDiscipline => {
+                denominator.is_none().then_some(NoEvidence::NoFunctions)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoEvidence {
+    NoFiles,
+    NoDependencyEdges,
+    NoDependencyChain,
+    FewerThanTwoComplexityFiles,
+    FewerThanTwoFiles,
+    NoComponents,
+    NoFunctions,
+}
+
+impl NoEvidence {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::NoFiles => "0 files in scope",
+            Self::NoDependencyEdges => "no dependency edges",
+            Self::NoDependencyChain => "no dependency chain",
+            Self::FewerThanTwoComplexityFiles => "fewer than 2 files with measured complexity",
+            Self::FewerThanTwoFiles => "fewer than 2 files",
+            Self::NoComponents => "no components after hub removal",
+            Self::NoFunctions => "no functions",
+        }
+    }
+}
+
 #[tracing::instrument(name = "usecases.graph.health_snapshot", level = "trace", skip_all)]
 pub async fn compute_verified_health_snapshot(
     graph: &GraphQueryManager<'_>,
@@ -46,13 +153,17 @@ pub async fn compute_verified_health_snapshot(
         tracing::trace_span!("usecases.graph.health.inputs"),
     )
     .await?;
-    let adjacency = inputs.adjacency;
+    Ok(health_snapshot_from_inputs(&inputs))
+}
+
+pub fn health_snapshot_from_inputs(inputs: &VerifiedHealthInputsV1) -> VerifiedHealthSnapshotV1 {
+    let adjacency = &inputs.adjacency;
     let files_analyzed = adjacency.len();
     let total_edges = adjacency.values().map(HashSet::len).sum();
-    let (acyclicity, edges_in_cycles) = acyclicity_score(&adjacency);
-    let depth_result = dependency_depth(&adjacency, 1);
+    let (acyclicity, edges_in_cycles) = acyclicity_score(adjacency);
+    let depth_result = dependency_depth(adjacency, 1);
     let depth = depth_score(depth_result.max_depth, depth_result.ideal_depth);
-    let aggregates = inputs.aggregates;
+    let aggregates = &inputs.aggregates;
     let complexity_values = aggregates
         .iter()
         .map(|aggregate| aggregate.complexity)
@@ -81,7 +192,7 @@ pub async fn compute_verified_health_snapshot(
     } else {
         (1.0 - dead_count as f64 / total_fns as f64).clamp(0.0, 1.0)
     };
-    let (modularity, modularity_components) = modularity_score(&adjacency);
+    let (modularity, modularity_components) = modularity_score(adjacency);
     let coverage_discipline = if total_fns == 0 {
         1.0
     } else {
@@ -95,7 +206,7 @@ pub async fn compute_verified_health_snapshot(
         modularity,
         coverage_discipline,
     });
-    Ok(VerifiedHealthSnapshotV1 {
+    VerifiedHealthSnapshotV1 {
         quality_signal,
         files_analyzed,
         acyclicity,
@@ -115,7 +226,7 @@ pub async fn compute_verified_health_snapshot(
         dead_count,
         total_fns,
         skip_coverage_count,
-    })
+    }
 }
 
 /// Computes the Gini coefficient for a slice of non-negative values.
@@ -555,18 +666,37 @@ pub struct HealthDimensions {
     pub coverage_discipline: f64,
 }
 
-/// Dimension names, worst score first. Equal scores break ties by name.
-pub fn health_panel(dims: &HealthDimensions) -> Vec<&'static str> {
-    let mut rows = [
-        ("acyclicity", dims.acyclicity),
-        ("coverage_discipline", dims.coverage_discipline),
-        ("depth", dims.depth),
-        ("equality", dims.equality),
-        ("modularity", dims.modularity),
-        ("redundancy", dims.redundancy),
-    ];
-    rows.sort_by(|left, right| left.1.total_cmp(&right.1).then_with(|| left.0.cmp(right.0)));
-    rows.into_iter().map(|(name, _)| name).collect()
+pub fn health_panel(snapshot: &VerifiedHealthSnapshotV1) -> String {
+    if snapshot.files_analyzed == 0 {
+        return format!("no evidence: {}", NoEvidence::NoFiles.label());
+    }
+    let mut measured = Vec::new();
+    let mut unmeasured = Vec::new();
+    for dimension in HealthDimension::ALL {
+        match snapshot.no_evidence(dimension) {
+            None => measured.push(dimension),
+            Some(reason) => unmeasured.push(format!("{} ({})", dimension.name(), reason.label())),
+        }
+    }
+    measured.sort_by(|left, right| {
+        left.score(snapshot)
+            .total_cmp(&right.score(snapshot))
+            .then_with(|| left.name().cmp(right.name()))
+    });
+    let mut sections = Vec::new();
+    if !measured.is_empty() {
+        sections.push(
+            measured
+                .iter()
+                .map(|dimension| dimension.name())
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+    }
+    if !unmeasured.is_empty() {
+        sections.push(format!("no evidence: {}", unmeasured.join(", ")));
+    }
+    sections.join("; ")
 }
 
 /// Computes quality signal (0–10000) from geometric mean of all five dimensions.
@@ -588,29 +718,142 @@ pub fn compute_composite_health(dims: &HealthDimensions) -> u32 {
 
 #[cfg(test)]
 mod panel_tests {
-    use super::{HealthDimensions, health_panel};
+    use std::collections::{HashMap, HashSet};
+
+    use super::{HealthDimension, NoEvidence, health_panel, health_snapshot_from_inputs};
+    use crate::queries::{VerifiedHealthFileAggregateV1, VerifiedHealthInputsV1};
+
+    fn scope(
+        files: &[(&str, &[&str])],
+        aggregates: &[(&str, f64, usize, usize)],
+    ) -> VerifiedHealthInputsV1 {
+        VerifiedHealthInputsV1 {
+            adjacency: files
+                .iter()
+                .map(|(file, targets)| {
+                    (
+                        (*file).to_owned(),
+                        targets.iter().map(|target| (*target).to_owned()).collect(),
+                    )
+                })
+                .collect::<HashMap<_, HashSet<_>>>(),
+            aggregates: aggregates
+                .iter()
+                .map(
+                    |(file, complexity, functions, dead)| VerifiedHealthFileAggregateV1 {
+                        file_path: (*file).to_owned(),
+                        complexity: *complexity,
+                        function_methods: *functions,
+                        dead_function_methods: *dead,
+                        ..VerifiedHealthFileAggregateV1::default()
+                    },
+                )
+                .collect(),
+        }
+    }
 
     #[test]
-    fn the_panel_lists_the_worst_dimension_first() {
-        let dims = HealthDimensions {
-            acyclicity: 0.9,
-            depth: 0.2,
-            equality: 0.8,
-            redundancy: 0.1,
-            modularity: 0.7,
-            coverage_discipline: 1.0,
+    fn each_dimension_needs_its_own_evidence() {
+        use HealthDimension::{
+            Acyclicity, CoverageDiscipline, Depth, Equality, Modularity, Redundancy,
         };
+        use NoEvidence::{
+            FewerThanTwoComplexityFiles, FewerThanTwoFiles, NoComponents, NoDependencyChain,
+            NoDependencyEdges, NoFiles, NoFunctions,
+        };
+
+        for dimension in HealthDimension::ALL {
+            assert_eq!(
+                dimension.no_evidence(Some(5), 0),
+                Some(NoFiles),
+                "{dimension:?}"
+            );
+        }
+        let cases = [
+            (Acyclicity, None, 3, Some(NoDependencyEdges)),
+            (Acyclicity, Some(1), 3, None),
+            (Depth, None, 3, Some(NoDependencyChain)),
+            (Depth, Some(1), 3, None),
+            (Equality, None, 3, Some(FewerThanTwoComplexityFiles)),
+            (Equality, Some(1), 3, Some(FewerThanTwoComplexityFiles)),
+            (Equality, Some(2), 3, None),
+            (Modularity, Some(1), 1, Some(FewerThanTwoFiles)),
+            (Modularity, None, 3, Some(NoComponents)),
+            (Modularity, Some(1), 2, None),
+            (Redundancy, None, 3, Some(NoFunctions)),
+            (Redundancy, Some(1), 3, None),
+            (CoverageDiscipline, None, 3, Some(NoFunctions)),
+            (CoverageDiscipline, Some(1), 3, None),
+        ];
+        for (dimension, denominator, files, expected) in cases {
+            assert_eq!(
+                dimension.no_evidence(denominator, files),
+                expected,
+                "{dimension:?} over denominator {denominator:?} and {files} files"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fully_measured_scope_lists_every_dimension_worst_first() {
+        let snapshot = health_snapshot_from_inputs(&scope(
+            &[("a.rs", &["b.rs"]), ("b.rs", &[]), ("c.rs", &[])],
+            &[("a.rs", 2.0, 2, 1), ("b.rs", 4.0, 2, 0)],
+        ));
+
         assert_eq!(
-            health_panel(&dims),
-            [
-                "redundancy",
-                "depth",
-                "modularity",
-                "equality",
-                "acyclicity",
-                "coverage_discipline",
-            ]
+            health_panel(&snapshot),
+            "modularity, redundancy, equality, acyclicity, coverage_discipline, depth"
         );
+    }
+
+    #[test]
+    fn heterogeneous_scopes_name_each_dimension_without_evidence() {
+        let cases: [(&str, VerifiedHealthInputsV1, &str); 5] = [
+            (
+                "functions without edges",
+                scope(
+                    &[("a.rs", &[]), ("b.rs", &[])],
+                    &[("a.rs", 1.0, 1, 0), ("b.rs", 1.0, 1, 0)],
+                ),
+                "modularity, coverage_discipline, equality, redundancy; no evidence: acyclicity (no dependency edges), depth (no dependency chain)",
+            ),
+            (
+                "edges without functions",
+                scope(&[("a.rs", &["b.rs"]), ("b.rs", &[]), ("c.rs", &[])], &[]),
+                "modularity, acyclicity, depth; no evidence: coverage_discipline (no functions), equality (fewer than 2 files with measured complexity), redundancy (no functions)",
+            ),
+            (
+                "a cycle without a chain",
+                scope(&[("a.rs", &["b.rs"]), ("b.rs", &["a.rs"])], &[]),
+                "acyclicity, modularity; no evidence: coverage_discipline (no functions), depth (no dependency chain), equality (fewer than 2 files with measured complexity), redundancy (no functions)",
+            ),
+            (
+                "one file without functions",
+                scope(&[("a.rs", &[])], &[]),
+                "no evidence: acyclicity (no dependency edges), coverage_discipline (no functions), depth (no dependency chain), equality (fewer than 2 files with measured complexity), modularity (fewer than 2 files), redundancy (no functions)",
+            ),
+            ("no files", scope(&[], &[]), "no evidence: 0 files in scope"),
+        ];
+        for (name, inputs, panel) in cases {
+            assert_eq!(
+                health_panel(&health_snapshot_from_inputs(&inputs)),
+                panel,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn dimensions_without_evidence_still_enter_the_signal_at_their_formula_value() {
+        let edges_without_functions = health_snapshot_from_inputs(&scope(
+            &[("a.rs", &["b.rs"]), ("b.rs", &[]), ("c.rs", &[])],
+            &[],
+        ));
+        let empty = health_snapshot_from_inputs(&scope(&[], &[]));
+
+        assert_eq!(edges_without_functions.quality_signal, 8706);
+        assert_eq!(empty.quality_signal, 10_000);
     }
 }
 

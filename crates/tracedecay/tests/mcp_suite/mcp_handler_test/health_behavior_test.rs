@@ -3,9 +3,11 @@
 //! Two isolated modules have no dependency edges, matching complexity, no dead
 //! functions, and no `skip-test-coverage` annotations. Modularity is then
 //! `1 - 1/components` = 1/2 and the other four dimensions are 1, so the
-//! composite is `(1/2)^(1/5) * 10000` = 8706. One file is a single component
-//! (modularity 0, composite 0). A path that matches no file is the empty
-//! graph, whose composite is 10000.
+//! composite is `(1/2)^(1/5) * 10000` = 8706. Acyclicity and depth score 1
+//! without any edge to measure, so the panel lists them under no evidence.
+//! One file is a single component (modularity 0, composite 0) and measures
+//! only its functions. A path that matches no file is the empty graph, whose
+//! composite is 10000 and whose panel names no measured dimension.
 
 #![cfg(feature = "test-transport")]
 
@@ -74,7 +76,7 @@ async fn health_scores_two_isolated_modules_and_distinguishes_scope() {
     let summary = call_health(&fixture, json!({})).await;
     assert_eq!(
         extract_text(&summary.value),
-        "freshness: fresh\n**files_analyzed:** 2\n**panel:** modularity, acyclicity, coverage_discipline, depth, equality, redundancy\n**quality_signal:** 8706\n"
+        "freshness: fresh\n**files_analyzed:** 2\n**panel:** modularity, coverage_discipline, equality, redundancy; no evidence: acyclicity (no dependency edges), depth (no dependency chain)\n**quality_signal:** 8706\n"
     );
 
     let summary_json = call_health(&fixture, json!({"format": "json"})).await;
@@ -84,7 +86,7 @@ async fn health_scores_two_isolated_modules_and_distinguishes_scope() {
             "freshness": {"state": "fresh"},
             "quality_signal": 8706,
             "files_analyzed": 2,
-            "panel": "modularity, acyclicity, coverage_discipline, depth, equality, redundancy",
+            "panel": "modularity, coverage_discipline, equality, redundancy; no evidence: acyclicity (no dependency edges), depth (no dependency chain)",
         })
     );
 
@@ -139,12 +141,28 @@ async fn health_scores_two_isolated_modules_and_distinguishes_scope() {
     assert_eq!(one_file["quality_signal"], json!(0));
     assert_eq!(one_file["files_analyzed"], json!(1));
     assert_eq!(
+        one_file["panel"],
+        json!(
+            "coverage_discipline, redundancy; no evidence: acyclicity (no dependency edges), depth (no dependency chain), equality (fewer than 2 files with measured complexity), modularity (fewer than 2 files)"
+        )
+    );
+    assert_eq!(
+        one_file["weights"]["note"],
+        json!(
+            "quality_signal is a breakdown of panel, worst dimension first. Do not maximize it. Dimensions under \"no evidence\" enter quality_signal at their vacuous formula value, so quality_signal does not summarize such a scope."
+        )
+    );
+    assert_eq!(
         dimension_without_formula(&one_file, "modularity"),
         json!({
             "score": 0.0,
-            "interpretation": "low",
+            "interpretation": "no evidence: fewer than 2 files",
             "components_after_hub_removal": 1,
         })
+    );
+    assert_eq!(
+        one_file["dimensions"]["equality"]["interpretation"],
+        json!("no evidence: fewer than 2 files with measured complexity")
     );
     assert_eq!(
         dimension_without_formula(&one_file, "depth"),
@@ -167,11 +185,12 @@ async fn health_scores_two_isolated_modules_and_distinguishes_scope() {
     let missing = extract_json(&missing.value);
     assert_eq!(missing["quality_signal"], json!(10000));
     assert_eq!(missing["files_analyzed"], json!(0));
+    assert_eq!(missing["panel"], json!("no evidence: 0 files in scope"));
     assert_eq!(
         dimension_without_formula(&missing, "modularity"),
         json!({
             "score": 1.0,
-            "interpretation": "high",
+            "interpretation": "no evidence: 0 files in scope",
             "components_after_hub_removal": 0,
         })
     );

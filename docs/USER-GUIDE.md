@@ -980,7 +980,7 @@ When running as an MCP server, tracedecay exposes typed operations that AI agent
 
 | Tool | What it does |
 |------|-------------|
-| `tracedecay_health` | Composite quality signal (0–10000) from five structural dimensions (acyclicity, depth, equality, redundancy, modularity) with a low-weight penalty for `/// skip-test-coverage` overuse. The single number to track over time. |
+| `tracedecay_health` | Health panel: the measured dimensions (acyclicity, depth, equality, redundancy, modularity, coverage_discipline), worst first, then the dimensions the scope gave nothing to measure under `no evidence:` with the reason. `quality_signal` (0–10000) is the geometric mean of the five structural dimensions with a low-weight penalty for `/// skip-test-coverage` overuse. Dimensions without evidence enter it at their formula value, so an empty scope reads 10000 and one file reads 0; read `panel` before the number. |
 | `tracedecay_gini` | Gini inequality coefficient for any metric (complexity, lines, fan-in, fan-out, members). Finds god files and uneven distributions. |
 | `tracedecay_dependency_depth` | Longest file-level dependency chains, the critical paths where upstream changes ripple through the most layers. |
 | `tracedecay_dsm` | Design Structure Matrix showing file dependencies as clusters, density stats, or an NxN grid. Reveals hidden coupling patterns. |

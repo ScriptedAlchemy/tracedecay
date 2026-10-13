@@ -376,7 +376,7 @@ pub(super) const HANDWRITTEN_TOOLS: &[HandwrittenTool] = &[
     read(
         "tracedecay_health",
         "Health Score",
-        "Health panel, worst dimension first in `panel`. Fix the lowest-scoring dimension. quality_signal is the geometric mean of acyclicity, depth, equality, redundancy, and modularity (0-10000), reduced by up to 2% for skip-test-coverage overuse. It is a breakdown, not a target. A zero in one dimension zeroes it. Pass details=true for the per-dimension scores.",
+        "Health panel, worst measured dimension first in `panel`. Fix the lowest-scoring dimension it measured. `panel` then lists `no evidence:` dimensions with the reason, such as no dependency edges or fewer than 2 files; their scores measure nothing in this scope. quality_signal is the geometric mean of acyclicity, depth, equality, redundancy, and modularity (0-10000), reduced by up to 2% for skip-test-coverage overuse. It is a breakdown, not a target. A zero in one dimension zeroes it. No-evidence dimensions enter it at their formula value, so an empty scope reads 10000 and one file reads 0. Pass details=true for the per-dimension scores.",
     ),
     read(
         "tracedecay_runtime",
