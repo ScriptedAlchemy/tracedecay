@@ -5,7 +5,8 @@
 //! capture path, and depends on remaining usecases for those edges.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 
 use tracedecay_domain::{
     CanonicalObservationIdV1, FactOwnerV1, ObservationOrderingDomainV1, ObservationScopeV1,
@@ -66,20 +67,22 @@ pub struct HostAdmissionBroker {
     /// Admissions awaiting the next group commit: whichever admission holds
     /// the runtime next appends every queued item as one durable batch.
     appends: Arc<Mutex<Vec<QueuedAppend>>>,
-    replay: tokio::sync::Mutex<()>,
-    /// Coalesced wake for daemon-owned profile/project replay workers.
-    replay_wake: tokio::sync::Notify,
+    replay: futures_util::lock::Mutex<()>,
+    /// Coalesced wake for daemon-owned profile/project replay workers: at most
+    /// one request is pending however many admissions raise it.
+    replay_requested: AtomicBool,
+    replay_wake: asupersync::sync::Notify,
 }
 
 struct QueuedAppend {
     source: String,
     payload: Vec<u8>,
-    admitted: tokio::sync::oneshot::Sender<Result<DurableHostAdmission, HostAdmissionOutcome>>,
+    admitted: mpsc::Sender<Result<DurableHostAdmission, HostAdmissionOutcome>>,
 }
 
 pub struct HostAdmissionReplay<'a> {
     broker: &'a HostAdmissionBroker,
-    _guard: tokio::sync::MutexGuard<'a, ()>,
+    _guard: futures_util::lock::MutexGuard<'a, ()>,
 }
 
 fn spool_runtime_unavailable() -> HostAdmissionOutcome {
@@ -108,8 +111,9 @@ impl HostAdmissionBroker {
         Self {
             runtime: Arc::new(Mutex::new(runtime)),
             appends: Arc::new(Mutex::new(Vec::new())),
-            replay: tokio::sync::Mutex::new(()),
-            replay_wake: tokio::sync::Notify::new(),
+            replay: futures_util::lock::Mutex::new(()),
+            replay_requested: AtomicBool::new(false),
+            replay_wake: asupersync::sync::Notify::new(),
         }
     }
 
@@ -120,12 +124,16 @@ impl HostAdmissionBroker {
         F: FnOnce(&mut HostAdmissionRuntime) -> Result<T, HostAdmissionOutcome> + Send + 'static,
     {
         let runtime = Arc::clone(&self.runtime);
-        tokio::task::spawn_blocking(move || {
-            let mut runtime = runtime.lock().map_err(|_| spool_runtime_unavailable())?;
-            operation(&mut runtime)
-        })
-        .await
-        .unwrap_or_else(|_| Err(spool_runtime_unavailable()))
+        let mut task = tracedecay_runtime_core::native_runtime::cx()
+            .ok_or_else(spool_runtime_unavailable)?
+            .spawn_blocking(move |_cx| {
+                let mut runtime = runtime.lock().map_err(|_| spool_runtime_unavailable())?;
+                operation(&mut runtime)
+            })
+            .map_err(|_| spool_runtime_unavailable())?;
+        std::future::poll_fn(|context| task.poll_join(context))
+            .await
+            .unwrap_or_else(|_| Err(spool_runtime_unavailable()))
     }
 
     /// Durably admit one record, group-committed with every concurrent
@@ -136,7 +144,7 @@ impl HostAdmissionBroker {
         source: &str,
         payload: &[u8],
     ) -> Result<DurableHostAdmission, HostAdmissionOutcome> {
-        let (admitted, durable) = tokio::sync::oneshot::channel();
+        let (admitted, durable) = mpsc::channel();
         self.appends
             .lock()
             .map_err(|_| spool_runtime_unavailable())?
@@ -155,20 +163,25 @@ impl HostAdmissionBroker {
         .await?;
         // This admission was queued before its own runtime turn, so that turn
         // or an earlier one already answered it.
-        let admitted = durable.await.map_err(|_| spool_runtime_unavailable())??;
+        let admitted = durable
+            .try_recv()
+            .map_err(|_| spool_runtime_unavailable())??;
         self.request_replay();
         Ok(admitted)
     }
 
     /// Wake any coalesced replay worker without holding client permits.
     pub fn request_replay(&self) {
-        // notify_one retains one permit when the worker has not subscribed yet,
-        // closing the broker-creation/admission lost-wake window.
-        self.replay_wake.notify_one();
+        // The flag outlives a worker that has not subscribed yet, closing the
+        // broker-creation/admission lost-wake window.
+        self.replay_requested.store(true, Ordering::Release);
+        self.replay_wake.notify_waiters();
     }
 
     pub async fn wait_for_replay_request(&self) {
-        self.replay_wake.notified().await;
+        self.replay_wake
+            .wait_until(|| self.replay_requested.swap(false, Ordering::AcqRel))
+            .await;
     }
 
     pub async fn pending_replay_count(&self) -> Result<usize, HostAdmissionOutcome> {
