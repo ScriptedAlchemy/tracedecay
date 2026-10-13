@@ -8,6 +8,7 @@ use tracedecay_contracts::remote::recovery::{
     RemoteRecoveryControlPortV1, RemoteRecoveryInterruptionV1,
 };
 use tracedecay_domain::{ProjectId, RemoteWriterFenceV1, canonical_sha256};
+use tracedecay_rusqlite_runtime::native_runtime;
 use tracedecay_rusqlite_runtime::remote::{
     RemoteRecoveryPhysicalCommitV1, RemoteRecoveryPhysicalEffectErrorV1,
     RemoteRecoveryPhysicalEffectsV1, RemoteSqliteStorageErrorV1, RemoteSqliteStorageV1,
@@ -33,7 +34,6 @@ pub(super) struct DaemonRemoteRecoveryPhysicalEffectsV1 {
     storage: RemoteSqliteStorageV1,
     replay: Arc<crate::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1>,
     project_lifecycle: Arc<OnceLock<Arc<dyn super::RemoteRecoveryProjectLifecycle>>>,
-    runtime: tokio::runtime::Handle,
 }
 
 impl DaemonRemoteRecoveryPhysicalEffectsV1 {
@@ -41,13 +41,11 @@ impl DaemonRemoteRecoveryPhysicalEffectsV1 {
         storage: RemoteSqliteStorageV1,
         replay: Arc<crate::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1>,
         project_lifecycle: Arc<OnceLock<Arc<dyn super::RemoteRecoveryProjectLifecycle>>>,
-        runtime: tokio::runtime::Handle,
     ) -> Self {
         Self {
             storage,
             replay,
             project_lifecycle,
-            runtime,
         }
     }
 
@@ -89,10 +87,10 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
             .target_project_id()
             .cloned()
             .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
-        let _recovery_admission = self
-            .runtime
-            .block_on(self.authorize_project_recovery(&project_id))
-            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Unavailable)?;
+        let _recovery_admission =
+            native_runtime::block_on(self.authorize_project_recovery(&project_id))
+                .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Unavailable)?
+                .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Unavailable)?;
         let authority_key = authority_key(expected)?;
         match self
             .replay
@@ -146,10 +144,10 @@ impl RemoteRecoveryPhysicalEffectsV1 for DaemonRemoteRecoveryPhysicalEffectsV1 {
             .target_project_id()
             .cloned()
             .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Corruption)?;
-        let _recovery_admission = self
-            .runtime
-            .block_on(self.authorize_project_recovery(&project_id))
-            .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Unavailable)?;
+        let _recovery_admission =
+            native_runtime::block_on(self.authorize_project_recovery(&project_id))
+                .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Unavailable)?
+                .map_err(|_| RemoteRecoveryPhysicalEffectErrorV1::Unavailable)?;
         let expected_sinks = self.required_promotion_sink_ids(expected)?;
         if expected_sinks != required_sink_ids {
             return Err(RemoteRecoveryPhysicalEffectErrorV1::Corruption);

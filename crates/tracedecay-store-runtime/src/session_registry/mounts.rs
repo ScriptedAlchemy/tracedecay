@@ -164,12 +164,10 @@ impl DaemonSessionRuntimeRegistryV1 {
             identity.profile_id().clone(),
         ));
         let remote_replay_transaction = Arc::new(
-            crate::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1::new(
-                tokio::runtime::Handle::current(),
-            )
-            .map_err(|error| {
-                session_registry_error("start remote replay transaction authority", error)
-            })?,
+            crate::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1::new()
+                .map_err(|error| {
+                    session_registry_error("start remote replay transaction authority", error)
+                })?,
         );
         // The kernel's registry initialises profile- and session-scoped shards
         // through a fail-closed port, because the registered schema lives in
@@ -1062,7 +1060,6 @@ impl DaemonSessionRuntimeRegistryV1 {
                 storage.clone(),
                 Arc::clone(&self.remote_replay_transaction),
                 self.remote_recovery_project_lifecycle(),
-                tokio::runtime::Handle::current(),
             ));
             let recovery = database.remote_recovery_authority(effects)?;
             let recovery = Arc::new(recovery);
