@@ -56,6 +56,31 @@ pub fn block_on<F: Future>(future: F) -> Result<F::Output, String> {
     Ok(started_process_runtime()?.block_on(future))
 }
 
+/// Runs `work` on the runtime's blocking pool and awaits its result.
+///
+/// The work is owned by the runtime, not by the caller's region: cancelling or
+/// dropping the caller abandons only the wait. Work spawned through a request
+/// `Cx` can instead be cancelled with that region before it starts, which
+/// would strand anything the caller had already queued for it.
+pub async fn spawn_blocking<T, F>(work: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let runtime = handle().ok_or("native execution runtime unavailable")?;
+    let cx = cx().ok_or("native execution context unavailable")?;
+    let (sender, mut receiver) = asupersync::channel::oneshot::channel();
+    runtime
+        .spawn_blocking(move || {
+            let _ = sender.send_blocking(work());
+        })
+        .ok_or("native blocking pool unavailable")?;
+    receiver
+        .recv(&cx)
+        .await
+        .map_err(|error| format!("native blocking work ended without a result: {error}"))
+}
+
 fn started_process_runtime() -> Result<&'static Runtime, String> {
     PROCESS_RUNTIME
         .get_or_init(|| {
@@ -97,6 +122,62 @@ mod tests {
         assert!(on_native_worker, "settlement must run on a native worker");
         let mut blocking = cx.spawn_blocking(|_| 7).expect("native blocking task");
         assert_eq!(blocking.join(&cx).await.expect("native blocking join"), 7);
+    }
+
+    #[test]
+    fn blocking_work_outlives_a_cancelled_caller_region() {
+        use std::future::poll_fn;
+        use std::pin::pin;
+        use std::task::Poll;
+
+        let runtime = RuntimeBuilder::current_thread()
+            .blocking_threads(1, 1)
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("block_on context");
+            let (release, held) = std::sync::mpsc::channel::<()>();
+            Runtime::current_handle()
+                .expect("test runtime handle")
+                .spawn_blocking(move || {
+                    let _ = held.recv();
+                })
+                .expect("pool blocker");
+            let (ran, settled) = std::sync::mpsc::channel::<()>();
+            let (queued, mut entered) = asupersync::channel::oneshot::channel::<()>();
+            let region = cx
+                .open_child_region(asupersync::cx::child_region::ChildRegionSpec::inherit())
+                .await
+                .expect("caller region");
+            let mut caller = region
+                .cx()
+                .spawn(move |_| async move {
+                    let mut pending = pin!(spawn_blocking(move || {
+                        let _ = ran.send(());
+                    }));
+                    poll_fn(|context| {
+                        assert!(pending.as_mut().poll(context).is_pending());
+                        Poll::Ready(())
+                    })
+                    .await;
+                    let _ = queued.send_blocking(());
+                    pending.await
+                })
+                .expect("caller task");
+            entered
+                .recv(&cx)
+                .await
+                .expect("work queued behind the blocker");
+            region
+                .cancel(asupersync::types::CancelReason::user("caller cancelled"))
+                .expect("cancel caller region");
+            let _ = caller.join(&cx).await;
+            region.close().await.expect("close caller region");
+            release.send(()).expect("release blocker");
+            settled
+                .recv_timeout(Duration::from_secs(5))
+                .expect("queued work must still run after its caller's region is cancelled");
+        });
     }
 
     #[test]

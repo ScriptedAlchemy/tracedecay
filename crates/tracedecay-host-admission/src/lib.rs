@@ -124,16 +124,12 @@ impl HostAdmissionBroker {
         F: FnOnce(&mut HostAdmissionRuntime) -> Result<T, HostAdmissionOutcome> + Send + 'static,
     {
         let runtime = Arc::clone(&self.runtime);
-        let mut task = tracedecay_runtime_core::native_runtime::cx()
-            .ok_or_else(spool_runtime_unavailable)?
-            .spawn_blocking(move |_cx| {
-                let mut runtime = runtime.lock().map_err(|_| spool_runtime_unavailable())?;
-                operation(&mut runtime)
-            })
-            .map_err(|_| spool_runtime_unavailable())?;
-        std::future::poll_fn(|context| task.poll_join(context))
-            .await
-            .unwrap_or_else(|_| Err(spool_runtime_unavailable()))
+        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+            let mut runtime = runtime.lock().map_err(|_| spool_runtime_unavailable())?;
+            operation(&mut runtime)
+        })
+        .await
+        .unwrap_or_else(|_| Err(spool_runtime_unavailable()))
     }
 
     /// Durably admit one record, group-committed with every concurrent
