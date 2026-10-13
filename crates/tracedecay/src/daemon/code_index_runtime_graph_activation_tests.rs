@@ -2002,13 +2002,32 @@ async fn first_index_serves_graph_reads_without_decoding_the_generation() {
 async fn admitted_graph_read_retains_only_the_catalog_it_requires() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
     let store = TempDir::new().expect("store root");
+    let owners = Arc::new(ResidentOwnersV1::new(RESIDENT_OWNER_IDLE_WINDOW_V1));
     let mount = PersistentGraphMountV1::mount(
-        CodeIndexSchedulerRegistryV1::new(1),
+        CodeIndexSchedulerRegistryV1::new(1).with_resident_owners(Arc::clone(&owners)),
         &fixture,
         &store,
         "graph read catalog retention",
     )
     .await;
+    // A read after the publisher's park re-warms the engine on a background
+    // thread that briefly holds the catalog after the read is served, and
+    // the releases below would race it. Restore both here instead.
+    initial_publisher_parks_and_releases_its_graph(&mount, &fixture, &owners).await;
+    let serving = mount
+        .registry
+        .retained_text_owner_for_root(fixture.path())
+        .await
+        .expect("text owner")
+        .interactive_graph_store()
+        .expect("serving graph store");
+    serving.warm_serving_engine().expect("restore the engine");
+    serving
+        .warm_interactive_catalog_with_cancellation(
+            None,
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("restore the catalog");
     let context = graph_request_context(mount.scope.clone(), "catalog-retention");
     let port = project_code_graph_projection_read_port(
         mount.registry.clone(),
