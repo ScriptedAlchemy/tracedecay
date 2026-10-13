@@ -50,6 +50,44 @@ pub(super) fn bind_node_identity(
     Ok(())
 }
 
+/// Moves writer-authority rows to the runtime attaching this store. Each
+/// daemon generation attaches under a new incarnation and authority epoch, so
+/// rows the previous generation bound to this same shard adopt the current
+/// binding. A row bound to any other shard is refused, never rewritten.
+pub(super) fn adopt_runtime_binding(
+    handle: &ExactSqlHandle,
+    binding: &StoreRuntimeBindingV1,
+) -> Result<(), RemoteSqliteStorageErrorV1> {
+    let current =
+        serde_json::to_string(binding).map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
+    let rows = handle.query(
+        ExactSqlStatement::new(
+            "SELECT runtime_binding_json FROM remote_authorities
+             WHERE runtime_binding_json != ?1"
+                .to_owned(),
+            vec![text(&current)],
+        )?,
+        READ_WAIT,
+    )?;
+    if rows.rows.is_empty() {
+        return Ok(());
+    }
+    for row in &rows.rows {
+        let stored: StoreRuntimeBindingV1 = serde_json::from_str(identity_text(row, 0)?)
+            .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
+        if stored.shard_id != binding.shard_id {
+            return Err(RemoteSqliteStorageErrorV1::BindingMismatch);
+        }
+    }
+    handle.execute(ExactSqlStatement::new(
+        "UPDATE remote_authorities SET runtime_binding_json = ?1
+         WHERE runtime_binding_json != ?1"
+            .to_owned(),
+        vec![text(&current)],
+    )?)?;
+    Ok(())
+}
+
 pub(super) fn provision_node_identity(
     handle: &ExactSqlHandle,
     binding: &StoreRuntimeBindingV1,
