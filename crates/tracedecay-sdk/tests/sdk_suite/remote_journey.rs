@@ -1,6 +1,3 @@
-//! Remote Brain journeys driven against spawned production daemons over
-//! loopback TLS, observed only through their public HTTP surfaces.
-
 use std::fs;
 use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt;
@@ -37,8 +34,6 @@ use crate::{production_binary, run};
 const GRANT_CREDENTIAL: [u8; 32] = *b"0123456789abcdef0123456789abcdef";
 const ENROLLMENT_CREDENTIAL: [u8; 32] = *b"fedcba9876543210fedcba9876543210";
 
-/// One spawned daemon serving an initialized project, its loopback operator
-/// surface, and its Remote Brain TLS listener.
 struct RemoteDaemonFixture {
     daemon: Daemon,
     project_id: String,
@@ -143,7 +138,6 @@ impl RemoteDaemonFixture {
         (status, response.text().unwrap())
     }
 
-    /// The authority `/remote-status` reports for this daemon's Brain.
     fn status_authority(&self) -> Value {
         let status: Value = reqwest::blocking::Client::new()
             .get(format!("{}/remote-status", self.local_base))
@@ -193,9 +187,7 @@ impl RemoteDaemonFixture {
     }
 }
 
-/// Authority truth without the instant an unavailable state was observed:
-/// two reads of the same unavailable authority differ only in that instant.
-fn authority_truth(mut authority: Value) -> Value {
+fn authority_without_observed_at(mut authority: Value) -> Value {
     if authority["state"] != "available" {
         authority["value"]
             .as_object_mut()
@@ -355,10 +347,10 @@ fn protocol_envelopes_report_the_status_authority_through_publication_and_failov
         "{unpublished}"
     );
     assert_eq!(
-        authority_truth(capture_authority(
+        authority_without_observed_at(capture_authority(
             "request.remote-journey-capture-unpublished"
         )),
-        authority_truth(unpublished.clone()),
+        authority_without_observed_at(unpublished.clone()),
         "capture before publication reports the status authority"
     );
     let refused_failover = node
@@ -366,8 +358,8 @@ fn protocol_envelopes_report_the_status_authority_through_publication_and_failov
         .unwrap();
     assert!(refused_failover.result.is_err());
     assert_eq!(
-        authority_truth(serde_json::to_value(&refused_failover.authority).unwrap()),
-        authority_truth(unpublished),
+        authority_without_observed_at(serde_json::to_value(&refused_failover.authority).unwrap()),
+        authority_without_observed_at(unpublished),
         "failover before publication reports the status authority"
     );
 
