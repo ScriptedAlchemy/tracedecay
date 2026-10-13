@@ -62,15 +62,20 @@ impl RemoteCredentialUseV1 {
         }
     }
 
-    pub const fn required_capability(self) -> Option<RemoteCapabilityV1> {
+    /// A promoted node becomes the authority, so promotion also requires the
+    /// capability to serve as one.
+    pub const fn required_capabilities(self) -> &'static [RemoteCapabilityV1] {
         match self {
-            Self::InitialEnrollment => None,
-            Self::CaptureOffline => Some(RemoteCapabilityV1::CaptureOffline),
-            Self::TransferFrame => Some(RemoteCapabilityV1::TransferFrame),
-            Self::Replay => Some(RemoteCapabilityV1::Replay),
-            Self::Query => Some(RemoteCapabilityV1::Query),
-            Self::Promote => Some(RemoteCapabilityV1::Promote),
-            Self::DiscoverAuthority => Some(RemoteCapabilityV1::DiscoverAuthority),
+            Self::InitialEnrollment => &[],
+            Self::CaptureOffline => &[RemoteCapabilityV1::CaptureOffline],
+            Self::TransferFrame => &[RemoteCapabilityV1::TransferFrame],
+            Self::Replay => &[RemoteCapabilityV1::Replay],
+            Self::Query => &[RemoteCapabilityV1::Query],
+            Self::Promote => &[
+                RemoteCapabilityV1::Promote,
+                RemoteCapabilityV1::ServeAuthority,
+            ],
+            Self::DiscoverAuthority => &[RemoteCapabilityV1::DiscoverAuthority],
         }
     }
 }
@@ -602,9 +607,10 @@ where
             return Err(RemoteCredentialAdmissionErrorV1::Rejected);
         }
         validate_state(&record, observed_at)?;
-        if use_case
-            .required_capability()
-            .is_some_and(|capability| !record.capabilities().contains(&capability))
+        if !use_case
+            .required_capabilities()
+            .iter()
+            .all(|capability| record.capabilities().contains(capability))
         {
             return Err(RemoteCredentialAdmissionErrorV1::InsufficientCapability);
         }
@@ -741,7 +747,10 @@ mod tests {
         }
     }
 
-    fn enrollment(secret: &[u8]) -> EnrollmentCredentialRecordV1 {
+    fn enrollment(
+        secret: &[u8],
+        capabilities: BTreeSet<RemoteCapabilityV1>,
+    ) -> EnrollmentCredentialRecordV1 {
         EnrollmentCredentialRecordV1 {
             enrollment_id: id::<EntityId>("enrollment.remote"),
             brain_id: id::<BrainId>("brain.remote"),
@@ -751,17 +760,27 @@ mod tests {
             issued_at: UtcMicros(10),
             expires_at: UtcMicros(100),
             revoked_at: None,
-            capabilities: BTreeSet::from([
-                RemoteCapabilityV1::Replay,
-                RemoteCapabilityV1::Query,
-                RemoteCapabilityV1::TransferFrame,
-            ]),
+            capabilities,
             scope: scope(),
         }
     }
 
     fn fake_record(secret: &[u8]) -> RemoteCredentialAuthorityRecordV1 {
-        let enrollment = enrollment(secret);
+        fake_record_with(
+            secret,
+            BTreeSet::from([
+                RemoteCapabilityV1::Replay,
+                RemoteCapabilityV1::Query,
+                RemoteCapabilityV1::TransferFrame,
+            ]),
+        )
+    }
+
+    fn fake_record_with(
+        secret: &[u8],
+        capabilities: BTreeSet<RemoteCapabilityV1>,
+    ) -> RemoteCredentialAuthorityRecordV1 {
+        let enrollment = enrollment(secret, capabilities);
         let grant = EnrollmentGrantV1 {
             grant_id: id("grant.remote"),
             brain_id: enrollment.brain_id.clone(),
@@ -997,6 +1016,33 @@ mod tests {
         assert_eq!(
             service.reauthorize_publication(&session, UtcMicros(21)),
             Err(RemoteCredentialAdmissionErrorV1::Revoked)
+        );
+    }
+
+    #[test]
+    fn promotion_requires_the_capability_to_serve_as_the_promoted_authority() {
+        let secret = [7_u8; 32];
+        let presented = OpaqueRemoteCredential::new(secret).unwrap();
+        let admit = |capabilities: &[RemoteCapabilityV1]| {
+            let record = fake_record_with(&secret, capabilities.iter().copied().collect());
+            RemoteCredentialAdmissionServiceV1::new(FakeStore {
+                records: Mutex::new(BTreeMap::from([(record.fingerprint().clone(), record)])),
+            })
+            .admit_before_body(&presented, RemoteCredentialUseV1::Promote, UtcMicros(20))
+            .map(|session| session.use_case)
+        };
+
+        assert_eq!(
+            admit(&[RemoteCapabilityV1::Promote]),
+            Err(RemoteCredentialAdmissionErrorV1::InsufficientCapability),
+            "a node that cannot serve authority must not be promoted to it"
+        );
+        assert_eq!(
+            admit(&[
+                RemoteCapabilityV1::Promote,
+                RemoteCapabilityV1::ServeAuthority
+            ]),
+            Ok(RemoteCredentialUseV1::Promote)
         );
     }
 }
