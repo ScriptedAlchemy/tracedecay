@@ -122,22 +122,23 @@ fn render_revocation_human(
     node_id: &BrainNodeId,
     revocation: &tracedecay::daemon::RemoteNodeRevocationV1,
 ) -> String {
-    if revocation.revocations.is_empty() {
-        return format!("Node {node_id} holds no enrollments\n");
+    if revocation.revocations.is_empty() && revocation.revoked_grants.is_empty() {
+        return format!("Node {node_id} holds no enrollments or unredeemed grants\n");
     }
-    revocation
-        .revocations
+    let enrollments = revocation.revocations.iter().map(|receipt| {
+        format!(
+            "Revoked enrollment {} on node {} (revision {} -> {})\n",
+            receipt.enrollment_id,
+            receipt.node_id,
+            receipt.prior_revision,
+            receipt.current_revision
+        )
+    });
+    let grants = revocation
+        .revoked_grants
         .iter()
-        .map(|receipt| {
-            format!(
-                "Revoked enrollment {} on node {} (revision {} -> {})\n",
-                receipt.enrollment_id,
-                receipt.node_id,
-                receipt.prior_revision,
-                receipt.current_revision
-            )
-        })
-        .collect()
+        .map(|grant_id| format!("Revoked unredeemed grant {grant_id} for node {node_id}\n"));
+    grants.chain(enrollments).collect()
 }
 
 #[tracing::instrument(name = "serve.remote.status", level = "trace", skip_all)]

@@ -2311,13 +2311,17 @@ mod tests {
 
         let unrelated_path = temp.path().join("unrelated.db");
         std::fs::File::create(&unrelated_path).unwrap();
-        tokio::time::timeout(
-            Duration::from_secs(1),
-            administration.host_admission_broker_for_path(&unrelated_path),
-        )
-        .await
-        .expect("typed bootstrap terminal must not block unrelated broker opens")
-        .unwrap();
+        // An unrelated first open takes only the broker map and the first-open
+        // gate; its own spool fsyncs are real IO with no latency contract.
+        assert!(
+            administration.host_admission_brokers.try_lock().is_ok()
+                && administration.host_admission_broker_gate.try_lock().is_ok(),
+            "typed bootstrap terminal must not block unrelated broker opens"
+        );
+        administration
+            .host_admission_broker_for_path(&unrelated_path)
+            .await
+            .unwrap();
         administration.shutdown_host_admission_replay().await;
     }
 

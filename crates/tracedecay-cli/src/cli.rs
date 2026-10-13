@@ -819,8 +819,9 @@ pub enum RemoteAction {
         #[command(flatten)]
         authority: RemoteAuthorityArgs,
     },
-    /// Revoke every enrollment of a node this daemon provisioned, such as a
-    /// lost machine; its capture, transfer and replay are refused afterward
+    /// Revoke every enrollment and unredeemed grant of a node this daemon
+    /// provisioned, such as a lost machine; its enrollment, capture, transfer
+    /// and replay are refused afterward
     Revoke {
         /// Node identity the node was provisioned with
         #[arg(long, value_name = "NODE")]

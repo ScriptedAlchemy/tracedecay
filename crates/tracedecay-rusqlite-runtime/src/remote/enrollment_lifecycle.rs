@@ -40,6 +40,55 @@ impl RemoteSqliteStorageV1 {
             .collect()
     }
 
+    /// Spends every grant issued to `node_id` that no enrollment has
+    /// consumed yet and returns the ids this call spent. A spent grant is
+    /// refused at credential lookup like any consumed grant, and
+    /// reprovisioning it is refused as a conflict. A repeat finds nothing
+    /// left to spend.
+    ///
+    /// Revocation reuses `consumed_at`: the grant record and its admission
+    /// evidence are digest-bound at issuance, so neither can carry a later
+    /// revocation, and the store contract has no column for one. A spent
+    /// grant without an enrollment row is therefore a revoked grant.
+    pub fn revoke_node_grants(
+        &self,
+        node_id: &BrainNodeId,
+        revoked_at: UtcMicros,
+    ) -> Result<Vec<EntityId>, RemoteSqliteStorageErrorV1> {
+        let rows = query(
+            self.handle(),
+            "SELECT grant_json FROM remote_enrollment_grants
+             WHERE consumed_at IS NULL ORDER BY grant_id",
+            Vec::new(),
+        )?;
+        let mut revoked = Vec::new();
+        for row in &rows.rows {
+            let grant: EnrollmentGrantV1 = serde_json::from_str(
+                crate::exact_sql::text_at(&row.values, 0)
+                    .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?,
+            )
+            .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
+            if grant.node_id != *node_id {
+                continue;
+            }
+            // Zero rows means a concurrent enrollment consumed the grant
+            // first; the node's enrollment revocation covers that row.
+            let spent = self.handle().execute(ExactSqlStatement::new(
+                "UPDATE remote_enrollment_grants SET consumed_at = ?1
+                 WHERE grant_id = ?2 AND consumed_at IS NULL"
+                    .to_owned(),
+                vec![
+                    ExactSqlValue::Integer(revoked_at.0),
+                    text(grant.grant_id.as_str()),
+                ],
+            )?)?;
+            if spent.changed_rows == 1 {
+                revoked.push(grant.grant_id);
+            }
+        }
+        Ok(revoked)
+    }
+
     pub fn revoke_enrollment(
         &self,
         expected: &EnrollmentCredentialRecordV1,

@@ -2,7 +2,9 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use tempfile::TempDir;
-use tracedecay_code_index::graph_projection::CodeGraphCatalogReleaseV1;
+use tracedecay_code_index::graph_projection::{
+    CodeGraphCatalogReleaseV1, CodeGraphReadinessRequirement,
+};
 use tracedecay_domain::{ProjectId, SymbolOccurrenceId, UtcMicros};
 use tracedecay_graph_db::NeverCancelled;
 
@@ -46,6 +48,15 @@ async fn source_body_serves_while_the_released_catalog_cannot_rewarm() {
         .await
         .unwrap();
     let store = serving.interactive_graph_store().unwrap();
+    // Hold the engine the way a graph read's admission does: the lookup's
+    // drained park release may already have closed it, and the hold keeps a
+    // later one from closing it under the reader this test opens directly.
+    let admission = store
+        .await_rewarm_and_retain_for(
+            Duration::from_secs(5),
+            CodeGraphReadinessRequirement::Engine,
+        )
+        .unwrap();
     store
         .warm_interactive_catalog_with_cancellation(None, Arc::new(NeverCancelled))
         .unwrap();
@@ -85,6 +96,7 @@ async fn source_body_serves_while_the_released_catalog_cannot_rewarm() {
     holding.join().unwrap();
     let warmed = store.await_rewarm(Duration::from_secs(5));
     drop(reader);
+    drop(admission);
     drop(store);
     drop(serving);
     harness.shutdown().await;

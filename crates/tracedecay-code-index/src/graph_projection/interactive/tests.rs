@@ -1301,8 +1301,7 @@ fn catalog_admission_retains_a_catalog_that_warms_after_the_wait() {
             Duration::from_secs(5),
             CodeGraphReadinessRequirement::Catalog,
         )
-        .expect("cold admission has no released warm to wait for")
-        .expect("catalog reads retain their catalog");
+        .expect("cold admission has no released warm to wait for");
     store
         .warm_interactive_catalog_with_cancellation(None, request())
         .expect("the concurrent first warm finishes before the reader opens");
@@ -1324,6 +1323,27 @@ fn catalog_admission_retains_a_catalog_that_warms_after_the_wait() {
         store.release_interactive_catalog(),
         CodeGraphCatalogReleaseV1::Released { .. }
     ));
+}
+
+#[test]
+fn an_engine_admission_is_a_live_read_for_the_park_release_retry() {
+    let store = store_for(production_manifest());
+    let admission = store
+        .await_rewarm_and_retain_for(Duration::ZERO, CodeGraphReadinessRequirement::Engine)
+        .expect("cold admission has no released warm to wait for");
+    let drained = Arc::new(AtomicBool::new(false));
+    let on_drain = Arc::clone(&drained);
+    assert!(
+        store.park_release_after_reads_drain(Arc::new(move || {
+            on_drain.store(true, Ordering::Release);
+        })),
+        "an engine-only admission must take the park release retry"
+    );
+    drop(admission);
+    assert!(
+        drained.load(Ordering::Acquire),
+        "the turned-away park release runs when the admission drains"
+    );
 }
 
 /// Holds the catalog build gate for `hold`, the way a corpus-sized scan

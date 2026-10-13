@@ -249,6 +249,71 @@ fn remote_revoke_refuses_the_revoked_nodes_capture_transfer_and_replay() {
     );
 }
 
+#[test]
+fn remote_revoke_refuses_enrollment_with_the_nodes_unredeemed_grant() {
+    let fixture = remote_cli_fixture();
+    let context = fixture_project_context(&fixture);
+    let project_id = context["project"]["project_id"]
+        .as_str()
+        .expect("project id");
+    let grant_credential = *b"0123456789abcdef0123456789abcdef";
+    let brain_id = BrainId::new(fixture.authority["brain_id"].as_str().expect("brain id")).unwrap();
+    let node_id = BrainNodeId::new("node.remote-cli-revoke-grant").unwrap();
+    let grant = remote_grant(brain_id, node_id.clone(), project_id, &grant_credential);
+    provision_remote_node(&fixture, &grant);
+
+    let first = run_remote_revoke(&fixture, node_id.as_str());
+    assert_eq!(first.status.code(), Some(0), "{first:?}");
+
+    let enroll_request = write_json_fixture(
+        &fixture.home_path,
+        "enroll-request.json",
+        &enrollment_request(&grant),
+    );
+    let grant_path = write_bytes_fixture(&fixture.home_path, "grant.bin", &grant_credential);
+    let enroll_path = write_bytes_fixture(
+        &fixture.home_path,
+        "enroll.bin",
+        b"fedcba9876543210fedcba9876543210",
+    );
+    let refused = run_remote_enroll(&fixture, &grant_path, &enroll_path, &enroll_request);
+    assert_ne!(
+        refused.status.code(),
+        Some(0),
+        "a revoked node's unredeemed grant must not enroll it: {}",
+        String::from_utf8_lossy(&refused.stdout)
+    );
+    let stranger = write_bytes_fixture(
+        &fixture.home_path,
+        "stranger.bin",
+        b"00000000000000000000000000000000",
+    );
+    let concealed = run_remote_enroll(&fixture, &stranger, &enroll_path, &enroll_request);
+    assert_eq!(
+        (refused.status.code(), &refused.stdout, &refused.stderr),
+        (
+            concealed.status.code(),
+            &concealed.stdout,
+            &concealed.stderr
+        ),
+        "the spent grant's holder gets the same concealed refusal as a stranger"
+    );
+
+    let receipts: Value = serde_json::from_slice(&first.stdout).expect("revocation JSON");
+    assert_eq!(
+        receipts,
+        json!({"revocations": [], "revoked_grants": ["grant.remote-cli-enroll"]}),
+        "the node held no enrollment, only the unredeemed grant"
+    );
+    let repeat = run_remote_revoke(&fixture, node_id.as_str());
+    assert_eq!(repeat.status.code(), Some(0), "{repeat:?}");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&repeat.stdout).expect("revocation JSON"),
+        json!({"revocations": []}),
+        "a repeat finds no grant left to spend"
+    );
+}
+
 fn refused_as_enrollment_revoked(stdout: &[u8]) -> bool {
     serde_json::from_slice::<Value>(stdout).is_ok_and(|document| {
         document["authority"]["value"]["reason"] == json!("enrollment_revoked")
