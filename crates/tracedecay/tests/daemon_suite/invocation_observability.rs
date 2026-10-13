@@ -1311,6 +1311,7 @@ async fn runtimeless_last_alias_drop_keeps_the_store_retiring_until_the_drain_co
 #[tokio::test]
 async fn registered_persistence_failure_releases_only_after_join_and_writer_fence() {
     let (_project, project_id, database, _runtime) = runtime("observability-shutdown-fenced").await;
+    let persistence = Duration::from_millis(50);
     let identity = ObservabilityProducerIdentityV1 {
         authorized_scope_ref: project_id.as_str().to_owned(),
         process_boot_id: "daemon:shutdown-failure".to_owned(),
@@ -1323,7 +1324,7 @@ async fn registered_persistence_failure_releases_only_after_join_and_writer_fenc
         identity.clone(),
         1,
         ObservabilityProducerDeadlinesV1 {
-            persistence: Duration::from_millis(50),
+            persistence,
             shutdown: Duration::from_millis(250),
         },
     )
@@ -1336,18 +1337,28 @@ async fn registered_persistence_failure_releases_only_after_join_and_writer_fenc
         .begin_write_transaction()
         .await
         .expect("hold registered writer");
+    // Paused, the clock advances only while every task waits, so the held
+    // writer exhausts the persistence deadline before shutdown begins.
+    tokio::time::pause();
     registered
         .producer()
         .try_emit(envelope(&project_id, "shutdown:blocked"))
         .expect("enqueue blocked event");
-    tokio::task::yield_now().await;
+    tokio::time::sleep(persistence * 6).await;
+    tokio::time::resume();
 
     let retained = registered.producer();
     assert!(!retained.shutdown_settled());
     let shutdown = tokio::spawn(registered.shutdown());
-    // Hold the writer past persistence's deadline, then release it within
-    // shutdown's existing budget so its fence can observe transaction closure.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // The terminal write misses the held writer, so the worker joins with
+    // the fence still owed. Release the writer only then.
+    while !retained.shutdown_joined() && !shutdown.is_finished() {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert!(
+        retained.shutdown_joined(),
+        "the worker joins before the fence"
+    );
     assert!(!retained.shutdown_settled());
     blocker.commit().await.expect("release registered writer");
     let error = shutdown
@@ -1421,6 +1432,10 @@ async fn assert_blocked_writer_retirement(
 ) {
     let (_project, project_id, database, _runtime) =
         runtime("observability-shutdown-failure").await;
+    // The same logical project in another registered store. Built before the
+    // writer is held: the held transaction's lease must not span a fixture.
+    let (_other_project, other_id, other_database, _other_runtime) =
+        runtime("observability-shutdown-failure").await;
     let identity = ObservabilityProducerIdentityV1 {
         authorized_scope_ref: project_id.as_str().to_owned(),
         process_boot_id: "daemon:shutdown-failure".to_owned(),
@@ -1443,11 +1458,26 @@ async fn assert_blocked_writer_retirement(
         .begin_write_transaction()
         .await
         .expect("hold registered writer");
-    registered
-        .producer()
-        .try_emit(envelope(&project_id, "shutdown:blocked"))
-        .expect("enqueue blocked event");
-    tokio::task::yield_now().await;
+    if worker_settled {
+        // The worker must reply inside the shutdown budget, so the blocked
+        // batch fails before shutdown begins. Paused, the clock advances only
+        // while every task waits.
+        tokio::time::pause();
+        registered
+            .producer()
+            .try_emit(envelope(&project_id, "shutdown:blocked"))
+            .expect("enqueue blocked event");
+        tokio::time::sleep(deadlines.persistence * 6).await;
+        tokio::time::resume();
+    } else {
+        // The shutdown deadline must elapse first, so the blocked batch is
+        // still in flight when shutdown begins.
+        registered
+            .producer()
+            .try_emit(envelope(&project_id, "shutdown:blocked"))
+            .expect("enqueue blocked event");
+        tokio::task::yield_now().await;
+    }
 
     let retained = registered.producer();
     let error = registered
@@ -1511,8 +1541,6 @@ async fn assert_blocked_writer_retirement(
     );
 
     // The same logical project in another registered store remains independent.
-    let (_other_project, other_id, other_database, _other_runtime) =
-        runtime("observability-shutdown-failure").await;
     assert_eq!(project_id, other_id);
     let other = registry
         .acquire_or_start(&other_database, &store_mount(&identity), || {
@@ -1522,7 +1550,16 @@ async fn assert_blocked_writer_retirement(
         .expect("foreign exact store is not retiring");
 
     blocker.commit().await.expect("release registered writer");
-    tokio::task::yield_now().await;
+    // Admitted writes outlive their timed-out callers, and the writer serves
+    // them before any later transaction. Draining them here leaves the
+    // bounded retry below only the released writer to observe.
+    database
+        .begin_write_transaction()
+        .await
+        .expect("drain admitted writes")
+        .rollback()
+        .await
+        .expect("drain admitted writes");
     assert!(
         !retained.shutdown_settled(),
         "release alone must not trigger a retry loop"
