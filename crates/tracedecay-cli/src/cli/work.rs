@@ -50,4 +50,11 @@ impl ApplicationOperation for WorkflowOperation {
     }
 }
 
-pub type WorkInvocationArgs = ApplicationInvocationArgs<WorkOperation>;
+#[derive(Args)]
+pub struct WorkInvocationArgs {
+    #[command(flatten)]
+    pub invocation: ApplicationInvocationArgs<WorkOperation>,
+    /// With `advance-job`, call again until the job completes or is refused.
+    #[arg(long)]
+    pub until_settled: bool,
+}

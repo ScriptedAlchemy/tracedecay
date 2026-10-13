@@ -3,7 +3,7 @@
 //! Serves TraceDecay's embedded dashboard and its project-scoped JSON APIs:
 //!
 //! - `/api/plugins/holographic/*`  → canonical project facts, verified Grafeo
-//!   topology, and deterministic FHRR projections derived on read
+//!   topology, and deterministic MAP-C projections derived on read
 //! - `/api/plugins/hermes-lcm/*`   → LCM session store
 //!   (`lcm_raw_messages` / `session_summary_nodes` in the resolved active project
 //!   store where transcript ingest writes; the daemon-registered session store

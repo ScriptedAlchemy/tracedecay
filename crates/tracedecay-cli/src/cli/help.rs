@@ -718,9 +718,11 @@ daemon's in-memory remote mount. `capture` spools one observation on a node \
 whose authority is unreachable, `transfer-frame` moves one encrypted spool \
 frame to an enrolled node, and `query` reads one exact observation and \
 renders the honest remote shard coverage next to the caller's own pending \
-local spool. Protocol actions take a typed `RemoteProtocolRequestV1` JSON \
-body from `--request-file` (`-` reads stdin) and send credentials only from \
-files. `--json` emits one canonical JSON line.";
+local spool. `revoke` asks the running daemon to revoke every enrollment of \
+a node it provisioned; that node's later capture, transfer and replay are \
+refused as revoked. Protocol actions take a typed `RemoteProtocolRequestV1` \
+JSON body from `--request-file` (`-` reads stdin) and send credentials only \
+from files. `--json` emits one canonical JSON line.";
 
 pub(crate) const REMOTE_AFTER_HELP: &str = "\
 Examples:
@@ -739,6 +741,7 @@ Examples:
       --credential-file cred.bin --request-file replay.json
   tracedecay remote failover --endpoint https://brain.example/remote/ \\
       --credential-file cred.bin --request-file failover.json
+  tracedecay remote revoke --node-id node.lost   Revoke a lost machine's node
 
 Related: tracedecay daemon (local HTTP + optional Remote Brain TLS listener),
 tracedecay doctor (same operational identities).";

@@ -163,10 +163,16 @@ pub struct HealthWeightsV1 {
 #[serde(deny_unknown_fields)]
 pub struct HealthResultV1 {
     /// Geometric mean of the dimensions, scaled to 0-10000. A breakdown of
-    /// `panel`, not a number to maximize.
+    /// `panel`, not a number to maximize. Dimensions that `panel` lists under
+    /// `no evidence:` enter it at their formula value for an empty
+    /// measurement, so it does not summarize such a scope: an empty scope
+    /// reads 10000 and one file reads 0.
     pub quality_signal: u32,
     pub files_analyzed: u64,
-    /// Dimension names, worst score first.
+    /// Measured dimension names, worst score first, then
+    /// `no evidence: name (reason), ...` for the dimensions the scope gave
+    /// nothing to measure. An empty scope reads
+    /// `no evidence: 0 files in scope`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub panel: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

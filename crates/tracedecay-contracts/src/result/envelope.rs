@@ -267,6 +267,15 @@ pub struct ApplicationProblemRecord {
 }
 
 impl ApplicationProblemRecord {
+    /// The wire record of `problem`, for a result that carries a refusal as a
+    /// value rather than as the response's own problem envelope.
+    pub fn from_problem(
+        request_id: RequestId,
+        problem: ApplicationProblem,
+    ) -> Result<Self, ApplicationContractError> {
+        Self::new(request_id, problem)
+    }
+
     /// `code: message`, the single line adapters print for a refusal.
     pub fn summary(&self) -> String {
         format!("{}: {}", self.code, self.message)

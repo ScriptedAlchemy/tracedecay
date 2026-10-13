@@ -1,8 +1,45 @@
+use tracedecay_contracts::remote::auth::revoke_credential;
 use tracedecay_domain::{CredentialRevocationReceiptV1, EnrollmentCredentialRecordV1};
 
 use super::*;
 
 impl RemoteSqliteStorageV1 {
+    /// Revokes every enrollment `node_id` holds in this store and returns one
+    /// receipt per enrollment. A row revoked earlier keeps its original
+    /// revocation and receipt and is not rewritten, so a repeat, or a rerun
+    /// after a crash between rows, converges on the same state.
+    pub fn revoke_node_enrollments(
+        &self,
+        node_id: &BrainNodeId,
+        revoked_at: UtcMicros,
+    ) -> Result<Vec<CredentialRevocationReceiptV1>, RemoteSqliteStorageErrorV1> {
+        let rows = query(
+            self.handle(),
+            "SELECT enrollment_json FROM remote_enrollments
+             WHERE node_id = ?1 ORDER BY enrollment_id",
+            vec![text(node_id.as_str())],
+        )?;
+        rows.rows
+            .iter()
+            .map(|row| {
+                let current: EnrollmentCredentialRecordV1 = serde_json::from_str(
+                    crate::exact_sql::text_at(&row.values, 0)
+                        .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?,
+                )
+                .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
+                let at = current
+                    .revoked_at
+                    .unwrap_or_else(|| revoked_at.max(current.issued_at));
+                let (next, receipt) = revoke_credential(&current, current.revision, at)
+                    .map_err(|_| RemoteSqliteStorageErrorV1::Corruption)?;
+                if current.revoked_at.is_none() {
+                    self.revoke_enrollment(&current, &next, &receipt)?;
+                }
+                Ok(receipt)
+            })
+            .collect()
+    }
+
     pub fn revoke_enrollment(
         &self,
         expected: &EnrollmentCredentialRecordV1,

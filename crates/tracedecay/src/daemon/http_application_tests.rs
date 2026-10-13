@@ -1226,6 +1226,34 @@ async fn authenticated_remote_node_provisioning_creates_and_registers_first_stor
         status(&unauthenticated_publication),
         StatusCode::UNAUTHORIZED
     );
+    let revocation = serde_json::json!({ "node_id": node_id }).to_string();
+    let unauthenticated_revocation = request_path_body(
+        &service,
+        "POST",
+        "/remote-nodes/revoke",
+        None,
+        Some(&origin),
+        &revocation,
+    )
+    .await;
+    assert_eq!(
+        status(&unauthenticated_revocation),
+        StatusCode::UNAUTHORIZED
+    );
+    let unregistered_revocation = request_path_body(
+        &service,
+        "POST",
+        "/remote-nodes/revoke",
+        Some(&format!("Bearer {AUTH_TOKEN}")),
+        Some(&origin),
+        &revocation,
+    )
+    .await;
+    assert_eq!(status(&unregistered_revocation), StatusCode::NOT_FOUND);
+    assert_eq!(
+        json_body(&unregistered_revocation),
+        serde_json::json!({ "code": "node_not_registered" })
+    );
 
     let authenticated = request_path_body(
         &service,
@@ -1238,6 +1266,20 @@ async fn authenticated_remote_node_provisioning_creates_and_registers_first_stor
     .await;
     assert_eq!(status(&authenticated), StatusCode::NO_CONTENT);
     assert!(runtime.remote_recovery_authority(&node_id).await.is_some());
+    let unenrolled_revocation = request_path_body(
+        &service,
+        "POST",
+        "/remote-nodes/revoke",
+        Some(&format!("Bearer {AUTH_TOKEN}")),
+        Some(&origin),
+        &revocation,
+    )
+    .await;
+    assert_eq!(status(&unenrolled_revocation), StatusCode::OK);
+    assert_eq!(
+        json_body(&unenrolled_revocation),
+        serde_json::json!({ "revocations": [] })
+    );
 
     service.shutdown().await.expect("shutdown HTTP service");
 }

@@ -32,6 +32,8 @@ scripts or hooks; `--json` emits the one canonical application envelope.";
 
 const WORK_AFTER_HELP: &str = "\
 Examples:
+  tracedecay work advance-job --request-file job.json --until-settled
+                                                           Run a parallel job with synthesis
   tracedecay work views --request-file views.json --json    Read the current Work projection
   tracedecay work prepare-graph-mutation --request-file - --json
   tracedecay work create --request-file create.json --json  Create work items
@@ -792,6 +794,16 @@ pub enum RemoteAction {
     Failover {
         #[command(flatten)]
         authority: RemoteAuthorityArgs,
+    },
+    /// Revoke every enrollment of a node this daemon provisioned, such as a
+    /// lost machine; its capture, transfer and replay are refused afterward
+    Revoke {
+        /// Node identity the node was provisioned with
+        #[arg(long, value_name = "NODE")]
+        node_id: String,
+        /// Emit one canonical JSON object and newline
+        #[arg(long)]
+        json: bool,
     },
 }
 

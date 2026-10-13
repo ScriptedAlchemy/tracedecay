@@ -496,6 +496,46 @@ fn credential_authority_failures_share_one_concealed_response() {
     }
 }
 
+#[tokio::test]
+async fn revoked_enrollment_holder_gets_a_typed_refusal_without_reaching_the_port() {
+    let port_calls = Arc::new(AtomicUsize::new(0));
+    let body = serde_json::to_vec(&query_request(repository_scope("snapshot.remote"))).unwrap();
+    let response = rejecting_router(
+        RemoteCredentialAdmissionErrorV1::Revoked,
+        Arc::new(AtomicUsize::new(0)),
+        Arc::clone(&port_calls),
+    )
+    .oneshot(query_http_request(Body::from(body)))
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let request_id = RequestId::new("request.remote.query").unwrap();
+    let expected = RemoteProtocolResponseV1::<()>::new(
+        request_id.clone(),
+        CurrentRemoteAuthorityStateV1::Unavailable {
+            reason: RemoteAuthorityUnavailableReasonV1::EnrollmentRevoked,
+            observed_at: fixed_remote_clock(),
+        },
+        Err(remote_protocol_problem(
+            tracedecay_contracts::remote::query::remote_exact_observation_query_result_contract_v1(
+            ),
+            request_id,
+            RemoteProtocolFailureV1::EnrollmentRevoked,
+        )
+        .unwrap()),
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::to_value(RemoteHttpResponseV1::from(expected)).unwrap()
+    );
+    assert_eq!(port_calls.load(Ordering::SeqCst), 0);
+}
+
 #[test]
 fn typed_query_scope_must_match_the_pre_body_session() {
     let port_calls = Arc::new(AtomicUsize::new(0));
