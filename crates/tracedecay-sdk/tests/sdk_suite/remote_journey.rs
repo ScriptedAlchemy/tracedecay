@@ -130,7 +130,7 @@ impl RemoteDaemonFixture {
         format!("https://{}/remote/", self.remote)
     }
 
-    /// Runs the node operator `operation` (`join`) on this daemon, as
+    /// Runs the node operator `operation` (`join`, `drain`) on this daemon, as
     /// `node_id` of the Brain whose authority serves `endpoint`.
     fn node_operation(
         &self,
@@ -637,6 +637,129 @@ fn a_joined_node_captures_offline_only_while_its_authority_is_unreachable() {
         "capture is refused again once the authority answers: {:?}",
         reachable.result
     );
+
+    for fixture in [laptop, desktop] {
+        let mut daemon = fixture.daemon;
+        stop_daemon(&mut daemon);
+    }
+}
+
+#[test]
+#[ignore = "requires a prebuilt production tracedecay daemon"]
+fn a_joined_node_drains_offline_frames_in_order_to_its_authority() {
+    let desktop = RemoteDaemonFixture::start("remote-drain-desktop");
+    let laptop = RemoteDaemonFixture::start("remote-drain-laptop");
+    let node_id = BrainNodeId::new("node.remote-drain-laptop").unwrap();
+    let mut grant = remote_grant(
+        desktop.brain_id.clone(),
+        node_id.clone(),
+        &desktop.project_id,
+        &GRANT_CREDENTIAL,
+    );
+    grant.capabilities = [
+        RemoteCapabilityV1::CaptureOffline,
+        RemoteCapabilityV1::DiscoverAuthority,
+        RemoteCapabilityV1::TransferFrame,
+    ]
+    .into_iter()
+    .collect();
+    desktop.provision_and_enroll(&grant);
+    let writer: RemoteWriterAuthorityV1 = serde_json::from_value(json!({
+        "project_id": desktop.project_id,
+        "scope": grant.scope,
+        "authority": {
+            "fence": writer_fence(&desktop.brain_id, 1, node_id.as_str()),
+            "credential_revision": 1,
+            "observed_at": now_micros(),
+        },
+    }))
+    .unwrap();
+    desktop.publish_writer(&node_id, &writer);
+    let operate = |operation: &str, endpoint: &str| {
+        laptop.node_operation(
+            operation,
+            endpoint,
+            &desktop.brain_id,
+            &node_id,
+            &grant.scope,
+        )
+    };
+    let (status, joined) = operate("join", &desktop.remote_endpoint());
+    assert_eq!(status, reqwest::StatusCode::OK, "{joined}");
+    let (status, refused) = operate("join", &unreachable_endpoint());
+    assert_eq!(status, reqwest::StatusCode::BAD_GATEWAY, "{refused}");
+    let mut previous_event_id = None;
+    let mut captured = Vec::new();
+    for (sequence, observation_id) in [
+        (1, "observation.remote-drain-first"),
+        (2, "observation.remote-drain-second"),
+    ] {
+        let receipt = laptop
+            .local_client()
+            .capture(&capture_request(
+                &format!("request.remote-drain-capture-{sequence}"),
+                &node_id,
+                &writer,
+                RemoteCaptureSequenceV1 {
+                    sequence,
+                    previous_event_id: previous_event_id.clone(),
+                },
+                observation(&desktop.project_id, observation_id),
+            ))
+            .unwrap()
+            .result
+            .expect("offline capture is admitted while the authority is unreachable")
+            .outcome
+            .payload()
+            .cloned()
+            .expect("an admitted capture returns its receipt");
+        previous_event_id = Some(receipt.event_id.clone());
+        captured.push(json!({
+            "event_id": receipt.event_id,
+            "sequence": sequence,
+            "disposition": "transferred_pending",
+        }));
+    }
+    let (status, unreachable) = operate("drain", &unreachable_endpoint());
+    assert_eq!(
+        (status, unreachable),
+        (
+            reqwest::StatusCode::BAD_GATEWAY,
+            json!({"code": "authority_unreachable"})
+        )
+    );
+    assert_eq!(
+        laptop.status()["spool"]["pending_count"],
+        json!(2),
+        "frames stay pending until the authority acknowledges them"
+    );
+
+    let drain = || operate("drain", &desktop.remote_endpoint());
+    let (status, drained) = drain();
+    assert_eq!(status, reqwest::StatusCode::OK, "{drained}");
+    assert_eq!(
+        drained,
+        json!({"transferred": captured}),
+        "the authority acknowledges every frame once, in sequence order"
+    );
+    assert_eq!(
+        laptop.status()["spool"]["pending_count"],
+        json!(0),
+        "acknowledged frames leave the laptop's pending spool"
+    );
+    assert_eq!(
+        desktop.status()["spool"]["pending_count"],
+        json!(2),
+        "the authority holds both frames pending replay"
+    );
+
+    let (status, again) = drain();
+    assert_eq!(
+        (status, again),
+        (reqwest::StatusCode::OK, json!({"transferred": []})),
+        "a second drain sends nothing"
+    );
+    assert_eq!(desktop.status()["spool"]["pending_count"], json!(2));
 
     for fixture in [laptop, desktop] {
         let mut daemon = fixture.daemon;
