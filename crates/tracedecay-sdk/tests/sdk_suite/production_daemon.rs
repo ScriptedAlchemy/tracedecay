@@ -49,9 +49,9 @@ pub(super) const REMOTE_TLS_PRIVATE_KEY: &[u8] =
     include_bytes!("../../../../tests/fixtures/remote_tls/localhost.key.pem");
 pub(super) const REMOTE_TLS_ROOT_CERTIFICATE: &[u8] =
     include_bytes!("../../../../tests/fixtures/remote_tls/localhost-root.crt.pem");
-pub(super) const REMOTE_TLS_ALTERNATE_CERTIFICATE: &[u8] =
+const REMOTE_TLS_ALTERNATE_CERTIFICATE: &[u8] =
     include_bytes!("../../../../tests/fixtures/remote_tls/alternate.crt.pem");
-pub(super) const REMOTE_TLS_ALTERNATE_PRIVATE_KEY: &[u8] =
+const REMOTE_TLS_ALTERNATE_PRIVATE_KEY: &[u8] =
     include_bytes!("../../../../tests/fixtures/remote_tls/alternate.key.pem");
 const REMOTE_TLS_ALTERNATE_ROOT_CERTIFICATE: &[u8] =
     include_bytes!("../../../../tests/fixtures/remote_tls/alternate-root.crt.pem");
