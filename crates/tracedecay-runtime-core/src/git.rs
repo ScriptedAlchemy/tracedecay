@@ -895,4 +895,48 @@ mod tests {
             Err(GitCommandError::Cancelled)
         ));
     }
+
+    fn spin_until_interrupted(interrupt: &AtomicBool) {
+        let spinning = Instant::now();
+        while !interrupt.load(Ordering::Acquire) {
+            assert!(
+                spinning.elapsed() < Duration::from_secs(5),
+                "the watchdog never raised the interrupt"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn in_process_work_is_interrupted_by_live_cancellation() {
+        let cancel = CancellationToken::new();
+        let trigger = cancel.clone();
+        let bounds = GitCommandBounds {
+            cancel: Some(cancel),
+            ..GitCommandBounds::default()
+        };
+        let interrupt = AtomicBool::new(false);
+        let notifier = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            trigger.cancel();
+        });
+
+        let result = run_interruptible(&bounds, &interrupt, || spin_until_interrupted(&interrupt));
+        notifier.join().expect("cancellation notifier");
+
+        assert!(matches!(result, Err(GitCommandError::Cancelled)));
+    }
+
+    #[test]
+    fn in_process_work_is_interrupted_at_its_deadline() {
+        let bounds = GitCommandBounds {
+            deadline: Instant::now() + Duration::from_millis(30),
+            ..GitCommandBounds::default()
+        };
+        let interrupt = AtomicBool::new(false);
+
+        let result = run_interruptible(&bounds, &interrupt, || spin_until_interrupted(&interrupt));
+
+        assert!(matches!(result, Err(GitCommandError::DeadlineExceeded)));
+    }
 }
