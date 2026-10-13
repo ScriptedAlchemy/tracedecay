@@ -8,11 +8,13 @@ use tracedecay_code_index_retention::code_index_generations::{
 use tracedecay_runtime_core::logging::log_daemon_event;
 
 pub enum ReconcileOutcome {
-    /// Every queued release event has been consumed.
+    /// The page from the cursor held no queued release event.
     Complete,
-    /// The bounded page was served and more queued release events remain; the
-    /// caller should keep the short cadence instead of parking the backlog
-    /// behind the full maintenance interval.
+    /// The bounded page was served and more queued release events remain, or
+    /// the page consumed a release: its replay-pool link was the last
+    /// reference to some segments, which only a later census can sweep. The
+    /// caller should keep the short cadence instead of parking either behind
+    /// the full maintenance interval.
     MoreWork,
     /// At least one release stays queued because the graph still needs its
     /// replay; nothing failed.
@@ -198,6 +200,7 @@ pub async fn reconcile_graph_replay_releases(
         return ReconcileOutcome::Complete;
     }
     let mut retained = false;
+    let mut released = false;
     for release in page.releases {
         if cancellation.is_cancelled() {
             return ReconcileOutcome::Failed;
@@ -221,6 +224,7 @@ pub async fn reconcile_graph_replay_releases(
                     );
                     return ReconcileOutcome::Failed;
                 }
+                released = true;
             }
             Ok(false) => retained = true,
             Err(error) => {
@@ -238,7 +242,7 @@ pub async fn reconcile_graph_replay_releases(
     }
     let more_work = page.continuation.is_some();
     observations.record_graph_replay_release_served(project_root, page.continuation);
-    if more_work {
+    if more_work || released {
         ReconcileOutcome::MoreWork
     } else if retained {
         ReconcileOutcome::Retained

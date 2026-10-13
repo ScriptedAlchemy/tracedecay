@@ -35,10 +35,11 @@ pub use scope_reconciliation::{run_code_index_scope_reconciliation, scheduler_ow
 ///
 /// `MoreWork` reports bounded progress with a remaining backlog, another
 /// collectable superseded generation, superseded bytes a transient holder
-/// (serving seat, in-flight text replacement) is about to release, or
-/// unconsumed graph-replay release evidence, so the maintenance owner keeps
-/// the short cadence until the store converges instead of parking multi-GiB
-/// debris behind the full maintenance interval.
+/// (serving seat, in-flight text replacement) is about to release,
+/// unconsumed graph-replay release evidence, or a consumed release whose
+/// freed segments the pass's earlier census missed, so the maintenance owner
+/// keeps the short cadence until the store converges instead of parking
+/// multi-GiB debris behind the full maintenance interval.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CodeGenerationRetentionOutcomeV1 {
     Complete,
