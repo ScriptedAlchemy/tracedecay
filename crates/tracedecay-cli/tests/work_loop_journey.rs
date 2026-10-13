@@ -2134,6 +2134,11 @@ exit 0
             admitted_snapshot(task),
             "a guided start carries the snapshot its admission returned: {leased}"
         );
+        assert_eq!(
+            leased["execution"]["worktree_root"],
+            json!(guided_root(task).to_string_lossy()),
+            "a guided source runs in its own admitted placement root: {leased}"
+        );
     }
     poll_until("both guided sources running at once", || {
         let running = [&guided_alpha, &guided_beta].iter().all(|identity| {
@@ -2293,6 +2298,11 @@ exit 0
     assert_eq!(
         completed["synthesis"], guided_synthesis_settled,
         "{completed}"
+    );
+    assert_eq!(
+        guided_synthesis_settled["execution"]["worktree_root"],
+        json!(guided_root("alpha").to_string_lossy()),
+        "the guided synthesis runs in its task's admitted placement root: {guided_synthesis_settled}"
     );
     assert_eq!(
         guided_synthesis_settled["artifacts"], synthesis_settled["artifacts"],

@@ -501,13 +501,20 @@ fn start_command(
         &task.task_id,
         admitted_at,
     )?;
-    // Start does not consult placement yet, so attempts run in the project
-    // root exactly as a step-by-step caller's would.
-    let worktree_root = host
-        .project_root
-        .as_ref()
-        .map(|root| root.to_string_lossy().into_owned())
+    // An attempt runs in the root its run's placement admitted; a placement
+    // without a root keeps the project root.
+    let placement = seen
+        .placements
+        .get(&task.key)
         .ok_or_else(step_unavailable)?;
+    let worktree_root = match placement.target().root() {
+        Some(root) => root.to_owned(),
+        None => host
+            .project_root
+            .as_ref()
+            .map(|root| root.to_string_lossy().into_owned())
+            .ok_or_else(step_unavailable)?,
+    };
     Ok(StartWorkAttemptCommand {
         task_id: identity.task_id().clone(),
         run_id: identity.run_id().clone(),

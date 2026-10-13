@@ -806,9 +806,9 @@ again is always safe, including after a daemon restart.
 Pause, resume, cancel, retry, and adjudication stay separate operations. For
 example, while you pause a job's run with `tracedecay work pause-run`, the
 next call refuses synthesis with `application.work-run-control.paused`. After
-`resume-run`, the same request continues. Today an attempt still runs in the
-project checkout. The job admits and releases each placement, but the attempt
-process does not run inside the placement root yet.
+`resume-run`, the same request continues. Each source attempt runs in the root
+its own placement admitted, and the synthesis runs in its task's placement
+root. A placement without a root runs in the project checkout.
 
 ## Checking Your Setup with Doctor
 
