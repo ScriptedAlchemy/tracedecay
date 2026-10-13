@@ -46,6 +46,7 @@ fn install_droid(home: &Path) -> Result<(), HostBundleError> {
         0,
         TRACEDECAY_BIN,
         "0123456789abcdef0123456789abcdef01234567",
+        &tracedecay_agent_hosts::agents::serve_args::ServeArgs::default(),
     )
     .unwrap();
     let request = HostComponentSetExecutionRequestV1 {

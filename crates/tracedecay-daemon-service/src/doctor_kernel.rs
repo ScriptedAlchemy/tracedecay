@@ -131,7 +131,7 @@ fn saved_catalog_profiles(
 ) -> Option<tracedecay_agent_hosts::agents::serve_args::HostCatalogProfiles> {
     let Ok(config) = tracedecay_session_memory::user_config::UserConfig::load(profile.data_dir())
     else {
-        return Some(Default::default());
+        return Some(tracedecay_agent_hosts::agents::serve_args::HostCatalogProfiles::default());
     };
     let catalog = crate::application_surface::application_surface_binding_catalog_ref().ok()?;
     tracedecay_agent_hosts::agents::serve_args::HostCatalogProfiles::parse(

@@ -88,6 +88,7 @@ fn receipt_backed_doctor_checks_deployed_digests_registration_and_repair() {
         HostComponentV1::Core,
         0,
         GENERATOR_COMMIT,
+        &tracedecay_agent_hosts::agents::serve_args::ServeArgs::default(),
     )
     .unwrap();
     for content in &bundle.contents {
@@ -237,6 +238,7 @@ fn cursor_native_extension_receipt_matches_embedded_assets() {
         HostComponentV1::Agent,
         0,
         GENERATOR_COMMIT,
+        &tracedecay_agent_hosts::agents::serve_args::ServeArgs::default(),
     )
     .unwrap();
     for content in &bundle.contents {

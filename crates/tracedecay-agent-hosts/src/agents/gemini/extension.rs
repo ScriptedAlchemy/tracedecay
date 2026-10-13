@@ -49,8 +49,6 @@ pub(super) const EXTENSION_NAME: &str = "tracedecay";
 /// Key the MCP server lands under inside the extension manifest.
 pub(super) const MCP_SERVER_NAME: &str = "tracedecay";
 
-/// Arguments the tracedecay MCP server is launched with.
-
 /// Manifest file name Gemini CLI requires at the root of an extension.
 pub(super) const EXTENSION_MANIFEST_FILE: &str = "gemini-extension.json";
 
