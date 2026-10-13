@@ -231,6 +231,7 @@ pub enum RemoteReplayFindingV1 {
     EnrollmentRevoked,
     PolicyChanged,
     LostAcknowledgement,
+    StoreRefused,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -894,6 +895,8 @@ fn replay_protocol_failure(error: RemoteReplayServiceErrorV1) -> RemoteProtocolF
 pub enum RemoteReplayTransactionOutcomeV1 {
     Admitted(RemoteReplayCommitReceiptV1),
     Duplicate(RemoteReplayCommitReceiptV1),
+    /// The project store permanently refused the frame and committed nothing.
+    Refused,
 }
 
 pub trait RemoteReplayTransactionPortV1: Send + Sync {
@@ -1118,6 +1121,21 @@ fn replay_remote_capture_attempt(
             receipt,
             Some(RemoteReplayFindingV1::LostAcknowledgement),
         ),
+        RemoteReplayTransactionOutcomeV1::Refused => {
+            let terminal = transition(
+                spool,
+                frame,
+                RemoteReplayStateV1::Pending,
+                RemoteReplayStateV1::Rejected,
+                replay_attempt,
+                clock.now()?,
+                Some(RemoteReplayFindingV1::StoreRefused),
+                None,
+            )?;
+            return Ok(RemoteReplayOutcomeV1::Rejected {
+                operation_receipt: replay_operation_receipt(&terminal, &terminal, None)?,
+            });
+        }
     };
     receipt.validate_for(frame, current_writer)?;
     let admitted_at = clock.now()?;
