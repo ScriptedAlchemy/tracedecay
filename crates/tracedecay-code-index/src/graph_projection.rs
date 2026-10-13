@@ -366,7 +366,6 @@ pub struct CodeGraphProjectionStore {
     /// re-warms it in the background instead of waiting on activation, which
     /// already ran for this generation.
     released: Arc<AtomicBool>,
-    rewarming: Arc<AtomicBool>,
     /// Why the last background re-warm failed, answered to readers until a
     /// later re-warm succeeds.
     rewarm_failure: Arc<Mutex<Option<String>>>,
@@ -433,7 +432,6 @@ impl CodeGraphProjectionStore {
             interactive_catalog: Arc::new(InteractiveCatalogCache::new(Arc::clone(&warm_clock))),
             serving_engine: Arc::new(Mutex::new(None)),
             released: Arc::new(AtomicBool::new(false)),
-            rewarming: Arc::new(AtomicBool::new(false)),
             rewarm_failure: Arc::new(Mutex::new(None)),
             warm_clock,
         })
@@ -509,7 +507,7 @@ impl CodeGraphProjectionStore {
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
         Ok(CodeGraphServingWarmthV1::Warming(
-            match (failure, self.rewarming.load(AtomicOrdering::Acquire)) {
+            match (failure, self.warm_clock.engine_rewarming()) {
                 (_, true) => "code graph engine is re-warming in the background".to_owned(),
                 (Some(failure), false) => {
                     format!(
@@ -576,10 +574,9 @@ impl CodeGraphProjectionStore {
     }
 
     fn rewarm_in_background(&self) {
-        if self.rewarming.swap(true, AtomicOrdering::AcqRel) {
+        if !self.warm_clock.begin_engine_rewarm() {
             return;
         }
-        self.warm_clock.begin(WarmOwner::Engine);
         let store = self.clone();
         let spawned = std::thread::Builder::new()
             .name("code-graph-rewarm".to_owned())
@@ -603,19 +600,14 @@ impl CodeGraphProjectionStore {
                     .rewarm_failure
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner) = failure;
-                store.rewarming.store(false, AtomicOrdering::Release);
-                // A release after the warm's own settle leaves waiters that
-                // found this re-warm running asleep, and a re-pinned slot
-                // never settled the begin above; this settle covers both.
-                store.warm_clock.settle(WarmOwner::Engine, false);
+                store.warm_clock.end_engine_rewarm();
             });
         if let Err(error) = spawned {
             *self
                 .rewarm_failure
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner) = Some(error.to_string());
-            self.rewarming.store(false, AtomicOrdering::Release);
-            self.warm_clock.settle(WarmOwner::Engine, false);
+            self.warm_clock.end_engine_rewarm();
         }
     }
 
