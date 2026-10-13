@@ -19,4 +19,7 @@ prove execution coverage.
 
 For before/after analysis, retain the generation- and path-bound `health_delta`
 cursor. Compare the same scope and explain changed coverage rather than treating
-a score increase alone as proof of better architecture.
+a score increase alone as proof of better architecture. Ignore dimensions whose
+status is `no_evidence`. A `definition-mismatch` or `definition-unrecorded`
+refusal means the cursor predates the current health definition: call again
+without `before_cursor` to record a new baseline.

@@ -73,13 +73,15 @@ async fn health_scores_two_isolated_modules_and_distinguishes_scope() {
         .expect("production health server");
     wait_for_current_graph(&server).await;
 
-    let summary = call_health(&fixture, json!({})).await;
-    assert_eq!(
-        extract_text(&summary.value),
-        "freshness: fresh\n**files_analyzed:** 2\n**panel:** modularity, coverage_discipline, equality, redundancy; no evidence: acyclicity (no dependency edges), depth (no dependency chain)\n**quality_signal:** 8706\n"
-    );
-
     let summary_json = call_health(&fixture, json!({"format": "json"})).await;
+    assert_eq!(
+        (
+            tracedecay_graph_query::health::HEALTH_DEFINITION,
+            extract_json(&summary_json.value)["quality_signal"].clone(),
+        ),
+        ("health.2026-09-12", json!(8706)),
+        "the indexed scope's score moved: bump HEALTH_DEFINITION and re-pin in the same change"
+    );
     assert_eq!(
         extract_json(&summary_json.value),
         json!({
@@ -88,6 +90,12 @@ async fn health_scores_two_isolated_modules_and_distinguishes_scope() {
             "files_analyzed": 2,
             "panel": "modularity, coverage_discipline, equality, redundancy; no evidence: acyclicity (no dependency edges), depth (no dependency chain)",
         })
+    );
+
+    let summary = call_health(&fixture, json!({})).await;
+    assert_eq!(
+        extract_text(&summary.value),
+        "freshness: fresh\n**files_analyzed:** 2\n**panel:** modularity, coverage_discipline, equality, redundancy; no evidence: acyclicity (no dependency edges), depth (no dependency chain)\n**quality_signal:** 8706\n"
     );
 
     let detailed = call_health(&fixture, json!({"format": "json", "details": true})).await;

@@ -11,6 +11,8 @@ use super::queries::{GraphQueryManager, VerifiedHealthInputsV1};
 use super::scc::tarjan_scc;
 use tracedecay_domain::errors::Result;
 
+pub const HEALTH_DEFINITION: &str = "health.2026-09-12";
+
 #[derive(Clone, Debug)]
 pub struct VerifiedHealthSnapshotV1 {
     pub quality_signal: u32,
@@ -82,6 +84,10 @@ impl HealthDimension {
             Self::Modularity => snapshot.modularity,
             Self::Redundancy => snapshot.redundancy,
         }
+    }
+
+    pub fn score_ppm(self, snapshot: &VerifiedHealthSnapshotV1) -> u64 {
+        (self.score(snapshot).clamp(0.0, 1.0) * 1_000_000.0).round() as u64
     }
 
     pub fn denominator(self, snapshot: &VerifiedHealthSnapshotV1) -> Option<u64> {
@@ -842,6 +848,66 @@ mod panel_tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn the_health_definition_pins_its_scores() {
+        let aggregate =
+            |file: &str, complexity, functions, skipped, dead| VerifiedHealthFileAggregateV1 {
+                file_path: file.to_owned(),
+                complexity,
+                function_methods: functions,
+                skipped_function_methods: skipped,
+                dead_function_methods: dead,
+                ..VerifiedHealthFileAggregateV1::default()
+            };
+        let mut inputs = scope(
+            &[
+                ("a.rs", &["b.rs"]),
+                ("b.rs", &["c.rs"]),
+                ("c.rs", &[]),
+                ("d.rs", &["e.rs"]),
+                ("e.rs", &["d.rs"]),
+                ("f.rs", &[]),
+            ],
+            &[],
+        );
+        inputs.aggregates = vec![
+            aggregate("a.rs", 3.0, 4, 1, 1),
+            aggregate("b.rs", 9.0, 6, 0, 0),
+            aggregate("d.rs", 1.0, 2, 1, 1),
+            aggregate("f.rs", 5.0, 3, 0, 0),
+        ];
+        let snapshot = health_snapshot_from_inputs(&inputs);
+
+        assert!(
+            HealthDimension::ALL
+                .iter()
+                .all(|dimension| snapshot.no_evidence(*dimension).is_none()),
+            "the pinned scope must give every dimension evidence"
+        );
+        let pinned = (
+            super::HEALTH_DEFINITION,
+            snapshot.quality_signal,
+            HealthDimension::ALL
+                .map(|dimension| (dimension.name(), dimension.score_ppm(&snapshot))),
+        );
+        assert_eq!(
+            pinned,
+            (
+                "health.2026-09-12",
+                7113,
+                [
+                    ("acyclicity", 500_000),
+                    ("coverage_discipline", 866_667),
+                    ("depth", 1_000_000),
+                    ("equality", 638_889),
+                    ("modularity", 666_667),
+                    ("redundancy", 866_667),
+                ]
+            ),
+            "a persisted health score or key moved: bump HEALTH_DEFINITION and re-pin these values in the same change"
+        );
     }
 
     #[test]
