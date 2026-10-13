@@ -148,7 +148,11 @@ def _isolated_rust_test_impl(ctx):
         ),
         RunEnvironmentInfo(
             environment = environment,
-            inherited_environment = test_environment.inherited_environment,
+            # Bazel starts tests with HOME already in scratch. The launcher
+            # reads the client's homes to find the rustup proxy (and its
+            # rust-analyzer) before it isolates HOME and CARGO_HOME.
+            inherited_environment = test_environment.inherited_environment +
+                                    ["HOME", "RUSTUP_HOME", "CARGO_HOME"],
         ),
     ]
 
