@@ -240,6 +240,21 @@ pub(crate) enum ExecutionPolicy {
     AuthorityRevalidated,
 }
 
+/// How long one read-snapshot statement may run.
+///
+/// `Request` carries the ordinary per-statement deadline, which keeps one
+/// caller from holding a pooled reader indefinitely. `Convergence` removes it
+/// for schema-convergence audits whose single statements scan a whole table:
+/// on a large store such a scan cannot fit any fixed request deadline, and an
+/// audit interrupted at the same statement on every open never converges.
+/// Reader shutdown still interrupts a convergence statement.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ExactSqlStatementBudget {
+    #[default]
+    Request,
+    Convergence,
+}
+
 pub trait ExactSqlWriteAuthority: Send + Sync {
     fn verify(&self, intent: ExactSqlWriteIntent) -> Result<(), ExactSqlError>;
 }

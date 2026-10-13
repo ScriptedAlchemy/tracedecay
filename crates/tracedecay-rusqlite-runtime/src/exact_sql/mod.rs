@@ -1179,6 +1179,7 @@ fn execute_batch(connection: &Connection, sql: &str) -> Result<ExactSqlBatchResu
 pub(crate) fn execute_query(
     connection: &Connection,
     request: ExactSqlStatement,
+    _budget: ExactSqlStatementBudget,
 ) -> Result<ExactSqlRows, ExactSqlError> {
     request.validate()?;
     with_exact_sql_guard(
