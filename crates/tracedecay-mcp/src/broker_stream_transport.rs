@@ -592,7 +592,7 @@ impl McpTransport for BrokerStreamTransport {
         if let Some(line) = self.replay.pop_front() {
             return Ok(Some(line));
         }
-        self.reader.read_mcp_line().await
+        self.reader.read_mcp_line_tokio().await
     }
 
     async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
