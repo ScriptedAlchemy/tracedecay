@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use std::fs;
 use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt;
