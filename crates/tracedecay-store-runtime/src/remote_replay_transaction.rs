@@ -8,9 +8,7 @@ use tracedecay_contracts::remote::replay::{
     RemoteReplayCommitReceiptV1, RemoteReplayFrameV1, RemoteReplayTransactionErrorV1,
     RemoteReplayTransactionOutcomeV1, RemoteReplayTransactionPortV1,
 };
-use tracedecay_domain::{
-    ManifestDigest, ObservationSourceCursorV1, ProjectionGenerationId, UtcMicros, canonical_sha256,
-};
+use tracedecay_domain::{ManifestDigest, ObservationSourceCursorV1, UtcMicros, canonical_sha256};
 use tracedecay_global_db::RegisteredGlobalDbWeakLeaseIssuerV1;
 use tracedecay_rusqlite_runtime::native_runtime;
 use tracedecay_rusqlite_runtime::remote::RemoteRecoveryPhysicalEffectErrorV1;
@@ -27,7 +25,7 @@ use tracedecay_store::{
 };
 
 const CHANNEL_CAPACITY: usize = 128;
-const PROJECTION_GENERATION: &str = "remote-replay.v1";
+const REPLAY_AUTHORITY_NAMESPACE: &str = "remote-replay.v1";
 
 #[derive(Clone)]
 struct ReplayTargetV1 {
@@ -599,11 +597,12 @@ fn prepare_request(
         position.end(),
     )
     .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?;
-    let projection_generation = ProjectionGenerationId::new(PROJECTION_GENERATION)
-        .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?;
+    // A replayed observation projects into the writer lineage's generation,
+    // the one remote reads expect it under.
+    let projection_generation = current_writer.authority.fence.generation_id.clone();
     let committed_at = tracedecay_contracts::clock::now_micros();
     let authorization =
-        build_observation_resolution_authorization_v1(&observation, PROJECTION_GENERATION)
+        build_observation_resolution_authorization_v1(&observation, REPLAY_AUTHORITY_NAMESPACE)
             .map_err(|_| RemoteReplayTransactionErrorV1::CanonicalEffect)?;
     let anchor = build_observation_retrieval_anchor(
         &observation,

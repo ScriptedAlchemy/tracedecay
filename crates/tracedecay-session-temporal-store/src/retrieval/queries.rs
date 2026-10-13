@@ -642,11 +642,11 @@ pub(super) const ROOT_OCCURRENCE_FTS_COUNT_QUERY: &str = concat!(
 // Newest-first empty-query browse across every active participant. The
 // leading table is the occurrence index on knowledge_at so LIMIT can stop
 // after one keyset page instead of joining every generation to every
-// occurrence and sorting the project. `CROSS JOIN` pins that loop order:
-// once a reader loads `ANALYZE` statistics, a small anchor or generation
-// table otherwise wins the outer loop and the page sorts the whole window.
-// `ROOT_TIME_CANDIDATE_QUERY` keeps the generation-first shape because its
-// window already bounds that join.
+// occurrence and sorting the project. `ROOT_TIME_CANDIDATE_QUERY` keeps the
+// generation-first shape because its window already bounds that join.
+// CROSS JOIN pins that order: once ANALYZE records a near-empty
+// `retrieval_anchors`, SQLite otherwise drives from the anchor scan and
+// sorts every occurrence before LIMIT.
 pub(super) const ROOT_SCOPE_CANDIDATE_QUERY: &str = concat!(
     "
     SELECT o.occurrence_id, o.retrieval_anchor_id, o.knowledge_at,
