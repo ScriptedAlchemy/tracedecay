@@ -213,7 +213,7 @@ impl RemoteDaemonFixture {
 
     fn client(&self, credential: [u8; 32]) -> EnrolledRemoteClient {
         EnrolledRemoteClient::new_with_root_certificate(
-            &format!("https://{}/remote/", self.remote),
+            format!("https://{}/remote/", self.remote),
             credential,
             Duration::from_secs(30),
             REMOTE_TLS_ROOT_CERTIFICATE,
