@@ -2142,8 +2142,8 @@ exit 0
         .lines()
         .map(|line| {
             let answer: Value = serde_json::from_str(line).expect("one JSON result per call");
-            assert_eq!(answer["kind"], "success", "{answer}");
-            answer["value"]["outcome"]["value"]["payload"].clone()
+            assert_eq!(answer["outcome"]["outcome"], "effect", "{answer}");
+            answer["outcome"]["value"]["payload"].clone()
         })
         .collect::<Vec<_>>();
     let finished = calls
