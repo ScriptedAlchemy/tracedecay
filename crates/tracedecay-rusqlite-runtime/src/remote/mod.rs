@@ -54,6 +54,7 @@ mod identity;
 mod membership;
 mod policy;
 mod promotion_gate;
+mod reachability;
 mod recovery_authority;
 mod replay_authority;
 mod replay_recovery;
@@ -569,19 +570,31 @@ impl RemoteCapturePortV1 for RemoteSqliteStorageV1 {
         }
         let row = authority_row(
             self.handle(),
-            "authority_state_json, runtime_binding_json",
+            "authority_state_json, runtime_binding_json, writer_json",
             &writer.authority.fence.brain_id,
         )
         .map_err(map_authority_persistence_error)?;
-        let authority_json = row_text(&row, 0).map_err(map_persistence_error)?;
-        let binding_json = row_text(&row, 1).map_err(map_persistence_error)?;
-        let stored_binding: StoreRuntimeBindingV1 = serde_json::from_str(binding_json)
-            .map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)?;
+        let stored_binding: StoreRuntimeBindingV1 = decode_capture_column(&row, 1)?;
         if stored_binding != self.binding {
             return Err(RemoteCapturePersistenceErrorV1::Corruption);
         }
-        serde_json::from_str(authority_json)
-            .map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)
+        let authority: CurrentRemoteAuthorityStateV1 = decode_capture_column(&row, 0)?;
+        if let CurrentRemoteAuthorityStateV1::Unavailable {
+            reason: tracedecay_domain::RemoteAuthorityUnavailableReasonV1::AuthorityUnreachable,
+            observed_at,
+        } = authority
+        {
+            let stored_writer: RemoteWriterAuthorityV1 = decode_capture_column(&row, 2)?;
+            if stored_writer != *writer {
+                // Offline capture runs only under the writer the authority
+                // last published to this node.
+                return Ok(CurrentRemoteAuthorityStateV1::Unavailable {
+                    reason: tracedecay_domain::RemoteAuthorityUnavailableReasonV1::FenceUnverified,
+                    observed_at,
+                });
+            }
+        }
+        Ok(authority)
     }
 
     fn capture_pending(
@@ -873,6 +886,14 @@ impl RemoteFrameTransferPortV1 for RemoteSqliteStorageV1 {
     ) -> Result<RemoteFrameTransferReceiptV1, RemoteFrameTransferErrorV1> {
         self.transfer_pending_frame(request)
     }
+}
+
+fn decode_capture_column<T: serde::de::DeserializeOwned>(
+    row: &crate::exact_sql::ExactSqlRow,
+    index: usize,
+) -> Result<T, RemoteCapturePersistenceErrorV1> {
+    let json = row_text(row, index)?;
+    serde_json::from_str(json).map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)
 }
 
 fn map_transfer_persistence_error(

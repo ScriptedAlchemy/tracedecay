@@ -9,11 +9,12 @@ use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use tracedecay_api::remote::REMOTE_ENROLLMENT_CREDENTIAL_HEADER;
 use tracedecay_contracts::ApplicationOutcome;
+use tracedecay_contracts::remote::auth::OpaqueRemoteCredential;
 use tracedecay_contracts::remote::discovery::RemoteAuthorityDiscoveryV1;
 use tracedecay_contracts::remote::protocol::{CurrentAuthorityRequestV1, RemoteProtocolRequestV1};
 use tracedecay_domain::RemoteCredentialFingerprintV1;
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_sdk::remote_client::EnrolledRemoteClient;
+use tracedecay_sdk::remote_client::{EnrolledRemoteClient, RemoteClientError};
 use tracedecay_store_runtime::RemoteNodeOperatorErrorV1;
 
 use super::http_application::{DaemonHttpApplicationRegistry, remote_node_operator_refusal};
@@ -51,12 +52,36 @@ pub(super) async fn join_remote_node(
     else {
         return remote_node_operator_refusal(RemoteNodeOperatorErrorV1::InvalidRequest);
     };
+    let identity = (
+        request.discovery.brain_id.clone(),
+        request.discovery.caller_node_id.clone(),
+    );
+    let presented = OpaqueRemoteCredential::new(credential.clone()).ok();
     // The SDK client is blocking; it is built, used, and dropped off the runtime.
     let discovered = tokio::task::spawn_blocking(move || discover_authority(&request, &credential))
         .await
         .unwrap_or(Err(RemoteNodeOperatorErrorV1::Unavailable));
     let discovery = match discovered {
         Ok(discovery) => discovery,
+        Err(RemoteNodeOperatorErrorV1::AuthorityUnreachable) => {
+            let Some(presented) = presented else {
+                return remote_node_operator_refusal(RemoteNodeOperatorErrorV1::InvalidRequest);
+            };
+            let (brain_id, node_id) = identity;
+            let recorded = runtime
+                .remote_credential_authority()
+                .record_authority_unreachable(
+                    &presented,
+                    &brain_id,
+                    &node_id,
+                    tracedecay_contracts::clock::now_micros(),
+                );
+            return remote_node_operator_refusal(
+                recorded
+                    .err()
+                    .unwrap_or(RemoteNodeOperatorErrorV1::AuthorityUnreachable),
+            );
+        }
         Err(error) => return remote_node_operator_refusal(error),
     };
     match runtime.join_remote_node(&discovery).await {
@@ -92,7 +117,10 @@ fn discover_authority(
         .discover_authority(&request.discovery)
         .map_err(|error| {
             tracing::warn!(%error, "remote authority discovery failed during join");
-            RemoteNodeOperatorErrorV1::AuthorityUnavailable
+            match error {
+                RemoteClientError::Transport(_) => RemoteNodeOperatorErrorV1::AuthorityUnreachable,
+                _ => RemoteNodeOperatorErrorV1::AuthorityUnavailable,
+            }
         })?;
     let Ok(envelope) = response.result else {
         return Err(RemoteNodeOperatorErrorV1::AuthorityUnavailable);

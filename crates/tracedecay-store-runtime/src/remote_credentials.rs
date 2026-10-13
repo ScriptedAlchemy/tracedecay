@@ -76,6 +76,8 @@ pub enum RemoteNodeOperatorErrorV1 {
     CapacityExceeded,
     #[error("the remote authority did not answer discovery for this enrollment")]
     AuthorityUnavailable,
+    #[error("the remote authority could not be reached")]
+    AuthorityUnreachable,
     #[error("remote node store is unavailable")]
     Unavailable,
 }
@@ -430,6 +432,36 @@ impl DaemonRemoteCredentialAuthorityV1 {
             return Err(RemoteCredentialLookupErrorV1::NotFound);
         }
         Ok(registered)
+    }
+
+    /// Records that the authority owning `node_id`'s joined store did not
+    /// answer the node credential `presented`, which makes offline capture
+    /// admissible there. A node that has not joined yet has nothing to record.
+    pub fn record_authority_unreachable(
+        &self,
+        presented: &OpaqueRemoteCredential,
+        brain_id: &BrainId,
+        node_id: &BrainNodeId,
+        observed_at: UtcMicros,
+    ) -> std::result::Result<(), RemoteNodeOperatorErrorV1> {
+        let Ok(registered) =
+            self.storage_for_presented(RemoteCredentialUseV1::CaptureOffline, presented)
+        else {
+            return Ok(());
+        };
+        if !registered.storage.is_joined()
+            || registered.storage.member_brain() != brain_id
+            || &registered.node_id != node_id
+        {
+            return Err(RemoteNodeOperatorErrorV1::InvalidRequest);
+        }
+        registered
+            .storage
+            .record_authority_unreachable(observed_at)
+            .map_err(|error| {
+                tracing::warn!(%error, "remote authority reachability was not recorded");
+                RemoteNodeOperatorErrorV1::Unavailable
+            })
     }
 
     pub fn cancel(&self) {

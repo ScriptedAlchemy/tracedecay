@@ -427,7 +427,8 @@ pub(super) fn remote_node_operator_refusal(error: RemoteNodeOperatorErrorV1) -> 
             StatusCode::CONFLICT
         }
         RemoteNodeOperatorErrorV1::CapacityExceeded => StatusCode::TOO_MANY_REQUESTS,
-        RemoteNodeOperatorErrorV1::AuthorityUnavailable => StatusCode::BAD_GATEWAY,
+        RemoteNodeOperatorErrorV1::AuthorityUnavailable
+        | RemoteNodeOperatorErrorV1::AuthorityUnreachable => StatusCode::BAD_GATEWAY,
         RemoteNodeOperatorErrorV1::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
     };
     (status, Json(serde_json::json!({ "code": error }))).into_response()
