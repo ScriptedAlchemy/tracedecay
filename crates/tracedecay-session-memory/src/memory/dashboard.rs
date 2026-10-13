@@ -7,8 +7,7 @@ use tracedecay_store::{
     ProjectMemoryDashboardOplogEntryV1, ProjectMemoryDashboardOplogQueryV1,
     ProjectMemoryDashboardVectorPointsQueryV1, ProjectMemoryDashboardVectorSnapshotV1,
     ProjectMemoryFactFeedbackHistoryQueryV1, ProjectMemoryFactFeedbackHistoryV1,
-    ProjectMemoryFactIdV1, ProjectMemoryFactStore, ProjectMemoryMemoryStatusV1,
-    ProjectMemoryStoreRevisionV1,
+    ProjectMemoryFactIdV1, ProjectMemoryFactStore, ProjectMemoryStoreRevisionV1,
 };
 
 use super::MemoryApplication;
@@ -113,13 +112,6 @@ impl<A: ProjectMemoryFactStore> MemoryApplication<A> {
             read_control,
         )
         .await
-    }
-
-    pub async fn dashboard_memory_status(
-        &self,
-        read_control: &FactReadControl,
-    ) -> Result<ProjectMemoryMemoryStatusV1, MemoryApplicationError> {
-        self.project_memory_status(read_control).await
     }
 
     /// Canonical store generation used to identify derived dashboard caches.

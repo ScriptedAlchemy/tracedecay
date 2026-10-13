@@ -81,13 +81,15 @@ impl Fixture {
         .await
     }
 
+    /// The identity, receipt, and cursor of every stored observation. The
+    /// payload is left out: its Session fact names the transcript by design.
     fn authority_documents(&self) -> Vec<String> {
         self.admission
             .observations()
             .into_iter()
             .flat_map(|stored| {
                 [
-                    serde_json::to_string(stored.observation()).unwrap(),
+                    serde_json::to_string(stored.observation().identity()).unwrap(),
                     serde_json::to_string(stored.sanitization_receipt()).unwrap(),
                     serde_json::to_string(stored.committed_cursor()).unwrap(),
                 ]
@@ -307,23 +309,18 @@ async fn production_vertical_persists_only_sanitized_payload_and_searchable_v1_r
     // which doubles the `\\` separators on Windows.
     let escaped = serde_json::to_string(&root).unwrap();
     let normalized = payload.replace(&escaped[1..escaped.len() - 1], "/fixture");
-    // Native separators are retained. Unlike '/', '\\' does not join the
-    // directory and filename into one high-entropy token for redaction.
-    let expected_transcript = if cfg!(windows) {
-        let path = fixture
+    let expected_transcript = serde_json::to_string(
+        &fixture
             .temp
             .path()
             .join("home")
             .join(".claude")
             .join("projects")
             .join("project-scope")
-            .join(format!("{session_id}.jsonl"));
-        serde_json::to_string(&path)
-            .unwrap()
-            .replace(&escaped[1..escaped.len() - 1], "/fixture")
-    } else {
-        r#""/fixture/home/.[TraceDecay redacted: high-entropy token].jsonl""#.to_owned()
-    };
+            .join(format!("{session_id}.jsonl")),
+    )
+    .unwrap()
+    .replace(&escaped[1..escaped.len() - 1], "/fixture");
 
     // The record embeds the temp directory as `cwd`, so its byte span (the
     // whole one-record file) depends on that path's length.

@@ -51,7 +51,82 @@ use tracedecay_store_runtime::{
 
 mod observability;
 
+use tracedecay_store_runtime::remote_credentials::RegisteredRemoteNodeStoreV1;
 use tracedecay_store_runtime::{DaemonRemoteCredentialAuthorityV1, DaemonRemoteCredentialLookupV1};
+
+/// Reports a protocol envelope's authority from the current writer state of
+/// the node store the presented credential routes to, the same per-node read
+/// `/remote-status` aggregates. A credential that routes to no store keeps the
+/// operation's own unavailable answer.
+struct CurrentAuthorityEnvelopeV1<Port> {
+    credentials: Arc<DaemonRemoteCredentialAuthorityV1>,
+    port: Port,
+}
+
+impl<Port> CurrentAuthorityEnvelopeV1<Port> {
+    fn new(credentials: &Arc<DaemonRemoteCredentialAuthorityV1>, port: Port) -> Self {
+        Self {
+            credentials: Arc::clone(credentials),
+            port,
+        }
+    }
+}
+
+fn report_current_authority<T>(
+    credentials: &DaemonRemoteCredentialAuthorityV1,
+    node: Option<&RegisteredRemoteNodeStoreV1>,
+    mut response: RemoteProtocolResponseV1<T>,
+) -> RemoteProtocolResponseV1<T> {
+    if let Some(node) = node
+        && let Ok(authority) =
+            credentials.current_authority(node, tracedecay_contracts::clock::now_micros())
+    {
+        response.authority = authority;
+    }
+    response
+}
+
+impl<Request, Port> RemoteProtocolPortV1<Request> for CurrentAuthorityEnvelopeV1<Port>
+where
+    Port: RemoteProtocolPortV1<Request>,
+{
+    type Output = Port::Output;
+
+    fn execute(
+        &self,
+        request: RemoteProtocolRequestV1<Request>,
+        credential: OpaqueRemoteCredential,
+    ) -> std::result::Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
+        let node = self
+            .credentials
+            .storage_for_presented(RemoteCredentialClassV1::Enrollment, &credential)
+            .ok();
+        let response = self.port.execute(request, credential)?;
+        Ok(report_current_authority(
+            &self.credentials,
+            node.as_ref(),
+            response,
+        ))
+    }
+
+    fn execute_controlled(
+        &self,
+        request: RemoteProtocolRequestV1<Request>,
+        credential: OpaqueRemoteCredential,
+        control: RemoteProtocolExecutionControlV1,
+    ) -> std::result::Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
+        let node = self
+            .credentials
+            .storage_for_presented(RemoteCredentialClassV1::Enrollment, &credential)
+            .ok();
+        let response = self.port.execute_controlled(request, credential, control)?;
+        Ok(report_current_authority(
+            &self.credentials,
+            node.as_ref(),
+            response,
+        ))
+    }
+}
 
 struct DaemonRemoteEnrollmentProtocolPortV1 {
     credentials: Arc<DaemonRemoteCredentialAuthorityV1>,
@@ -90,8 +165,8 @@ impl RemoteEnrollmentProtocolPortV1 for DaemonRemoteEnrollmentProtocolPortV1 {
                 remote_enrollment_result_contract_v1(),
             );
         }
-        let response = RemoteEnrollmentProtocolAdapterV1::new(registered.storage)
-            .execute_enrollment(request, grant_credential, enrollment_credential);
+        let response = RemoteEnrollmentProtocolAdapterV1::new(registered.storage.clone())
+            .execute_enrollment(request, grant_credential, enrollment_credential)?;
         if self
             .credentials
             .refresh_storage(&registered.node_id)
@@ -103,7 +178,11 @@ impl RemoteEnrollmentProtocolPortV1 for DaemonRemoteEnrollmentProtocolPortV1 {
                 remote_enrollment_result_contract_v1(),
             );
         }
-        response
+        Ok(report_current_authority(
+            &self.credentials,
+            Some(&registered),
+            response,
+        ))
     }
 }
 
@@ -337,30 +416,40 @@ pub fn build_daemon_remote_protocol_router(
     transaction: Arc<DaemonRemoteReplayTransactionAuthorityV1>,
     invocation: DaemonInvocationService,
 ) -> Result<Router> {
-    let recovery = Arc::new(DaemonRemoteRecoveryProtocolPortV1 {
+    let recovery = DaemonRemoteRecoveryProtocolPortV1 {
         credentials: Arc::clone(&credentials),
         promotion_contract: remote_result_contract("remote.promotion.result")?,
-    });
+    };
     let enrollment = Arc::new(DaemonRemoteEnrollmentProtocolPortV1 {
         credentials: Arc::clone(&credentials),
     });
     let operations = RemoteOperationProtocolPortsV1 {
-        capture: Arc::new(DaemonRemoteCaptureProtocolPortV1 {
-            credentials: Arc::clone(&credentials),
-        }),
-        replay: Arc::new(DaemonRemoteReplayProtocolPortV1 {
-            credentials: Arc::clone(&credentials),
-            transaction: Arc::clone(&transaction),
-        }),
-        frame_transfer: Arc::new(DaemonRemoteFrameTransferProtocolPortV1::new(Arc::clone(
+        capture: Arc::new(CurrentAuthorityEnvelopeV1::new(
             &credentials,
-        ))),
-        query: Arc::new(observability::DaemonRemoteQueryProtocolPortV1::new(
-            Arc::clone(&credentials),
-            transaction,
-            invocation,
+            DaemonRemoteCaptureProtocolPortV1 {
+                credentials: Arc::clone(&credentials),
+            },
         )),
-        promotion: recovery,
+        replay: Arc::new(CurrentAuthorityEnvelopeV1::new(
+            &credentials,
+            DaemonRemoteReplayProtocolPortV1 {
+                credentials: Arc::clone(&credentials),
+                transaction: Arc::clone(&transaction),
+            },
+        )),
+        frame_transfer: Arc::new(CurrentAuthorityEnvelopeV1::new(
+            &credentials,
+            DaemonRemoteFrameTransferProtocolPortV1::new(Arc::clone(&credentials)),
+        )),
+        query: Arc::new(CurrentAuthorityEnvelopeV1::new(
+            &credentials,
+            observability::DaemonRemoteQueryProtocolPortV1::new(
+                Arc::clone(&credentials),
+                transaction,
+                invocation,
+            ),
+        )),
+        promotion: Arc::new(CurrentAuthorityEnvelopeV1::new(&credentials, recovery)),
     };
     let admission = Arc::new(RemoteCredentialAdmissionServiceV1::new(
         DaemonRemoteCredentialLookupV1::new(credentials),

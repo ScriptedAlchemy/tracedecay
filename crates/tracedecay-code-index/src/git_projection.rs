@@ -125,11 +125,6 @@ pub enum GitTopologyProjectionError {
     RefWatermarkMismatch,
     #[error("Git topology generation does not match")]
     GenerationMismatch,
-    #[error("Git topology projection is stale")]
-    Stale {
-        projected: ManifestDigest,
-        current: ManifestDigest,
-    },
     #[error("Git topology declared binding is stale: {detail}")]
     StaleBinding { detail: &'static str },
     #[error("Git topology operation was cancelled")]
@@ -386,20 +381,6 @@ impl GitTopologyProjectionStore {
 
     pub fn coverage(&self) -> &GitCoverageV1 {
         &self.coverage
-    }
-
-    pub fn verify_ref_watermark(
-        &self,
-        current: &ManifestDigest,
-    ) -> Result<(), GitTopologyProjectionError> {
-        if &self.ref_watermark == current {
-            Ok(())
-        } else {
-            Err(GitTopologyProjectionError::Stale {
-                projected: self.ref_watermark.clone(),
-                current: current.clone(),
-            })
-        }
     }
 
     pub fn ancestors(

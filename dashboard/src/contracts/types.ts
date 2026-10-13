@@ -4967,7 +4967,7 @@ export type SkillOutcomeRecord = {
   views_since_activation: number;
 };
 
-export type SkillOutcomeVerdict = "adopted" | "ignored" | "too_early";
+export type SkillOutcomeVerdict = "adopted" | "too_early" | "unknown";
 
 export type SourceSpan = {
   end_byte: number;

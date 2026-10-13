@@ -16,6 +16,7 @@ use super::detect::{
     SanitizationDetectorOriginV1, SanitizationFindingV1, SanitizationScanBoundaryV1, normalize_key,
     redact_sensitive_values,
 };
+use super::detector_kernel::JsonPathSegment;
 use super::structural_id::{StructuralIdProtectionError, protect_sensitive_structural_id};
 use super::{ParseLimits, ParsedObservationRecordV1, ParsedPolicyLimitViolation};
 
@@ -291,7 +292,13 @@ impl RecordSanitizerV1 {
         } else {
             false
         };
-        let mut detected = redact_sensitive_values(payload, &self.policy.sensitive_keys)?;
+        let locators = if self.policy.provider_neutral {
+            session_locator_paths(&payload)
+        } else {
+            Vec::new()
+        };
+        let mut detected =
+            redact_sensitive_values(payload, &self.policy.sensitive_keys, &locators)?;
         if structural_identity_protected {
             detected
                 .findings
@@ -519,6 +526,45 @@ fn protect_string_field(
     let changed = protected != *value;
     *value = protected;
     Ok(changed)
+}
+
+/// The filesystem paths a canonical Session fact records. Replacing one with
+/// the entropy marker leaves a session row a transcript path that names no
+/// file: a Codex rollout path joins `codex/sessions/<date>/rollout-<uuid>`
+/// into a single token that reads as random.
+fn session_locator_paths(payload: &Value) -> Vec<Vec<JsonPathSegment>> {
+    let Some((facts_field, Value::Array(facts))) = payload.as_object().and_then(|object| {
+        object
+            .iter()
+            .enumerate()
+            .find_map(|(index, (key, value))| (key == "facts").then_some((index, value)))
+    }) else {
+        return Vec::new();
+    };
+    facts
+        .iter()
+        .enumerate()
+        .filter_map(|(fact_index, fact)| Some((fact_index, fact.as_object()?)))
+        .filter(|(_, fact)| fact.get("kind").and_then(Value::as_str) == Some("session"))
+        .flat_map(|(fact_index, fact)| {
+            fact.iter()
+                .enumerate()
+                .filter(|(_, (key, value))| {
+                    value.is_string()
+                        && matches!(
+                            key.as_str(),
+                            "project_path" | "location_path" | "transcript_path"
+                        )
+                })
+                .map(move |(field_index, _)| {
+                    vec![
+                        JsonPathSegment::Field(facts_field),
+                        JsonPathSegment::Index(fact_index),
+                        JsonPathSegment::Field(field_index),
+                    ]
+                })
+        })
+        .collect()
 }
 
 fn protect_canonical_payload_structural_ids(

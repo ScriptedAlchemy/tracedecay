@@ -1075,7 +1075,7 @@ pub(super) async fn compute_dashboard(
             let app = router(
                 retained_cg.as_ref(),
                 state,
-                tracedecay_api::static_dashboard_router(Arc::new(product_runtime.dashboard())),
+                tracedecay_api::static_dashboard_router(product_runtime.dashboard()),
             )
             .await?;
             let (listener, addr) = bind_dashboard(&host, port).await?;

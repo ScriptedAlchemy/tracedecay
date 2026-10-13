@@ -157,7 +157,7 @@ fn sanitize_parsed(
     limits: StructuredSanitizationLimits,
 ) -> Result<StructuredSanitizedPayload, StructuredSanitizationError> {
     validate_expansion(&value, limits)?;
-    let detected = redact_sensitive_values(value, &BTreeSet::new())
+    let detected = redact_sensitive_values(value, &BTreeSet::new(), &[])
         .map_err(|_| StructuredSanitizationError::SanitizerUnavailable)?;
     if !detected.quarantine_findings.is_empty() {
         return Err(StructuredSanitizationError::CredentialKeyQuarantine);
@@ -174,7 +174,7 @@ fn sanitize_malformed(
     text: &str,
     limits: StructuredSanitizationLimits,
 ) -> Result<StructuredSanitizedPayload, StructuredSanitizationError> {
-    let detected = redact_sensitive_values(Value::String(text.to_owned()), &BTreeSet::new())
+    let detected = redact_sensitive_values(Value::String(text.to_owned()), &BTreeSet::new(), &[])
         .map_err(|_| StructuredSanitizationError::SanitizerUnavailable)?;
     if !detected.quarantine_findings.is_empty() {
         return Err(StructuredSanitizationError::CredentialKeyQuarantine);

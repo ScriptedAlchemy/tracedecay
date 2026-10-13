@@ -830,6 +830,7 @@ fn storage_problem(error: WorkAttemptStorageError) -> ApplicationProblem {
         ),
         WorkAttemptStorageError::AttemptConflict
         | WorkAttemptStorageError::RunAdmissionConflict
+        | WorkAttemptStorageError::PlacementRootConflict
         | WorkAttemptStorageError::FenceConflict => ApplicationProblem::conflict(
             "application.work-retry.conflict",
             "The Work retry authority changed.",

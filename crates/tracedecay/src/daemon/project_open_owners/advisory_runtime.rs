@@ -929,12 +929,25 @@ fn log_scout_producer_outcome(project_root: &Path, outcome: &str) {
     );
 }
 
+/// The advisory half runs for every admitted boundary whatever the Scout
+/// state, so its refusals are named apart from Scout producer work.
+fn log_advisory_hook_cycle_outcome(project_root: &Path, outcome: &str, error_class: Option<&str>) {
+    let mut fields = vec![
+        ("project", project_root.display().to_string()),
+        ("outcome", outcome.to_owned()),
+    ];
+    if let Some(error_class) = error_class {
+        fields.push(("error_class", error_class.to_owned()));
+    }
+    tracedecay_runtime_core::logging::log_daemon_event("advisory_hook_cycle_work", &fields);
+}
+
 /// One admitted hook boundary's advisory-and-Scout cycle: the one-shot
-/// advisory/hook-notice run, then the Scout producer tail,
-/// canonical input assembly from the latest committed publication, daemon-side
-/// delivery selection, `prepare_configured`, and a claim-authority mount for
-/// the enqueued generation. Every early return is a typed fail-closed state;
-/// none of them invents guidance.
+/// advisory/hook-notice run, then, unless Context Scout is disabled, the Scout
+/// producer tail: canonical input assembly from the latest committed
+/// publication, daemon-side delivery selection, `prepare_configured`, and a
+/// claim-authority mount for the enqueued generation. Every early return is a
+/// typed fail-closed state; none of them invents guidance.
 #[expect(
     clippy::too_many_lines,
     reason = "Production hook cycle is one ingest-and-advise pass for the opened project."
@@ -953,22 +966,26 @@ async fn run_production_hook_cycle(
         .registration
         .host_delivery
         .source_observations;
-    let Some((indexed_generation, indexed_files)) = current_indexed_files(&producer).await else {
+    let Some(indexed_generation) = producer
+        .code_index_schedulers
+        .latest_feedback_generation_for_scope(&producer.project_root, &producer.scope)
+        .await
+    else {
         observe_hook_feedback_cycle_terminal(
             observations,
             &request,
             FeedbackOutcomeV1::Unavailable,
         );
-        log_scout_producer_outcome(&producer.project_root, "indexed_files_unavailable");
+        log_advisory_hook_cycle_outcome(&producer.project_root, "indexed_files_unavailable", None);
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
     let Some(document_uri) = hook_feedback_document_uri_or_observe(
         &producer.project_root,
-        &indexed_files,
+        &indexed_generation.metadata().snapshot().files,
         &request,
         observations,
     ) else {
-        log_scout_producer_outcome(&producer.project_root, "document_uri_unavailable");
+        log_advisory_hook_cycle_outcome(&producer.project_root, "document_uri_unavailable", None);
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
     // Retain this wait in the existing hook owner: cancellation, duplicate
@@ -1009,19 +1026,32 @@ async fn run_production_hook_cycle(
         .await
     {
         Ok(execution) => execution,
+        // An invalid request, such as a document no analyzer supports, fails
+        // the same way on every redrive. It settles the boundary instead of
+        // leaving its work owed; a later edit is a new boundary.
+        Err(error) if error.is_invalid_request() => {
+            observe_hook_feedback_cycle_terminal(
+                observations,
+                &request,
+                FeedbackOutcomeV1::Rejected,
+            );
+            log_advisory_hook_cycle_outcome(
+                &producer.project_root,
+                "feedback_cycle_unfeasible",
+                Some(error.class()),
+            );
+            return HookOrchestrationWorkOutcomeV1::Completed;
+        }
         Err(error) => {
             observe_hook_feedback_cycle_terminal(
                 observations,
                 &request,
                 FeedbackOutcomeV1::Unavailable,
             );
-            tracedecay_runtime_core::logging::log_daemon_event(
-                "context_scout_producer_work",
-                &[
-                    ("project", producer.project_root.display().to_string()),
-                    ("outcome", "feedback_cycle_failed".to_owned()),
-                    ("error_class", error.class().to_owned()),
-                ],
+            log_advisory_hook_cycle_outcome(
+                &producer.project_root,
+                "feedback_cycle_failed",
+                Some(error.class()),
             );
             return HookOrchestrationWorkOutcomeV1::RetryableFailure;
         }
@@ -1029,22 +1059,9 @@ async fn run_production_hook_cycle(
     if work_cancellation.is_cancelled() {
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     }
-    // The feedback publication revalidates its authority while the cycle is
-    // running. Scout evidence must use a real observation made after that
-    // publication, while the hook event keeps its original observation time.
-    let Some(observed_at) = admit_context_scout_observed_at(
-        now_micros(),
-        execution
-            .outcome
-            .publication()
-            .map(|publication| publication.authority.revalidated_at),
-    ) else {
-        log_scout_producer_outcome(&producer.project_root, "observation_time_unavailable");
-        return HookOrchestrationWorkOutcomeV1::RetryableFailure;
-    };
     // The Scout tail re-pins the current configuration: a revision that
     // landed while the advisory half ran must not produce guidance under the
-    // superseded control state.
+    // superseded control state, and a disabled Scout owes no work at all.
     let Ok(pinned_configuration) = producer
         .graph
         .configuration_runtime()
@@ -1065,10 +1082,26 @@ async fn run_production_hook_cycle(
         log_scout_producer_outcome(&producer.project_root, "configuration_pin_unavailable");
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     };
+    if scout_configuration.control().state == ContextScoutServiceStateV1::Disabled {
+        return HookOrchestrationWorkOutcomeV1::Completed;
+    }
     if scout_configuration.configuration_digest() != &execution.configuration_digest {
         log_scout_producer_outcome(&producer.project_root, "configuration_superseded");
         return HookOrchestrationWorkOutcomeV1::RetryableFailure;
     }
+    // The feedback publication revalidates its authority while the cycle is
+    // running. Scout evidence must use a real observation made after that
+    // publication, while the hook event keeps its original observation time.
+    let Some(observed_at) = admit_context_scout_observed_at(
+        now_micros(),
+        execution
+            .outcome
+            .publication()
+            .map(|publication| publication.authority.revalidated_at),
+    ) else {
+        log_scout_producer_outcome(&producer.project_root, "observation_time_unavailable");
+        return HookOrchestrationWorkOutcomeV1::RetryableFailure;
+    };
     let Ok(model_config) =
         tracedecay_automation_runtime::automation::config::from_configuration_snapshot(
             pinned_configuration.snapshot(),
@@ -1276,7 +1309,7 @@ fn observe_hook_feedback_cycle_terminal(
 
 fn hook_feedback_document_uri_or_observe(
     project_root: &Path,
-    indexed_files: &[String],
+    indexed_files: &[tracedecay_domain::SanitizedCodeFileV1],
     request: &HookOrchestrationRequestV1,
     observations: &Arc<dyn FeedbackObservationEmitterV1 + Send + Sync>,
 ) -> Option<String> {
@@ -1297,12 +1330,14 @@ fn hook_feedback_document_uri_or_observe(
 
 fn hook_feedback_document_uri(
     project_root: &Path,
-    indexed_files: &[String],
+    indexed_files: &[tracedecay_domain::SanitizedCodeFileV1],
     request: &HookOrchestrationRequestV1,
 ) -> Option<String> {
     let logical_path = match &request.hook.envelope().event {
-        tracedecay_hooks::HookEventV2::SavedEdit { file_id, .. } => {
-            indexed_files.iter().find(|logical_path| {
+        tracedecay_hooks::HookEventV2::SavedEdit { file_id, .. } => indexed_files
+            .iter()
+            .map(|file| file.logical_path.as_str())
+            .find(|logical_path| {
                 let logical_file_id = daemon_mint_hook_v2_file_id(
                     request.hook.envelope(),
                     hash16(logical_path.as_bytes()),
@@ -1312,13 +1347,25 @@ fn hook_feedback_document_uri(
                     hash16(project_root.join(logical_path).to_string_lossy().as_bytes()),
                 );
                 logical_file_id == *file_id || absolute_file_id == *file_id
-            })?
-        }
-        _ => indexed_files.first()?,
+            })?,
+        _ => stop_boundary_document(indexed_files)?,
     };
     url::Url::from_file_path(project_root.join(logical_path))
         .ok()
         .map(Into::into)
+}
+
+/// A stop boundary names no document, so the cycle runs over the first sorted
+/// path an analyzer supports. A file sealed without a language, such as
+/// `.gitignore` sorting ahead of every source file, can never form a request.
+fn stop_boundary_document(
+    indexed_files: &[tracedecay_domain::SanitizedCodeFileV1],
+) -> Option<&str> {
+    indexed_files
+        .iter()
+        .filter(|file| file.language.is_some())
+        .map(|file| file.logical_path.as_str())
+        .min()
 }
 
 fn hash16(value: &[u8]) -> [u8; 16] {

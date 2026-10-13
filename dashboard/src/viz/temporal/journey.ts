@@ -17,6 +17,8 @@ import type {
   LcmMessageV1,
   LoomTemporalPayloadV1,
 } from '../../contracts/generated.ts';
+import { gradeKind } from '../../ui/EvidenceGrade.tsx';
+import { commitEvidence } from '../../workspaces/sessions/model.ts';
 import { proximityThreadId, proximityTone } from '../proximity/proximity.ts';
 import type {
   EvidenceGrade,
@@ -94,8 +96,16 @@ function compareStrings(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-function keyOf(provider: string, sessionId: string): string {
-  return laneIdOf(provider || 'unknown', sessionId);
+const UNRECORDED_PROVIDER = 'unknown';
+
+export function sessionLaneId(provider: string, sessionId: string): string {
+  return laneIdOf(provider || UNRECORDED_PROVIDER, sessionId);
+}
+
+/** The provider a lane tuple names, or null when its provider was never
+ * recorded. A provider literally called `unknown` is indistinguishable. */
+export function recordedProvider(laneProvider: string): string | null {
+  return laneProvider === '' || laneProvider === UNRECORDED_PROVIDER ? null : laneProvider;
 }
 
 function isFinitePositive(value: unknown): value is number {
@@ -183,7 +193,7 @@ function lanesFrom(temporal: LoomTemporalPayloadV1): {
 } {
   const editedPaths = new Map<string, Set<string>>();
   for (const file of temporal.edited_files) {
-    const key = keyOf(file.provider, file.session_id);
+    const key = sessionLaneId(file.provider, file.session_id);
     const bucket = editedPaths.get(key);
     if (bucket) bucket.add(file.path);
     else editedPaths.set(key, new Set([file.path]));
@@ -197,8 +207,8 @@ function lanesFrom(temporal: LoomTemporalPayloadV1): {
       undated += 1;
       continue;
     }
-    const provider = row.provider || 'unknown';
-    const id = laneIdOf(provider, row.session_id);
+    const provider = row.provider || UNRECORDED_PROVIDER;
+    const id = sessionLaneId(row.provider, row.session_id);
     if (drafts.has(id)) continue;
     // An end equal to the start is the same instant recorded twice, not a
     // duration; only a strictly later reading measures an extent.
@@ -306,7 +316,7 @@ export function projectJourney(sources: JourneySources): JourneyProjection {
     else toolCallsBySecond.set(secondKey, [anchor]);
   };
   for (const event of temporal.events) {
-    const laneId = keyOf(event.provider, event.session_id);
+    const laneId = sessionLaneId(event.provider, event.session_id);
     if (!drafts.has(laneId)) continue;
     const recorded = { laneId, time: event.recorded_at, sequence: 0, grade: 'exact', source: 'recorded_event' } as const;
     switch (event.kind) {
@@ -383,13 +393,13 @@ export function projectJourney(sources: JourneySources): JourneyProjection {
   };
   for (const row of temporal.sessions) {
     const parent = row.parent_session_id?.trim();
-    const laneId = keyOf(row.provider, row.session_id);
+    const laneId = sessionLaneId(row.provider, row.session_id);
     if (!parent || !drafts.has(laneId)) continue;
     claimFor(laneId).row = { parentSessionId: parent, toolUseId: row.parent_tool_use_id?.trim() || null, source: 'sessions row' };
   }
   const nodeByLane = new Map<string, AnalyticsSubagentNodeV1>();
   for (const node of hierarchy?.nodes ?? []) {
-    nodeByLane.set(keyOf(node.provider, node.session_id), node);
+    nodeByLane.set(sessionLaneId(node.provider, node.session_id), node);
   }
   for (const [laneId, node] of nodeByLane) {
     const child = drafts.get(laneId);
@@ -452,7 +462,7 @@ export function projectJourney(sources: JourneySources): JourneyProjection {
     }
     const candidates = both !== null && parentsDiffer ? [both.row, both.tree] : [primary];
     for (const claim of candidates) {
-      const parent = drafts.get(keyOf(child.provider, claim.parentSessionId));
+      const parent = drafts.get(sessionLaneId(child.provider, claim.parentSessionId));
       if (!parent) {
         gaps.push({
           id: `gap:parent_outside_page:${child.id}:${claim.source}`,
@@ -577,7 +587,7 @@ export function projectJourney(sources: JourneySources): JourneyProjection {
   const untimedEditPaths = new Map<string, Set<string>>();
   for (const file of temporal.edited_files) {
     if (file.edited_at_micros != null) continue;
-    const laneId = keyOf(file.provider, file.session_id);
+    const laneId = sessionLaneId(file.provider, file.session_id);
     const bucket = untimedEditPaths.get(laneId);
     if (bucket) bucket.add(file.path);
     else untimedEditPaths.set(laneId, new Set([file.path]));
@@ -646,18 +656,19 @@ export function projectJourney(sources: JourneySources): JourneyProjection {
     }
   }
   for (const commit of temporal.commits) {
-    const laneId = keyOf(commit.provider, commit.session_id);
+    const laneId = sessionLaneId(commit.provider, commit.session_id);
     if (!laneIndex.has(laneId)) continue;
     const detail =
       `${commit.relation} · ${commit.evidence}` +
       (commit.span_overlap_kind ? ` · ${commit.span_overlap_kind}` : '');
+    const graded = commitEvidence(commit);
     pushRecorded({
       id: `commit:${laneId}:${commit.commit_sha}`,
       laneId,
       kind: 'commit',
       time: commit.committed_at,
       sequence: 0,
-      grade: commit.evidence === 'transcript' ? 'exact' : 'inferred',
+      grade: graded ? gradeKind(graded.grade) : 'unavailable',
       source: 'commit',
       label: commit.commit_sha.slice(0, 7),
       detail,
@@ -665,7 +676,7 @@ export function projectJourney(sources: JourneySources): JourneyProjection {
     });
   }
   for (const file of temporal.edited_files) {
-    const laneId = keyOf(file.provider, file.session_id);
+    const laneId = sessionLaneId(file.provider, file.session_id);
     if (!laneIndex.has(laneId) || file.edited_at_micros == null) continue;
     // An edit binds to the one loaded tool call recorded in its second; two
     // calls in that second name no single call, so neither is linked.
@@ -744,7 +755,7 @@ export function projectJourney(sources: JourneySources): JourneyProjection {
     intervals.push(interval);
   };
   for (const span of temporal.branch_spans) {
-    const laneId = keyOf(span.provider, span.session_id);
+    const laneId = sessionLaneId(span.provider, span.session_id);
     if (!laneIndex.has(laneId)) continue;
     pushInterval({
       id: `span:${laneId}:${span.first_at}:${span.worktree}`,

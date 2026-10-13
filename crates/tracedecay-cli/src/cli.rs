@@ -74,6 +74,9 @@ pub enum HostBundleComponentArg {
     Core,
     Agent,
     ContextMcp,
+    /// Retired name of `context-mcp`, still accepted on the hosts that
+    /// offered it.
+    #[value(hide = true)]
     OperatorMcp,
 }
 
@@ -757,19 +760,6 @@ pub struct RemoteAuthorityArgs {
     pub json: bool,
 }
 
-impl From<RemoteAuthorityArgs> for crate::remote_command::RemoteProtocolArgs {
-    fn from(args: RemoteAuthorityArgs) -> Self {
-        Self {
-            endpoint: args.endpoint,
-            credential_file: args.credential_file,
-            trust_root_file: args.trust_root_file,
-            timeout_secs: args.timeout_secs,
-            request_file: args.request_file,
-            json: args.json,
-        }
-    }
-}
-
 #[derive(Subcommand)]
 pub enum RemoteAction {
     /// Read the running daemon's mounted Remote Brain operational state
@@ -812,36 +802,6 @@ pub enum RemoteAction {
         #[command(flatten)]
         authority: RemoteAuthorityArgs,
     },
-}
-
-impl From<RemoteAction> for crate::remote_command::RemoteCommand {
-    fn from(action: RemoteAction) -> Self {
-        match action {
-            RemoteAction::Status { json } => Self::Status { json },
-            RemoteAction::Enroll {
-                authority,
-                enrollment_credential_file,
-            } => Self::Enroll {
-                args: authority.into(),
-                enrollment_credential_file,
-            },
-            RemoteAction::Capture { authority } => Self::Capture {
-                args: authority.into(),
-            },
-            RemoteAction::Query { authority } => Self::Query {
-                args: authority.into(),
-            },
-            RemoteAction::TransferFrame { authority } => Self::TransferFrame {
-                args: authority.into(),
-            },
-            RemoteAction::Replay { authority } => Self::Replay {
-                args: authority.into(),
-            },
-            RemoteAction::Failover { authority } => Self::Failover {
-                args: authority.into(),
-            },
-        }
-    }
 }
 
 #[derive(Subcommand)]

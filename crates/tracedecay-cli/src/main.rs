@@ -1260,11 +1260,10 @@ async fn dispatch_runtime_command(
         Commands::Workflow { invocation } => workflow_command::run(profile, invocation).await?,
         Commands::Remote { action } => {
             let profile = profile.clone();
-            let command = action.into();
             tracing::Instrument::instrument(
                 async {
                     tokio::task::spawn_blocking(move || {
-                        crate::remote_command::run(&profile, command)
+                        crate::remote_command::run(&profile, action)
                     })
                     .await
                     .map_err(|error| {

@@ -19,6 +19,8 @@ use automation::{
 };
 mod feedback_component;
 mod feedback_rollback;
+#[cfg(test)]
+mod mcp_identity_tests;
 pub(crate) use feedback_rollback::handle_feedback_rollback_command;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -664,6 +666,22 @@ fn component_is_not_applicable(agent: &str, component: crate::cli::HostBundleCom
     })
 }
 
+/// The identity a `--component` selection writes. A retired identity the host
+/// still lists plans its canonical route, so `operator-mcp` writes
+/// `context-mcp` on the hosts that offered it and stays a refusal elsewhere.
+fn selected_host_component(
+    host: tracedecay_agent_hosts::agents::host_bundle::HostKindV1,
+    component: tracedecay_agent_hosts::agents::host_bundle::HostComponentV1,
+) -> tracedecay_agent_hosts::agents::host_bundle::HostComponentV1 {
+    if tracedecay_agent_hosts::agents::host_bundle_registry::supported_components(host)
+        .contains(&component)
+    {
+        tracedecay_agent_hosts::agents::host_bundle::canonical_component(component)
+    } else {
+        component
+    }
+}
+
 fn canonical_host_component_set_with_tracedecay_bin(
     agent: &str,
     component: Option<crate::cli::HostBundleComponentArg>,
@@ -681,7 +699,7 @@ fn canonical_host_component_set_with_tracedecay_bin(
     };
     let requested = component.map(host_bundle_component).map_or_else(
         || tracedecay_agent_hosts::agents::host_bundle_registry::default_components(host),
-        |component| vec![component],
+        |component| vec![selected_host_component(host, component)],
     );
     if requested.is_empty() {
         return Err(tracedecay_domain::errors::TraceDecayError::Config {
@@ -842,28 +860,19 @@ fn dry_run_canonical_component_set(
     Ok(())
 }
 
-/// Deploy paths the durable receipt for this component already claims. A path
-/// missing from this set is one no receipt records, so replacing an existing
-/// file there is an adoption rather than an ordinary refresh.
+/// Deploy paths a durable receipt for this component's route already claims. A
+/// path missing from this set is one no receipt records, so replacing an
+/// existing file there is an adoption rather than an ordinary refresh.
 fn receipt_owned_paths(
     lifecycle_root: &Path,
     host: tracedecay_agent_hosts::agents::host_bundle::HostKindV1,
     component: tracedecay_agent_hosts::agents::host_bundle::HostComponentV1,
 ) -> std::collections::BTreeSet<String> {
-    tracedecay_agent_hosts::agents::host_bundle::latest_host_component_receipt_at(
+    tracedecay_agent_hosts::agents::host_bundle::host_component_owned_paths_at(
         lifecycle_root,
         host,
         component,
     )
-    .ok()
-    .flatten()
-    .map(|receipt| {
-        receipt
-            .artifacts
-            .into_iter()
-            .map(|artifact| artifact.relative_path)
-            .collect()
-    })
     .unwrap_or_default()
 }
 

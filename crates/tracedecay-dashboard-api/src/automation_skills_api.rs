@@ -21,7 +21,6 @@ use tracedecay_automation_runtime::automation::skill_usage::{
     skill_improvement_recommendations, stale_skill_recommendations, summarize_skill_usage_for,
 };
 use tracedecay_automation_runtime::automation::skill_writer::ManagedSkillDeploymentReceipt;
-use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
 
@@ -175,13 +174,9 @@ async fn skill_payload_with_deployment(
     let usage_summary = summarize_skill_usage_for(profile_root, &skill)
         .await
         .map_err(|err| internal_error(&err))?;
-    let stale_recommendation = stale_skill_recommendations(
-        std::slice::from_ref(&usage_summary),
-        current_timestamp(),
-        60 * 60 * 24 * 90,
-    )
-    .into_iter()
-    .next();
+    let stale_recommendation = stale_skill_recommendations(std::slice::from_ref(&usage_summary))
+        .into_iter()
+        .next();
     let improvement_recommendation =
         skill_improvement_recommendations(std::slice::from_ref(&usage_summary))
             .into_iter()
