@@ -994,10 +994,6 @@ fn writer_authority_readers_report_an_unpublished_writer_as_typed_absence() {
         placement_revision: fence.placement_revision.get(),
         authority_epoch: fence.authority_epoch.0,
     };
-    let frame = tracedecay_contracts::remote::replay::RemoteReplayFrameV1 {
-        event_id: "remote.event.unpublished".to_owned(),
-        capture: admitted(),
-    };
     let read_all =
         |storage: &RemoteSqliteStorageV1| {
             (
@@ -1006,7 +1002,7 @@ fn writer_authority_readers_report_an_unpublished_writer_as_typed_absence() {
             )
             .map(|_| ()),
             tracedecay_contracts::remote::replay::RemoteReplayCurrentWriterPortV1::current_writer(
-                storage, &frame,
+                storage, fence,
             )
             .map(|current| current.writer),
             storage
