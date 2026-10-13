@@ -48,6 +48,7 @@ use tracedecay_contracts::{
 const READ_WAIT: Duration = Duration::from_secs(5);
 mod credential_admission;
 mod crypto;
+mod drain;
 mod enrollment;
 mod enrollment_lifecycle;
 mod identity;
@@ -811,7 +812,7 @@ impl RemoteSqliteStorageV1 {
                     return Ok(RemoteFrameTransferReceiptV1 {
                         event_id: request.event_id.clone(),
                         sequence: request.sequence.sequence,
-                        disposition: RemoteFrameTransferDispositionV1::AlreadyTransferred,
+                        disposition: RemoteFrameTransferDispositionV1::TransferredPending,
                     });
                 }
                 validate_previous_frame(&transaction, &capture).map_err(|error| match error {

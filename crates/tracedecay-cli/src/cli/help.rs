@@ -724,7 +724,9 @@ transfer-frame/replay/failover against an authenticated \
 authority endpoint. `status` never probes local stores; it reads the \
 daemon's in-memory remote mount. `capture` spools one observation on a node \
 whose authority is unreachable, `transfer-frame` moves one encrypted spool \
-frame to an enrolled node, and `query` reads one exact observation and \
+frame to an enrolled node, `drain` has the running daemon send a joined \
+node's pending frames to its authority in sequence order, and `query` reads \
+one exact observation and \
 renders the honest remote shard coverage next to the caller's own pending \
 local spool. `revoke` asks the running daemon to revoke every enrollment of \
 a node it provisioned; that node's later capture, transfer and replay are \
@@ -745,6 +747,9 @@ Examples:
       --credential-file cred.bin --request-file query.json
   tracedecay remote transfer-frame --endpoint https://peer.example/remote/ \\
       --credential-file cred.bin --request-file frame.json --json
+  tracedecay remote drain --endpoint https://brain.example/remote/ \\
+      --credential-file cred.bin --trust-root-file root.pem \\
+      --request-file discovery.json
   tracedecay remote replay --endpoint https://brain.example/remote/ \\
       --credential-file cred.bin --request-file replay.json
   tracedecay remote failover --endpoint https://brain.example/remote/ \\

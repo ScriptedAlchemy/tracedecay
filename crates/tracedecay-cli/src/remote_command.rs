@@ -38,6 +38,7 @@ pub fn run(profile: &ProfileRoot, action: RemoteAction) -> Result<()> {
             enrollment_credential_file,
         } => run_enroll(authority, enrollment_credential_file),
         RemoteAction::Join { authority } => run_join(profile, authority),
+        RemoteAction::Drain { authority } => run_drain(profile, authority),
         RemoteAction::Capture { authority: args } => {
             let request = read_protocol_request(&args.request_file)?;
             let client = build_client(&args)?;
@@ -177,6 +178,44 @@ fn run_enroll(args: RemoteAuthorityArgs, enrollment_credential_file: PathBuf) ->
 
 #[tracing::instrument(name = "serve.remote.join", level = "trace", skip_all)]
 fn run_join(profile: &ProfileRoot, args: RemoteAuthorityArgs) -> Result<()> {
+    let json = args.json;
+    let (request, credential) = node_operation_request(args)?;
+    let discovery = tracedecay::daemon::live_remote_join(profile, &request, &credential)?;
+    if json {
+        print!("{}", canonical_json_line(&discovery)?);
+    } else {
+        let enrollment = &discovery.enrollment.enrollment;
+        println!(
+            "Joined Brain {} as node {} (enrollment {} revision {})",
+            enrollment.brain_id.as_str(),
+            enrollment.node_id.as_str(),
+            enrollment.enrollment_id.as_str(),
+            enrollment.revision
+        );
+    }
+    Ok(())
+}
+
+#[tracing::instrument(name = "serve.remote.drain", level = "trace", skip_all)]
+fn run_drain(profile: &ProfileRoot, args: RemoteAuthorityArgs) -> Result<()> {
+    let json = args.json;
+    let (request, credential) = node_operation_request(args)?;
+    let drained = tracedecay::daemon::live_remote_drain(profile, &request, &credential)?;
+    if json {
+        print!("{}", canonical_json_line(&drained)?);
+    } else {
+        println!(
+            "Drained {} pending frame(s) to the authority",
+            drained.transferred.len()
+        );
+    }
+    Ok(())
+}
+
+/// The node operation request and enrollment credential `args` name.
+fn node_operation_request(
+    args: RemoteAuthorityArgs,
+) -> Result<(tracedecay::daemon::RemoteNodeJoinRequestV1, Vec<u8>)> {
     if args.timeout_secs == 0 {
         return Err(TraceDecayError::Config {
             message: "Remote Brain --timeout-secs must be greater than zero".to_owned(),
@@ -203,20 +242,7 @@ fn run_join(profile: &ProfileRoot, args: RemoteAuthorityArgs) -> Result<()> {
         timeout_secs: args.timeout_secs,
         discovery: read_protocol_request(&args.request_file)?,
     };
-    let discovery = tracedecay::daemon::live_remote_join(profile, &request, &credential)?;
-    if args.json {
-        print!("{}", canonical_json_line(&discovery)?);
-    } else {
-        let enrollment = &discovery.enrollment.enrollment;
-        println!(
-            "Joined Brain {} as node {} (enrollment {} revision {})",
-            enrollment.brain_id.as_str(),
-            enrollment.node_id.as_str(),
-            enrollment.enrollment_id.as_str(),
-            enrollment.revision
-        );
-    }
-    Ok(())
+    Ok((request, credential))
 }
 
 #[tracing::instrument(name = "serve.remote.client", level = "trace", skip_all)]
