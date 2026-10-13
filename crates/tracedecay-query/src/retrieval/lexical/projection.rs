@@ -497,6 +497,45 @@ impl ExactOccurrenceOwnersV1 {
     }
 }
 
+/// How specific each request literal is: the inverse of the number of rows
+/// it matched, the chance that one of those rows is the one the literal
+/// names. `format_relative_time callers` names one function and a word that
+/// hundreds of rows contain, so a row matching only `callers` carries a
+/// small share of the query and the definition carries nearly all of it.
+struct ExactLiteralSpecificityV1 {
+    inverse_frequencies: Vec<u128>,
+    total: u128,
+}
+
+impl ExactLiteralSpecificityV1 {
+    /// `document_frequencies[literal]` counts the rows that matched it; a
+    /// literal nothing matched carries no weight.
+    fn new(document_frequencies: &[usize]) -> Self {
+        let inverse_frequencies = document_frequencies
+            .iter()
+            .map(|&frequency| match frequency {
+                0 => 0,
+                frequency => (1_u128 << 64) / frequency as u128,
+            })
+            .collect::<Vec<_>>();
+        let total = inverse_frequencies.iter().sum();
+        Self {
+            inverse_frequencies,
+            total,
+        }
+    }
+
+    /// The share of the query's literal specificity that `literals` carry,
+    /// in `[1, 1_000_000]` micros for a non-empty matched set.
+    fn share_micros(&self, literals: &[usize]) -> u64 {
+        let matched = literals
+            .iter()
+            .map(|&literal| self.inverse_frequencies[literal])
+            .sum::<u128>();
+        (matched * 1_000_000 / self.total.max(1)).clamp(1, 1_000_000) as u64
+    }
+}
+
 /// Per-request lazily admitted proofs, one slot per request literal.
 ///
 /// An admission proof depends only on the literal and the request, never on

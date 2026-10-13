@@ -109,6 +109,11 @@ pub struct ExactLaneEvidence {
     /// Absent historical evidence deserializes as a non-definition hit.
     #[serde(default)]
     pub source_role: tracedecay_domain::RetrievalSourceRoleV1,
+    /// The share of the query's literal specificity (each literal weighs the
+    /// inverse of the rows it matched) that `matched_literals` carry, in
+    /// `[1, 1_000_000]` micros. It is the candidate's exact score: matching
+    /// every literal, or the query's only literal, scores the full million.
+    pub specificity_micros: u64,
 }
 
 impl LaneBoundEvidence for ExactLaneEvidence {
@@ -157,6 +162,11 @@ impl ExactLaneEvidence {
         }
         for literal in &self.matched_literals {
             literal.validate()?;
+        }
+        if !(1..=FULL_SPECIFICITY_MICROS).contains(&self.specificity_micros) {
+            return Err(RetrievalPortError::Contract(
+                "exact lane specificity is outside (0, 1] of the query".to_owned(),
+            ));
         }
         Ok(())
     }
@@ -545,12 +555,13 @@ fn is_known_tool(value: &str) -> bool {
     is_tool_name_token(value)
 }
 
-/// Fixed-point score contributed by one admitted matched literal.
+/// The exact score of a candidate carrying all of the query's literal
+/// specificity.
 ///
 /// The exact tier is non-demotable and its identity is the validated proof.
-/// The lane's raw score is a deterministic count of admitted literals, never a
-/// float or a port-supplied ranking signal.
-const ADMITTED_LITERAL_SCORE_MICROS: u64 = 1_000_000;
+/// The lane's raw score is the evidence's fixed-point specificity share,
+/// never a float.
+const FULL_SPECIFICITY_MICROS: u64 = 1_000_000;
 
 /// The independent exact-literal lane.
 ///
@@ -718,7 +729,7 @@ where
             admitted.push((candidate.clone(), evidence.clone()));
         }
         // Canonical deterministic order: production definitions ahead of
-        // every other source role, then admitted matched-literal count
+        // every other source role, then matched-literal specificity
         // (descending), then stable occurrence identity, then the evidence
         // anchor. Port emission order can never select a different prefix.
         admitted.sort_by(|left, right| {
@@ -726,13 +737,7 @@ where
                 .source_role
                 .admission_rank()
                 .cmp(&right.1.source_role.admission_rank())
-                .then_with(|| {
-                    right
-                        .1
-                        .matched_literals
-                        .len()
-                        .cmp(&left.1.matched_literals.len())
-                })
+                .then_with(|| right.1.specificity_micros.cmp(&left.1.specificity_micros))
                 .then_with(|| {
                     left.0
                         .source_occurrence_id
@@ -766,10 +771,7 @@ where
             }
             candidate.ordinal_rank = ordinal as u32;
             candidate.source_role = evidence.source_role;
-            candidate.raw_score = FixedPointScore(
-                (evidence.matched_literals.len() as u64)
-                    .saturating_mul(ADMITTED_LITERAL_SCORE_MICROS),
-            );
+            candidate.raw_score = FixedPointScore(evidence.specificity_micros);
             evidence_by_occurrence.insert(candidate.source_occurrence_id.clone(), evidence);
             candidates.push(candidate);
         }
