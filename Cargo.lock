@@ -6277,11 +6277,11 @@ dependencies = [
 name = "tracedecay-configuration"
 version = "0.1.0"
 dependencies = [
+ "asupersync",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
- "tokio",
  "tracedecay-automation",
  "tracedecay-contracts",
  "tracedecay-domain",
