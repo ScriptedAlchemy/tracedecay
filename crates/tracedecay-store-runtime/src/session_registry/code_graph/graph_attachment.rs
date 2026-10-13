@@ -104,11 +104,10 @@ async fn open_session_relation_owner_with_cancellation(
         })?;
     let registration = registration(cancellation, lifecycle_cancellation, operation);
     let graph_registry = graph_registry.clone();
-    // Grafeo SingleFile restore is blocking CPU and allocation work. Retain
-    // the join in the daemon-owned task while moving the resolver off Tokio's
-    // cooperative workers; cancellation remains visible inside the native
-    // load through the exact registration authority.
-    let graph = tokio::task::spawn_blocking(move || {
+    // Grafeo SingleFile restore is blocking CPU and allocation work, so it runs
+    // on the native blocking pool; cancellation remains visible inside the load
+    // through the exact registration authority.
+    let graph = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         let _span = tracing::trace_span!("daemon.store.session_relation_graph.open").entered();
         {
             graph_registry.resolve_lazy_owner_attachment(GraphDbOwnerRegistrationV1 {
@@ -118,7 +117,7 @@ async fn open_session_relation_owner_with_cancellation(
         }
     })
     .await
-    .map_err(|error| session_registry_error("join session relation graph open", error.to_string()))?
+    .map_err(|error| session_registry_error("join session relation graph open", error))?
     .map_err(|error| {
         session_registry_error("open session relation graph owner", error.to_string())
     })?;
@@ -137,16 +136,18 @@ pub async fn close_retained_for_shutdown(
     // graph client lease, and the reconciliation workers must already be
     // joined. A lease that survives the drain is a live consumer, so the
     // typed Conflict below is the correct terminal answer, never retry here.
-    tokio::task::spawn_blocking(move || graph_registry.close_retained(&binding, &verified_locator))
-        .await
-        .map_err(|error| session_registry_error("join graph shutdown close", error.to_string()))?
-        .map(|_| ())
-        .map_err(|error| {
-            session_registry_error(
-                "close graph runtime for shutdown",
-                format!("{error} (shard {shard_id:?})"),
-            )
-        })
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        graph_registry.close_retained(&binding, &verified_locator)
+    })
+    .await
+    .map_err(|error| session_registry_error("join graph shutdown close", error))?
+    .map(|_| ())
+    .map_err(|error| {
+        session_registry_error(
+            "close graph runtime for shutdown",
+            format!("{error} (shard {shard_id:?})"),
+        )
+    })
 }
 
 impl super::RetainedVerifiedGraphRuntimeV1 {
