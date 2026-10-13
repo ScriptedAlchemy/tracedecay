@@ -43,6 +43,16 @@ runs:
         if [[ "$RUNNER_OS" == "Windows" ]]; then
           exe=".exe"
         fi
+        # A cold repository cache downloads every external repository. Bazel
+        # retries a 5xx for only ~17 s, and a longer GitHub release-host outage
+        # failed beta.86's macOS build (#3756). Analysis fetches every
+        # repository and the next command refetches a failed one, so retry
+        # only that phase, over about six minutes.
+        for attempt in 1 2 3 4; do
+          bazel build --nobuild --config="$CONFIG" --config=ci //crates/tracedecay-cli:tracedecay && break
+          (( attempt < 4 )) || exit 1
+          sleep $((attempt * 60))
+        done
         bazel build --config="$CONFIG" --config=ci //crates/tracedecay-cli:tracedecay
         mkdir -p "$DEST"
         cp "$(bazel info --config="$CONFIG" --config=ci bazel-bin)/crates/tracedecay-cli/tracedecay${exe}" "$DEST/tracedecay${exe}"
