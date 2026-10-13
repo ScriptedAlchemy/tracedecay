@@ -10,6 +10,7 @@ use tracedecay_contracts::remote::replay::{
 };
 use tracedecay_domain::{ManifestDigest, ObservationSourceCursorV1, UtcMicros, canonical_sha256};
 use tracedecay_global_db::RegisteredGlobalDbWeakLeaseIssuerV1;
+use tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRegistryFailure;
 use tracedecay_rusqlite_runtime::native_runtime;
 use tracedecay_rusqlite_runtime::remote::RemoteRecoveryPhysicalEffectErrorV1;
 use tracedecay_store::{
@@ -19,9 +20,10 @@ use tracedecay_store::{
     RuntimeBatchCompatibilityV1, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
     RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestControlV1,
     RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1, RuntimeTransactionIdV1,
-    RuntimeTransactionScopeV1, StoreClientIdV1, StoreCommitReceiptV1, StoreIdempotencyKeyV1,
-    StoreOperationIdV1, StoreOperationMetadataV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
-    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
+    RuntimeTransactionScopeV1, StorageRuntimeErrorV1, StoreClientIdV1, StoreCommitReceiptV1,
+    StoreIdempotencyKeyV1, StoreOperationIdV1, StoreOperationMetadataV1, StoreRuntimeBindingV1,
+    VerifiedStoreLocatorV1, build_observation_resolution_authorization_v1,
+    build_observation_retrieval_anchor,
 };
 
 const CHANNEL_CAPACITY: usize = 128;
@@ -558,10 +560,23 @@ fn execute_replay(
     });
     let lease =
         issue_target_lease(&target).map_err(|_| RemoteReplayTransactionErrorV1::Unavailable)?;
-    let outcome = native_runtime::block_on(lease.runtime_client().dispatch_submit(request, probe))
-        .map_err(|_| RemoteReplayTransactionErrorV1::Unavailable)?
-        .map_err(|_| RemoteReplayTransactionErrorV1::Unavailable)?;
-    map_submit_outcome(frame, current_writer, prepared.admission_bytes, outcome)
+    let submitted =
+        native_runtime::block_on(lease.runtime_client().dispatch_submit(request, probe))
+            .map_err(|_| RemoteReplayTransactionErrorV1::Unavailable)?;
+    match submitted {
+        Ok(outcome) => map_submit_outcome(frame, current_writer, prepared.admission_bytes, outcome),
+        Err(StoreRuntimeRegistryFailure::StorageRuntime(error))
+            if matches!(
+                *error,
+                StorageRuntimeErrorV1::ObservationSourceCursorConflict { .. }
+                    | StorageRuntimeErrorV1::ObservationCursorAdvanceCollision
+                    | StorageRuntimeErrorV1::ObservationCursorAdvanceLedgerDisagreement { .. }
+            ) =>
+        {
+            Ok(RemoteReplayTransactionOutcomeV1::Refused)
+        }
+        Err(_) => Err(RemoteReplayTransactionErrorV1::Unavailable),
+    }
 }
 
 struct PreparedReplayRequestV1 {
