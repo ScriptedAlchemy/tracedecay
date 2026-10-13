@@ -37,12 +37,7 @@ impl RemoteObservationReplayWriteV1 {
                 });
             }
         };
-        let expected_authority_key = tracedecay_domain::canonical_sha256(&(
-            "tracedecay.remote-recovery-authority.v1",
-            &self.writer_fence.brain_id,
-            &self.writer_fence.shard_id,
-            &self.writer_fence.generation_id,
-        ));
+        let expected_authority_key = self.writer_fence.recovery_authority_key();
         if !valid_event_id(&self.event_id)
             || self
                 .previous_event_id
@@ -97,12 +92,7 @@ impl RemoteWriterFenceInstallV1 {
                 .is_some_and(|revision| revision == self.replacement.placement_revision.get());
             expected.validate().is_ok() && same_lineage && next_epoch && next_placement
         });
-        let expected_authority_key = tracedecay_domain::canonical_sha256(&(
-            "tracedecay.remote-recovery-authority.v1",
-            &self.replacement.brain_id,
-            &self.replacement.shard_id,
-            &self.replacement.generation_id,
-        ));
+        let expected_authority_key = self.replacement.recovery_authority_key();
         let target_matches_project = matches!(
             &self.target_binding.shard_id.scope,
             crate::StoreShardScopeV1::ProjectSessions { project_id }
