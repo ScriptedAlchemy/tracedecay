@@ -1,5 +1,9 @@
+use std::pin::pin;
 use std::sync::Arc;
+use std::task::{Context, Waker};
 use std::time::Duration;
+
+use asupersync::Cx;
 
 use tracedecay_private_fs::framed_log::sync_latency;
 
@@ -14,10 +18,11 @@ fn open_broker(dir: &std::path::Path) -> Arc<HostAdmissionBroker> {
 
 // The held runtime guard is the in-flight batch the admissions queue behind.
 #[allow(clippy::await_holding_lock)]
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[asupersync::test(flavor = "multi_thread", workers = 4)]
 async fn admissions_queued_behind_a_batch_share_the_next_durable_batch() {
     let spool = tempfile::tempdir().unwrap();
     let broker = open_broker(spool.path());
+    let cx = Cx::current().unwrap();
     broker.admit("warm", b"first").await.unwrap();
 
     // Hold the spool the way an in-flight batch does, so every admission
@@ -26,7 +31,7 @@ async fn admissions_queued_behind_a_batch_share_the_next_durable_batch() {
     let admissions = (0..CONCURRENT_ADMISSIONS)
         .map(|index| {
             let broker = Arc::clone(&broker);
-            tokio::spawn(async move {
+            cx.spawn(move |_| async move {
                 broker
                     .admit(
                         &format!("source-{index}"),
@@ -34,17 +39,18 @@ async fn admissions_queued_behind_a_batch_share_the_next_durable_batch() {
                     )
                     .await
             })
+            .unwrap()
         })
         .collect::<Vec<_>>();
     while broker.appends.lock().unwrap().len() < CONCURRENT_ADMISSIONS {
-        tokio::task::yield_now().await;
+        asupersync::runtime::yield_now().await;
     }
     let barriers = sync_latency::inject(spool.path(), Duration::ZERO);
     drop(in_flight);
 
     let mut seqs = Vec::new();
-    for admission in admissions {
-        seqs.push(admission.await.unwrap().unwrap().seq);
+    for mut admission in admissions {
+        seqs.push(admission.join(&cx).await.unwrap().unwrap().seq);
     }
     seqs.sort_unstable();
     assert_eq!(seqs, (2..=9).collect::<Vec<u64>>());
@@ -53,26 +59,28 @@ async fn admissions_queued_behind_a_batch_share_the_next_durable_batch() {
     assert_eq!(barriers.syncs(), 2 + u64::from(cfg!(unix)));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[asupersync::test(flavor = "multi_thread", workers = 4)]
 async fn every_acknowledged_concurrent_admission_survives_a_crash() {
     let spool = tempfile::tempdir().unwrap();
     let broker = open_broker(spool.path());
+    let cx = Cx::current().unwrap();
     let _slow_disk = sync_latency::inject(spool.path(), Duration::from_millis(5));
     let admissions = (0..CONCURRENT_ADMISSIONS)
         .map(|index| {
             let broker = Arc::clone(&broker);
-            tokio::spawn(async move {
+            cx.spawn(move |_| async move {
                 let payload = format!("event-{index}");
                 let admitted = broker
                     .admit(&format!("source-{index}"), payload.as_bytes())
                     .await;
                 (admitted.map(|admitted| admitted.seq), payload)
             })
+            .unwrap()
         })
         .collect::<Vec<_>>();
     let mut acknowledged = Vec::new();
-    for admission in admissions {
-        let (seq, payload) = admission.await.unwrap();
+    for mut admission in admissions {
+        let (seq, payload) = admission.join(&cx).await.unwrap();
         acknowledged.push((seq.unwrap(), payload.into_bytes()));
     }
     acknowledged.sort_unstable();
@@ -97,7 +105,7 @@ async fn commit_leased(broker: &HostAdmissionBroker) -> u64 {
     leased.seq
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[asupersync::test(flavor = "multi_thread", workers = 4)]
 async fn a_commit_waits_on_no_barrier_and_the_next_batch_publishes_its_watermark() {
     let spool = tempfile::tempdir().unwrap();
     let broker = open_broker(spool.path());
@@ -130,4 +138,38 @@ async fn a_commit_waits_on_no_barrier_and_the_next_batch_publishes_its_watermark
         (second.seq, b"second".to_vec())
     );
     assert_eq!(runtime.try_lease_next().unwrap(), None);
+}
+
+#[test]
+fn replay_requests_coalesce_into_one_pending_wake() {
+    let spool = tempfile::tempdir().unwrap();
+    let broker = open_broker(spool.path());
+    let mut context = Context::from_waker(Waker::noop());
+
+    for _ in 0..3 {
+        broker.request_replay();
+    }
+    assert!(
+        pin!(broker.wait_for_replay_request())
+            .poll(&mut context)
+            .is_ready(),
+        "a request raised before the worker subscribes must not be lost"
+    );
+    let mut waiting = pin!(broker.wait_for_replay_request());
+    assert!(
+        waiting.as_mut().poll(&mut context).is_pending(),
+        "requests raised before one wake must coalesce into that wake"
+    );
+
+    broker.request_replay();
+    assert!(
+        waiting.as_mut().poll(&mut context).is_ready(),
+        "a request must wake the subscribed worker"
+    );
+    assert!(
+        pin!(broker.wait_for_replay_request())
+            .poll(&mut context)
+            .is_pending(),
+        "a delivered request must leave no stored wake behind"
+    );
 }

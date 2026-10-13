@@ -6590,6 +6590,8 @@ dependencies = [
 name = "tracedecay-host-admission"
 version = "0.1.0"
 dependencies = [
+ "asupersync",
+ "futures-util",
  "serde",
  "serde_json",
  "sha2 0.11.0",
