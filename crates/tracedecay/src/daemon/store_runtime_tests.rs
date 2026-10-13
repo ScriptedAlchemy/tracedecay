@@ -18,8 +18,9 @@ use tracedecay_contracts::remote::recovery::{
 use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{
-    BrainNodeId, Confidence, EntityId, FactCategoryV1, FactCurationActionV1,
-    FactLineageEventKindV1, FactOwnerV1, FactRelationKindV1, UtcMicros, canonical_sha256,
+    BrainNodeId, Confidence, CurrentRemoteAuthorityStateV1, EntityId, FactCategoryV1,
+    FactCurationActionV1, FactLineageEventKindV1, FactOwnerV1, FactRelationKindV1, UtcMicros,
+    canonical_sha256,
 };
 use tracedecay_global_db::register_registered_schema_installer;
 use tracedecay_graph_db::{
@@ -964,6 +965,38 @@ async fn republishing_a_writer_restores_a_lost_project_writer_fence_before_failo
     .expect("failover thread");
 
     assert_eq!((republished, failover), (Ok(()), Ok((1, 2, true))));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failover_names_the_promoted_node_credential_as_the_authority_credential() {
+    let fixture = provisioned_writer_fixture().await;
+    let promotion = fixture.promotion("request.cancel-test.promoted-credential");
+    fixture.publish().await.expect("publish the first writer");
+    let mut caller = fixture.caller.clone();
+    caller.enrollment_revision = fixture.writer.authority.credential_revision + 1;
+    let expected = (fixture.node_id.clone(), caller.enrollment_revision);
+
+    let promote_recovery = Arc::clone(&fixture.recovery);
+    let authority = tokio::task::spawn_blocking(move || {
+        promote_recovery
+            .promote(&promotion, &caller, &PromotionControl(None))
+            .map(|committed| committed.authority)
+    })
+    .await
+    .expect("failover thread")
+    .expect("failover commits");
+
+    let CurrentRemoteAuthorityStateV1::Available(authority) = authority else {
+        panic!("failover reports an available authority, got {authority:?}");
+    };
+    assert_eq!(
+        (
+            authority.fence.authority_node_id,
+            authority.credential_revision
+        ),
+        expected,
+        "replay authenticates the promoted node's own enrollment revision"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

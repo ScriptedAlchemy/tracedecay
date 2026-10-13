@@ -455,6 +455,7 @@ fn protocol_envelopes_report_the_status_authority_through_publication_and_failov
     grant.capabilities = [
         RemoteCapabilityV1::CaptureOffline,
         RemoteCapabilityV1::Promote,
+        RemoteCapabilityV1::ServeAuthority,
     ]
     .into_iter()
     .collect();
