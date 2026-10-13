@@ -16,6 +16,7 @@ use super::super::work_attempt_exec::WorkAttemptProcessRegistryV1;
 use super::attempt_operations;
 use super::evidence_retrieval;
 use super::intelligence;
+use super::job;
 use super::leak_adjudication::adjudicate_leak;
 use super::preparation;
 use super::{
@@ -39,6 +40,9 @@ pub(super) async fn dispatch_work_application(
     cancellation: CancellationContext,
 ) -> DaemonInvocationResponse {
     let operation_key = request.operation_key();
+    // A guided job's steps are their own Work invocations under this request's
+    // cancellation.
+    let job_cancellation = cancellation.clone();
     let Some((_, capability, use_case)) = tracedecay_contracts::WORK_APPLICATION_OPERATION_IDS_V1
         .iter()
         .find(|(operation, _, _)| *operation == operation_key)
@@ -997,6 +1001,36 @@ pub(super) async fn dispatch_work_application(
                     WorkApplicationOutcomeV1::ReleasePlacement,
                 )
             }
+        }
+        WorkApplicationInvocationV1::AdvanceJob(request) => {
+            let advanced = match preparation::repository_selection(&context) {
+                Ok(selection) => {
+                    let host = job::WorkJobHost {
+                        registered: registered.clone(),
+                        attempt_processes,
+                        observability_producer,
+                        project_root,
+                        selection,
+                        deadline: deadline.clone(),
+                        cancellation: job_cancellation,
+                    };
+                    job::advance_job(&host, &context, capability, &use_case, request).await
+                }
+                Err(problem) => Err(problem),
+            };
+            complete_work_effect(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                advanced,
+                observed_at,
+                deadline,
+                WorkApplicationOutcomeV1::AdvanceJob,
+            )
         }
     }
 }

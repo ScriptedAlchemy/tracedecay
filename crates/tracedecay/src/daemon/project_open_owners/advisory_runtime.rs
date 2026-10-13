@@ -1126,7 +1126,7 @@ async fn run_production_hook_cycle(
     }
     let Some(lifecycle) = request.lifecycle else {
         log_scout_producer_outcome(&producer.project_root, "lifecycle_absent");
-        return HookOrchestrationWorkOutcomeV1::RetryableFailure;
+        return HookOrchestrationWorkOutcomeV1::AwaitingLifecycle;
     };
     let Some(pin) = ContextScoutAuthorityPinV1::new(
         &execution.context,

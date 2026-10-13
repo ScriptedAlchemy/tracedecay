@@ -1198,6 +1198,7 @@ mod tests {
         ("tracedecay_work_admit_placement", BranchSensitivity::Independent),
         ("tracedecay_work_placement_status", BranchSensitivity::Independent),
         ("tracedecay_work_release_placement", BranchSensitivity::Independent),
+        ("tracedecay_work_advance_job", BranchSensitivity::Independent),
         // Workflow: definition and run lifecycle via the Workflow daemon owner.
         // `handle_workflow` does not take `cg`.
         ("tracedecay_workflow_register_definition", BranchSensitivity::Independent),

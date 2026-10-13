@@ -32,6 +32,8 @@ scripts or hooks; `--json` emits the one canonical application envelope.";
 
 const WORK_AFTER_HELP: &str = "\
 Examples:
+  tracedecay work advance-job --request-file job.json --until-settled
+                                                           Run a parallel job with synthesis
   tracedecay work views --request-file views.json --json    Read the current Work projection
   tracedecay work prepare-graph-mutation --request-file - --json
   tracedecay work create --request-file create.json --json  Create work items

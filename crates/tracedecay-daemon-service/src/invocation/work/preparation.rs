@@ -189,7 +189,24 @@ pub(super) fn prepare_execution_snapshot(
             tracedecay_contracts::WorkProductApplicationErrorV1::VersionConflict,
         ));
     }
-    let item = snapshot.graph().item(&request.task_id).ok_or_else(|| {
+    admitted_execution_snapshot(
+        registered,
+        snapshot.graph(),
+        &request.task_id,
+        request.mutation.occurred_at,
+    )
+}
+
+/// The execution snapshot admission derives for `task_id`'s accepted
+/// proposal at `admitted_at`. Admission records that instant on the task, so
+/// a later start re-derives the snapshot admission returned.
+pub(super) fn admitted_execution_snapshot(
+    registered: &RegisteredWorkRuntime,
+    graph: &tracedecay_domain::WorkProductGraphV1,
+    task_id: &tracedecay_domain::TaskId,
+    admitted_at: UtcMicros,
+) -> Result<tracedecay_domain::WorkExecutionSnapshot, ApplicationProblem> {
+    let item = graph.item(task_id).ok_or_else(|| {
         work_product_problem(
             tracedecay_contracts::WorkProductApplicationErrorV1::NotFoundOrNotAuthorized,
         )
@@ -197,8 +214,7 @@ pub(super) fn prepare_execution_snapshot(
     let accepted_proposal = item.accepted_proposal().ok_or_else(|| {
         work_product_problem(tracedecay_contracts::WorkProductApplicationErrorV1::InvalidRequest)
     })?;
-    let proposal = snapshot
-        .graph()
+    let proposal = graph
         .proposal_decisions()
         .iter()
         .find(|decision| {
@@ -222,11 +238,7 @@ pub(super) fn prepare_execution_snapshot(
     }
     registered
         .proposal_routing
-        .execution_snapshot(
-            proposal,
-            &registered.work_topology_policy,
-            request.mutation.occurred_at,
-        )
+        .execution_snapshot(proposal, &registered.work_topology_policy, admitted_at)
         .map_err(|_| work_product_authority_unavailable())
 }
 
@@ -258,32 +270,52 @@ pub(super) fn current_work_product_snapshot(
     use_case: &UseCaseId,
     observed_at: UtcMicros,
 ) -> Result<tracedecay_contracts::WorkGraphVersionEntryV1, ApplicationProblem> {
+    read_repository_graph(registered, context, capability, use_case, observed_at)?
+        .into_current_snapshot()
+        .map_err(work_product_problem)
+}
+
+/// The current graph over the request's repository, including its absence.
+pub(super) fn read_repository_graph(
+    registered: &RegisteredWorkRuntime,
+    context: &RequestContext,
+    capability: &str,
+    use_case: &UseCaseId,
+    observed_at: UtcMicros,
+) -> Result<tracedecay_contracts::WorkGraphReadV1, ApplicationProblem> {
     let capability =
         CapabilityId::new(capability).map_err(|_| work_product_authority_unavailable())?;
     let binding = tracedecay_contracts::WorkProductBindingV1::new(capability, use_case.clone());
-    let selection = tracedecay_contracts::WorkProductSelectionScopeV1::relations(
-        std::collections::BTreeSet::from([
-            tracedecay_contracts::WorkProductAuthorizedRelationScopeV1::Repository {
-                project_id: context.scope().project_id.clone(),
-                repository_id: context.scope().repository_id.clone(),
-            },
-        ]),
+    tracedecay_application::work::RegisteredWorkProductServicesV1::attach_with_attempt_authority(
+        &registered.database,
+        binding,
+        registered.authority.clone(),
     )
-    .map_err(|_| work_product_authority_unavailable())?;
-    let read =
-        tracedecay_application::work::RegisteredWorkProductServicesV1::attach_with_attempt_authority(
-            &registered.database,
-            binding,
-            registered.authority.clone(),
-        )
     .map_err(|_| work_product_authority_unavailable())?
     .reads()
     .read_graph(
         context,
-        tracedecay_contracts::WorkGraphReadRequestV1::current(selection, observed_at),
+        tracedecay_contracts::WorkGraphReadRequestV1::current(
+            repository_selection(context)?,
+            observed_at,
+        ),
     )
-    .map_err(work_product_problem)?;
-    read.into_current_snapshot().map_err(work_product_problem)
+    .map_err(work_product_problem)
+}
+
+/// The selection naming exactly the request's own repository.
+pub(super) fn repository_selection(
+    context: &RequestContext,
+) -> Result<tracedecay_contracts::WorkProductSelectionScopeV1, ApplicationProblem> {
+    tracedecay_contracts::WorkProductSelectionScopeV1::relations(std::collections::BTreeSet::from(
+        [
+            tracedecay_contracts::WorkProductAuthorizedRelationScopeV1::Repository {
+                project_id: context.scope().project_id.clone(),
+                repository_id: context.scope().repository_id.clone(),
+            },
+        ],
+    ))
+    .map_err(|_| work_product_authority_unavailable())
 }
 
 pub(super) fn decide_product_proposal(
