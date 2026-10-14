@@ -91,7 +91,7 @@ pub fn settings_path(dashboard_root: &Path) -> PathBuf {
 
 pub async fn load_settings(dashboard_root: &Path) -> AnalyzerResult<CodeDiagnosticsSettings> {
     let path = settings_path(dashboard_root);
-    match tokio::fs::read(&path).await {
+    run_settings_io(move || match std::fs::read(&path) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| {
             AnalyzerRuntimeError::new(format!(
                 "failed to parse code diagnostics settings '{}': {error}",
@@ -105,7 +105,8 @@ pub async fn load_settings(dashboard_root: &Path) -> AnalyzerResult<CodeDiagnost
             "failed to read code diagnostics settings '{}': {error}",
             path.display()
         ))),
-    }
+    })
+    .await
 }
 
 pub async fn save_settings(
@@ -113,27 +114,32 @@ pub async fn save_settings(
     settings: &CodeDiagnosticsSettings,
 ) -> AnalyzerResult<()> {
     let path = settings_path(dashboard_root);
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|error| {
-            AnalyzerRuntimeError::new(format!(
-                "failed to create code diagnostics settings directory '{}': {error}",
-                parent.display()
-            ))
-        })?;
-    }
     let bytes = serde_json::to_vec_pretty(settings).map_err(|error| {
         AnalyzerRuntimeError::new(format!(
             "failed to serialize code diagnostics settings: {error}"
         ))
     })?;
-    let staged = path.with_extension("json.pending");
-    let publish_path = path.clone();
-    tokio::task::spawn_blocking(move || publish_settings(&staged, &publish_path, &bytes))
+    run_settings_io(move || {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                AnalyzerRuntimeError::new(format!(
+                    "failed to create code diagnostics settings directory '{}': {error}",
+                    parent.display()
+                ))
+            })?;
+        }
+        publish_settings(&path.with_extension("json.pending"), &path, &bytes)
+    })
+    .await
+}
+
+async fn run_settings_io<T: Send + 'static>(
+    work: impl FnOnce() -> AnalyzerResult<T> + Send + 'static,
+) -> AnalyzerResult<T> {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(work)
         .await
         .map_err(|error| {
-            AnalyzerRuntimeError::new(format!(
-                "code diagnostics settings write task failed: {error}"
-            ))
+            AnalyzerRuntimeError::new(format!("code diagnostics settings I/O failed: {error}"))
         })?
 }
 

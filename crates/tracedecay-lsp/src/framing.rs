@@ -7,12 +7,9 @@
 
 use std::io;
 
-use futures_util::StreamExt;
-use tokio::io::AsyncRead;
-use tokio::time::Instant;
 use tokio_util::bytes::{Buf, BytesMut};
-use tokio_util::codec::{Decoder, Encoder, FramedRead};
-use tracedecay_daemon_protocol::{FramePoll, LspFrame, MAX_LSP_FRAME_BYTES};
+use tokio_util::codec::{Decoder, Encoder};
+use tracedecay_daemon_protocol::{LspFrame, MAX_LSP_FRAME_BYTES};
 
 /// A framing header is metadata, not an unbounded side channel.
 pub const MAX_LSP_HEADER_BYTES: usize = 16 * 1024;
@@ -214,25 +211,6 @@ impl From<io::Error> for AsyncContentLengthError {
 impl From<ContentLengthCodecError> for AsyncContentLengthError {
     fn from(error: ContentLengthCodecError) -> Self {
         Self::Codec(error)
-    }
-}
-
-/// Reads one framed payload before `deadline`.
-///
-/// An idle deadline is retryable, while a partial frame at the deadline is a
-/// typed failure so callers cannot silently discard an incomplete envelope.
-pub async fn read_content_length_frame_until<R>(
-    reader: &mut FramedRead<R, ContentLengthCodec>,
-    deadline: Instant,
-) -> Result<FramePoll, AsyncContentLengthError>
-where
-    R: AsyncRead + Unpin,
-{
-    match tokio::time::timeout_at(deadline, reader.next()).await {
-        Ok(Some(result)) => result.map(FramePoll::Frame),
-        Ok(None) => Ok(FramePoll::Closed),
-        Err(_) if reader.read_buffer().is_empty() => Ok(FramePoll::Pending),
-        Err(_) => Err(AsyncContentLengthError::DeadlineElapsed),
     }
 }
 
