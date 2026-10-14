@@ -292,7 +292,6 @@ const COMPACTION_INGEST_CONVERGING_REASONS: &[&str] = &[
     "external_source_commit_failed",
     "batch_worker_stopped",
     "reader_pool_saturated",
-    "writer_lane_saturated",
 ];
 
 /// Lands the project's Codex rollouts in the owning store through the
