@@ -1,0 +1,7 @@
+disallowed-methods = [
+    { path = "tracing::subscriber::set_default", reason = "use tracedecay_runtime_core::logging::set_tracing_capture; a lone scoped dispatcher lets another thread cache a callsite as disabled (#3829)" },
+    { path = "tracing::subscriber::with_default", reason = "use tracedecay_runtime_core::logging::set_tracing_capture; a lone scoped dispatcher lets another thread cache a callsite as disabled (#3829)" },
+    { path = "tracing::dispatcher::set_default", reason = "use tracedecay_runtime_core::logging::set_tracing_capture; a lone scoped dispatcher lets another thread cache a callsite as disabled (#3829)" },
+    { path = "tracing::dispatcher::with_default", reason = "use tracedecay_runtime_core::logging::set_tracing_capture; a lone scoped dispatcher lets another thread cache a callsite as disabled (#3829)" },
+    { path = "tracing_subscriber::util::SubscriberInitExt::set_default", reason = "use tracedecay_runtime_core::logging::set_tracing_capture; a lone scoped dispatcher lets another thread cache a callsite as disabled (#3829)" },
+]

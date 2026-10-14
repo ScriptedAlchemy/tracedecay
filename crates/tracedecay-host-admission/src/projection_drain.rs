@@ -473,7 +473,7 @@ mod tests {
         );
 
         let (subscriber, fields) = ErrorFieldCapture::new();
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let _guard = tracedecay_runtime_core::logging::set_tracing_capture(subscriber);
         warn_projection_drain_store_error(
             &error,
             "projection store operation failed during host drain",
