@@ -55,15 +55,45 @@ async fn create_schema_db() -> (TestConnection, TempDir) {
     (conn, dir)
 }
 
-/// Sets PRAGMA `user_version` on the connection.
 async fn set_user_version(conn: &Connection, version: u32) {
+    if ledger_table_exists(conn).await {
+        crate::db::schema_version::record_version(
+            conn,
+            crate::db::schema_version::GRAPH_COMPONENT,
+            i64::from(version),
+        )
+        .await
+        .expect("failed to set schema version");
+        return;
+    }
     conn.execute(&format!("PRAGMA user_version = {version}"), ())
         .await
         .expect("failed to set user_version");
 }
 
-/// Reads PRAGMA `user_version` from the connection.
+async fn ledger_table_exists(conn: &Connection) -> bool {
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tracedecay_schema_version'",
+            (),
+        )
+        .await
+        .expect("probe schema ledger");
+    rows.next()
+        .await
+        .expect("read schema ledger probe")
+        .is_some()
+}
+
 async fn get_user_version(conn: &Connection) -> u32 {
+    let version =
+        crate::db::schema_version::read_version(conn, crate::db::schema_version::GRAPH_COMPONENT)
+            .await
+            .expect("failed to read schema version");
+    u32::try_from(version.unwrap_or(0)).expect("schema version fits u32")
+}
+
+async fn pragma_user_version(conn: &Connection) -> u32 {
     let mut rows = conn
         .query("PRAGMA user_version", ())
         .await
@@ -73,8 +103,8 @@ async fn get_user_version(conn: &Connection) -> u32 {
         .await
         .expect("failed to read user_version row")
         .expect("user_version should return a row");
-    let v: i64 = row.get(0).expect("failed to read user_version value");
-    v as u32
+    let version: i64 = row.get(0).expect("failed to read user_version value");
+    u32::try_from(version).expect("user_version fits u32")
 }
 
 /// Checks whether a table exists in `sqlite_master`.
@@ -777,4 +807,41 @@ async fn the_content_digest_lookup_is_an_indexed_point_read() {
         !plan.contains("SCAN digests"),
         "the digest lookup must never scan the digest table: {plan}"
     );
+}
+
+#[asupersync::test]
+async fn a_user_version_stamp_at_the_current_schema_upgrades_onto_the_ledger() {
+    let (conn, _dir) = create_schema_db().await;
+    conn.execute_batch("DROP TABLE tracedecay_schema_version")
+        .await
+        .expect("remove the adopted ledger");
+    conn.execute(&format!("PRAGMA user_version = {SCHEMA_VERSION}"), ())
+        .await
+        .expect("restore the legacy stamp");
+
+    ensure_schema_current_connection(&conn)
+        .await
+        .expect("current legacy stamp must be admitted and adopted");
+
+    assert_eq!(get_user_version(&conn).await, SCHEMA_VERSION);
+    assert_eq!(pragma_user_version(&conn).await, 0);
+    assert!(ledger_table_exists(&conn).await);
+}
+
+#[asupersync::test]
+async fn an_older_user_version_is_refused_without_adopting_it() {
+    let (conn, _dir) = create_schema_db().await;
+    conn.execute_batch("DROP TABLE tracedecay_schema_version")
+        .await
+        .expect("remove the adopted ledger");
+    conn.execute("PRAGMA user_version = 38", ())
+        .await
+        .expect("stamp the previous graph schema");
+
+    let error = ensure_schema_current_connection(&conn)
+        .await
+        .expect_err("an older pragma must be refused");
+    assert!(error.to_string().contains("database schema v38"), "{error}");
+    assert_eq!(pragma_user_version(&conn).await, 38);
+    assert!(!ledger_table_exists(&conn).await);
 }

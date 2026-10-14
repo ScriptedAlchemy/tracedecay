@@ -1,6 +1,9 @@
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor};
+#[cfg(test)]
+use tracedecay_runtime_core::db::engine::params;
+use tracedecay_runtime_core::db::schema_version;
 
-use super::super::global_db_operation_error;
+use super::super::{global_db_operation_error, global_db_operation_message};
 
 /// Marker proving `observations` was created with the canonical AUTOINCREMENT
 /// DDL below; the authority schema contract's AUTOINCREMENT invariant consumes
@@ -80,20 +83,22 @@ async fn observation_table_exists(
 }
 
 async fn migration_recorded(
-    conn: &impl QueryExecutor,
+    conn: &(impl QueryExecutor + Sync),
     migration: &str,
 ) -> tracedecay_domain::errors::Result<bool> {
-    let mut rows = conn
-        .query(
-            "SELECT 1 FROM global_schema_migrations WHERE migration = ?1",
-            params![migration],
-        )
+    schema_version::read_version(conn, migration)
         .await
-        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
-    rows.next()
+        .map(|version| version.is_some())
+        .map_err(|error| global_db_operation_message(OBSERVATION_SCHEMA_OPERATION, error.to_string()))
+}
+
+async fn record_marker(
+    conn: &(impl Executor + Sync),
+    migration: &str,
+) -> tracedecay_domain::errors::Result<()> {
+    schema_version::record_version(conn, migration, 1)
         .await
-        .map(|row| row.is_some())
-        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))
+        .map_err(|error| global_db_operation_message(OBSERVATION_SCHEMA_OPERATION, error.to_string()))
 }
 
 async fn observation_rows_exist(
@@ -111,10 +116,7 @@ async fn observation_rows_exist(
 
 /// Canonical observation-authority DDL.
 const OBSERVATION_AUTHORITY_SCHEMA_SQL: &str =
-    "CREATE TABLE IF NOT EXISTS global_schema_migrations (
-            migration TEXT PRIMARY KEY
-        );
-        CREATE TABLE IF NOT EXISTS sanitization_receipts (
+    "CREATE TABLE IF NOT EXISTS sanitization_receipts (
             receipt_id TEXT PRIMARY KEY,
             sanitizer_version TEXT NOT NULL,
             payload_digest TEXT NOT NULL,
@@ -244,6 +246,9 @@ const OBSERVATION_AUTHORITY_SCHEMA_SQL: &str =
 pub async fn ensure_observation_schema(
     conn: &(impl Executor + Sync),
 ) -> tracedecay_domain::errors::Result<Option<crate::registered::RefusedAuthorityV1>> {
+    schema_version::retire_named_ledgers(conn).await.map_err(|error| {
+        global_db_operation_message(OBSERVATION_SCHEMA_OPERATION, error.to_string())
+    })?;
     let table_preexisted = observation_table_exists(conn).await?;
     tracedecay_runtime_core::db::retrieval_anchor_schema::install_retrieval_anchor_schema(
         conn,
@@ -258,34 +263,19 @@ pub async fn ensure_observation_schema(
             OBSERVATION_SCHEMA_MIGRATION,
             OBSERVATION_UNIFIED_IDENTITY_MIGRATION,
         ] {
-            conn.execute(
-                "INSERT OR IGNORE INTO global_schema_migrations(migration) VALUES (?1)",
-                params![migration],
-            )
-            .await
-            .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+            record_marker(conn, migration).await?;
         }
     } else if !migration_recorded(conn, OBSERVATION_UNIFIED_IDENTITY_MIGRATION).await? {
         if observation_rows_exist(conn).await? {
             return Ok(Some(OBSERVATIONS_PREDATE_UNIFIED_IDENTITY));
         }
-        conn.execute(
-            "INSERT OR IGNORE INTO global_schema_migrations(migration) VALUES (?1)",
-            params![OBSERVATION_UNIFIED_IDENTITY_MIGRATION],
-        )
-        .await
-        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+        record_marker(conn, OBSERVATION_UNIFIED_IDENTITY_MIGRATION).await?;
     }
     if !migration_recorded(conn, OBSERVATION_REPOSITORY_CAPTURE_DEDUPE_MIGRATION).await? {
         conn.execute_batch(REPOSITORY_CAPTURE_DEDUPE_SQL)
             .await
             .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
-        conn.execute(
-            "INSERT OR IGNORE INTO global_schema_migrations(migration) VALUES (?1)",
-            params![OBSERVATION_REPOSITORY_CAPTURE_DEDUPE_MIGRATION],
-        )
-        .await
-        .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
+        record_marker(conn, OBSERVATION_REPOSITORY_CAPTURE_DEDUPE_MIGRATION).await?;
     }
     super::canonical_bodies::ensure_canonical_bodies_table(conn).await?;
     Ok(None)
@@ -383,7 +373,7 @@ mod tests {
         drop(reopen(&path).await.unwrap());
         let conn = TestConnection::open(&path);
         conn.execute(
-            "DELETE FROM global_schema_migrations WHERE migration = ?1",
+            "DELETE FROM tracedecay_schema_version WHERE component = ?1",
             params!["observations-unified-identity-v1"],
         )
         .await
@@ -427,7 +417,7 @@ mod tests {
         let conn = TestConnection::open(&path);
         let mut rows = conn
             .query(
-                "SELECT COUNT(*) FROM global_schema_migrations WHERE migration = ?1",
+                "SELECT COUNT(*) FROM tracedecay_schema_version WHERE component = ?1",
                 params![OBSERVATION_UNIFIED_IDENTITY_MIGRATION],
             )
             .await
@@ -461,7 +451,7 @@ mod tests {
         drop(reopen(&path).await.unwrap());
         let conn = TestConnection::open(&path);
         conn.execute(
-            "DELETE FROM global_schema_migrations WHERE migration = ?1",
+            "DELETE FROM tracedecay_schema_version WHERE component = ?1",
             params![OBSERVATION_UNIFIED_IDENTITY_MIGRATION],
         )
         .await
@@ -473,7 +463,7 @@ mod tests {
         let conn = TestConnection::open(&path);
         let mut rows = conn
             .query(
-                "SELECT COUNT(*) FROM global_schema_migrations WHERE migration = ?1",
+                "SELECT COUNT(*) FROM tracedecay_schema_version WHERE component = ?1",
                 params![OBSERVATION_UNIFIED_IDENTITY_MIGRATION],
             )
             .await
@@ -665,7 +655,7 @@ mod tests {
             .unwrap();
         transaction
             .execute(
-                "DELETE FROM global_schema_migrations WHERE migration = ?1",
+                "DELETE FROM tracedecay_schema_version WHERE component = ?1",
                 params![OBSERVATION_REPOSITORY_CAPTURE_DEDUPE_MIGRATION],
             )
             .await

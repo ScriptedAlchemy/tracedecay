@@ -59,25 +59,6 @@ async fn stale_or_future_lcm_marker_requires_reset_without_rewriting_marker() {
     }
 }
 
-#[asupersync::test]
-async fn current_lcm_schema_reopens_without_republishing_its_marker() {
-    let tmp = TempDir::new().unwrap();
-    let db_path = tmp.path().join(".tracedecay").join("sessions.db");
-    let db = open_global_db(&db_path).await.expect("fresh global db");
-    drop(db);
-    set_migration_applied_at(&db_path, 123).await;
-
-    let reopened = open_global_db(&db_path)
-        .await
-        .expect("current global db reopen");
-    assert_eq!(
-        schema_version_on(&reopened).await,
-        tracedecay_lcm::LCM_SCHEMA_VERSION
-    );
-    drop(reopened);
-    assert_eq!(migration_applied_at(&db_path).await, 123);
-}
-
 /// A store installed before the LCM status performance indexes existed is
 /// already at the current LCM schema version, so the in-transaction LCM
 /// stage skips it. A short-lived attach must still converge the indexes in
@@ -89,7 +70,6 @@ async fn short_lived_attach_convergence_rebuilds_queryable_lcm_status_indexes() 
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
     let db = open_global_db(&db_path).await.expect("fresh global db");
     drop(db);
-    set_migration_applied_at(&db_path, 123).await;
     {
         // Rewind to the pre-index store shape while keeping the current
         // version marker, exactly as a store installed by an older binary.
@@ -179,5 +159,4 @@ async fn short_lived_attach_convergence_rebuilds_queryable_lcm_status_indexes() 
         tracedecay_lcm::LCM_SCHEMA_VERSION
     );
     drop(reopened);
-    assert_eq!(migration_applied_at(&db_path).await, 123);
 }

@@ -306,7 +306,9 @@ async fn read_only_open_refuses_nonfinal_schema_as_reset_required_before_publica
     let project_path = seed_final_graph_db(&root, "project.db").await;
     Connection::open(&project_path)
         .unwrap()
-        .execute_batch("PRAGMA user_version = 31;")
+        .execute_batch(
+            "UPDATE tracedecay_schema_version SET version = 31 WHERE component = 'graph';",
+        )
         .unwrap();
 
     let resolver = Arc::new(FileResolver::default());
@@ -571,17 +573,21 @@ async fn rewind_to_pre_digest_shape(path: &Path) {
              DROP TRIGGER memory_v2_assertion_payload_digests_no_update;
              DROP INDEX memory_v2_assertion_payload_digests_lookup;
              DROP TABLE memory_v2_assertion_payload_digests;
-             PRAGMA user_version = 34;",
+             UPDATE tracedecay_schema_version SET version = 34 WHERE component = 'graph';",
         )
         .await
         .expect("rewind graph store to the pre-digest shape");
 }
 
 fn user_version(path: &Path) -> u32 {
-    Connection::open(path)
-        .unwrap()
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .unwrap()
+    let connection = Connection::open(path).unwrap();
+    let version = crate::db::schema_version::read_version_sync(
+        &connection,
+        crate::db::schema_version::GRAPH_COMPONENT,
+    )
+    .unwrap()
+    .unwrap_or(0);
+    u32::try_from(version).unwrap()
 }
 
 /// A store at an older released schema is never upgraded in place, even by a

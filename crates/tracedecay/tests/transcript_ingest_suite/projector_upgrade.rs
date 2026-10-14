@@ -64,7 +64,7 @@ async fn ingest_both(db: &ProjectSessionTestRuntime, home: &Path, project: &Path
 fn shape_store_as_shipped(db_path: &Path) {
     let conn = rusqlite::Connection::open(db_path).unwrap();
     conn.execute(
-        "UPDATE session_schema_migrations SET version = ?1 WHERE name = 'lcm'",
+        "UPDATE tracedecay_schema_version SET version = ?1 WHERE component = 'lcm'",
         [SHIPPED_LCM_SCHEMA_VERSION],
     )
     .unwrap();
@@ -187,7 +187,7 @@ async fn shipped_store_is_reset_required_and_a_reset_store_serves_both_messages(
     let untouched: i64 = rusqlite::Connection::open(&db_path)
         .unwrap()
         .query_row(
-            "SELECT version FROM session_schema_migrations WHERE name = 'lcm'",
+            "SELECT version FROM tracedecay_schema_version WHERE component = 'lcm'",
             (),
             |row| row.get(0),
         )
