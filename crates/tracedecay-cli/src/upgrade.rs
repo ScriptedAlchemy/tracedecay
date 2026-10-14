@@ -507,7 +507,10 @@ fn extract_zip(archive: impl Read + Seek, staging: &Path, members: &[ReleaseMemb
         let mut file = archive.by_index(i).map_err(|e| TraceDecayError::Config {
             message: format!("zip entry error: {e}"),
         })?;
-        let Some(member) = intended_member(Path::new(file.name()), members) else {
+        let name = file.name().map_err(|e| TraceDecayError::Config {
+            message: format!("zip entry name error: {e}"),
+        })?;
+        let Some(member) = intended_member(Path::new(name.as_ref()), members) else {
             continue;
         };
         if !file.is_file() {
