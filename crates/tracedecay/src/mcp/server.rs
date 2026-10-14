@@ -1141,10 +1141,15 @@ impl McpServer {
             && server.startup_catch_up.try_claim_dispatch()
         {
             let s = Arc::clone(&server);
-            let task = tokio::spawn(async move {
+            match tracedecay_runtime_core::native_runtime::NativeTask::spawn(async move {
                 s.run_startup_catch_up_sync().await;
-            });
-            server.startup_catch_up.install_sync_task(task);
+            }) {
+                Ok(task) => server.startup_catch_up.install_sync_task(task),
+                Err(error) => {
+                    tracing::error!(%error, "startup catch-up could not start");
+                    server.startup_catch_up.settle();
+                }
+            }
         }
 
         server

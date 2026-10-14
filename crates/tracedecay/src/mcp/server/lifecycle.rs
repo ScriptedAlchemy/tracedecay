@@ -116,7 +116,7 @@ impl McpServer {
     pub(super) async fn shutdown_startup_catch_up_sync(&self) {
         if let Some(task) = self.startup_catch_up.take_sync_task() {
             task.abort();
-            let _ = task.await;
+            let _ = task.wait().await;
         }
         self.startup_catch_up.mark_cancelled();
     }

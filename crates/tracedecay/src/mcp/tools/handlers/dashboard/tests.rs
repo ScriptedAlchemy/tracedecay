@@ -142,3 +142,40 @@ async fn timed_out_shutdown_owner_aborts_the_dashboard_task() {
         .await;
     assert!(get_manager().lock().await.is_empty());
 }
+
+/// The session resolution for a dashboard of a still-opening project runs
+/// where no Tokio runtime exists and publishes its terminal answer.
+#[test]
+fn opening_project_sessions_resolve_without_a_tokio_runtime() {
+    let hazards = crate::test_support::native_runtime_hazards();
+    let unavailable = tracedecay_runtime_core::native_runtime::block_on(async {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let resolver = crate::mcp::server::install_retained_project_server_resolver(|_| {
+            Box::pin(async { Ok(None) })
+        });
+        let mut sessions = super::opening_project_sessions(
+            resolver,
+            tracedecay_daemon_service::ProjectRuntimeRegistryV1::default(),
+            std::path::PathBuf::from("/dashboard-test/never-published"),
+        );
+        let resolution = sessions
+            .wait_for(|resolution| {
+                !matches!(
+                    resolution,
+                    tracedecay_dashboard_api::DashboardSessionResolutionV1::Opening
+                )
+            })
+            .await
+            .expect("resolution is published");
+        matches!(
+            *resolution,
+            tracedecay_dashboard_api::DashboardSessionResolutionV1::Unavailable
+        )
+    })
+    .expect("native runtime");
+    assert!(
+        unavailable,
+        "an unpublished project resolves as unavailable"
+    );
+    assert_eq!(crate::test_support::native_runtime_hazards(), hazards);
+}

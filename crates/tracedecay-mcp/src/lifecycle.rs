@@ -3,6 +3,8 @@
 
 use std::sync::Arc;
 
+use tracedecay_runtime_core::native_runtime::NativeTask;
+
 /// Bound on the join failures retained from tasks reaped during normal
 /// operation. Shutdown reports these alongside anything it drains itself; a
 /// long-lived server keeps only this many panics rather than one per task.
@@ -157,7 +159,7 @@ impl McpBackgroundTaskOwner {
 /// authority is released.
 #[derive(Default)]
 struct StartupCatchUpTasksV1 {
-    sync: Option<tokio::task::JoinHandle<()>>,
+    sync: Option<NativeTask<()>>,
 }
 
 /// The startup catch-up lifecycle as one linear machine.
@@ -277,7 +279,7 @@ impl StartupCatchUpMachineV1 {
         *state = StartupCatchUpStateV1::Settled { tasks };
     }
 
-    pub fn install_sync_task(&self, task: tokio::task::JoinHandle<()>) {
+    pub fn install_sync_task(&self, task: NativeTask<()>) {
         let mut state = self.state();
         match state.tasks_mut() {
             Some(tasks) => tasks.sync = Some(task),
@@ -286,7 +288,7 @@ impl StartupCatchUpMachineV1 {
         }
     }
 
-    pub fn take_sync_task(&self) -> Option<tokio::task::JoinHandle<()>> {
+    pub fn take_sync_task(&self) -> Option<NativeTask<()>> {
         self.state().tasks_mut().and_then(|tasks| tasks.sync.take())
     }
 
