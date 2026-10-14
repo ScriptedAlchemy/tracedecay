@@ -1,7 +1,6 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use asupersync::Budget;
 use asupersync::sync::{Mutex, OwnedMutexGuard};
 
 use tracedecay_rusqlite_runtime::exact_sql::ExactSqlTransaction as RuntimeTransaction;
@@ -29,8 +28,8 @@ impl Transaction {
         }
     }
 
-    /// Runs one operation as native settlement that holds the transaction
-    /// gate. Dropping the caller's future detaches, never truncates, it.
+    /// Runs one operation that holds the transaction gate. Dropping the
+    /// caller's future detaches, never truncates, it.
     async fn settle<T, F, Fut>(&self, operation: F) -> Result<T>
     where
         T: Send + 'static,
@@ -38,21 +37,19 @@ impl Transaction {
         Fut: Future<Output = Result<T>> + Send + 'static,
     {
         let runtime = Arc::clone(&self.runtime);
-        let settlement = crate::native_runtime::handle()
-            .ok_or(Error::RuntimeContextUnavailable)?
-            .try_request_cx_with_budget(Budget::INFINITE)
-            .map_err(|error| Error::Runtime(format!("failed to admit SQL settlement: {error}")))?;
-        let mut task = settlement
-            .spawn(move |cx| async move {
-                let gate = OwnedMutexGuard::lock(runtime, &cx).await.map_err(|error| {
-                    Error::Runtime(format!("SQL transaction gate failed: {error}"))
-                })?;
-                operation(gate).await
-            })
-            .map_err(|error| Error::Runtime(format!("failed to spawn SQL settlement: {error}")))?;
-        std::future::poll_fn(|context| task.poll_join(context))
-            .await
-            .map_err(join_error)?
+        crate::native_runtime::settle(async move {
+            let gate = match OwnedMutexGuard::try_lock(Arc::clone(&runtime)) {
+                Ok(gate) => gate,
+                Err(_) => {
+                    let cx = crate::native_runtime::cx().ok_or(Error::RuntimeContextUnavailable)?;
+                    OwnedMutexGuard::lock(runtime, &cx).await.map_err(|error| {
+                        Error::Runtime(format!("SQL transaction gate failed: {error}"))
+                    })?
+                }
+            };
+            operation(gate).await
+        })
+        .await
     }
 
     pub async fn execute<P>(&self, sql: &str, params: P) -> Result<u64>
@@ -172,10 +169,6 @@ type TransactionGate = OwnedMutexGuard<Option<RuntimeTransaction>>;
 
 fn open(gate: &TransactionGate) -> Result<&RuntimeTransaction> {
     gate.as_ref().ok_or(Error::TransactionClosed)
-}
-
-fn join_error(error: asupersync::runtime::JoinError) -> super::Error {
-    super::Error::Runtime(format!("exact SQL transaction task failed: {error}"))
 }
 
 #[cfg(test)]
