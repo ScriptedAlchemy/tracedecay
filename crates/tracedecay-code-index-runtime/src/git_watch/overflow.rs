@@ -9,9 +9,8 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use tokio::time::Instant;
 use tracedecay_runtime_core::git_discovery::GitRepositoryIdentity;
 
 use super::{GitWatcher, GitWatcherAdmission, log_daemon_event};
@@ -212,7 +211,8 @@ pub async fn cover_overflowed_repositories(watcher: &GitWatcher) {
             GitWatcherAdmission::ShuttingDown => return,
             // admit_resolved performs no discovery, so it can never report an
             // unavailable identity; keep the entry covered if it ever does.
-            GitWatcherAdmission::IdentityUnavailable => {}
+            // A refused supervisor stays covered for the next pass.
+            GitWatcherAdmission::IdentityUnavailable | GitWatcherAdmission::RuntimeUnavailable => {}
         }
     }
 }

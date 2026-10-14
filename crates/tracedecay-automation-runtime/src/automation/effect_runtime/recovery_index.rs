@@ -62,7 +62,7 @@ pub async fn prepare_reserved_automation_effect_recovery(
     dashboard_root: &Path,
 ) -> Result<AutomationEffectRecoveryPreparation> {
     let repair_root = dashboard_root.to_path_buf();
-    tokio::task::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         run_ledger::repair_corrupt_run_ledger_append_intent_blocking(&repair_root)
     })
     .await
@@ -72,14 +72,15 @@ pub async fn prepare_reserved_automation_effect_recovery(
         ))
     })??;
     let recovery_root = dashboard_root.to_path_buf();
-    let (reset_journals, indexed) = tokio::task::spawn_blocking(move || {
-        let reset_journals = reset_refused_shapes_blocking(&recovery_root)?;
-        Ok::<_, TraceDecayError>((reset_journals, indexed_recovery_blocking(&recovery_root)?))
-    })
-    .await
-    .map_err(|error| {
-        contract_error(format!("automation recovery index reader failed: {error}"))
-    })??;
+    let (reset_journals, indexed) =
+        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+            let reset_journals = reset_refused_shapes_blocking(&recovery_root)?;
+            Ok::<_, TraceDecayError>((reset_journals, indexed_recovery_blocking(&recovery_root)?))
+        })
+        .await
+        .map_err(|error| {
+            contract_error(format!("automation recovery index reader failed: {error}"))
+        })??;
     if indexed.is_empty() {
         let report = reset_report(reset_journals);
         return Ok(AutomationEffectRecoveryPreparation::Complete(report));
@@ -311,7 +312,7 @@ where
     let mut report = reset_report(reset_journals);
     let indexed_root = dashboard_root.clone();
     let indexed_scope = scope.clone();
-    let indexed = tokio::task::spawn_blocking(move || {
+    let indexed = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         indexed_journals_blocking(&indexed_root, &indexed_scope)
     })
     .await
@@ -381,9 +382,11 @@ where
         return Ok(EntryRecoveryOutcome::Deferred);
     }
     let path = indexed.path.clone();
-    let record = tokio::task::spawn_blocking(move || journal::read_indexed_record_blocking(&path))
-        .await
-        .map_err(|error| contract_error(format!("automation recovery reader failed: {error}")))?;
+    let record = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        journal::read_indexed_record_blocking(&path)
+    })
+    .await
+    .map_err(|error| contract_error(format!("automation recovery reader failed: {error}")))?;
     let record = match record {
         Err(error) if error.reset_required_context().is_some() => {
             return discard_unsupported_journal(dashboard_root, &indexed.path).await;
@@ -409,7 +412,7 @@ where
     }
     if record.is_terminal() {
         let terminal_path = indexed.path.clone();
-        let terminal = tokio::task::spawn_blocking(move || {
+        let terminal = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             journal::read_indexed_terminal_blocking(&terminal_path)
         })
         .await
@@ -450,7 +453,7 @@ where
     }
     if record.prepared().is_some() {
         let prepared_path = indexed.path.clone();
-        let terminal = tokio::task::spawn_blocking(move || {
+        let terminal = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             let record = journal::read_indexed_record_blocking(&prepared_path)?
                 .ok_or_else(|| contract_error("prepared journal disappeared during recovery"))?;
             let publication = record
@@ -478,7 +481,7 @@ where
         let publication = publication.clone();
         let cleanup_publication = publication.clone();
         let cleanup_terminal = terminal.clone();
-        tokio::task::spawn_blocking(move || {
+        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             journal::promote_prepared_terminal_blocking(&path, &requested, terminal, &publication)
         })
         .await
@@ -578,7 +581,7 @@ async fn persist_reserved_recovery(
     let path = indexed.path.clone();
     let root = dashboard_root.to_path_buf();
     let write_cancellation = cancellation.clone();
-    let committed = tokio::task::spawn_blocking(move || {
+    let committed = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         let Some(_) = journal::persist_recovered_terminal_blocking(
             &path,
             &admission,
@@ -736,13 +739,15 @@ async fn discard_unsupported_journal(
 ) -> Result<EntryRecoveryOutcome> {
     let root = dashboard_root.to_path_buf();
     let path = journal_path.to_path_buf();
-    tokio::task::spawn_blocking(move || match discard_if_refused_blocking(&path)? {
-        journal::JournalShapeProbe::Discarded(_) => {
-            remove_pending_blocking(&root, &path)?;
-            Ok(EntryRecoveryOutcome::ResetRequired)
-        }
-        journal::JournalShapeProbe::Missing | journal::JournalShapeProbe::Current(_) => {
-            Ok(EntryRecoveryOutcome::Deferred)
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        match discard_if_refused_blocking(&path)? {
+            journal::JournalShapeProbe::Discarded(_) => {
+                remove_pending_blocking(&root, &path)?;
+                Ok(EntryRecoveryOutcome::ResetRequired)
+            }
+            journal::JournalShapeProbe::Missing | journal::JournalShapeProbe::Current(_) => {
+                Ok(EntryRecoveryOutcome::Deferred)
+            }
         }
     })
     .await
@@ -752,9 +757,11 @@ async fn discard_unsupported_journal(
 async fn remove_pending_async(dashboard_root: &Path, journal_path: &Path) -> Result<()> {
     let root = dashboard_root.to_path_buf();
     let path = journal_path.to_path_buf();
-    tokio::task::spawn_blocking(move || remove_pending_blocking(&root, &path))
-        .await
-        .map_err(|error| contract_error(format!("automation pending cleanup failed: {error}")))?
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        remove_pending_blocking(&root, &path)
+    })
+    .await
+    .map_err(|error| contract_error(format!("automation pending cleanup failed: {error}")))?
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

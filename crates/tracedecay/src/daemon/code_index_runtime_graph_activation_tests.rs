@@ -2915,7 +2915,7 @@ async fn ignored_dependency_admission_answers_once_the_successor_catalog_serves(
                 &admission_root,
                 request,
                 Arc::new(ActiveAdmissionControl),
-                tokio::time::Instant::now() + DEFAULT_TOOL_REQUEST_DEADLINE,
+                std::time::Instant::now() + DEFAULT_TOOL_REQUEST_DEADLINE,
             )
             .await
     });

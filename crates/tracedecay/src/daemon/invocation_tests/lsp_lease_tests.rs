@@ -217,16 +217,17 @@ async fn disconnect_reclamation_does_not_outlive_daemon_service() {
     );
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn abrupt_disconnect_reclaims_session_at_its_bounded_lease() {
     let service = DaemonInvocationService::default();
     let registry = Arc::new(Mutex::new(LspSessionRegistry::new(1)));
     let session = open_session(&service, &registry, "request.abrupt-drop").await;
 
     service.disconnect_lsp_session(&registry, session).await;
-    tokio::task::yield_now().await;
-    tokio::time::advance(std::time::Duration::from_millis(LSP_SESSION_TTL_MS)).await;
-    tokio::task::yield_now().await;
+    service
+        .lsp_lease_tasks
+        .expire_leases_through(now_millis() + LSP_SESSION_TTL_MS);
+    service.lsp_lease_tasks.wait_until_idle().await;
 
     assert_eq!(registry.lock().await.active_sessions(), 0);
     assert!(service.lsp_sessions.lock().await.is_empty());
@@ -463,7 +464,7 @@ async fn repeated_disconnect_preserves_the_existing_bounded_lease() {
     );
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn reconnect_at_lease_expiry_joins_reclamation_before_rotating_credentials() {
     let service = Arc::new(DaemonInvocationService::default());
     let registry = Arc::new(Mutex::new(LspSessionRegistry::new(1)));
@@ -487,7 +488,9 @@ async fn reconnect_at_lease_expiry_joins_reclamation_before_rotating_credentials
             .await
     });
     tokio::task::yield_now().await;
-    tokio::time::advance(std::time::Duration::from_millis(LSP_SESSION_TTL_MS)).await;
+    service
+        .lsp_lease_tasks
+        .expire_leases_through(now_millis() + LSP_SESSION_TTL_MS);
     tokio::task::yield_now().await;
     drop(endpoint_guard);
 

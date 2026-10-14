@@ -3,12 +3,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
-#[cfg(test)]
-use std::time::Instant as StdInstant;
+use std::time::{Duration, Instant};
 
 use tokio::sync::Notify;
-use tokio::time::Instant;
+use tracedecay_runtime_core::native_runtime::NativeTask;
 
 use super::DirtySet;
 use super::health::ProjectHealth;
@@ -83,7 +81,7 @@ impl OperationScanProbe {
         }
         self.active.fetch_add(1, Ordering::AcqRel);
         self.entered.notify_one();
-        let started = StdInstant::now();
+        let started = Instant::now();
         let mut guard = self
             .wait_lock
             .lock()
@@ -142,10 +140,14 @@ pub struct WatchState {
     retry_backoff_ms: AtomicU64,
     pub maintenance: MaintenanceCoordinator,
     pub health: ProjectHealth,
-    task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    task: std::sync::Mutex<Option<NativeTask<()>>>,
     retirement: CancellationToken,
     #[cfg(test)]
+    retained_tasks: AtomicU64,
+    #[cfg(test)]
     pub entered_debounce: Notify,
+    #[cfg(test)]
+    pub heartbeat: Notify,
     #[cfg(test)]
     pub drained_plans: AtomicU64,
     #[cfg(test)]
@@ -202,7 +204,11 @@ impl WatchState {
             task: std::sync::Mutex::new(None),
             retirement: CancellationToken::new(),
             #[cfg(test)]
+            retained_tasks: AtomicU64::new(0),
+            #[cfg(test)]
             entered_debounce: Notify::new(),
+            #[cfg(test)]
+            heartbeat: Notify::new(),
             #[cfg(test)]
             drained_plans: AtomicU64::new(0),
             #[cfg(test)]
@@ -355,27 +361,27 @@ impl WatchState {
         self.reconfigure.notify_waiters();
     }
 
-    pub fn retain_task(&self, handle: tokio::task::JoinHandle<()>) {
+    pub fn retain_task(&self, task: NativeTask<()>) {
+        #[cfg(test)]
+        self.retained_tasks.fetch_add(1, Ordering::AcqRel);
         *self
             .task
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task);
     }
 
-    pub fn take_task(&self) -> Option<tokio::task::JoinHandle<()>> {
+    pub fn take_task(&self) -> Option<NativeTask<()>> {
         self.task
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
     }
 
+    /// Which retention the held task came from, counted per owner.
     #[cfg(test)]
-    pub fn retained_task_id(&self) -> Option<tokio::task::Id> {
-        self.task
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-            .map(tokio::task::JoinHandle::id)
+    pub fn retained_task_id(&self) -> Option<u64> {
+        self.has_retained_task()
+            .then(|| self.retained_tasks.load(Ordering::Acquire))
     }
 
     #[cfg(test)]

@@ -8,6 +8,7 @@ use tracedecay_query::code_search::{self, CodeIndexSearchDisplayV1};
 use tracedecay_query::retrieval::RetrievalPortError;
 use tracedecay_query::retrieval::hydrate::HydrationUnavailableV1;
 use tracedecay_query::retrieval::lexical::LexicalRouteReceiptV1;
+use tracedecay_runtime_core::native_runtime;
 
 use crate::code_index_scheduler;
 use crate::code_index_task_support;
@@ -1180,7 +1181,7 @@ where
                     });
                     match tracing::Instrument::instrument(
                         code_index_task_support::settle_owned_blocking_task(
-                            execution,
+                            async { execution.await.map_err(|error| error.to_string()) },
                             std::time::Duration::from_millis(10),
                             || search_terminated(&control, &admission_provider, None),
                         ),
@@ -1813,7 +1814,7 @@ where
                 }
             };
             let read_control = Arc::clone(&control);
-            let read = tokio::task::spawn_blocking(move || {
+            let read = native_runtime::spawn_blocking(move || {
                 let _permit = permit;
                 owners.similar(&request, read_control.as_ref())
             })
@@ -1981,7 +1982,7 @@ where
                 }
             };
             let read_control = Arc::clone(&control);
-            let read = tokio::task::spawn_blocking(move || {
+            let read = native_runtime::spawn_blocking(move || {
                 let _permit = permit;
                 owners.redundancy(&request, read_control.as_ref())
             })

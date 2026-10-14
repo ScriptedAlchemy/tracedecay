@@ -1012,56 +1012,50 @@ mod tests {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-    async fn snapshot_adapter_metadata_read_releases_the_only_worker() {
-        let handle = tokio::runtime::Handle::current();
-        tokio::spawn(async move {
-            capture_snapshot_observations::<TestSnapshotRecord, _, _, _>(
-                &MemoryHostAdmission::default(),
-                "test",
-                ObservationScopeV1::Profile,
-                &ObservationCancellation::default(),
-                None,
-                || discovery(vec![PathBuf::from("session.snapshot")]),
-                move |_| {
-                    crate::runtime::source::require_blocking_section_releases_worker(
-                        handle.clone(),
-                    );
-                    Ok(0)
-                },
-                |_| Ok(None),
-            )
-            .await
-        })
-        .await
-        .expect("join snapshot metadata read")
-        .expect("snapshot metadata read");
+    #[test]
+    fn snapshot_adapter_metadata_read_leaves_the_polling_thread() {
+        let caller = std::thread::current().id();
+        let admission = MemoryHostAdmission::default();
+        let cancellation = ObservationCancellation::default();
+        let capture = capture_snapshot_observations::<TestSnapshotRecord, _, _, _>(
+            &admission,
+            "test",
+            ObservationScopeV1::Profile,
+            &cancellation,
+            None,
+            || discovery(vec![PathBuf::from("session.snapshot")]),
+            move |_| {
+                crate::runtime::source::require_blocking_section_releases_worker(caller);
+                Ok(0)
+            },
+            |_| Ok(None),
+        );
+        tracedecay_runtime_core::native_runtime::block_on(capture)
+            .expect("process runtime")
+            .expect("snapshot metadata read");
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-    async fn snapshot_adapter_parse_releases_the_only_worker() {
-        let handle = tokio::runtime::Handle::current();
-        tokio::spawn(async move {
-            capture_snapshot_observations::<TestSnapshotRecord, _, _, _>(
-                &MemoryHostAdmission::default(),
-                "test",
-                ObservationScopeV1::Profile,
-                &ObservationCancellation::default(),
-                None,
-                || discovery(vec![PathBuf::from("session.snapshot")]),
-                |_| Ok(0),
-                move |_| {
-                    crate::runtime::source::require_blocking_section_releases_worker(
-                        handle.clone(),
-                    );
-                    Ok(None)
-                },
-            )
-            .await
-        })
-        .await
-        .expect("join snapshot parse")
-        .expect("snapshot parse");
+    #[test]
+    fn snapshot_adapter_parse_leaves_the_polling_thread() {
+        let caller = std::thread::current().id();
+        let admission = MemoryHostAdmission::default();
+        let cancellation = ObservationCancellation::default();
+        let capture = capture_snapshot_observations::<TestSnapshotRecord, _, _, _>(
+            &admission,
+            "test",
+            ObservationScopeV1::Profile,
+            &cancellation,
+            None,
+            || discovery(vec![PathBuf::from("session.snapshot")]),
+            |_| Ok(0),
+            move |_| {
+                crate::runtime::source::require_blocking_section_releases_worker(caller);
+                Ok(None)
+            },
+        );
+        tracedecay_runtime_core::native_runtime::block_on(capture)
+            .expect("process runtime")
+            .expect("snapshot parse");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

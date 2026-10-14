@@ -16,7 +16,7 @@ pub async fn finalize_terminal_housekeeping(
 ) -> Result<()> {
     let dashboard_root = dashboard_root.to_path_buf();
     let journal_path = journal_path.to_path_buf();
-    tokio::task::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         recovery_index::remove_pending_blocking(&dashboard_root, &journal_path)
     })
     .await

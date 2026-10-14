@@ -328,7 +328,7 @@ pub async fn projection_payload(
             let observed_revision = (snapshot.store_revision(), normalized_query, limit);
             let rows = vector_rows(snapshot.into_points())?;
             let blocking_control = read_control.clone();
-            let computed = tokio::task::spawn_blocking(move || {
+            let computed = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
                 let _span =
                     tracing::trace_span!("dashboard_api.memory.projection_compute").entered();
                 compute_projection(rows, point_limit, blocking_control)
