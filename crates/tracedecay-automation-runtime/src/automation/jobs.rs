@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -30,6 +30,9 @@ use super::scheduler::{
 };
 use tracedecay_automation::text::truncate_chars_for_prompt;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::git::{GitCommandBounds, GitCommandError, bounded_command_output};
+use tracedecay_runtime_core::native_runtime;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 pub(crate) mod effect_receipt;
@@ -579,7 +582,13 @@ async fn run_retained_user_job(
         attached_skill_sections(&profile_root, &job.skill_ids).await;
 
     let command_output = match &job.pre_run_command {
-        Some(command) => match run_pre_run_command(command, project_root.as_deref()).await {
+        Some(command) => match run_pre_run_command(
+            command,
+            project_root.as_deref(),
+            Duration::from_secs(JOB_COMMAND_TIMEOUT_SECS),
+        )
+        .await
+        {
             Ok(output) => Some(output),
             Err(err) => {
                 let record = ctx
@@ -975,35 +984,63 @@ impl PreRunCommandError {
     }
 }
 
+impl From<GitCommandError> for PreRunCommandError {
+    fn from(error: GitCommandError) -> Self {
+        match error {
+            GitCommandError::DeadlineExceeded => Self::TimedOut,
+            GitCommandError::Unavailable(source)
+            | GitCommandError::Wait(source)
+            | GitCommandError::WriteInput(source)
+            | GitCommandError::ReadOutput { source, .. } => Self::Spawn(source),
+            error @ (GitCommandError::Cancelled | GitCommandError::OutputLimitExceeded { .. }) => {
+                Self::Spawn(std::io::Error::other(error))
+            }
+        }
+    }
+}
+
+struct CancelOnDrop(CancellationToken);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
 async fn run_pre_run_command(
     command: &str,
     project_root: Option<&Path>,
+    timeout: Duration,
 ) -> std::result::Result<String, PreRunCommandError> {
     #[cfg(windows)]
     let mut process = {
-        let mut process = tokio::process::Command::new("cmd");
+        let mut process = std::process::Command::new("cmd");
         process.arg("/C").arg(command);
         process
     };
     #[cfg(not(windows))]
     let mut process = {
-        let mut process = tokio::process::Command::new("sh");
+        let mut process = std::process::Command::new("sh");
         process.arg("-c").arg(command);
         process
     };
     if let Some(project_root) = project_root {
         process.current_dir(project_root);
     }
-    // Scheduler shutdown aborts the owning future. Ensure a pre-run command
-    // does not outlive that future and keep the daemon cgroup alive.
-    process.kill_on_drop(true);
-    let output = tokio::time::timeout(
-        Duration::from_secs(JOB_COMMAND_TIMEOUT_SECS),
-        process.output(),
-    )
-    .await
-    .map_err(|_| PreRunCommandError::TimedOut)?
-    .map_err(PreRunCommandError::Spawn)?;
+    let cancel = CancellationToken::new();
+    let bounds = GitCommandBounds {
+        deadline: Instant::now() + timeout,
+        cancel: Some(cancel.clone()),
+        max_stdout_bytes: usize::MAX,
+        max_stderr_bytes: usize::MAX,
+    };
+    // Scheduler shutdown drops the owning future. Cancelling makes the
+    // supervisor kill the command, so it cannot keep the daemon cgroup alive.
+    let _kill_on_drop = CancelOnDrop(cancel);
+    let output =
+        native_runtime::spawn_blocking(move || bounded_command_output(process, None, &bounds))
+            .await
+            .map_err(|error| PreRunCommandError::Spawn(std::io::Error::other(error)))??;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(PreRunCommandError::Exited {
@@ -1018,6 +1055,10 @@ async fn run_pre_run_command(
     ))
 }
 
+#[cfg(all(test, unix))]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[path = "jobs/pre_run_command_tests.rs"]
+mod pre_run_command_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 #[path = "jobs/scheduler_config_tests.rs"]

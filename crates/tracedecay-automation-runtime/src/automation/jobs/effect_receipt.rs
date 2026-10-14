@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use crate::automation::artifacts::sha256_bytes;
 use crate::automation::{AutomationCommittedReceipt, AutomationRunError, AutomationRunResult};
 use tracedecay_domain::errors::Result;
+use tracedecay_runtime_core::native_runtime;
 
 use super::{
     AgentTaskResponse, AutomationJob, JOB_OUTPUT_DIR, JobDelivery, TraceDecayError,
@@ -307,16 +308,21 @@ pub(super) async fn deliver_job_output(
             });
             let target_digest = sha256_bytes(url.as_bytes());
             let post_url = url.clone();
-            let attempted = tokio::task::spawn_blocking(move || {
+            let attempted = native_runtime::spawn_blocking(move || {
                 job_webhook::post_json_url(
                     &post_url,
                     &payload,
                     Duration::from_secs(WEBHOOK_TIMEOUT_SECS),
                 )
-            });
-            let status =
-                await_webhook_attempt(attempted, run_id, &task_key, &target_digest, content_digest)
-                    .await?;
+            })
+            .await;
+            let status = settle_webhook_attempt(
+                attempted,
+                run_id,
+                &task_key,
+                &target_digest,
+                content_digest,
+            )?;
             Ok(JobDeliveryOutcome::Webhook {
                 target_digest,
                 status,
@@ -325,14 +331,16 @@ pub(super) async fn deliver_job_output(
     }
 }
 
-async fn await_webhook_attempt(
-    attempted: tokio::task::JoinHandle<std::result::Result<u16, job_webhook::WebhookPostError>>,
+/// `attempted` is `Err` when the blocking worker ended without a result, so
+/// whether the POST went out is unknown.
+fn settle_webhook_attempt(
+    attempted: std::result::Result<std::result::Result<u16, job_webhook::WebhookPostError>, String>,
     run_id: &str,
     task_key: &str,
     target_digest: &str,
     content_digest: &str,
 ) -> AutomationRunResult<u16> {
-    match attempted.await {
+    match attempted {
         Err(_) => Err(indeterminate_error(
             run_id,
             task_key,
@@ -687,20 +695,22 @@ mod tests {
         assert!(!debug.contains("private delivery body"));
     }
 
-    #[tokio::test]
-    async fn webhook_worker_panic_after_attempt_remains_a_bound_partial_effect() {
-        let attempted = tokio::task::spawn_blocking(|| {
-            // The worker "attempted" its write; the panic lands afterwards.
-            panic!("injected panic after write")
-        });
-        let error = await_webhook_attempt(
+    #[test]
+    fn webhook_worker_panic_after_attempt_remains_a_bound_partial_effect() {
+        let attempted = native_runtime::block_on(native_runtime::spawn_blocking(
+            || -> std::result::Result<u16, job_webhook::WebhookPostError> {
+                // The worker "attempted" its write; the panic lands afterwards.
+                panic!("injected panic after write")
+            },
+        ))
+        .expect("native runtime available");
+        let error = settle_webhook_attempt(
             attempted,
             "run-webhook-panic",
             "user_job:notify",
             &sha256_bytes(b"https://secret.invalid/hook?token=private"),
             &sha256_bytes(b"private body"),
         )
-        .await
         .expect_err("unknown worker phase must fail closed as indeterminate");
         let AutomationRunError::PartialEffect {
             committed_receipt,
