@@ -440,7 +440,7 @@ pub(crate) struct WorkflowFanOutCensusObservationRecoveryOwnerV1 {
 
 struct WorkflowFanOutCensusObservationRecoveryInnerV1 {
     cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
-    task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    task: std::sync::Mutex<Option<tracedecay_runtime_core::native_runtime::NativeTask<()>>>,
 }
 
 impl WorkflowFanOutCensusObservationRecoveryOwnerV1 {
@@ -458,7 +458,7 @@ impl WorkflowFanOutCensusObservationRecoveryOwnerV1 {
         let cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
         let worker_cancellation = cancellation.clone();
         let task_cancellation = worker_cancellation.clone();
-        let task = tokio::spawn(async move {
+        let task = tracedecay_runtime_core::native_runtime::NativeTask::spawn(async move {
             run_recovery_loop(
                 signal,
                 worker_cancellation,
@@ -482,7 +482,12 @@ impl WorkflowFanOutCensusObservationRecoveryOwnerV1 {
                 },
             )
             .await;
-        });
+        })
+        .map_err(|error| {
+            tracedecay_contracts::ApplicationContractError::Domain(format!(
+                "workflow census recovery could not start: {error}"
+            ))
+        })?;
         Ok(Self {
             inner: Arc::new(WorkflowFanOutCensusObservationRecoveryInnerV1 {
                 cancellation,
@@ -507,10 +512,12 @@ impl WorkflowFanOutCensusObservationRecoveryOwnerV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
-        if let Some(task) = task
-            && let Err(error) = task.await
-        {
-            tracing::warn!(%error, "workflow census recovery shutdown failed");
+        if let Some(task) = task {
+            let outcome = task.wait().await;
+            if outcome != tracedecay_runtime_core::native_runtime::NativeTaskOutcome::Completed(())
+            {
+                tracing::warn!(?outcome, "workflow census recovery shutdown failed");
+            }
         }
     }
 }

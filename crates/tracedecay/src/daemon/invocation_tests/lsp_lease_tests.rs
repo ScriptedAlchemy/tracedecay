@@ -209,12 +209,16 @@ async fn disconnect_reclamation_does_not_outlive_daemon_service() {
 
     service.disconnect_lsp_session(&registry, session).await;
     drop(service);
-    tokio::task::yield_now().await;
 
-    assert!(
-        retained_runtime_state.upgrade().is_none(),
-        "lease reclamation must be cancelled with its daemon owner"
-    );
+    // The aborted lease task drops its future on the native runtime, so the
+    // release lands on another thread.
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while retained_runtime_state.upgrade().is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("lease reclamation must be cancelled with its daemon owner");
 }
 
 #[tokio::test]

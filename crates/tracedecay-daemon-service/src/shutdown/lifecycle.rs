@@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use std::time::Duration;
 
+use tracedecay_runtime_core::native_runtime::{NativeTask, NativeTaskOutcome};
+
 pub use tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE;
 pub use tracedecay_session_runtime::DAEMON_CLIENT_DRAIN_DEADLINE;
 
@@ -55,7 +57,7 @@ struct DaemonShutdownCoordinator {
 }
 
 struct ShutdownCoordinatorTask {
-    handle: tokio::task::JoinHandle<()>,
+    handle: NativeTask<()>,
     exited: Arc<AtomicBool>,
 }
 
@@ -179,11 +181,12 @@ impl DaemonLifecycle {
     /// Retain the coordinator independently of any caller that is merely
     /// waiting for its receipt. The task is joined after it publishes that
     /// receipt, so cancelling a first waiter cannot detach shutdown work.
+    /// The error says why no coordinator now owns `attempt`.
     pub fn spawn_shutdown_coordinator<Task>(
         &self,
         attempt: &Arc<DaemonShutdownAttempt>,
         task: Task,
-    ) -> bool
+    ) -> Result<(), String>
     where
         Task: std::future::Future<Output = ()> + Send + 'static,
     {
@@ -195,10 +198,8 @@ impl DaemonLifecycle {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             Arc::clone(&shutdown.coordinator_task)
         };
-        let mut coordinator_task = match coordinator_task.try_lock() {
-            Ok(task) => task,
-            Err(_) => return false,
-        };
+        let lost = || "daemon shutdown coordinator ownership was lost".to_owned();
+        let mut coordinator_task = coordinator_task.try_lock().map_err(|_| lost())?;
         let shutdown = self
             .inner
             .shutdown
@@ -210,7 +211,7 @@ impl DaemonLifecycle {
             .is_some_and(|current| Arc::ptr_eq(current, attempt))
             || coordinator_task.is_some()
         {
-            return false;
+            return Err(lost());
         }
         let exited = Arc::new(AtomicBool::new(false));
         let completion = DaemonShutdownCoordinatorCompletion {
@@ -218,15 +219,16 @@ impl DaemonLifecycle {
             completed: Arc::clone(&shutdown.coordinator_completed),
         };
         drop(shutdown);
-        let handle = tokio::spawn(tracing::Instrument::instrument(
+        let handle = NativeTask::spawn(tracing::Instrument::instrument(
             async move {
                 let _completion = completion;
                 task.await;
             },
             tracing::trace_span!("daemon.engine.shutdown.coordinator"),
-        ));
+        ))
+        .map_err(|error| format!("daemon shutdown coordinator was not started: {error}"))?;
         *coordinator_task = Some(ShutdownCoordinatorTask { handle, exited });
-        true
+        Ok(())
     }
 
     /// A receipt is sent immediately before the coordinator returns. Await
@@ -299,10 +301,14 @@ impl DaemonLifecycle {
                 None
             }
         };
-        if let Some(task) = task
-            && let Err(error) = task.handle.await
-        {
-            tracing::error!(%error, "daemon shutdown coordinator task failed after receipt");
+        if let Some(task) = task {
+            let outcome = task.handle.wait().await;
+            if !matches!(outcome, NativeTaskOutcome::Completed(())) {
+                tracing::error!(
+                    ?outcome,
+                    "daemon shutdown coordinator task failed after receipt"
+                );
+            }
         }
     }
 
@@ -373,6 +379,28 @@ impl Drop for DaemonActivity {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn the_shutdown_coordinator_runs_off_tokio() {
+        let lifecycle = DaemonLifecycle::default();
+        let DaemonShutdownClaim::Run { attempt, .. } = lifecycle.claim_shutdown_coordination()
+        else {
+            panic!("the first claim runs the shutdown");
+        };
+        let (on_tokio, observed) = tokio::sync::oneshot::channel();
+        lifecycle
+            .spawn_shutdown_coordinator(&attempt, async move {
+                let _ = on_tokio.send(tokio::runtime::Handle::try_current().is_ok());
+            })
+            .expect("the claimed attempt starts its coordinator");
+
+        assert!(
+            !observed.await.expect("the coordinator ran"),
+            "the coordinator task runs on the native runtime"
+        );
+        lifecycle.wait_for_finished_shutdown_coordinator().await;
+        lifecycle.join_finished_shutdown_coordinator().await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn coordinator_completion_notification_cannot_strand_its_waiter() {
         let lifecycle = DaemonLifecycle::default();
@@ -382,9 +410,11 @@ mod tests {
         };
         let release = Arc::new(tokio::sync::Notify::new());
         let coordinator_release = Arc::clone(&release);
-        assert!(lifecycle.spawn_shutdown_coordinator(&attempt, async move {
-            coordinator_release.notified().await;
-        }));
+        lifecycle
+            .spawn_shutdown_coordinator(&attempt, async move {
+                coordinator_release.notified().await;
+            })
+            .expect("the claimed attempt starts its coordinator");
         let waiter = tokio::spawn({
             let lifecycle = lifecycle.clone();
             async move {

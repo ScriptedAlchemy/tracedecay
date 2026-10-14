@@ -27,6 +27,7 @@ use tracedecay_automation_runtime::automation::jobs::{
     validate_job_id,
 };
 use tracedecay_domain::canonical_text::default_true;
+use tracedecay_runtime_core::native_runtime;
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
@@ -296,12 +297,18 @@ pub async fn run(
         job_id: job.id.clone(),
         run_id: run_id.clone(),
     };
-    tokio::spawn(async move {
+    native_runtime::NativeTask::spawn(async move {
         let job_id = job.id.clone();
         if let Err(err) = authority.run(&project_root, request, control).await {
             tracing::warn!(%job_id, error = err.detail(), "dashboard user job failed");
         }
-    });
+    })
+    .map_err(|error| {
+        json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("dashboard user job could not start: {error}"),
+        )
+    })?;
     Ok((StatusCode::ACCEPTED, Json(payload)))
 }
 
@@ -351,4 +358,85 @@ fn not_found(job_id: &str) -> JsonError {
         StatusCode::NOT_FOUND,
         format!("automation job '{job_id}' not found"),
     )
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use super::*;
+    use crate::{DashboardAutomationAuthorityErrorV1, DashboardAutomationAuthorityV1};
+
+    #[test]
+    fn accepted_user_job_runs_without_a_tokio_runtime() {
+        let fixture = tokio::runtime::Runtime::new().expect("fixture runtime");
+        let (_project, mut dash) = fixture.block_on(crate::events_api::dashboard_state_fixture(
+            "project.dashboard-jobs-native",
+        ));
+        let job: AutomationJob = serde_json::from_value(json!({
+            "id": "native-job",
+            "name": "Native job",
+            "prompt": "Do nothing.",
+            "enabled": true,
+        }))
+        .expect("fixture job");
+        fixture
+            .block_on(save_jobs(&dash.dashboard_root, &[job]))
+            .expect("fixture job saved");
+        let (ran, runs) = mpsc::channel();
+        let ran = std::sync::Mutex::new(ran);
+        dash.automation_authority = Some(
+            DashboardAutomationAuthorityV1::new(
+                dash.profile_root.clone(),
+                Arc::new(move |invocation| {
+                    let on_tokio = tokio::runtime::Handle::try_current().is_ok();
+                    let _ = ran
+                        .lock()
+                        .expect("run channel")
+                        .send((invocation.request, on_tokio));
+                    Box::pin(async {
+                        Err(DashboardAutomationAuthorityErrorV1::unavailable(
+                            "fixture run port",
+                        ))
+                    })
+                }),
+                Arc::new(|_| {
+                    Box::pin(async {
+                        Err(DashboardAutomationAuthorityErrorV1::unavailable(
+                            "fixture skill port",
+                        ))
+                    })
+                }),
+            )
+            .expect("fixture automation authority"),
+        );
+        let writer_waits = native_runtime::native_thread_writer_waits();
+
+        let (status, _payload) = native_runtime::block_on(run(
+            State(dash),
+            Extension(DashboardHttpRequestControlV1::test_fixture(
+                "dashboard-job-run",
+            )),
+            AxumPath("native-job".to_owned()),
+        ))
+        .expect("native block_on")
+        .expect("job run accepted");
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let (request, on_tokio) = runs
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the accepted job reaches the run port");
+        assert!(
+            matches!(request, DashboardAutomationRunRequestV1::UserJob { job_id, .. } if job_id == "native-job")
+        );
+        assert!(!on_tokio, "the job ran on a Tokio worker");
+        assert_eq!(
+            native_runtime::native_thread_writer_waits(),
+            writer_waits,
+            "the job run parked no native thread on a writer"
+        );
+    }
 }

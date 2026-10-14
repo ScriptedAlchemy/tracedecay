@@ -94,7 +94,7 @@ fn notify_hook_event<'a>(
 ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
     Box::pin(tracing::Instrument::instrument(
         async move {
-            let _ = tokio::time::timeout(
+            let _ = tracedecay_runtime_core::native_runtime::timeout(
                 HOOK_EVENT_NOTIFY_TIMEOUT,
                 crate::daemon::notify_hook_event(profile, project_root, event),
             )

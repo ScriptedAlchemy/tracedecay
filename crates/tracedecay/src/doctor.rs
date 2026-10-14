@@ -185,15 +185,15 @@ pub async fn run_doctor(
 }
 
 struct IndependentDoctorChecks {
-    daemon_service: tokio::task::JoinHandle<DoctorCounters>,
-    reset_stores: tokio::task::JoinHandle<(DoctorCounters, bool)>,
-    project_files: tokio::task::JoinHandle<DoctorCounters>,
+    daemon_service: DoctorCheck<DoctorCounters>,
+    reset_stores: DoctorCheck<(DoctorCounters, bool)>,
+    project_files: DoctorCheck<DoctorCounters>,
     daemon_status: tokio::task::JoinHandle<
         Option<tracedecay_domain::errors::Result<Option<serde_json::Value>>>,
     >,
-    watcher: tokio::task::JoinHandle<DoctorCounters>,
+    watcher: DoctorCheck<DoctorCounters>,
     upload: tokio::task::JoinHandle<tracedecay_domain::errors::Result<UploadSetting>>,
-    hosts: tokio::task::JoinHandle<DoctorCounters>,
+    hosts: DoctorCheck<DoctorCounters>,
     network: DoctorNetworkChecks,
 }
 
@@ -265,18 +265,23 @@ fn collect_quiet(check: impl FnOnce(&mut DoctorCounters)) -> DoctorCounters {
     counters
 }
 
-fn spawn_doctor_check<T, F>(check: F) -> tokio::task::JoinHandle<T>
+/// A synchronous doctor check running on the native blocking pool.
+type DoctorCheck<T> = futures_util::future::BoxFuture<'static, Result<T, String>>;
+
+fn spawn_doctor_check<T, F>(check: F) -> DoctorCheck<T>
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
-    tokio::task::spawn_blocking(check)
+    Box::pin(tracedecay_runtime_core::native_runtime::spawn_blocking(
+        check,
+    ))
 }
 
-async fn join_doctor_check<T>(
-    handle: tokio::task::JoinHandle<T>,
+async fn join_doctor_check<T, E: std::fmt::Display>(
+    check: impl Future<Output = Result<T, E>>,
 ) -> tracedecay_domain::errors::Result<T> {
-    handle
+    check
         .await
         .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
             message: format!("doctor check task failed: {error}"),
@@ -668,7 +673,7 @@ async fn daemon_project_status(
         false,
         false,
     )?;
-    let warmup_deadline = tokio::time::Instant::now() + RUNTIME_TELEMETRY_WARMUP;
+    let warmup_deadline = std::time::Instant::now() + RUNTIME_TELEMETRY_WARMUP;
     loop {
         // Diagnostic probe, not a liveness gate. A multi-gigabyte store
         // cold-opening while agents saturate the daemon can take well over 10s
@@ -694,7 +699,7 @@ async fn daemon_project_status(
             Some(deadline),
         )
         .await?;
-        let warmed_up = tokio::time::Instant::now() >= warmup_deadline;
+        let warmed_up = std::time::Instant::now() >= warmup_deadline;
         match daemon_runtime_status(runtime)? {
             // The first Doctor call starts the project open, so a warming
             // owner is polled like missing telemetry until the report lands.
@@ -706,7 +711,11 @@ async fn daemon_project_status(
                 return Ok(Some(status));
             }
             None if warmed_up => return Ok(None),
-            Some(_) | None => tokio::time::sleep(RUNTIME_TELEMETRY_POLL).await,
+            Some(_) | None => tracedecay_runtime_core::native_runtime::sleep_until(
+                std::time::Instant::now() + RUNTIME_TELEMETRY_POLL,
+            )
+            .await
+            .map_err(|message| tracedecay_domain::errors::TraceDecayError::Config { message })?,
         }
     }
 }
@@ -1430,10 +1439,8 @@ fn tracked_hosts(dc: &mut DoctorCounters, profile_root: &Path) -> Vec<String> {
 }
 
 struct DoctorNetworkChecks {
-    latest: tokio::task::JoinHandle<
-        Result<String, tracedecay_dashboard_api::cloud::ReleaseLookupError>,
-    >,
-    worldwide: Option<tokio::task::JoinHandle<Option<u64>>>,
+    latest: DoctorCheck<Result<String, tracedecay_dashboard_api::cloud::ReleaseLookupError>>,
+    worldwide: Option<DoctorCheck<Option<u64>>>,
     fetch_worldwide_total: fn() -> Option<u64>,
 }
 

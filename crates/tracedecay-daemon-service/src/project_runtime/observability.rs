@@ -9,6 +9,7 @@ use tracedecay_application::observability::{
     DeliverySettlementAuthorityV1, ObservabilityProducerIdentityV1, WorkOwnerObservationRecoveryV1,
 };
 use tracedecay_contracts::ApplicationContractError;
+use tracedecay_runtime_core::native_runtime;
 
 /// The live observability owners for one registered project-session store.
 ///
@@ -114,8 +115,8 @@ fn same_registered_store_authority(
 enum StoreObservabilityDrainV1 {
     /// A retiring caller is awaiting the core drain or has spawned it.
     InFlight,
-    /// The last alias was dropped without a tokio runtime, so nothing could
-    /// run the drain. The next mount attempt on a live runtime starts it.
+    /// The background drain was not admitted to the native runtime. The next
+    /// mount attempt or store settlement retries it.
     Deferred,
     /// All workers joined; a later mount may retry their writer fence once.
     AwaitingWriter,
@@ -233,7 +234,7 @@ impl fmt::Display for StoreObservabilityMountErrorV1 {
 #[derive(Clone, Default)]
 pub struct StoreObservabilityRegistryV1 {
     entries: Arc<StdMutex<Vec<StoreObservabilityEntryV1>>>,
-    /// Background drains started by a last alias dropped on a live runtime.
+    /// Background drains started by a dropped last alias or a later demand.
     /// Each holds its store's lease until the drain settles, so shutdown
     /// joins them before the stores close.
     retirement_drains: TaskTracker,
@@ -329,17 +330,7 @@ impl StoreObservabilityRegistryV1 {
                 StoreObservabilityStateV1::Stopping { core, drain } => {
                     // Demand starts at most one bounded drain or writer recheck.
                     // The mount stays refused until exact-owner settlement.
-                    if matches!(
-                        drain,
-                        StoreObservabilityDrainV1::Deferred
-                            | StoreObservabilityDrainV1::AwaitingWriter
-                    ) && let Ok(runtime) = tokio::runtime::Handle::try_current()
-                    {
-                        let writer_only =
-                            matches!(drain, StoreObservabilityDrainV1::AwaitingWriter);
-                        *drain = StoreObservabilityDrainV1::InFlight;
-                        self.spawn_retirement_drain(&runtime, Arc::clone(core), writer_only);
-                    }
+                    self.start_retirement_drain(Arc::clone(core), drain);
                     Err(StoreObservabilityMountErrorV1::Retiring)
                 }
                 StoreObservabilityStateV1::Failed => {
@@ -365,16 +356,15 @@ impl StoreObservabilityRegistryV1 {
         Ok(registered)
     }
 
-    /// Surrenders one alias release. Reports whether it was the last one, in
-    /// which case the entry is now `Stopping` with the given drain progress:
-    /// an `InFlight` caller must drain the core and finish the retirement; a
-    /// `Deferred` retirement waits for the next mount attempt on a live
-    /// runtime to start the drain.
+    /// Surrenders one alias release. When it was the last one the entry is now
+    /// `Stopping`: an `InFlight` caller gets its core handle back to drain the
+    /// core and finish the retirement; a `Deferred` release hands its handle
+    /// to a background drain started here.
     fn begin_retirement(
         &self,
-        core: &Arc<StoreObservabilityCoreV1>,
+        core: Arc<StoreObservabilityCoreV1>,
         drain: StoreObservabilityDrainV1,
-    ) -> Result<bool, ApplicationContractError> {
+    ) -> Result<Option<Arc<StoreObservabilityCoreV1>>, ApplicationContractError> {
         let mut entries =
             self.lock_entries()
                 .map_err(|_| ApplicationContractError::Inconsistent {
@@ -387,7 +377,7 @@ impl StoreObservabilityRegistryV1 {
                     StoreObservabilityStateV1::Active {
                         core: incumbent,
                         ..
-                    } if Arc::ptr_eq(incumbent, core)
+                    } if Arc::ptr_eq(incumbent, &core)
                 )
         }) else {
             return Err(ApplicationContractError::Inconsistent {
@@ -408,27 +398,41 @@ impl StoreObservabilityRegistryV1 {
             1 => {}
             _ => {
                 *aliases -= 1;
-                return Ok(false);
+                return Ok(None);
             }
         }
+        let incumbent = Arc::clone(&core);
+        let mut drain = drain;
+        let retiring = match drain {
+            StoreObservabilityDrainV1::InFlight => Some(core),
+            StoreObservabilityDrainV1::Deferred | StoreObservabilityDrainV1::AwaitingWriter => {
+                self.start_retirement_drain(core, &mut drain);
+                None
+            }
+        };
         entry.state = StoreObservabilityStateV1::Stopping {
-            core: Arc::clone(core),
+            core: incumbent,
             drain,
         };
-        Ok(true)
+        Ok(retiring)
     }
 
-    /// Runs the core drain in the background and settles the retirement with
-    /// the drain's confirmed outcome.
-    fn spawn_retirement_drain(
+    /// Runs a `Deferred` drain or an `AwaitingWriter` recheck in the
+    /// background, settling the retirement with the drain's confirmed
+    /// outcome. The drain stays as it was when the runtime refuses the task.
+    fn start_retirement_drain(
         &self,
-        runtime: &tokio::runtime::Handle,
         core: Arc<StoreObservabilityCoreV1>,
-        writer_only: bool,
+        drain: &mut StoreObservabilityDrainV1,
     ) {
+        let writer_only = match drain {
+            StoreObservabilityDrainV1::InFlight => return,
+            StoreObservabilityDrainV1::Deferred => false,
+            StoreObservabilityDrainV1::AwaitingWriter => true,
+        };
         let registry = self.clone();
-        self.retirement_drains.spawn_on(
-            async move {
+        let task =
+            native_runtime::NativeTask::spawn(self.retirement_drains.track_future(async move {
                 let (result, settled) = if writer_only {
                     let result = core.producer.finish_shutdown_settlement().await;
                     let completion = if result.is_ok() {
@@ -446,9 +450,14 @@ impl StoreObservabilityRegistryV1 {
                 if let Err(error) = registry.finish_retirement(core, settled) {
                     tracing::warn!(%error, "background observability retirement was incomplete");
                 }
-            },
-            runtime,
-        );
+            }));
+        match task {
+            Ok(_detached) => *drain = StoreObservabilityDrainV1::InFlight,
+            Err(error) => tracing::error!(
+                %error,
+                "observability retirement drain was not started; the store stays retiring"
+            ),
+        }
     }
 
     /// Shutdown's join of every background retirement drain started so far.
@@ -582,15 +591,7 @@ impl StoreObservabilityRegistryV1 {
             StoreObservabilityStateV1::Active { .. } => Ok(StoreObservabilitySettleV1::Active),
             StoreObservabilityStateV1::Failed => Ok(StoreObservabilitySettleV1::Failed),
             StoreObservabilityStateV1::Stopping { core, drain } => {
-                if matches!(
-                    *drain,
-                    StoreObservabilityDrainV1::Deferred | StoreObservabilityDrainV1::AwaitingWriter
-                ) && let Ok(runtime) = tokio::runtime::Handle::try_current()
-                {
-                    let writer_only = matches!(*drain, StoreObservabilityDrainV1::AwaitingWriter);
-                    *drain = StoreObservabilityDrainV1::InFlight;
-                    self.spawn_retirement_drain(&runtime, Arc::clone(core), writer_only);
-                }
+                self.start_retirement_drain(Arc::clone(core), drain);
                 Ok(StoreObservabilitySettleV1::Waiting)
             }
         }
@@ -738,9 +739,10 @@ impl RegisteredObservabilityProducerV1 {
         };
         let registry = self.registry.clone();
         drop(self);
-        if !registry.begin_retirement(&core, StoreObservabilityDrainV1::InFlight)? {
+        let Some(core) = registry.begin_retirement(core, StoreObservabilityDrainV1::InFlight)?
+        else {
             return Ok(());
-        }
+        };
         let (result, settled) = core.shutdown().await;
         let retirement = registry.finish_retirement(core, settled);
         match result {
@@ -763,34 +765,16 @@ impl Drop for RegisteredObservabilityProducerV1 {
         let Some(core) = self.release.take() else {
             return;
         };
-        // A drop without a runtime cannot await the drain, and retained
-        // mount frontends may still hold the shared producer core open, so
-        // inability to drain is never a confirmed close. The entry stays
-        // retiring, refusing replacement mounts that would start a
-        // duplicate producer, until the deferred drain, started by the next
-        // mount attempt on a live runtime, confirms the close.
-        let runtime = tokio::runtime::Handle::try_current().ok();
-        let drain = if runtime.is_some() {
-            StoreObservabilityDrainV1::InFlight
-        } else {
-            StoreObservabilityDrainV1::Deferred
-        };
-        let is_last = match self.registry.begin_retirement(&core, drain) {
-            Ok(is_last) => is_last,
-            Err(error) => {
-                tracing::warn!(%error, "observability alias release was incomplete");
-                return;
-            }
-        };
-        if !is_last {
-            return;
-        }
-        match runtime {
-            Some(runtime) => self.registry.spawn_retirement_drain(&runtime, core, false),
-            None => tracing::warn!(
-                "observability owners dropped without a runtime; the store stays \
-                 retiring until a deferred drain confirms the close"
-            ),
+        // A drop cannot await the drain, and retained mount frontends may
+        // still hold the shared producer core open, so the drop is never a
+        // confirmed close. The entry stays retiring, refusing replacement
+        // mounts that would start a duplicate producer, until the background
+        // drain confirms the close.
+        if let Err(error) = self
+            .registry
+            .begin_retirement(core, StoreObservabilityDrainV1::Deferred)
+        {
+            tracing::warn!(%error, "observability alias release was incomplete");
         }
     }
 }

@@ -1241,22 +1241,29 @@ async fn execute_context_scout_state_transition(
         let reconciliation_registry = Arc::clone(&registry);
         let reconciliation_scope = registered.scope.clone();
         let reconciliation_address = control.address;
-        tokio::spawn(async move {
-            if let Err(reconciliation_error) = reconcile_context_scout_configuration(
-                &runtime,
-                &reconciliation_owner,
-                &reconciliation_registry,
-                reconciliation_address,
-                &reconciliation_scope,
-            )
-            .await
-            {
-                tracing::warn!(
-                    %reconciliation_error,
-                    "Context Scout configuration activation remains pending reconciliation"
-                );
-            }
-        });
+        let reconciliation =
+            tracedecay_runtime_core::native_runtime::NativeTask::spawn(async move {
+                if let Err(reconciliation_error) = reconcile_context_scout_configuration(
+                    &runtime,
+                    &reconciliation_owner,
+                    &reconciliation_registry,
+                    reconciliation_address,
+                    &reconciliation_scope,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        %reconciliation_error,
+                        "Context Scout configuration activation remains pending reconciliation"
+                    );
+                }
+            });
+        if let Err(error) = reconciliation {
+            tracing::warn!(
+                %error,
+                "Context Scout configuration activation retry could not start"
+            );
+        }
     }
     DaemonInvocationResponse::with_outcome(
         request_id,

@@ -414,7 +414,7 @@ async fn open_host_admission_broker(
     let slot = Arc::clone(brokers.lock().await.entry(path.to_path_buf()).or_default());
     slot.get_or_try_init(|| async {
         let open_path = path.to_path_buf();
-        let (runtime, _) = tokio::task::spawn_blocking(move || {
+        let (runtime, _) = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             let _span =
                 tracing::trace_span!("daemon.branch_admin.host_admission_runtime.open").entered();
             open(&open_path)

@@ -961,7 +961,7 @@ impl McpServer {
         }
 
         let project_root = project_root.to_path_buf();
-        let uncached_tokens = tokio::task::spawn_blocking(move || {
+        let uncached_tokens = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             response_trailers::raw_file_tokens(&project_root, &uncached_files)
         })
         .await

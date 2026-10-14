@@ -238,6 +238,12 @@ tokensave-medium-treesitters = { path = "patches/tokensave-medium-treesitters" }
 # upstream master moves it to dev-dependencies with grammar sources identical
 # to 1.1.2. Unpublished, so pin that commit until a release ships it.
 tree-sitter-perl = { git = "https://github.com/ganezdragon/tree-sitter-perl", rev = "5b97493ce70686e22ec8b9ea261437147e342b49" }
+# tree-sitter-sequel 0.3.11 builds with `cc = "~1.2.1"`, which holds every
+# cc 1.x in the graph at 1.2. The fork is the 0.3.11 tag plus upstream
+# DerekStride/tree-sitter-sql#368 (cc = "1.2.1") and the generated parser
+# copied byte for byte from the published crate. Drop it once a release
+# ships #368 (DerekStride/tree-sitter-sql#384).
+tree-sitter-sequel = { git = "https://github.com/ScriptedAlchemy/tree-sitter-sql", rev = "52fb886f900022d459df9f87cecb3d5033ce7268" }
 
 # Dev opt-level 0 for workspace glue crates (every tracedecay-* crate that is
 # not a profile.perf kernel below). A `cargo build -p tracedecay-cli --timings`

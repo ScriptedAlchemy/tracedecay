@@ -55,8 +55,8 @@ use std::time::{Duration, Instant};
 
 use axum::extract::State;
 use axum::http::HeaderMap;
-use axum::response::IntoResponse;
 use axum::response::sse::{Event, Sse};
+use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
 use tracedecay_runtime_core::db::engine::QueryExecutor;
@@ -629,7 +629,7 @@ impl SharedSourcePoll {
 }
 
 /// `GET /api/events`
-pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> impl IntoResponse {
+pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> Response {
     let scope = scope_from_state(&state);
     let run_id = format!("run-{}-{}", std::process::id(), now_micros());
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(CHANNEL_CAPACITY);
@@ -641,17 +641,18 @@ pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> 
     let requested = parse_last_event_id(&headers);
     let activity_db = state.lcm_db.clone();
     let activity_project_id = state.project_id.clone();
+    let delivery_settlements = Arc::clone(&state.delivery_settlements);
+    let source_receiver = state.event_source_poll.subscribe(&state);
 
     // The response returns before any store is read, so the stream opens
     // even while the session store is busy.
-    tokio::spawn(async move {
-        let delivery_settlements = Arc::clone(&state.delivery_settlements);
+    let producer = native_runtime::NativeTask::spawn(async move {
         let connection_ref = crate::events_delivery::connection_ref(&run_id, &scope);
         let connection_ref_for_stream = connection_ref.clone();
         async {
         let activity_run_id = run_id.clone();
         let mut stream_state = EventStreamState::new(run_id);
-        stream_state.source_receiver = Some(state.event_source_poll.subscribe(&state));
+        stream_state.source_receiver = Some(source_receiver);
         // The first frame proves the stream is live before the activity
         // replay or the source baselines read a store.
         let connected = stream_state.heartbeat(&scope);
@@ -866,8 +867,16 @@ pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> 
             delivery_settlements.disconnect(connection_ref).await;
         }
     });
+    if let Err(error) = producer {
+        tracing::error!(%error, "dashboard event stream producer not admitted");
+        return crate::util::json_error(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            format!("dashboard event stream could not start: {error}"),
+        )
+        .into_response();
+    }
 
-    keep_alive_sse(rx, KEEP_ALIVE_INTERVAL)
+    keep_alive_sse(rx, KEEP_ALIVE_INTERVAL).into_response()
 }
 
 /// Sends a keep-alive comment after each `interval` without an event, as
@@ -1848,6 +1857,37 @@ mod tests {
         assert!(
             initialized,
             "the first published snapshot is a real observation"
+        );
+    }
+
+    #[test]
+    fn event_stream_sends_its_first_frame_without_a_tokio_runtime() {
+        let tokio = tokio::runtime::Runtime::new().expect("fixture runtime");
+        let (_project, dash) =
+            tokio.block_on(dashboard_state_fixture("project.dashboard-events-stream"));
+        let writer_waits = native_runtime::native_thread_writer_waits();
+        let first = native_runtime::block_on(async {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            let mut body = events(State(dash), HeaderMap::new())
+                .await
+                .into_response()
+                .into_body()
+                .into_data_stream();
+            native_runtime::timeout(Duration::from_secs(60), next_frame(&mut body))
+                .await
+                .expect("the stream producer sends its connected frame")
+        })
+        .expect("native block_on");
+        assert!(
+            first
+                .as_deref()
+                .is_some_and(|frame| frame.starts_with("event: heartbeat\n")),
+            "{first:?}"
+        );
+        assert_eq!(
+            native_runtime::native_thread_writer_waits(),
+            writer_waits,
+            "the stream parked no native thread on a writer"
         );
     }
 

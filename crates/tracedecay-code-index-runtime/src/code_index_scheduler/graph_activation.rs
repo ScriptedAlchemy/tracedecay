@@ -400,7 +400,7 @@ impl CodeGraphActivationAuthorityV1 {
                     ))
                 })??;
                 if let Some(pending_catalog_warm) = pending_catalog_warm {
-                    drop(crate::code_index_task_support::start_blocking(move || {
+                    drop(native_runtime::spawn_blocking(move || {
                         if let Err(error) = pending_catalog_warm.run() {
                             tracing::warn!(
                                 error = %error,
@@ -545,14 +545,14 @@ impl CodeGraphActivationAuthorityV1 {
                         "code graph activation task failed: {error}"
                     ))
                 })??;
-                let catalog_warm = pending_catalog_warm.and_then(|pending_catalog_warm| {
+                let catalog_warm = pending_catalog_warm.map(|pending_catalog_warm| {
                     #[cfg(any(test, feature = "test-helpers"))]
                     let gate = injected_faults()
                         .catalog_warm_gates
                         .remove(worktree_id.as_str());
                     #[cfg(any(test, feature = "test-helpers"))]
                     let warm_gate = gate.clone();
-                    let handle = crate::code_index_task_support::start_blocking(move || {
+                    let handle = native_runtime::spawn_blocking(move || {
                         #[cfg(any(test, feature = "test-helpers"))]
                         if let Some(gate) = warm_gate
                             && let Err(error) = native_runtime::block_on(async {
@@ -568,12 +568,12 @@ impl CodeGraphActivationAuthorityV1 {
                                 "background code graph interactive catalog warm failed"
                             );
                         }
-                    })?;
-                    Some(CodeGraphCatalogWarmV1 {
-                        handle,
+                    });
+                    CodeGraphCatalogWarmV1 {
+                        handle: Box::pin(handle),
                         #[cfg(any(test, feature = "test-helpers"))]
                         gate,
-                    })
+                    }
                 });
                 Self::record_seated(seated, generation_id);
                 Ok(catalog_warm)
@@ -707,7 +707,7 @@ impl GraphCancellation for SchedulerGraphCancellation {
 /// A seated generation's catalog warm, which runs in the background. Dropping
 /// it leaves the warm running.
 pub struct CodeGraphCatalogWarmV1 {
-    handle: native_runtime::NativeTask<Result<(), String>>,
+    handle: std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>,
     #[cfg(any(test, feature = "test-helpers"))]
     gate: Option<Arc<InjectedActivationGateStateV1>>,
 }
@@ -720,7 +720,7 @@ impl CodeGraphCatalogWarmV1 {
         if let Some(gate) = &self.gate {
             gate.awaited.notify_one();
         }
-        let _ = self.handle.wait().await;
+        let _ = self.handle.await;
     }
 }
 

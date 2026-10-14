@@ -3706,7 +3706,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 // long and hide it inside the owner's join budget, so the
                 // release runs on the blocking pool. Shutdown still joins it
                 // below: ownership must be gone when this returns.
-                owner_releases.extend(crate::code_index_task_support::start_blocking(move || {
+                owner_releases.push(native_runtime::spawn_blocking(move || {
                     let _span =
                         tracing::trace_span!("daemon.code_index.shutdown.owner_release").entered();
                     drop(worktree);
@@ -3722,7 +3722,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let release_count = owner_releases.len();
         for release in owner_releases {
             let _ = tracing::Instrument::instrument(
-                release.wait(),
+                release,
                 tracing::trace_span!("daemon.code_index.shutdown.owner_release_join"),
             )
             .await;

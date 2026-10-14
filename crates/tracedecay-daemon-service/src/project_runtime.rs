@@ -731,7 +731,7 @@ pub struct ProjectRuntimeRegistryV1 {
     /// The blocking drain is retained independently of whichever async
     /// shutdown caller first requested it. A retry can therefore join the
     /// same work after that caller is cancelled.
-    shutdown_task: Arc<AsyncMutex<Option<tokio::task::JoinHandle<()>>>>,
+    shutdown_task: Arc<AsyncMutex<Option<tracedecay_runtime_core::native_runtime::NativeTask<()>>>>,
     closed: Arc<AtomicBool>,
     shutdown_started: Arc<AtomicBool>,
     shutdown_complete: watch::Sender<ShutdownState>,

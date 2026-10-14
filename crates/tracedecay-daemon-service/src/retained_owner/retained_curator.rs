@@ -33,6 +33,18 @@ pub async fn execute_retained_memory_curator(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     request: &FactStoreCurateRequestV1,
 ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+    // The curator calls its Codex backend synchronously for the whole model
+    // run (`CodexAppServerBackend::run_task`), which would park a native
+    // worker; the run stays on a Tokio worker until that call moves off the
+    // async path.
+    let curator_runtime = tracedecay_runtime_core::native_runtime::tokio_handle(
+        "daemon-service.retained_curator.run",
+    )
+    .ok_or_else(|| {
+        RetainedSurfaceExecutionErrorV1::unavailable(
+            "the memory curator runtime is unavailable".to_owned(),
+        )
+    })?;
     let pinned = cg
         .configuration_runtime()
         .client()
@@ -150,7 +162,7 @@ pub async fn execute_retained_memory_curator(
         fact_review_limit: request.fact_review_limit as usize,
         min_confidence,
     };
-    drop(tokio::spawn(async move {
+    drop(curator_runtime.spawn(async move {
         let retained_run = run_memory_curator_with_backend_for_retained_settlement(
             &automation_context,
             &config,

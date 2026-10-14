@@ -1,7 +1,7 @@
 //! First-party commands' `tracedecay_admin_project` requests to the project's
 //! owner.
 
-use tokio::time::Instant;
+use std::time::Instant;
 use tracedecay_contracts::graph_tool::GraphToolResultV1;
 use tracedecay_contracts::retrieval::{
     AdminProjectCounterV1, AdminProjectResultV1, AdminProjectSurfaceRequestV1,

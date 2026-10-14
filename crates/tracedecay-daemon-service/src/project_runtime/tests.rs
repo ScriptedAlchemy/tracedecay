@@ -1246,6 +1246,27 @@ async fn cancelled_publication_releases_while_shutdown_drain_is_waiting() {
     assert!(registry.is_empty());
 }
 
+/// The drain task runs on the native runtime, so a caller with no Tokio
+/// runtime still shuts every project runtime down.
+#[test]
+fn shutting_down_off_tokio_empties_the_registry() {
+    let registry = ProjectRuntimeRegistryV1::default();
+    let writer_waits = tracedecay_rusqlite_runtime::exact_sql::native_thread_writer_waits();
+    let shut_down = tracedecay_runtime_core::native_runtime::block_on(async {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        registry.publish(root("alpha"), component(1)).await.unwrap();
+        registry.shut_down_all().await
+    })
+    .expect("native runtime");
+
+    assert!(shut_down, "the off-Tokio drain completes");
+    assert!(registry.is_empty());
+    assert_eq!(
+        tracedecay_rusqlite_runtime::exact_sql::native_thread_writer_waits(),
+        writer_waits
+    );
+}
+
 #[tokio::test]
 async fn shutting_down_empties_the_registry() {
     let registry = ProjectRuntimeRegistryV1::default();
