@@ -3,7 +3,6 @@ use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use tokio::io::AsyncWriteExt;
 
 use crate::automation::artifacts::sha256_bytes;
 use crate::automation::{AutomationCommittedReceipt, AutomationRunError, AutomationRunResult};
@@ -263,36 +262,36 @@ pub(super) async fn deliver_job_output(
         JobDelivery::File { path } => {
             let target = file_target(dashboard_root, job, run_id, path.as_deref())?;
             if let Some(parent) = target.parent() {
-                tokio::fs::create_dir_all(parent).await.map_err(|error| {
-                    TraceDecayError::Config {
+                let directory = parent.to_path_buf();
+                crate::automation::blocking_fs(move || std::fs::create_dir_all(directory))
+                    .await
+                    .map_err(|error| TraceDecayError::Config {
                         message: format!("failed to create job output directory: {error}"),
-                    }
-                })?;
+                    })?;
             }
             let target_digest = sha256_bytes(target.display().to_string().as_bytes());
-            let mut file = tokio::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(&target)
-                .await
-                .map_err(|error| {
-                    AutomationRunError::Runtime(TraceDecayError::Config {
-                        message: format!("failed to open job output: {error}"),
-                    })
-                })?;
-            {
-                use tracing::Instrument as _;
-                {
-                    file.write_all(response.output_text.as_bytes())
-                        .instrument(tracing::trace_span!("automation.job_delivery.write_file"))
-                        .await
-                }
-            }
-            .map_err(|_| {
-                indeterminate_error(run_id, &task_key, "file", &target_digest, content_digest)
+            let mut file = crate::automation::blocking_fs(move || {
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(true)
+                    .open(target)
+            })
+            .await
+            .map_err(|error| {
+                AutomationRunError::Runtime(TraceDecayError::Config {
+                    message: format!("failed to open job output: {error}"),
+                })
             })?;
-            file.flush().await.map_err(|_| {
+            let output = response.output_text.clone();
+            crate::automation::blocking_fs(move || {
+                use std::io::Write as _;
+                let _span = tracing::trace_span!("automation.job_delivery.write_file").entered();
+                file.write_all(output.as_bytes())?;
+                file.flush()
+            })
+            .await
+            .map_err(|_| {
                 indeterminate_error(run_id, &task_key, "file", &target_digest, content_digest)
             })?;
             Ok(JobDeliveryOutcome::File { target_digest })

@@ -293,7 +293,7 @@ pub async fn find_run_record_exact_bounded(
 ) -> Result<Option<AutomationRunLedgerRecord>> {
     let root = dashboard_root.to_path_buf();
     let requested_run_id = run_id.to_owned();
-    tokio::task::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         find_run_record_exact_bounded_blocking(&root, &requested_run_id)
     })
     .await

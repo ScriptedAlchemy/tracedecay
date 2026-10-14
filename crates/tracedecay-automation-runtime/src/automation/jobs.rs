@@ -189,7 +189,8 @@ pub(super) async fn try_acquire_job_task_lock(
 #[tracing::instrument(name = "automation.jobs.load", level = "trace", skip_all)]
 pub async fn load_jobs(dashboard_root: &Path) -> Result<Vec<AutomationJob>> {
     let path = jobs_path(dashboard_root);
-    match tokio::fs::read(&path).await {
+    let read_path = path.clone();
+    match crate::automation::blocking_fs(move || std::fs::read(read_path)).await {
         Ok(bytes) => {
             let file = serde_json::from_slice::<AutomationJobsRawFile>(&bytes).map_err(|e| {
                 TraceDecayError::Config {
@@ -221,7 +222,8 @@ pub async fn load_jobs(dashboard_root: &Path) -> Result<Vec<AutomationJob>> {
 pub async fn save_jobs(dashboard_root: &Path, jobs: &[AutomationJob]) -> Result<()> {
     let path = jobs_path(dashboard_root);
     if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent)
+        let directory = parent.to_path_buf();
+        crate::automation::blocking_fs(move || std::fs::create_dir_all(directory))
             .await
             .map_err(|e| TraceDecayError::Config {
                 message: format!(
@@ -237,7 +239,8 @@ pub async fn save_jobs(dashboard_root: &Path, jobs: &[AutomationJob]) -> Result<
     let bytes = serde_json::to_vec_pretty(&file).map_err(|e| TraceDecayError::Config {
         message: format!("failed to serialize automation jobs: {e}"),
     })?;
-    tokio::fs::write(&path, bytes)
+    let write_path = path.clone();
+    crate::automation::blocking_fs(move || std::fs::write(write_path, bytes))
         .await
         .map_err(|e| TraceDecayError::Config {
             message: format!("failed to write automation jobs '{}': {e}", path.display()),
