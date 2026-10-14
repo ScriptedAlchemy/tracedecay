@@ -3,7 +3,7 @@
 //! The coordinator composes existing graph, session, and memory authorities.
 //! It preserves source-local ordering and coverage instead of manufacturing a
 //! cross-source rank. Query cancellation is bound to the opaque run identity
-//! stored here and reaches the live Tokio work through `CancellationToken`.
+//! stored here and reaches the live work through `CancellationToken`.
 
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
@@ -38,6 +38,7 @@ use super::util::json_error;
 use super::{DashboardHttpRequestControlV1, DashboardState, RequestControl, graph_service};
 use crate::request_identity::{GlobalOpaqueIdentityKind, mint_global_opaque_id};
 use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::native_runtime;
 
 const SOURCE_IDS: [ExplorerSourceIdV1; 3] = [
     ExplorerSourceIdV1::CodeGraph,
@@ -436,19 +437,29 @@ pub async fn create_query(
                     cancellation: cancellation.clone(),
                     run: Arc::clone(&run),
                 },
-                run_id,
+                run_id.clone(),
             ) {
                 return internal_error(message);
             }
             let initial = run.read().await.clone();
             let response = envelope_for_run(&state, initial);
-            tokio::spawn(execute_query(
+            if let Err(error) = native_runtime::NativeTask::spawn(execute_query(
                 state,
                 request,
                 Arc::clone(&run),
                 cancellation,
                 control,
-            ));
+            )) {
+                query_runs()
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&run_id);
+                return json_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!("explorer query could not start: {error}"),
+                )
+                .into_response();
+            }
             (StatusCode::ACCEPTED, Json(response)).into_response()
         },
         tracing::trace_span!("dashboard_api.query.create"),
@@ -517,8 +528,8 @@ async fn execute_query(
         }
     }
 
-    // Polled in place: the sources read through daemon ports that still run
-    // on Tokio, and dropping `tasks` on any exit cancels the unfinished reads.
+    // Polled in place, so dropping `tasks` on any exit cancels the
+    // unfinished reads.
     let mut tasks: FuturesUnordered<_> = SOURCE_IDS
         .into_iter()
         .map(|source_id| {
@@ -1294,5 +1305,66 @@ const fn explorer_lcm_error_code(state: DashboardLcmReadStateV1) -> &'static str
         DashboardLcmReadStateV1::BudgetExhausted => "lcm_temporal_budget_exhausted",
         DashboardLcmReadStateV1::TimedOut => "lcm_temporal_read_timed_out",
         DashboardLcmReadStateV1::Cancelled => "lcm_temporal_read_cancelled",
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod native_tests {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    #[test]
+    fn explorer_query_settles_without_a_tokio_runtime() {
+        let fixture = tokio::runtime::Runtime::new().expect("fixture runtime");
+        let (_project, dash) = fixture.block_on(crate::events_api::dashboard_state_fixture(
+            "project.dashboard-explorer-native",
+        ));
+        let writer_waits = native_runtime::native_thread_writer_waits();
+        let state = native_runtime::block_on(async move {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            let response = create_query(
+                State(dash.clone()),
+                RequestControl(DashboardHttpRequestControlV1::test_fixture(
+                    "dashboard-explorer-native",
+                )),
+                Json(ExplorerQueryRequestV1 {
+                    query: "fixture".to_owned(),
+                    limit: 1,
+                    offset: 0,
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .expect("accepted body");
+            let accepted: Value = serde_json::from_slice(&body).expect("accepted json");
+            let run_id = accepted["payload"]["run_id"]
+                .as_str()
+                .expect("accepted run id")
+                .to_owned();
+            let run = find_run(&dash, &run_id).expect("remembered run").run;
+            native_runtime::timeout(Duration::from_secs(60), async {
+                loop {
+                    let state = run.read().await.state;
+                    if state != ExplorerRunStateV1::Pending {
+                        return state;
+                    }
+                    let _ = native_runtime::sleep_until(Instant::now() + Duration::from_millis(10))
+                        .await;
+                }
+            })
+            .await
+            .expect("the explorer run settles")
+        })
+        .expect("native block_on");
+        assert_eq!(state, ExplorerRunStateV1::Partial);
+        assert_eq!(
+            native_runtime::native_thread_writer_waits(),
+            writer_waits,
+            "the explorer run parked no native thread on a writer"
+        );
     }
 }
