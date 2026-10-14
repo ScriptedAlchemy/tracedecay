@@ -26,6 +26,7 @@ use super::{
     dashboard_terminal_status, dashboard_text_freshness_identity, project_graph_publication_phase,
     unique_mounted_for_scope,
 };
+use tracedecay_runtime_core::native_runtime;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 impl CodeIndexSchedulerRegistryV1 {
@@ -85,7 +86,7 @@ impl CodeIndexSchedulerRegistryV1 {
         if pending_wake.has_pending_arrival() || reconcile_in_progress.running() {
             return Some(epoch.load(Ordering::Acquire));
         }
-        tokio::task::spawn_blocking(move || {
+        native_runtime::spawn_blocking(move || {
             let mut scheduler = scheduler
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -188,7 +189,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 .clone()
         };
         Some(
-            tokio::task::spawn_blocking(move || read(&owner))
+            native_runtime::spawn_blocking(move || read(&owner))
                 .await
                 .unwrap_or_else(|error| {
                     Err(CodeIndexSchedulerErrorV1::Identity(format!(
@@ -299,7 +300,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 worktree.graph_activation.policy().is_enabled(),
             )
         };
-        tokio::task::spawn_blocking(move || {
+        native_runtime::spawn_blocking(move || {
             let mut progress = {
                 let _span = tracing::trace_span!("daemon.code_index.dashboard.progress").entered();
                 build_progress
@@ -600,7 +601,7 @@ impl CodeIndexSchedulerRegistryV1 {
         // last complete immutable generation instead of joining its work.
         let authority_root = project_root.clone();
         let freshness_root = project_root.clone();
-        let latest = crate::ports::park_admission(tokio::task::spawn_blocking(move || {
+        let latest = crate::ports::park_admission(native_runtime::spawn_blocking(move || {
             let scheduler = match scheduler.try_lock() {
                 Ok(scheduler) => scheduler,
                 Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
@@ -763,7 +764,7 @@ impl CodeIndexSchedulerRegistryV1 {
             )
         };
         let freshness_root = project_root.clone();
-        let (request_reconcile, latest) = tokio::task::spawn_blocking(move || {
+        let (request_reconcile, latest) = native_runtime::spawn_blocking(move || {
             let serving = serving_generation
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -924,7 +925,7 @@ impl CodeIndexSchedulerRegistryV1 {
     pub async fn latest_complete_fresh_for_scope_awaiting_seat(
         &self,
         scope: &tracedecay_contracts::ResolvedScope,
-        deadline: tokio::time::Instant,
+        deadline: std::time::Instant,
     ) -> Option<LatestCompleteCodeIndexV1> {
         let root = {
             let mounted = self.mounted.lock().await;
@@ -1210,7 +1211,7 @@ impl CodeIndexSchedulerRegistryV1 {
         };
         let scope = scope.clone();
         let probe_root = project_root.clone();
-        let probe = tokio::task::spawn_blocking(move || {
+        let probe = native_runtime::spawn_blocking(move || {
             let _span =
                 tracing::trace_span!("daemon.code_index.query.latest_ready_decoded.execution")
                     .entered();
