@@ -88,7 +88,6 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
             project_root.clone(),
             access.clone(),
             tracedecay_contracts::now_micros(),
-            tokio::runtime::Handle::current(),
         )
         .await
         .unwrap();
@@ -107,6 +106,23 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
             .to_string()
     );
     assert_eq!(initial.scope, scope);
+    // The authority blocks on the configuration store from whichever thread
+    // rechecks policy, so it must not need that thread's Tokio runtime.
+    let off_runtime = std::thread::scope(|threads| {
+        let plain = threads.spawn(|| owner.current_authority(operation));
+        let current_thread = threads.spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(async { owner.current_authority(operation) })
+        });
+        [plain.join().unwrap(), current_thread.join().unwrap()]
+    });
+    for authority in off_runtime {
+        let authority = authority.unwrap();
+        assert_eq!(authority.policy_digest, initial.policy_digest);
+        assert_eq!(authority.configuration_digest, initial.configuration_digest);
+    }
 
     // A separate owner can refuse its own provider without replacing the
     // canonical dependency already retained by the first owner.
@@ -117,7 +133,6 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
             project_root.clone(),
             access.clone(),
             tracedecay_contracts::now_micros(),
-            tokio::runtime::Handle::current(),
         )
         .await
         .unwrap();
@@ -188,7 +203,6 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
             project_root.clone(),
             revoked,
             tracedecay_contracts::now_micros(),
-            tokio::runtime::Handle::current(),
         )
         .await
         .unwrap();
@@ -225,7 +239,6 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
             project_root.clone(),
             expired,
             tracedecay_contracts::now_micros(),
-            tokio::runtime::Handle::current(),
         )
         .await
         .unwrap();
