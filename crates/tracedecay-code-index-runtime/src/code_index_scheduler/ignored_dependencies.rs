@@ -844,7 +844,7 @@ fn prove_gix_ignored(root: &Path, logical_path: &str) -> Result<(), CodeIndexSch
         .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
     let ignored = excludes
         .at_path(Path::new(logical_path), None)
-        .map_err(CodeIndexSchedulerErrorV1::Io)?
+        .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?
         .is_excluded();
     if ignored {
         Ok(())
