@@ -12,11 +12,7 @@ use tracedecay_store::{
 use crate::{
     RuntimeWriteAuthority, RuntimeWriteAuthorityStage, WriterActorError,
     admission::{Permit, QueueItem},
-    checkpoint::{
-        CheckpointBlockers, CheckpointError, CheckpointResult, MaintenanceCheckpointMode,
-        RusqliteCheckpointError,
-    },
-    maintenance::ExclusiveMaintenancePermit,
+    checkpoint::{CheckpointBlockers, CheckpointError, CheckpointResult, RusqliteCheckpointError},
 };
 
 pub(super) type RequestResult = Result<RuntimeSubmitOutcomeV1, StorageRuntimeErrorV1>;
@@ -192,19 +188,9 @@ pub(super) type CheckpointRequestResult =
 
 pub(super) struct CheckpointCommand {
     pub(super) snapshot_blockers: CheckpointBlockers,
-    pub(super) kind: CheckpointCommandKind,
+    probe: Arc<dyn RuntimeRequestProbeV1>,
     authority: Arc<dyn RuntimeWriteAuthority>,
     reply: oneshot::Sender<CheckpointRequestResult>,
-}
-
-pub(super) enum CheckpointCommandKind {
-    Passive {
-        probe: Arc<dyn RuntimeRequestProbeV1>,
-    },
-    Maintenance {
-        mode: MaintenanceCheckpointMode,
-        permit: Box<ExclusiveMaintenancePermit>,
-    },
 }
 
 impl CheckpointCommand {
@@ -216,25 +202,7 @@ impl CheckpointCommand {
     ) -> Self {
         Self {
             snapshot_blockers,
-            kind: CheckpointCommandKind::Passive { probe },
-            authority,
-            reply,
-        }
-    }
-
-    pub(super) fn new_maintenance(
-        snapshot_blockers: CheckpointBlockers,
-        mode: MaintenanceCheckpointMode,
-        permit: ExclusiveMaintenancePermit,
-        authority: Arc<dyn RuntimeWriteAuthority>,
-        reply: oneshot::Sender<CheckpointRequestResult>,
-    ) -> Self {
-        Self {
-            snapshot_blockers,
-            kind: CheckpointCommandKind::Maintenance {
-                mode,
-                permit: Box::new(permit),
-            },
+            probe,
             authority,
             reply,
         }
@@ -257,13 +225,13 @@ impl CheckpointCommand {
         self,
     ) -> (
         CheckpointBlockers,
-        CheckpointCommandKind,
+        Arc<dyn RuntimeRequestProbeV1>,
         Arc<dyn RuntimeWriteAuthority>,
         CheckpointReply,
     ) {
         (
             self.snapshot_blockers,
-            self.kind,
+            self.probe,
             self.authority,
             CheckpointReply(self.reply),
         )

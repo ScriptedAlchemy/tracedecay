@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tracedecay_contracts::session_sync::{
     SessionGitSyncV1, SessionSyncAdmissionErrorV1, SessionSyncCommandV1,
@@ -21,6 +21,7 @@ use crate::session_temporal_refresh_scheduler::wake::HistoricalAdmissionView;
 use tracedecay_global_db::GlobalDbGitCorrelationStore;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
+use tracedecay_runtime_core::native_runtime::{self, NativeTask, NativeTaskOutcome};
 use tracedecay_sessions::admission::{SESSION_INGEST_DISABLED_REASON_V1, session_ingest_disabled};
 
 const MAX_SESSION_SYNC_OPERATIONS: usize = 128;
@@ -445,23 +446,21 @@ impl DaemonSessionSyncService {
         let task_scope = request.scope().clone();
         let task_key = key.clone();
         let task_cancellation = request.cancellation().clone();
-        let task = tokio::spawn(async move {
+        let task_import_scope = import_scope.clone();
+        let task = NativeTask::spawn(async move {
             service
                 .run_operation(context, project_sessions, key.clone(), request)
                 .await;
-            service
-                .active
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .remove(&key);
-            if let Some(import_scope) = import_scope {
-                service
-                    .active_imports
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .remove(&import_scope);
-            }
+            service.release_active(&key, import_scope.as_ref());
         });
+        let task = match task {
+            Ok(task) => task,
+            Err(error) => {
+                tracing::warn!(%error, "session sync operation did not start");
+                self.release_active(&task_key, task_import_scope.as_ref());
+                return false;
+            }
+        };
         let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
         tasks.retain(|task| !task.task.is_finished());
         tasks.push(SessionSyncTaskV1 {
@@ -471,6 +470,19 @@ impl DaemonSessionSyncService {
             task,
         });
         true
+    }
+
+    fn release_active(&self, key: &str, import_scope: Option<&String>) {
+        self.active
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(key);
+        if let Some(import_scope) = import_scope {
+            self.active_imports
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(import_scope);
+        }
     }
 
     async fn run_operation(
@@ -910,11 +922,11 @@ impl SessionSyncServicePort for DaemonSessionSyncService {
         Box::pin(async move {
             self.shutdown.cancel();
             self.shutdown_notify.notify_waiters();
-            let mut tasks = SessionSyncTaskShutdownV1::take(&self.tasks);
-            let grace_deadline = tokio::time::Instant::now() + SESSION_SYNC_SHUTDOWN_ABORT_GRACE;
+            let tasks = SessionSyncTaskShutdownV1::take(&self.tasks);
+            let grace_deadline = Instant::now() + SESSION_SYNC_SHUTDOWN_ABORT_GRACE;
             tokio::select! {
                 results = futures_util::future::join_all(
-                    tasks.tasks.iter_mut().map(|task| &mut task.task)
+                    tasks.tasks.iter().map(|task| task.task.wait())
                 ) => {
                     for result in results {
                         work::log_session_sync_join(result);
@@ -925,13 +937,17 @@ impl SessionSyncServicePort for DaemonSessionSyncService {
                         .clear();
                     return;
                 }
-                () = tokio::time::sleep_until(grace_deadline) => {}
+                fired = native_runtime::sleep_until(grace_deadline) => {
+                    if let Err(error) = fired {
+                        tracing::warn!(%error, "session sync shutdown aborts its tasks without a grace period");
+                    }
+                }
             }
             for task in &tasks.tasks {
                 task.task.abort();
             }
             for result in
-                futures_util::future::join_all(tasks.tasks.iter_mut().map(|task| &mut task.task))
+                futures_util::future::join_all(tasks.tasks.iter().map(|task| task.task.wait()))
                     .await
             {
                 work::log_session_sync_join(result);
@@ -1132,7 +1148,14 @@ impl DaemonSessionSyncService {
             biased;
             () = &mut shutdown => work::SessionSyncInterruption::Shutdown,
             () = cancellation.cancelled() => work::SessionSyncInterruption::Cancelled,
-            () = sleep_until_deadline(deadline) => work::SessionSyncInterruption::TimedOut,
+            fired = sleep_until_deadline(deadline) => {
+                // Without a timer the deadline cannot be observed, so the
+                // operation ends rather than run unbounded.
+                if let Err(error) = fired {
+                    tracing::error!(%error, "session sync deadline has no native timer");
+                }
+                work::SessionSyncInterruption::TimedOut
+            }
         }
     }
 }
@@ -1150,10 +1173,12 @@ fn transcript_import_requested_coverage() -> Vec<SessionSyncSourceCoverageV1> {
         .collect()
 }
 
-fn sleep_until_deadline(deadline: &tracedecay_contracts::Deadline) -> impl Future<Output = ()> {
+fn sleep_until_deadline(
+    deadline: &tracedecay_contracts::Deadline,
+) -> impl Future<Output = Result<(), String>> {
     let remaining_micros = deadline.expires_at.0.saturating_sub(now_micros().0);
     let remaining = u64::try_from(remaining_micros).unwrap_or(0);
-    tokio::time::sleep(Duration::from_micros(remaining))
+    native_runtime::sleep_until(Instant::now() + Duration::from_micros(remaining))
 }
 
 fn journal_prefix(scope: &SessionSyncScopeV1) -> String {

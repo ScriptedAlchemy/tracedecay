@@ -19,7 +19,6 @@ single_version_override(
     patch_strip = 1,
 )
 bazel_dep(name = "aspect_rules_js", version = "3.5.1")
-bazel_dep(name = "aspect_bazel_lib", version = "2.22.5")
 bazel_dep(name = "rules_nodejs", version = "6.7.6")
 
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")

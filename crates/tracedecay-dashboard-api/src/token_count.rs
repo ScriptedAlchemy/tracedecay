@@ -425,7 +425,7 @@ async fn count_and_store(
             .collect();
 
         // BPE encoding is CPU-bound; keep it off the async worker threads.
-        let counted = tokio::task::spawn_blocking(move || {
+        let counted = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             batch
                 .into_iter()
                 .filter_map(|(provider, message_id, len, text)| {

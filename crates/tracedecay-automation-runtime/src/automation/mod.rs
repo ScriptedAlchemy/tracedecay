@@ -53,6 +53,18 @@ pub fn config_error(message: impl Into<String>) -> tracedecay_domain::errors::Tr
     }
 }
 
+/// Runs filesystem `work` on the native blocking pool, as `tokio::fs` did on
+/// Tokio's. A pool failure becomes an `io::Error`, so callers keep one mapping.
+pub(crate) async fn blocking_fs<T, F>(work: F) -> std::io::Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> std::io::Result<T> + Send + 'static,
+{
+    tracedecay_runtime_core::native_runtime::spawn_blocking(work)
+        .await
+        .map_err(std::io::Error::other)?
+}
+
 pub(crate) fn job_error<T>(message: &str) -> tracedecay_domain::errors::Result<T> {
     Err(config_error(message))
 }

@@ -75,7 +75,7 @@ fn profile_project_root(database_path: &Path) -> Option<&Path> {
 fn profile_remote_node_root(database_path: &Path) -> Option<&Path> {
     if database_path
         .file_name()
-        .is_none_or(|name| name != "remote.db")
+        .is_none_or(|name| name != crate::storage::REMOTE_DB_FILENAME)
     {
         return None;
     }
