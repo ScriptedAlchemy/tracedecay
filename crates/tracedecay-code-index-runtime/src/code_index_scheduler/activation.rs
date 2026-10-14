@@ -303,6 +303,8 @@ impl CodeIndexActivationV1 {
         }
         #[cfg(test)]
         self.activation_attempts.fetch_add(1, Ordering::SeqCst);
+        // The daemon's mount closure still spawns Tokio work, so this task
+        // stays on the caller's Tokio runtime.
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             self.state.store(ACTIVATION_IDLE, Ordering::Release);
             return false;

@@ -17,6 +17,7 @@ use tracedecay_query::code_search::{
     CodeIndexSearchRequestV1, CodeIndexSearchUnavailableReasonV1, CodeIndexSimilarOutcomeV1,
     CodeIndexSimilarRequestV1, CodeIndexSimilarTargetV1,
 };
+use tracedecay_runtime_core::native_runtime;
 
 use crate::code_index_executor::{code_index_search_executor, code_index_similar_executor};
 use crate::mcp_admission::{
@@ -844,6 +845,47 @@ async fn a_family_read_that_loses_the_permit_race_waits_for_the_permit() {
         similar_settlement(&second),
         SimilarSettlementV1::Complete,
         "the read parked with the first settles exactly as the first did: {second:?}"
+    );
+
+    registry.shutdown().await;
+}
+
+/// The executor runs a search's scheduler work on the native runtime, so a
+/// caller with no Tokio runtime still gets a complete result.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_search_off_tokio_completes() {
+    let fixture = GitFixture::new(&[("src/alpha.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+    let executor = code_index_search_executor(
+        registry.clone(),
+        test_project_id(),
+        OpenAdmission(CodeIndexSearchAuthorityV1 {
+            principal: PrincipalId::new("principal.native-search.fixture").expect("principal"),
+            authorization_revision: AuthorizationRevision::new(
+                "authorization.native-search.fixture",
+            )
+            .expect("authorization revision"),
+        }),
+        FixedScopeResolver(scope),
+    );
+    let request = search_request(fixture.path(), None);
+    let search = std::thread::spawn(move || native_runtime::block_on(executor(request)));
+    let outcome = tokio::task::spawn_blocking(move || search.join())
+        .await
+        .expect("the joining thread finishes");
+    let outcome = outcome
+        .map_err(|panic| {
+            panic.downcast_ref::<String>().cloned().or_else(|| {
+                panic
+                    .downcast_ref::<&str>()
+                    .map(|message| (*message).to_owned())
+            })
+        })
+        .map(|outcome| outcome.expect("process runtime"));
+    assert!(
+        matches!(outcome, Ok(CodeIndexSearchOutcomeV1::Complete(_))),
+        "a search with no Tokio runtime must complete: {outcome:?}"
     );
 
     registry.shutdown().await;
