@@ -65,7 +65,7 @@ where
     /// Mounts the session review scheduler a user-global catch-up pass
     /// hands its freshly ingested sessions to.
     #[must_use]
-    pub const fn with_session_review(mut self, session_review: SessionReviewPort) -> Self {
+    pub fn with_session_review(mut self, session_review: SessionReviewPort) -> Self {
         self.session_review = Some(session_review);
         self
     }
@@ -169,6 +169,6 @@ where
     }
 
     fn session_review(&self) -> Option<SessionReviewPort> {
-        self.session_review
+        self.session_review.clone()
     }
 }
