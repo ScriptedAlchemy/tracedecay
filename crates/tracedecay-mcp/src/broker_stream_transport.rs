@@ -8,9 +8,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
+use asupersync::io::AsyncWriteExt;
 use rmcp::model::{ClientJsonRpcMessage, ServerJsonRpcMessage};
 use serde_json::json;
-use tokio::io::AsyncWriteExt;
 use tracedecay_daemon_protocol::{BrokerReadHalf, BrokerStream, BrokerWriteHalf};
 use tracedecay_framing::{BoundedLineReader, is_wire_oversized_io_error};
 use tracedecay_runtime_core::cancellation::CancellationToken;
@@ -101,7 +101,7 @@ pub struct BrokerStreamTransport {
     // bounded reader owns the partial-frame accumulator so a read dropped by a
     // lost race resumes instead of restarting mid-frame and desynchronizing
     // JSON-RPC framing for the rest of the connection.
-    reader: BoundedLineReader<tokio::io::BufReader<BrokerReadHalf>>,
+    reader: BoundedLineReader<asupersync::io::BufReader<BrokerReadHalf>>,
     writer: Arc<tokio::sync::Mutex<Option<BrokerWriteHalf>>>,
     active_requests: ActiveRmcpRequests,
     replay: VecDeque<String>,
@@ -152,7 +152,7 @@ impl BrokerStreamTransport {
     pub fn new(stream: BrokerStream) -> Self {
         let (reader, writer) = stream.into_owned_split();
         Self {
-            reader: BoundedLineReader::new(tokio::io::BufReader::new(reader)),
+            reader: BoundedLineReader::new(asupersync::io::BufReader::new(reader)),
             writer: Arc::new(tokio::sync::Mutex::new(Some(writer))),
             active_requests: Arc::new(std::sync::Mutex::new(HashMap::new())),
             replay: VecDeque::new(),
@@ -347,32 +347,17 @@ impl BrokerStreamTransport {
 
     async fn wait_for_peer_full_close(writer: Arc<tokio::sync::Mutex<Option<BrokerWriteHalf>>>) {
         loop {
-            let full_close = {
-                let writer = writer.lock().await;
-                let Some(writer) = writer.as_ref() else {
-                    return;
-                };
-                match writer.peer_write_readiness_now().await {
-                    // The readiness future is deliberately polled once. If
-                    // it is pending, release the writer mutex and retry on
-                    // the next 100ms interval so a blocked response write is
-                    // never starved by the close monitor.
-                    None => false,
-                    Some(Ok(ready)) if ready.is_write_closed() => true,
-                    Some(Ok(_)) => match writer.consume_write_readiness() {
-                        Ok(()) => false,
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
-                        Err(_) => true,
-                    },
-                    Some(Err(_)) => true,
-                }
+            let full_close = match writer.lock().await.as_mut() {
+                Some(writer) => writer.peer_fully_closed(),
+                None => return,
             };
             if full_close {
                 return;
             }
-            // WRITABLE is level-triggered, so avoid a busy loop while a
-            // legitimate half-closed one-shot client is still computing its
-            // response. No request deadline is imposed here.
+            // A full close raises no event this side waits on, so probe on a
+            // bounded interval while a legitimate half-closed one-shot client
+            // is still computing its response. No request deadline is imposed
+            // here.
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
@@ -523,7 +508,7 @@ impl McpTransport for BrokerStreamTransport {
         if let Some(line) = self.replay.pop_front() {
             return Ok(Some(line));
         }
-        self.reader.read_mcp_line_tokio().await
+        self.reader.read_mcp_line().await
     }
 
     async fn write_line(&mut self, line: &str) -> std::io::Result<()> {

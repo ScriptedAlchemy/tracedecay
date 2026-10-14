@@ -1,5 +1,4 @@
 use std::fmt;
-use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
@@ -9,10 +8,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::str::FromStr;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 
+use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
@@ -205,11 +204,11 @@ fn connect_unix(path: &Path) -> std::io::Result<asupersync::net::unix::UnixStrea
     asupersync::net::unix::UnixStream::from_std(socket.into())
 }
 
-impl asupersync::io::AsyncRead for DaemonClientReadHalf {
+impl AsyncRead for DaemonClientReadHalf {
     fn poll_read(
         self: Pin<&mut Self>,
         context: &mut Context<'_>,
-        buffer: &mut asupersync::io::ReadBuf<'_>,
+        buffer: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
         match self.get_mut() {
             #[cfg(unix)]
@@ -219,7 +218,7 @@ impl asupersync::io::AsyncRead for DaemonClientReadHalf {
     }
 }
 
-impl asupersync::io::AsyncWrite for DaemonClientWriteHalf {
+impl AsyncWrite for DaemonClientWriteHalf {
     fn poll_write(
         self: Pin<&mut Self>,
         context: &mut Context<'_>,
@@ -253,24 +252,20 @@ impl asupersync::io::AsyncWrite for DaemonClientWriteHalf {
 #[derive(Debug)]
 pub enum BrokerStream {
     #[cfg(unix)]
-    Unix(tokio::net::UnixStream),
-    Tcp(tokio::net::TcpStream),
+    Unix(asupersync::net::unix::UnixStream),
+    Tcp(asupersync::net::TcpStream),
 }
 
-/// Owned halves keep the concrete Tokio socket available for readiness
-/// probes. The generic `tokio::io::split` halves intentionally hide it behind
-/// a mutex and cannot report the distinction between RDHUP (request-half
-/// close) and HUP (full peer close).
 pub enum BrokerReadHalf {
     #[cfg(unix)]
-    Unix(tokio::net::unix::OwnedReadHalf),
-    Tcp(tokio::net::tcp::OwnedReadHalf),
+    Unix(asupersync::net::unix::OwnedReadHalf),
+    Tcp(asupersync::net::tcp::split::OwnedReadHalf),
 }
 
 pub enum BrokerWriteHalf {
     #[cfg(unix)]
-    Unix(tokio::net::unix::OwnedWriteHalf),
-    Tcp(tokio::net::tcp::OwnedWriteHalf),
+    Unix(asupersync::net::unix::OwnedWriteHalf),
+    Tcp(asupersync::net::tcp::split::OwnedWriteHalf),
 }
 
 impl BrokerStream {
@@ -334,50 +329,57 @@ impl AsyncWrite for BrokerWriteHalf {
 }
 
 impl BrokerWriteHalf {
-    /// Poll the native writable-readiness future once without waiting while a
-    /// caller holds the shared writer mutex. A pending readiness registration
-    /// is retried by the caller on its next bounded polling interval.
-    pub async fn peer_write_readiness_now(&self) -> Option<std::io::Result<tokio::io::Ready>> {
-        let mut readiness = Box::pin(self.peer_write_readiness());
-        std::future::poll_fn(|context| match readiness.as_mut().poll(context) {
-            std::task::Poll::Ready(result) => std::task::Poll::Ready(Some(result)),
-            std::task::Poll::Pending => std::task::Poll::Ready(None),
-        })
-        .await
-    }
-
-    pub async fn peer_write_readiness(&self) -> std::io::Result<tokio::io::Ready> {
-        match self {
-            #[cfg(unix)]
-            Self::Unix(writer) => writer.ready(tokio::io::Interest::WRITABLE).await,
-            Self::Tcp(writer) => writer.ready(tokio::io::Interest::WRITABLE).await,
-        }
-    }
-
-    pub fn consume_write_readiness(&self) -> std::io::Result<()> {
-        match self {
-            #[cfg(unix)]
-            Self::Unix(writer) => writer.try_write(&[]).map(|_| ()),
-            Self::Tcp(writer) => writer.try_write(&[]).map(|_| ()),
-        }
+    /// True once the peer has closed both directions, not just its request
+    /// half. A zero-length write sends nothing, yet fails after a full close:
+    /// `EPIPE` on a Unix socket, the peer's reset on TCP. It never waits, so
+    /// a caller may probe while holding the writer's lock, on any executor.
+    pub fn peer_fully_closed(&mut self) -> bool {
+        let mut context = Context::from_waker(Waker::noop());
+        matches!(
+            Pin::new(self).poll_write(&mut context, &[]),
+            Poll::Ready(Err(error)) if !matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+            )
+        )
     }
 }
 
-impl AsyncRead for BrokerStream {
+/// Test peers drive the daemon end with Tokio I/O.
+#[cfg(any(test, feature = "test-helpers"))]
+impl BrokerStream {
+    /// The daemon end of a Unix socket a test built with Tokio.
+    #[cfg(unix)]
+    pub fn from_tokio_unix(stream: tokio::net::UnixStream) -> std::io::Result<Self> {
+        Ok(Self::Unix(asupersync::net::unix::UnixStream::from_std(
+            stream.into_std()?,
+        )?))
+    }
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+impl tokio::io::AsyncRead for BrokerStream {
     fn poll_read(
         self: Pin<&mut Self>,
         context: &mut Context<'_>,
-        buffer: &mut ReadBuf<'_>,
+        buffer: &mut tokio::io::ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        match self.get_mut() {
+        let mut native = ReadBuf::new(buffer.initialize_unfilled());
+        let polled = match self.get_mut() {
             #[cfg(unix)]
-            Self::Unix(stream) => Pin::new(stream).poll_read(context, buffer),
-            Self::Tcp(stream) => Pin::new(stream).poll_read(context, buffer),
+            Self::Unix(stream) => Pin::new(stream).poll_read(context, &mut native),
+            Self::Tcp(stream) => Pin::new(stream).poll_read(context, &mut native),
+        };
+        let filled = native.filled().len();
+        if let Poll::Ready(Ok(())) = polled {
+            buffer.advance(filled);
         }
+        polled
     }
 }
 
-impl AsyncWrite for BrokerStream {
+#[cfg(any(test, feature = "test-helpers"))]
+impl tokio::io::AsyncWrite for BrokerStream {
     fn poll_write(
         self: Pin<&mut Self>,
         context: &mut Context<'_>,
@@ -409,8 +411,8 @@ impl AsyncWrite for BrokerStream {
 
 pub enum BrokerListener {
     #[cfg(unix)]
-    Unix(tokio::net::UnixListener),
-    Tcp(tokio::net::TcpListener),
+    Unix(asupersync::net::unix::UnixListener),
+    Tcp(asupersync::net::TcpListener),
 }
 
 /// Owner-only mode the daemon's Unix socket must carry for its whole lifetime.
@@ -462,11 +464,11 @@ pub fn ensure_private_socket_parent(path: &Path) -> Result<()> {
 /// caller can publish or accept on a socket that is not already owner-only, and
 /// a socket that cannot be narrowed is torn down instead of served.
 #[cfg(unix)]
-fn bind_owner_only_unix_listener(path: &Path) -> Result<tokio::net::UnixListener> {
+fn bind_owner_only_unix_listener(path: &Path) -> Result<asupersync::net::unix::UnixListener> {
     // Binding the real path (rather than staging elsewhere and renaming) keeps
     // `EADDRINUSE` as the kernel-level guarantee that only one daemon owns the
     // endpoint.
-    let listener = tokio::net::UnixListener::bind(path)?;
+    let listener = std::os::unix::net::UnixListener::bind(path)?;
     if let Err(e) =
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(DAEMON_SOCKET_MODE))
     {
@@ -477,7 +479,7 @@ fn bind_owner_only_unix_listener(path: &Path) -> Result<tokio::net::UnixListener
             path.display()
         )));
     }
-    Ok(listener)
+    Ok(asupersync::net::unix::UnixListener::from_std(listener)?)
 }
 
 impl BrokerListener {
@@ -503,7 +505,7 @@ impl BrokerListener {
                 if !address.ip().is_loopback() {
                     return Err(config_error("refusing non-loopback daemon listener"));
                 }
-                let listener = tokio::net::TcpListener::bind(address).await?;
+                let listener = asupersync::net::TcpListener::bind(*address).await?;
                 let endpoint = DaemonEndpoint::loopback(listener.local_addr()?)?;
                 Ok((Self::Tcp(listener), endpoint))
             }
@@ -550,6 +552,79 @@ mod tests {
         assert!(decoded.authenticate("0123456789abcdef"));
         assert!(!decoded.authenticate("0123456789abcdee"));
         assert!(!decoded.authenticate("short"));
+    }
+
+    fn native_runtime() -> asupersync::runtime::Runtime {
+        assert!(
+            tokio::runtime::Handle::try_current().is_err(),
+            "the broker socket must serve with no Tokio runtime entered"
+        );
+        asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("native runtime")
+    }
+
+    /// A one-shot client half-closes its request side and keeps reading, so
+    /// only the later full close may end its session.
+    #[cfg(unix)]
+    #[test]
+    fn unix_broker_accepts_and_tells_a_full_close_from_a_half_close_natively() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let runtime = native_runtime();
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = dir.path().join("daemon.sock");
+        let (listener, _endpoint) = runtime
+            .block_on(BrokerListener::bind(&DaemonEndpoint::Unix(path.clone())))
+            .unwrap();
+
+        let client = std::os::unix::net::UnixStream::connect(&path).unwrap();
+        let (_reader, mut writer) = runtime
+            .block_on(listener.accept())
+            .unwrap()
+            .into_owned_split();
+        assert!(!writer.peer_fully_closed(), "an open peer is not closed");
+
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        assert!(
+            !writer.peer_fully_closed(),
+            "a request-half close is not a full close"
+        );
+
+        drop(client);
+        assert!(writer.peer_fully_closed(), "the full close must be seen");
+    }
+
+    /// TCP reports a vanished peer only through its reset, which the probe
+    /// must surface as a full close.
+    #[test]
+    fn loopback_broker_accepts_and_sees_a_reset_peer_as_fully_closed_natively() {
+        use asupersync::io::AsyncReadExt;
+
+        let runtime = native_runtime();
+        let (listener, endpoint) = runtime
+            .block_on(BrokerListener::bind(&default_loopback_endpoint()))
+            .unwrap();
+        let DaemonEndpoint::Loopback(address) = endpoint else {
+            panic!("loopback bind returned {endpoint}");
+        };
+
+        let client = std::net::TcpStream::connect(address).unwrap();
+        let (mut reader, mut writer) = runtime
+            .block_on(listener.accept())
+            .unwrap()
+            .into_owned_split();
+        assert!(!writer.peer_fully_closed(), "an open peer is not closed");
+
+        socket2::SockRef::from(&client)
+            .set_linger(Some(std::time::Duration::ZERO))
+            .unwrap();
+        drop(client);
+        let mut byte = [0_u8; 1];
+        let reset = runtime.block_on(reader.read(&mut byte)).unwrap_err();
+        assert_eq!(reset.kind(), std::io::ErrorKind::ConnectionReset);
+        assert!(writer.peer_fully_closed(), "the reset must read as closed");
     }
 
     /// The daemon socket must never be observable with wider-than-owner

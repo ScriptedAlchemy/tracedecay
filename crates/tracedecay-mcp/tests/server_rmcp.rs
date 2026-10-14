@@ -1,5 +1,4 @@
 use std::future::Future;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -10,7 +9,7 @@ use rmcp::transport::IntoTransport;
 use rmcp::{RoleClient, ServiceExt};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tracedecay_daemon_protocol::BrokerStream;
+use tracedecay_daemon_protocol::{BrokerListener, DaemonEndpoint, default_loopback_endpoint};
 use tracedecay_mcp::jsonrpc::JsonRpcError;
 use tracedecay_mcp::server::{
     McpConnectionContext, McpConnectionState, McpDispatchRequest, McpResponseLease,
@@ -141,21 +140,17 @@ type SessionOutcome = tracedecay_domain::errors::Result<()>;
 
 /// A daemon-side broker stream and its connected client socket.
 async fn broker_pair() -> (BrokerStreamTransport, ClientStream) {
-    let listener =
-        tokio::net::TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
-            .await
-            .expect("bind loopback listener");
-    let address = listener.local_addr().expect("listener address");
-    let client = tokio::spawn(tokio::net::TcpStream::connect(address));
-    let (server, _) = listener.accept().await.expect("accept loopback client");
-    let client = client
+    let (listener, endpoint) = BrokerListener::bind(&default_loopback_endpoint())
         .await
-        .expect("join client connect")
+        .expect("bind loopback listener");
+    let DaemonEndpoint::Loopback(address) = endpoint else {
+        panic!("loopback bind returned {endpoint}");
+    };
+    let client = tokio::net::TcpStream::connect(address)
+        .await
         .expect("connect loopback client");
-    (
-        BrokerStreamTransport::new(BrokerStream::Tcp(server)),
-        client,
-    )
+    let server = listener.accept().await.expect("accept loopback client");
+    (BrokerStreamTransport::new(server), client)
 }
 
 /// Serves one session inside a task-local scope standing in for the daemon's
