@@ -477,6 +477,7 @@ fn cancellation_during_background_warm_preserves_warming_ownership() {
             .expect("interactive catalog lock"),
         InteractiveCatalogState::Warming { owner: None }
     ));
+    assert_eq!(store.interactive_catalog_scan_builds(), 1);
     assert!(matches!(
         reader(&store).external_type_import_candidates("pkg", None, 1, request()),
         Err(CodeGraphProjectionError::Unavailable(detail))
@@ -490,7 +491,7 @@ fn cancellation_during_background_warm_preserves_warming_ownership() {
         );
         thread::sleep(Duration::from_millis(1));
     }
-    assert_eq!(store.interactive_catalog_scan_builds(), 1);
+    assert_eq!(store.interactive_catalog_scan_builds(), 2);
 }
 
 #[test]
