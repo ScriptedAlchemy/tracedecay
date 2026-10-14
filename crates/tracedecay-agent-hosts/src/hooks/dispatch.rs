@@ -869,10 +869,6 @@ fn render_host_delivery(
     }))
 }
 
-/// Spool writer admission waits for the holder to release, bounded only by a
-/// whole writer lease. No holder keeps the lease across a barrier, so any
-/// shorter wall-clock budget is one a loaded runner misses: the hook answered
-/// `{}` with exit 0 and the event was never spooled.
 fn append_for_replay(
     data_root: &Path,
     host: NativeHostIdentityV1,
@@ -881,19 +877,16 @@ fn append_for_replay(
     binding: &HookScopeBindingV1,
     now: UtcMicros,
 ) -> SpoolAppendOutcomeV1 {
-    let root = tracedecay_hooks::hook_v2_spool_root(data_root, host);
-    let config = HookSpoolConfigV1::stock(host);
-    let Ok((mut spool, _)) = HookSpoolV1::open_within(root, config, now, config.writer_lease())
-    else {
-        return SpoolAppendOutcomeV1::Unavailable;
-    };
-    match spool.append_with_native_lifecycle(envelope.clone(), native_lifecycle, binding, now) {
-        Ok(_) => {}
-        Err(HookSpoolError::SpoolFull) => return SpoolAppendOutcomeV1::Full,
-        Err(_) => return SpoolAppendOutcomeV1::Unavailable,
-    }
-    match spool.commit() {
+    match tracedecay_hooks::spool_hook_event(
+        &tracedecay_hooks::hook_v2_spool_root(data_root, host),
+        HookSpoolConfigV1::stock(host),
+        envelope.clone(),
+        native_lifecycle,
+        binding,
+        now,
+    ) {
         Ok(()) => SpoolAppendOutcomeV1::Accepted,
+        Err(HookSpoolError::SpoolFull) => SpoolAppendOutcomeV1::Full,
         Err(_) => SpoolAppendOutcomeV1::Unavailable,
     }
 }
@@ -916,10 +909,17 @@ fn replay_envelope_if_pending(
     now: UtcMicros,
 ) -> PendingEnvelopeV1 {
     let root = tracedecay_hooks::hook_v2_spool_root(data_root, host);
-    let config = HookSpoolConfigV1::stock(host);
-    let Ok((mut spool, _)) = HookSpoolV1::open_within(root, config, now, config.writer_lease())
-    else {
-        return PendingEnvelopeV1::Unavailable;
+    let mut spool = match HookSpoolV1::open_within(
+        root,
+        HookSpoolConfigV1::stock(host),
+        now,
+        tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
+    ) {
+        Ok((spool, _)) => spool,
+        // A busy spool proves nothing queued. Admitting the fresh envelope
+        // still lands the event once: a queued copy replays as a conflict.
+        Err(HookSpoolError::AdmissionTimedOut) => return PendingEnvelopeV1::Missing,
+        Err(_) => return PendingEnvelopeV1::Unavailable,
     };
     let queued = match spool.pending_envelope(retry.event_id) {
         Ok(Some(queued)) => queued,

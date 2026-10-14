@@ -162,6 +162,7 @@ where
     F: Future<Output = HookReplayAdmissionOutcomeV1>,
 {
     let (mut spool, _) = HookSpoolV1::open_within(root, config, now, config.writer_lease())?;
+    spool.import_staged(now)?;
     let host = config.host;
     let mut pass = HookReplayPassReportV1::default();
 
