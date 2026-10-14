@@ -5903,6 +5903,7 @@ dependencies = [
 name = "tracedecay-agent-hosts"
 version = "0.1.0"
 dependencies = [
+ "asupersync",
  "cap-fs-ext",
  "cap-std",
  "flate2",
