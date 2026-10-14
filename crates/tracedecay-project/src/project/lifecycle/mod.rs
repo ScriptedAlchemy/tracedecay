@@ -1144,13 +1144,16 @@ mod tests {
         let db_path = initialized.store_layout().graph_db_path.clone();
         initialized.close();
         let connection = rusqlite::Connection::open(&db_path).expect("open graph fixture");
-        connection
-            .pragma_update(
-                None,
-                "user_version",
-                tracedecay_runtime_core::db::migrations::SCHEMA_VERSION - 1,
+        let downgraded = connection
+            .execute(
+                "UPDATE tracedecay_schema_version SET version = ?1 WHERE component = ?2",
+                rusqlite::params![
+                    tracedecay_runtime_core::db::migrations::SCHEMA_VERSION - 1,
+                    tracedecay_runtime_core::db::schema_version::GRAPH_COMPONENT
+                ],
             )
             .expect("stamp incompatible graph schema");
+        assert_eq!(downgraded, 1, "the graph stamp row must exist to downgrade");
         drop(connection);
 
         let error = match TraceDecay::open_read_only_with_options(&project, options).await {
