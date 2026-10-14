@@ -275,6 +275,9 @@ impl BoundedHookOrchestratorV1 {
         tracedecay_runtime_core::cancellation::CancellationToken,
         HookOrchestrationAdmissionV1,
     > {
+        // The production work runs the advisory feedback cycle, which the LSP
+        // runtime spawner in `registrars/lsp.rs` also runs on Tokio; both
+        // move to the native runtime together.
         let Some(runtime_handle) = tracedecay_runtime_core::native_runtime::tokio_handle(
             "daemon-service.hook_orchestration.admit",
         ) else {
@@ -1028,17 +1031,18 @@ pub struct RuntimeLspSession {
 struct LspLeaseTask {
     generation: u64,
     cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
-    handle: tokio::task::JoinHandle<()>,
+    handle: tracedecay_runtime_core::native_runtime::NativeTask<()>,
     #[cfg(any(test, feature = "test-helpers"))]
     finished: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 impl LspLeaseTask {
-    async fn stop(mut self) -> Result<(), DaemonInvocationProblem> {
+    async fn stop(self) -> Result<(), DaemonInvocationProblem> {
         self.cancellation.cancel();
-        (&mut self.handle)
-            .await
-            .map_err(|_| DaemonInvocationProblem::Unavailable)
+        match self.handle.wait().await {
+            tracedecay_runtime_core::native_runtime::NativeTaskOutcome::Completed(()) => Ok(()),
+            _ => Err(DaemonInvocationProblem::Unavailable),
+        }
     }
 }
 
@@ -1157,7 +1161,7 @@ impl LspLeaseTaskRegistry {
             let (start, started) = tokio::sync::oneshot::channel();
             #[cfg(any(test, feature = "test-helpers"))]
             let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
-            let handle = tokio::spawn(async move {
+            let spawned = tracedecay_runtime_core::native_runtime::NativeTask::spawn(async move {
                 let admitted = tokio::select! {
                     result = started => result.is_ok(),
                     () = task_cancellation.cancelled() => false,
@@ -1176,6 +1180,13 @@ impl LspLeaseTaskRegistry {
                     let _ = finished_tx.send(());
                 }
             });
+            let handle = match spawned {
+                Ok(handle) => handle,
+                Err(error) => {
+                    tracing::error!(%error, "LSP lease task could not start");
+                    return Err(DaemonInvocationProblem::Unavailable);
+                }
+            };
             let previous = state.tasks.insert(
                 session_id,
                 LspLeaseTask {
@@ -1438,3 +1449,50 @@ impl GitIndexTransactionPort for SharedGitTransactionPort {
 
 #[cfg(test)]
 mod context_scout_tests;
+
+#[cfg(test)]
+mod lsp_lease_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tracedecay_runtime_core::native_runtime;
+
+    use super::{LspLeaseTaskRegistry, LspSessionId};
+
+    /// A disconnected session's lease task runs on the native runtime: it
+    /// starts, finishes, and shuts down with no Tokio runtime anywhere.
+    #[test]
+    fn lease_tasks_run_without_a_tokio_runtime() {
+        native_runtime::block_on(async {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            let registry = Arc::new(LspLeaseTaskRegistry::default());
+            let (ran, lease_ran) = tokio::sync::oneshot::channel();
+            registry
+                .start(
+                    LspSessionId::new("lsp-native-lease").expect("session id"),
+                    async move {
+                        let _ = ran.send(());
+                    },
+                )
+                .await
+                .expect("lease task starts");
+            native_runtime::timeout(Duration::from_secs(30), lease_ran)
+                .await
+                .expect("the lease task must run")
+                .expect("the lease task reports");
+            registry
+                .start(
+                    LspSessionId::new("lsp-native-pending").expect("session id"),
+                    std::future::pending(),
+                )
+                .await
+                .expect("pending lease task starts");
+            native_runtime::timeout(Duration::from_secs(30), registry.shutdown())
+                .await
+                .expect("shutdown must join the pending lease")
+                .expect("lease shutdown is clean");
+            assert_eq!(registry.active_tasks(), 0);
+        })
+        .expect("native runtime");
+    }
+}
