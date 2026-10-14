@@ -43,6 +43,7 @@ use tracedecay_daemon_service::remote_http_transport::{
     RemoteBrainTlsDeadlines, RemoteBrainTlsEgressObserver, RemoteBrainTlsEgressSnapshot,
     RemoteBrainTlsIngressSnapshot,
 };
+use tracedecay_dashboard_api::serve_loopback;
 use tracedecay_domain::{BrainNodeId, EnrollmentGrantV1, ProjectId};
 use tracedecay_rusqlite_runtime::remote::RemoteWriterPublicationErrorV1;
 use tracedecay_store_runtime::RemoteNodeOperatorErrorV1;
@@ -770,7 +771,7 @@ pub(super) struct DaemonHttpApplicationService {
     active: Arc<AtomicBool>,
     remote_credentials: Option<Arc<tracedecay_store_runtime::DaemonRemoteCredentialAuthorityV1>>,
     shutdown: Option<oneshot::Sender<()>>,
-    task: Option<JoinHandle<Result<()>>>,
+    task: Option<JoinHandle<()>>,
     remote_tls_shutdown: Option<oneshot::Sender<()>>,
     remote_tls_task: Option<JoinHandle<Result<()>>>,
     #[cfg(test)]
@@ -859,7 +860,7 @@ impl DaemonHttpApplicationService {
         auth_token: &str,
         remote_tls_server: Option<RemoteBrainTlsServer>,
     ) -> Result<Self> {
-        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        let listener = asupersync::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .map_err(|error| TraceDecayError::Config {
                 message: format!("failed to bind daemon HTTP loopback listener: {error}"),
@@ -884,16 +885,11 @@ impl DaemonHttpApplicationService {
         let task_active = Arc::clone(&active);
         let task = tokio::spawn(tracing::Instrument::instrument(
             async move {
-                let result = axum::serve(listener, app)
-                    .with_graceful_shutdown(async {
-                        let _ = shutdown_requested.await;
-                    })
-                    .await
-                    .map_err(|error| TraceDecayError::Config {
-                        message: format!("daemon HTTP application service failed: {error}"),
-                    });
+                serve_loopback(listener, app, async {
+                    let _ = shutdown_requested.await;
+                })
+                .await;
                 task_active.store(false, Ordering::Release);
-                result
             },
             tracing::trace_span!("daemon.http.application.listener"),
         ));
@@ -1002,7 +998,7 @@ impl DaemonHttpApplicationService {
         };
         task.await.map_err(|error| TraceDecayError::Config {
             message: format!("daemon HTTP application service task failed: {error}"),
-        })??;
+        })?;
         let Some(task) = self.remote_tls_task.take() else {
             return Ok(());
         };

@@ -23,7 +23,6 @@ use axum::http::{HeaderValue, header::CONNECTION};
 use axum::middleware::Next;
 use axum::response::Response;
 use axum::{Router, middleware};
-use hyper_util::service::TowerToHyperService;
 use rustls::client::{verify_server_cert_signed_by_trust_anchor, verify_server_name};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
@@ -31,8 +30,8 @@ use rustls::server::ParsedCertificate;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tower::ServiceExt;
 use tracedecay_daemon_control::RemoteBrainTlsConfig;
+use tracedecay_dashboard_api::serve_http_connection;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::native_runtime;
 
@@ -178,7 +177,9 @@ impl RemoteBrainTlsListener {
                         let router = router.clone();
                         let graceful = graceful.clone();
                         connections.spawn(tracing::Instrument::instrument(async move {
-                                serve_remote_brain_tls_connection(io, router, graceful, address).await;
+                                if let Err(error) = serve_http_connection(io, router, false, graceful).await {
+                                    tracing::debug!(%error, %address, "Remote Brain TLS connection stopped");
+                                }
                             }, tracing::trace_span!("daemon.http.application.remote_tls_connection")));
                     }
                 }
@@ -357,77 +358,11 @@ pub fn validate_remote_brain_tls_identity_at(
     )
 }
 
-async fn serve_remote_brain_tls_connection(
-    io: RemoteBrainTlsIo,
-    router: Router,
-    graceful: CancellationToken,
-    address: SocketAddr,
-) {
-    let service =
-        router.map_request(|request: hyper::Request<hyper::body::Incoming>| request.map(Body::new));
-    let service = TowerToHyperService::new(service);
-    let mut builder = hyper::server::conn::http1::Builder::new();
-    builder.keep_alive(false);
-    let connection = builder.serve_connection(HyperIo(io), service);
-    tokio::pin!(connection);
-    let result = tokio::select! {
-        result = &mut connection => result,
-        () = graceful.cancelled() => {
-            connection.as_mut().graceful_shutdown();
-            connection.await
-        }
-    };
-    if let Err(error) = result {
-        tracing::debug!(%error, %address, "Remote Brain TLS connection stopped");
-    }
-}
-
 fn observe_remote_brain_connection_join(joined: std::result::Result<(), tokio::task::JoinError>) {
     if let Err(error) = joined
         && !error.is_cancelled()
     {
         tracing::warn!(%error, "Remote Brain TLS connection task failed");
-    }
-}
-
-/// Adapts an Asupersync byte stream to hyper's IO traits.
-struct HyperIo<T>(T);
-
-impl<T: AsyncRead + Unpin> hyper::rt::Read for HyperIo<T> {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-        mut cursor: hyper::rt::ReadBufCursor<'_>,
-    ) -> Poll<io::Result<()>> {
-        let filled = {
-            let mut buffer = ReadBuf::new(cursor.initialize_unfilled());
-            match Pin::new(&mut self.0).poll_read(context, &mut buffer) {
-                Poll::Ready(Ok(())) => buffer.filled().len(),
-                other => return other,
-            }
-        };
-        // SAFETY: `initialize_unfilled` initialized the whole unfilled region
-        // and the read filled its first `filled` bytes.
-        unsafe { cursor.advance(filled) };
-        Poll::Ready(Ok(()))
-    }
-}
-
-impl<T: AsyncWrite + Unpin> hyper::rt::Write for HyperIo<T> {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-        buffer: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.0).poll_write(context, buffer)
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.0).poll_flush(context)
-    }
-
-    fn poll_shutdown(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.0).poll_shutdown(context)
     }
 }
 

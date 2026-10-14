@@ -8,12 +8,15 @@ description = "HTTP dashboard API surface (routes, read models and services) for
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [dependencies]
+asupersync.workspace = true
 axum = "0.8"
 base64 = "0.22"
 clru = "0.6"
 futures-util = "0.3.33"
 getrandom = "0.2"
 httpdate = "1.0.3"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["service"] }
 schemars.workspace = true
 semver = "1"
 serde = { version = "1", features = ["derive"] }
@@ -22,7 +25,8 @@ sha2 = "0.11"
 tracedecay-tokenizer = { path = "../tracedecay-tokenizer", optional = true }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
-tower = "0.5"
+tokio-util = "0.7"
+tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracedecay-api = { path = "../tracedecay-api" }
 tracedecay-automation = { path = "../tracedecay-automation" }

@@ -6476,8 +6476,6 @@ dependencies = [
  "axum",
  "getrandom 0.2.17",
  "hex",
- "hyper",
- "hyper-util",
  "libc",
  "rustls",
  "serde",
@@ -6532,12 +6530,15 @@ dependencies = [
 name = "tracedecay-dashboard-api"
 version = "0.1.0"
 dependencies = [
+ "asupersync",
  "axum",
  "base64 0.22.1",
  "clru",
  "futures-util",
  "getrandom 0.2.17",
  "httpdate",
+ "hyper",
+ "hyper-util",
  "schemars",
  "semver",
  "serde",
@@ -6546,6 +6547,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tower",
  "tracedecay-api",
  "tracedecay-application",
