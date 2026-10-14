@@ -34,11 +34,11 @@ impl Drop for ReadRefreshRunningGuard {
     }
 }
 
-struct BranchReopenCompletion(Arc<AtomicU64>);
+struct BranchReopenCompletion(Arc<tokio::sync::watch::Sender<u64>>);
 
 impl Drop for BranchReopenCompletion {
     fn drop(&mut self) {
-        self.0.fetch_add(1, Ordering::Release);
+        self.0.send_modify(|completed| *completed += 1);
     }
 }
 
@@ -226,7 +226,7 @@ impl McpServer {
         });
     }
 
-    /// Polls until at least one branch reopen has completed past `after`, or
+    /// Waits until at least one branch reopen has completed past `after`, or
     /// until `timeout` elapses. Returns `true` if one landed. Reopens do not
     /// block requests, so tests observe completion here.
     #[cfg(test)]
@@ -235,20 +235,21 @@ impl McpServer {
         after: u64,
         timeout: std::time::Duration,
     ) -> bool {
-        let deadline = tokio::time::Instant::now() + timeout;
-        while self.branch_reopen_completions.load(Ordering::Acquire) <= after {
-            if tokio::time::Instant::now() >= deadline {
-                return false;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        true
+        let mut completions = self.branch_reopen_completions.subscribe();
+        matches!(
+            tracedecay_runtime_core::native_runtime::timeout(
+                timeout,
+                completions.wait_for(|completed| *completed > after),
+            )
+            .await,
+            Ok(Ok(_))
+        )
     }
 
     /// Number of branch reopens that have completed so far.
     #[cfg(test)]
     pub(crate) fn branch_reopens_completed(&self) -> u64 {
-        self.branch_reopen_completions.load(Ordering::Acquire)
+        *self.branch_reopen_completions.borrow()
     }
 
     /// Catch-up helper for tests and explicit callers. Bypasses the 30 s

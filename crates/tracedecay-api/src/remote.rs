@@ -405,7 +405,7 @@ where
     };
     let execution = tracing::Instrument::instrument(
         async move {
-            tokio::task::spawn_blocking(move || {
+            tracedecay_rusqlite_runtime::native_runtime::spawn_blocking(move || {
                 service.execute_controlled(request.request, credential, control)
             })
             .await

@@ -41,7 +41,7 @@ rust_library(
 )
 
 rust_library(
-    name = "tracedecay-dashboard-api__+token-counting__d745ac692ea",
+    name = "tracedecay-dashboard-api__+token-counting__d71fadff11b",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/lib.rs",
     crate_name = "tracedecay_dashboard_api",
@@ -57,7 +57,7 @@ rust_library(
 )
 
 rust_library(
-    name = "tracedecay-dashboard-api__d7674268c99",
+    name = "tracedecay-dashboard-api__d76e12cb850",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/lib.rs",
     crate_name = "tracedecay_dashboard_api",

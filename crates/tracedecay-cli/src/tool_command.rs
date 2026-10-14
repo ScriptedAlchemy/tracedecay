@@ -43,11 +43,10 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::{Value, json};
-use tokio::time::Instant;
 
 use tracedecay::daemon::invocation_client_for_current_client;
 use tracedecay::mcp::tools::{registered_project_not_found, registered_project_selector_id};
@@ -528,7 +527,7 @@ fn dispatch_cli_application_surface_inner(
             if deadline.saturating_duration_since(Instant::now()) <= delay {
                 break result;
             }
-            tokio::time::sleep(delay).await;
+            sleep_before_retry(delay).await?;
         };
         print_cli_application_surface(profile, project.as_deref(), result, output)
     })
@@ -557,6 +556,14 @@ fn cli_request_controls(
             },
         )?;
     Ok((request_deadline, cancellation))
+}
+
+/// Waits `delay` before a retry. Without a timer the retry fails rather than
+/// resend at once.
+async fn sleep_before_retry(delay: Duration) -> Result<()> {
+    tracedecay_runtime_core::native_runtime::sleep_until(Instant::now() + delay)
+        .await
+        .map_err(|message| TraceDecayError::Config { message })
 }
 
 fn cli_request_id() -> Result<tracedecay_contracts::RequestId> {
@@ -635,7 +642,7 @@ async fn dispatch_cli_retained(
         if deadline.saturating_duration_since(Instant::now()) <= delay {
             break execution;
         }
-        tokio::time::sleep(delay).await;
+        sleep_before_retry(delay).await?;
     };
     let response_handle_root = cli_response_handle_root(profile, dispatch.project_path.as_deref())?;
     let result = tracedecay::mcp::tools::render_retained_execution(
@@ -693,7 +700,7 @@ async fn dispatch_cli_source_edit(
         if deadline.saturating_duration_since(Instant::now()) <= delay {
             break outcome;
         }
-        tokio::time::sleep(delay).await;
+        sleep_before_retry(delay).await?;
     };
     let response_handle_root = cli_response_handle_root(profile, project.as_deref())?;
     let result = tracedecay_mcp::handlers::edit::render_source_edit_outcome(
@@ -815,7 +822,7 @@ async fn invoke_cli_graph_tool(
         if deadline.saturating_duration_since(Instant::now()) <= delay {
             return Ok(outcome);
         }
-        tokio::time::sleep(delay).await;
+        sleep_before_retry(delay).await?;
     }
 }
 

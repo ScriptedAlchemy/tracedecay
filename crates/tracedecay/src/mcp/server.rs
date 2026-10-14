@@ -288,7 +288,7 @@ pub struct McpServer {
     branch_reopen: Arc<tokio::sync::Mutex<()>>,
     /// Count of settled branch reopens (success, failure, cancellation, or
     /// shutdown-time rejection) without exposing the retained task handle.
-    branch_reopen_completions: Arc<AtomicU64>,
+    branch_reopen_completions: Arc<tokio::sync::watch::Sender<u64>>,
     /// Retains non-request maintenance futures so shutdown can fence task
     /// admission, cancel every live future, and join it before stores close.
     background_tasks: McpBackgroundTaskOwner,
@@ -1000,7 +1000,7 @@ impl McpServer {
         let server = Arc::new_cyclic(|dispatch_server| Self {
             cg: Arc::new(tokio::sync::RwLock::new(cg)),
             branch_reopen: Arc::new(tokio::sync::Mutex::new(())),
-            branch_reopen_completions: Arc::new(AtomicU64::new(0)),
+            branch_reopen_completions: Arc::new(tokio::sync::watch::Sender::new(0)),
             background_tasks: McpBackgroundTaskOwner::default(),
             tool_activity_publish_running: Arc::new(AtomicBool::new(false)),
             stats: ServerStats::new(),

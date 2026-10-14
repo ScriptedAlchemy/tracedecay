@@ -37,7 +37,7 @@ async fn shutdown_deadline_aborts_joins_and_clears_dashboard_task() {
     );
     drop(manager);
 
-    let error = shutdown_dashboard_until(tokio::time::Instant::now())
+    let error = shutdown_dashboard_until(std::time::Instant::now())
         .await
         .expect_err("expired dashboard shutdown must report its abort");
 
@@ -82,7 +82,7 @@ async fn shutdown_observes_a_completion_signalled_before_the_stop_began() {
 
     shutdown_dashboard_for_until(
         &project_root,
-        tokio::time::Instant::now() + std::time::Duration::from_millis(50),
+        std::time::Instant::now() + std::time::Duration::from_millis(50),
     )
     .await
     .expect("a stop that begins after the completion signal must not miss it");
@@ -138,8 +138,7 @@ async fn timed_out_shutdown_owner_aborts_the_dashboard_task() {
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
         "a timed-out owner must not leave the dashboard task it was joining running"
     );
-    let _ =
-        shutdown_dashboard_until(tokio::time::Instant::now() + std::time::Duration::from_secs(5))
-            .await;
+    let _ = shutdown_dashboard_until(std::time::Instant::now() + std::time::Duration::from_secs(5))
+        .await;
     assert!(get_manager().lock().await.is_empty());
 }

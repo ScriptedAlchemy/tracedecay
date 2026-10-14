@@ -75,29 +75,29 @@ async fn registered_project_stores(
 /// the blocking closure keeps that client past the terminal store close, which
 /// then leaves the store's WAL untruncated. The task therefore gets the abort
 /// deadline to finish cooperatively and is aborted only past it.
-async fn join_cancelled_maintenance_task(task: Option<JoinHandle<()>>, owner: &'static str) {
+async fn join_cancelled_maintenance_task(
+    task: Option<JoinHandle<()>>,
+    owner: &'static str,
+    abort_deadline: Duration,
+) {
     let Some(mut task) = task else {
         return;
     };
-    if tokio::time::timeout(DAEMON_TASK_ABORT_DEADLINE, &mut task)
-        .await
-        .is_ok()
-    {
-        return;
-    }
+    let reason = match native_runtime::timeout(abort_deadline, &mut task).await {
+        Ok(_) => return,
+        Err(TimeoutError::Elapsed) => "cooperative_join_exceeded_abort_deadline".to_string(),
+        Err(error @ TimeoutError::TimerUnavailable(_)) => error.to_string(),
+    };
     log_daemon_event(
         "daemon_shutdown",
         &[
             ("outcome", "maintenance_task_aborted".to_string()),
             ("owner", owner.to_string()),
-            (
-                "reason",
-                "cooperative_join_exceeded_abort_deadline".to_string(),
-            ),
+            ("reason", reason),
         ],
     );
     task.abort();
-    let reason = match native_runtime::timeout(DAEMON_TASK_ABORT_DEADLINE, task).await {
+    let reason = match native_runtime::timeout(abort_deadline, task).await {
         Ok(Ok(()) | Err(_)) => return,
         Err(TimeoutError::Elapsed) => "join_exceeded_abort_deadline".to_string(),
         Err(error @ TimeoutError::TimerUnavailable(_)) => error.to_string(),
@@ -572,10 +572,16 @@ impl MaintenanceCoordinator {
         // Cancel stops the next pass and the sampler at once; an in-flight
         // tick notices between stores. Retention and RSS sampling are
         // abandonable, so the abort deadline bounds each join.
-        join_cancelled_maintenance_task(self.task.lock().await.take(), "retention_tick").await;
+        join_cancelled_maintenance_task(
+            self.task.lock().await.take(),
+            "retention_tick",
+            DAEMON_TASK_ABORT_DEADLINE,
+        )
+        .await;
         join_cancelled_maintenance_task(
             self.resident_memory_sampler.lock().await.take(),
             "resident_memory_sampler",
+            DAEMON_TASK_ABORT_DEADLINE,
         )
         .await;
     }
@@ -1740,24 +1746,31 @@ mod tests {
         assert_eq!(generation_files(), 1);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn shutdown_aborts_a_stuck_tick_at_the_abort_deadline() {
-        let coordinator = MaintenanceCoordinator::default();
+        let tick_state = Arc::new(());
+        let held_state = Arc::clone(&tick_state);
         let started = Arc::new(Notify::new());
         let task_started = Arc::clone(&started);
         let handle = tokio::spawn(async move {
             task_started.notify_one();
             std::future::pending::<()>().await;
+            drop(held_state);
         });
-        *coordinator.task.lock().await = Some(handle);
         started.notified().await;
 
-        tokio::time::timeout(
-            super::DAEMON_TASK_ABORT_DEADLINE + Duration::from_millis(500),
-            coordinator.shutdown(),
+        super::join_cancelled_maintenance_task(
+            Some(handle),
+            "stuck_tick",
+            Duration::from_millis(50),
         )
-        .await
-        .expect("maintenance shutdown must abort a tick stuck past the abort deadline");
+        .await;
+
+        assert_eq!(
+            Arc::strong_count(&tick_state),
+            1,
+            "a tick stuck past the abort deadline must be aborted and joined"
+        );
     }
 
     /// A tick cancelled while it awaits blocking store work must not leave
