@@ -24,7 +24,9 @@ use crate::{
 
 const MAX_QUERY_ROWS: usize = 10_000;
 const MAX_QUERY_BYTES: usize = 64 * 1024 * 1024;
-const MAX_SQL_BYTES: usize = 1024 * 1024;
+/// SQLite's statement-length limit, less the authority suffix
+/// [`guard::prepare_cached`] appends to a cached statement's text.
+const MAX_SQL_BYTES: usize = 1024 * 1024 - guard::MAX_CACHE_KEY_SUFFIX_BYTES;
 const MAX_SQL_PARAMETERS: usize = 32_766;
 const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 const MAX_EXACT_SQL_ATTACHMENTS: i32 = 4;
@@ -53,7 +55,10 @@ pub use types::*;
 pub(crate) use command::{WriterCommand, reject_writer_command, run_writer_command};
 
 use command::{TransactionCommand, TransactionLeaseState};
-use guard::{AuthorizedDatabaseOperation, with_exact_sql_guard};
+pub(crate) use guard::{authorize_connection, connection_identity};
+
+use crate::connection::ConnectionMode;
+use guard::{AuthorizedDatabaseOperation, ExactSqlAuthority, with_exact_sql_guard};
 
 type ExactSqlQuery = dyn Fn(ExactSqlStatement, OperationPriorityV1, Duration) -> Result<ExactSqlRows, ExactSqlError>
     + Send
@@ -1047,18 +1052,16 @@ fn execute_request(
     validate_request(&request)?;
     with_exact_sql_guard(
         connection,
-        pinned_transaction,
-        false,
+        ExactSqlAuthority::Writer {
+            allow_savepoints: pinned_transaction,
+            database_operation: None,
+        },
         shutdown_requested,
         execution_deadline,
         enforce_statement_limit,
         repeated_authority,
-        crate::connection::authorize_writer,
-        true,
-        None,
         || match request {
-            SqlRequest::Validate(statement) => connection
-                .prepare_cached(&statement.sql)
+            SqlRequest::Validate(statement) => guard::prepare_cached(connection, &statement.sql)
                 .map(|_| SqlResult::Validated)
                 .map_err(|error| sqlite_error("validate statement", error)),
             SqlRequest::Execute(statement) => {
@@ -1136,8 +1139,7 @@ fn execute_statement(
         .params
         .into_iter()
         .map(ExactSqlValue::into_rusqlite);
-    let mut prepared = connection
-        .prepare_cached(&statement.sql)
+    let mut prepared = guard::prepare_cached(connection, &statement.sql)
         .map_err(|error| sqlite_error("prepare execute", error))?;
     let changed_rows = prepared
         .execute(params_from_iter(values))
@@ -1160,15 +1162,14 @@ fn attach_database(
     )?;
     with_exact_sql_guard(
         connection,
-        pinned_transaction,
-        false,
+        ExactSqlAuthority::Writer {
+            allow_savepoints: pinned_transaction,
+            database_operation: Some(AuthorizedDatabaseOperation::Attach),
+        },
         shutdown_requested,
         execution_deadline,
         true,
         None,
-        crate::connection::authorize_writer,
-        true,
-        Some(AuthorizedDatabaseOperation::Attach),
         || execute_statement(connection, statement).map(|_| ()),
     )
 }
@@ -1184,17 +1185,16 @@ fn detach_database(
     let sql = format!("DETACH DATABASE \"{database_name}\"");
     with_exact_sql_guard(
         connection,
-        false,
-        false,
+        ExactSqlAuthority::Writer {
+            allow_savepoints: false,
+            database_operation: Some(AuthorizedDatabaseOperation::Detach(
+                database_name.to_owned(),
+            )),
+        },
         shutdown_requested,
         None,
         true,
         None,
-        crate::connection::authorize_writer,
-        true,
-        Some(AuthorizedDatabaseOperation::Detach(
-            database_name.to_owned(),
-        )),
         || execute_batch(connection, &sql).map(|_| ()),
     )
 }
@@ -1222,14 +1222,10 @@ pub(crate) fn execute_query(
     request.validate()?;
     with_exact_sql_guard(
         connection,
-        false,
-        false,
+        ExactSqlAuthority::Canonical(ConnectionMode::Reader),
         None,
         None,
         budget == ExactSqlStatementBudget::Request,
-        None,
-        crate::connection::authorize_reader,
-        false,
         None,
         || execute_query_unchecked(connection, request),
     )
@@ -1251,7 +1247,7 @@ fn prepare_read_statement<'c>(
     const BACKOFF: std::time::Duration = std::time::Duration::from_millis(25);
     let mut attempt = 0;
     loop {
-        match connection.prepare_cached(sql) {
+        match guard::prepare_cached(connection, sql) {
             Ok(statement) => return Ok(statement),
             Err(rusqlite::Error::SqliteFailure(failure, _))
                 if attempt < ATTEMPTS

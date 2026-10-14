@@ -39,9 +39,9 @@ pub use ingest::{
     ingest_user_global_sources_for_provider_with_authorities_and_cancellation,
     ingest_user_global_sources_for_startup_with_db_and_codex_state, registered_project_roots_from,
     subscribe_history_capacity_release, transcript_source_profile,
-    try_ingest_user_codex_sessions_with_db_and_admission, with_transcript_source_profile,
+    try_ingest_user_codex_sessions_with_db_and_admission, user_sessions_db_path,
+    with_transcript_source_profile,
 };
-pub use ingest::{USER_SESSIONS_DB_FILENAME, user_sessions_db_path};
 pub use registered_db::{
     SessionExec, SessionQuery, SessionRegisteredDb, SessionStoreAccess, SessionWriteTxn,
 };

@@ -10,6 +10,7 @@ use crate::runtime::{
     SessionProvider, hosts::claude_observation, hosts::codex, hosts::cursor, hosts::cursor_composer,
 };
 use tracedecay_domain::{BrainId, ObservationScopeV1, UserProfileId};
+use tracedecay_runtime_core::storage::USER_SESSIONS_DB_FILENAME;
 use tracedecay_store::StoreShardScopeV1;
 
 use super::failure::{
@@ -24,8 +25,6 @@ use super::scheduler::{
 };
 use super::startup::TranscriptIngestOutcome;
 use super::user_provider::UserProviderUnit;
-
-pub const USER_SESSIONS_DB_FILENAME: &str = "user-sessions.db";
 
 pub fn user_sessions_db_path(profile_root: &Path) -> PathBuf {
     profile_root.join(USER_SESSIONS_DB_FILENAME)

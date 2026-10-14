@@ -164,21 +164,14 @@ fn pinned_batch_allows_schema_install_ddl() {
 fn exact_sql_guard_restores_authorizer_after_panic() {
     let clock = FakeClock::frozen();
     clock.install();
-    let connection = rusqlite::Connection::open_in_memory().unwrap();
-    connection
-        .authorizer(Some(crate::connection::authorize_writer))
-        .unwrap();
+    let connection = policy_connection(ConnectionMode::Writer);
 
     let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _: Result<(), ExactSqlError> = with_exact_sql_guard(
             &connection,
-            false,
-            false,
+            exact_writer(false),
             None,
             None,
-            true,
-            None,
-            crate::connection::authorize_writer,
             true,
             None,
             || panic!("exact SQL operation panic"),
@@ -204,4 +197,122 @@ fn exact_sql_guard_restores_authorizer_after_panic() {
         .execute_batch("CREATE TABLE protected (value INTEGER)")
         .unwrap();
     assert!(connection.execute_batch("DROP TABLE protected").is_err());
+}
+
+fn policy_connection(mode: ConnectionMode) -> rusqlite::Connection {
+    let connection = rusqlite::Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch("CREATE TABLE guarded_rows (id INTEGER PRIMARY KEY, payload TEXT NOT NULL); INSERT INTO guarded_rows VALUES (1, 'row');")
+        .unwrap();
+    crate::connection::install_authorizer(&connection, mode).unwrap();
+    connection
+}
+
+fn exact_writer(allow_savepoints: bool) -> ExactSqlAuthority {
+    ExactSqlAuthority::Writer {
+        allow_savepoints,
+        database_operation: None,
+    }
+}
+
+fn prepare_under(
+    connection: &rusqlite::Connection,
+    authority: ExactSqlAuthority,
+    sql: &str,
+) -> Result<(), ExactSqlError> {
+    with_exact_sql_guard(connection, authority, None, None, false, None, || {
+        crate::exact_sql::guard::prepare_cached(connection, sql)
+            .map(drop)
+            .map_err(|error| sqlite_error("prepare", error))
+    })
+}
+
+#[test]
+fn guarded_statements_stay_compiled_across_operations() {
+    let connection = policy_connection(ConnectionMode::Writer);
+    let mut reprepares = 0;
+    for _ in 0..64 {
+        reprepares += with_exact_sql_guard(
+            &connection,
+            exact_writer(false),
+            None,
+            None,
+            true,
+            None,
+            || {
+                let mut statement = crate::exact_sql::guard::prepare_cached(
+                    &connection,
+                    "SELECT payload FROM guarded_rows WHERE id = ?1",
+                )
+                .unwrap();
+                let payload: String = statement.query_row([1_i64], |row| row.get(0)).unwrap();
+                assert_eq!(payload, "row");
+                Ok(statement.reset_status(rusqlite::StatementStatus::RePrepare))
+            },
+        )
+        .unwrap();
+        let canonical: i64 = connection
+            .prepare_cached("SELECT count(*) FROM guarded_rows")
+            .unwrap()
+            .query_row([], |row| row.get(0))
+            .unwrap();
+        assert_eq!(canonical, 1);
+    }
+    assert_eq!(
+        reprepares, 0,
+        "an exact SQL operation must not expire the connection's cached statements"
+    );
+}
+
+#[test]
+fn cached_statement_is_never_reused_under_a_stricter_authority() {
+    let reader = policy_connection(ConnectionMode::Reader);
+    reader.prepare_cached("SAVEPOINT probe").unwrap();
+    assert!(matches!(
+        prepare_under(
+            &reader,
+            ExactSqlAuthority::Canonical(ConnectionMode::Reader),
+            "SAVEPOINT probe"
+        ),
+        Err(ExactSqlError::TransactionControlDenied)
+    ));
+
+    let writer = policy_connection(ConnectionMode::Writer);
+    prepare_under(&writer, exact_writer(true), "SAVEPOINT probe").unwrap();
+    assert!(matches!(
+        prepare_under(&writer, exact_writer(false), "SAVEPOINT probe"),
+        Err(ExactSqlError::TransactionControlDenied)
+    ));
+
+    prepare_under(&writer, exact_writer(false), "DROP TABLE guarded_rows").unwrap();
+    assert!(writer.prepare_cached("DROP TABLE guarded_rows").is_err());
+}
+
+#[test]
+fn cache_key_suffixes_fit_the_reserved_length() {
+    use AuthorizedDatabaseOperation::{Attach, Detach};
+    let authorities = [
+        ExactSqlAuthority::Canonical(ConnectionMode::Writer),
+        ExactSqlAuthority::Canonical(ConnectionMode::Reader),
+        ExactSqlAuthority::Canonical(ConnectionMode::Maintenance),
+    ]
+    .into_iter()
+    .chain([false, true].into_iter().flat_map(|allow_savepoints| {
+        [None, Some(Attach), Some(Detach("aux".to_owned()))]
+            .into_iter()
+            .map(move |database_operation| ExactSqlAuthority::Writer {
+                allow_savepoints,
+                database_operation,
+            })
+    }));
+    let suffixes: Vec<_> = authorities
+        .map(|authority| authority.cache_key_suffix())
+        .collect();
+    let distinct: std::collections::HashSet<_> = suffixes.iter().collect();
+    assert_eq!(distinct.len(), suffixes.len());
+    assert!(
+        suffixes
+            .iter()
+            .all(|suffix| suffix.len() <= crate::exact_sql::guard::MAX_CACHE_KEY_SUFFIX_BYTES)
+    );
 }
