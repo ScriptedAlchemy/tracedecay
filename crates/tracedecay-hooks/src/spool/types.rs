@@ -50,6 +50,8 @@ impl HookSpoolLimitsV1 {
     }
 }
 
+pub(super) const STOCK_WRITER_LEASE_MICROS: i64 = 5_000_000;
+
 /// Configuration owned by the thin host adapter. Time is caller-provided so
 /// the spool does not read a clock or invent a product timing policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,7 +67,7 @@ impl HookSpoolConfigV1 {
         Self {
             host,
             limits: HookSpoolLimitsV1::stock(),
-            writer_lease_micros: 5_000_000,
+            writer_lease_micros: STOCK_WRITER_LEASE_MICROS,
         }
     }
 
