@@ -31,7 +31,7 @@ pub use hermes::replay_projectless_hermes_host_admission;
 use crate::map_host_admission_outcome;
 use admission::{hook_v2_admit, hook_v2_profile_admit};
 use context_scout::{hook_v2_delivery_receipt, hook_v2_feedback_notice_delivery};
-use hermes::{hermes_receipt, user_review_unavailable};
+use hermes::hermes_receipt;
 use ingest::{claude_compact, codex_compact, cursor_compact, ingest_transcript};
 
 const TOOL_NAME: &str = "tracedecay_hook_runtime";
@@ -126,7 +126,6 @@ pub async fn compute_hook_runtime(
         Request::CursorCompact { event_json } => HookRuntimeResultV1::CursorCompact(
             cursor_compact(&event_json, session_authorities).await?,
         ),
-        Request::UserReview { .. } => return Err(requires_projectless_routing("user_review")),
         Request::HermesReceipt { .. } => {
             return Err(requires_projectless_routing("hermes_receipt"));
         }
@@ -163,7 +162,6 @@ pub async fn compute_projectless_hook_runtime(
                 .await?,
             ))
         }
-        Request::UserReview { .. } => return Err(user_review_unavailable()),
         Request::HermesReceipt { event } => {
             let host_admission_broker =
                 host_admission_broker.map_err(|outcome| map_host_admission_outcome(&outcome))?;

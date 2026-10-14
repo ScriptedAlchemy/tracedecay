@@ -128,8 +128,7 @@ pub async fn hook_codex_user_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
         // Keep recall current, but wait for the native Stop receipt before
         // reflection so one completed turn schedules one review rather than a
         // prompt-only review followed immediately by a final-turn review.
-        let _ =
-            super::ingest_user_session(runtime, "Codex", session_id, Some(&hook_telemetry)).await;
+        super::ingest_user_session(runtime, "Codex", session_id, Some(&hook_telemetry)).await;
     }
     let context = Box::pin(codex_user_prompt_submit_context_with_root(
         &runtime.profile,
