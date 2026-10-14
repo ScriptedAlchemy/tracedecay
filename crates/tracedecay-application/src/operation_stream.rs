@@ -291,10 +291,8 @@ impl OperationResumeAuthority {
     fn new() -> Result<Self, OperationEventError> {
         let mut key_random = [0_u8; RESUME_KEY_RANDOM_BYTES];
         let mut key_material = [0_u8; RESUME_KEY_MATERIAL_BYTES];
-        getrandom::getrandom(&mut key_random)
-            .map_err(|_| OperationEventError::ResumeUnavailable)?;
-        getrandom::getrandom(&mut key_material)
-            .map_err(|_| OperationEventError::ResumeUnavailable)?;
+        getrandom::fill(&mut key_random).map_err(|_| OperationEventError::ResumeUnavailable)?;
+        getrandom::fill(&mut key_material).map_err(|_| OperationEventError::ResumeUnavailable)?;
         let key = SignedCursorKeyRefV1 {
             key_id: SessionCursorKeyIdV1::new(format!(
                 "cursor.operation-stream.{}",

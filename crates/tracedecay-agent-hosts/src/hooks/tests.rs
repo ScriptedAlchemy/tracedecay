@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use super::{block_on_hook_test_runtime, hook_output_owner_event_id, schedule_user_session_review};
-use tracedecay_runtime_core::config::ProfileRoot;
+use super::hook_output_owner_event_id;
 
 fn canonical(path: &Path) -> PathBuf {
     tracedecay_runtime_core::path_safety::canonical_root_identity(path)
@@ -167,35 +166,16 @@ fn direct_hook_owner_identity_is_stable_across_retry_time() {
     assert_eq!(first, expected);
 }
 
-#[cfg(unix)]
 #[test]
-fn session_review_hint_routes_exact_identity_to_the_daemon() {
-    block_on_hook_test_runtime(async {
-        let profile_home = tempfile::tempdir().unwrap();
-        let profile = ProfileRoot::under_home(profile_home.path());
-        let daemon = super::TestDaemonHookActionGuard::install([serde_json::json!({
-            "action": "user_review",
-            "status": "accepted",
-        })]);
+fn stop_budget_deadline_fires_without_a_tokio_runtime() {
+    let outcome =
+        tracedecay_runtime_core::native_runtime::block_on(super::await_within_stop_budget(
+            std::future::pending::<&str>(),
+            std::time::Duration::from_millis(20),
+            None,
+            || "timed out",
+        ))
+        .expect("native runtime");
 
-        schedule_user_session_review(
-            &crate::ports::hook_runtime::crate_test_runtime(profile.clone()),
-            "claude",
-            Some("session-native-17"),
-        )
-        .await;
-
-        assert_eq!(
-            daemon.calls(),
-            [(
-                None,
-                serde_json::json!({
-                    "action": "user_review",
-                    "format": "json",
-                    "provider": "claude",
-                    "session_id": "session-native-17",
-                }),
-            )]
-        );
-    });
+    assert_eq!(outcome, "timed out");
 }

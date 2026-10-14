@@ -47,7 +47,7 @@ use tracedecay_dashboard_api::{
     DashboardHttpRequestControlV1, DashboardProfileCodeIndexWorkerSettingsPort,
     DashboardScopeSetReadFuture, DashboardSessionAuthoritiesV1, DashboardSessionMountV1,
     DashboardSessionResolutionV1, DashboardStateCompositionV1, bind_dashboard,
-    build_state_with_automation_reconciler, router, validate_dashboard_host,
+    build_state_with_automation_reconciler, router, serve_loopback, validate_dashboard_host,
 };
 
 #[derive(Clone)]
@@ -513,7 +513,7 @@ struct RunningDashboard {
     url: String,
     addr: std::net::SocketAddr,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
-    task: tokio::task::JoinHandle<Result<()>>,
+    task: tokio::task::JoinHandle<()>,
     completed: Arc<tokio::sync::Semaphore>,
 }
 
@@ -571,11 +571,10 @@ async fn take_finished_dashboard_for(project_root: &Path) -> Option<RunningDashb
 async fn join_dashboard(dashboard: RunningDashboard, exceeded_deadline: bool) -> Result<()> {
     let url = format!("http://{}/", dashboard.addr);
     match dashboard.task.await {
-        Ok(Ok(())) if !exceeded_deadline => Ok(()),
-        Ok(Ok(())) => Err(TraceDecayError::Config {
+        Ok(()) if !exceeded_deadline => Ok(()),
+        Ok(()) => Err(TraceDecayError::Config {
             message: format!("dashboard '{url}' exceeded its shutdown deadline"),
         }),
-        Ok(Err(error)) => Err(error),
         Err(error) if error.is_cancelled() && exceeded_deadline => Err(TraceDecayError::Config {
             message: format!("dashboard '{url}' was aborted after its shutdown deadline"),
         }),
@@ -644,9 +643,17 @@ pub(crate) async fn shutdown_dashboard_for(project_root: &Path) -> Result<()> {
 /// [`shutdown_dashboard_for`] instead so one project's stop never takes down
 /// another project's dashboard.
 pub(crate) async fn shutdown_dashboard_until(deadline: tokio::time::Instant) -> Result<()> {
-    let project_roots: Vec<PathBuf> = {
+    let (project_roots, _abort_unjoined) = {
         let manager = get_manager().lock().await;
-        manager.keys().cloned().collect()
+        (
+            manager.keys().cloned().collect::<Vec<_>>(),
+            crate::daemon::AbortTasksOnDrop(
+                manager
+                    .values()
+                    .map(|dashboard| dashboard.task.abort_handle())
+                    .collect(),
+            ),
+        )
     };
     let mut first_error = None;
     for project_root in project_roots {
@@ -1088,14 +1095,10 @@ pub(super) async fn compute_dashboard(
             let task_completion = DashboardTaskCompletion(Arc::clone(&completed));
             let task = tokio::spawn(async move {
                 let _completion = task_completion;
-                axum::serve(listener, app)
-                    .with_graceful_shutdown(async move {
-                        let _ = shutdown_rx.await;
-                    })
-                    .await
-                    .map_err(|error| TraceDecayError::Config {
-                        message: format!("dashboard server failed: {error}"),
-                    })
+                serve_loopback(listener, app, async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await;
             });
 
             guard.insert(

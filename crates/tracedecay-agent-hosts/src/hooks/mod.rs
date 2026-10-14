@@ -683,11 +683,11 @@ pub(crate) async fn ingest_user_session(
     provider: &str,
     session_id: Option<String>,
     telemetry: Option<&analytics::HookTimingSpan>,
-) -> bool {
+) {
     if session_id.is_none() {
-        return false;
+        return;
     }
-    match daemon_hook_action(
+    if let Err(error) = daemon_hook_action(
         runtime,
         None,
         HookRuntimeSurfaceRequestV1::IngestTranscript(HookIngestTranscriptRequestV1 {
@@ -702,68 +702,8 @@ pub(crate) async fn ingest_user_session(
     )
     .await
     {
-        Ok(result) => result
-            .get("messages_upserted")
-            .and_then(Value::as_u64)
-            .is_some_and(|count| count > 0),
-        Err(error) => {
-            tracing::warn!(provider, %error, "user transcript ingest daemon call failed");
-            false
-        }
+        tracing::warn!(provider, %error, "user transcript ingest daemon call failed");
     }
-}
-
-/// Fail-open transcript ingest shared by Cursor and Kiro catch-up hooks.
-///
-/// Daemon errors and budget timeouts are typed here. They must not collapse
-/// into a zero-counter success that hosts would treat as "nothing to review".
-#[derive(Default)]
-pub(crate) struct TranscriptIngestOutcome {
-    user_scope: bool,
-    messages_upserted: u64,
-    failed: bool,
-    timed_out: bool,
-}
-
-impl TranscriptIngestOutcome {
-    fn from_daemon_result(result: &Value) -> Self {
-        Self {
-            user_scope: result
-                .get("user_scope")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            messages_upserted: result
-                .get("messages_upserted")
-                .and_then(Value::as_u64)
-                .unwrap_or(0),
-            failed: false,
-            timed_out: false,
-        }
-    }
-
-    fn failed() -> Self {
-        Self {
-            failed: true,
-            ..Self::default()
-        }
-    }
-
-    fn timed_out() -> Self {
-        Self {
-            timed_out: true,
-            ..Self::default()
-        }
-    }
-
-    pub(crate) fn should_schedule_user_review(&self) -> bool {
-        !self.failed && !self.timed_out && self.user_scope && self.messages_upserted > 0
-    }
-}
-
-enum IngestAttempt {
-    Succeeded(Value),
-    Failed,
-    TimedOut,
 }
 
 pub(crate) async fn await_within_stop_budget<T>(
@@ -775,7 +715,7 @@ pub(crate) async fn await_within_stop_budget<T>(
     if let Some(telemetry) = telemetry {
         telemetry.note_timeout_budget(budget);
     }
-    match tokio::time::timeout(budget, work).await {
+    match asupersync::time::timeout(asupersync::time::wall_now(), budget, work).await {
         Ok(value) => {
             if let Some(telemetry) = telemetry {
                 telemetry.note_timed_out(false);
@@ -800,7 +740,7 @@ pub(crate) async fn ingest_transcript_for_event(
     max_new_bytes: Option<u64>,
     budget: Duration,
     telemetry: Option<&analytics::HookTimingSpan>,
-) -> TranscriptIngestOutcome {
+) {
     let args = HookRuntimeSurfaceRequestV1::IngestTranscript(HookIngestTranscriptRequestV1 {
         provider: provider.to_owned(),
         user_scope: project_root.is_none(),
@@ -809,29 +749,17 @@ pub(crate) async fn ingest_transcript_for_event(
         messages: None,
         max_new_bytes,
     });
-    match await_within_stop_budget(
+    await_within_stop_budget(
         async {
-            match daemon_hook_action(runtime, project_root, args, telemetry).await {
-                Ok(result) => IngestAttempt::Succeeded(result),
-                Err(error) => {
-                    tracing::warn!(provider, %error, "transcript ingest daemon call failed");
-                    IngestAttempt::Failed
-                }
+            if let Err(error) = daemon_hook_action(runtime, project_root, args, telemetry).await {
+                tracing::warn!(provider, %error, "transcript ingest daemon call failed");
             }
         },
         budget,
         telemetry,
-        || {
-            tracing::warn!(provider, "transcript ingest daemon call timed out");
-            IngestAttempt::TimedOut
-        },
+        || tracing::warn!(provider, "transcript ingest daemon call timed out"),
     )
-    .await
-    {
-        IngestAttempt::Succeeded(result) => TranscriptIngestOutcome::from_daemon_result(&result),
-        IngestAttempt::Failed => TranscriptIngestOutcome::failed(),
-        IngestAttempt::TimedOut => TranscriptIngestOutcome::timed_out(),
-    }
+    .await;
 }
 
 pub(crate) async fn reset_counter_for_project(
@@ -974,23 +902,6 @@ pub async fn hook_hermes_terminal_receipt(runtime: &HookRuntimeV1) -> i32 {
         return 1;
     }
     0
-}
-
-pub async fn schedule_user_session_review(
-    runtime: &HookRuntimeV1,
-    provider: &str,
-    session_id: Option<&str>,
-) {
-    let hint = daemon_hook_action(
-        runtime,
-        None,
-        HookRuntimeSurfaceRequestV1::UserReview {
-            provider: provider.to_owned(),
-            session_id: session_id.map(str::to_owned),
-        },
-        None,
-    );
-    let _ = tokio::time::timeout(std::time::Duration::from_millis(25), hint).await;
 }
 
 #[cfg(test)]

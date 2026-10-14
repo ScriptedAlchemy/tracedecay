@@ -12,9 +12,9 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::Notify;
-use tokio::task::JoinHandle;
 #[cfg(test)]
 use tokio::task::JoinSet;
+use tokio_util::task::AbortOnDropHandle;
 
 use tracedecay_daemon_identity::authority;
 use tracedecay_host_admission::{
@@ -112,12 +112,12 @@ pub struct ProfileHostAdmissionReplayRegistry {
 
 struct ReplayWorkerEntry {
     worker: Arc<ProfileHostAdmissionReplayWorker>,
-    task: JoinHandle<()>,
+    task: AbortOnDropHandle<()>,
 }
 
 struct ProfileHostAdmissionBootstrapEntry {
     worker: Arc<ProfileHostAdmissionBootstrapWorker>,
-    task: JoinHandle<()>,
+    task: AbortOnDropHandle<()>,
 }
 
 struct ProfileHostAdmissionBootstrapWorker {
@@ -227,12 +227,12 @@ impl ProfileHostAdmissionReplayRegistry {
             self.bootstrap_retry_budget,
         ));
         let task_worker = Arc::clone(&worker);
-        let task = tokio::spawn(tracing::Instrument::instrument(
+        let task = AbortOnDropHandle::new(tokio::spawn(tracing::Instrument::instrument(
             async move {
                 task_worker.run(operation).await;
             },
             tracing::trace_span!("daemon.authority.host_admission.bootstrap.run"),
-        ));
+        )));
         workers.insert(
             profile_root,
             ProfileHostAdmissionBootstrapEntry { worker, task },
@@ -310,7 +310,7 @@ impl ProfileHostAdmissionReplayRegistry {
         let worker_path = broker_path.to_path_buf();
         let workers_weak = Arc::downgrade(&self.workers);
         let idle_eviction_after = self.idle_eviction_after;
-        let task = tokio::spawn(tracing::Instrument::instrument(
+        let task = AbortOnDropHandle::new(tokio::spawn(tracing::Instrument::instrument(
             async move {
                 worker.run(idle_eviction_after).await;
                 let Some(workers) = workers_weak.upgrade() else {
@@ -325,7 +325,7 @@ impl ProfileHostAdmissionReplayRegistry {
                 }
             },
             tracing::trace_span!("daemon.authority.host_admission.replay.run"),
-        ));
+        )));
         workers.insert(
             broker_path.to_path_buf(),
             ReplayWorkerEntry {
@@ -1475,6 +1475,59 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn timed_out_shutdown_owner_aborts_the_replay_task_it_was_joining() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let profile_root = temp.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        let db_path = tracedecay_sessions::runtime::user_sessions_db_path(&profile_root);
+        let (runtime, _) =
+            tracedecay_host_admission::HostAdmissionRuntime::open_for_database(&db_path).unwrap();
+        let broker = Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));
+        let registry = Arc::new(ProfileHostAdmissionReplayRegistry::default());
+        let worker = Arc::new(ProfileHostAdmissionReplayWorker::new(
+            &broker,
+            &profile_root,
+            Arc::clone(&registry.cancellation),
+            None,
+            None,
+            None,
+        ));
+        let (alive, task_dropped) = std::sync::mpsc::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _alive = alive;
+            std::future::pending::<()>().await;
+        });
+        registry.workers.lock().await.insert(
+            db_path,
+            ReplayWorkerEntry {
+                worker,
+                task: AbortOnDropHandle::new(task),
+            },
+        );
+
+        let join_registry = Arc::clone(&registry);
+        let receipt = crate::shutdown::join_shutdown_owners(
+            Instant::now() + Duration::from_millis(100),
+            vec![crate::shutdown::ShutdownOwner::new(
+                "host_admission_replay",
+                || {},
+                async move { join_registry.shutdown().await },
+            )],
+        )
+        .await;
+
+        assert_eq!(
+            receipt.owners[0].status,
+            crate::shutdown::ShutdownStatus::TimedOut
+        );
+        assert_eq!(
+            task_dropped.recv_timeout(Duration::from_secs(5)),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
+            "a timed-out owner must not leave the replay task it was joining running"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn pending_probe_deadline_and_shutdown_are_cancellable() {
         let temp = tempfile::TempDir::new().unwrap();
         let profile_root = temp.path().join("profile");
@@ -1509,7 +1562,7 @@ mod tests {
             db_path.clone(),
             ReplayWorkerEntry {
                 worker: Arc::clone(&worker),
-                task,
+                task: AbortOnDropHandle::new(task),
             },
         );
         probe_started.notified().await;
@@ -1579,7 +1632,7 @@ mod tests {
             db_path.clone(),
             ReplayWorkerEntry {
                 worker: Arc::clone(&worker),
-                task,
+                task: AbortOnDropHandle::new(task),
             },
         );
 
@@ -1811,9 +1864,9 @@ mod tests {
             Some(pending_count_override),
         ));
         let task_worker = Arc::clone(&worker);
-        let task = tokio_runtime.spawn(async move {
+        let task = AbortOnDropHandle::new(tokio_runtime.spawn(async move {
             task_worker.run(Duration::from_secs(30)).await;
-        });
+        }));
         registry
             .workers
             .try_lock()

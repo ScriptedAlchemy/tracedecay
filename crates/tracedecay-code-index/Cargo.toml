@@ -65,9 +65,9 @@ lang-toml = ["tracedecay-code-extraction/lang-toml"]
 lang-lean = ["tracedecay-code-extraction/lang-lean"]
 
 [dependencies]
-ast-grep-core = "0.44"
+ast-grep-core = "0.50"
 flate2 = "1"
-base64 = "0.22"
+base64 = "0.23"
 hex = "0.4"
 ignore = "0.4"
 rayon = "1"
@@ -83,13 +83,13 @@ tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-graph-db = { path = "../tracedecay-graph-db" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
 tracing = "0.1"
-tree-sitter = "0.26"
+tree-sitter = "0.27"
 
 [dev-dependencies]
 # Self dev-dependency: the integration suite forces indexing width through
 # the `test-helpers` hooks; production builds never select them.
 tracedecay-code-index = { path = ".", default-features = false, features = ["test-helpers"] }
-criterion = "0.5"
+criterion = "0.8"
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 tempfile = "3"
 tracedecay-code-extraction = { path = "../tracedecay-code-extraction", default-features = false, features = ["lite", "test-helpers"] }

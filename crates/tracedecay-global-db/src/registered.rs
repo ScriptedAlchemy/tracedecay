@@ -507,6 +507,18 @@ impl RegisteredGlobalDb {
         self.database.begin_engine_health_read_snapshot().await
     }
 
+    /// The exhaustive observation-authority audit Doctor reports, bounded by
+    /// [`super::schema_stages::OBSERVATION_AUTHORITY_AUDIT_BUDGET`].
+    pub async fn observation_authority_audit(
+        &self,
+    ) -> super::schema_stages::ObservationAuthorityAuditV1 {
+        super::schema_stages::audit_observation_authority(
+            &self.database,
+            super::schema_stages::OBSERVATION_AUTHORITY_AUDIT_BUDGET,
+        )
+        .await
+    }
+
     /// Rebuilds the registered observation projection through this client's
     /// guarded database capability.
     pub async fn rebuild_observation_projection(

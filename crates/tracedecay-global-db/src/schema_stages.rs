@@ -1,3 +1,7 @@
+use std::time::{Duration, Instant};
+
+use tracedecay_domain::errors::ProjectOpenFailureKind;
+
 use super::schema_contract::{
     authority_invariant_triggers_intact, ensure_authority_audit_checkpoint_schema,
     ensure_authority_invariant_schema, ensure_authority_invariants,
@@ -442,14 +446,14 @@ enum RegisteredSchemaAdmission {
 /// inside the attach chain overflowed rustc's layout query depth limit.
 #[tracing::instrument(name = "global_db.schema.query.classify", level = "trace", skip_all)]
 async fn classify_registered_schema_admission(
-    connection: &impl QueryExecutor,
+    connection: &(impl QueryExecutor + Sync),
     scope: &StoreShardScopeV1,
 ) -> tracedecay_domain::errors::Result<RegisteredSchemaAdmission> {
     Box::pin(classify_registered_schema_authorities(connection, scope)).await
 }
 
 async fn classify_registered_schema_authorities(
-    connection: &impl QueryExecutor,
+    connection: &(impl QueryExecutor + Sync),
     scope: &StoreShardScopeV1,
 ) -> tracedecay_domain::errors::Result<RegisteredSchemaAdmission> {
     let hosts_session_features = hosts_session_features(scope);
@@ -544,7 +548,7 @@ fn configuration_schema_error(
 }
 
 async fn lcm_schema_refusal(
-    connection: &impl QueryExecutor,
+    connection: &(impl QueryExecutor + Sync),
 ) -> tracedecay_domain::errors::Result<Option<RefusedAuthorityV1>> {
     match tracedecay_lcm::schema::require_admissible_lcm_schema(connection).await {
         Ok(_) => Ok(None),
@@ -567,7 +571,7 @@ async fn lcm_schema_refusal(
 /// recorded at any other version holds a shape nothing converts, so it keeps
 /// its data untouched behind the typed, versioned reset.
 async fn git_correlation_schema_refusal(
-    connection: &impl QueryExecutor,
+    connection: &(impl QueryExecutor + Sync),
 ) -> tracedecay_domain::errors::Result<Option<RefusedAuthorityV1>> {
     let recorded = recorded_git_correlation_schema_version(connection)
         .await
@@ -852,6 +856,11 @@ async fn install_registered_schema_stage_sequence(
     session_features: SessionFeatureSchema,
     force_exhaustive: bool,
 ) -> tracedecay_domain::errors::Result<Option<RefusedAuthorityV1>> {
+    tracedecay_runtime_core::db::schema_version::retire_named_ledgers(transaction)
+        .await
+        .map_err(|error| {
+            global_db_operation_message("adopt store schema version", error.to_string())
+        })?;
     let is_fresh = configuration_fresh.is_some();
     configuration::ensure_configuration_schema(transaction, configuration_fresh)
         .await
@@ -1473,11 +1482,102 @@ fn workflow_schema_refusal(reason: &'static str) -> RefusedAuthorityV1 {
     }
 }
 
-pub async fn validate_observation_authority_connection(
-    conn: &impl QueryExecutor,
-) -> tracedecay_domain::errors::Result<()> {
-    validate_authority_schema_contract(conn).await?;
-    validate_authority_rows_exhaustive(conn).await
+/// Wall-clock budget for one diagnostic run of the exhaustive authority audit.
+///
+/// Doctor and `tracedecay_runtime` answer an interactive caller: the CLI waits
+/// 90 s for the whole runtime reply. On a store too large to audit inside
+/// this budget the audit reports [`ObservationAuthorityAuditV1::BudgetExceeded`];
+/// schema convergence still runs the same audit without a deadline.
+pub const OBSERVATION_AUTHORITY_AUDIT_BUDGET: Duration = Duration::from_secs(60);
+
+/// Outcome of one diagnostic exhaustive observation-authority audit.
+#[derive(Debug)]
+pub enum ObservationAuthorityAuditV1 {
+    /// The audit ran to completion and every invariant held.
+    Held,
+    /// The audit ran and an invariant failed.
+    Violated(tracedecay_domain::errors::TraceDecayError),
+    /// The audit did not finish inside its budget. This says nothing about
+    /// the stored rows.
+    BudgetExceeded { budget: Duration },
+    /// The authority would not yield a read snapshot to audit.
+    Unavailable(tracedecay_domain::errors::TraceDecayError),
+}
+
+impl ObservationAuthorityAuditV1 {
+    /// `Some(true)` held, `Some(false)` violated, `None` not finished.
+    #[must_use]
+    pub fn verdict(&self) -> Option<bool> {
+        match self {
+            Self::Held => Some(true),
+            Self::Violated(_) => Some(false),
+            Self::BudgetExceeded { .. } | Self::Unavailable(_) => None,
+        }
+    }
+
+    /// The typed `authority_audit_reason` wire value.
+    #[must_use]
+    pub fn reason(&self) -> Option<&'static str> {
+        match self {
+            Self::Held => None,
+            Self::Violated(_) => Some("authority_invariant_failed"),
+            Self::BudgetExceeded { .. } => Some("authority_audit_budget_exceeded"),
+            Self::Unavailable(_) => Some("authority_store_unavailable"),
+        }
+    }
+
+    /// The observed `authority_audit_error` detail.
+    #[must_use]
+    pub fn detail(&self) -> Option<String> {
+        match self {
+            Self::Held => None,
+            Self::Violated(error) | Self::Unavailable(error) => Some(error.to_string()),
+            Self::BudgetExceeded { budget } => Some(format!(
+                "audit skipped: store too large for the {} s doctor budget; schema \
+                 convergence runs the exhaustive audit without a deadline",
+                budget.as_secs()
+            )),
+        }
+    }
+}
+
+/// Runs the exhaustive observation-authority audit on a health snapshot whose
+/// statements are all interrupted once `budget` has elapsed.
+pub async fn audit_observation_authority(
+    database: &Database,
+    budget: Duration,
+) -> ObservationAuthorityAuditV1 {
+    let deadline = Instant::now() + budget;
+    let snapshot = match database.begin_engine_health_read_snapshot().await {
+        Ok(snapshot) => snapshot.until(deadline),
+        Err(error) => {
+            return ObservationAuthorityAuditV1::Unavailable(global_db_operation_error(
+                "begin observation authority audit",
+                error,
+            ));
+        }
+    };
+    let audit = async {
+        validate_authority_schema_contract(&snapshot).await?;
+        validate_authority_rows_exhaustive(&snapshot).await
+    };
+    match audit.await {
+        Ok(()) => ObservationAuthorityAuditV1::Held,
+        Err(error)
+            if matches!(
+                error.project_open_failure_kind(),
+                Some(ProjectOpenFailureKind::AuthorityVerdict { .. })
+            ) =>
+        {
+            ObservationAuthorityAuditV1::Violated(error)
+        }
+        // Only the shared deadline interrupts these statements, so a
+        // non-verdict failure past it is the budget, not the rows.
+        Err(_) if Instant::now() >= deadline => {
+            ObservationAuthorityAuditV1::BudgetExceeded { budget }
+        }
+        Err(error) => ObservationAuthorityAuditV1::Violated(error),
+    }
 }
 
 #[cfg(test)]
@@ -1526,9 +1626,9 @@ mod tests {
         const PREVIOUS_LCM: i64 = LCM_SCHEMA_VERSION - 1;
         const PREVIOUS_GIT_CORRELATION: i64 = GIT_CORRELATION_SCHEMA_VERSION - 1;
         let age_session_features = format!(
-            "UPDATE session_schema_migrations SET version = {PREVIOUS_LCM} WHERE name = 'lcm';
-             UPDATE session_schema_migrations SET version = {PREVIOUS_GIT_CORRELATION}
-             WHERE name = 'git_correlation';
+            "UPDATE tracedecay_schema_version SET version = {PREVIOUS_LCM} WHERE component = 'lcm';
+             UPDATE tracedecay_schema_version SET version = {PREVIOUS_GIT_CORRELATION}
+             WHERE component = 'git_correlation';
              UPDATE workflow_schema SET definition_digest =
                 'sha256:0000000000000000000000000000000000000000000000000000000000000000';"
         );
@@ -1586,9 +1686,9 @@ mod tests {
                 .unwrap()
                 .query_row(
                     "SELECT
-                        (SELECT version FROM session_schema_migrations WHERE name = 'lcm'),
-                        (SELECT version FROM session_schema_migrations
-                         WHERE name = 'git_correlation'),
+                        (SELECT version FROM tracedecay_schema_version WHERE component = 'lcm'),
+                        (SELECT version FROM tracedecay_schema_version
+                         WHERE component = 'git_correlation'),
                         (SELECT definition_digest FROM workflow_schema)",
                     [],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),

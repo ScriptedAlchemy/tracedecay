@@ -122,7 +122,7 @@ async fn lock_scheduler_for_exact_read_async<'a>(
         if let Some(reason) = control.termination() {
             return Err(reason);
         }
-        tokio::time::sleep(SCHEDULER_LOCK_RETRY_INTERVAL).await;
+        super::control_poll().await;
     }
 }
 
@@ -349,7 +349,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let _build_publication = loop {
             tokio::select! {
                 guard = &mut build_publication => break guard,
-                () = tokio::time::sleep(std::time::Duration::from_millis(5)) => {
+                () = super::control_poll() => {
                     if let Some(reason) = control.termination() {
                         return Err(reason);
                     }
@@ -446,7 +446,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let build_publication = loop {
             tokio::select! {
                 guard = &mut build_publication => break guard,
-                () = tokio::time::sleep(std::time::Duration::from_millis(5)) => {
+                () = super::control_poll() => {
                     if let Some(reason) = control.termination() {
                         return Err(reason);
                     }
@@ -1602,6 +1602,50 @@ mod tests {
             base_symbols
                 .iter()
                 .any(|symbol| symbol.name == "held_scheduler_base_value")
+        );
+    }
+
+    /// The search executor polls exact reads on a native blocking thread with
+    /// no Tokio runtime. A read that finds the scheduler held still waits on
+    /// its control there and ends at its deadline.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_exact_read_off_tokio_waits_out_its_deadline_on_a_held_scheduler() {
+        let fixture = HeldSchedulerFixtureV1::open("project.native-held-scheduler-read").await;
+        let (release_tx, probe) = fixture.hold_scheduler().await;
+        let registry = fixture.registry.clone();
+        let scope = fixture.scope.clone();
+        let control = BranchGenerationReadControlV1 {
+            deadline: Some(deadline_in(std::time::Duration::from_millis(300))),
+            cancellation: None,
+        };
+        let read = std::thread::spawn(move || {
+            tracedecay_runtime_core::native_runtime::block_on(
+                registry.with_native_candidate_generation_producer(&scope, control, |_, _| {
+                    Ok("produced")
+                }),
+            )
+        });
+        let produced = tokio::task::spawn_blocking(move || read.join())
+            .await
+            .expect("the joining thread finishes")
+            .map_err(|panic| {
+                panic.downcast_ref::<String>().cloned().or_else(|| {
+                    panic
+                        .downcast_ref::<&str>()
+                        .map(|message| (*message).to_owned())
+                })
+            });
+        release_tx
+            .send(())
+            .expect("the probe is waiting to release");
+        probe.join().expect("the probe thread joins");
+        assert!(
+            matches!(
+                produced,
+                Ok(Ok(Err(CodeIndexSearchUnavailableReasonV1::TimedOut)))
+            ),
+            "a read off Tokio that runs out of deadline on a held scheduler reports the \
+             deadline, got {produced:?}"
         );
     }
 

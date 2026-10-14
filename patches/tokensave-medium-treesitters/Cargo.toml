@@ -12,17 +12,25 @@ publish = false
 # TraceDecay path-patch: drop tree-sitter-kotlin-sg. Kotlin is registered from
 # arborium-kotlin (directly for lite, or via tokensave-large-treesitters for
 # full) so the shipping binary never links two Kotlin parse tables.
+# The lite tier's seven grammars are inlined (tokensave-lite-treesitters 0.2.0
+# pins tree-sitter 0.26, whose `links = "tree-sitter"` blocks 0.27), and the
+# `tree_sitter` re-export is dropped so this bundle carries no runtime pin.
 
 [dependencies]
-tokensave-lite-treesitters = "0.2.0"
-tree-sitter = "0.26"
 tree-sitter-bash = "0.25"
+tree-sitter-c = "0.24"
 tree-sitter-c-sharp = "0.23"
 tree-sitter-cpp = "0.23"
 tree-sitter-dart-orchard = "0.3"
+tree-sitter-go = "0.25"
+tree-sitter-java = "0.23"
+tree-sitter-javascript = "0.25"
 tree-sitter-language = "0.1"
 tree-sitter-lua = "0.5"
 tree-sitter-php = "0.24"
+tree-sitter-python = "0.25"
 tree-sitter-ruby = "0.23"
+tree-sitter-rust = "0.24"
 tree-sitter-scala = "0.25"
 tree-sitter-swift = "0.7"
+tree-sitter-typescript = "0.23"

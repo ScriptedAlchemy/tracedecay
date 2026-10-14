@@ -100,6 +100,28 @@ pub async fn settle_owned_blocking_task<T, O>(
     }
 }
 
+/// Starts `work` on the native runtime and detaches it. For work that never
+/// reaches Tokio. A refused start is logged, and `work` is dropped.
+pub(crate) fn spawn_detached(event: &'static str, work: impl Future<Output = ()> + Send + 'static) {
+    if let Err(error) = native_runtime::NativeTask::spawn(work) {
+        tracing::warn!(event, %error, "native task did not start");
+    }
+}
+
+/// Awaits a task that [`native_runtime::NativeTask::spawn`] started, or
+/// reports why it did not start, so the caller has one failure path.
+pub(crate) async fn join_native<T: Clone + Send + Sync + 'static>(
+    task: &Result<native_runtime::NativeTask<T>, String>,
+) -> Result<T, String> {
+    match task.as_ref().map_err(Clone::clone)?.wait().await {
+        native_runtime::NativeTaskOutcome::Completed(value) => Ok(value),
+        native_runtime::NativeTaskOutcome::Cancelled => Err("native task was cancelled".to_owned()),
+        native_runtime::NativeTaskOutcome::Panicked(payload) => {
+            Err(format!("native task panicked: {payload}"))
+        }
+    }
+}
+
 pub fn exact_source_is_complete(
     reference: Option<&tracedecay_domain::RefId>,
     commit: Option<&tracedecay_domain::GitOidV1>,

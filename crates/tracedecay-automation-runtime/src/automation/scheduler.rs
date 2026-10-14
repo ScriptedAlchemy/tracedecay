@@ -843,7 +843,7 @@ pub(crate) fn elapsed_secs(completed_at: i64, now_secs: i64) -> u64 {
 
 fn new_automation_task_lock_token() -> Result<String> {
     let mut random = [0_u8; AUTOMATION_TASK_LOCK_TOKEN_BYTES];
-    getrandom::getrandom(&mut random).map_err(|error| TraceDecayError::Config {
+    getrandom::fill(&mut random).map_err(|error| TraceDecayError::Config {
         message: format!("failed to generate automation task-lock ownership token: {error}"),
     })?;
     Ok(hex::encode(random))

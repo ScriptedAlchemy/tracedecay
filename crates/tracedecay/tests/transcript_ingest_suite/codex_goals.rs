@@ -247,16 +247,14 @@ async fn codex_workflow_lifecycle_goal_plan_task_persist_on_production_observati
         }),
         "goal-context response_item must remain Message-only (no WorkflowLifecycle Goal)"
     );
-    // `9d1f430c1` made the plain user `response_item` the deduped precursor of
-    // `item_completed/UserMessage`: it admits as an unsupported duplicate
-    // instead of a second canonical Message, and still never becomes a Goal.
     assert!(
         blobs.iter().any(|blob| {
-            blob.contains("\"native_kind\":\"response_item.message.user\"")
-                && blob.contains("\"state\":\"unsupported\"")
+            blob.contains("plain user response_item that is not goal context")
+                && blob.contains("\"kind\":\"message\"")
+                && blob.contains("\"native_record_kind\":\"response_item\"")
                 && !blob.contains("\"semantic_kind\":\"goal\"")
         }),
-        "a non-goal user response_item must stay an unsupported duplicate"
+        "a non-goal user response_item is a message and not a goal"
     );
     for lookalike in ["task_completed", "task_failed"] {
         assert!(

@@ -25,12 +25,10 @@ use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_runtime_core::db::engine::{
     Executor, QueryExecutor, Row, Value, opt_i64, opt_text, params,
 };
+use tracedecay_runtime_core::db::schema_version::{self as store_schema, WORKFLOW_INDEX_COMPONENT};
 
-/// Schema version recorded in `session_schema_migrations` under
-/// `MIGRATION_NAME`. Bump when the workflow tables change shape.
+/// Schema version of the workflow index tables. Bump when they change shape.
 pub const WORKFLOW_INDEX_SCHEMA_VERSION: i64 = 1;
-
-const MIGRATION_NAME: &str = "workflow_indexing";
 
 /// Hard cap on rows returned by run/agent list queries, matching the
 /// git-correlation ceiling so the two surfaces page alike.
@@ -87,24 +85,23 @@ impl From<crate::runtime::git_correlation::GitCorrelationError> for WorkflowInde
     }
 }
 
-/// Ensures the workflow-index tables exist in the session store. Version-gated
-/// through the shared `session_schema_migrations` table exactly like
-/// [`crate::runtime::git_correlation::ensure_git_correlation_receipt_schema_in_transaction`],
-/// so both stores register under their own migration name in one table.
-pub async fn ensure_workflow_index_schema(conn: &impl Executor) -> Result<(), WorkflowIndexError> {
-    if schema_version(conn)
-        .await
+/// Ensures the workflow-index tables exist in the session store. A store
+/// already at this version keeps its tables; the shared ledger still retires
+/// any legacy stamp so a current store moves onto it.
+pub async fn ensure_workflow_index_schema(
+    conn: &(impl Executor + Sync),
+) -> Result<(), WorkflowIndexError> {
+    if recorded_version(conn)
+        .await?
         .is_some_and(|version| version >= WORKFLOW_INDEX_SCHEMA_VERSION)
     {
+        store_schema::retire_named_ledgers(conn)
+            .await
+            .map_err(stamp_error)?;
         return Ok(());
     }
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS session_schema_migrations (
-            name TEXT PRIMARY KEY,
-            version INTEGER NOT NULL,
-            applied_at INTEGER NOT NULL DEFAULT (unixepoch())
-        );
-        CREATE TABLE IF NOT EXISTS workflow_runs (
+        "CREATE TABLE IF NOT EXISTS workflow_runs (
             run_id TEXT PRIMARY KEY,
             parent_session_id TEXT NOT NULL DEFAULT '',
             name TEXT,
@@ -147,27 +144,26 @@ pub async fn ensure_workflow_index_schema(conn: &impl Executor) -> Result<(), Wo
         );",
     )
     .await?;
-    conn.execute(
-        "INSERT INTO session_schema_migrations(name, version)
-         VALUES (?1, ?2)
-         ON CONFLICT(name) DO UPDATE SET
-            version = excluded.version,
-            applied_at = unixepoch()",
-        params![MIGRATION_NAME, WORKFLOW_INDEX_SCHEMA_VERSION],
+    store_schema::record_version(
+        conn,
+        WORKFLOW_INDEX_COMPONENT,
+        WORKFLOW_INDEX_SCHEMA_VERSION,
     )
-    .await?;
+    .await
+    .map_err(stamp_error)?;
     Ok(())
 }
 
-async fn schema_version(conn: &impl QueryExecutor) -> Option<i64> {
-    let mut rows = conn
-        .query(
-            "SELECT version FROM session_schema_migrations WHERE name = ?1",
-            params![MIGRATION_NAME],
-        )
+fn stamp_error(error: store_schema::SchemaVersionError) -> WorkflowIndexError {
+    WorkflowIndexError::Db(error.to_string())
+}
+
+async fn recorded_version(
+    conn: &(impl QueryExecutor + Sync),
+) -> Result<Option<i64>, WorkflowIndexError> {
+    store_schema::read_version(conn, WORKFLOW_INDEX_COMPONENT)
         .await
-        .ok()?;
-    rows.next().await.ok()??.get(0).ok()
+        .map_err(stamp_error)
 }
 
 #[cfg(test)]

@@ -151,7 +151,7 @@ const PROJECT_OPEN_REQUEST_DEADLINE: Duration = Duration::from_millis(500);
 /// recorded `reset_required`: the connection spent the budget before it joined
 /// the watch, so the publication wait returned immediately and never read the
 /// refusal.
-fn project_open_publication_deadline(claimed_at: tokio::time::Instant) -> tokio::time::Instant {
+fn project_open_publication_deadline(claimed_at: Instant) -> Instant {
     claimed_at + PROJECT_OPEN_REQUEST_DEADLINE
 }
 /// One budget for every blocking repository probe a route resolution runs.
@@ -282,6 +282,19 @@ pub fn tool_call_transport_error_is_retryable(error: &TraceDecayError) -> bool {
                 || reason == REPOSITORY_DISCOVERY_DEFERRED_REASON_CODE
                 || reason == PROJECT_SERVER_RESPONSE_REVOKED_REASON_CODE
     )
+}
+
+/// Aborts its tasks when dropped. A shutdown join holds one so that the
+/// coordinator dropping the join at its phase deadline aborts the tasks the
+/// join was waiting on. Aborting a task that already finished does nothing.
+pub(crate) struct AbortTasksOnDrop(pub(crate) Vec<tokio::task::AbortHandle>);
+
+impl Drop for AbortTasksOnDrop {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
 }
 
 mod bootstrap;

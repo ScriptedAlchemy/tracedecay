@@ -7,13 +7,14 @@
 use super::*;
 use tracedecay_daemon_service::shutdown::DaemonLifecycle;
 use tracedecay_runtime_core::logging::log_daemon_event;
+use tracedecay_runtime_core::native_runtime::{self, TimeoutError};
 use tracedecay_runtime_core::path_safety::{plain_host_path, same_canonical_path};
 
 /// Bounds how long a foreground request waits for a route's background open.
 /// The open task itself is deliberately left running after the deadline.
 pub(super) async fn wait_for_project_open_publication<Publication, Output>(
     project_path: &Path,
-    deadline: tokio::time::Instant,
+    deadline: Instant,
     publication: Publication,
 ) -> Result<Output>
 where
@@ -25,11 +26,16 @@ where
     // Callers repair that with `prefer_recorded_open_failure` against the
     // claim's own watch channel instead of weakening the bound.
     tracing::Instrument::instrument(
-        tokio::time::timeout_at(deadline, publication),
+        native_runtime::timeout_at(deadline, publication),
         tracing::trace_span!("daemon.project.open.publication_wait"),
     )
     .await
-    .map_err(|_| project_warming_error(project_path))?
+    .map_err(|error| match error {
+        TimeoutError::Elapsed => project_warming_error(project_path),
+        TimeoutError::TimerUnavailable(_) => TraceDecayError::Config {
+            message: error.to_string(),
+        },
+    })?
 }
 
 /// Ride out one claimed project open for the bounded publication wait.
@@ -42,7 +48,7 @@ where
 pub(super) async fn await_claimed_project_open<Published, PublishedFuture, Ready, ReadyFuture>(
     claim: ProjectOpenTaskClaim,
     project_path: &Path,
-    publication_deadline: tokio::time::Instant,
+    publication_deadline: Instant,
     published: Published,
     ready: Ready,
 ) -> Result<Arc<crate::mcp::McpServer>>
@@ -71,7 +77,9 @@ where
                                             .to_string(),
                                     })?;
                                 }
-                                () = tokio::time::sleep(Duration::from_millis(25)) => {}
+                                slept = native_runtime::sleep_until(Instant::now() + Duration::from_millis(25)) => {
+                                    slept.map_err(|message| TraceDecayError::Config { message })?;
+                                }
                             }
                         }
                         ProjectOpenTaskState::Ready => {
@@ -599,7 +607,7 @@ pub(super) async fn portable_project_server_for_request(
         // The bound starts here, after the open is claimed. Starting it at
         // connection arrival let route enrollment spend it, and the request
         // then answered warming for a refusal already on the watch.
-        let publication_deadline = project_open_publication_deadline(tokio::time::Instant::now());
+        let publication_deadline = project_open_publication_deadline(Instant::now());
         let probe = || {
             portable_cached_project_server(
                 &store_administration,

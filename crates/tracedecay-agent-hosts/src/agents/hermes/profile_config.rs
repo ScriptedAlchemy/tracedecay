@@ -7,7 +7,6 @@
 
 use std::io::ErrorKind;
 use std::path::Path;
-use std::str::FromStr;
 
 use yaml_edit::{Document, Mapping, Sequence, YamlNode};
 
@@ -54,13 +53,7 @@ struct ProfileConfigDocument {
 impl ProfileConfigDocument {
     fn parse(contents: &str) -> std::result::Result<Self, String> {
         let normalized = LineEnding::detect(contents).normalize(contents);
-        let document = if normalized.trim().is_empty() {
-            Document::new_mapping()
-        } else {
-            Document::from_str(&normalized)
-                .map_err(|error| format!("invalid Hermes YAML config: {error}"))?
-        };
-        let root = document
+        let root = parse_profile(&normalized)?
             .as_mapping()
             .ok_or_else(|| "unsupported Hermes config; expected a top-level mapping".to_string())?;
         Ok(Self { root })
@@ -155,7 +148,7 @@ const MEMORY_ERR: &str = "unsupported Hermes memory config";
 const CONTEXT_ERR: &str = "unsupported Hermes context config";
 
 // The mutation path is deliberately text/span oriented rather than CST oriented.
-// The pinned `yaml-edit` (0.2.3) cannot reliably synthesize nested block or flow
+// `yaml-edit` (as of 0.2.3) cannot reliably synthesize nested block or flow
 // collections: `Mapping::set`/`Sequence::push` render new members at column 0
 // (their indent is derived from context that is lost through the cloned
 // `get_mapping`/`get_sequence` handles), and node-copying `set` ignores the
@@ -271,8 +264,10 @@ fn parse_profile(text: &str) -> std::result::Result<Document, String> {
     if text.trim().is_empty() {
         return Ok(Document::new_mapping());
     }
-    let document =
-        Document::from_str(text).map_err(|error| format!("invalid Hermes YAML config: {error}"))?;
+    // Spans index into `text`, so comments outside the document body survive
+    // every splice even though the parsed `Document` drops them.
+    let document = Document::from_str_ignoring_comments(text)
+        .map_err(|error| format!("invalid Hermes YAML config: {error}"))?;
     if document.as_mapping().is_none() {
         return Err("unsupported Hermes config; expected a top-level mapping".to_string());
     }
@@ -320,14 +315,14 @@ fn append_root_block(text: &str, block: &str) -> String {
 }
 
 fn value_end(node: &YamlNode) -> Option<usize> {
-    if let Some(scalar) = node.as_scalar() {
-        Some(scalar.byte_range().end as usize)
-    } else if let Some(mapping) = node.as_mapping() {
-        Some(mapping.byte_range().end as usize)
-    } else {
-        node.as_sequence()
-            .map(|sequence| sequence.byte_range().end as usize)
-    }
+    let range = node
+        .as_scalar()
+        .map(yaml_edit::Scalar::byte_range)
+        .or_else(|| node.as_mapping().map(Mapping::byte_range))
+        .or_else(|| node.as_sequence().map(Sequence::byte_range))?;
+    // An omitted value parses as a zero-width scalar placed after any blank
+    // lines that follow its key; it owns no bytes, so it has no end.
+    (range.end > range.start).then_some(range.end as usize)
 }
 
 // ---- enable mutations ----
@@ -575,8 +570,8 @@ fn remove_map_entry(
                 .map(|scalar| scalar.byte_range().start as usize)
         })
         .ok_or_else(|| PLUGINS_ERR.to_string())?;
-    // A `key:` whose only child was just removed has a null value and no value
-    // node; fall back to the key position so we still drop the dangling line.
+    // A `key:` whose only child was just removed has a null value that owns no
+    // bytes; fall back to the key position so we still drop the dangling line.
     let value_end = entry.value_node().and_then(|node| value_end(&node));
     if parent.is_flow_style() {
         let value_end = value_end.ok_or_else(|| PLUGINS_ERR.to_string())?;

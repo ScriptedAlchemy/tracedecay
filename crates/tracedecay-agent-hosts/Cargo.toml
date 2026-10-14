@@ -28,9 +28,9 @@ test-transport = [
 cap-fs-ext = "4.0.2"
 cap-std = "4.0.2"
 same-file = "1.0.6"
-getrandom = "0.2"
+getrandom = "0.4"
 hex = "0.4"
-jsonc-parser = { version = "0.33.2", features = ["serde_json"] }
+jsonc-parser = { version = "0.34.0", features = ["serde_json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
@@ -38,13 +38,14 @@ shell-words = "1.1"
 thiserror = "2"
 flate2 = "1"
 tracedecay-tokenizer = { path = "../tracedecay-tokenizer", optional = true }
+asupersync.workspace = true
 tokio = { version = "1", features = ["full"] }
-gix = { version = "=0.87.1", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
+gix = { version = "=0.89.0", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
 toml = "1"
 toml_edit = "0.25"
 tracing = "0.1"
 ureq = { version = "3", features = ["json"] }
-yaml-edit = { version = "0.2.3", default-features = false }
+yaml-edit = { version = "0.3.2", default-features = false }
 
 tracedecay-contracts = { path = "../tracedecay-contracts" }
 tracedecay-automation = { path = "../tracedecay-automation" }

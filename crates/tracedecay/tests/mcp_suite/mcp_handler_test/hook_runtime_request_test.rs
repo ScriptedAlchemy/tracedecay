@@ -108,22 +108,12 @@ async fn hook_runtime_answers_typed_results_and_refuses_what_no_host_sends() {
     assert_eq!(
         refusal(&fixture, json!({"action": "codex_stop", "session_id": "s"})).await,
         invalid(
-            "invalid arguments for tracedecay_hook_runtime: unknown variant `codex_stop`, expected one of `reset_counter`, `hook_v2_admit`, `hook_v2_delivery_receipt`, `hook_v2_feedback_notice_delivery`, `ingest_transcript`, `codex_compact`, `claude_compact`, `cursor_compact`, `user_review`, `hermes_receipt`, `hook_v2_profile_admit`"
+            "invalid arguments for tracedecay_hook_runtime: unknown variant `codex_stop`, expected one of `reset_counter`, `hook_v2_admit`, `hook_v2_delivery_receipt`, `hook_v2_feedback_notice_delivery`, `ingest_transcript`, `codex_compact`, `claude_compact`, `cursor_compact`, `hermes_receipt`, `hook_v2_profile_admit`"
         )
     );
 
     // A hook with no project route selects the profile; the daemon's profile
     // owner answers it even on a project connection.
-    assert_eq!(
-        refusal(
-            &fixture,
-            json!({"action": "user_review", "provider": "codex", "session_id": null})
-        )
-        .await,
-        invalid(
-            "projectless Hermes review is unavailable: automation requires a pinned project configuration"
-        )
-    );
     assert_eq!(
         refusal(
             &fixture,

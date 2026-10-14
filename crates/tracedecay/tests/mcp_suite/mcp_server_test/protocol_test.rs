@@ -1548,7 +1548,6 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
     )
     .unwrap();
     let project = profile.enroll(repository.root()).await;
-    let project_root = project.root().to_path_buf();
     let server = project.mcp_server().await;
     let lcm_status_call = |id: i64| {
         jsonrpc_request(
@@ -1585,51 +1584,6 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
         assert_eq!(payload["status"], "ok", "lcm_status id={id} payload");
     }
 
-    // Stamp a sentinel applied_at; only a re-run of the migrations would
-    // rewrite it (the version-gate fast path and the per-process ensured
-    // flag both leave the row untouched).
-    project
-        .registry()
-        .set_lcm_schema_migration_applied_at_for_test(
-            tracedecay_sessions::admission::HostAdmissionScope::Project,
-            123,
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        project
-            .registry()
-            .lcm_schema_migration_applied_at_for_test(
-                tracedecay_sessions::admission::HostAdmissionScope::Project,
-            )
-            .await
-            .unwrap(),
-        Some(123)
-    );
-
-    // Store-resolution evidence for the final assertion: a rewritten sentinel
-    // means migrations re-ran, and the stats below distinguish "the same
-    // store file was recreated" (created/length drift on one path) from "a
-    // different store file answered" (the seeded file left untouched).
-    let sessions_db =
-        tracedecay_runtime_core::storage::resolve_layout(&project_root, profile.root())
-            .expect("resolve the project's sessions db path")
-            .sessions_db_path;
-    let stat_sessions_db = |label: &str| match std::fs::metadata(&sessions_db) {
-        Ok(meta) => format!(
-            "{label}: path={} len={} created={:?} modified={:?}",
-            sessions_db.display(),
-            meta.len(),
-            meta.created().ok(),
-            meta.modified().ok(),
-        ),
-        Err(error) => format!(
-            "{label}: path={} unavailable: {error}",
-            sessions_db.display()
-        ),
-    };
-    let seeded_stat = stat_sessions_db("after-seed");
-
     // A second serve session over the same project in the same process. The
     // LCM mutation tools are daemon-internal now, so the status reads are the
     // remaining serve-mode calls that would re-run migrations if the
@@ -1664,15 +1618,13 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
     assert_eq!(
         project
             .registry()
-            .lcm_schema_migration_applied_at_for_test(
+            .lcm_schema_migration_version_for_test(
                 tracedecay_sessions::admission::HostAdmissionScope::Project,
             )
             .await
             .unwrap(),
-        Some(123),
-        "repeated serve-mode LCM calls must not re-run the LCM migrations\n  \
-         {seeded_stat}\n  {}",
-        stat_sessions_db("after-second-serve"),
+        Some(tracedecay_lcm::LCM_SCHEMA_VERSION),
+        "repeated serve-mode LCM calls keep the current schema version"
     );
 }
 

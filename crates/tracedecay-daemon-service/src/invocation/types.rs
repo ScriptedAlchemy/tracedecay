@@ -481,11 +481,12 @@ impl BoundedHookOrchestratorV1 {
             }
         }
         let deadline =
-            tokio::time::Instant::now() + tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE;
+            std::time::Instant::now() + tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE;
         for mut task in tasks {
-            match tokio::time::timeout_at(deadline, &mut task).await {
+            match tracedecay_runtime_core::native_runtime::timeout_at(deadline, &mut task).await {
                 Ok(Ok(())) => {}
                 Ok(Err(_)) => clean = false,
+                // An unavailable timer aborts the task as if its deadline passed.
                 Err(_) => {
                     task.abort();
                     let _ = task.await;
@@ -668,7 +669,12 @@ pub(super) async fn run_registered_context_scout_request(
     let outcome = tokio::select! {
         biased;
         () = request_cancellation.cancelled() => Err(ApplicationProblem::cancelled_before_admission()),
-        () = tokio::time::sleep_until(deadline.instant().into()) => Err(ApplicationProblem::timed_out_before_admission()),
+        fired = tracedecay_runtime_core::native_runtime::sleep_until(deadline.instant()) => {
+            if let Err(error) = fired {
+                tracing::error!(%error, "Context Scout admission timer unavailable; timing out");
+            }
+            Err(ApplicationProblem::timed_out_before_admission())
+        }
         () = operation_cancellation.cancelled() => Err(unavailable()),
         completed = completion => completed.map_err(|_| unavailable()),
     };
@@ -1026,15 +1032,16 @@ struct LspLeaseTask {
 }
 
 impl LspLeaseTask {
-    async fn stop(self) -> Result<(), DaemonInvocationProblem> {
+    async fn stop(mut self) -> Result<(), DaemonInvocationProblem> {
         self.cancellation.cancel();
-        self.handle
+        (&mut self.handle)
             .await
             .map_err(|_| DaemonInvocationProblem::Unavailable)
     }
+}
 
-    fn abort(&self) {
-        self.cancellation.cancel();
+impl Drop for LspLeaseTask {
+    fn drop(&mut self) {
         self.handle.abort();
     }
 }
@@ -1280,19 +1287,6 @@ impl LspLeaseTaskRegistry {
     }
 }
 
-impl Drop for LspLeaseTaskRegistry {
-    fn drop(&mut self) {
-        let state = match self.state.get_mut() {
-            Ok(state) => state,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        state.accepting = false;
-        for task in state.tasks.values() {
-            task.abort();
-        }
-    }
-}
-
 pub type RuntimeLspActor = DaemonLspRuntimeSession;
 
 #[derive(Clone)]
@@ -1392,10 +1386,8 @@ impl LspSessionAdmissionPort for AdmittedWorkspaceSessionAdmission {
     ) -> Result<AuthorizedLspSession, LspEndpointError> {
         let mut session_bytes = [0_u8; 16];
         let mut credential_bytes = [0_u8; 32];
-        getrandom::getrandom(&mut session_bytes)
-            .map_err(|_| LspEndpointError::AdmissionRejected)?;
-        getrandom::getrandom(&mut credential_bytes)
-            .map_err(|_| LspEndpointError::AdmissionRejected)?;
+        getrandom::fill(&mut session_bytes).map_err(|_| LspEndpointError::AdmissionRejected)?;
+        getrandom::fill(&mut credential_bytes).map_err(|_| LspEndpointError::AdmissionRejected)?;
         let session_id = LspSessionId::new(format!("lsp-{}", hex::encode(session_bytes)))?;
         let credential = LspSessionCredential::new(credential_bytes.to_vec())?;
         Ok(AuthorizedLspSession {
