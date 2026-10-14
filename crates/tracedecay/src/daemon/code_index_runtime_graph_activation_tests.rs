@@ -564,28 +564,29 @@ async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generat
         )
         .await
         .expect("mount persistent generation A");
+    // A recovered head seats no decoded generation, so only the seated graph
+    // keeps generation A a retention root for its successor's refresh. The
+    // worker records that seat after the graph store becomes readable, so
+    // the wait covers both.
     let ready_deadline = std::time::Instant::now() + Duration::from_secs(20);
     loop {
-        if registry
+        let graph_ready = registry
             .retained_text_owner_freshness_for_scope(&scope)
             .await
-            .is_some_and(|(latest, current)| current && latest.interactive_graph_store().is_ok())
-        {
+            .is_some_and(|(latest, current)| current && latest.interactive_graph_store().is_ok());
+        let seated = registry
+            .serving_code_scope(fixture.path())
+            .await
+            .and_then(|mounted| mounted.graph_generation);
+        if graph_ready && seated.as_ref() == Some(&generation_a) {
             break;
         }
         assert!(
             std::time::Instant::now() <= ready_deadline,
-            "generation A graph did not become ready"
+            "generation A graph did not become ready and seated: seated {seated:?}"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    // A recovered head seats no decoded generation, so only the seated graph
-    // keeps generation A a retention root for its successor's refresh.
-    let mounted_scope = registry
-        .serving_code_scope(fixture.path())
-        .await
-        .expect("mounted scope");
-    assert_eq!(mounted_scope.graph_generation, Some(generation_a.clone()));
     let sessions = graph_runtime
         .profile_sessions()
         .await
