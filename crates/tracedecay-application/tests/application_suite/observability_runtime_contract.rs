@@ -175,7 +175,10 @@ fn bounded_producer_starts_and_delivers_without_a_tokio_runtime() {
     let summary = block_on(producer.shutdown())
         .expect("native runtime")
         .expect("clean shutdown");
-    assert_eq!(summary.persisted, 1);
+    assert_eq!(
+        summary.persisted, 2,
+        "the event and its zero terminal carrier"
+    );
     let page = block_on(
         RegisteredObservabilityPortV1::new(&db).query(ObservabilityQueryV1 {
             authorized_scope_ref: scope,
@@ -745,23 +748,27 @@ async fn drops_carried_by_a_later_normal_event_remain_explicit_and_counted() {
             .expect("first emission"),
         ObservabilityEmissionOutcomeV1::Enqueued
     );
-    tokio::task::yield_now().await;
-    assert_eq!(
-        producer
-            .try_emit(envelope(&scope, "boot:carried-drops", 2, 2))
-            .expect("queued emission"),
-        ObservabilityEmissionOutcomeV1::Enqueued
-    );
-    let mut dropped = u64::from(
-        producer
-            .try_emit(envelope(&scope, "boot:carried-drops", 3, 3))
-            .expect("capacity observation")
-            == ObservabilityEmissionOutcomeV1::DroppedAtCapacity,
-    );
+    // The native worker takes at most one batch before it parks on the held
+    // writer, so the single slot overflows within a batch of offers.
+    let mut dropped = 0_u64;
+    let mut next_id = 2_u64;
+    while dropped == 0 && next_id <= 64 {
+        dropped = u64::from(
+            producer
+                .try_emit(envelope(
+                    &scope,
+                    "boot:carried-drops",
+                    next_id,
+                    i64::try_from(next_id).expect("small event id"),
+                ))
+                .expect("capacity observation")
+                == ObservabilityEmissionOutcomeV1::DroppedAtCapacity,
+        );
+        next_id += 1;
+    }
     assert!(dropped > 0, "the held writer must make the data queue full");
     blocker.commit().await.expect("release registered writer");
 
-    let mut next_id = 4_u64;
     // The reopened slot is a wall-clock condition, not an iteration count:
     // the worker only frees the queued observation once its previously
     // blocked write actually lands. Retry under a real deadline and park

@@ -734,18 +734,39 @@ async fn clean_shutdown_with_pending_drop_remains_partial() {
                 until_micros: i64::MAX,
             },
             after_watermark: None,
-            limit: 2,
+            limit: 16,
         })
         .await
         .expect("drop terminal query");
-    assert_eq!(page.events.len(), 1);
-    let terminal = &page.events[0];
-    let ObservabilityPayloadV1::TelemetryDrop(drop) = &terminal.payload else {
-        unreachable!()
+    // The native worker can free the slot between offers, so a later offer
+    // may carry earlier drops in its own range. The worker parks on the held
+    // writer before the loop ends, so the tail drops reach the terminal.
+    let ranges: Vec<_> = page
+        .events
+        .iter()
+        .map(|event| {
+            let ObservabilityPayloadV1::TelemetryDrop(drop) = &event.payload else {
+                unreachable!()
+            };
+            (event, drop)
+        })
+        .collect();
+    assert_eq!(
+        ranges
+            .iter()
+            .map(|(_, drop)| drop.proved_drop_lower_bound)
+            .sum::<u64>(),
+        dropped
+    );
+    let [(terminal, drop)] = ranges
+        .iter()
+        .filter(|(_, drop)| drop.clean_shutdown_observed)
+        .collect::<Vec<_>>()[..]
+    else {
+        panic!("exactly one clean terminal drop carrier is required");
     };
-    assert!(drop.clean_shutdown_observed);
-    assert_eq!(drop.proved_drop_lower_bound, dropped);
-    assert_eq!(terminal.dropped_count, dropped);
+    assert!(drop.proved_drop_lower_bound > 0);
+    assert_eq!(terminal.dropped_count, drop.proved_drop_lower_bound);
     assert_eq!(terminal.coverage, CoverageStateV1::Partial);
     assert_eq!(
         terminal.terminal_result,
