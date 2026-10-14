@@ -1,4 +1,6 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use tracedecay_domain::errors::ProjectOpenFailureKind;
 
 use super::schema_contract::{
     authority_invariant_triggers_intact, ensure_authority_audit_checkpoint_schema,
@@ -1475,16 +1477,9 @@ fn workflow_schema_refusal(reason: &'static str) -> RefusedAuthorityV1 {
     }
 }
 
-pub async fn validate_observation_authority_connection(
-    conn: &impl QueryExecutor,
-) -> tracedecay_domain::errors::Result<()> {
-    validate_authority_schema_contract(conn).await?;
-    validate_authority_rows_exhaustive(conn).await
-}
-
 /// Wall-clock budget for one diagnostic run of the exhaustive authority audit.
 ///
-/// Doctor and `tracedecay_runtime` answer an interactive caller, the CLI waits
+/// Doctor and `tracedecay_runtime` answer an interactive caller: the CLI waits
 /// 90 s for the whole runtime reply. On a store too large to audit inside
 /// this budget the audit reports [`ObservationAuthorityAuditV1::BudgetExceeded`];
 /// schema convergence still runs the same audit without a deadline.
@@ -1547,8 +1542,9 @@ pub async fn audit_observation_authority(
     database: &Database,
     budget: Duration,
 ) -> ObservationAuthorityAuditV1 {
+    let deadline = Instant::now() + budget;
     let snapshot = match database.begin_engine_health_read_snapshot().await {
-        Ok(snapshot) => snapshot,
+        Ok(snapshot) => snapshot.until(deadline),
         Err(error) => {
             return ObservationAuthorityAuditV1::Unavailable(global_db_operation_error(
                 "begin observation authority audit",
@@ -1562,6 +1558,19 @@ pub async fn audit_observation_authority(
     };
     match audit.await {
         Ok(()) => ObservationAuthorityAuditV1::Held,
+        Err(error)
+            if matches!(
+                error.project_open_failure_kind(),
+                Some(ProjectOpenFailureKind::AuthorityVerdict { .. })
+            ) =>
+        {
+            ObservationAuthorityAuditV1::Violated(error)
+        }
+        // Only the shared deadline interrupts these statements, so a
+        // non-verdict failure past it is the budget, not the rows.
+        Err(_) if Instant::now() >= deadline => {
+            ObservationAuthorityAuditV1::BudgetExceeded { budget }
+        }
         Err(error) => ObservationAuthorityAuditV1::Violated(error),
     }
 }

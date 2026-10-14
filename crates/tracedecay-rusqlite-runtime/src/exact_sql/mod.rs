@@ -1220,13 +1220,18 @@ pub(crate) fn execute_query(
     budget: ExactSqlStatementBudget,
 ) -> Result<ExactSqlRows, ExactSqlError> {
     request.validate()?;
+    let (execution_deadline, enforce_statement_limit) = match budget {
+        ExactSqlStatementBudget::Request => (None, true),
+        ExactSqlStatementBudget::Convergence => (None, false),
+        ExactSqlStatementBudget::Until(deadline) => (Some(deadline), false),
+    };
     with_exact_sql_guard(
         connection,
         false,
         false,
         None,
-        None,
-        budget == ExactSqlStatementBudget::Request,
+        execution_deadline,
+        enforce_statement_limit,
         None,
         crate::connection::authorize_reader,
         false,
