@@ -1,12 +1,10 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
-
-use tokio::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::ownership::retire_missing_repository_owners;
-use super::{GitWatcher, WatchState, log_daemon_event, request_freshness_for_repository};
+use super::{GitWatcher, WatchState, log_daemon_event, park, request_freshness_for_repository};
 
 /// The backstop's per-repository coverage decision.
 ///
@@ -27,16 +25,14 @@ pub const fn coverage_action(watcher_stale: bool, interval_elapsed: bool) -> Opt
 }
 
 pub async fn run(watcher: GitWatcher) {
-    let mut ticker = tokio::time::interval(Duration::from_mins(1));
     let mut due_by_root = HashMap::new();
-    ticker.tick().await;
-
-    loop {
-        tokio::select! {
-            biased;
-            () = watcher.inner.cancellation.cancelled() => return,
-            _ = ticker.tick() => {}
-        }
+    while park(
+        watcher.inner.cancellation.cancelled(),
+        Duration::from_mins(1),
+        "backstop",
+    )
+    .await
+    {
         tick(&watcher, &mut due_by_root).await;
     }
 }

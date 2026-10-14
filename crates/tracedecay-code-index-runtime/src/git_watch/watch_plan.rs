@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use notify::{RecursiveMode, Watcher};
+use tracedecay_runtime_core::native_runtime;
 use walkdir::WalkDir;
 
 use super::GIT_OBSERVATION_BUDGET;
@@ -106,15 +107,14 @@ pub async fn observe_watch_plan(
     cancellation: WatchCancellation,
 ) -> Result<Vec<PathBuf>, WatchPlanFailure> {
     let worker_cancellation = cancellation.clone();
-    let mut handle =
-        tokio::task::spawn_blocking(move || build_watch_plan(&state, &worker_cancellation));
+    let plan =
+        native_runtime::spawn_blocking(move || build_watch_plan(&state, &worker_cancellation));
     tokio::select! {
         biased;
-        () = cancellation.cancelled() => {
-            handle.abort();
-            Err(WatchPlanFailure::Cancelled)
-        }
-        result = tokio::time::timeout(GIT_OBSERVATION_BUDGET, &mut handle) => match result {
+        // The walk checks cancellation itself, so the dropped wait detaches a
+        // build that is already stopping.
+        () = cancellation.cancelled() => Err(WatchPlanFailure::Cancelled),
+        result = native_runtime::timeout(GIT_OBSERVATION_BUDGET, plan) => match result {
             Ok(Ok(plan)) => plan,
             Ok(Err(_)) if cancellation.is_cancelled() => Err(WatchPlanFailure::Cancelled),
             Ok(Err(_)) | Err(_) => Err(WatchPlanFailure::Unavailable),

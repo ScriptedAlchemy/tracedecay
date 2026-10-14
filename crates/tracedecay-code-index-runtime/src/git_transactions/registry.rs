@@ -89,7 +89,7 @@ impl GitIndexTransactionStoreRegistry {
                 .map_err(GitIndexTransactionStoreError::unavailable)?;
             retained.drain().map(|(_, store)| store).collect::<Vec<_>>()
         };
-        tokio::task::spawn_blocking(move || {
+        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             let mut joined = 0usize;
             for store in stores {
                 joined = joined.saturating_add(usize::from(store.shutdown()?));

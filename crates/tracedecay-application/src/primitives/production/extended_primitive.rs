@@ -24,6 +24,7 @@ use tracedecay_graph_query::{
     request_graph_cancellation,
 };
 use tracedecay_runtime_core::db::Database;
+use tracedecay_runtime_core::native_runtime;
 
 use super::super::runtime::{
     CallChainPrimitiveRequest, CallChainPrimitiveResult, DiagnosticPrimitiveRecord,
@@ -294,7 +295,7 @@ pub(crate) async fn canonical_storage_status(
             // on the blocking pool so a stalled filesystem cannot capture an
             // async executor thread for the daemon.
             tracing::Instrument::instrument(
-                tokio::task::spawn_blocking(move || {
+                native_runtime::spawn_blocking(move || {
                     update_storage_status_history(
                         &history_path,
                         history_project_id,

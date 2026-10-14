@@ -998,7 +998,7 @@ impl DaemonInvocationService {
                 return owner;
             }
             let remaining = Duration::from_micros(remaining_micros.unsigned_abs());
-            let woke = tokio::time::timeout(remaining, async {
+            let woke = tracedecay_runtime_core::native_runtime::timeout(remaining, async {
                 tokio::select! {
                     published = changed.changed() => published.is_ok(),
                     () = mount_changed => true,

@@ -28,7 +28,7 @@ jobs:
       CARGO_INCREMENTAL: 0
       CARGO_NET_RETRY: 10
       # renovate: datasource=github-releases depName=astral-sh/hawk
-      HAWK_VERSION: 0.1.12
+      HAWK_VERSION: 0.1.15
       RUSTUP_MAX_RETRIES: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

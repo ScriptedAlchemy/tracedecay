@@ -649,10 +649,7 @@ mod tests {
         loop {
             match background.read_snapshot().await {
                 Ok(snapshot) => held.push(snapshot),
-                Err(EngineError::Runtime(reason)) => {
-                    assert_eq!(reason, "exact SQL reader lane is saturated");
-                    break;
-                }
+                Err(EngineError::ReaderSaturated) => break,
                 Err(error) => panic!("unexpected background admission failure: {error}"),
             }
         }

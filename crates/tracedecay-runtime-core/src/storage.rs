@@ -20,6 +20,12 @@ pub const DAEMON_AUTHORITY_LOCK_FILE: &str = "daemon-authority.lock";
 /// state lives directly in the profile root.
 pub const DAEMON_AUTHORITY_DIRECTORY: &str = "daemon-authority";
 pub const SESSIONS_DB_FILENAME: &str = "sessions.db";
+/// Profile-wide session store. A project's sessions stay in [`SESSIONS_DB_FILENAME`].
+pub const USER_SESSIONS_DB_FILENAME: &str = "user-sessions.db";
+/// Profile-wide memory for conversations that have no code project.
+pub const USER_MEMORY_DB_FILENAME: &str = "user-memory.db";
+/// Remote-node store file under `remote/nodes/<digest>/`.
+pub const REMOTE_DB_FILENAME: &str = "remote.db";
 pub const BRANCH_META_FILENAME: &str = "branch-meta.json";
 /// Directory holding truncated tool responses: under an enrolled project's
 /// store shard, or directly under the profile root for any other checkout.
@@ -171,8 +177,6 @@ pub struct RepositoryIdentityMarker {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectIdentity {
     pub project_id: Option<String>,
-    pub display_root: PathBuf,
-    pub primary_alias: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -399,24 +403,6 @@ pub struct StoreManifest {
     /// then inspects the store in full.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sessions_schema_digest: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum GraphScopeId {
-    Project,
-    Branch(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct QueryTarget {
-    pub graph_db_path: PathBuf,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ActiveProjectContext {
-    pub layout: StoreLayout,
-    pub scope_id: GraphScopeId,
-    pub query_target: QueryTarget,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
