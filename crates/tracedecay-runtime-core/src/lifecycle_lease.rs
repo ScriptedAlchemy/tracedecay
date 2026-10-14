@@ -495,7 +495,7 @@ fn live_owner_matches(owner: &str, inherited_token: &str) -> bool {
         .is_none_or(|recorded| recorded.parse::<u64>().ok() == Some(live_start_time))
 }
 
-/// Start time of `pid`, in the units `sysinfo` reports for that process.
+/// Start time of `pid` in whole seconds since the Unix epoch, as `sysinfo` reports it.
 ///
 /// Callers store this beside a PID so a later probe can tell the original
 /// owner from a reused PID. `None` means the start time could not be read

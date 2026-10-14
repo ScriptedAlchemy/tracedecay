@@ -388,18 +388,17 @@ async fn doctor_runtime_value_inner(
     let page_size = page_counts.map(|(page_size, _, _)| page_size);
     let expected_schema_version = tracedecay_runtime_core::db::migrations::SCHEMA_VERSION;
     let schema_version = if route_live {
-        // Retained admission is not a schema observation. Leave the pragma
+        // Retained admission is not a schema observation. Leave the stamp
         // unread rather than inventing the compiled version.
         None
     } else {
-        match Box::pin(
-            graph
-                .db()
-                .query_scalar_i64("Doctor project schema inspection", "PRAGMA user_version"),
-        )
+        match Box::pin(tracedecay_runtime_core::db::schema_version::read_version(
+            &graph.db().read_connection(),
+            tracedecay_runtime_core::db::schema_version::GRAPH_COMPONENT,
+        ))
         .await
         {
-            Ok(version) => Some(version),
+            Ok(version) => Some(version.unwrap_or(0)),
             Err(_) => {
                 return doctor_runtime_unavailable(
                     build_version,

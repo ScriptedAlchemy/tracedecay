@@ -344,8 +344,8 @@ pub(crate) struct StoredLspTestRunExpansionV1 {
 /// Mount-ready bundle construction. The same concrete feedback source is
 /// shared by cycle triggers, managed diagnostics, and context projections.
 /// `test_run_store` is the project sessions store managed test runs are
-/// recorded in. `runtime` runs the feedback-cycle, diagnostic, and context
-/// work, which reaches the code index.
+/// recorded in. `runtime` runs the feedback-cycle and diagnostic work, which
+/// runs the advisory cycle.
 #[allow(clippy::too_many_arguments)]
 pub fn lsp_session_factory<F>(
     runtime: Arc<dyn LspRuntimeSpawner>,

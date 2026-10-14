@@ -533,6 +533,63 @@ async fn shutdown_bounds_a_stuck_repository_join() {
     assert!(!state.has_retained_task());
 }
 
+/// The daemon coordinator drops its `git_watcher` join at the phase deadline,
+/// which can come before the join's own budget ends. The task the join was
+/// waiting on must be aborted then. The retained join still finishes, so a
+/// later shutdown reads its outcome.
+#[tokio::test]
+async fn abandoned_shutdown_aborts_the_task_it_was_joining() {
+    let repo = temp_repo();
+    let watcher = with_cadence(
+        GitWatcher::new(fast_watch_config()),
+        WatchCadence {
+            join_budget: Duration::from_secs(600),
+            ..WatchCadence::default()
+        },
+    );
+    let state = Arc::new(WatchState::new(
+        tracedecay_runtime_core::worktree::git_common_dir(repo.path())
+            .expect("git common directory"),
+        repo.path().canonicalize().expect("canonical project root"),
+        worktree_git_dir(repo.path()).expect("worktree git directory"),
+        MaintenanceCoordinator::default(),
+    ));
+    let (alive, task_dropped) = std::sync::mpsc::channel::<()>();
+    state.retain_task(native_task(async move {
+        let _alive = alive;
+        std::future::pending::<()>().await;
+    }));
+    watcher
+        .inner
+        .projects
+        .lock()
+        .await
+        .insert(state.common_dir.clone(), Arc::clone(&state));
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), watcher.shutdown())
+            .await
+            .is_err(),
+        "the join must still be inside its budget when its caller gives up"
+    );
+
+    assert_eq!(
+        task_dropped.recv_timeout(Duration::from_secs(5)),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
+        "an abandoned shutdown must not leave the task it was joining running"
+    );
+    let outcome = tokio::time::timeout(TEST_READY_TIMEOUT, watcher.shutdown())
+        .await
+        .expect("a later shutdown reads the finished join");
+    assert_eq!(
+        outcome.failures(),
+        &[GitWatcherTaskFailure {
+            owner: GitWatcherTaskOwner::Repository(state.common_dir.clone()),
+            kind: GitWatcherTaskFailureKind::TimedOut,
+        }]
+    );
+}
+
 #[tokio::test]
 async fn an_unmounted_scheduler_does_not_retry_the_exact_watcher_frontier() {
     let repo = temp_repo();

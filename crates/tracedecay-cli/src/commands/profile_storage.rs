@@ -206,14 +206,17 @@ fn verified_graph_db_schema(
             message: error.to_string(),
         },
     )?;
-    let schema_version = connection
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .map_err(
-            |error| tracedecay_domain::errors::TraceDecayError::Database {
-                operation: "read project graph store schema version".to_string(),
-                message: error.to_string(),
-            },
-        )?;
+    let schema_version = tracedecay_runtime_core::db::schema_version::read_version_sync(
+        &connection,
+        tracedecay_runtime_core::db::schema_version::GRAPH_COMPONENT,
+    )
+    .map_err(
+        |error| tracedecay_domain::errors::TraceDecayError::Database {
+            operation: "read project graph store schema version".to_string(),
+            message: error.to_string(),
+        },
+    )?
+    .unwrap_or(0);
     let exact_final_shape =
         if schema_version != i64::from(tracedecay_runtime_core::db::migrations::SCHEMA_VERSION) {
             false
@@ -713,9 +716,12 @@ mod reset_project_store_tests {
         connection
             .execute_batch("DROP TABLE diagnostic_generation_publications")
             .unwrap();
-        let version: i64 = connection
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .unwrap();
+        let version = tracedecay_runtime_core::db::schema_version::read_version_sync(
+            &connection,
+            tracedecay_runtime_core::db::schema_version::GRAPH_COMPONENT,
+        )
+        .unwrap()
+        .unwrap_or(0);
         assert_eq!(
             version,
             i64::from(tracedecay_runtime_core::db::migrations::SCHEMA_VERSION)

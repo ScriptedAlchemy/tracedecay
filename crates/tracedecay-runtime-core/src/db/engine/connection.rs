@@ -156,27 +156,19 @@ impl Connection {
         let runtime = Arc::clone(&self.runtime);
         // Once admitted, a batch continues through its first error even if its
         // caller stops waiting. Separate dispatches preserve writer interleaving.
-        let settlement = crate::native_runtime::handle()
-            .ok_or(Error::RuntimeContextUnavailable)?
-            .try_request_cx_with_budget(Budget::INFINITE)
-            .map_err(|error| Error::Runtime(format!("failed to admit SQL settlement: {error}")))?;
-        let mut task = settlement
-            .spawn(move |_cx| async move {
-                let mut results = Vec::with_capacity(statements.len());
-                for (index, statement) in statements.into_iter().enumerate() {
-                    let result = runtime
-                        .execute_async(statement)
-                        .await
-                        .map_err(Error::from)
-                        .map_err(|error| Error::statement_batch(index, error))?;
-                    results.push(result.changed_rows as u64);
-                }
-                Ok(results)
-            })
-            .map_err(|error| Error::Runtime(format!("failed to spawn SQL settlement: {error}")))?;
-        std::future::poll_fn(|context| task.poll_join(context))
-            .await
-            .map_err(join_error)?
+        crate::native_runtime::settle(async move {
+            let mut results = Vec::with_capacity(statements.len());
+            for (index, statement) in statements.into_iter().enumerate() {
+                let result = runtime
+                    .execute_async(statement)
+                    .await
+                    .map_err(Error::from)
+                    .map_err(|error| Error::statement_batch(index, error))?;
+                results.push(result.changed_rows as u64);
+            }
+            Ok(results)
+        })
+        .await
     }
 
     pub async fn query<P>(&self, sql: &str, params: P) -> Result<Rows>

@@ -69,8 +69,8 @@ fn seed_pre_unified_observation_rows(db_path: &Path) {
     let connection = rusqlite::Connection::open(db_path).expect("open the session store");
     let unmarked = connection
         .execute(
-            "DELETE FROM global_schema_migrations \
-             WHERE migration = 'observations-unified-identity-v1'",
+            "DELETE FROM tracedecay_schema_version \
+             WHERE component = 'observations-unified-identity-v1'",
             [],
         )
         .expect("remove the unified-identity marker");
@@ -672,7 +672,7 @@ fn session_stores_at_the_previous_lcm_schema_refuse_sessions_only_until_their_sc
             execute_once(
                 db,
                 &format!(
-                    "UPDATE session_schema_migrations SET version = {PREVIOUS} WHERE name = 'lcm'"
+                    "UPDATE tracedecay_schema_version SET version = {PREVIOUS} WHERE component = 'lcm'"
                 ),
             );
         },
@@ -698,8 +698,8 @@ fn project_session_store_at_another_git_correlation_version_refuses_sessions_onl
             execute_once(
                 db,
                 &format!(
-                    "UPDATE session_schema_migrations SET version = {PREVIOUS} \
-                     WHERE name = 'git_correlation'"
+                    "UPDATE tracedecay_schema_version SET version = {PREVIOUS} \
+                     WHERE component = 'git_correlation'"
                 ),
             );
         },

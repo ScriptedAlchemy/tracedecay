@@ -70,7 +70,7 @@ tracedecay-store-runtime = { path = "../tracedecay-store-runtime" }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 tracing = "0.1"
-tree-sitter = "0.26"
+tree-sitter = "0.27"
 url = "2"
 
 [dev-dependencies]

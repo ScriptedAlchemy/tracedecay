@@ -124,9 +124,12 @@ fn schema_version(db_path: &Path) -> u32 {
     let connection =
         rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap();
-    let version = connection
-        .query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0))
-        .unwrap();
+    let version = tracedecay_runtime_core::db::schema_version::read_version_sync(
+        &connection,
+        tracedecay_runtime_core::db::schema_version::GRAPH_COMPONENT,
+    )
+    .unwrap()
+    .unwrap_or(0);
     u32::try_from(version).unwrap()
 }
 
@@ -183,9 +186,16 @@ async fn incompatible_profile_store_requires_reset_without_in_place_changes() {
 
     let incompatible_version = tracedecay_runtime_core::db::migrations::SCHEMA_VERSION - 1;
     let connection = rusqlite::Connection::open(&db_path).unwrap();
-    connection
-        .pragma_update(None, "user_version", incompatible_version)
+    let downgraded = connection
+        .execute(
+            "UPDATE tracedecay_schema_version SET version = ?1 WHERE component = ?2",
+            rusqlite::params![
+                incompatible_version,
+                tracedecay_runtime_core::db::schema_version::GRAPH_COMPONENT
+            ],
+        )
         .unwrap();
+    assert_eq!(downgraded, 1, "the graph stamp row must exist to downgrade");
     drop(connection);
 
     let error = match open_with_maintenance(&project, &profile_root, profile_options(&profile_root))

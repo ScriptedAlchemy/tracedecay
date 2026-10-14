@@ -27,7 +27,7 @@ grafeo-common.workspace = true
 grafeo-core = { workspace = true, features = ["compact-store"] }
 grafeo-engine = { workspace = true, features = ["mmap", "compact-store"] }
 grafeo-storage.workspace = true
-base64 = "0.22"
+base64 = "0.23"
 hex = "0.4"
 parking_lot = { version = "0.12", features = ["arc_lock", "send_guard"] }
 rayon = "1"
@@ -47,7 +47,7 @@ tracing = "0.1"
 tempfile = "3"
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.8"
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime" }
 

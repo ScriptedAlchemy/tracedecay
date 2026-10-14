@@ -607,8 +607,16 @@ async fn seed_github_diagnostic(database: &Database, observed_at: UtcMicros) {
         .expect("published diagnostic");
 }
 
-#[tokio::test]
-async fn concrete_feedback_source_projects_expands_and_clears_a_saved_github_finding() {
+/// Runs off Tokio: the daemon serves these projections and expansions on the
+/// native runtime.
+#[test]
+fn concrete_feedback_source_projects_expands_and_clears_a_saved_github_finding() {
+    assert!(tokio::runtime::Handle::try_current().is_err());
+    tracedecay_runtime_core::native_runtime::block_on(Box::pin(saved_github_finding_journey()))
+        .expect("native runtime");
+}
+
+async fn saved_github_finding_journey() {
     let root = tempfile::tempdir().expect("root");
     std::fs::create_dir_all(root.path().join("src")).expect("source directory");
     std::fs::write(root.path().join("src/lib.rs"), SOURCE).expect("source");
@@ -668,7 +676,11 @@ async fn concrete_feedback_source_projects_expands_and_clears_a_saved_github_fin
                 let request = clean_request.clone();
                 let advisory = clean_advisory.clone();
                 Box::pin(async move {
-                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    tracedecay_runtime_core::native_runtime::sleep_until(
+                        std::time::Instant::now() + std::time::Duration::from_millis(1),
+                    )
+                    .await
+                    .expect("native timer");
                     service
                         .execute_with_advisory(&context, request, advisory)
                         .await

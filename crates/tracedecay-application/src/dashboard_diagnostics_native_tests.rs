@@ -154,12 +154,12 @@ fn python() -> &'static str {
     }
 }
 
-#[test]
-fn language_refresh_settles_diagnostics_without_a_tokio_runtime() {
-    let project = tempfile::tempdir().expect("project root");
-    std::fs::create_dir_all(project.path().join("src")).expect("source dir");
-    std::fs::write(project.path().join("src/lib.fake"), "let nope\n").expect("source");
-    let analyzer = project.path().join("fake_analyzer.py");
+/// A dashboard authority over a one-file project whose fake analyzer reports
+/// one type error.
+fn fake_analyzer_authority(project: &std::path::Path) -> DashboardDiagnosticsAuthorityV1 {
+    std::fs::create_dir_all(project.join("src")).expect("source dir");
+    std::fs::write(project.join("src/lib.fake"), "let nope\n").expect("source");
+    let analyzer = project.join("fake_analyzer.py");
     std::fs::write(&analyzer, FAKE_ANALYZER).expect("analyzer script");
     let settings = CodeDiagnosticsSettings {
         custom_adapters: vec![LspAdapterDefinition {
@@ -174,33 +174,89 @@ fn language_refresh_settles_diagnostics_without_a_tokio_runtime() {
         }],
         ..CodeDiagnosticsSettings::default()
     };
-    let authority = DashboardDiagnosticsAuthorityV1::new(
-        project.path().to_path_buf(),
-        project.path().to_path_buf(),
+    DashboardDiagnosticsAuthorityV1::new(
+        project.to_path_buf(),
+        project.to_path_buf(),
         Arc::new(FixtureAdmission),
         Arc::new(FixtureProjection(graph_with_file("src/lib.fake"))),
         Arc::new(Mutex::new(diagnostic_broker(
-            project.path().to_path_buf(),
+            project.to_path_buf(),
             settings,
         ))),
-    );
-    let request = DashboardDiagnosticsGraphRequestV1::new(
+    )
+}
+
+fn graph_request() -> DashboardDiagnosticsGraphRequestV1 {
+    DashboardDiagnosticsGraphRequestV1::new(
         callable_code_operation(CallableCodeOperationKind::SourceMetadata).expect("operation"),
         RequestId::new("request.native-diagnostics").expect("request"),
         Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
         CancellationSignal::active("cancel.native-diagnostics.request").expect("signal"),
         tracedecay_contracts::now_micros(),
-    );
+    )
+}
+
+fn reported(snapshot: &DiagnosticsSnapshot) -> Vec<(&str, &str)> {
+    snapshot
+        .diagnostics
+        .iter()
+        .map(|diagnostic| (diagnostic.file.as_str(), diagnostic.message.as_str()))
+        .collect()
+}
+
+#[test]
+fn language_refresh_settles_diagnostics_without_a_tokio_runtime() {
+    let project = tempfile::tempdir().expect("project root");
+    let authority = fake_analyzer_authority(project.path());
+    let request = graph_request();
 
     assert!(tokio::runtime::Handle::try_current().is_err());
     let snapshot = block_on(authority.refresh_language(&request, "fake"))
         .expect("native runtime")
         .expect("the refresh settles off Tokio");
 
-    let reported = snapshot
-        .diagnostics
-        .iter()
-        .map(|diagnostic| (diagnostic.file.as_str(), diagnostic.message.as_str()))
-        .collect::<Vec<_>>();
-    assert_eq!(reported, vec![("src/lib.fake", "fake type error")]);
+    assert_eq!(
+        reported(&snapshot),
+        vec![("src/lib.fake", "fake type error")]
+    );
+}
+
+#[test]
+fn idle_backfill_settles_diagnostics_without_a_tokio_runtime() {
+    let project = tempfile::tempdir().expect("project root");
+    let authority = fake_analyzer_authority(project.path());
+    let request = graph_request();
+
+    assert!(tokio::runtime::Handle::try_current().is_err());
+    let backfilled = block_on(async {
+        let overview = authority
+            .overview(request.clone())
+            .await
+            .expect("the overview settles off Tokio");
+        assert!(
+            overview.diagnostics.is_empty(),
+            "the overview answers before the backfill runs"
+        );
+        let hang_guard = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let snapshot = authority
+                .snapshot(&request)
+                .await
+                .expect("the snapshot settles off Tokio");
+            if !snapshot.diagnostics.is_empty() {
+                break snapshot;
+            }
+            assert!(
+                std::time::Instant::now() < hang_guard,
+                "the idle backfill never published diagnostics"
+            );
+            std::thread::yield_now();
+        }
+    })
+    .expect("native runtime");
+
+    assert_eq!(
+        reported(&backfilled),
+        vec![("src/lib.fake", "fake type error")]
+    );
 }

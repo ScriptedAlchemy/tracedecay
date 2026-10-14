@@ -986,11 +986,10 @@ pub(super) const TABLES: &[Table] = &[
         ]
     ),
     table!(
-        "session_temporal_schema_migrations",
+        "tracedecay_schema_version",
         [
-            column("name", "TEXT", false, None, 1),
+            column("component", "TEXT", false, None, 1),
             column("version", "INTEGER", true, None, 0),
-            column("applied_at", "INTEGER", true, None, 0),
         ],
         []
     ),

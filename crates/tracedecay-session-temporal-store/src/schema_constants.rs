@@ -16,10 +16,6 @@ pub const SESSION_TEMPORAL_SCHEMA_VERSION: i64 = 8;
 
 pub const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
     (
-        "session_temporal_schema_migrations",
-        &["name", "version", "applied_at"],
-    ),
-    (
         "session_summary_nodes",
         &[
             "summary_id",

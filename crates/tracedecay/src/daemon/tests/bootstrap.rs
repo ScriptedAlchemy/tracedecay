@@ -2789,6 +2789,69 @@ async fn project_open_shutdown_aborts_a_noncooperative_task_at_the_backstop() {
     );
 }
 
+/// The daemon coordinator drops the `project_open` join at its phase deadline,
+/// which can come before the join's own cooperative window ends and its abort
+/// backstop runs. The open it was waiting on must be aborted then. Its route
+/// stays registered, so a later shutdown still joins it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn timed_out_shutdown_owner_aborts_the_project_open_task() {
+    let tasks = super::super::ProjectOpenTasks::default();
+    let route = project_open_test_route("timed-out-owner");
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (alive, task_dropped) = std::sync::mpsc::channel::<()>();
+    match tasks.start_cancellable(route, move |_| async move {
+        let _alive = alive;
+        started_tx.send(()).expect("publish task start");
+        std::future::pending::<()>().await;
+        Ok(())
+    }) {
+        super::super::ProjectOpenTaskClaim::InFlight(_) => {}
+        super::super::ProjectOpenTaskClaim::Failed(_) => panic!("pending task must start"),
+        super::super::ProjectOpenTaskClaim::Saturated => panic!("pending task must fit"),
+    }
+    started_rx.await.expect("noncooperative task started");
+
+    let join_tasks = tasks.clone();
+    let receipt = tracedecay_daemon_service::shutdown::join_shutdown_owners(
+        std::time::Instant::now() + std::time::Duration::from_millis(100),
+        vec![
+            tracedecay_daemon_service::shutdown::ShutdownOwner::with_deadline_status(
+                "project_open",
+                || {},
+                move |_| async move {
+                    if join_tasks.shutdown().await {
+                        tracedecay_daemon_service::shutdown::ShutdownStatus::Clean
+                    } else {
+                        tracedecay_daemon_service::shutdown::ShutdownStatus::TimedOut
+                    }
+                },
+            ),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        receipt.owners[0].status,
+        tracedecay_daemon_service::shutdown::ShutdownStatus::TimedOut
+    );
+    assert_eq!(
+        task_dropped.recv_timeout(std::time::Duration::from_secs(5)),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
+        "a timed-out owner must not leave the project open it was joining running"
+    );
+    assert_eq!(tasks.tracked_route_count(), 1);
+    assert!(
+        tasks
+            .shutdown_with_deadline(
+                tokio::time::Duration::from_secs(5),
+                tokio::time::Duration::ZERO,
+            )
+            .await,
+        "a later shutdown must join the aborted open"
+    );
+    assert_eq!(tasks.tracked_route_count(), 0);
+}
+
 #[tokio::test]
 async fn project_open_identity_shutdown_ignores_unrelated_retiring_routes() {
     let tasks = super::super::ProjectOpenTasks::default();

@@ -6,16 +6,18 @@
 //! stored here and reaches the live Tokio work through `CancellationToken`.
 
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
+use futures_util::FutureExt;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::RwLock;
-use tokio::task::JoinSet;
 
 mod knowledge;
 mod lifecycle;
@@ -515,26 +517,35 @@ async fn execute_query(
         }
     }
 
-    let mut tasks = JoinSet::new();
-    for source_id in SOURCE_IDS {
-        let state = state.clone();
-        let request = request.clone();
-        let control = control.clone();
-        let source_cancellation = cancellation.clone();
-        tasks.spawn(async move {
-            (
+    // Polled in place: the sources read through daemon ports that still run
+    // on Tokio, and dropping `tasks` on any exit cancels the unfinished reads.
+    let mut tasks: FuturesUnordered<_> = SOURCE_IDS
+        .into_iter()
+        .map(|source_id| {
+            let source = execute_source(
+                state.clone(),
+                request.clone(),
                 source_id,
-                execute_source(state, request, source_id, control, source_cancellation).await,
-            )
-        });
-    }
+                control.clone(),
+                cancellation.clone(),
+            );
+            AssertUnwindSafe(source).catch_unwind().map(move |outcome| {
+                outcome.unwrap_or_else(|_| {
+                    ExplorerSourceProgressV1::error(
+                        source_id,
+                        "source_task_failed",
+                        "explorer source read panicked",
+                    )
+                })
+            })
+        })
+        .collect();
 
     let mut completed = 0;
     while completed < SOURCE_IDS.len() {
         tokio::select! {
             biased;
             () = &mut deadline_wait => {
-                tasks.abort_all();
                 let mut current = run.write().await;
                 if current.state == ExplorerRunStateV1::Pending {
                     mark_timed_out(&mut current);
@@ -542,7 +553,6 @@ async fn execute_query(
                 return;
             }
             () = cancellation.cancelled() => {
-                tasks.abort_all();
                 let mut current = run.write().await;
                 if current.state == ExplorerRunStateV1::Pending {
                     mark_cancelled(&mut current);
@@ -550,35 +560,19 @@ async fn execute_query(
                 return;
             }
             () = request_cancellation.cancelled() => {
-                tasks.abort_all();
                 let mut current = run.write().await;
                 if current.state == ExplorerRunStateV1::Pending {
                     mark_cancelled(&mut current);
                 }
                 return;
             }
-            result = tasks.join_next() => {
-                let source = match result {
-                    Some(Ok((_, source))) => source,
-                    Some(Err(error)) => {
-                        let current = run.read().await;
-                        let source_id = current
-                            .sources
-                            .iter()
-                            .find(|source| source.outcome == ExplorerSourceOutcomeV1::Pending)
-                            .map_or(ExplorerSourceIdV1::CodeGraph, |source| source.source_id);
-                        ExplorerSourceProgressV1::error(
-                            source_id,
-                            "source_task_failed",
-                            error.to_string(),
-                        )
-                    }
-                    None => break,
+            source = tasks.next() => {
+                let Some(source) = source else {
+                    break;
                 };
                 completed += 1;
                 let mut current = run.write().await;
                 if current.state != ExplorerRunStateV1::Pending {
-                    tasks.abort_all();
                     return;
                 }
                 if let Some(slot) = current

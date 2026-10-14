@@ -80,11 +80,7 @@ fn absent_head_reflog_is_a_sealed_single_segment() {
     let fixture = fixture();
     let repository = tracedecay_runtime_core::git_open::discover(fixture.path()).unwrap();
     let head = repository.head().unwrap().log_iter();
-    let relative = head.store.namespace.as_ref().map_or_else(
-        || head.name.to_path().to_owned(),
-        |namespace| namespace.to_path().join(head.name.to_path()),
-    );
-    let path = head.store.git_dir().join("logs").join(relative);
+    let path = head_reflog_path(&head).unwrap();
     std::fs::remove_file(path).unwrap();
 
     let segments = collect_segments(fixture.path());
@@ -120,11 +116,7 @@ fn truncated_reflog_is_permanent_unsupported_framing() {
     let fixture = fixture();
     let repository = tracedecay_runtime_core::git_open::discover(fixture.path()).unwrap();
     let head = repository.head().unwrap().log_iter();
-    let relative = head.store.namespace.as_ref().map_or_else(
-        || head.name.to_path().to_owned(),
-        |namespace| namespace.to_path().join(head.name.to_path()),
-    );
-    let path = head.store.git_dir().join("logs").join(relative);
+    let path = head_reflog_path(&head).unwrap();
     let mut bytes = std::fs::read(&path).unwrap();
     assert_eq!(bytes.pop(), Some(b'\n'));
     std::fs::write(path, bytes).unwrap();

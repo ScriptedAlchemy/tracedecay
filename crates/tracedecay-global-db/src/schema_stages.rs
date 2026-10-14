@@ -446,14 +446,14 @@ enum RegisteredSchemaAdmission {
 /// inside the attach chain overflowed rustc's layout query depth limit.
 #[tracing::instrument(name = "global_db.schema.query.classify", level = "trace", skip_all)]
 async fn classify_registered_schema_admission(
-    connection: &impl QueryExecutor,
+    connection: &(impl QueryExecutor + Sync),
     scope: &StoreShardScopeV1,
 ) -> tracedecay_domain::errors::Result<RegisteredSchemaAdmission> {
     Box::pin(classify_registered_schema_authorities(connection, scope)).await
 }
 
 async fn classify_registered_schema_authorities(
-    connection: &impl QueryExecutor,
+    connection: &(impl QueryExecutor + Sync),
     scope: &StoreShardScopeV1,
 ) -> tracedecay_domain::errors::Result<RegisteredSchemaAdmission> {
     let hosts_session_features = hosts_session_features(scope);
@@ -548,7 +548,7 @@ fn configuration_schema_error(
 }
 
 async fn lcm_schema_refusal(
-    connection: &impl QueryExecutor,
+    connection: &(impl QueryExecutor + Sync),
 ) -> tracedecay_domain::errors::Result<Option<RefusedAuthorityV1>> {
     match tracedecay_lcm::schema::require_admissible_lcm_schema(connection).await {
         Ok(_) => Ok(None),
@@ -571,7 +571,7 @@ async fn lcm_schema_refusal(
 /// recorded at any other version holds a shape nothing converts, so it keeps
 /// its data untouched behind the typed, versioned reset.
 async fn git_correlation_schema_refusal(
-    connection: &impl QueryExecutor,
+    connection: &(impl QueryExecutor + Sync),
 ) -> tracedecay_domain::errors::Result<Option<RefusedAuthorityV1>> {
     let recorded = recorded_git_correlation_schema_version(connection)
         .await
@@ -856,6 +856,11 @@ async fn install_registered_schema_stage_sequence(
     session_features: SessionFeatureSchema,
     force_exhaustive: bool,
 ) -> tracedecay_domain::errors::Result<Option<RefusedAuthorityV1>> {
+    tracedecay_runtime_core::db::schema_version::retire_named_ledgers(transaction)
+        .await
+        .map_err(|error| {
+            global_db_operation_message("adopt store schema version", error.to_string())
+        })?;
     let is_fresh = configuration_fresh.is_some();
     configuration::ensure_configuration_schema(transaction, configuration_fresh)
         .await
@@ -1621,9 +1626,9 @@ mod tests {
         const PREVIOUS_LCM: i64 = LCM_SCHEMA_VERSION - 1;
         const PREVIOUS_GIT_CORRELATION: i64 = GIT_CORRELATION_SCHEMA_VERSION - 1;
         let age_session_features = format!(
-            "UPDATE session_schema_migrations SET version = {PREVIOUS_LCM} WHERE name = 'lcm';
-             UPDATE session_schema_migrations SET version = {PREVIOUS_GIT_CORRELATION}
-             WHERE name = 'git_correlation';
+            "UPDATE tracedecay_schema_version SET version = {PREVIOUS_LCM} WHERE component = 'lcm';
+             UPDATE tracedecay_schema_version SET version = {PREVIOUS_GIT_CORRELATION}
+             WHERE component = 'git_correlation';
              UPDATE workflow_schema SET definition_digest =
                 'sha256:0000000000000000000000000000000000000000000000000000000000000000';"
         );
@@ -1681,9 +1686,9 @@ mod tests {
                 .unwrap()
                 .query_row(
                     "SELECT
-                        (SELECT version FROM session_schema_migrations WHERE name = 'lcm'),
-                        (SELECT version FROM session_schema_migrations
-                         WHERE name = 'git_correlation'),
+                        (SELECT version FROM tracedecay_schema_version WHERE component = 'lcm'),
+                        (SELECT version FROM tracedecay_schema_version
+                         WHERE component = 'git_correlation'),
                         (SELECT definition_digest FROM workflow_schema)",
                     [],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
