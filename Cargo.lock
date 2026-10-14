@@ -7178,6 +7178,7 @@ name = "tracedecay-store-runtime"
 version = "0.1.0"
 dependencies = [
  "asupersync",
+ "futures-util",
  "hex",
  "libc",
  "serde",

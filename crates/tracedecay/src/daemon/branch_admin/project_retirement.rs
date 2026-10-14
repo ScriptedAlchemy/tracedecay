@@ -1,4 +1,7 @@
 use super::{StoreAdministration, StoreOwnerKey};
+use std::time::Instant;
+
+use tracedecay_runtime_core::native_runtime::{self, TimeoutError};
 use tracedecay_store_runtime::{ShutdownStatus, ShutdownTaskOutcome, ShutdownTaskReceipt};
 
 /// Drops the process-global Context Scout owner when this project's other
@@ -270,18 +273,25 @@ async fn shutdown_receipt(
         String,
         tokio::sync::watch::Receiver<ProjectServerRetirementStatus>,
     )>,
-    deadline: tokio::time::Instant,
+    deadline: Instant,
 ) -> ShutdownTaskReceipt {
     let mut receipt = ShutdownTaskReceipt::default();
     for (owner, completion) in completions {
-        let status =
-            match tokio::time::timeout_at(deadline, wait_for_project_server_retirement(completion))
-                .await
-            {
-                Ok(ProjectServerRetirementStatus::Clean) => ShutdownStatus::Clean,
-                Ok(ProjectServerRetirementStatus::Failed(error)) => ShutdownStatus::Failed(error),
-                Ok(ProjectServerRetirementStatus::Pending) | Err(_) => ShutdownStatus::TimedOut,
-            };
+        let status = match native_runtime::timeout_at(
+            deadline,
+            wait_for_project_server_retirement(completion),
+        )
+        .await
+        {
+            Ok(ProjectServerRetirementStatus::Clean) => ShutdownStatus::Clean,
+            Ok(ProjectServerRetirementStatus::Failed(error)) => ShutdownStatus::Failed(error),
+            Ok(ProjectServerRetirementStatus::Pending) | Err(TimeoutError::Elapsed) => {
+                ShutdownStatus::TimedOut
+            }
+            Err(error @ TimeoutError::TimerUnavailable(_)) => {
+                ShutdownStatus::Failed(error.to_string())
+            }
+        };
         receipt.outcomes.push(ShutdownTaskOutcome { owner, status });
     }
     receipt
@@ -291,7 +301,7 @@ pub(super) async fn settle_project_retirements(
     retirements: &tokio::sync::Mutex<Vec<ProjectServerRetirement>>,
     profile_root: &std::path::Path,
     project_id: &str,
-    deadline: tokio::time::Instant,
+    deadline: Instant,
 ) -> ShutdownTaskReceipt {
     let completions = retirements
         .lock()
@@ -373,26 +383,31 @@ impl StoreAdministration {
     /// a hung retirement surfaces as a typed timeout instead of a silent hang.
     pub(crate) async fn join_project_server_retirements_until(
         &self,
-        deadline: tokio::time::Instant,
+        deadline: impl Into<Instant>,
     ) -> ShutdownTaskReceipt {
-        let completions =
-            match tokio::time::timeout_at(deadline, self.project_server_retirements.lock()).await {
-                Ok(retirements) => retirements
-                    .iter()
-                    .map(|retirement| {
-                        (
-                            retirement_shutdown_owner_label(&retirement.owner),
-                            retirement.completion.clone(),
-                        )
-                    })
-                    .collect::<Vec<_>>(),
-                Err(_) => {
-                    return ShutdownTaskReceipt::timed_out("project_server_retirement_registry");
-                }
-            };
+        let deadline = deadline.into();
+        let completions = match native_runtime::timeout_at(
+            deadline,
+            self.project_server_retirements.lock(),
+        )
+        .await
+        {
+            Ok(retirements) => retirements
+                .iter()
+                .map(|retirement| {
+                    (
+                        retirement_shutdown_owner_label(&retirement.owner),
+                        retirement.completion.clone(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            Err(_) => {
+                return ShutdownTaskReceipt::timed_out("project_server_retirement_registry");
+            }
+        };
         let receipt = shutdown_receipt(completions, deadline).await;
         if let Ok(mut retirements) =
-            tokio::time::timeout_at(deadline, self.project_server_retirements.lock()).await
+            native_runtime::timeout_at(deadline, self.project_server_retirements.lock()).await
         {
             retirements.retain(|retirement| {
                 !matches!(
@@ -582,7 +597,7 @@ mod tests {
             retirements,
             std::path::Path::new("/profile"),
             "project-a",
-            tokio::time::Instant::now(),
+            Instant::now(),
         )
         .await;
         assert_eq!(first.status(), ShutdownStatus::TimedOut);
@@ -608,7 +623,7 @@ mod tests {
             retirements,
             std::path::Path::new("/profile"),
             "project-a",
-            tokio::time::Instant::now(),
+            Instant::now(),
         )
         .await;
         assert_eq!(partially_settled.status(), ShutdownStatus::TimedOut);
@@ -618,11 +633,43 @@ mod tests {
             retirements,
             std::path::Path::new("/profile"),
             "project-a",
-            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+            Instant::now() + std::time::Duration::from_secs(1),
         )
         .await;
         assert!(second.is_clean());
         assert!(retirements.lock().await.is_empty());
+    }
+
+    // Remote recovery settles retirements under `native_runtime::block_on`
+    // from a blocking thread, where no Tokio runtime is entered.
+    #[test]
+    fn shutdown_receipt_settles_outside_any_tokio_runtime() {
+        let (_clean_sender, clean) =
+            tokio::sync::watch::channel(ProjectServerRetirementStatus::Clean);
+        let (_pending_sender, pending) =
+            tokio::sync::watch::channel(ProjectServerRetirementStatus::Pending);
+        let deadline = Instant::now() + std::time::Duration::from_millis(50);
+
+        let receipt = native_runtime::block_on(shutdown_receipt(
+            vec![("clean".to_owned(), clean), ("pending".to_owned(), pending)],
+            deadline,
+        ))
+        .expect("native runtime");
+
+        assert!(Instant::now() >= deadline);
+        assert_eq!(
+            receipt.outcomes,
+            [
+                ShutdownTaskOutcome {
+                    owner: "clean".to_owned(),
+                    status: ShutdownStatus::Clean,
+                },
+                ShutdownTaskOutcome {
+                    owner: "pending".to_owned(),
+                    status: ShutdownStatus::TimedOut,
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -637,7 +684,7 @@ mod tests {
             &retirements,
             std::path::Path::new("/profile"),
             "project-a",
-            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+            Instant::now() + std::time::Duration::from_secs(1),
         )
         .await;
         assert!(matches!(receipt.status(), ShutdownStatus::Failed(_)));
