@@ -95,6 +95,8 @@ impl DashboardGraphTestRuntimeV1 {
             .await?;
             let graph_proxy =
                 tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
+                    &self.registry,
+                    &project_id,
                     &project_database,
                     "bind dashboard project graph",
                 )

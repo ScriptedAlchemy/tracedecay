@@ -384,6 +384,8 @@ async fn persistent_graph_activation_publishes_a_small_generation() {
     // asynchronously after `project_memory` returns, so an unawaited bind
     // races activation into "not ready for verified reads".
     tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
+        &graph_runtime,
+        &project_id,
         &project_database,
         "bind small persistent activation graph runtime",
     )
@@ -527,6 +529,8 @@ async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generat
         .await
         .expect("project database");
     tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
+        &graph_runtime,
+        &project_id,
         &project_database,
         "bind persistent historical cursor graph runtime",
     )
@@ -836,6 +840,8 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
         .await
         .expect("writable project database");
     tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
+        &graph_runtime,
+        &project_id,
         &project_database,
         "bind stale graph status projection",
     )
@@ -916,6 +922,8 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
         .await
         .expect("restarted writable project database");
     tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
+        &graph_runtime,
+        &project_id,
         &project_database,
         "bind restarted graph status projection",
     )
@@ -1536,6 +1544,8 @@ async fn restart_with_published_graph_head(
         .await
         .expect("writable project database");
     tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
+        &graph_runtime,
+        &project_id,
         &project_database,
         "bind graph projection before restart",
     )
@@ -1582,10 +1592,12 @@ async fn restart_with_published_graph_head(
             .expect("restarted graph runtime registry"),
     );
     let project_database = graph_runtime
-        .project_memory(project_id, [fixture.path().to_path_buf()])
+        .project_memory(project_id.clone(), [fixture.path().to_path_buf()])
         .await
         .expect("restarted writable project database");
     tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
+        &graph_runtime,
+        &project_id,
         &project_database,
         "bind restarted graph projection",
     )
@@ -1882,6 +1894,8 @@ async fn first_index_serves_graph_reads_without_decoding_the_generation() {
         .await
         .expect("writable project database");
     tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
+        &graph_runtime,
+        &project_id,
         &project_database,
         "bind first index graph runtime",
     )
@@ -2185,6 +2199,8 @@ impl PersistentGraphMountV1 {
             .await
             .expect("writable project database");
         tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
+            &graph_runtime,
+            &project_id,
             &project_database,
             "bind persistent graph runtime",
         )
@@ -2795,6 +2811,8 @@ async fn ignored_dependency_admission_answers_once_the_successor_catalog_serves(
         .await
         .expect("writable project database");
     tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
+        &graph_runtime,
+        &project_id,
         &project_database,
         "bind admission graph runtime",
     )
