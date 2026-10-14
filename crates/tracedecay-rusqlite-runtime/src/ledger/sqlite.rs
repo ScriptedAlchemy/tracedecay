@@ -10,7 +10,9 @@ use tracedecay_store::{
 use super::LedgerError;
 
 pub(crate) trait LedgerTransaction {
-    fn execute<P: rusqlite::Params>(&self, sql: &str, parameters: P) -> rusqlite::Result<usize>;
+    fn execute<P: rusqlite::Params>(&self, sql: &str, parameters: P) -> rusqlite::Result<usize> {
+        self.prepare(sql)?.execute(parameters)
+    }
     fn execute_batch(&self, sql: &str) -> rusqlite::Result<()>;
     fn prepare(&self, sql: &str) -> rusqlite::Result<CachedStatement<'_>>;
 }
@@ -18,14 +20,6 @@ pub(crate) trait LedgerTransaction {
 macro_rules! impl_transaction {
     ($type:ty) => {
         impl LedgerTransaction for $type {
-            fn execute<P: rusqlite::Params>(
-                &self,
-                sql: &str,
-                parameters: P,
-            ) -> rusqlite::Result<usize> {
-                self.deref().execute(sql, parameters)
-            }
-
             fn execute_batch(&self, sql: &str) -> rusqlite::Result<()> {
                 self.deref().execute_batch(sql)
             }
@@ -41,10 +35,6 @@ impl_transaction!(Transaction<'_>);
 impl_transaction!(Savepoint<'_>);
 
 impl LedgerTransaction for Connection {
-    fn execute<P: rusqlite::Params>(&self, sql: &str, parameters: P) -> rusqlite::Result<usize> {
-        Connection::execute(self, sql, parameters)
-    }
-
     fn execute_batch(&self, sql: &str) -> rusqlite::Result<()> {
         Connection::execute_batch(self, sql)
     }

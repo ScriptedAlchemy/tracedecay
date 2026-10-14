@@ -264,13 +264,9 @@ impl RegisteredGlobalDb {
                         hook_name, tool_name, tool_category, skill_name, hint_category,
                         hint_id, outcome, metadata_json
                  FROM analytics_events
-                 WHERE provider = ?1 AND project_id = ?2 AND hint_id = ?3
+                 WHERE provider = 'tracedecay-observability' AND project_id = ?1 AND hint_id = ?2
                  LIMIT 1",
-                tracedecay_runtime_core::db::engine::params![
-                    "tracedecay-observability",
-                    project_id,
-                    idempotency_key,
-                ],
+                tracedecay_runtime_core::db::engine::params![project_id, idempotency_key],
             )
             .await
             .map_err(|error| format!("failed to read observability event: {error}"))?;
@@ -1504,10 +1500,9 @@ async fn append_observability_event_in_existing_tx(
                     hook_name, tool_name, tool_category, skill_name, hint_category,
                     hint_id, outcome, metadata_json
              FROM analytics_events
-             WHERE provider = ?1 AND project_id = ?2 AND hint_id = ?3
+             WHERE provider = 'tracedecay-observability' AND project_id = ?1 AND hint_id = ?2
              LIMIT 1",
             tracedecay_runtime_core::db::engine::params![
-                event.provider.as_str(),
                 event.project_id.as_str(),
                 event.hint_id.as_deref()
             ],
