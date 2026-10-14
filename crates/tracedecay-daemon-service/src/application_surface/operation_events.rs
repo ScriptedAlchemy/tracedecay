@@ -49,28 +49,27 @@ impl Drop for SseDisconnectObserver {
         if self.terminal.load(Ordering::Relaxed) {
             return;
         }
+        let Ok(observed_at) = current_micros() else {
+            return;
+        };
         let executor = Arc::clone(&self.executor);
         let subject = self.subject.clone();
-        if let (Some(runtime), Ok(observed_at)) = (
-            tracedecay_runtime_core::native_runtime::tokio_handle(
-                "daemon-service.operation_events.sse_disconnect",
-            ),
-            current_micros(),
-        ) {
-            runtime.spawn(async move {
-                let _ = executor
-                    .observe_feedback(
-                        subject,
-                        observed_at,
-                        FeedbackSourceEventV1::SseLifecycle {
-                            lifecycle: FeedbackSseLifecycleV1::Disconnected,
-                            sequence: None,
-                            item_count: 0,
-                            duration_micros: None,
-                        },
-                    )
-                    .await;
-            });
+        let observed = tracedecay_runtime_core::native_runtime::NativeTask::spawn(async move {
+            let _ = executor
+                .observe_feedback(
+                    subject,
+                    observed_at,
+                    FeedbackSourceEventV1::SseLifecycle {
+                        lifecycle: FeedbackSseLifecycleV1::Disconnected,
+                        sequence: None,
+                        item_count: 0,
+                        duration_micros: None,
+                    },
+                )
+                .await;
+        });
+        if let Err(error) = observed {
+            tracing::warn!(%error, "SSE disconnect feedback observation was not recorded");
         }
     }
 }
@@ -930,5 +929,103 @@ pub(super) fn operation_event_application_problem(
             application_problem_response(envelope.with_owning_layer(ProblemOwningLayer::Runtime))
         }
         Err(error) => application_contract_error_response(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
+
+    use tracedecay_contracts::feedback::observations::{
+        FeedbackSourceEventV1, FeedbackSseLifecycleV1,
+    };
+    use tracedecay_domain::ManifestDigest;
+    use tracedecay_runtime_core::native_runtime;
+
+    use super::SseDisconnectObserver;
+
+    /// Forwards each observed feedback event to the test.
+    struct ObservingExecutor(std::sync::mpsc::Sender<FeedbackSourceEventV1>);
+
+    impl tracedecay_contracts::ApplicationInvocationExecutor for ObservingExecutor {
+        fn invoke(
+            &self,
+            _invocation: tracedecay_contracts::ApplicationInvocation,
+        ) -> tracedecay_contracts::ApplicationInvocationFuture<
+            '_,
+            Result<
+                tracedecay_contracts::ApplicationResponse,
+                tracedecay_contracts::InvocationError,
+            >,
+        > {
+            Box::pin(async { Err(tracedecay_contracts::InvocationError::Unavailable) })
+        }
+    }
+
+    impl tracedecay_daemon_protocol::DaemonInvocationExecutor for ObservingExecutor {
+        fn invoke_controlled(
+            &self,
+            _request: tracedecay_daemon_protocol::DaemonInvocationRequest,
+            _deadline: tracedecay_contracts::Deadline,
+            _cancellation: tracedecay_contracts::CancellationSignal,
+            _policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
+        ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
+            '_,
+            Result<
+                tracedecay_daemon_protocol::DaemonInvocationResponse,
+                tracedecay_daemon_protocol::DaemonInvocationError,
+            >,
+        > {
+            Box::pin(async { Err(tracedecay_daemon_protocol::DaemonInvocationError::Unavailable) })
+        }
+
+        fn observe_feedback(
+            &self,
+            _subject_digest: ManifestDigest,
+            _observed_at: tracedecay_domain::UtcMicros,
+            event: FeedbackSourceEventV1,
+        ) -> tracedecay_daemon_protocol::DaemonInvocationExecutorFuture<
+            '_,
+            tracedecay_domain::errors::Result<()>,
+        > {
+            let _ = self.0.send(event);
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    /// A stream dropped before its terminal still reports the disconnect when
+    /// the dropping thread has no Tokio runtime.
+    #[test]
+    fn an_sse_disconnect_is_observed_without_a_tokio_runtime() {
+        let site = "daemon-service.operation_events.sse_disconnect";
+        let tokio_misses = native_runtime::tokio_runtime_missing_count(site);
+        let (observed, observations) = std::sync::mpsc::channel();
+        native_runtime::block_on(async {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            drop(SseDisconnectObserver {
+                executor: Arc::new(ObservingExecutor(observed)),
+                subject: ManifestDigest::new(format!("sha256:{}", "a".repeat(64)))
+                    .expect("subject digest"),
+                terminal: Arc::new(AtomicBool::new(false)),
+            });
+        })
+        .expect("native runtime");
+        let event = observations
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the disconnect must be observed");
+        assert!(matches!(
+            event,
+            FeedbackSourceEventV1::SseLifecycle {
+                lifecycle: FeedbackSseLifecycleV1::Disconnected,
+                ..
+            }
+        ));
+        assert_eq!(
+            native_runtime::tokio_runtime_missing_count(site),
+            tokio_misses,
+            "the observation must not look for a Tokio runtime"
+        );
     }
 }
