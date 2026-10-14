@@ -21,7 +21,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use sigstore_verify::trust_root::{SIGSTORE_PRODUCTION_TRUSTED_ROOT, TrustedRoot};
 use sigstore_verify::types::{Bundle, Sha256Hash};
-use sigstore_verify::{VerificationPolicy, Verifier};
+use sigstore_verify::{SubjectAltName, VerificationPolicy, Verifier};
 use tracedecay_dashboard_api::cloud::ReleaseLookupError;
 
 use super::GITHUB_REPO;
@@ -201,8 +201,8 @@ pub(super) fn verify_release_attestation(
         .map_err(|error| error.to_string())
         .and_then(|root| Verifier::new(&root).map_err(|error| error.to_string()))
         .map_err(|detail| AttestationRefusal::TrustRootUnusable { detail })?;
-    let policy = VerificationPolicy::with_issuer(GITHUB_ACTIONS_ISSUER);
-    let artifact = Sha256Hash::from_bytes(digest);
+    let policy = VerificationPolicy::any_identity().require_issuer(GITHUB_ACTIONS_ISSUER);
+    let artifact = Sha256Hash::new(digest);
 
     let mut rejections = Vec::with_capacity(records.len());
     for record in records {
@@ -222,7 +222,7 @@ pub(super) fn verify_release_attestation(
                 continue;
             }
         };
-        let identity = verified.identity().unwrap_or_default();
+        let identity = verified.identity().map_or("", SubjectAltName::as_str);
         if provenance.signers.iter().any(|signer| signer == identity) {
             return Ok(identity.to_owned());
         }
