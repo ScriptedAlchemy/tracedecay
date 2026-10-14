@@ -327,6 +327,7 @@ export function GenerationAnchor(value: PublicWidget) { return value; }
             .filter(|activity| {
                 activity.worker_phase() == CodeIndexWorkerPhaseV1::Parked
                     && !activity.refresh_in_flight()
+                    && !activity.wake_pending()
             })
     })
     .await;
