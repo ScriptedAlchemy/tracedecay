@@ -729,7 +729,7 @@ async fn run_foreground_unix(
     // and is left alone. Detection is truthful about what fd 2 is, so a
     // failure to inspect it is reported, not treated as "not a file".
     let stderr_log_rotation = match BoundedStderrLog::detect() {
-        Ok(Some(log)) => Some(log.spawn_rotation()),
+        Ok(Some(log)) => log.spawn_rotation(),
         Ok(None) => None,
         Err(error) => {
             log_daemon_event(
