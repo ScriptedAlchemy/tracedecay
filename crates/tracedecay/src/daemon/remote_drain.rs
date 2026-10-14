@@ -53,7 +53,7 @@ pub(super) async fn drain_remote_node(
         Err(error) => return remote_node_operator_refusal(error),
     };
     let credentials = runtime.remote_credential_authority();
-    let drained = tokio::task::spawn_blocking(move || {
+    let drained = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         drain_pending_frames(&credentials, &request, &credential, &discovery)
     })
     .await

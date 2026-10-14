@@ -658,13 +658,18 @@ impl McpServer {
             && let Some(project_session_db) = context.project_session_db.as_ref()
         {
             let database_path = project_session_db.db_path().to_path_buf();
-            let admission_runtime = tokio::task::spawn_blocking(move || {
-                tracedecay_host_admission::HostAdmissionRuntime::open_for_database(&database_path)
-            })
-            .await
-            .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("test server host-admission task failed: {error}"),
-            })?;
+            let admission_runtime =
+                tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+                    tracedecay_host_admission::HostAdmissionRuntime::open_for_database(
+                        &database_path,
+                    )
+                })
+                .await
+                .map_err(|error| {
+                    tracedecay_domain::errors::TraceDecayError::Config {
+                        message: format!("test server host-admission task failed: {error}"),
+                    }
+                })?;
             let (admission_runtime, _) = admission_runtime?;
             context.host_admission_broker = Some(Arc::new(
                 tracedecay_host_admission::HostAdmissionBroker::new(admission_runtime),
@@ -888,7 +893,7 @@ impl McpServer {
             let project_root = cg.project_root().to_path_buf();
             let scope_prefix = scope_prefix.clone();
             tracing::Instrument::instrument(
-                tokio::task::spawn_blocking(move || {
+                tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
                     tracedecay_runtime_core::worktree::detect_scoped_worktree_index_mismatch(
                         &project_root,
                         scope_prefix.as_deref(),
@@ -1088,12 +1093,15 @@ impl McpServer {
             dispatch_authority: RetainedDispatchAuthority::new(dispatch_server.clone()),
         });
 
-        tokio::task::spawn_blocking(move || {
-            let _ = cleanup_expired_response_handles(
-                &response_handle_root,
-                tracedecay_runtime_core::tracedecay::current_timestamp(),
-            );
-        });
+        // Detached: the sweep is best-effort and the server never waits on it.
+        drop(tracedecay_runtime_core::native_runtime::NativeTask::spawn(
+            tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+                let _ = cleanup_expired_response_handles(
+                    &response_handle_root,
+                    tracedecay_runtime_core::tracedecay::current_timestamp(),
+                );
+            }),
+        ));
         if own_project_host_admission_replay
             && let Some(broker) = server.host_admission_broker.clone()
         {

@@ -2434,7 +2434,7 @@ async fn discover_production_pull_request(
             let control =
                 GitHubDiscoveryControlV1::bounded(Instant::now() + Duration::from_secs(15));
             let blocking_control = control.clone();
-            tokio::task::spawn_blocking(move || {
+            tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
                 discover_exact_commit_pull_request_v1(
                     &owner,
                     &repository,

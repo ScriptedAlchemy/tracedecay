@@ -13,6 +13,7 @@ use tracedecay_daemon_control::RemoteBrainTlsConfig;
 use tracedecay_daemon_identity::authority;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
+use tracedecay_runtime_core::native_runtime::{self, NativeTask, NativeTaskOutcome};
 
 use super::*;
 #[cfg(unix)]
@@ -37,10 +38,19 @@ fn prewarm_static_daemon_bootstrap_catalog() {
     }
 }
 
-fn log_catalog_prewarm_task(result: std::result::Result<(), tokio::task::JoinError>) {
-    if let Err(error) = result {
+/// Starts the prewarm now, so it overlaps the authority acquisition that
+/// follows rather than starting when the bootstrap first awaits it.
+fn spawn_catalog_prewarm() -> Result<NativeTask<std::result::Result<(), String>>> {
+    NativeTask::spawn(native_runtime::spawn_blocking(
+        prewarm_static_daemon_bootstrap_catalog,
+    ))
+    .map_err(|message| TraceDecayError::Config { message })
+}
+
+fn log_catalog_prewarm_task(outcome: NativeTaskOutcome<std::result::Result<(), String>>) {
+    if !matches!(outcome, NativeTaskOutcome::Completed(Ok(()))) {
         tracing::warn!(
-            %error,
+            ?outcome,
             "static MCP bootstrap catalog prewarm task failed; tools/list will retry lazily"
         );
     }
@@ -80,7 +90,7 @@ async fn run_foreground_loopback(
     tracedecay_runtime_core::native_runtime::process_runtime()
         .map_err(|message| TraceDecayError::Config { message })?;
     let profile_root = profile.data_dir().to_path_buf();
-    let catalog_prewarm = tokio::task::spawn_blocking(prewarm_static_daemon_bootstrap_catalog);
+    let catalog_prewarm = spawn_catalog_prewarm()?;
     let requested = default_loopback_endpoint();
     let _lifecycle_lease = {
         let _span = tracing::trace_span!("daemon.bootstrap.lifecycle_lease").entered();
@@ -116,7 +126,7 @@ async fn run_foreground_loopback(
     if let remote_deletion::RemoteDeletionBootMode::DeletionOnly(receipt) =
         remote_deletion::resume_remote_account_deletion_for_boot(&deletion_owners).await?
     {
-        log_catalog_prewarm_task(catalog_prewarm.await);
+        log_catalog_prewarm_task(catalog_prewarm.wait().await);
         log_daemon_event(
             "remote_account_deletion_resume",
             &[("outcome", format!("{:?}", receipt.status))],
@@ -125,7 +135,7 @@ async fn run_foreground_loopback(
     }
     let (worker_plan, catalog_prewarm) = tokio::join!(
         install_profile_worker_plan(&store_administration, &invocation),
-        catalog_prewarm
+        catalog_prewarm.wait()
     );
     worker_plan?;
     log_catalog_prewarm_task(catalog_prewarm);
@@ -519,7 +529,7 @@ async fn run_foreground_unix(
     tracedecay_runtime_core::native_runtime::process_runtime()
         .map_err(|message| TraceDecayError::Config { message })?;
     let profile_root = profile.data_dir().to_path_buf();
-    let catalog_prewarm = tokio::task::spawn_blocking(prewarm_static_daemon_bootstrap_catalog);
+    let catalog_prewarm = spawn_catalog_prewarm()?;
     let endpoint = DaemonEndpoint::Unix(socket_path);
     let _lifecycle = {
         let _span = tracing::trace_span!("daemon.bootstrap.lifecycle_lease").entered();
@@ -554,7 +564,7 @@ async fn run_foreground_unix(
     if let remote_deletion::RemoteDeletionBootMode::DeletionOnly(receipt) =
         remote_deletion::resume_remote_account_deletion_for_boot(&deletion_owners).await?
     {
-        log_catalog_prewarm_task(catalog_prewarm.await);
+        log_catalog_prewarm_task(catalog_prewarm.wait().await);
         log_daemon_event(
             "remote_account_deletion_resume",
             &[("outcome", format!("{:?}", receipt.status))],
@@ -563,7 +573,7 @@ async fn run_foreground_unix(
     }
     let (worker_plan, catalog_prewarm) = tokio::join!(
         install_profile_worker_plan(&engine.store_administration, &engine.invocation),
-        catalog_prewarm
+        catalog_prewarm.wait()
     );
     worker_plan?;
     log_catalog_prewarm_task(catalog_prewarm);

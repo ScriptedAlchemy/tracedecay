@@ -509,7 +509,7 @@ impl McpServer {
         let server = self.dispatch_authority.server();
         let spawned = self.spawn_background_task(tracing::Instrument::instrument(
             async move {
-                let latest = match tokio::task::spawn_blocking(
+                let latest = match tracedecay_runtime_core::native_runtime::spawn_blocking(
                     tracedecay_dashboard_api::cloud::fetch_latest_version,
                 )
                 .await

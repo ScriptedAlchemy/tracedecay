@@ -195,7 +195,7 @@ async fn poll_project(
     let command_control = PrCommandControl::with_cancellation(cancellation.clone());
     let repo_for_discovery = repo_root.clone();
     let discovery_control = command_control.clone();
-    let discovery = match tokio::task::spawn_blocking(move || {
+    let discovery = match tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         discover_open_prs_with_control(&repo_for_discovery, &discovery_control)
     })
     .await
