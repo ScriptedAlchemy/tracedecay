@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 #![allow(clippy::too_many_arguments, clippy::collapsible_if)]
 // binary crate: match lib allow policy for CLI dispatch
 use clap::{ArgMatches, CommandFactory, FromArgMatches};
