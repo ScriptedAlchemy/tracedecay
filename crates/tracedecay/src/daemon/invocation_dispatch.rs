@@ -555,7 +555,7 @@ pub(super) async fn execute_portable_daemon_invocation(
             #[cfg(test)]
             let project_open_attempts = project_open_attempts.clone();
             Box::pin(async move {
-                portable_project_server_for_request(
+                Box::pin(portable_project_server_for_request(
                     lifecycle,
                     store_administration,
                     project_open_gates,
@@ -565,7 +565,7 @@ pub(super) async fn execute_portable_daemon_invocation(
                     ProjectServerRequirement::Core,
                     #[cfg(test)]
                     project_open_attempts,
-                )
+                ))
                 .await
             })
         },

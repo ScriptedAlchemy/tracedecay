@@ -134,6 +134,7 @@ rust_test(
 
 rust_test(
     name = "session_ingest_index_read_cost",
+    size = "large",
     srcs = glob(["tests/**/*.rs"], exclude = ["tests/fixtures/**"]),
     crate_root = "tests/session_ingest_index_read_cost.rs",
     edition = crate_edition(),
@@ -164,6 +165,7 @@ rust_test(
 
 rust_test(
     name = "session_refresh_read_cost",
+    size = "large",
     srcs = glob(["tests/**/*.rs"], exclude = ["tests/fixtures/**"]),
     crate_root = "tests/session_refresh_read_cost.rs",
     edition = crate_edition(),

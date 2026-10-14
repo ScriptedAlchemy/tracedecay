@@ -1074,9 +1074,59 @@ impl Default for LspLeaseTaskRegistryState {
 #[derive(Default)]
 pub struct LspLeaseTaskRegistry {
     state: StdMutex<LspLeaseTaskRegistryState>,
+    /// Wall-clock milliseconds tests have moved lease time forward to.
+    #[cfg(any(test, feature = "test-helpers"))]
+    lease_clock: tokio::sync::watch::Sender<u64>,
+}
+
+/// Waits out one disconnected session's lease.
+pub(super) struct LspLeaseTimer {
+    #[cfg(any(test, feature = "test-helpers"))]
+    lease_clock: tokio::sync::watch::Receiver<u64>,
+}
+
+impl LspLeaseTimer {
+    /// Completes when wall-clock time reaches `expires_at_ms`, timed on the
+    /// native runtime. A lease whose timer cannot start ends now rather than
+    /// hold its session forever.
+    pub(super) async fn expire(self, expires_at_ms: u64) {
+        let remaining = Duration::from_millis(expires_at_ms.saturating_sub(now_millis()));
+        let timer = async {
+            if let Err(error) = tracedecay_runtime_core::native_runtime::sleep_until(
+                std::time::Instant::now() + remaining,
+            )
+            .await
+            {
+                tracing::error!(%error, "LSP lease timer unavailable; reclaiming the session now");
+            }
+        };
+        #[cfg(any(test, feature = "test-helpers"))]
+        let timer = async {
+            let mut lease_clock = self.lease_clock;
+            tokio::select! {
+                () = timer => {}
+                _ = lease_clock.wait_for(|now_ms| *now_ms >= expires_at_ms) => {}
+            }
+        };
+        timer.await;
+    }
 }
 
 impl LspLeaseTaskRegistry {
+    pub(super) fn lease_timer(&self) -> LspLeaseTimer {
+        LspLeaseTimer {
+            #[cfg(any(test, feature = "test-helpers"))]
+            lease_clock: self.lease_clock.subscribe(),
+        }
+    }
+
+    /// Ends every lease that expires by wall-clock `now_ms`, as if that time
+    /// had come.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn expire_leases_through(&self, now_ms: u64) {
+        self.lease_clock.send_replace(now_ms);
+    }
+
     pub async fn start<F>(
         self: &Arc<Self>,
         session_id: LspSessionId,

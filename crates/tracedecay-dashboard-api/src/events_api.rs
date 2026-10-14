@@ -51,7 +51,7 @@ use std::convert::Infallible;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::State;
 use axum::http::HeaderMap;
@@ -61,6 +61,7 @@ use serde::Serialize;
 use tokio_stream::wrappers::ReceiverStream;
 
 use tracedecay_runtime_core::db::engine::QueryExecutor;
+use tracedecay_runtime_core::native_runtime;
 
 use super::DashboardState;
 use super::read_model::{
@@ -579,11 +580,16 @@ impl SharedSourcePoll {
         let poller_sender = sender.clone();
         let poller_slot = Arc::clone(&self.sender);
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(POLL_INTERVAL);
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut due = Instant::now();
             loop {
-                interval.tick().await;
-                if poller_sender.receiver_count() == 0 {
+                let timer = native_runtime::sleep_until(due).await;
+                due = Instant::now() + POLL_INTERVAL;
+                if let Err(error) = &timer {
+                    // Without a timer the poller would spin; it stops and the
+                    // next subscriber arms a fresh one.
+                    tracing::error!(%error, "dashboard shared source poller timer unavailable");
+                }
+                if timer.is_err() || poller_sender.receiver_count() == 0 {
                     // The exit re-check runs under the same lock `subscribe`
                     // holds while attaching a receiver: a stream that lands in
                     // between either bumps the count (keep polling) or sees
@@ -595,7 +601,7 @@ impl SharedSourcePoll {
                             poisoned.into_inner()
                         }
                     };
-                    if poller_sender.receiver_count() == 0 {
+                    if timer.is_err() || poller_sender.receiver_count() == 0 {
                         *slot = None;
                         return;
                     }
@@ -664,10 +670,10 @@ pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> 
             }
             _ => Ok(None),
         };
-        let mut interval = tokio::time::interval(POLL_INTERVAL);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut flush = tokio::time::interval(ACTIVITY_FLUSH_INTERVAL);
-        flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let poll_due = native_runtime::sleep_until(Instant::now());
+        tokio::pin!(poll_due);
+        let flush_due = native_runtime::sleep_until(Instant::now());
+        tokio::pin!(flush_due);
         let mut tick: u64 = 0;
         let mut pending: std::collections::BTreeMap<ActivityBucketKeyV1, ActivityBucketV1> =
             std::collections::BTreeMap::new();
@@ -736,7 +742,12 @@ pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> 
 
         loop {
             let batch: Vec<DashboardEventV1> = tokio::select! {
-                _ = interval.tick() => {
+                fired = &mut poll_due => {
+                    poll_due.set(native_runtime::sleep_until(Instant::now() + POLL_INTERVAL));
+                    if let Err(error) = fired {
+                        tracing::error!(%error, "dashboard event stream timer unavailable");
+                        return;
+                    }
                     tick = tick.saturating_add(1);
                     let mut batch = Vec::new();
                     if tick.is_multiple_of(HEARTBEAT_EVERY_TICKS) {
@@ -745,7 +756,12 @@ pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> 
                     batch.extend(stream_state.poll_sources(&scope).await);
                     batch
                 }
-                _ = flush.tick() => {
+                fired = &mut flush_due => {
+                    flush_due.set(native_runtime::sleep_until(Instant::now() + ACTIVITY_FLUSH_INTERVAL));
+                    if let Err(error) = fired {
+                        tracing::error!(%error, "dashboard event stream timer unavailable");
+                        return;
+                    }
                     if pending.is_empty() {
                         continue;
                     }

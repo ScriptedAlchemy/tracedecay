@@ -111,7 +111,7 @@ async fn similarity_computation(
             let observed_revision = snapshot.store_revision();
             let rows = vector_rows(snapshot.into_points())?;
             let blocking_control = read_control.clone();
-            let computed = tokio::task::spawn_blocking(
+            let computed = tracedecay_runtime_core::native_runtime::spawn_blocking(
                 move || -> Result<SimilarityComputation, MemoryAnalysisError> {
                     {
                         let _span = tracing::trace_span!("dashboard_api.memory.similarity_compute")
