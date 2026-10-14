@@ -362,7 +362,8 @@ impl DashboardDiagnosticsAuthorityV1 {
             .broker
             .lock()
             .await
-            .prepare_refresh(language, documents);
+            .prepare_refresh(language, documents)
+            .await;
         match prepared {
             Ok(Some(prepared)) => {
                 let authority = self.clone();

@@ -284,6 +284,7 @@ where
         let mut broker = broker.lock().await;
         let prepared = broker
             .prepare_refresh(&language, vec![document])
+            .await
             .map_err(|_| LspRuntimeFailure::new("diagnostic-broker-preparation-failed"))?;
         let immediate_snapshot = prepared.is_none().then(|| broker.snapshot());
         (prepared, immediate_snapshot)

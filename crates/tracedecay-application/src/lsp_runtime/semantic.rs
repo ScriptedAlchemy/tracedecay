@@ -68,6 +68,7 @@ pub async fn production_semantic_authorities(
                     root_uri.clone(),
                     timeouts,
                 )
+                .await
                 .map_err(analyzer_runtime_config_error)?
             {
                 routes.push((language, adapter, authority));
