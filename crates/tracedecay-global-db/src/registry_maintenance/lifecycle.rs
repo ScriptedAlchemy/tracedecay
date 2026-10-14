@@ -166,12 +166,17 @@ pub async fn apply_registry_gc(
 ) -> tracedecay_domain::errors::Result<RegistryGcReport> {
     let transaction = db.begin_write_transaction().await?;
     let mut report = registry_gc_report(db, profile_root, prefix).await?;
-    for project in &report.candidates {
-        if Path::new(&project.canonical_root).exists() {
+    // Re-probe with the planning rule: an alias or store that appeared since
+    // the plan would otherwise be cascaded away with its identity.
+    for context in db
+        .project_registry_contexts_for_projects(&report.candidates)
+        .await?
+    {
+        if !project_context_liveness(&context).permits_retirement() {
             return Err(tracedecay_domain::errors::TraceDecayError::Config {
                 message: format!(
                     "registry cleanup candidate '{}' became live while applying the plan",
-                    project.project_id
+                    context.project.project_id
                 ),
             });
         }
