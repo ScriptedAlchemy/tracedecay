@@ -19,6 +19,15 @@ const OBSERVABILITY_ROLLUP_RETENTION_SECONDS: i64 = 395 * 86_400;
 const MAX_OBSERVABILITY_OUTBOX_JSON_BYTES: usize = 1_048_576;
 const OBSERVABILITY_RETENTION_ROWS_PER_CLASS: usize = 512;
 pub(crate) const ANALYTICS_INSERT_ROWS_PER_STATEMENT: usize = 500;
+// The provider is a literal so `idx_observability_event_idempotency` stays
+// usable; the planner does not match a bound value against an index predicate.
+pub(crate) const OBSERVABILITY_EVENT_BY_IDEMPOTENCY_KEY_SQL: &str =
+    "SELECT id, provider, project_id, session_id, timestamp, event_kind,
+            hook_name, tool_name, tool_category, skill_name, hint_category,
+            hint_id, outcome, metadata_json
+     FROM analytics_events
+     WHERE provider = 'tracedecay-observability' AND project_id = ?1 AND hint_id = ?2
+     LIMIT 1";
 
 #[derive(Clone, Copy)]
 enum AnalyticsAppendKind {
@@ -279,12 +288,7 @@ impl RegisteredGlobalDb {
                     + '_,
             >,
         > = Box::pin(snapshot.query(
-            "SELECT id, provider, project_id, session_id, timestamp, event_kind,
-                        hook_name, tool_name, tool_category, skill_name, hint_category,
-                        hint_id, outcome, metadata_json
-                 FROM analytics_events
-                 WHERE provider = 'tracedecay-observability' AND project_id = ?1 AND hint_id = ?2
-                 LIMIT 1",
+            OBSERVABILITY_EVENT_BY_IDEMPOTENCY_KEY_SQL,
             tracedecay_runtime_core::db::engine::params![project_id, idempotency_key],
         ));
         let mut rows = queried
@@ -1516,12 +1520,7 @@ async fn append_observability_event_in_existing_tx(
     validate_observability_event(event).map_err(ObservabilityAppendError::Failed)?;
     let mut rows = transaction
         .query(
-            "SELECT id, provider, project_id, session_id, timestamp, event_kind,
-                    hook_name, tool_name, tool_category, skill_name, hint_category,
-                    hint_id, outcome, metadata_json
-             FROM analytics_events
-             WHERE provider = 'tracedecay-observability' AND project_id = ?1 AND hint_id = ?2
-             LIMIT 1",
+            OBSERVABILITY_EVENT_BY_IDEMPOTENCY_KEY_SQL,
             tracedecay_runtime_core::db::engine::params![
                 event.project_id.as_str(),
                 event.hint_id.as_deref()

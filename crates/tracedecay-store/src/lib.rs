@@ -225,7 +225,10 @@ pub use runtime::{
     WORKSTATION_GLOBAL_QUEUE_BYTES, WalBudgetV1, WatermarkCoverageStatusV1, WorktreeId,
     canonical_store_locator_digest, graph_store_locator_path, single_shard_required_coverage_v1,
 };
-pub use schema::{GENERATION_DIAGNOSTICS_SCHEMA_DDL, RETRIEVAL_ANCHORS_SCHEMA_DDL};
+pub use schema::{
+    CLEAR_CURRENT_DIAGNOSTIC_PUBLICATION_SQL, CLEAR_CURRENT_DIAGNOSTICS_SQL,
+    GENERATION_DIAGNOSTICS_SCHEMA_DDL, RETRIEVAL_ANCHORS_SCHEMA_DDL,
+};
 pub use session::{
     MAX_SESSION_SUMMARY_SOURCE_ANCHORS, MAX_SESSION_TEMPORAL_PROJECTION_BATCH_ITEMS,
     MAX_SESSION_TEMPORAL_RETRIEVAL_PAGE_SIZE, SessionFrozenWatermarksV1,

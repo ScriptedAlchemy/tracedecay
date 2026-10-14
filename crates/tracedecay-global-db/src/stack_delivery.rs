@@ -282,22 +282,23 @@ fn decode_signal_row(
     })
 }
 
+// The state is a literal so the per-state partial indexes stay usable; the
+// planner does not match a bound value against an index predicate.
+fn state_count_sql(state: GitHubStackDeliveryStateV1) -> String {
+    format!(
+        "SELECT COUNT(*) FROM github_stack_delivery_recipients
+         WHERE project_id = ?1 AND state = '{}'",
+        state.as_str()
+    )
+}
+
 async fn state_count(
     executor: &impl QueryExecutor,
     project_id: &str,
     state: GitHubStackDeliveryStateV1,
 ) -> Result<usize, String> {
-    // The state is a literal so the per-state partial indexes stay usable; the
-    // planner does not match a bound value against an index predicate.
     let mut rows = executor
-        .query(
-            &format!(
-                "SELECT COUNT(*) FROM github_stack_delivery_recipients
-                 WHERE project_id = ?1 AND state = '{}'",
-                state.as_str()
-            ),
-            params![project_id],
-        )
+        .query(&state_count_sql(state), params![project_id])
         .await
         .map_err(|error| format!("count GitHub stack {state:?} deliveries: {error}"))?;
     let row = rows
@@ -1068,7 +1069,7 @@ mod batch_tests {
 
     use super::{
         GitHubStackDeliveryKeyV1, GitHubStackDeliveryStateV1, GitHubStackSignalRecordV1,
-        read_delivery_batch,
+        read_delivery_batch, state_count_sql,
     };
     use crate::tests::harness::RegisteredGlobalDbHarness;
 
@@ -1088,6 +1089,39 @@ mod batch_tests {
         {
             self.queries.fetch_add(1, Ordering::Relaxed);
             self.inner.query(sql, params).await
+        }
+    }
+
+    #[asupersync::test]
+    async fn state_counts_search_their_partial_indexes() {
+        let harness = RegisteredGlobalDbHarness::open("github-stack-delivery-count-plan").await;
+        let snapshot = harness.registered.read_snapshot().await.unwrap();
+        for (state, index) in [
+            (
+                GitHubStackDeliveryStateV1::Pending,
+                "idx_github_stack_delivery_pending",
+            ),
+            (
+                GitHubStackDeliveryStateV1::Deferred,
+                "idx_github_stack_delivery_deferred",
+            ),
+        ] {
+            let sql = state_count_sql(state);
+            let mut rows = snapshot
+                .query(
+                    &format!("EXPLAIN QUERY PLAN {sql}"),
+                    ["project.github-stack-count-plan"],
+                )
+                .await
+                .unwrap();
+            let mut plan = Vec::new();
+            while let Some(row) = rows.next().await.unwrap() {
+                plan.push(row.get::<String>(3).unwrap());
+            }
+            assert!(
+                plan.iter().any(|detail| detail.contains(index)),
+                "{sql}\nmust search {index}: {plan:?}"
+            );
         }
     }
 
