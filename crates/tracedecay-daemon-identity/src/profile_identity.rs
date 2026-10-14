@@ -219,7 +219,7 @@ fn new_record() -> Result<ProfileIdentityRecordV1> {
 
 fn random_identity(prefix: &str) -> Result<String> {
     let mut bytes = [0_u8; 16];
-    getrandom::getrandom(&mut bytes).map_err(|error| TraceDecayError::Config {
+    getrandom::fill(&mut bytes).map_err(|error| TraceDecayError::Config {
         message: format!("failed to generate local {prefix} identity: {error}"),
     })?;
     Ok(format!("{prefix}.{}", hex::encode(bytes)))

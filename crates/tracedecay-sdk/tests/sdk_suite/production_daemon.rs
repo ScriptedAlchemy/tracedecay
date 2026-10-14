@@ -1394,7 +1394,10 @@ fn tls_http11_request(endpoint: SocketAddr, certificate_pem: &[u8], request: &st
     let certificate = rustls::pki_types::CertificateDer::from_pem_slice(certificate_pem).unwrap();
     let mut roots = rustls::RootCertStore::empty();
     roots.add(certificate).unwrap();
-    let mut config = rustls::ClientConfig::builder()
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
         .with_root_certificates(roots)
         .with_no_client_auth();
     config.alpn_protocols = vec![b"http/1.1".to_vec()];

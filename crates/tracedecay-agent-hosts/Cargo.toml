@@ -28,7 +28,7 @@ test-transport = [
 cap-fs-ext = "4.0.2"
 cap-std = "4.0.2"
 same-file = "1.0.6"
-getrandom = "0.2"
+getrandom = "0.4"
 hex = "0.4"
 jsonc-parser = { version = "0.34.0", features = ["serde_json"] }
 serde = { version = "1", features = ["derive"] }
@@ -39,7 +39,7 @@ thiserror = "2"
 flate2 = "1"
 tracedecay-tokenizer = { path = "../tracedecay-tokenizer", optional = true }
 tokio = { version = "1", features = ["full"] }
-gix = { version = "=0.87.1", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
+gix = { version = "=0.89.0", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
 toml = "1"
 toml_edit = "0.25"
 tracing = "0.1"

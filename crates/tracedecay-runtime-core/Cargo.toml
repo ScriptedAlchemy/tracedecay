@@ -28,8 +28,8 @@ tracedecay-private-fs = { path = "../tracedecay-private-fs" }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime" }
 tracedecay-store = { path = "../tracedecay-store" }
 
-getrandom = "0.2"
-gix = { version = "=0.87.1", default-features = false, features = ["revision", "blob-diff", "merge", "parallel", "sha1", "sha256", "status"] }
+getrandom = "0.4"
+gix = { version = "=0.89.0", default-features = false, features = ["revision", "blob-diff", "merge", "parallel", "sha1", "sha256", "status"] }
 hex = "0.4"
 reflink-copy = "0.1"
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
@@ -48,7 +48,7 @@ tracing-subscriber = { version = "0.3", optional = true, default-features = fals
 libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-mach2 = "0.6"
+mach2 = "0.7"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

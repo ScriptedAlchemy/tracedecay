@@ -24,8 +24,8 @@ use crate::common::{
     response_to_json, spawn_tracedecay_daemon_logged, tracedecay_command_with_home,
 };
 
-const CAUSE: &str = "code-index repository status failed: code-index classification: IO error \
-    while writing blob or reading file metadata or changing filetype";
+const CAUSE: &str = "code-index repository status failed: code-index classification: \
+    Permission denied (os error 13)";
 const REMEDY: &str = "indexing this worktree fails the same way on every pass over unchanged \
     source; fix what the named failure points at, then run `tracedecay sync` to retry; if it \
     names an internal indexing contract, run `tracedecay upgrade` (a restarted daemon retries \

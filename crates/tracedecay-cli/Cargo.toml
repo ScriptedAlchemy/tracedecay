@@ -184,7 +184,8 @@ tree-sitter = "0.27"
 # Self-update authenticates a release archive by its GitHub build-provenance
 # attestation against the embedded Sigstore public-good trust root; without
 # `tuf` the root is pinned by this version rather than fetched at runtime.
-sigstore-verify = { version = "0.13", default-features = false }
+# `aws-lc-rs` is the crypto provider; without one every verification panics.
+sigstore-verify = { version = "0.15", default-features = false, features = ["aws-lc-rs"] }
 # GitHub serves some attestation bundles only through `bundle_url`, as a raw
 # snappy block.
 snap = "1"
@@ -217,8 +218,8 @@ libc = "0.2"
 
 [dev-dependencies]
 axum = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-dirs = "6"
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
+dirs = "7"
 socket2 = "0.6"
 tokio = { version = "1", features = ["full", "test-util"] }
 toml = "1"
