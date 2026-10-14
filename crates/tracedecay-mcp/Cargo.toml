@@ -25,7 +25,7 @@ gix.workspace = true
 glob = "0.3"
 hex = "0.4"
 libc = "0.2"
-rmcp = { version = "3.0.1", default-features = false, features = ["server"] }
+rmcp = { version = "3.5.1", default-features = false, features = ["server"] }
 # The multi-root execute tool derives its input schema from the contracts DTO.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -73,7 +73,7 @@ tree-sitter = "0.26"
 url = "2"
 
 [dev-dependencies]
-rmcp = { version = "3.0.1", default-features = false, features = ["client", "server", "transport-async-rw"] }
+rmcp = { version = "3.5.1", default-features = false, features = ["client", "server", "transport-async-rw"] }
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 tracedecay-code-index-runtime = { path = "../tracedecay-code-index-runtime", features = ["test-helpers"] }

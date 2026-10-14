@@ -48,10 +48,10 @@ pub fn initialize_result(
     instructions: &str,
     requested_protocol: Option<&str>,
 ) -> Value {
-    let protocol = ProtocolVersion::known_up_to(&ProtocolVersion::LATEST)
+    let protocol = ProtocolVersion::known_up_to(&ProtocolVersion::LATEST_WITH_INITIALIZE)
         .iter()
         .find(|known| Some(known.as_str()) == requested_protocol)
-        .unwrap_or(&ProtocolVersion::LATEST);
+        .unwrap_or(&ProtocolVersion::LATEST_WITH_INITIALIZE);
     json!({
         "protocolVersion": protocol,
         "capabilities": {

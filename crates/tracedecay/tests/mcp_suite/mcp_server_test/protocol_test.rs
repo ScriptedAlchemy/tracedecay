@@ -16,7 +16,12 @@ use tracedecay_runtime_core::tracedecay::current_timestamp;
 
 #[tokio::test]
 async fn test_initialize_negotiates_legacy_and_unknown_client_versions() {
-    for (requested, expected) in [("2024-11-05", "2024-11-05"), ("2099-01-01", "2025-11-25")] {
+    for (requested, expected) in [
+        ("2024-11-05", "2024-11-05"),
+        ("2025-11-25", "2025-11-25"),
+        ("2026-07-28", "2025-11-25"),
+        ("2099-01-01", "2025-11-25"),
+    ] {
         let (server, _dir) = setup_server().await;
         let mut initialize: Value =
             serde_json::from_str(&spec_initialize_request(json!(1))).unwrap();

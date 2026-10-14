@@ -592,7 +592,9 @@ pub fn attach_stateless_request_context(request: &mut JsonRpcRequest) -> bool {
         return false;
     };
     let mut context = RequestMetaObject::new();
-    context.set_protocol_version(ProtocolVersion::LATEST);
+    // `LATEST` (2026-07-28) has no initialize handshake, and stamping it would add
+    // resultType/ttlMs/cacheScope that strict 2025-11-25 clients reject.
+    context.set_protocol_version(ProtocolVersion::LATEST_WITH_INITIALIZE);
     context.set_client_capabilities(ClientCapabilities::default());
     let mut attached = false;
     for (key, value) in context.0.0 {
@@ -639,7 +641,7 @@ const MALFORMED_INITIALIZE_MESSAGE: &str = "initialize params are missing or mal
 /// request carried SEP-2575 `_meta` instead of `initialize` is an inline
 /// lifecycle peer, and `rmcp`'s blanket `Service` impl refuses `ping` there
 /// with method-not-found (or invalid params without `_meta`) before
-/// `ServerHandler::ping` runs (rmcp 3.4, `handler/server.rs`). MCP requires
+/// `ServerHandler::ping` runs (rmcp 3.5, `handler/server.rs`). MCP requires
 /// an empty result to a ping at any time; hosts use it as a liveness probe.
 struct GuardedHandshakeTransport<T: rmcp::transport::Transport<RoleServer>> {
     inner: T,
