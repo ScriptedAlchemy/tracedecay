@@ -990,9 +990,10 @@ async fn daemon_http_saturated_cold_resolution_preserves_curate_request_identity
     service.shutdown().await.expect("shutdown HTTP service");
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn daemon_http_timed_out_cold_resolution_preserves_curate_request_identity() {
-    let registry = DaemonHttpApplicationRegistry::default();
+    let registry = DaemonHttpApplicationRegistry::default()
+        .with_cold_resolution_deadline(std::time::Duration::from_millis(50));
     let resolver_calls = Arc::new(AtomicUsize::new(0));
     let observed_resolver_calls = Arc::clone(&resolver_calls);
     registry
@@ -1024,12 +1025,9 @@ async fn daemon_http_timed_out_cold_resolution_preserves_curate_request_identity
         )
         .await
     });
-    while resolver_calls.load(Ordering::Relaxed) < 1 {
-        tokio::task::yield_now().await;
-    }
-    tokio::time::advance(std::time::Duration::from_secs(6)).await;
     let response = request.await.expect("timed-out cold-resolution request");
 
+    assert_eq!(resolver_calls.load(Ordering::Relaxed), 1);
     assert_eq!(status(&response), StatusCode::GATEWAY_TIMEOUT);
     assert_eq!(json_body(&response)["value"]["request_id"], supplied);
     assert_eq!(
@@ -1037,6 +1035,47 @@ async fn daemon_http_timed_out_cold_resolution_preserves_curate_request_identity
         "timed_out"
     );
     service.shutdown().await.expect("shutdown HTTP service");
+}
+
+/// A Tokio runtime with neither the IO nor the time driver panics on any
+/// Tokio socket or timer, so this proves the loopback path uses neither.
+#[test]
+fn daemon_http_serves_loopback_without_tokio_io_or_time_drivers() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .build()
+        .expect("Tokio runtime without drivers");
+    runtime.block_on(async {
+        let (service, calls) = service_with_probe().await;
+        let endpoint = service.endpoint();
+        let origin = service.origin().to_owned();
+        let response = tokio::task::spawn_blocking(move || {
+            use std::io::{Read, Write};
+            let mut stream =
+                std::net::TcpStream::connect(endpoint).expect("connect daemon HTTP loopback");
+            write!(
+                stream,
+                "POST /projects/{PROJECT_ID}/application/tests/results HTTP/1.1\r\n\
+                 Host: {endpoint}\r\n\
+                 Authorization: Bearer {AUTH_TOKEN}\r\n\
+                 Origin: {origin}\r\n\
+                 Content-Length: 0\r\n\
+                 Connection: close\r\n\r\n"
+            )
+            .expect("write HTTP request");
+            let mut response = String::new();
+            stream
+                .read_to_string(&mut response)
+                .expect("read HTTP response");
+            response
+        })
+        .await
+        .expect("blocking HTTP client");
+
+        assert_eq!(status(&response), StatusCode::NO_CONTENT);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        service.shutdown().await.expect("shutdown HTTP service");
+    });
 }
 
 #[tokio::test]

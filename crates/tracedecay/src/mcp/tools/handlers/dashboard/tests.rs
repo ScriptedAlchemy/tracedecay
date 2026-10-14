@@ -23,7 +23,7 @@ async fn shutdown_deadline_aborts_joins_and_clears_dashboard_task() {
     let completion = DashboardTaskCompletion(Arc::clone(&completed));
     let task = tokio::spawn(async move {
         let _completion = completion;
-        std::future::pending::<tracedecay_domain::errors::Result<()>>().await
+        std::future::pending::<()>().await;
     });
     manager.insert(
         project_root.clone(),
@@ -65,7 +65,6 @@ async fn shutdown_observes_a_completion_signalled_before_the_stop_began() {
         // which waits on the `JoinHandle` transition instead of the signal
         // reports a deadline miss.
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        Ok(())
     });
     get_manager().lock().await.insert(
         project_root.clone(),
