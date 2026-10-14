@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::native_runtime::{self, NativeTask, NativeTaskOutcome};
 
 use super::{GitWatcherInner, WatchState, log_daemon_event};
@@ -165,14 +166,20 @@ impl GitWatcherShutdownOutcome {
 
 async fn join_before(
     outcome: &mut GitWatcherShutdownOutcome,
+    abandoned: &CancellationToken,
     owner: GitWatcherTaskOwner,
     task: NativeTask<()>,
     deadline: Instant,
 ) {
     // An unavailable timer fails closed like an elapsed deadline.
-    match native_runtime::timeout_at(deadline, task.wait()).await {
-        Ok(result) => outcome.record_join(owner, result),
-        Err(_) => {
+    let joined = tokio::select! {
+        biased;
+        joined = native_runtime::timeout_at(deadline, task.wait()) => joined.ok(),
+        () = abandoned.cancelled() => task.try_finished(),
+    };
+    match joined {
+        Some(result) => outcome.record_join(owner, result),
+        None => {
             task.abort();
             let _ = task.wait().await;
             outcome.record_timeout(owner);
@@ -187,6 +194,7 @@ pub async fn join_watcher_tasks(inner: Arc<GitWatcherInner>) -> GitWatcherShutdo
     if let Some(handle) = inner.backstop_task.lock().await.take() {
         join_before(
             &mut outcome,
+            &inner.join_abandoned,
             GitWatcherTaskOwner::Backstop,
             handle,
             deadline,
@@ -204,6 +212,7 @@ pub async fn join_watcher_tasks(inner: Arc<GitWatcherInner>) -> GitWatcherShutdo
     for (root, handle) in identity_retries {
         join_before(
             &mut outcome,
+            &inner.join_abandoned,
             GitWatcherTaskOwner::IdentityDiscovery(root),
             handle,
             deadline,
@@ -220,6 +229,7 @@ pub async fn join_watcher_tasks(inner: Arc<GitWatcherInner>) -> GitWatcherShutdo
         if let Some(handle) = state.take_task() {
             join_before(
                 &mut outcome,
+                &inner.join_abandoned,
                 GitWatcherTaskOwner::Repository(state.common_dir.clone()),
                 handle,
                 deadline,
@@ -272,6 +282,7 @@ pub async fn join_retired_repository_state(inner: &GitWatcherInner, state: &Watc
         let mut outcome = GitWatcherShutdownOutcome::default();
         join_before(
             &mut outcome,
+            &inner.join_abandoned,
             GitWatcherTaskOwner::Repository(state.common_dir.clone()),
             handle,
             Instant::now() + inner.cadence.join_budget,

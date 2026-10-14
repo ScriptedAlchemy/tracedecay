@@ -201,6 +201,10 @@ pub struct GitWatcherInner {
     shutting_down: AtomicBool,
     shutdown_completion:
         tokio::sync::Mutex<Option<Shared<BoxFuture<'static, GitWatcherShutdownOutcome>>>>,
+    /// Cancelled when a shutdown caller stops waiting before the join ends.
+    /// The join then aborts every task it still holds instead of spending the
+    /// rest of its budget.
+    join_abandoned: tracedecay_runtime_core::cancellation::CancellationToken,
     #[cfg(test)]
     repository_publication_probe: ownership::PublicationRaceProbe,
     #[cfg(test)]
@@ -254,6 +258,7 @@ impl GitWatcher {
                 backstop_task: tokio::sync::Mutex::new(None),
                 shutting_down: AtomicBool::new(false),
                 shutdown_completion: tokio::sync::Mutex::new(None),
+                join_abandoned: tracedecay_runtime_core::cancellation::CancellationToken::new(),
                 #[cfg(test)]
                 repository_publication_probe: ownership::PublicationRaceProbe::default(),
                 #[cfg(test)]
@@ -395,7 +400,13 @@ impl GitWatcher {
                 completion
             }
         };
-        completion.await
+        let mut abandoned = AbandonedShutdownJoin {
+            inner: &self.inner,
+            completion: Some(completion.clone()),
+        };
+        let outcome = completion.await;
+        abandoned.completion = None;
+        outcome
     }
 
     /// A doctor-facing health value for one project's watch coverage.
@@ -483,6 +494,29 @@ impl GitWatcher {
             .collect();
         out.sort_by(|a, b| a.0.cmp(&b.0));
         out
+    }
+}
+
+/// Finishes a shutdown join whose caller dropped it, for example the daemon
+/// coordinator at its phase deadline. Nothing else polls the retained join, so
+/// this drives it on the native runtime with the abandon signal set, and the
+/// join aborts what it still holds.
+struct AbandonedShutdownJoin<'a> {
+    inner: &'a GitWatcherInner,
+    completion: Option<Shared<BoxFuture<'static, GitWatcherShutdownOutcome>>>,
+}
+
+impl Drop for AbandonedShutdownJoin<'_> {
+    fn drop(&mut self) {
+        let Some(completion) = self.completion.take() else {
+            return;
+        };
+        self.inner.join_abandoned.cancel();
+        if let Err(error) = NativeTask::spawn(async move {
+            completion.await;
+        }) {
+            log_daemon_event("git_watch_abandoned_join_unspawned", &[("error", error)]);
+        }
     }
 }
 
