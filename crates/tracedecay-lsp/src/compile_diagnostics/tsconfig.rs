@@ -146,14 +146,11 @@ impl TypeScriptProjectConfigInputs {
     #[must_use]
     pub fn load(project_root: &Path, tsconfig: &Path) -> Self {
         let tsconfig = normalize(tsconfig);
-        let manifest_dirs = tsconfig
-            .parent()
-            .map(|dir| {
-                ancestors_within(project_root, dir)
-                    .map(Path::to_path_buf)
-                    .collect()
-            })
-            .unwrap_or_default();
+        let manifest_dirs = tsconfig.parent().map_or_default(|dir| {
+            ancestors_within(project_root, dir)
+                .map(Path::to_path_buf)
+                .collect()
+        });
         Self {
             config: Tsconfig::load(&tsconfig),
             tsconfig,

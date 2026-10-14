@@ -801,9 +801,10 @@ impl CanonicalContextProjectionAuthority for ConcreteFeedbackLspSource {
                         };
                     }
                 };
-                let mut producer_state = advisory_projection_producer(&kind)
-                    .map(|producer| advisory_projection_status(&cycle, producer).1)
-                    .unwrap_or_else(|| producer_state_for_cycle(&cycle));
+                let mut producer_state = advisory_projection_producer(&kind).map_or_else(
+                    || producer_state_for_cycle(&cycle),
+                    |producer| advisory_projection_status(&cycle, producer).1,
+                );
                 if coverage == ContextCoverage::Partial
                     && producer_state == ContextProducerState::Complete
                 {

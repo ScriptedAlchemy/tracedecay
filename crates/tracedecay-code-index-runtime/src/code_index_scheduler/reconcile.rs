@@ -4042,22 +4042,18 @@ impl CodeIndexWorktreeSchedulerV1 {
                 })
                 .flatten()
         });
-        let active_files = reusable_active
-            .as_ref()
-            .map(|active| {
-                active
-                    .snapshot()
-                    .files
-                    .iter()
-                    .filter(|file| {
-                        remembered_dirty_paths
-                            .is_none_or(|paths| !paths.contains(&file.logical_path))
-                            && self.row_follows_path_policy(file)
-                    })
-                    .map(|file| (file.logical_path.as_str(), file))
-                    .collect::<BTreeMap<_, _>>()
-            })
-            .unwrap_or_default();
+        let active_files = reusable_active.as_ref().map_or_default(|active| {
+            active
+                .snapshot()
+                .files
+                .iter()
+                .filter(|file| {
+                    remembered_dirty_paths.is_none_or(|paths| !paths.contains(&file.logical_path))
+                        && self.row_follows_path_policy(file)
+                })
+                .map(|file| (file.logical_path.as_str(), file))
+                .collect::<BTreeMap<_, _>>()
+        });
         let files = candidate_paths
             .iter()
             .filter(|logical_path| !changed_paths.contains(*logical_path))

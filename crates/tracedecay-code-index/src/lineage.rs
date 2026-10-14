@@ -620,14 +620,13 @@ impl SymbolLineageResolver {
 
         let content_candidates: Vec<usize> = by_content
             .get(symbol.content_digest.as_str())
-            .map(|indices| {
+            .map_or_default(|indices| {
                 indices
                     .iter()
                     .copied()
                     .filter(|index| !reserved(*index))
                     .collect()
-            })
-            .unwrap_or_default();
+            });
         match content_candidates.len() {
             0 => {}
             count => {
@@ -797,14 +796,13 @@ impl SymbolLineageResolver {
         //    never proves lineage.
         let content_candidates: Vec<usize> = by_content
             .get(symbol.content_digest.as_str())
-            .map(|indices| {
+            .map_or_default(|indices| {
                 indices
                     .iter()
                     .copied()
                     .filter(|index| !consumed[*index])
                     .collect()
-            })
-            .unwrap_or_default();
+            });
         match content_candidates.len() {
             0 => {}
             count => {

@@ -1060,7 +1060,7 @@ fn check_watcher(dc: &mut DoctorCounters, profile: &tracedecay_runtime_core::con
                     degraded += 1;
                     dc.warn(&format!(
                         "{project}: degraded (bounded scheduler-reconciliation fallback){}",
-                        ev.detail.map(|d| format!(", {d}")).unwrap_or_default()
+                        ev.detail.map_or_default(|d| format!(", {d}"))
                     ));
                 }
                 "git_watch_restart" => {
@@ -1396,9 +1396,7 @@ fn warn_detected_unintegrated_host(
     dc.warn(&format!(
         "{} detected{} but tracedecay is not integrated, run `tracedecay install --agent {}`",
         agent.name(),
-        surface
-            .map(|surface| format!(" ({})", surface.display()))
-            .unwrap_or_default(),
+        surface.map_or_default(|surface| format!(" ({})", surface.display())),
         agent.id()
     ));
 }

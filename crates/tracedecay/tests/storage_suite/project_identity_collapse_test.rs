@@ -147,9 +147,7 @@ async fn ephemeral_project_root_cannot_enter_a_durable_registry() {
     const PROFILE_ENV: &str = "TRACEDECAY_DURABLE_REGISTRY_FIXTURE";
     if !crate::common::in_child_test() {
         let scratch = TempDir::new_in(
-            std::env::var_os("TEST_TMPDIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(std::env::temp_dir),
+            std::env::var_os("TEST_TMPDIR").map_or_else(std::env::temp_dir, PathBuf::from),
         )
         .unwrap();
         let temporary = scratch.path().join("temporary");

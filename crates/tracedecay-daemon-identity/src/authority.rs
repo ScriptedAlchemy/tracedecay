@@ -99,13 +99,12 @@ impl DaemonAuthority {
             let record = read_record_if_present(&authority_root.join(RECORD_FILE))
                 .ok()
                 .flatten()
-                .map(|record| {
+                .map_or_default(|record| {
                     format!(
                         " (pid {}, epoch {}, endpoint '{}')",
                         record.pid, record.epoch, record.endpoint
                     )
-                })
-                .unwrap_or_default();
+                });
             return Err(TraceDecayError::Config {
                 message: format!(
                     "daemon authority for profile '{}' is already held{record}: {error}",

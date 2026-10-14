@@ -54,40 +54,30 @@ impl WorkOwnerObservationStoragePortV1 for WorkSqliteStorage {
                       worktree_id, actor_id, policy_digest
              LIMIT ?9",
             vec![
-                after
-                    .map(|cursor| ExactSqlValue::Integer(cursor.ordered_at_micros))
-                    .unwrap_or(ExactSqlValue::Null),
-                after
-                    .map(|cursor| ExactSqlValue::Text(kind_text(cursor.kind).to_owned()))
-                    .unwrap_or(ExactSqlValue::Null),
-                after
-                    .map(|cursor| ExactSqlValue::Text(cursor.command_id.as_str().to_owned()))
-                    .unwrap_or(ExactSqlValue::Null),
-                after
-                    .map(|cursor| {
-                        ExactSqlValue::Text(cursor.authority.project_id().as_str().to_owned())
-                    })
-                    .unwrap_or(ExactSqlValue::Null),
-                after
-                    .map(|cursor| {
-                        ExactSqlValue::Text(cursor.authority.repository_id().as_str().to_owned())
-                    })
-                    .unwrap_or(ExactSqlValue::Null),
-                after
-                    .map(|cursor| {
-                        ExactSqlValue::Text(cursor.authority.worktree_id().as_str().to_owned())
-                    })
-                    .unwrap_or(ExactSqlValue::Null),
-                after
-                    .map(|cursor| {
-                        ExactSqlValue::Text(cursor.authority.actor_id().as_str().to_owned())
-                    })
-                    .unwrap_or(ExactSqlValue::Null),
-                after
-                    .map(|cursor| {
-                        ExactSqlValue::Text(cursor.authority.policy_digest().as_str().to_owned())
-                    })
-                    .unwrap_or(ExactSqlValue::Null),
+                after.map_or(ExactSqlValue::Null, |cursor| {
+                    ExactSqlValue::Integer(cursor.ordered_at_micros)
+                }),
+                after.map_or(ExactSqlValue::Null, |cursor| {
+                    ExactSqlValue::Text(kind_text(cursor.kind).to_owned())
+                }),
+                after.map_or(ExactSqlValue::Null, |cursor| {
+                    ExactSqlValue::Text(cursor.command_id.as_str().to_owned())
+                }),
+                after.map_or(ExactSqlValue::Null, |cursor| {
+                    ExactSqlValue::Text(cursor.authority.project_id().as_str().to_owned())
+                }),
+                after.map_or(ExactSqlValue::Null, |cursor| {
+                    ExactSqlValue::Text(cursor.authority.repository_id().as_str().to_owned())
+                }),
+                after.map_or(ExactSqlValue::Null, |cursor| {
+                    ExactSqlValue::Text(cursor.authority.worktree_id().as_str().to_owned())
+                }),
+                after.map_or(ExactSqlValue::Null, |cursor| {
+                    ExactSqlValue::Text(cursor.authority.actor_id().as_str().to_owned())
+                }),
+                after.map_or(ExactSqlValue::Null, |cursor| {
+                    ExactSqlValue::Text(cursor.authority.policy_digest().as_str().to_owned())
+                }),
                 ExactSqlValue::Integer(i64::from(limit.get())),
             ],
         )

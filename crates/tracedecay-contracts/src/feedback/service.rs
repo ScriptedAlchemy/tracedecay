@@ -946,8 +946,7 @@ where
         let affected_tests_state = progress
             .impact
             .as_ref()
-            .map(|impact| impact.affected_tests_state)
-            .unwrap_or(impact_state);
+            .map_or(impact_state, |impact| impact.affected_tests_state);
         let termination = determine_termination(
             &progress.provider_states,
             &progress.baseline_states,
@@ -1710,26 +1709,29 @@ fn collect_diagnostics(
                             &request.input,
                         ) && diagnostic.validate().is_ok() =>
                     {
-                        let classification = baselines
-                            .get(provider_index)
-                            .map(|resolved| {
+                        let classification = baselines.get(provider_index).map_or(
+                            FeedbackDiagnosticClassificationV1::Unknown,
+                            |resolved| {
                                 resolved
                                     .baseline
                                     .zip(resolved.expected.as_ref())
-                                    .map(|(baseline, expected)| {
-                                        baseline.classify(expected, &diagnostic.diagnostic_anchor)
-                                    })
-                                    .unwrap_or_else(|| {
-                                        if resolved.state
-                                            == FeedbackBaselineStateV1::NoPriorBaseline
-                                        {
-                                            FeedbackDiagnosticClassificationV1::New
-                                        } else {
-                                            FeedbackDiagnosticClassificationV1::Unknown
-                                        }
-                                    })
-                            })
-                            .unwrap_or(FeedbackDiagnosticClassificationV1::Unknown);
+                                    .map_or_else(
+                                        || {
+                                            if resolved.state
+                                                == FeedbackBaselineStateV1::NoPriorBaseline
+                                            {
+                                                FeedbackDiagnosticClassificationV1::New
+                                            } else {
+                                                FeedbackDiagnosticClassificationV1::Unknown
+                                            }
+                                        },
+                                        |(baseline, expected)| {
+                                            baseline
+                                                .classify(expected, &diagnostic.diagnostic_anchor)
+                                        },
+                                    )
+                            },
+                        );
                         provider_findings.push(FeedbackFindingV1 {
                             finding_id: derive_feedback_finding_id(
                                 &diagnostic.diagnostic_anchor,

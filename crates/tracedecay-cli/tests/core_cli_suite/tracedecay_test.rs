@@ -208,10 +208,10 @@ fn project_path_flags_resolve_a_relative_path_from_inside_the_project() {
         "sessions import --project-path . must import into the CLI's project\nstdout:\n{stdout}\nstderr:\n{}",
         String::from_utf8_lossy(&import.stderr)
     );
-    let sync_status = stdout
-        .split_once("Check status with: ")
-        .map(|(_, command)| shell_words::split(command.trim_end()).unwrap())
-        .unwrap_or_else(|| panic!("the import hint must name its status command: {stdout}"));
+    let sync_status = stdout.split_once("Check status with: ").map_or_else(
+        || panic!("the import hint must name its status command: {stdout}"),
+        |(_, command)| shell_words::split(command.trim_end()).unwrap(),
+    );
     assert_eq!(
         sync_status[..4],
         ["tracedecay", "sessions", "sync-status", "--idempotency-key"],

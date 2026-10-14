@@ -279,8 +279,7 @@ impl ObjcExtractor {
         // Check if this is an NS_ENUM pattern
         if let Some(macro_spec) = find_direct_child_by_kind(node, "macro_type_specifier") {
             let macro_name = find_direct_child_by_kind(macro_spec, "identifier")
-                .map(|n| state.node_text(n).to_string())
-                .unwrap_or_default();
+                .map_or_default(|n| state.node_text(n).to_string());
             if macro_name == "NS_ENUM" || macro_name == "NS_OPTIONS" {
                 Self::visit_ns_enum(state, node, &macro_spec);
                 return;

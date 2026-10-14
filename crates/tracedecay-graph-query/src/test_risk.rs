@@ -196,8 +196,7 @@ pub async fn analyze_test_risk(
     let top_risk_untested = risks
         .iter()
         .find(|risk| !risk.has_test())
-        .map(|risk| risk.name.clone())
-        .unwrap_or_default();
+        .map_or_default(|risk| risk.name.clone());
     let reachable_unattributed = source_fns
         .iter()
         .filter(|n| {

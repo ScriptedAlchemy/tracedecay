@@ -612,8 +612,7 @@ impl PythonExtractor {
     fn visit_import_from(state: &mut ExtractionState<'_>, node: TsNode<'_>) {
         let module_name = find_direct_child_by_kind(node, "dotted_name")
             .or_else(|| find_direct_child_by_kind(node, "relative_import"))
-            .map(|n| state.node_text(n))
-            .unwrap_or_default()
+            .map_or_default(|n| state.node_text(n))
             .to_string();
 
         // Find the imported names in the import list or a single name.

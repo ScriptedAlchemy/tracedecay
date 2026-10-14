@@ -14,9 +14,7 @@ const PRESSURED_WAL_LOAD_BATCHES: usize = 40;
 fn wal_file_bytes(database: &RegisteredGlobalDb) -> u64 {
     let mut wal = database.db_path().as_os_str().to_owned();
     wal.push("-wal");
-    std::fs::metadata(std::path::PathBuf::from(wal))
-        .map(|metadata| metadata.len())
-        .unwrap_or(0)
+    std::fs::metadata(std::path::PathBuf::from(wal)).map_or(0, |metadata| metadata.len())
 }
 
 /// Creates the load table, pins a read snapshot on the empty WAL position,

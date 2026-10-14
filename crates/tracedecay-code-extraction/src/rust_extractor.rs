@@ -348,8 +348,10 @@ impl RustExtractor {
                 .parent_node_id()
                 .and_then(|parent_id| state.nodes.iter().rev().find(|node| node.id == parent_id))
                 .filter(|parent| parent.kind == NodeKind::Trait)
-                .map(|parent| parent.visibility.clone())
-                .unwrap_or_else(|| Self::extract_visibility(node, state))
+                .map_or_else(
+                    || Self::extract_visibility(node, state),
+                    |parent| parent.visibility.clone(),
+                )
         } else {
             Self::extract_visibility(node, state)
         };

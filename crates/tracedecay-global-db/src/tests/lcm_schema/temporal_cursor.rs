@@ -512,8 +512,7 @@ async fn temporal_schema_concurrent_cursor_rotations_serialize_safely(cx: &asupe
         let message = result
             .as_ref()
             .err()
-            .map(ToString::to_string)
-            .unwrap_or_default()
+            .map_or_default(ToString::to_string)
             .to_ascii_lowercase();
         assert!(
             !message.contains("busy") && !message.contains("locked"),

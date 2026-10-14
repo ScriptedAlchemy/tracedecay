@@ -97,8 +97,7 @@ pub fn lookup_registered_context_scout_owners(
     owners
         .get(&project_id)
         .cloned()
-        .map(|owner| vec![owner])
-        .unwrap_or_default()
+        .map_or_default(|owner| vec![owner])
 }
 
 /// What one conditional unregister did to the project's owner slot.

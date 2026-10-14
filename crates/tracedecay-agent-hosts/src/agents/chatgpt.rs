@@ -93,8 +93,7 @@ impl AgentIntegration for ChatGptIntegration {
         // proof that nothing was deployed.
         chatgpt_staged_plugin_dir(home)
             .read_dir()
-            .map(|mut entries| entries.next().is_some())
-            .unwrap_or(false)
+            .is_ok_and(|mut entries| entries.next().is_some())
     }
 
     fn detected_host_surface(&self, home: &Path, _profile: &ProfileRoot) -> Option<PathBuf> {
@@ -170,8 +169,7 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
         // fails rather than warning as if nothing were staged.
         let has_residue = staged_dir
             .read_dir()
-            .map(|mut entries| entries.next().is_some())
-            .unwrap_or(false);
+            .is_ok_and(|mut entries| entries.next().is_some());
         if has_residue {
             dc.fail(&format!(
                 "ChatGPT staged bundle at {} is incomplete: {} missing, run `tracedecay reinstall --agent chatgpt`",

@@ -125,18 +125,16 @@ fn capture_stop(home: &Path, project: &Path, generation: &str) {
 }
 
 fn published_receipts(receipts: &Path) -> Vec<PathBuf> {
-    let mut published = std::fs::read_dir(receipts)
-        .map(|entries| {
-            entries
-                .map(|entry| entry.unwrap().path())
-                .filter(|path| {
-                    path.file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.ends_with(".delivery.v1.json"))
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let mut published = std::fs::read_dir(receipts).map_or_default(|entries| {
+        entries
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(".delivery.v1.json"))
+            })
+            .collect::<Vec<_>>()
+    });
     published.sort();
     published
 }

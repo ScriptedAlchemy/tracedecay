@@ -93,8 +93,7 @@ pub(super) async fn project_scoped_api_gateway(
     let query = req
         .uri()
         .query()
-        .map(|query| format!("?{query}"))
-        .unwrap_or_default();
+        .map_or_default(|query| format!("?{query}"));
     if let Some(read) = application_read {
         let Some(project_graph) = selected.state.project_graph.as_deref() else {
             return gateway_problem(

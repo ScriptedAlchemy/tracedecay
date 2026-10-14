@@ -404,8 +404,7 @@ impl GenerationMarkers {
             admitted: self
                 .container
                 .as_deref()
-                .map(|container| load(container, identity))
-                .unwrap_or_default(),
+                .map_or_default(|container| load(container, identity)),
             proven: BTreeMap::new(),
             pristine: true,
         });

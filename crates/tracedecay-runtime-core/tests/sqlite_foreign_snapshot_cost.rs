@@ -30,9 +30,7 @@ fn written_bytes() -> u64 {
 }
 
 fn file_bytes(path: &Path) -> u64 {
-    fs::metadata(path)
-        .map(|metadata| metadata.len())
-        .unwrap_or(0)
+    fs::metadata(path).map_or(0, |metadata| metadata.len())
 }
 
 fn sidecar(path: &Path, suffix: &str) -> std::path::PathBuf {

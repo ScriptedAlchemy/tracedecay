@@ -973,9 +973,10 @@ fn handle_list_inner(
         };
         println!(
             "Total: {} on disk · {} tokens saved{}",
-            total_size
-                .map(tracedecay_runtime_core::text::format_bytes)
-                .unwrap_or_else(|| "—".to_string()),
+            total_size.map_or_else(
+                || "—".to_string(),
+                tracedecay_runtime_core::text::format_bytes
+            ),
             total_tokens_str,
             total_suffix
         );

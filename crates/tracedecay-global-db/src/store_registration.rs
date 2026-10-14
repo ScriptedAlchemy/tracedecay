@@ -125,8 +125,7 @@ pub async fn register_project_store(
 
             let tracked_branches: BTreeSet<String> = meta
                 .as_ref()
-                .map(|meta| meta.branches.keys().cloned().collect())
-                .unwrap_or_default();
+                .map_or_default(|meta| meta.branches.keys().cloned().collect());
             let artifact_mtimes = vec![
                 artifact_mtime(&store_layout.graph_db_path),
                 artifact_mtime(&store_layout.sessions_db_path),

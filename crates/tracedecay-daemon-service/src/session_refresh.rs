@@ -382,8 +382,7 @@ fn refresh_progress_view(
         coverage: refresh_coverage_view(progress.coverage()),
         source_coverage: progress
             .source_coverage()
-            .map(|receipt| receipt.sources().to_vec())
-            .unwrap_or_default(),
+            .map_or_default(|receipt| receipt.sources().to_vec()),
         committed_batches: progress.committed_batches(),
         committed_records: progress.committed_records(),
         updated_at: utc_micros_value(progress.updated_at()),
@@ -400,8 +399,7 @@ fn refresh_receipt_view(
         coverage: refresh_coverage_view(receipt.coverage()),
         source_coverage: receipt
             .source_coverage()
-            .map(|coverage| coverage.sources().to_vec())
-            .unwrap_or_default(),
+            .map_or_default(|coverage| coverage.sources().to_vec()),
         state: match receipt.state() {
             tracedecay_store::SessionRefreshTerminalStateV1::Complete => "complete",
             tracedecay_store::SessionRefreshTerminalStateV1::Failed => "failed",

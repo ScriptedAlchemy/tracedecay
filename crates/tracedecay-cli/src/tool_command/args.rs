@@ -390,8 +390,7 @@ fn unknown_key_error(
     required: &[String],
 ) -> TraceDecayError {
     let suggestion = nearest_key(key, props)
-        .map(|k| format!(", did you mean `--{}`?", k.replace('_', "-")))
-        .unwrap_or_default();
+        .map_or_default(|k| format!(", did you mean `--{}`?", k.replace('_', "-")));
     let mut valid: Vec<String> = props
         .keys()
         .map(|k| {
@@ -475,12 +474,11 @@ fn schema_required_keys(def: &ToolDefinition) -> Vec<String> {
     def.input_schema
         .get("required")
         .and_then(Value::as_array)
-        .map(|arr| {
+        .map_or_default(|arr| {
             arr.iter()
                 .filter_map(|v| v.as_str().map(String::from))
                 .collect()
         })
-        .unwrap_or_default()
 }
 
 fn max_typo_distance(name: &str) -> usize {

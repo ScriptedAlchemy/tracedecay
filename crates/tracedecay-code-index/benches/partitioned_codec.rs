@@ -225,9 +225,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn replicated_sources(replicas: usize) -> Result<Vec<SourceFile>, Box<dyn Error>> {
-    let root = std::env::var_os(CORPUS_ENV)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(CORPUS_ROOT));
+    let root =
+        std::env::var_os(CORPUS_ENV).map_or_else(|| PathBuf::from(CORPUS_ROOT), PathBuf::from);
     let root = root.as_path();
     let mut base = WalkBuilder::new(root)
         .hidden(false)

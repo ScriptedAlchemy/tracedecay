@@ -443,8 +443,7 @@ async fn payload_ref_locations_for_scope(
                 };
                 for payload_ref in value
                     .as_deref()
-                    .map(payload::extract_payload_refs_from_text)
-                    .unwrap_or_default()
+                    .map_or_default(payload::extract_payload_refs_from_text)
                 {
                     refs.entry(payload_ref.clone())
                         .or_insert_with(|| PayloadRefLocation {

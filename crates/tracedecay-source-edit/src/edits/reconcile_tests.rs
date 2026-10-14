@@ -193,11 +193,8 @@ async fn prepared_roll_forward_keeps_journal_when_rollback_material_cannot_persi
     let store = fixture.transaction_store();
     let obstruction = store.join("rollback-records");
     std::fs::write(&obstruction, b"not a directory").unwrap();
-    let receipts = || {
-        std::fs::read_dir(store.join("receipts"))
-            .map(|entries| entries.count())
-            .unwrap_or(0)
-    };
+    let receipts =
+        || std::fs::read_dir(store.join("receipts")).map_or(0, |entries| entries.count());
     let receipts_before = receipts();
 
     assert!(

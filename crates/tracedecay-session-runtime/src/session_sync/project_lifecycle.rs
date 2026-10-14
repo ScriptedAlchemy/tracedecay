@@ -532,9 +532,7 @@ impl DaemonSessionSyncService {
             return Err(format!(
                 "session sync project '{}' could not recover after rebind: {error}{}",
                 project_id.as_str(),
-                drain
-                    .map(|drain| format!("; rollback failed: {drain}"))
-                    .unwrap_or_default(),
+                drain.map_or_default(|drain| format!("; rollback failed: {drain}")),
             ));
         }
         Ok(true)

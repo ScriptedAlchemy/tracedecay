@@ -208,13 +208,12 @@ async fn ingested_server() -> (Arc<McpServer>, TempDir, TempDir, TempDir) {
 fn omission_reasons(evidence: &Value) -> Vec<String> {
     evidence["omissions"]
         .as_array()
-        .map(|omissions| {
+        .map_or_default(|omissions| {
             omissions
                 .iter()
                 .map(|omission| omission["reason"].as_str().unwrap_or("").to_string())
                 .collect()
         })
-        .unwrap_or_default()
 }
 
 #[tokio::test]

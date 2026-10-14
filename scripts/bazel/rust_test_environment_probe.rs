@@ -1,3 +1,38 @@
+fn compiler_version(
+    program: impl AsRef<std::ffi::OsStr>,
+    home: &std::path::Path,
+    rustup_home: Option<&std::path::Path>,
+) -> String {
+    let mut command = std::process::Command::new(program.as_ref());
+    command.arg("--version").current_dir(home);
+    if let Some(rustup_home) = rustup_home {
+        command.env("RUSTUP_HOME", rustup_home);
+    }
+    let output = command
+        .output()
+        .expect("run fixture compiler outside the workspace");
+    assert!(
+        output.status.success(),
+        "{:?}: {output:?}",
+        program.as_ref()
+    );
+    String::from_utf8(output.stdout).expect("compiler version is UTF-8")
+}
+
+fn assert_pinned_compiler(channel: &str, version: &str, label: &str) {
+    if channel.starts_with("nightly-") {
+        assert!(
+            version.contains("nightly"),
+            "{label} {version} is not the pinned nightly {channel}"
+        );
+    } else {
+        assert!(
+            version.contains(channel),
+            "{label} {version} does not contain {channel}"
+        );
+    }
+}
+
 fn main() {
     let manifest_dir =
         std::env::var("CARGO_MANIFEST_DIR").expect("rules_rust must provide CARGO_MANIFEST_DIR");
@@ -34,36 +69,28 @@ fn main() {
         std::path::Path::new(&test_tmpdir).join("cargo-home"),
     );
     let toolchain = std::env::var("RUSTUP_TOOLCHAIN").expect("pinned test toolchain");
+    // A dated nightly's `rustc --version` is `1.x.0-nightly (hash date)`.
+    // The channel date is not in that string, so PATH identity is the
+    // declared binary's version text.
+    let channel = toolchain.replace('/', "-");
+    let mut declared = std::collections::BTreeMap::new();
     for variable in ["CARGO", "RUSTC", "RUSTDOC"] {
         let tool = std::path::PathBuf::from(std::env::var_os(variable).expect("fixture compiler"));
         assert!(tool.is_absolute(), "{variable}={}", tool.display());
-        let output = std::process::Command::new(&tool)
-            .arg("--version")
-            .current_dir(&home)
-            .output()
-            .expect("run fixture compiler outside the workspace");
-        assert!(output.status.success(), "{variable}: {:?}", output);
-        assert!(
-            String::from_utf8(output.stdout)
-                .unwrap()
-                .contains(&toolchain)
-        );
+        let version = compiler_version(&tool, &home, None);
+        assert_pinned_compiler(&channel, &version, variable);
+        declared.insert(variable, version);
     }
 
     // Exercise the production runner's literal executable lookup under a
     // fresh home: no rustup proxy may download a second toolchain here.
     for tool in ["cargo", "rustc", "rustdoc"] {
-        let output = std::process::Command::new(tool)
-            .arg("--version")
-            .env("RUSTUP_HOME", home.join("empty-rustup"))
-            .current_dir(&home)
-            .output()
-            .expect("run declared toolchain through PATH");
-        assert!(output.status.success(), "{tool}: {output:?}");
-        assert!(
-            String::from_utf8(output.stdout)
-                .unwrap()
-                .contains(&toolchain)
+        let version = compiler_version(tool, &home, Some(home.join("empty-rustup").as_path()));
+        let variable = tool.to_ascii_uppercase();
+        assert_eq!(
+            version,
+            declared[&variable.as_str()],
+            "PATH {tool} is not the declared toolchain"
         );
     }
     let fixture = home.join("fixture");

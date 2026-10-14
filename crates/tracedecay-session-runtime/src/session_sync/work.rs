@@ -478,9 +478,9 @@ impl SessionSyncProjectContext {
         .await
         .map_err(store_error)?;
         Ok(
-            git_history_frontier_from_meta(change_sequence, source_rowid)
-                .map(|frontier| vec![git_history_source_frontier(&self.project_id, frontier)])
-                .unwrap_or_default(),
+            git_history_frontier_from_meta(change_sequence, source_rowid).map_or_default(
+                |frontier| vec![git_history_source_frontier(&self.project_id, frontier)],
+            ),
         )
     }
 

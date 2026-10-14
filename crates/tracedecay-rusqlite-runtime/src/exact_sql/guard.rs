@@ -66,11 +66,9 @@ where
         .map_err(|error| sqlite_error("install transaction-control guard", error))?;
     let deadline = if enforce_statement_limit {
         let operation_deadline = clock::now() + EXACT_SQL_EXECUTION_LIMIT;
-        Some(
-            execution_deadline
-                .map(|deadline| deadline.min(operation_deadline))
-                .unwrap_or(operation_deadline),
-        )
+        Some(execution_deadline.map_or(operation_deadline, |deadline| {
+            deadline.min(operation_deadline)
+        }))
     } else {
         execution_deadline
     };

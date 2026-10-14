@@ -84,8 +84,7 @@ async fn run_stdio_bridge(
             .map(|binding| binding.canonical_root_uri.clone()),
         initialize
             .as_ref()
-            .map(|binding| binding.workspace_folders.clone())
-            .unwrap_or_default(),
+            .map_or_default(|binding| binding.workspace_folders.clone()),
         deadline,
         cancellation,
     )

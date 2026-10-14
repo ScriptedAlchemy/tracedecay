@@ -263,8 +263,7 @@ async fn project_memory_rank_facts_tx(
         .unwrap_or(Confidence::new(0.3).map_err(FactStoreError::from)?);
     let fts_scores = candidates
         .as_mut()
-        .map(|candidates| std::mem::take(&mut candidates.fts_scores))
-        .unwrap_or_default();
+        .map_or_default(|candidates| std::mem::take(&mut candidates.fts_scores));
     let mut facts = if let Some(candidates) = candidates.take() {
         ensure_project_memory_read_active(read_control)?;
         let projections = load_project_memory_projections_controlled_tx(

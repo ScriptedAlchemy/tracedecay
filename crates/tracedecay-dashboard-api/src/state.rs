@@ -477,10 +477,10 @@ pub(super) async fn build_state_inner(
         ),
         _ => None,
     };
-    let savings_db_path = registered_savings_db
-        .as_ref()
-        .map(|db| db.db_path().display().to_string())
-        .unwrap_or_else(|| cg.profile.global_db_path().display().to_string());
+    let savings_db_path = registered_savings_db.as_ref().map_or_else(
+        || cg.profile.global_db_path().display().to_string(),
+        |db| db.db_path().display().to_string(),
+    );
     let delivery_settlements = Arc::new(
         events_delivery::DashboardDeliverySettlementRegistryV1::new(delivery_settlement_authority),
     );

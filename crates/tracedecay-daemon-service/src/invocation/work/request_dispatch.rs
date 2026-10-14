@@ -884,8 +884,7 @@ pub(super) async fn dispatch_work_application(
                 let transition = services.run_control().pause_with_receipt(&context, command);
                 let open_receipts = transition
                     .as_ref()
-                    .map(|transition| transition.blocked_intervals.clone())
-                    .unwrap_or_default();
+                    .map_or_default(|transition| transition.blocked_intervals.clone());
                 let response = complete_work_effect(
                     &registered,
                     request_id,
@@ -916,8 +915,7 @@ pub(super) async fn dispatch_work_application(
                     .resume_with_receipt(&context, command);
                 let settled_receipts = transition
                     .as_ref()
-                    .map(|transition| transition.blocked_intervals.clone())
-                    .unwrap_or_default();
+                    .map_or_default(|transition| transition.blocked_intervals.clone());
                 let response = complete_work_effect(
                     &registered,
                     request_id,

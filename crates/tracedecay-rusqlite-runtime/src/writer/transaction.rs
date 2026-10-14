@@ -260,14 +260,14 @@ pub(super) fn process_batch<E: StorageOperationExecutor>(
     let lock_held = lock_held_from.elapsed();
     record_transaction(
         telemetry,
-        commit_failure
-            .as_ref()
-            .map(transaction_outcome)
-            .unwrap_or(if has_pending_writes {
+        commit_failure.as_ref().map_or(
+            if has_pending_writes {
                 WriterTransactionOutcome::Committed
             } else {
                 WriterTransactionOutcome::RolledBack
-            }),
+            },
+            transaction_outcome,
+        ),
         command_count,
         connection.total_changes().saturating_sub(rows_before),
         started,
@@ -456,11 +456,9 @@ fn rollback_or(
     fallback: StorageRuntimeErrorV1,
     operation: &'static str,
 ) -> StorageRuntimeErrorV1 {
-    savepoint
-        .rollback()
-        .err()
-        .map(|error| driver_failure(error, operation).storage_error())
-        .unwrap_or(fallback)
+    savepoint.rollback().err().map_or(fallback, |error| {
+        driver_failure(error, operation).storage_error()
+    })
 }
 
 fn settle_batch_failure(
@@ -556,12 +554,14 @@ fn settle_commit_denied(
                 item.probe.as_ref(),
                 RuntimeCancellationStageV1::BeforeCommit,
             )
-            .map(Ok)
-            .unwrap_or_else(|| {
-                Ok(RuntimeSubmitOutcomeV1::Unavailable {
-                    reason: UnavailableReasonV1::Faulted,
-                })
-            })
+            .map_or_else(
+                || {
+                    Ok(RuntimeSubmitOutcomeV1::Unavailable {
+                        reason: UnavailableReasonV1::Faulted,
+                    })
+                },
+                Ok,
+            )
         } else {
             match result {
                 PreparedResult::Final(result) => result,

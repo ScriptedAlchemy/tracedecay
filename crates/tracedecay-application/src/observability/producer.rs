@@ -1040,10 +1040,10 @@ async fn settle_worker(
             for carried_drop in carried_drops {
                 push_drop_range(&mut ranges, carried_drop);
             }
-            let emission_identity = owner_fact
-                .as_ref()
-                .map(|owner| owner.emission_identity.clone())
-                .unwrap_or_else(|| identity_from_envelope(&envelope));
+            let emission_identity = owner_fact.as_ref().map_or_else(
+                || identity_from_envelope(&envelope),
+                |owner| owner.emission_identity.clone(),
+            );
             let sequence = if owner_fact.is_some() {
                 state.next_sequence.fetch_add(1, Ordering::AcqRel)
             } else {

@@ -2866,11 +2866,7 @@ fn sqlite_family_bytes(path: &std::path::Path) -> u64 {
             name.push(*suffix);
             std::path::PathBuf::from(name)
         };
-        total.saturating_add(
-            std::fs::metadata(member)
-                .map(|meta| meta.len())
-                .unwrap_or(0),
-        )
+        total.saturating_add(std::fs::metadata(member).map_or(0, |meta| meta.len()))
     })
 }
 

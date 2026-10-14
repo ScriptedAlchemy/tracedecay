@@ -39,8 +39,7 @@ fn evidence_strength(
         authority_rank(occurrence.evidence.authority),
         support
             .get(&occurrence.anchor_id)
-            .map(BTreeSet::len)
-            .unwrap_or_default(),
+            .map_or_default(BTreeSet::len),
     )
 }
 
@@ -138,15 +137,12 @@ fn cycle_members_among(
     hook: &mut dyn FnMut(ResolutionCheckpoint) -> Result<(), TemporalPortError>,
 ) -> Result<BTreeSet<RetrievalAnchorId>, TemporalPortError> {
     let children_in_subgraph = |node: &RetrievalAnchorId| -> Vec<RetrievalAnchorId> {
-        descendants
-            .get(node)
-            .map(|set| {
-                set.iter()
-                    .filter(|child| nodes.contains(*child))
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default()
+        descendants.get(node).map_or_default(|set| {
+            set.iter()
+                .filter(|child| nodes.contains(*child))
+                .cloned()
+                .collect()
+        })
     };
 
     let mut index_of = BTreeMap::<RetrievalAnchorId, usize>::new();

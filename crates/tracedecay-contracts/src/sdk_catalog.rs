@@ -537,10 +537,10 @@ mod tests {
                 .as_str()
                 .strip_prefix("operation.")
                 .expect("canonical operation ID");
-            let expected_method = operation
-                .strip_prefix("application.code_")
-                .map(|suffix| format!("code_{suffix}"))
-                .unwrap_or_else(|| operation.replace('.', "_"));
+            let expected_method = operation.strip_prefix("application.code_").map_or_else(
+                || operation.replace('.', "_"),
+                |suffix| format!("code_{suffix}"),
+            );
             assert_eq!(
                 projected_binding.sdk_method().as_str(),
                 expected_method,

@@ -111,9 +111,7 @@ impl HlslExtractor {
         );
 
         let body = node.child_by_field_name("body");
-        let metrics = body
-            .map(|b| count_complexity(b, &C_COMPLEXITY, state.source))
-            .unwrap_or_default();
+        let metrics = body.map_or_default(|b| count_complexity(b, &C_COMPLEXITY, state.source));
 
         let graph_node = Node {
             id: id.clone(),

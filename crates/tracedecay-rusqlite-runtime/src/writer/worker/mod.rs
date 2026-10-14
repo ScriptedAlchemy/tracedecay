@@ -1019,8 +1019,8 @@ fn checkpoint_sample(result: &CheckpointResult) -> WalCheckpointSample {
             snapshot_blockers,
             ..
         } => WalCheckpointSample {
-            wal_frames: sample.map(|sample| sample.frames).unwrap_or(0),
-            wal_bytes: sample.map(|sample| sample.bytes).unwrap_or(0),
+            wal_frames: sample.map_or(0, |sample| sample.frames),
+            wal_bytes: sample.map_or(0, |sample| sample.bytes),
             blocker_count: u64::try_from(snapshot_blockers.count()).unwrap_or(u64::MAX),
             ..WalCheckpointSample::default()
         },

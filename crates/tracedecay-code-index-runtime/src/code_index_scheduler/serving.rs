@@ -3852,8 +3852,7 @@ fn ensure_private_text_artifacts_root(path: &Path) -> Result<(), RetrievalPortEr
                      re-enroll the store",
                     path.display(),
                     observed_unix_mode(path)
-                        .map(|mode| format!(" (mode {mode:o}, need 700)"))
-                        .unwrap_or_default(),
+                        .map_or_default(|mode| format!(" (mode {mode:o}, need 700)")),
                 ))
             })
         }
