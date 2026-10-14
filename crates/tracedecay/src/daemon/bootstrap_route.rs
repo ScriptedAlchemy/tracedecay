@@ -5,6 +5,9 @@
 //! project admission.
 
 use super::*;
+use tracedecay_mcp::server::{
+    request_protocol_version, speaks_2026_07_28, stamp_2026_07_28_result,
+};
 
 fn bootstrap_tools_list_payload(node_count: Option<u64>, budget: u8) -> Result<serde_json::Value> {
     let profile_id = tracedecay_tool_catalog::ProfileId::new(
@@ -170,7 +173,13 @@ pub(super) fn daemon_bootstrap_response(
                 bootstrap_tools_list_payload(project_node_count, budget)
             };
             match payload {
-                Ok(payload) => JsonRpcResponse::success(id, payload),
+                Ok(mut payload) => {
+                    if speaks_2026_07_28(request_protocol_version(request.params.as_ref()).as_ref())
+                    {
+                        stamp_2026_07_28_result(&request.method, &mut payload);
+                    }
+                    JsonRpcResponse::success(id, payload)
+                }
                 Err(_) => JsonRpcResponse::error(
                     id,
                     ErrorCode::InternalError,

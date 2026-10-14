@@ -10,11 +10,12 @@ use std::sync::Arc;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ClientCapabilities,
     CustomNotification, CustomRequest, CustomResult, ErrorCode, ErrorData, Implementation,
-    InitializeRequestParams, InitializeResult, ListResourcesResult, ListToolsResult, MetaObject,
-    ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult,
-    RequestMetaObject, ServerCapabilities, ServerConfig,
+    InitializeRequestParams, InitializeResult, ListPromptsResult, ListResourceTemplatesResult,
+    ListResourcesResult, ListToolsResult, MetaObject, PaginatedRequestParams, ProtocolVersion,
+    ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, RequestMetaObject,
+    ServerCapabilities, ServerConfig,
 };
-use rmcp::service::{NotificationContext, RequestContext};
+use rmcp::service::{MaybeSendFuture, NotificationContext, RequestContext};
 use rmcp::{RoleServer, ServerHandler};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -24,7 +25,7 @@ use crate::transport::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 
 use super::{
     McpConnectionContext, McpConnectionState, McpDispatchParams, McpDispatchRequest,
-    McpResponseLease, dispatch_is_independent_read,
+    McpResponseLease, dispatch_is_independent_read, speaks_2026_07_28, stamp_2026_07_28_result,
 };
 
 /// Per-RMCP-connection handoff from handler completion to the transport write.
@@ -340,6 +341,7 @@ where
         method: &str,
         params: McpDispatchParams<'_>,
     ) -> Result<JsonRpcResponse, ErrorData> {
+        let on_2026_07_28 = speaks_2026_07_28(context.protocol_version().as_ref());
         let request_permit = self.acquire_request_permit().await?;
         // Heap-allocate the admission + dispatch composition: rmcp's generated
         // `handle_request` polls every handler-method future inline, and the
@@ -350,7 +352,12 @@ where
             .run_in_connection_admission(self.dispatch_admitted(context, method, params))
             .await;
         drop(request_permit);
-        result
+        result.map(|mut response| {
+            if on_2026_07_28 && let Some(result) = response.result.as_mut() {
+                stamp_2026_07_28_result(method, result);
+            }
+            response
+        })
     }
 
     #[tracing::instrument(name = "mcp.server.rmcp.queue_wait", level = "trace", skip_all)]
@@ -762,7 +769,7 @@ where
 
     async fn list_tools(
         &self,
-        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
         rmcp_response_result(
@@ -800,13 +807,38 @@ where
 
     async fn list_resources(
         &self,
-        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, ErrorData> {
         rmcp_response_result(
             self.dispatch(context, "resources/list", McpDispatchParams::TypedEmpty)
                 .await?,
         )
+    }
+
+    fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<ListResourceTemplatesResult, ErrorData>> + MaybeSendFuture + '_
+    {
+        std::future::ready(empty_list_result(
+            &context,
+            "resources/templates/list",
+            json!({ "resourceTemplates": [] }),
+        ))
+    }
+
+    fn list_prompts(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<ListPromptsResult, ErrorData>> + MaybeSendFuture + '_ {
+        std::future::ready(empty_list_result(
+            &context,
+            "prompts/list",
+            json!({ "prompts": [] }),
+        ))
     }
 
     async fn read_resource(
@@ -870,6 +902,19 @@ where
         )
         .map(CustomResult::new)
     }
+}
+
+/// A list this server always answers empty, shaped for the request's revision.
+fn empty_list_result<T: DeserializeOwned>(
+    context: &RequestContext<RoleServer>,
+    method: &str,
+    mut result: Value,
+) -> Result<T, ErrorData> {
+    if speaks_2026_07_28(context.protocol_version().as_ref()) {
+        stamp_2026_07_28_result(method, &mut result);
+    }
+    serde_json::from_value(result)
+        .map_err(|error| ErrorData::internal_error(error.to_string(), None))
 }
 
 fn rmcp_error(error: JsonRpcError) -> ErrorData {
