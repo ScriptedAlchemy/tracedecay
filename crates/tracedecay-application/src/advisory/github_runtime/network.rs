@@ -12,6 +12,7 @@ use tracedecay_domain::feedback::{
     GitHubReviewReadOperationV1,
 };
 use tracedecay_domain::{UserProfileId, UtcMicros};
+use tracedecay_runtime_core::native_runtime;
 use url::Url;
 use zeroize::Zeroizing;
 
@@ -1605,7 +1606,7 @@ impl GitHubCiReadOnlyClientV1 {
         let client = self.clone();
         let context_for_read = context.clone();
         Box::pin(async move {
-            let task = tokio::task::spawn_blocking(move || {
+            let read = move || {
                 if request_context_admitted(&context_for_read)
                     && !matches!(
                         client.credential.authorization_for_repository(
@@ -1636,8 +1637,8 @@ impl GitHubCiReadOnlyClientV1 {
                 } else {
                     HttpResponseV1::Denied
                 }
-            });
-            match wait_for_read(context, task).await {
+            };
+            match wait_for_read(context, read).await {
                 Some(HttpResponseV1::Ok { body, etag, .. })
                     if body.len() <= MAX_CI_RESPONSE_BYTES_V1 =>
                 {
@@ -1717,10 +1718,11 @@ impl GitHubReadOnlyNetworkAuthorityV1 for GitHubReadOnlyClientV1 {
         let request = request.clone();
         Box::pin(async move {
             let wait_context = context.clone();
-            let task = tokio::task::spawn_blocking(move || client.execute_rest(&context, &request));
-            wait_for_read(&wait_context, task)
-                .await
-                .unwrap_or(GitHubReadNetworkOutcomeV1::Unavailable)
+            wait_for_read(&wait_context, move || {
+                client.execute_rest(&context, &request)
+            })
+            .await
+            .unwrap_or(GitHubReadNetworkOutcomeV1::Unavailable)
         })
     }
 
@@ -1743,11 +1745,11 @@ impl GitHubReadOnlyNetworkAuthorityV1 for GitHubReadOnlyClientV1 {
         let request = request.clone();
         Box::pin(async move {
             let wait_context = context.clone();
-            let task =
-                tokio::task::spawn_blocking(move || client.execute_graphql(&context, &request));
-            wait_for_read(&wait_context, task)
-                .await
-                .unwrap_or(GitHubReadNetworkOutcomeV1::Unavailable)
+            wait_for_read(&wait_context, move || {
+                client.execute_graphql(&context, &request)
+            })
+            .await
+            .unwrap_or(GitHubReadNetworkOutcomeV1::Unavailable)
         })
     }
 }
@@ -1889,29 +1891,15 @@ fn decode_ureq_response(
     }
 }
 
-async fn wait_for_read<T: Send + 'static>(
-    context: &RequestContext,
-    mut task: tokio::task::JoinHandle<T>,
-) -> Option<T> {
-    tokio::select! {
-        result = &mut task => result.ok(),
-        () = wait_for_interruption(context) => {
-            let _ = task.await;
-            None
-        },
-    }
-}
-
-async fn wait_for_interruption(context: &RequestContext) {
-    loop {
-        if !matches!(
-            context.admission_at(now_micros()),
-            RequestAdmission::Admitted
-        ) {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+/// Runs one blocking read to completion; a read whose request stopped being
+/// admitted while it ran yields no response.
+async fn wait_for_read<T, F>(context: &RequestContext, read: F) -> Option<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let response = native_runtime::spawn_blocking(read).await.ok()?;
+    request_context_admitted(context).then_some(response)
 }
 
 fn request_context_admitted(context: &RequestContext) -> bool {

@@ -11,7 +11,7 @@ use super::{
     LcmTokenCountProvenanceV1, message_tool_use_id,
 };
 
-pub(super) fn render_canonical_payload<T>(
+pub(super) async fn render_canonical_payload<T>(
     request: DashboardLcmReadRequestV1,
     page: DashboardLcmCanonicalPageV1,
     storage_scope: &str,
@@ -20,7 +20,7 @@ pub(super) fn render_canonical_payload<T>(
 where
     T: serde::de::DeserializeOwned,
 {
-    warm_displayed_content_token_counts(&page, token_counts);
+    warm_displayed_content_token_counts(&page, token_counts).await;
     let value = match request {
         DashboardLcmReadRequestV1::Overview { query, limit } => {
             overview_json(page, query, limit, storage_scope, token_counts)?
@@ -239,7 +239,7 @@ struct DisplayedContentTokenCount {
 
 /// Counts uncached displayed-content tokens off the async worker in one batch
 /// so later per-message lookups hit [`TokenCountCache`].
-fn warm_displayed_content_token_counts(
+async fn warm_displayed_content_token_counts(
     page: &DashboardLcmCanonicalPageV1,
     token_counts: &TokenCountCache,
 ) {
@@ -258,7 +258,7 @@ fn warm_displayed_content_token_counts(
     if misses.is_empty() {
         return;
     }
-    for (provider, message_id, fingerprint, tokens) in count_displayed_token_batch(misses) {
+    for (provider, message_id, fingerprint, tokens) in count_displayed_token_batch(misses).await {
         token_counts.store_displayed_tokens(&provider, &message_id, fingerprint, tokens);
     }
 }
@@ -284,27 +284,19 @@ fn collect_displayed_token_misses(
     }
 }
 
-fn count_displayed_token_batch(
+async fn count_displayed_token_batch(
     misses: Vec<(String, String, ContentFingerprint, String)>,
 ) -> Vec<(String, String, ContentFingerprint, i64)> {
-    let count = move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         misses
             .into_iter()
             .filter_map(|(provider, message_id, fingerprint, text)| {
                 count_text_tokens(&text).map(|tokens| (provider, message_id, fingerprint, tokens))
             })
             .collect::<Vec<_>>()
-    };
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(|| {
-                handle
-                    .block_on(tokio::task::spawn_blocking(count))
-                    .unwrap_or_default()
-            })
-        }
-        _ => count(),
-    }
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// Token count of the displayed message content, served from the shared

@@ -11,6 +11,7 @@ use tracedecay_contracts::retrieval::{
 use tracedecay_contracts::{DisclosureClass, EvidenceDomain, OmissionReason};
 use tracedecay_domain::{RetrievalAnchorId, canonical_sha256};
 use tracedecay_graph_query::SourceReadContext;
+use tracedecay_runtime_core::native_runtime;
 
 use super::super::runtime::ExtendedPrimitiveFuture;
 use super::{completed, evidence_unavailable, failed, now_observed};
@@ -73,8 +74,9 @@ impl SourceRetrievalPort for TraceDecaySourceLinesPortV1 {
                 let Some(relative) = identity.logical_path(&request.file) else {
                     return unavailable(OmissionReason::Stale);
                 };
-                let Ok(bytes) =
-                    tokio::fs::read(self.source_runtime.project_root().join(relative)).await
+                let source = self.source_runtime.project_root().join(relative);
+                let Ok(Ok(bytes)) =
+                    native_runtime::spawn_blocking(move || std::fs::read(source)).await
                 else {
                     return unavailable(OmissionReason::Unavailable);
                 };
