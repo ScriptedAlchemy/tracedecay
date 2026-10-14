@@ -49,8 +49,9 @@ struct ActiveSessionImport {
 }
 
 /// Owns the handles while shutdown awaits them. If the daemon-wide deadline
-/// cancels that wait, unfinished handles return to the service so a retry can
-/// join them instead of detaching lease-owning tasks.
+/// cancels that wait, unfinished tasks are aborted and their handles return
+/// to the service, so a retry joins them instead of detaching lease-owning
+/// tasks. A retry only needs the join, not the task still running.
 struct SessionSyncTaskShutdownV1 {
     registry: Arc<Mutex<Vec<SessionSyncTaskV1>>>,
     tasks: Vec<SessionSyncTaskV1>,
@@ -74,6 +75,9 @@ impl Drop for SessionSyncTaskShutdownV1 {
         self.tasks.retain(|task| !task.task.is_finished());
         if self.tasks.is_empty() {
             return;
+        }
+        for task in &self.tasks {
+            task.task.abort();
         }
         self.registry
             .lock()
@@ -966,6 +970,8 @@ pub mod work;
 
 #[cfg(test)]
 mod import_admission_tests;
+#[cfg(test)]
+mod shutdown_tests;
 
 pub use project_lifecycle::{SessionSyncProjectContext, SessionSyncTaskV1};
 

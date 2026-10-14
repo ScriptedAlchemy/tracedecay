@@ -284,6 +284,19 @@ pub fn tool_call_transport_error_is_retryable(error: &TraceDecayError) -> bool {
     )
 }
 
+/// Aborts its tasks when dropped. A shutdown join holds one so that the
+/// coordinator dropping the join at its phase deadline aborts the tasks the
+/// join was waiting on. Aborting a task that already finished does nothing.
+pub(crate) struct AbortTasksOnDrop(pub(crate) Vec<tokio::task::AbortHandle>);
+
+impl Drop for AbortTasksOnDrop {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+
 mod bootstrap;
 mod bootstrap_route;
 use bootstrap_route::{

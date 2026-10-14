@@ -962,12 +962,19 @@ impl ProjectOpenTasks {
                 registry.retiring.insert(route, entry);
             }
         }
-        let routes = self
-            .lock_registry()
-            .retiring
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
+        let (routes, _abort_unjoined) = {
+            let registry = self.lock_registry();
+            (
+                registry.retiring.keys().cloned().collect::<Vec<_>>(),
+                AbortTasksOnDrop(
+                    registry
+                        .retiring
+                        .values()
+                        .map(|entry| entry.task.abort_handle())
+                        .collect(),
+                ),
+            )
+        };
         if self
             .drain_retiring_routes(routes.clone(), cooperative_deadline)
             .await

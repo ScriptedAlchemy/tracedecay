@@ -60,6 +60,7 @@ use tracedecay_domain::{
     WorkProductSourceWatermarkV1, WorkProviderRouteId, WorkProviderRouteV1, WorkRecoveryStateV1,
     WorkSandboxPolicy, WorkflowOperationRef, WorkflowStageClassV1, WorktreeId, canonical_sha256,
 };
+use tracedecay_runtime_core::native_runtime;
 #[cfg(unix)]
 use tracedecay_runtime_core::test_executable::write_executable_script;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -78,6 +79,16 @@ const CODEX_EXEC_JSON_ARGV: [&str; 3] = ["exec", "--json", "-"];
 use tracedecay_domain::test_fixtures::id;
 
 use tracedecay_domain::test_fixtures::digest;
+
+/// Runs `future` with no Tokio runtime anywhere on the stack, so any Tokio
+/// reactor, timer or blocking-pool call on the attempt path panics.
+fn without_tokio<F: std::future::Future>(future: F) -> F::Output {
+    native_runtime::block_on(async {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        future.await
+    })
+    .expect("native runtime available")
+}
 
 fn sha256_digest(bytes: &[u8]) -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(bytes)))).unwrap()
@@ -781,165 +792,167 @@ const CLEAN_PROVIDER: &str = "#!/bin/sh\ncat > /dev/null\nexit 0\n";
 // ---------------------------------------------------------------------------
 
 #[cfg(unix)]
-#[tokio::test]
-async fn a_clean_provider_run_seals_succeeded_evidence_over_the_captured_stream() {
-    let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
-    let directory = tempfile::TempDir::new().unwrap();
-    let root = directory.path();
-    let argv_marker = root.join("argv");
-    let stdin_marker = root.join("stdin");
-    // Claude `stream-json` framing: one JSON object per line on stdout.
-    let stream = concat!(
-        r#"{"type":"system","subtype":"init","session_id":"s-1"}"#,
-        "\n",
-        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}"#,
-        "\n",
-        r#"{"type":"result","subtype":"success","is_error":false}"#,
-        "\n",
-    );
-    let executable = fake_executable(
-        root,
-        "claude-code",
-        &format!(
-            "#!/bin/sh\nprintf '%s' \"$*\" > {argv}\ncat > {stdin}\nprintf '%s' '{stream}'\nexit 0\n",
-            argv = argv_marker.display(),
-            stdin = stdin_marker.display(),
-            stream = stream,
-        ),
-    );
+#[test]
+fn a_clean_provider_run_seals_succeeded_evidence_over_the_captured_stream() {
+    without_tokio(async {
+        let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
+        let argv_marker = root.join("argv");
+        let stdin_marker = root.join("stdin");
+        // Claude `stream-json` framing: one JSON object per line on stdout.
+        let stream = concat!(
+            r#"{"type":"system","subtype":"init","session_id":"s-1"}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}"#,
+            "\n",
+            r#"{"type":"result","subtype":"success","is_error":false}"#,
+            "\n",
+        );
+        let executable = fake_executable(
+            root,
+            "claude-code",
+            &format!(
+                "#!/bin/sh\nprintf '%s' \"$*\" > {argv}\ncat > {stdin}\nprintf '%s' '{stream}'\nexit 0\n",
+                argv = argv_marker.display(),
+                stdin = stdin_marker.display(),
+                stream = stream,
+            ),
+        );
 
-    let instructions = "Execute the admitted provider step.";
-    let fixture = leased_attempt(root, instructions, &SnapshotShape::default());
-    let admitted_environment =
-        admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
-    execute_provider_with_environment(
-        &fixture.attempts,
-        &fixture.effects,
-        Some(&workflow_artifacts),
-        &fixture.context,
-        &fixture.attempt,
-        &preferred(
-            executable,
-            WorkProviderProtocol::ClaudeStreamJson,
-            &CLAUDE_STREAM_JSON_ARGV,
-            requested_route(WorkProviderBackendV1::ClaudeCodeCli),
-        ),
-        &admitted_environment,
-        Arc::new(Notify::new()),
-        None,
-        None,
-        AttemptAdmissionTimingV1::for_test(),
-    )
-    .await;
+        let instructions = "Execute the admitted provider step.";
+        let fixture = leased_attempt(root, instructions, &SnapshotShape::default());
+        let admitted_environment =
+            admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
+        execute_provider_with_environment(
+            &fixture.attempts,
+            &fixture.effects,
+            Some(&workflow_artifacts),
+            &fixture.context,
+            &fixture.attempt,
+            &preferred(
+                executable,
+                WorkProviderProtocol::ClaudeStreamJson,
+                &CLAUDE_STREAM_JSON_ARGV,
+                requested_route(WorkProviderBackendV1::ClaudeCodeCli),
+            ),
+            &admitted_environment,
+            Arc::new(Notify::new()),
+            None,
+            None,
+            AttemptAdmissionTimingV1::for_test(),
+        )
+        .await;
 
-    // The protocol's argv reached the real child, and the attempt
-    // instructions were piped to its stdin.
-    assert_eq!(
-        std::fs::read_to_string(&argv_marker).unwrap(),
-        CLAUDE_STREAM_JSON_ARGV.join(" ")
-    );
-    assert_eq!(
-        std::fs::read_to_string(&stdin_marker).unwrap(),
-        instructions
-    );
+        // The protocol's argv reached the real child, and the attempt
+        // instructions were piped to its stdin.
+        assert_eq!(
+            std::fs::read_to_string(&argv_marker).unwrap(),
+            CLAUDE_STREAM_JSON_ARGV.join(" ")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&stdin_marker).unwrap(),
+            instructions
+        );
 
-    assert_eq!(fixture.state(), WorkAttemptStateV1::Succeeded);
-    assert_eq!(
-        fixture
-            .effects
-            .load(&fixture.context, fixture.identity())
-            .unwrap()
-            .and_then(|holder| holder.resolution()),
-        Some(WorkAttemptEffectResolutionV1::NoEffect)
-    );
-    let settled = fixture.current_attempt();
-    assert_eq!(settled.artifacts().len(), 1);
-    assert_eq!(
-        settled.artifacts()[0].artifact_id().as_str(),
-        "artifact.provider.stdout"
-    );
-    assert_eq!(settled.artifacts()[0].byte_length(), stream.len() as u64);
-    assert_eq!(
-        workflow_artifacts
-            .load(&settled.artifacts()[0])
-            .unwrap()
-            .bytes(),
-        stream.as_bytes()
-    );
-    let scheduled = std::time::Instant::now();
-    let admitted = scheduled + std::time::Duration::from_micros(5);
-    let started = scheduled + std::time::Duration::from_micros(10);
-    let terminal = scheduled + std::time::Duration::from_micros(40);
-    let resource = work_operation_resource_observation(
-        &fixture.current_attempt(),
-        AttemptAdmissionTimingV1 {
-            scheduled,
-            admitted,
-        },
-        started,
-        terminal,
-        Some("provider-request-1".to_owned()),
-    )
-    .expect("settled provider timing");
-    assert_eq!(resource.scheduled_latency_micros, 5);
-    assert_eq!(resource.service_latency_micros, 30);
-    assert_eq!(
-        resource.provider_request_id.as_deref(),
-        Some("provider-request-1")
-    );
-    assert_eq!(
-        resource.activation_outcome,
-        Some(OperationActivationOutcomeV1::Committed)
-    );
-    assert_eq!(
-        resource
-            .stage_timings
-            .iter()
-            .map(|timing| (timing.stage, timing.elapsed_micros))
-            .collect::<Vec<_>>(),
-        vec![
-            (OperationStageV1::Scheduled, 0),
-            (OperationStageV1::Admitted, 5),
-            (OperationStageV1::Started, 10),
-            (OperationStageV1::Terminal, 40),
-        ]
-    );
-    let evidence = fixture.sealed_evidence();
-    assert_eq!(
-        evidence.outcome,
-        WorkAttemptProviderOutcomeV1::Exited { code: 0 }
-    );
-    assert_eq!(evidence.identity, *fixture.identity());
-    let route = requested_route(WorkProviderBackendV1::ClaudeCodeCli);
-    assert_eq!(evidence.requested_route, route);
-    assert_eq!(evidence.actual_route, Some(route));
-    assert_eq!(
-        evidence.provider_session,
-        Some(
-            ObservationSourceIdentityV1::for_provider(
-                id::<ProviderId>("claude"),
-                id::<SessionId>("s-1"),
-            )
-            .expect("Claude provider session"),
-        ),
-    );
-    // Session correlation does not weaken byte-exact stream accounting.
-    let stdout = evidence.stdout.expect("stdout summary");
-    assert_eq!(stdout.byte_length, stream.len() as u64);
-    assert!(!stdout.truncated);
-    assert_eq!(stdout.digest, sha256_digest(stream.as_bytes()));
-    let stderr = evidence.stderr.expect("stderr summary");
-    assert_eq!(stderr.byte_length, 0);
-    assert!(!stderr.truncated);
-    // The durable trail runs Leased -> Running -> Succeeded; nothing skips.
-    assert_eq!(
-        fixture.rows.observed_states(),
-        vec![
-            WorkAttemptStateV1::Leased,
-            WorkAttemptStateV1::Running,
-            WorkAttemptStateV1::Succeeded,
-        ]
-    );
+        assert_eq!(fixture.state(), WorkAttemptStateV1::Succeeded);
+        assert_eq!(
+            fixture
+                .effects
+                .load(&fixture.context, fixture.identity())
+                .unwrap()
+                .and_then(|holder| holder.resolution()),
+            Some(WorkAttemptEffectResolutionV1::NoEffect)
+        );
+        let settled = fixture.current_attempt();
+        assert_eq!(settled.artifacts().len(), 1);
+        assert_eq!(
+            settled.artifacts()[0].artifact_id().as_str(),
+            "artifact.provider.stdout"
+        );
+        assert_eq!(settled.artifacts()[0].byte_length(), stream.len() as u64);
+        assert_eq!(
+            workflow_artifacts
+                .load(&settled.artifacts()[0])
+                .unwrap()
+                .bytes(),
+            stream.as_bytes()
+        );
+        let scheduled = std::time::Instant::now();
+        let admitted = scheduled + std::time::Duration::from_micros(5);
+        let started = scheduled + std::time::Duration::from_micros(10);
+        let terminal = scheduled + std::time::Duration::from_micros(40);
+        let resource = work_operation_resource_observation(
+            &fixture.current_attempt(),
+            AttemptAdmissionTimingV1 {
+                scheduled,
+                admitted,
+            },
+            started,
+            terminal,
+            Some("provider-request-1".to_owned()),
+        )
+        .expect("settled provider timing");
+        assert_eq!(resource.scheduled_latency_micros, 5);
+        assert_eq!(resource.service_latency_micros, 30);
+        assert_eq!(
+            resource.provider_request_id.as_deref(),
+            Some("provider-request-1")
+        );
+        assert_eq!(
+            resource.activation_outcome,
+            Some(OperationActivationOutcomeV1::Committed)
+        );
+        assert_eq!(
+            resource
+                .stage_timings
+                .iter()
+                .map(|timing| (timing.stage, timing.elapsed_micros))
+                .collect::<Vec<_>>(),
+            vec![
+                (OperationStageV1::Scheduled, 0),
+                (OperationStageV1::Admitted, 5),
+                (OperationStageV1::Started, 10),
+                (OperationStageV1::Terminal, 40),
+            ]
+        );
+        let evidence = fixture.sealed_evidence();
+        assert_eq!(
+            evidence.outcome,
+            WorkAttemptProviderOutcomeV1::Exited { code: 0 }
+        );
+        assert_eq!(evidence.identity, *fixture.identity());
+        let route = requested_route(WorkProviderBackendV1::ClaudeCodeCli);
+        assert_eq!(evidence.requested_route, route);
+        assert_eq!(evidence.actual_route, Some(route));
+        assert_eq!(
+            evidence.provider_session,
+            Some(
+                ObservationSourceIdentityV1::for_provider(
+                    id::<ProviderId>("claude"),
+                    id::<SessionId>("s-1"),
+                )
+                .expect("Claude provider session"),
+            ),
+        );
+        // Session correlation does not weaken byte-exact stream accounting.
+        let stdout = evidence.stdout.expect("stdout summary");
+        assert_eq!(stdout.byte_length, stream.len() as u64);
+        assert!(!stdout.truncated);
+        assert_eq!(stdout.digest, sha256_digest(stream.as_bytes()));
+        let stderr = evidence.stderr.expect("stderr summary");
+        assert_eq!(stderr.byte_length, 0);
+        assert!(!stderr.truncated);
+        // The durable trail runs Leased -> Running -> Succeeded; nothing skips.
+        assert_eq!(
+            fixture.rows.observed_states(),
+            vec![
+                WorkAttemptStateV1::Leased,
+                WorkAttemptStateV1::Running,
+                WorkAttemptStateV1::Succeeded,
+            ]
+        );
+    });
 }
 
 #[cfg(unix)]
@@ -1025,86 +1038,88 @@ async fn initial_provider_child_uses_values_captured_for_that_spawn() {
 // ---------------------------------------------------------------------------
 
 #[cfg(unix)]
-#[tokio::test]
-async fn stdout_past_the_admitted_cap_is_a_typed_overflow_not_a_silent_success() {
-    let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
-    let directory = tempfile::TempDir::new().unwrap();
-    let root = directory.path();
-    let argv_marker = root.join("argv");
-    // Codex `exec --json` framing: one JSON event per line, repeated well past
-    // the admitted stdout ceiling.
-    let line = r#"{"type":"item.completed","item":{"type":"agent_message","text":"chunk"}}"#;
-    let mut stream = String::new();
-    for _ in 0..64 {
-        stream.push_str(line);
-        stream.push('\n');
-    }
-    let executable = fake_executable(
-        root,
-        "codex",
-        &format!(
-            "#!/bin/sh\nprintf '%s' \"$*\" > {argv}\ncat > /dev/null\ni=0\nwhile [ $i -lt 64 ]; do printf '%s\\n' '{line}'; i=$((i+1)); done\nexit 0\n",
-            argv = argv_marker.display(),
-            line = line,
-        ),
-    );
-
-    const CAP: u64 = 128;
-    let fixture = leased_attempt(
-        root,
-        "Overflow the admitted stdout budget.",
-        &SnapshotShape {
-            backend: WorkProviderBackendV1::CodexCli,
-            max_stdout_bytes: CAP,
-            ..SnapshotShape::default()
-        },
-    );
-    let admitted_environment =
-        admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
-    execute_provider_with_environment(
-        &fixture.attempts,
-        &fixture.effects,
-        Some(&workflow_artifacts),
-        &fixture.context,
-        &fixture.attempt,
-        &preferred(
-            executable,
-            WorkProviderProtocol::CodexExecJson,
-            &CODEX_EXEC_JSON_ARGV,
-            requested_route(WorkProviderBackendV1::CodexCli),
-        ),
-        &admitted_environment,
-        Arc::new(Notify::new()),
-        None,
-        None,
-        AttemptAdmissionTimingV1::for_test(),
-    )
-    .await;
-
-    assert_eq!(
-        std::fs::read_to_string(&argv_marker).unwrap(),
-        CODEX_EXEC_JSON_ARGV.join(" ")
-    );
-    // The child exited 0; the overflow classification must still win, or a
-    // truncated transcript would be sealed as an unqualified success.
-    let evidence = fixture.sealed_evidence();
-    assert_eq!(
-        evidence.outcome,
-        WorkAttemptProviderOutcomeV1::StreamOverflow {
-            channel: WorkAttemptStreamChannelV1::Stdout,
+#[test]
+fn stdout_past_the_admitted_cap_is_a_typed_overflow_not_a_silent_success() {
+    without_tokio(async {
+        let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
+        let argv_marker = root.join("argv");
+        // Codex `exec --json` framing: one JSON event per line, repeated well past
+        // the admitted stdout ceiling.
+        let line = r#"{"type":"item.completed","item":{"type":"agent_message","text":"chunk"}}"#;
+        let mut stream = String::new();
+        for _ in 0..64 {
+            stream.push_str(line);
+            stream.push('\n');
         }
-    );
-    assert_eq!(fixture.state(), WorkAttemptStateV1::Failed);
-    let stdout = evidence.stdout.expect("stdout summary");
-    assert!(stdout.truncated);
-    // The summary tells the truth twice over: the real produced length, and
-    // the digest of exactly the retained prefix.
-    assert_eq!(stdout.byte_length, stream.len() as u64);
-    assert!(stdout.byte_length > CAP);
-    assert_eq!(
-        stdout.digest,
-        sha256_digest(&stream.as_bytes()[..CAP as usize])
-    );
+        let executable = fake_executable(
+            root,
+            "codex",
+            &format!(
+                "#!/bin/sh\nprintf '%s' \"$*\" > {argv}\ncat > /dev/null\ni=0\nwhile [ $i -lt 64 ]; do printf '%s\\n' '{line}'; i=$((i+1)); done\nexit 0\n",
+                argv = argv_marker.display(),
+                line = line,
+            ),
+        );
+
+        const CAP: u64 = 128;
+        let fixture = leased_attempt(
+            root,
+            "Overflow the admitted stdout budget.",
+            &SnapshotShape {
+                backend: WorkProviderBackendV1::CodexCli,
+                max_stdout_bytes: CAP,
+                ..SnapshotShape::default()
+            },
+        );
+        let admitted_environment =
+            admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
+        execute_provider_with_environment(
+            &fixture.attempts,
+            &fixture.effects,
+            Some(&workflow_artifacts),
+            &fixture.context,
+            &fixture.attempt,
+            &preferred(
+                executable,
+                WorkProviderProtocol::CodexExecJson,
+                &CODEX_EXEC_JSON_ARGV,
+                requested_route(WorkProviderBackendV1::CodexCli),
+            ),
+            &admitted_environment,
+            Arc::new(Notify::new()),
+            None,
+            None,
+            AttemptAdmissionTimingV1::for_test(),
+        )
+        .await;
+
+        assert_eq!(
+            std::fs::read_to_string(&argv_marker).unwrap(),
+            CODEX_EXEC_JSON_ARGV.join(" ")
+        );
+        // The child exited 0; the overflow classification must still win, or a
+        // truncated transcript would be sealed as an unqualified success.
+        let evidence = fixture.sealed_evidence();
+        assert_eq!(
+            evidence.outcome,
+            WorkAttemptProviderOutcomeV1::StreamOverflow {
+                channel: WorkAttemptStreamChannelV1::Stdout,
+            }
+        );
+        assert_eq!(fixture.state(), WorkAttemptStateV1::Failed);
+        let stdout = evidence.stdout.expect("stdout summary");
+        assert!(stdout.truncated);
+        // The summary tells the truth twice over: the real produced length, and
+        // the digest of exactly the retained prefix.
+        assert_eq!(stdout.byte_length, stream.len() as u64);
+        assert!(stdout.byte_length > CAP);
+        assert_eq!(
+            stdout.digest,
+            sha256_digest(&stream.as_bytes()[..CAP as usize])
+        );
+    });
 }
 
 #[test]
@@ -1176,105 +1191,177 @@ fn overflow_classification_names_the_channel_and_yields_to_cancellation() {
 /// virtual clock would let the grace expire without proving the child
 /// actually survived it.
 #[cfg(unix)]
-#[tokio::test]
-async fn a_provider_that_ignores_interrupt_is_escalated_to_a_kill_on_the_record() {
-    let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
-    let directory = tempfile::TempDir::new().unwrap();
-    let root = directory.path();
-    let started_marker = root.join("started");
-    let interrupted_marker = root.join("interrupted");
-    let blocker = root.join("blocker");
-    let executable = fake_executable(
-        root,
-        "stubborn-provider",
-        &format!(
-            "#!/bin/sh\ntrap \"printf x >> {interrupted}\" INT\nmkfifo {blocker}\nexec 3<> {blocker}\nprintf x > {started}\nwhile :; do read -r line <&3; done\n",
-            interrupted = interrupted_marker.display(),
-            blocker = blocker.display(),
-            started = started_marker.display(),
-        ),
-    );
+#[test]
+fn a_provider_that_ignores_interrupt_is_escalated_to_a_kill_on_the_record() {
+    without_tokio(async {
+        let (_artifact_dir, workflow_artifacts) = provider_artifact_store().await;
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
+        let started_marker = root.join("started");
+        let interrupted_marker = root.join("interrupted");
+        let blocker = root.join("blocker");
+        let executable = fake_executable(
+            root,
+            "stubborn-provider",
+            &format!(
+                "#!/bin/sh\ntrap \"printf x >> {interrupted}\" INT\nmkfifo {blocker}\nexec 3<> {blocker}\nprintf x > {started}\nwhile :; do read -r line <&3; done\n",
+                interrupted = interrupted_marker.display(),
+                blocker = blocker.display(),
+                started = started_marker.display(),
+            ),
+        );
 
-    let fixture = leased_attempt(
-        root,
-        "Run until cancelled.",
-        &SnapshotShape {
-            deadline: deadline_in(300),
-            ..SnapshotShape::default()
-        },
-    );
-    let cancel = Arc::new(Notify::new());
-    let provider = preferred(
-        executable,
-        WorkProviderProtocol::ClaudeStreamJson,
-        &CLAUDE_STREAM_JSON_ARGV,
-        requested_route(WorkProviderBackendV1::ClaudeCodeCli),
-    );
-    let identity = fixture.identity().clone();
-    let started_at = std::time::Instant::now();
-    let admitted_environment =
-        admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
+        let fixture = leased_attempt(
+            root,
+            "Run until cancelled.",
+            &SnapshotShape {
+                deadline: deadline_in(300),
+                ..SnapshotShape::default()
+            },
+        );
+        let cancel = Arc::new(Notify::new());
+        let provider = preferred(
+            executable,
+            WorkProviderProtocol::ClaudeStreamJson,
+            &CLAUDE_STREAM_JSON_ARGV,
+            requested_route(WorkProviderBackendV1::ClaudeCodeCli),
+        );
+        let identity = fixture.identity().clone();
+        let started_at = std::time::Instant::now();
+        let admitted_environment =
+            admitted_provider_environment(fixture.attempt.execution().execution_snapshot());
 
-    let driver = async {
-        // Wait for the real child to be up and the attempt to be durably
-        // Running before a cancellation may even be requested.
-        while !started_marker.exists() || fixture.state() != WorkAttemptStateV1::Running {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-        fixture
-            .attempts
-            .request_cancellation(
+        let driver = async {
+            // Wait for the real child to be up and the attempt to be durably
+            // Running before a cancellation may even be requested.
+            while !started_marker.exists() || fixture.state() != WorkAttemptStateV1::Running {
+                native_runtime::sleep_until(
+                    std::time::Instant::now() + std::time::Duration::from_millis(20),
+                )
+                .await
+                .expect("native timer");
+            }
+            fixture
+                .attempts
+                .request_cancellation(
+                    &fixture.context,
+                    CancelWorkAttemptCommand {
+                        task_id: identity.task_id().clone(),
+                        run_id: identity.run_id().clone(),
+                        attempt_id: identity.attempt_id().clone(),
+                        request_id: id("cancellation.work-attempt-exec.1"),
+                        occurred_at: now_micros(),
+                    },
+                )
+                .unwrap();
+            cancel.notify_one();
+            std::future::pending::<()>().await;
+        };
+
+        tokio::select! {
+            () = execute_provider_with_environment(
+                &fixture.attempts,
+                &fixture.effects,
+                Some(&workflow_artifacts),
                 &fixture.context,
-                CancelWorkAttemptCommand {
-                    task_id: identity.task_id().clone(),
-                    run_id: identity.run_id().clone(),
-                    attempt_id: identity.attempt_id().clone(),
-                    request_id: id("cancellation.work-attempt-exec.1"),
-                    occurred_at: now_micros(),
-                },
-            )
-            .unwrap();
-        cancel.notify_one();
-        std::future::pending::<()>().await;
-    };
+                &fixture.attempt,
+                &provider,
+                &admitted_environment,
+                Arc::clone(&cancel),
+                None,
+                None,
+                AttemptAdmissionTimingV1::for_test(),
+            ) => {}
+            () = driver => unreachable!("the driver never settles"),
+        }
 
-    tokio::select! {
-        () = execute_provider_with_environment(
-            &fixture.attempts,
-            &fixture.effects,
-            Some(&workflow_artifacts),
-            &fixture.context,
-            &fixture.attempt,
-            &provider,
-            &admitted_environment,
-            Arc::clone(&cancel),
-            None,
-            None,
-            AttemptAdmissionTimingV1::for_test(),
-        ) => {}
-        () = driver => unreachable!("the driver never settles"),
+        // The graceful rung really was delivered to the child, and really was
+        // survived: the trap fired and the grace window elapsed in full.
+        assert!(
+            interrupted_marker.exists(),
+            "the provider should have received SIGINT before any kill"
+        );
+        assert!(started_at.elapsed() >= CANCELLATION_GRACE);
+
+        let states = fixture.rows.observed_states();
+        assert!(
+            states.contains(&WorkAttemptStateV1::CancellationAcknowledged)
+                && states.contains(&WorkAttemptStateV1::CancellationEscalated),
+            "the ladder must record both rungs, got {states:?}"
+        );
+        assert_eq!(*states.last().unwrap(), WorkAttemptStateV1::Cancelled);
+        assert_eq!(fixture.state(), WorkAttemptStateV1::Cancelled);
+        assert_eq!(
+            fixture.sealed_evidence().outcome,
+            WorkAttemptProviderOutcomeV1::Cancelled
+        );
+    });
+}
+
+/// Dropping the attempt's process handle (an aborted attempt task) must not
+/// leave the provider or its descendants running in the worktree.
+#[cfg(target_os = "linux")]
+#[test]
+fn dropping_a_live_provider_kills_its_whole_process_group() {
+    fn alive(pid: &str) -> bool {
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+            !stat
+                .rsplit(')')
+                .next()
+                .is_some_and(|state| state.trim_start().starts_with('Z'))
+        })
+    }
+    async fn pause() {
+        native_runtime::sleep_until(
+            std::time::Instant::now() + std::time::Duration::from_millis(10),
+        )
+        .await
+        .expect("native timer");
     }
 
-    // The graceful rung really was delivered to the child, and really was
-    // survived: the trap fired and the grace window elapsed in full.
-    assert!(
-        interrupted_marker.exists(),
-        "the provider should have received SIGINT before any kill"
-    );
-    assert!(started_at.elapsed() >= CANCELLATION_GRACE);
+    without_tokio(async {
+        let directory = tempfile::TempDir::new().unwrap();
+        let pids = directory.path().join("pids");
+        let executable = fake_executable(
+            directory.path(),
+            "lingering-provider",
+            &format!(
+                "#!/bin/sh\nsleep 300 &\nprintf '%s %s\\n' $$ $! > {pids}\nwait\n",
+                pids = pids.display(),
+            ),
+        );
+        let mut command = std::process::Command::new(executable);
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        let process = ProviderProcess::spawn(command, 0, 0)
+            .await
+            .expect("provider spawns");
+        let pids = loop {
+            if let Some(pids) = std::fs::read_to_string(&pids)
+                .ok()
+                .filter(|pids| pids.ends_with('\n'))
+            {
+                break pids;
+            }
+            pause().await;
+        };
 
-    let states = fixture.rows.observed_states();
-    assert!(
-        states.contains(&WorkAttemptStateV1::CancellationAcknowledged)
-            && states.contains(&WorkAttemptStateV1::CancellationEscalated),
-        "the ladder must record both rungs, got {states:?}"
-    );
-    assert_eq!(*states.last().unwrap(), WorkAttemptStateV1::Cancelled);
-    assert_eq!(fixture.state(), WorkAttemptStateV1::Cancelled);
-    assert_eq!(
-        fixture.sealed_evidence().outcome,
-        WorkAttemptProviderOutcomeV1::Cancelled
-    );
+        drop(process);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        for pid in pids.split_whitespace() {
+            while alive(pid) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "process {pid} outlived its dropped provider handle"
+                );
+                pause().await;
+            }
+        }
+    });
 }
 
 /// A cancellation requested after the provider was launched but before the

@@ -1045,6 +1045,47 @@ async fn daemon_http_timed_out_cold_resolution_preserves_curate_request_identity
     service.shutdown().await.expect("shutdown HTTP service");
 }
 
+/// A Tokio runtime with neither the IO nor the time driver panics on any
+/// Tokio socket or timer, so this proves the loopback path uses neither.
+#[test]
+fn daemon_http_serves_loopback_without_tokio_io_or_time_drivers() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .build()
+        .expect("Tokio runtime without drivers");
+    runtime.block_on(async {
+        let (service, calls) = service_with_probe().await;
+        let endpoint = service.endpoint();
+        let origin = service.origin().to_owned();
+        let response = tokio::task::spawn_blocking(move || {
+            use std::io::{Read, Write};
+            let mut stream =
+                std::net::TcpStream::connect(endpoint).expect("connect daemon HTTP loopback");
+            write!(
+                stream,
+                "POST /projects/{PROJECT_ID}/application/tests/results HTTP/1.1\r\n\
+                 Host: {endpoint}\r\n\
+                 Authorization: Bearer {AUTH_TOKEN}\r\n\
+                 Origin: {origin}\r\n\
+                 Content-Length: 0\r\n\
+                 Connection: close\r\n\r\n"
+            )
+            .expect("write HTTP request");
+            let mut response = String::new();
+            stream
+                .read_to_string(&mut response)
+                .expect("read HTTP response");
+            response
+        })
+        .await
+        .expect("blocking HTTP client");
+
+        assert_eq!(status(&response), StatusCode::NO_CONTENT);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        service.shutdown().await.expect("shutdown HTTP service");
+    });
+}
+
 #[tokio::test]
 async fn daemon_http_shutdown_releases_loopback_listener() {
     let (service, _) = service_with_probe().await;

@@ -110,7 +110,14 @@ pub struct BrokerStreamTransport {
     work_delivery_settlement: Option<Arc<dyn BrokerWorkDeliverySettlement>>,
 }
 
-type ActiveRmcpRequests = Arc<std::sync::Mutex<HashMap<String, ActiveRmcpRequest>>>;
+type ActiveRmcpRequests = Arc<ActiveRmcpRequestRegistry>;
+
+#[derive(Default)]
+struct ActiveRmcpRequestRegistry {
+    requests: std::sync::Mutex<HashMap<String, ActiveRmcpRequest>>,
+    /// Signalled whenever a request settles, so the EOF wait re-checks.
+    settled: tokio::sync::Notify,
+}
 
 struct ActiveRmcpRequest {
     delivery_attempt: Option<tracedecay_domain::DeliverySettlementAttemptV1>,
@@ -154,7 +161,7 @@ impl BrokerStreamTransport {
         Self {
             reader: BoundedLineReader::new(asupersync::io::BufReader::new(reader)),
             writer: Arc::new(tokio::sync::Mutex::new(Some(writer))),
-            active_requests: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            active_requests: Arc::default(),
             replay: VecDeque::new(),
             response_lifecycle: None,
             selected_project_responses: None,
@@ -264,11 +271,15 @@ impl BrokerStreamTransport {
             }));
         };
         let response = active_requests
+            .requests
             .lock()
             .map_err(|_| std::io::Error::other("active RMCP request registry poisoned"))?
             .remove(&request_key);
         match response {
-            Some(request) => Ok(RmcpResponseWrite::Write(request)),
+            Some(request) => {
+                active_requests.settled.notify_waiters();
+                Ok(RmcpResponseWrite::Write(request))
+            }
             None => Ok(RmcpResponseWrite::Suppressed),
         }
     }
@@ -298,7 +309,7 @@ impl BrokerStreamTransport {
             let Some(request_key) = Self::request_key(request_id) else {
                 return;
             };
-            if let Ok(mut active) = self.active_requests.lock()
+            if let Ok(mut active) = self.active_requests.requests.lock()
                 && let Some(request) = active.get_mut(&request_key)
             {
                 // Retain the request until its handler returns, including Git lock cleanup.
@@ -309,7 +320,7 @@ impl BrokerStreamTransport {
         let Some(request_key) = value.get("id").and_then(Self::request_key) else {
             return;
         };
-        if let Ok(mut active) = self.active_requests.lock() {
+        if let Ok(mut active) = self.active_requests.requests.lock() {
             let delivery_attempt = self
                 .work_delivery_settlement
                 .as_deref()
@@ -334,14 +345,18 @@ impl BrokerStreamTransport {
     #[tracing::instrument(name = "daemon.broker.eof_settled_wait", level = "trace", skip_all)]
     async fn wait_for_accepted_requests_settled(active_requests: ActiveRmcpRequests) {
         loop {
-            if active_requests.lock().is_ok_and(|active| active.is_empty()) {
+            // Armed before the check: `notify_waiters` stores no permit.
+            let settled = active_requests.settled.notified();
+            tokio::pin!(settled);
+            settled.as_mut().enable();
+            if active_requests
+                .requests
+                .lock()
+                .is_ok_and(|active| active.is_empty())
+            {
                 return;
             }
-            // Settlement lands through independently spawned response
-            // writers; poll on the same bounded interval the
-            // full-close monitor uses rather than threading a notifier
-            // through every removal site.
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            settled.await;
         }
     }
 
@@ -357,8 +372,13 @@ impl BrokerStreamTransport {
             // A full close raises no event this side waits on, so probe on a
             // bounded interval while a legitimate half-closed one-shot client
             // is still computing its response. No request deadline is imposed
-            // here.
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            // here. A direct Asupersync timer, not `native_runtime::sleep_until`:
+            // it skips a task spawn per probe and works from any executor.
+            asupersync::time::sleep(
+                asupersync::time::wall_now(),
+                std::time::Duration::from_millis(100),
+            )
+            .await;
         }
     }
 }
@@ -614,8 +634,68 @@ impl BrokerStreamTransport {
 }
 
 #[cfg(test)]
-mod selected_response_error_tests {
+mod tests {
+    use std::future::poll_fn;
+    use std::pin::pin;
+    use std::task::Poll;
+    use std::time::{Duration, Instant};
+
+    use tracedecay_runtime_core::native_runtime;
+
     use super::*;
+
+    /// Polls `future` once, then races it against a bound so a wake that
+    /// never comes fails the test instead of hanging it.
+    async fn wakes_after<F: Future>(future: F, trigger: impl FnOnce()) -> bool {
+        let mut future = pin!(future);
+        let first = poll_fn(|context| Poll::Ready(future.as_mut().poll(context).is_ready())).await;
+        assert!(!first, "the wait must park before its trigger");
+        trigger();
+        tokio::select! {
+            _ = future => true,
+            _ = native_runtime::sleep_until(Instant::now() + Duration::from_secs(10)) => false,
+        }
+    }
+
+    #[test]
+    fn eof_wait_wakes_when_the_last_accepted_request_settles() {
+        let active: ActiveRmcpRequests = Arc::default();
+        active.requests.lock().unwrap().insert(
+            "1".to_owned(),
+            ActiveRmcpRequest {
+                delivery_attempt: None,
+                cancelled: false,
+            },
+        );
+        let woke = native_runtime::block_on(wakes_after(
+            BrokerStreamTransport::wait_for_accepted_requests_settled(Arc::clone(&active)),
+            || {
+                assert!(matches!(
+                    BrokerStreamTransport::take_response_write(&active, Some("1".to_owned())),
+                    Ok(RmcpResponseWrite::Write(_))
+                ));
+            },
+        ))
+        .expect("native runtime");
+        assert!(woke, "settling the last request must wake the EOF wait");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_close_probe_sees_the_peer_close_with_no_tokio_runtime_entered() {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let (server, client) = std::os::unix::net::UnixStream::pair().unwrap();
+        server.set_nonblocking(true).unwrap();
+        let transport = BrokerStreamTransport::new(BrokerStream::Unix(
+            asupersync::net::unix::UnixStream::from_std(server).unwrap(),
+        ));
+        let closed = native_runtime::block_on(wakes_after(
+            transport.peer_fully_closed_after_eof(),
+            move || drop(client),
+        ))
+        .expect("native runtime");
+        assert!(closed, "the probe must observe the peer's full close");
+    }
 
     #[test]
     fn io_boundary_retains_typed_project_route_classification() {

@@ -230,7 +230,12 @@ fn post_json_over_https(
     let root_store = rustls::RootCertStore {
         roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
     };
-    let config = rustls::ClientConfig::builder()
+    // reqwest links aws-lc-rs into the same rustls, so the process default
+    // provider is ambiguous and `ClientConfig::builder()` would panic.
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|_| WebhookPostError::NotAttempted(target_free_tls_error("protocol selection")))?
         .with_root_certificates(root_store)
         .with_no_client_auth();
     let host_label = host_label(&endpoint.url).map_err(WebhookPostError::NotAttempted)?;
@@ -457,6 +462,22 @@ mod tests {
             write_request(&mut after, &endpoint, b"{}"),
             Err(WebhookPostError::Indeterminate)
         ));
+    }
+
+    #[test]
+    fn https_webhook_to_a_non_tls_peer_is_a_typed_handshake_failure() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind peer");
+        let addr = listener.local_addr().expect("peer address");
+        let peer = thread::spawn(move || drop(listener.accept()));
+        let endpoint = WebhookEndpoint::new_for_test(
+            Url::parse("https://example.test/hook").expect("url"),
+            addr,
+        );
+
+        let outcome = post_json_over_https(&endpoint, b"{}", Duration::from_secs(5));
+
+        assert!(matches!(outcome, Err(WebhookPostError::NotAttempted(_))));
+        peer.join().expect("peer thread");
     }
 
     #[test]

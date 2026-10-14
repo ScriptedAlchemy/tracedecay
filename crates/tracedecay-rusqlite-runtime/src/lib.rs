@@ -4,6 +4,7 @@ mod admission;
 mod authority;
 mod checkpoint;
 mod connection;
+pub mod schema_version;
 pub use connection::{
     ConnectionPolicyError, OpenedDatabaseFileError, VerifiedReader, VerifiedReaderError,
     open_immutable_reader, open_verified_immutable_reader, open_verified_read_snapshot,

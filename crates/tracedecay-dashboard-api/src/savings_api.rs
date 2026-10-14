@@ -1033,7 +1033,8 @@ async fn sessions_overview(
         .ok_or_else(|| "session overview query returned no row".to_string())?;
     let session_count = query_i64_result(&conn, "SELECT COUNT(*) FROM sessions", ()).await?;
 
-    let overlay = token_count::non_usage_message_tokens(state).await;
+    let overlay =
+        token_count::non_usage_message_tokens(&state.token_counts, state.lcm_db.as_ref()).await;
     let total_tiers = overlay.as_deref().map(|messages| {
         let mut sums = TierSums::default();
         for msg in messages {
@@ -1169,7 +1170,8 @@ pub async fn models(
 
     if let Some(db) = state.lcm_db.as_deref() {
         let conn = db.read_connection();
-        let overlay = token_count::non_usage_message_tokens(&state).await;
+        let overlay =
+            token_count::non_usage_message_tokens(&state.token_counts, state.lcm_db.as_ref()).await;
         // Folds replicate the SQL range predicates exactly: per-model rows
         // use COALESCE(timestamp, 0), the daily series requires a positive
         // timestamp.

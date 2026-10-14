@@ -874,7 +874,7 @@ pub struct MountedCodeIndexWorktreeV1 {
     /// Live handle to the publication's encoded-byte counter; observed only by
     /// test memory accounting today.
     _active_generation_encoded_bytes: Arc<AtomicU64>,
-    pub task: tokio::task::JoinHandle<()>,
+    pub task: native_runtime::NativeTask<()>,
 }
 
 /// Unique mounted worktree for one admitted repo+worktree scope.
@@ -2713,10 +2713,12 @@ impl CodeIndexSchedulerRegistryV1 {
     /// pointer. A publication's owner is not installed until it reopens, so
     /// that caller passes `None`.
     async fn join_retained_text_projection_on_worker_exit(
-        projection: &mut Option<tokio::task::JoinHandle<PublishedTextProjectionOutcomeV1>>,
+        projection: &mut Option<
+            Result<native_runtime::NativeTask<PublishedTextProjectionOutcomeV1>, String>,
+        >,
     ) {
         if let Some(projection) = projection.take() {
-            let _ = projection.await;
+            let _ = crate::code_index_task_support::join_native(&projection).await;
         }
     }
 
@@ -3549,7 +3551,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     ],
                 );
                 let _ = tracing::Instrument::instrument(
-                    &mut worktree.task,
+                    worktree.task.wait(),
                     tracing::trace_span!("daemon.code_index.shutdown.worker_join"),
                 )
                 .await;
@@ -3671,7 +3673,7 @@ impl CodeIndexSchedulerRegistryV1 {
             let Some(worktree) = retiring.get_mut(root) else {
                 continue;
             };
-            match native_runtime::timeout_at(deadline, &mut worktree.task).await {
+            match native_runtime::timeout_at(deadline, worktree.task.wait()).await {
                 Ok(_) => {
                     joined.insert(root.clone());
                 }

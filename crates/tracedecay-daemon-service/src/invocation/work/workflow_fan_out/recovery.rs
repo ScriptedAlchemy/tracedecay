@@ -18,6 +18,17 @@ use tracedecay_contracts::now_micros;
 
 const RECOVERY_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Waits `delay` on the native clock. An unavailable timer ends the wait now,
+/// like an elapsed one.
+async fn recovery_backoff(delay: std::time::Duration) {
+    if let Err(error) =
+        tracedecay_runtime_core::native_runtime::sleep_until(std::time::Instant::now() + delay)
+            .await
+    {
+        tracing::warn!(%error, "workflow fan-out recovery backoff timer unavailable");
+    }
+}
+
 pub(crate) fn reconcile_active_workflow_fan_out(
     registered: &RegisteredWorkRuntime,
     attempt_processes: Arc<super::super::super::work_attempt_exec::WorkAttemptProcessRegistryV1>,
@@ -232,7 +243,7 @@ impl WorkflowFanOutRecoveryOwnerV1 {
                     tokio::select! {
                         biased;
                         () = worker_cancellation.cancelled() => return,
-                        () = tokio::time::sleep(RECOVERY_RETRY_DELAY) => continue,
+                        () = recovery_backoff(RECOVERY_RETRY_DELAY) => continue,
                     }
                 };
 
@@ -264,7 +275,7 @@ impl WorkflowFanOutRecoveryOwnerV1 {
                             tokio::select! {
                                 biased;
                                 () = worker_cancellation.cancelled() => return,
-                                () = tokio::time::sleep(RECOVERY_RETRY_DELAY) => continue,
+                                () = recovery_backoff(RECOVERY_RETRY_DELAY) => continue,
                             }
                         }
                         Err(error) => {
@@ -276,7 +287,7 @@ impl WorkflowFanOutRecoveryOwnerV1 {
                             tokio::select! {
                                 biased;
                                 () = worker_cancellation.cancelled() => return,
-                                () = tokio::time::sleep(RECOVERY_RETRY_DELAY) => continue,
+                                () = recovery_backoff(RECOVERY_RETRY_DELAY) => continue,
                             }
                         }
                     }
@@ -290,7 +301,7 @@ impl WorkflowFanOutRecoveryOwnerV1 {
                 let page_project_root = project_root.clone();
                 let page_producer = observability_producer.clone();
                 let page_cursor = cursor.clone();
-                let page = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+                let page = spawn_reconcile_page(tokio::runtime::Handle::current(), move || {
                     reconcile_active_workflow_fan_out_page(
                         &page_registered,
                         page_attempt_processes,
@@ -334,7 +345,7 @@ impl WorkflowFanOutRecoveryOwnerV1 {
                 tokio::select! {
                     biased;
                     () = worker_cancellation.cancelled() => return,
-                    () = tokio::time::sleep(delay) => {}
+                    () = recovery_backoff(delay) => {}
                 }
             }
         });
@@ -389,5 +400,69 @@ impl Drop for WorkflowFanOutRecoveryInnerV1 {
         if let Some(task) = task {
             task.abort();
         }
+    }
+}
+
+/// Runs one reconcile page on the native blocking pool. Dispatching a child
+/// spawns its attempt supervisor, and a committed change publishes task
+/// activity, with `tokio::spawn`, so the page runs with the worker's Tokio
+/// runtime entered.
+fn spawn_reconcile_page<T: Send + 'static>(
+    tokio: tokio::runtime::Handle,
+    page: impl FnOnce() -> T + Send + 'static,
+) -> impl std::future::Future<Output = Result<T, String>> + Send + 'static {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        let _tokio = tokio.enter();
+        page()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tracedecay_domain::test_fixtures::id;
+    use tracedecay_domain::{WorkAttemptIdentityV1, WorktreeId};
+
+    use super::super::super::super::work_attempt_exec::WorkAttemptProcessRegistryV1;
+    use super::spawn_reconcile_page;
+
+    /// The recovery worker reconciles each page on a native blocking thread,
+    /// where no Tokio runtime is entered. A page that dispatches a child must
+    /// still start its attempt supervisor on the worker's Tokio runtime.
+    #[test]
+    fn a_reconcile_page_dispatches_a_child_without_an_entered_tokio_runtime() {
+        let worker_tokio = tokio::runtime::Runtime::new().expect("worker runtime");
+        let registry = Arc::new(WorkAttemptProcessRegistryV1::default());
+        let identity = WorkAttemptIdentityV1::new(
+            id("task.fan-out-page"),
+            id("run.fan-out-page"),
+            id("attempt.fan-out-page"),
+        )
+        .expect("attempt identity");
+        let worktree_id: WorktreeId = id("worktree.fan-out-page");
+        let (ran, child_ran) = std::sync::mpsc::channel();
+        let page_registry = Arc::clone(&registry);
+
+        let dispatched = tracedecay_runtime_core::native_runtime::block_on(async {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            spawn_reconcile_page(worker_tokio.handle().clone(), move || {
+                page_registry.spawn_for_worktree(
+                    &identity,
+                    &worktree_id,
+                    move |_cancellation| async move {
+                        let _ = ran.send(());
+                    },
+                )
+            })
+            .await
+        })
+        .expect("native runtime");
+
+        assert_eq!(dispatched, Ok(true), "the page must dispatch the child");
+        child_ran
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the dispatched child must run on the worker's Tokio runtime");
     }
 }

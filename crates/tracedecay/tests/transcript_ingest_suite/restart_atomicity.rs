@@ -218,31 +218,11 @@ pub(super) async fn ingest_user_provider(
     provider: SessionProvider,
     registered_roots: Vec<PathBuf>,
 ) -> IngestPassOutcome {
-    ingest_user_provider_reviewed_on(
-        tokio::runtime::Handle::current(),
-        runtime,
-        home,
-        provider,
-        registered_roots,
-    )
-    .await
-}
-
-/// [`ingest_user_provider`] with the session review running on `tokio`, the
-/// way the daemon composes it for a pass polled outside Tokio.
-pub(super) async fn ingest_user_provider_reviewed_on(
-    tokio: tokio::runtime::Handle,
-    runtime: &HostAdmissionTestRuntimeV1,
-    home: &Path,
-    provider: SessionProvider,
-    registered_roots: Vec<PathBuf>,
-) -> IngestPassOutcome {
     let database = runtime
         .registered_database(HostAdmissionScope::Profile)
         .expect("fixture mounts its profile session store");
-    let authority = GlobalDbSessionIngestAuthority::new(database)
-        .with_background_cpu(runtime.background_cpu())
-        .with_session_review(tracedecay::session_review_port(tokio));
+    let authority =
+        GlobalDbSessionIngestAuthority::new(database).with_background_cpu(runtime.background_cpu());
     let shard = &database.binding().shard_id;
     let outcome = with_transcript_source_profile(
         ProfileRoot::new(runtime.profile_root_for_test()).with_home(home),

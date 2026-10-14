@@ -36,12 +36,13 @@ impl Default for ShutdownCoordinatorV1 {
 impl ShutdownCoordinatorV1 {
     pub async fn coordinate_until<Work>(
         &self,
-        deadline: tokio::time::Instant,
+        deadline: impl Into<std::time::Instant>,
         work: Work,
     ) -> ShutdownStatus
     where
         Work: std::future::Future<Output = ShutdownStatus> + Send + 'static,
     {
+        let deadline = deadline.into();
         let mut work = Some(work);
         loop {
             self.reap_completed_coordinator().await;
@@ -167,10 +168,7 @@ impl ShutdownCoordinatorV1 {
             .clone()
     }
 
-    async fn wait_for_terminal_status_until(
-        &self,
-        deadline: tokio::time::Instant,
-    ) -> ShutdownStatus {
+    async fn wait_for_terminal_status_until(&self, deadline: std::time::Instant) -> ShutdownStatus {
         loop {
             if let Some(status) = self.terminal_status() {
                 self.join_coordinator().await;
@@ -191,7 +189,11 @@ impl ShutdownCoordinatorV1 {
                 self.join_coordinator().await;
                 return ShutdownStatus::TimedOut;
             }
-            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+            // An unavailable timer reads as elapsed.
+            if tracedecay_runtime_core::native_runtime::timeout_at(deadline, notified)
+                .await
+                .is_err()
+            {
                 return ShutdownStatus::TimedOut;
             }
         }
@@ -214,6 +216,29 @@ impl ShutdownCoordinatorState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
+    use tracedecay_runtime_core::native_runtime;
+
+    /// The bounded wait times out on the native clock, so a waiter driven by
+    /// no Tokio runtime still returns at its deadline, and not before it.
+    #[test]
+    fn a_running_coordinator_wait_times_out_without_a_tokio_runtime() {
+        let coordinator = ShutdownCoordinatorV1::default();
+        coordinator.state.running.store(true, Ordering::Release);
+        let deadline = Instant::now() + Duration::from_millis(50);
+
+        let status = native_runtime::block_on(native_runtime::timeout(
+            Duration::from_secs(10),
+            coordinator.wait_for_terminal_status_until(deadline),
+        ))
+        .expect("native runtime");
+
+        assert_eq!(status, Ok(ShutdownStatus::TimedOut));
+        assert!(
+            Instant::now() >= deadline,
+            "the wait ended before its deadline"
+        );
+    }
 
     /// The ordering that stalled the daemon's RMCP shutdown for a full test
     /// bound: a waiter begins waiting for the coordinator task after the

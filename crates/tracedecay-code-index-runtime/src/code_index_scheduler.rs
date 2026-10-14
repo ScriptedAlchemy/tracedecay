@@ -50,6 +50,14 @@ impl Default for CodeIndexHintPolicyV1 {
     }
 }
 
+/// A request control is a synchronous predicate with no wake, so every wait
+/// that must honor one re-checks it on this period. Each tick is a direct
+/// Asupersync sleep rather than `native_runtime::sleep_until`, which spawns a
+/// native timer task per call.
+fn control_poll() -> asupersync::time::Sleep {
+    asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5))
+}
+
 fn id<T>(value: &str) -> Result<T, CodeIndexSchedulerErrorV1>
 where
     T: TryFrom<String>,

@@ -181,11 +181,12 @@ tracedecay-sessions = { path = "../tracedecay-sessions" }
 tracedecay-store-runtime = { path = "../tracedecay-store-runtime" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 tracing = "0.1"
-tree-sitter = "0.26"
+tree-sitter = "0.27"
 # Self-update authenticates a release archive by its GitHub build-provenance
 # attestation against the embedded Sigstore public-good trust root; without
 # `tuf` the root is pinned by this version rather than fetched at runtime.
-sigstore-verify = { version = "0.13", default-features = false }
+# `aws-lc-rs` is the crypto provider; without one every verification panics.
+sigstore-verify = { version = "0.15", default-features = false, features = ["aws-lc-rs"] }
 # GitHub serves some attestation bundles only through `bundle_url`, as a raw
 # snappy block.
 snap = "1"
@@ -203,7 +204,7 @@ mimalloc = { version = "0.1.52", optional = true, features = ["no_thp"] }
 [target.'cfg(windows)'.dependencies]
 # Keep the flate2 backend selected by the workspace: sealed segment digests
 # must not change when Windows archive support is enabled.
-zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 # sigstore-verify links aws-lc; on x86_64 MSVC it needs NASM unless its
 # prebuilt assembly objects are allowed, and release runners carry no NASM.
 aws-lc-rs = { version = "1.18", features = ["prebuilt-nasm"] }
@@ -218,8 +219,8 @@ libc = "0.2"
 
 [dev-dependencies]
 axum = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-dirs = "6"
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
+dirs = "7"
 socket2 = "0.6"
 tokio = { version = "1", features = ["full", "test-util"] }
 toml = "1"

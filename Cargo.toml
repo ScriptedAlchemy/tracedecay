@@ -90,7 +90,7 @@ rusqlite = { version = "0.40.1", default-features = false, features = ["backup",
 # Pinned once: the MCP git handlers and the root's edit/lifecycle readers must
 # resolve the same object database and status implementation, so a feature
 # added for one is never missing for the other.
-gix = { version = "=0.87.1", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
+gix = { version = "=0.89.0", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
 schemars = "1.2.1"
 
 [profile.bench]
@@ -231,6 +231,10 @@ tree-sitter-rust = { git = "https://github.com/vanessa-rodrigues/tree-sitter-rus
 # Kotlin uses arborium-kotlin across all tiers; the medium bundle must not
 # link tree-sitter-kotlin-sg's duplicate parse table.
 tokensave-medium-treesitters = { path = "patches/tokensave-medium-treesitters" }
+# tree-sitter-perl 1.1.2 lists `tree-sitter` ^0.26 as a normal dependency;
+# upstream master moves it to dev-dependencies with grammar sources identical
+# to 1.1.2. Unpublished, so pin that commit until a release ships it.
+tree-sitter-perl = { git = "https://github.com/ganezdragon/tree-sitter-perl", rev = "5b97493ce70686e22ec8b9ea261437147e342b49" }
 
 # Dev opt-level 0 for workspace glue crates (every tracedecay-* crate that is
 # not a profile.perf kernel below). A `cargo build -p tracedecay-cli --timings`

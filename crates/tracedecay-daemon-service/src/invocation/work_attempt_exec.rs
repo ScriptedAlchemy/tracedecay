@@ -53,7 +53,6 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Mutex as ProcessMapMutex;
 
-use tokio::io::AsyncWriteExt;
 use tokio::sync::Notify;
 use tracedecay_application::observability::{
     BoundedObservabilityProducerV1, WorkNoProgressObservationV1, WorkOwnerObservationResultV1,
@@ -85,14 +84,15 @@ use super::types::RegisteredWorkRuntime;
 use super::work::work_background_context;
 use super::{Arc, RequestContext};
 use tracedecay_contracts::now_micros;
+use tracedecay_runtime_core::native_runtime;
 
 mod operation_resource;
 mod provider_launch;
 mod provider_output;
 
 use operation_resource::{AttemptAdmissionTimingV1, work_operation_resource_observation};
-use provider_launch::spawn_provider;
-use provider_output::{overflow_outcome, provider_session, read_capped, stream_summary};
+use provider_launch::ProviderProcess;
+use provider_output::{overflow_outcome, provider_session, stream_summary};
 
 fn provider_stdout_artifacts<S: WorkflowArtifactStorePort>(
     identity: &WorkAttemptIdentityV1,
@@ -262,7 +262,7 @@ impl WorkAttemptProcessRegistryV1 {
         Some(notify)
     }
 
-    fn spawn_for_worktree<F, Fut>(
+    pub(super) fn spawn_for_worktree<F, Fut>(
         self: &Arc<Self>,
         identity: &WorkAttemptIdentityV1,
         worktree_id: &WorktreeId,
@@ -303,7 +303,7 @@ impl WorkAttemptProcessRegistryV1 {
                     () = &mut future => {}
                     () = task_lifecycle.cancelled() => {
                         task_cancellation.notify_one();
-                        let _ = tokio::time::timeout(CANCELLATION_GRACE, &mut future).await;
+                        let _ = native_runtime::timeout(CANCELLATION_GRACE, &mut future).await;
                     }
                 }
             }
@@ -443,13 +443,13 @@ impl WorkAttemptProcessRegistryV1 {
             process.lifecycle.cancel();
         }
         let deadline =
-            tokio::time::Instant::now() + tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE;
+            std::time::Instant::now() + tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE;
         let mut clean = true;
         for mut process in processes.into_values() {
             let Some(handle) = process.handle.as_mut() else {
                 continue;
             };
-            match tokio::time::timeout_at(deadline, &mut *handle).await {
+            match native_runtime::timeout_at(deadline, &mut *handle).await {
                 Ok(Ok(())) => {}
                 Ok(Err(_)) => clean = false,
                 Err(_) => {
@@ -998,17 +998,16 @@ async fn execute_provider_with_environment<S>(
     let identity = attempt.identity().clone();
     let envelope = attempt.execution();
     let resolved = &selection.provider;
-    let mut command = tokio::process::Command::new(&resolved.executable);
+    let mut command = std::process::Command::new(&resolved.executable);
     command
         .args(&resolved.arguments)
         .current_dir(envelope.worktree_root())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .env_clear()
-        .kill_on_drop(true);
+        .env_clear();
     #[cfg(unix)]
-    command.process_group(0);
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
     for (key, value) in admitted_environment {
         command.env(key, value);
     }
@@ -1032,8 +1031,15 @@ async fn execute_provider_with_environment<S>(
         }
     }
 
-    let (mut child, _lifeline) = match spawn_provider(command).await {
-        Ok(launched) => launched,
+    let budget = envelope.budget();
+    let spawned = ProviderProcess::spawn(
+        command,
+        budget.max_stdout_bytes(),
+        budget.max_stderr_bytes(),
+    )
+    .await;
+    let mut process = match spawned {
+        Ok(process) => process,
         Err(error) => {
             tracing::warn!(
                 task = identity.task_id().as_str(),
@@ -1066,8 +1072,8 @@ async fn execute_provider_with_environment<S>(
                 ?problem,
                 "work attempt could not be marked running; terminating provider"
             );
-            terminate(&mut child, TerminationSignal::Kill);
-            let _ = child.wait().await;
+            process.signal(TerminationSignal::Kill);
+            let _ = process.wait().await;
             if settle_effect_dispatch(attempt_effects, context, attempt, true) {
                 seal_cancellation_before_running(
                     attempts,
@@ -1083,39 +1089,28 @@ async fn execute_provider_with_environment<S>(
     };
     let started = std::time::Instant::now();
 
-    if let Some(mut stdin) = child.stdin.take() {
-        let instructions = envelope.instructions().as_bytes().to_vec();
-        if let Err(error) = stdin.write_all(&instructions).await {
-            tracing::debug!(
-                task = identity.task_id().as_str(),
-                ?error,
-                "work attempt provider closed stdin early"
-            );
-        }
-        drop(stdin);
-    }
-
-    let budget = envelope.budget();
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let stdout_task =
-        tokio::spawn(async move { read_capped(stdout, budget.max_stdout_bytes()).await });
-    let stderr_task =
-        tokio::spawn(async move { read_capped(stderr, budget.max_stderr_bytes()).await });
+    process.start(envelope.instructions().as_bytes().to_vec());
 
     let deadline_micros =
         u64::try_from(envelope.deadline().0.saturating_sub(now_micros().0)).unwrap_or(0);
     let wall = std::time::Duration::from_micros(deadline_micros);
 
-    let outcome = tokio::select! {
-        status = child.wait() => match status {
-            Ok(status) => exit_outcome(status),
-            Err(_) => WorkAttemptProviderOutcomeV1::LaunchFailed,
-        },
-        () = tokio::time::sleep(wall) => {
+    let ending = native_runtime::timeout(wall, async {
+        tokio::select! {
+            status = process.wait() => Some(status),
+            () = cancel.notified() => None,
+        }
+    })
+    .await;
+    let outcome = match ending {
+        Ok(Some(Ok(status))) => exit_outcome(status),
+        Ok(Some(Err(_))) => WorkAttemptProviderOutcomeV1::LaunchFailed,
+        Ok(None) => cancel_ladder(attempts, context, &identity, &mut process).await,
+        // An unavailable timer fails closed as an elapsed wall budget.
+        Err(_) => {
             let stalled_for = started.elapsed();
-            terminate(&mut child, TerminationSignal::Kill);
-            let _ = child.wait().await;
+            process.signal(TerminationSignal::Kill);
+            let _ = process.wait().await;
             offer_no_progress_observation(
                 observability_producer,
                 &identity,
@@ -1126,15 +1121,12 @@ async fn execute_provider_with_environment<S>(
             );
             WorkAttemptProviderOutcomeV1::TimedOut
         }
-        () = cancel.notified() => {
-            cancel_ladder(attempts, context, &identity, &mut child).await
-        }
     };
 
-    let captured_stdout = stdout_task.await.ok().flatten();
+    let (captured_stdout, captured_stderr) = process.output().await;
     let provider_session = provider_session(resolved.protocol, captured_stdout.as_ref());
     let stdout = stream_summary(captured_stdout.clone());
-    let stderr = stream_summary(stderr_task.await.ok().flatten());
+    let stderr = stream_summary(captured_stderr);
     let mut outcome = overflow_outcome(outcome, &stdout, &stderr);
     let artifacts =
         provider_stdout_artifacts(&identity, captured_stdout.as_ref(), workflow_artifacts)
@@ -1297,7 +1289,7 @@ async fn execute_app_server<S>(
         .clone();
     let launch_receipt = CodexAppServerLaunchReceipt::default();
     let blocking_launch_receipt = launch_receipt.clone();
-    let session = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+    let mut session = std::pin::pin!(native_runtime::spawn_blocking(move || {
         run_work_with_codex_app_server(
             &prompt,
             &config,
@@ -1333,47 +1325,49 @@ async fn execute_app_server<S>(
             })
         })
         .map_err(|error| error.to_string())
-    });
-    tokio::pin!(session);
+    }));
 
     // The terminal arms only decide *how* the session ended; draining the
     // blocking worker happens after the select, where the session future is no
     // longer borrowed by it.
-    let ending = tokio::select! {
-        joined = &mut session => AppServerEnding::Session(joined),
-        () = tokio::time::sleep(wall) => {
-            let stalled_for = attempt_started.elapsed();
-            // Cancelling the app-server session SIGKILLs its whole process
-            // tree; the escalation observed here is the same kill rung as the
-            // stdio path.
-            cancellation.cancel();
-            offer_no_progress_observation(
-                observability_producer,
-                &identity,
-                envelope.deadline(),
-                topology_policy_digest,
-                deadline_micros,
-                stalled_for,
-            );
-            AppServerEnding::TimedOut
-        }
-        () = cancel.notified() => {
-            // The app-server has no graceful rung: cancelling terminates the
-            // whole process tree, so the ladder acknowledges and stops there
-            // rather than pretending an interrupt was survived.
-            if let Err(problem) =
-                attempts.acknowledge_cancellation(context, &identity, now_micros())
-            {
-                tracing::warn!(
-                    task = identity.task_id().as_str(),
-                    ?problem,
-                    "work attempt cancellation could not be acknowledged"
-                );
+    let ending = native_runtime::timeout(wall, async {
+        tokio::select! {
+            joined = &mut session => AppServerEnding::Session(joined),
+            () = cancel.notified() => {
+                // The app-server has no graceful rung: cancelling terminates
+                // the whole process tree, so the ladder acknowledges and stops
+                // there rather than pretending an interrupt was survived.
+                if let Err(problem) =
+                    attempts.acknowledge_cancellation(context, &identity, now_micros())
+                {
+                    tracing::warn!(
+                        task = identity.task_id().as_str(),
+                        ?problem,
+                        "work attempt cancellation could not be acknowledged"
+                    );
+                }
+                cancellation.cancel();
+                AppServerEnding::Cancelled
             }
-            cancellation.cancel();
-            AppServerEnding::Cancelled
         }
-    };
+    })
+    .await
+    .unwrap_or_else(|_| {
+        let stalled_for = attempt_started.elapsed();
+        // Cancelling the app-server session SIGKILLs its whole process tree;
+        // the escalation observed here is the same kill rung as the stdio
+        // path. An unavailable timer fails closed the same way.
+        cancellation.cancel();
+        offer_no_progress_observation(
+            observability_producer,
+            &identity,
+            envelope.deadline(),
+            topology_policy_digest,
+            deadline_micros,
+            stalled_for,
+        );
+        AppServerEnding::TimedOut
+    });
 
     let mut text = None;
     let mut provider_session = None;
@@ -1518,7 +1512,7 @@ async fn cancel_ladder<S>(
     attempts: &tracedecay_contracts::WorkAttemptService<S>,
     context: &RequestContext,
     identity: &WorkAttemptIdentityV1,
-    child: &mut tokio::process::Child,
+    process: &mut ProviderProcess,
 ) -> WorkAttemptProviderOutcomeV1
 where
     S: tracedecay_contracts::WorkAttemptStoragePort,
@@ -1530,8 +1524,8 @@ where
             "work attempt cancellation could not be acknowledged"
         );
     }
-    terminate(child, TerminationSignal::Interrupt);
-    if tokio::time::timeout(CANCELLATION_GRACE, child.wait())
+    process.signal(TerminationSignal::Interrupt);
+    if native_runtime::timeout(CANCELLATION_GRACE, process.wait())
         .await
         .is_err()
     {
@@ -1542,8 +1536,8 @@ where
                 "work attempt cancellation could not be escalated"
             );
         }
-        terminate(child, TerminationSignal::Kill);
-        let _ = child.wait().await;
+        process.signal(TerminationSignal::Kill);
+        let _ = process.wait().await;
     }
     WorkAttemptProviderOutcomeV1::Cancelled
 }
@@ -1554,29 +1548,6 @@ where
 enum TerminationSignal {
     Interrupt,
     Kill,
-}
-
-#[cfg(unix)]
-fn terminate(child: &mut tokio::process::Child, signal: TerminationSignal) {
-    let signal = match signal {
-        TerminationSignal::Interrupt => libc::SIGINT,
-        TerminationSignal::Kill => libc::SIGKILL,
-    };
-    if let Some(pid) = child.id() {
-        let pid = pid as libc::pid_t;
-        // The child leads its own process group; signal the whole group so
-        // provider-spawned descendants observe the ladder too.
-        // SAFETY: killpg with a pid owned by this daemon and a constant
-        // signal number has no memory-safety obligations.
-        if unsafe { libc::killpg(pid, signal) } != 0 {
-            let _ = child.start_kill();
-        }
-    }
-}
-
-#[cfg(not(unix))]
-fn terminate(child: &mut tokio::process::Child, _signal: TerminationSignal) {
-    let _ = child.start_kill();
 }
 
 #[cfg(unix)]
