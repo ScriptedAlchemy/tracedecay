@@ -42,6 +42,7 @@ use tracedecay_domain::{
     SanitizerRevision, ScoreDomainId, SingleRootScopeV1, SymbolOccurrenceId, TemporalModeV1,
     UtcMicros, VectorWatermark, canonical_sha256,
 };
+use tracedecay_runtime_core::native_runtime;
 use tracedecay_tool_catalog::SortContractId;
 
 use super::{
@@ -227,7 +228,7 @@ impl CodeIndexSchedulerRegistryV1 {
         // The blocking side may park on the single-flight decode barrier for a
         // sealed generation, which is an O(store) sweep. Do not hold an admission
         // slot across it.
-        let task = tokio::task::spawn_blocking(move || {
+        let task = native_runtime::spawn_blocking(move || {
             if let Some(reason) = control
                 .as_ref()
                 .and_then(super::branch_generations::BranchGenerationReadControlV1::termination)
@@ -313,7 +314,7 @@ impl CodeIndexSchedulerRegistryV1 {
     ) -> Result<LatestCompleteCodeIndexV1, CallableCodeCursorError> {
         let wait = remaining_generation_resolution_wait(request)
             .ok_or(CallableCodeCursorError::Unavailable)?;
-        let deadline = tokio::time::Instant::now() + wait;
+        let deadline = std::time::Instant::now() + wait;
         let resolution = async {
             if let Some(cursor) = page.cursor.as_ref() {
                 let expected_generation = (!is_unpinned_latest(requested)).then_some(requested);
@@ -342,7 +343,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     .ok_or(CallableCodeCursorError::GenerationNotHeld)
             }
         };
-        let latest = tokio::time::timeout_at(deadline, resolution)
+        let latest = native_runtime::timeout_at(deadline, resolution)
             .await
             .map_err(|_| CallableCodeCursorError::Unavailable)??;
         if !matches!(
@@ -412,7 +413,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     .ok_or(CallableCodeCursorError::GenerationNotHeld)
             }
         };
-        let latest = tokio::time::timeout(wait, resolution)
+        let latest = native_runtime::timeout(wait, resolution)
             .await
             .map_err(|_| CallableCodeCursorError::Unavailable)??;
         if !matches!(
@@ -434,7 +435,7 @@ impl CodeIndexSchedulerRegistryV1 {
     ) -> Result<LatestCodeTextGenerationV1, CallableCodeCursorError> {
         let wait = remaining_generation_resolution_wait(request)
             .ok_or(CallableCodeCursorError::Unavailable)?;
-        let deadline = tokio::time::Instant::now() + wait;
+        let deadline = std::time::Instant::now() + wait;
         let resolution = async {
             if let Some(cursor) = page.cursor.as_ref() {
                 let expected_generation = (!is_unpinned_latest(requested)).then_some(requested);
@@ -486,7 +487,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     .ok_or(CallableCodeCursorError::GenerationNotHeld)
             }
         };
-        let latest = tokio::time::timeout(wait, resolution)
+        let latest = native_runtime::timeout(wait, resolution)
             .await
             .map_err(|_| CallableCodeCursorError::Unavailable)??;
         if !matches!(
@@ -1914,7 +1915,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let mut catalog_retain = None;
         if let Some(budget) = remaining_generation_resolution_wait(context.request) {
             let waiting = Arc::clone(&store);
-            match tokio::task::spawn_blocking(move || {
+            match native_runtime::spawn_blocking(move || {
                 waiting.await_rewarm_and_retain_for(budget, CodeGraphReadinessRequirement::Catalog)
             })
             .await
@@ -4432,17 +4433,18 @@ mod tests {
         assert_eq!(evidence.omissions[0].reason, OmissionReason::Unavailable);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn generation_resolution_inner_timeout_precedes_outer_dispatch_expiry() {
-        let remaining = Duration::from_secs(5);
+        let remaining = GENERATION_RESOLUTION_SETTLEMENT_MARGIN + Duration::from_millis(50);
+        let outer_horizon = std::time::Instant::now() + remaining;
         let inner = generation_resolution_wait_from_remaining(remaining);
-        let settled = tokio::time::timeout(remaining, async move {
-            tokio::time::timeout(inner, std::future::pending::<()>()).await
+        let settled = native_runtime::timeout_at(outer_horizon, async move {
+            native_runtime::timeout(inner, std::future::pending::<()>()).await
         })
         .await;
 
         assert!(
-            matches!(settled, Ok(Err(_))),
+            matches!(settled, Ok(Err(native_runtime::TimeoutError::Elapsed))),
             "the inner typed timeout must settle before the outer dispatch horizon"
         );
     }

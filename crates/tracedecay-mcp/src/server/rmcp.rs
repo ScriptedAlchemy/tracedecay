@@ -1,28 +1,27 @@
-//! `rmcp` 3.x adapter for the authenticated `TraceDecay` MCP surface.
+//! `rmcp` 3.x model adapter for the authenticated `TraceDecay` MCP surface.
 //!
 //! The daemon owns authentication, bounded framing, project selection, and
 //! replacement/retirement. Once that boundary selected a project server, this
-//! adapter delegates standard MCP requests to the existing catalog and handler
-//! authority through `rmcp`'s typed server callbacks.
+//! adapter answers standard MCP requests, decoded into `rmcp`'s typed model,
+//! from the existing catalog and handler authority. The session loop that
+//! feeds it lives in [`super::session`].
 
 use std::sync::Arc;
 
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ClientCapabilities,
-    CustomNotification, CustomRequest, CustomResult, ErrorCode, ErrorData, Implementation,
-    InitializeRequestParams, InitializeResult, ListPromptsResult, ListResourceTemplatesResult,
-    ListResourcesResult, ListToolsResult, MetaObject, PaginatedRequestParams, ProtocolVersion,
-    ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, RequestMetaObject,
-    ServerCapabilities, ServerConfig,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ClientCapabilities, ClientRequest,
+    CompleteResult, CustomRequest, CustomResult, DiscoverResult, EmptyResult, ErrorCode, ErrorData,
+    Implementation, InitializeRequestParams, InitializeResult, MetaObject, ProtocolVersion,
+    ReadResourceResult, RequestMetaObject, ServerCapabilities, ServerConfig, ServerResult,
 };
-use rmcp::service::{MaybeSendFuture, NotificationContext, RequestContext};
-use rmcp::{RoleServer, ServerHandler};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::sync::{RwLock, Semaphore};
 
 use crate::transport::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 
+use super::protocol::negotiate_protocol_version;
+use super::session::{McpRequestContext, SessionState, missing_request_context_error};
 use super::{
     McpConnectionContext, McpConnectionState, McpDispatchParams, McpDispatchRequest,
     McpResponseLease, dispatch_is_independent_read, speaks_2026_07_28, stamp_2026_07_28_result,
@@ -31,7 +30,7 @@ use super::{
 /// Per-RMCP-connection handoff from handler completion to the transport write.
 ///
 /// A selected project response owns a read lease from its exact target server.
-/// `rmcp` separates handler completion from response serialization, so the
+/// Handler completion and response serialization are separate steps, so the
 /// lease must cross that gap keyed by the JSON-RPC request id. The transport
 /// removes it exactly once when it sends or suppresses the response.
 pub struct RmcpSelectedProjectResponseAuthority<L> {
@@ -271,7 +270,7 @@ where
     }
 }
 
-/// Per-connection `rmcp` server facade over the existing `TraceDecay` request
+/// Per-connection MCP request handler over the existing `TraceDecay` request
 /// authority.
 pub struct RmcpConnectionAdapter<C>
 where
@@ -287,7 +286,7 @@ where
     work_delivery_settlement: RmcpWorkDeliverySettlement,
     initialize_response_decorator: Option<RmcpInitializeResponseDecorator>,
     /// Resolved from the registered product runtime at construction, because
-    /// `ServerHandler::get_info` is infallible and must not fabricate one.
+    /// `server_config` is infallible and must not fabricate one.
     build_version: &'static str,
 }
 
@@ -337,20 +336,16 @@ where
     #[tracing::instrument(name = "mcp.server.rmcp.dispatch_total", level = "trace", skip_all)]
     async fn dispatch(
         &self,
-        context: RequestContext<RoleServer>,
+        context: McpRequestContext,
         method: &str,
         params: McpDispatchParams<'_>,
     ) -> Result<JsonRpcResponse, ErrorData> {
         let on_2026_07_28 = speaks_2026_07_28(context.protocol_version().as_ref());
         let request_permit = self.acquire_request_permit().await?;
-        // Heap-allocate the admission + dispatch composition: rmcp's generated
-        // `handle_request` polls every handler-method future inline, and the
-        // combined resident frame overflows the worker stack in perf-profile
-        // layouts when this mega-future is embedded by value.
-        let result = self
-            .context
-            .run_in_connection_admission(self.dispatch_admitted(context, method, params))
-            .await;
+        // Heap-allocate the admission + dispatch composition so the combined
+        // resident frame never sits inline in the session's request future;
+        // it overflows the worker stack in perf-profile layouts.
+        let result = Box::pin(self.dispatch_admitted(context, method, params)).await;
         drop(request_permit);
         result.map(|mut response| {
             if on_2026_07_28 && let Some(result) = response.result.as_mut() {
@@ -371,7 +366,7 @@ where
     #[tracing::instrument(name = "mcp.server.rmcp.dispatch", level = "trace", skip_all)]
     async fn dispatch_admitted(
         &self,
-        context: RequestContext<RoleServer>,
+        context: McpRequestContext,
         method: &str,
         params: McpDispatchParams<'_>,
     ) -> Result<JsonRpcResponse, ErrorData> {
@@ -379,7 +374,7 @@ where
         // on (cancellation identity, response leases, delivery settlement), so
         // it is converted once, infallibly, and never re-derived.
         let id = context.id.into_json_value();
-        let request_cancellation = context.ct;
+        let request_cancellation = context.cancellation;
         let request = McpDispatchRequest::typed(id.clone(), method, params);
         if dispatch_is_independent_read(request.method_class(), request.tool_name(), |tool_name| {
             self.context.tool_is_read_only(tool_name)
@@ -407,7 +402,7 @@ where
         &self,
         request: McpDispatchRequest<'_>,
         id: Value,
-        request_cancellation: tokio_util::sync::CancellationToken,
+        request_cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
         connection: &mut C::Connection,
     ) -> Result<JsonRpcResponse, ErrorData> {
         let pre_cancelled = request_cancellation.is_cancelled();
@@ -417,7 +412,7 @@ where
         }
         // Erase the shared dispatch authority before awaiting it: the
         // cancellation combinator otherwise stores the complete
-        // catalog-dispatch future inline in rmcp's generated request future.
+        // catalog-dispatch future inline in the session's request future.
         let handling = self.context.dispatch(
             request,
             self.timings_enabled,
@@ -475,9 +470,9 @@ where
     }
 
     #[tracing::instrument(name = "mcp.server.rmcp.notification", level = "trace", skip_all)]
-    async fn dispatch_notification(&self, method: String, params: Option<Value>) {
-        // Custom notifications (hook events, cancellations) have no typed
-        // `rmcp` DTO: their params arrive as JSON and stay JSON.
+    pub(crate) async fn dispatch_notification(&self, method: String, params: Option<Value>) {
+        // Custom notifications (hook events) have no typed `rmcp` DTO: their
+        // params arrive as JSON and stay JSON.
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_owned(),
             id: None,
@@ -496,7 +491,7 @@ where
             .await;
     }
 
-    fn cancel_request(&self, request_id: Option<rmcp::model::RequestId>) -> bool {
+    pub(crate) fn cancel_request(&self, request_id: Option<rmcp::model::RequestId>) -> bool {
         request_id
             .map(rmcp::model::RequestId::into_json_value)
             .is_some_and(|request_id| {
@@ -505,48 +500,18 @@ where
             })
     }
 
-    /// Serve one connection with the handshake guard installed.
-    ///
-    /// This deliberately shadows [`rmcp::ServiceExt::serve`]: `rmcp` moves the
-    /// transport into its initialization state machine, so a caller can no
-    /// longer reach the wire once that machine fails. Installing the guard
-    /// here is what keeps every call site, daemon routing, benchmarks,
-    /// tests, on the same typed-refusal behavior.
-    pub async fn serve<T>(
-        self,
-        transport: T,
-    ) -> std::result::Result<
-        rmcp::service::RunningService<RoleServer, Self>,
-        Box<rmcp::service::ServerInitializeError>,
-    >
+    /// Serves one broker connection until the peer leaves or `shutdown`
+    /// resolves; see [`super::session`].
+    pub async fn serve<S>(
+        &self,
+        transport: crate::BrokerStreamTransport,
+        shutdown: S,
+    ) -> tracedecay_domain::errors::Result<()>
     where
-        T: rmcp::transport::Transport<RoleServer> + Send + 'static,
+        S: Future<Output = ()> + Send,
     {
-        serve_guarded_rmcp_connection(self, transport).await
+        super::session::serve(self, transport, shutdown).await
     }
-}
-
-pub(crate) async fn serve_guarded_rmcp_connection<S, T>(
-    service: S,
-    transport: T,
-) -> std::result::Result<
-    rmcp::service::RunningService<RoleServer, S>,
-    Box<rmcp::service::ServerInitializeError>,
->
-where
-    S: rmcp::Service<RoleServer>,
-    T: rmcp::transport::Transport<RoleServer> + Send + 'static,
-{
-    rmcp::service::serve_server(
-        service,
-        GuardedHandshakeTransport {
-            inner: transport,
-            handshake_settled: false,
-            pending_ping_answer: None,
-        },
-    )
-    .await
-    .map_err(Box::new)
 }
 
 /// Whether a daemon connection's first request opens an `rmcp` session: an
@@ -592,9 +557,7 @@ pub fn attach_stateless_request_context(request: &mut JsonRpcRequest) -> bool {
         return false;
     };
     let mut context = RequestMetaObject::new();
-    // `LATEST` (2026-07-28) has no initialize handshake, and stamping it would add
-    // resultType/ttlMs/cacheScope that strict 2025-11-25 clients reject.
-    context.set_protocol_version(ProtocolVersion::LATEST_WITH_INITIALIZE);
+    context.set_protocol_version(ProtocolVersion::LATEST);
     context.set_client_capabilities(ClientCapabilities::default());
     let mut attached = false;
     for (key, value) in context.0.0 {
@@ -620,123 +583,11 @@ pub fn rmcp_response_result<T: DeserializeOwned>(
     }
 }
 
-/// The typed refusal for an `initialize` whose params `rmcp` could not decode.
-const MALFORMED_INITIALIZE_MESSAGE: &str = "initialize params are missing or malformed: \
-     protocolVersion, capabilities and clientInfo are required";
-
-/// Answers a malformed `initialize` with a typed JSON-RPC error frame and
-/// leaves the connection able to accept a corrected handshake.
-///
-/// `rmcp` demotes an `initialize` whose params do not deserialize into
-/// `InitializeRequestParams` to a `CustomRequest`, and its pre-initialize state
-/// machine then fails with `ExpectedInitializeRequest` *without writing
-/// anything to the wire* (rmcp 3.1.1, `service/server.rs`). Daemon routing maps
-/// that failure to a config error and drops the socket, so the client only sees
-/// "the daemon closed the connection after the request was sent but before
-/// returning a matching response", a transport mystery for what is a
-/// definitive protocol answer, exactly like the unparseable-handshake and
-/// rejected-auth refusals the daemon already writes before closing.
-///
-/// The guard also answers every `ping` itself. A connection whose first
-/// request carried SEP-2575 `_meta` instead of `initialize` is an inline
-/// lifecycle peer, and `rmcp`'s blanket `Service` impl refuses `ping` there
-/// with method-not-found (or invalid params without `_meta`) before
-/// `ServerHandler::ping` runs (rmcp 3.5, `handler/server.rs`). MCP requires
-/// an empty result to a ping at any time; hosts use it as a liveness probe.
-struct GuardedHandshakeTransport<T: rmcp::transport::Transport<RoleServer>> {
-    inner: T,
-    /// Set once a request that ends `rmcp`'s pre-initialize loop is forwarded.
-    /// After that the guard is inert: a later stray `initialize` is an ordinary
-    /// request the adapter answers with a typed error of its own. Before it,
-    /// non-request messages are dropped: `rmcp`'s pre-initialize loop fails on
-    /// them, so a pipelined `notifications/initialized` after a refused
-    /// initialize would end the connection the corrected handshake needs.
-    /// JSON-RPC forbids answering them, and nothing is in flight yet.
-    handshake_settled: bool,
-    /// `rmcp` polls `receive` inside `select!`, so a ping answer is written
-    /// from here rather than from a receive future that may be dropped
-    /// mid-write.
-    pending_ping_answer: Option<PendingPingAnswer<T::Error>>,
-}
-
-type PendingPingAnswer<E> =
-    std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<(), E>> + Send>>;
-
-impl<T> rmcp::transport::Transport<RoleServer> for GuardedHandshakeTransport<T>
-where
-    T: rmcp::transport::Transport<RoleServer> + Send + 'static,
-{
-    type Error = T::Error;
-
-    fn send(
-        &mut self,
-        item: rmcp::service::TxJsonRpcMessage<RoleServer>,
-    ) -> impl std::future::Future<Output = std::result::Result<(), Self::Error>> + Send + 'static
-    {
-        self.inner.send(item)
-    }
-
-    fn receive(
-        &mut self,
-    ) -> impl std::future::Future<Output = Option<rmcp::service::RxJsonRpcMessage<RoleServer>>> + Send
-    {
-        async move {
-            loop {
-                if let Some(answer) = self.pending_ping_answer.as_mut() {
-                    let sent = answer.await;
-                    self.pending_ping_answer = None;
-                    sent.ok()?;
-                }
-                let message = self.inner.receive().await?;
-                if let rmcp::model::ClientJsonRpcMessage::Request(request) = &message
-                    && matches!(request.request, rmcp::model::ClientRequest::PingRequest(_))
-                {
-                    self.pending_ping_answer = Some(Box::pin(self.inner.send(
-                        rmcp::model::ServerJsonRpcMessage::response(
-                            rmcp::model::ServerResult::EmptyResult(rmcp::model::EmptyResult {}),
-                            request.id.clone(),
-                        ),
-                    )));
-                    continue;
-                }
-                if self.handshake_settled {
-                    return Some(message);
-                }
-                let rmcp::model::ClientJsonRpcMessage::Request(request) = &message else {
-                    continue;
-                };
-                let malformed_initialize = request.request.method() == "initialize"
-                    && !matches!(
-                        request.request,
-                        rmcp::model::ClientRequest::InitializeRequest(_)
-                    );
-                if !malformed_initialize {
-                    self.handshake_settled = true;
-                    return Some(message);
-                }
-                let refusal = rmcp::model::ServerJsonRpcMessage::error(
-                    ErrorData::invalid_params(MALFORMED_INITIALIZE_MESSAGE, None),
-                    Some(request.id.clone()),
-                );
-                if self.inner.send(refusal).await.is_err() {
-                    return None;
-                }
-            }
-        }
-    }
-
-    fn close(
-        &mut self,
-    ) -> impl std::future::Future<Output = std::result::Result<(), Self::Error>> + Send {
-        self.inner.close()
-    }
-}
-
-impl<C> ServerHandler for RmcpConnectionAdapter<C>
+impl<C> RmcpConnectionAdapter<C>
 where
     C: McpConnectionContext,
 {
-    fn get_info(&self) -> ServerConfig {
+    fn server_config(&self) -> ServerConfig {
         ServerConfig::new(
             ServerCapabilities::builder()
                 .enable_resources()
@@ -746,12 +597,129 @@ where
         .with_server_info(Implementation::new("tracedecay", self.build_version))
     }
 
-    async fn initialize(
+    /// Answers one request under `rmcp` 3.4's server request policy
+    /// (`handler/server.rs`), narrowed to the methods this server implements.
+    pub(crate) async fn handle_request(
+        &self,
+        request: ClientRequest,
+        context: McpRequestContext,
+    ) -> Result<ServerResult, ErrorData> {
+        // MCP requires an empty result to a ping at any time; hosts use it as
+        // a liveness probe, so no lifecycle rule below may refuse one.
+        if matches!(request, ClientRequest::PingRequest(_)) {
+            return Ok(ServerResult::EmptyResult(EmptyResult {}));
+        }
+        let protocol_version = context.protocol_version();
+        let on_2026_07_28 = speaks_2026_07_28(protocol_version.as_ref());
+        let requested_version = context.meta.protocol_version();
+        let inline_negotiation = !matches!(request, ClientRequest::InitializeRequest(_));
+        if inline_negotiation
+            && let Some(requested) = requested_version.as_ref()
+            && !ProtocolVersion::KNOWN_VERSIONS.contains(requested)
+        {
+            return Err(ErrorData::unsupported_protocol_version(
+                requested.clone(),
+                ProtocolVersion::KNOWN_VERSIONS,
+            ));
+        }
+        // Per-request context is required only of a request that itself uses
+        // the inline lifecycle; a session opened by `initialize` may omit it.
+        let requires_request_context = inline_negotiation
+            && (matches!(request, ClientRequest::DiscoverRequest(_))
+                || matches!(context.session, SessionState::Inline)
+                || speaks_2026_07_28(requested_version.as_ref()));
+        if requires_request_context {
+            let missing = context
+                .meta
+                .missing_required_keys(&ProtocolVersion::V_2026_07_28);
+            if !missing.is_empty() {
+                return Err(missing_request_context_error(&missing));
+            }
+        }
+        let result = match request {
+            ClientRequest::InitializeRequest(request) => self
+                .initialize(request.params, context)
+                .await
+                .map(ServerResult::InitializeResult),
+            ClientRequest::DiscoverRequest(_) => Ok(ServerResult::DiscoverResult(
+                DiscoverResult::from_server_info(
+                    ProtocolVersion::KNOWN_VERSIONS.to_vec(),
+                    self.server_config(),
+                ),
+            )),
+            ClientRequest::CompleteRequest(_) => {
+                Ok(ServerResult::CompleteResult(CompleteResult::default()))
+            }
+            ClientRequest::ListToolsRequest(_) => rmcp_response_result(
+                self.dispatch(context, "tools/list", McpDispatchParams::TypedEmpty)
+                    .await?,
+            )
+            .map(ServerResult::ListToolsResult),
+            ClientRequest::CallToolRequest(request) => self
+                .call_tool(request.params, context)
+                .await
+                .map(ServerResult::from),
+            ClientRequest::ListResourcesRequest(_) => rmcp_response_result(
+                self.dispatch(context, "resources/list", McpDispatchParams::TypedEmpty)
+                    .await?,
+            )
+            .map(ServerResult::ListResourcesResult),
+            ClientRequest::ListResourceTemplatesRequest(_) => empty_list_result(
+                &context,
+                "resources/templates/list",
+                json!({ "resourceTemplates": [] }),
+            )
+            .map(ServerResult::ListResourceTemplatesResult),
+            ClientRequest::ListPromptsRequest(_) => {
+                empty_list_result(&context, "prompts/list", json!({ "prompts": [] }))
+                    .map(ServerResult::ListPromptsResult)
+            }
+            ClientRequest::ReadResourceRequest(request) => {
+                rmcp_response_result::<ReadResourceResult>(
+                    self.dispatch(
+                        context,
+                        "resources/read",
+                        McpDispatchParams::ResourcesRead(&request.params),
+                    )
+                    .await?,
+                )
+                .map(ServerResult::ReadResourceResult)
+            }
+            ClientRequest::CustomRequest(request) => self
+                .custom_request(request, context)
+                .await
+                .map(ServerResult::CustomResult),
+            // Prompts, logging, subscriptions, and tasks are not offered.
+            request => Err(ErrorData::new(
+                ErrorCode::METHOD_NOT_FOUND,
+                request.method().to_owned(),
+                None,
+            )),
+        };
+        result
+            .map(|mut result| {
+                // Peers before 2026-07-28 keep the wire shape without
+                // `resultType: "complete"`.
+                if !on_2026_07_28 {
+                    result.strip_result_type_for_legacy_peer();
+                }
+                result
+            })
+            .map_err(|mut error| {
+                // SEP-2164: from 2026-07-28 a missing resource is invalid params.
+                if on_2026_07_28 && error.code == ErrorCode::RESOURCE_NOT_FOUND {
+                    error.code = ErrorCode::INVALID_PARAMS;
+                }
+                error
+            })
+    }
+
+    pub(crate) async fn initialize(
         &self,
         request: InitializeRequestParams,
-        context: RequestContext<RoleServer>,
+        context: McpRequestContext,
     ) -> Result<InitializeResult, ErrorData> {
-        let negotiated = self.negotiate_initialize(&request)?;
+        let protocol_version = negotiate_protocol_version(request.protocol_version.as_str());
         let mut response = self
             .dispatch(
                 context,
@@ -763,30 +731,17 @@ where
             decorate(&mut response);
         }
         let mut result = rmcp_response_result::<InitializeResult>(response)?;
-        // The broker delivers this result before rmcp's outer negotiation.
-        // Negotiate through the SDK first so the wire and peer agree.
-        result.protocol_version = negotiated.protocol_version;
+        result.protocol_version = protocol_version;
         Ok(result)
-    }
-
-    async fn list_tools(
-        &self,
-        _request: Option<PaginatedRequestParams>,
-        context: RequestContext<RoleServer>,
-    ) -> Result<ListToolsResult, ErrorData> {
-        rmcp_response_result(
-            self.dispatch(context, "tools/list", McpDispatchParams::TypedEmpty)
-                .await?,
-        )
     }
 
     async fn call_tool(
         &self,
         mut request: CallToolRequestParams,
-        context: RequestContext<RoleServer>,
+        context: McpRequestContext,
     ) -> Result<CallToolResponse, ErrorData> {
-        // `rmcp` moves the wire `params._meta` into the request context; the
-        // caller deadline is read from the typed params.
+        // The session lifts the wire `params._meta` into the request context;
+        // the caller deadline is read from the typed params.
         if request.meta.is_none() && !context.meta.is_empty() {
             request.meta = Some(context.meta.clone());
         }
@@ -807,93 +762,24 @@ where
         Ok(result.into())
     }
 
-    async fn list_resources(
-        &self,
-        _request: Option<PaginatedRequestParams>,
-        context: RequestContext<RoleServer>,
-    ) -> Result<ListResourcesResult, ErrorData> {
-        rmcp_response_result(
-            self.dispatch(context, "resources/list", McpDispatchParams::TypedEmpty)
-                .await?,
-        )
-    }
-
-    fn list_resource_templates(
-        &self,
-        _request: Option<PaginatedRequestParams>,
-        context: RequestContext<RoleServer>,
-    ) -> impl Future<Output = Result<ListResourceTemplatesResult, ErrorData>> + MaybeSendFuture + '_
-    {
-        std::future::ready(empty_list_result(
-            &context,
-            "resources/templates/list",
-            json!({ "resourceTemplates": [] }),
-        ))
-    }
-
-    fn list_prompts(
-        &self,
-        _request: Option<PaginatedRequestParams>,
-        context: RequestContext<RoleServer>,
-    ) -> impl Future<Output = Result<ListPromptsResult, ErrorData>> + MaybeSendFuture + '_ {
-        std::future::ready(empty_list_result(
-            &context,
-            "prompts/list",
-            json!({ "prompts": [] }),
-        ))
-    }
-
-    async fn read_resource(
-        &self,
-        request: ReadResourceRequestParams,
-        context: RequestContext<RoleServer>,
-    ) -> Result<ReadResourceResponse, ErrorData> {
-        rmcp_response_result::<ReadResourceResult>(
-            self.dispatch(
-                context,
-                "resources/read",
-                McpDispatchParams::ResourcesRead(&request),
-            )
-            .await?,
-        )
-        .map(Into::into)
-    }
-
-    async fn on_cancelled(
-        &self,
-        notification: rmcp::model::CancelledNotificationParam,
-        _context: NotificationContext<RoleServer>,
-    ) {
-        let _ = self.cancel_request(notification.request_id);
-    }
-
-    async fn on_custom_notification(
-        &self,
-        notification: CustomNotification,
-        _context: NotificationContext<RoleServer>,
-    ) {
-        self.dispatch_notification(notification.method, notification.params)
-            .await;
-    }
-
     /// A hook event arrives as a stateless request on its own daemon
     /// connection; it is dispatched exactly like the notification form.
     /// Any other custom request is an unknown method or a known one whose
     /// params did not fit its typed DTO; the dispatch authority answers it
     /// (method not found, invalid params) and accounts for it.
-    async fn on_custom_request(
+    async fn custom_request(
         &self,
         request: CustomRequest,
-        context: RequestContext<RoleServer>,
+        context: McpRequestContext,
     ) -> Result<CustomResult, ErrorData> {
         if request.method == tracedecay_hooks::core_events::HOOK_EVENT_METHOD {
             self.dispatch_notification(request.method, request.params)
                 .await;
             return Ok(CustomResult::new(json!({})));
         }
-        // `rmcp` lifts `params._meta` into the request context; the object it
-        // leaves empty is a request that carried no params of its own (the
-        // stdio proxy creates `params` only to hold that context).
+        // The session lifts `params._meta` into the request context; the
+        // object it leaves empty is a request that carried no params of its
+        // own (the stdio proxy creates `params` only to hold that context).
         let params = request
             .params
             .as_ref()
@@ -908,7 +794,7 @@ where
 
 /// A list this server always answers empty, shaped for the request's revision.
 fn empty_list_result<T: DeserializeOwned>(
-    context: &RequestContext<RoleServer>,
+    context: &McpRequestContext,
     method: &str,
     mut result: Value,
 ) -> Result<T, ErrorData> {

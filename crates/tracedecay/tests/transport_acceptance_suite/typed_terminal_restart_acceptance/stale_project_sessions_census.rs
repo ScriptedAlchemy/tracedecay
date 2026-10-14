@@ -249,7 +249,7 @@ fn previous_lcm_schema_profile_resets_its_session_stores_and_keeps_the_registry(
         let rewritten = rusqlite::Connection::open(profile_root.join(store))
             .expect("open a registered store")
             .execute(
-                "UPDATE session_schema_migrations SET version = ?1 WHERE name = 'lcm'",
+                "UPDATE tracedecay_schema_version SET version = ?1 WHERE component = 'lcm'",
                 [previous],
             )
             .expect("record the released LCM schema");

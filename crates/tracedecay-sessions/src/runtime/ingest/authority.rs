@@ -17,7 +17,6 @@ use tracedecay_domain::{BrainId, ProjectId, UserProfileId};
 use tracedecay_store::StoreShardIdV1;
 
 use crate::admission::HostAdmission;
-use crate::host_ports::session_review::SessionReviewPort;
 use crate::repository_provenance::RepositoryProvenanceAdmissionContext;
 use crate::runtime::git_correlation::GitCorrelationSessionStore;
 use crate::runtime::store_port::TranscriptIngestStore;
@@ -69,12 +68,4 @@ pub trait SessionIngestAuthority: Sync {
     /// registry. `None` means the registry could not be read, which is
     /// distinct from "no projects are registered".
     fn registered_project_roots(&self) -> impl Future<Output = Option<Vec<PathBuf>>> + Send;
-
-    /// The root-owned post-ingest session review scheduler.
-    ///
-    /// `None` is the typed unwired state: a user-global pass refuses to run
-    /// and reports `session_review_unwired` instead of ingesting transcripts
-    /// whose review it could never schedule. Read-only and project-scoped
-    /// callers never consult it.
-    fn session_review(&self) -> Option<SessionReviewPort>;
 }

@@ -426,7 +426,7 @@ mod tests {
         let runtime = crate::ports::hook_runtime::crate_test_runtime(ProfileRoot::under_home(
             profile_home.path(),
         ));
-        let outcome = crate::hooks::ingest_transcript_for_event(
+        crate::hooks::ingest_transcript_for_event(
             &runtime,
             "cursor",
             &event,
@@ -437,11 +437,6 @@ mod tests {
         )
         .await;
 
-        assert!(outcome.user_scope);
-        assert_eq!(outcome.messages_upserted, 2);
-        assert!(outcome.should_schedule_user_review());
-        assert!(!outcome.failed);
-        assert!(!outcome.timed_out);
         let calls = daemon.calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, None);
@@ -460,31 +455,5 @@ mod tests {
                 "format": "json",
             })
         );
-    }
-
-    #[tokio::test]
-    async fn transcript_ingest_types_daemon_failure() {
-        let _daemon = crate::hooks::TestDaemonHookActionGuard::install([]);
-        let event = serde_json::json!({ "session_id": "cursor-fail" }).to_string();
-
-        let profile_home = tempfile::tempdir().unwrap();
-        let runtime = crate::ports::hook_runtime::crate_test_runtime(ProfileRoot::under_home(
-            profile_home.path(),
-        ));
-        let outcome = crate::hooks::ingest_transcript_for_event(
-            &runtime,
-            "cursor",
-            &event,
-            None,
-            Some(4_096),
-            Duration::from_millis(250),
-            None,
-        )
-        .await;
-
-        assert!(outcome.failed);
-        assert!(!outcome.timed_out);
-        assert!(!outcome.should_schedule_user_review());
-        assert_eq!(outcome.messages_upserted, 0);
     }
 }

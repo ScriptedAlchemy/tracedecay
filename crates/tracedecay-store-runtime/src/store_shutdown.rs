@@ -1,14 +1,18 @@
 //! Typed receipts and bounded joins for named store-runtime shutdown tasks.
 //!
-//! `join_shutdown_tasks_until` reserves an abort budget inside the caller's
-//! deadline: tasks get the cooperative window first, then stragglers are
-//! aborted and joined so nothing detaches past shutdown while the receipt
-//! still names every owner truthfully.
+//! `join_shutdown_tasks_until` polls its tasks in place and ends their
+//! cooperative window `DAEMON_TASK_ABORT_DEADLINE` before the caller's
+//! deadline, then drops the stragglers, so nothing outlives the join while the
+//! receipt still names every owner truthfully.
 
-use std::collections::HashMap;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
+use std::time::Instant;
 
+use futures_util::FutureExt;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE;
+use tracedecay_runtime_core::native_runtime::{self, TimeoutError};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ShutdownStatus {
@@ -132,99 +136,66 @@ impl ShutdownTaskReceipt {
     }
 }
 
+/// Tasks are polled in place on the caller's task, so a task that blocks its
+/// thread holds up the others and the deadline. Move blocking work off-thread.
+// The `AbortHandle` element is unused; it goes away with the Tokio runtime in
+// the final native-runtime cutover PR.
 pub async fn join_shutdown_tasks_until<Tasks, Task>(
-    deadline: tokio::time::Instant,
+    deadline: impl Into<Instant>,
     tasks: Tasks,
 ) -> ShutdownTaskReceipt
 where
     Tasks: IntoIterator<Item = (String, Option<tokio::task::AbortHandle>, Task)>,
-    Task: Future<Output = ShutdownStatus> + Send + 'static,
+    Task: Future<Output = ShutdownStatus>,
 {
-    let now = tokio::time::Instant::now();
-    let cooperative_deadline =
-        if deadline.saturating_duration_since(now) > DAEMON_TASK_ABORT_DEADLINE {
-            deadline
-                .checked_sub(DAEMON_TASK_ABORT_DEADLINE)
-                .unwrap_or(deadline)
-        } else {
-            now
-        };
-    let mut joins = tokio::task::JoinSet::new();
-    let mut pending = HashMap::new();
-    for (ordinal, (owner, owned_task_abort, task)) in tasks.into_iter().enumerate() {
-        let wrapper_abort = joins.spawn(task);
-        pending.insert(
-            wrapper_abort.id(),
-            (ordinal, owner, owned_task_abort, wrapper_abort),
+    let deadline = deadline.into();
+    // Past `deadline - reserve` (or below the clock's origin) the window is
+    // already over.
+    let cooperative_deadline = deadline
+        .checked_sub(DAEMON_TASK_ABORT_DEADLINE)
+        .unwrap_or_else(Instant::now);
+    let mut outcomes = Vec::new();
+    let mut running = FuturesUnordered::new();
+    for (ordinal, (owner, _, task)) in tasks.into_iter().enumerate() {
+        outcomes.push((owner, None));
+        running.push(
+            AssertUnwindSafe(task)
+                .catch_unwind()
+                .map(move |result| (ordinal, result)),
         );
     }
-
-    let mut outcomes = Vec::new();
-    while !joins.is_empty() {
-        match tracing::Instrument::instrument(
-            tokio::time::timeout_at(cooperative_deadline, joins.join_next_with_id()),
-            tracing::trace_span!("daemon.store_runtime.shutdown_wait"),
-        )
-        .await
-        {
-            Ok(Some(Ok((id, task_status)))) => {
-                if let Some((ordinal, owner, _, _)) = pending.remove(&id) {
-                    outcomes.push((
-                        ordinal,
-                        ShutdownTaskOutcome {
-                            owner,
-                            status: task_status,
-                        },
-                    ));
-                }
+    let drained = tracing::Instrument::instrument(
+        native_runtime::timeout_at(cooperative_deadline, async {
+            while let Some((ordinal, result)) = running.next().await {
+                outcomes[ordinal].1 = Some(match result {
+                    Ok(status) => status,
+                    Err(panic) => ShutdownStatus::Failed(format!(
+                        "shutdown task panicked: {}",
+                        panic
+                            .downcast_ref::<&str>()
+                            .map(|message| (*message).to_owned())
+                            .or_else(|| panic.downcast_ref::<String>().cloned())
+                            .unwrap_or_else(|| "non-string panic payload".to_owned())
+                    )),
+                });
             }
-            Ok(Some(Err(error))) => {
-                if let Some((ordinal, owner, _, _)) = pending.remove(&error.id()) {
-                    outcomes.push((
-                        ordinal,
-                        ShutdownTaskOutcome {
-                            owner,
-                            status: ShutdownStatus::Failed(error.to_string()),
-                        },
-                    ));
-                }
-            }
-            Ok(None) => break,
-            Err(_) => {
-                for (_, _, owned_task_abort, wrapper_abort) in pending.values() {
-                    if let Some(owned_task_abort) = owned_task_abort {
-                        owned_task_abort.abort();
-                    } else {
-                        wrapper_abort.abort();
-                    }
-                }
-                outcomes.extend(pending.drain().map(|(_, (ordinal, owner, _, _))| {
-                    (
-                        ordinal,
-                        ShutdownTaskOutcome {
-                            owner,
-                            status: ShutdownStatus::TimedOut,
-                        },
-                    )
-                }));
-                while !joins.is_empty() {
-                    match tracing::Instrument::instrument(
-                        tokio::time::timeout_at(deadline, joins.join_next()),
-                        tracing::trace_span!("daemon.store_runtime.shutdown_abort_wait"),
-                    )
-                    .await
-                    {
-                        Ok(Some(_)) => {}
-                        Ok(None) | Err(_) => break,
-                    }
-                }
-                break;
-            }
-        }
-    }
-    outcomes.sort_by_key(|(ordinal, _)| *ordinal);
+        }),
+        tracing::trace_span!("daemon.store_runtime.shutdown_wait"),
+    )
+    .await;
+    let straggler = match drained {
+        Ok(()) | Err(TimeoutError::Elapsed) => ShutdownStatus::TimedOut,
+        Err(error @ TimeoutError::TimerUnavailable(_)) => ShutdownStatus::Failed(error.to_string()),
+    };
+    drop(running);
     ShutdownTaskReceipt {
-        outcomes: outcomes.into_iter().map(|(_, outcome)| outcome).collect(),
+        outcomes: outcomes
+            .into_iter()
+            .map(|(owner, status)| ShutdownTaskOutcome {
+                owner,
+                status: status.unwrap_or_else(|| straggler.clone()),
+            })
+            .collect(),
     }
 }
 
@@ -232,9 +203,16 @@ where
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
-    use super::ShutdownStatus;
+    use futures_util::FutureExt;
+    use futures_util::future::BoxFuture;
+    use tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE;
+    use tracedecay_runtime_core::native_runtime;
+
+    use super::{ShutdownStatus, ShutdownTaskOutcome, ShutdownTaskReceipt};
+
+    const COOPERATIVE_WINDOW: Duration = Duration::from_millis(50);
 
     struct Dropped(Arc<AtomicBool>);
 
@@ -244,131 +222,144 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn panicked_and_cancelled_tasks_are_reported_as_failed() {
-        let panicked = tokio::spawn(async {
-            panic!("shutdown task panic");
-        });
-        let cancelled = tokio::spawn(std::future::pending::<()>());
-        cancelled.abort();
-
-        let receipt = super::join_shutdown_tasks_until(
-            tokio::time::Instant::now() + Duration::from_secs(1),
-            [
-                ("panicked".to_owned(), panicked),
-                ("cancelled".to_owned(), cancelled),
-            ]
-            .map(|(owner, task)| {
-                (owner, None, async move {
-                    match task.await {
-                        Ok(()) => ShutdownStatus::Clean,
-                        Err(error) => ShutdownStatus::Failed(error.to_string()),
-                    }
-                })
-            }),
-        )
-        .await;
-
-        assert_eq!(receipt.outcomes[0].owner, "panicked");
-        assert_eq!(receipt.outcomes[1].owner, "cancelled");
-        assert!(matches!(
-            receipt.outcomes[0].status,
-            ShutdownStatus::Failed(_)
-        ));
-        assert!(matches!(
-            receipt.outcomes[1].status,
-            ShutdownStatus::Failed(_)
-        ));
-        assert!(!receipt.is_clean());
-    }
-
-    #[tokio::test]
-    async fn typed_task_failure_is_preserved_verbatim() {
-        let receipt = super::join_shutdown_tasks_until(
-            tokio::time::Instant::now() + Duration::from_secs(1),
-            [("drain".to_owned(), None, async {
-                ShutdownStatus::Failed("project request drain timed out".to_owned())
-            })],
-        )
-        .await;
-
-        assert_eq!(receipt.outcomes.len(), 1);
-        assert_eq!(
-            receipt.outcomes[0].status,
-            ShutdownStatus::Failed("project request drain timed out".to_owned())
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn timeout_aborts_stragglers_and_names_the_exact_owner() {
-        let dropped = Arc::new(AtomicBool::new(false));
-        let started = Arc::new(tokio::sync::Notify::new());
-        let task_dropped = Arc::clone(&dropped);
-        let task_started = Arc::clone(&started);
-        let straggler = tokio::spawn(async move {
-            let _dropped = Dropped(task_dropped);
-            task_started.notify_one();
-            std::future::pending::<ShutdownStatus>().await
-        });
-        started.notified().await;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
-
-        let join = super::join_shutdown_tasks_until(
+    fn join(
+        deadline: Instant,
+        tasks: Vec<(&str, BoxFuture<'static, ShutdownStatus>)>,
+    ) -> ShutdownTaskReceipt {
+        native_runtime::block_on(super::join_shutdown_tasks_until(
             deadline,
-            [("straggler".to_owned(), Some(straggler.abort_handle()), {
-                async move {
-                    match straggler.await {
-                        Ok(status) => status,
-                        Err(error) => ShutdownStatus::Failed(error.to_string()),
-                    }
-                }
-            })],
-        );
-        tokio::pin!(join);
-        tokio::time::advance(Duration::from_secs(1)).await;
-        let receipt = join.await;
-        tokio::task::yield_now().await;
-
-        assert_eq!(
-            receipt.outcomes,
-            [super::ShutdownTaskOutcome {
-                owner: "straggler".to_string(),
-                status: ShutdownStatus::TimedOut,
-            }]
-        );
-        assert!(dropped.load(Ordering::Acquire));
+            tasks
+                .into_iter()
+                .map(|(owner, task)| (owner.to_owned(), None, task)),
+        ))
+        .expect("native runtime")
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn sub_abort_reserve_deadline_aborts_immediately_and_preserves_join_time() {
-        let dropped = Arc::new(AtomicBool::new(false));
-        let task_dropped = Arc::clone(&dropped);
-        let task = tokio::spawn(async move {
-            let _dropped = Dropped(task_dropped);
-            std::future::pending::<()>().await;
-        });
-        tokio::task::yield_now().await;
-        let abort = task.abort_handle();
-        let started = tokio::time::Instant::now();
+    fn outcome(owner: &str, status: ShutdownStatus) -> ShutdownTaskOutcome {
+        ShutdownTaskOutcome {
+            owner: owner.to_owned(),
+            status,
+        }
+    }
 
-        let receipt = super::join_shutdown_tasks_until(
-            started + Duration::from_secs(1),
-            [("short-budget-owner".to_owned(), Some(abort), async move {
-                match task.await {
-                    Ok(()) => ShutdownStatus::Clean,
-                    Err(error) => ShutdownStatus::Failed(error.to_string()),
-                }
-            })],
-        )
-        .await;
+    fn straggler(dropped: &Arc<AtomicBool>) -> BoxFuture<'static, ShutdownStatus> {
+        let dropped = Dropped(Arc::clone(dropped));
+        async move {
+            let _dropped = dropped;
+            std::future::pending().await
+        }
+        .boxed()
+    }
 
-        assert_eq!(tokio::time::Instant::now(), started);
+    #[test]
+    fn a_panicking_task_fails_only_its_own_owner() {
+        let receipt = join(
+            Instant::now() + DAEMON_TASK_ABORT_DEADLINE + COOPERATIVE_WINDOW,
+            vec![
+                (
+                    "panicked",
+                    futures_util::future::lazy(|_| -> ShutdownStatus {
+                        panic!("shutdown task panic")
+                    })
+                    .boxed(),
+                ),
+                ("clean", async { ShutdownStatus::Clean }.boxed()),
+            ],
+        );
+
         assert_eq!(
             receipt.outcomes,
-            [super::ShutdownTaskOutcome {
-                owner: "short-budget-owner".to_owned(),
-                status: ShutdownStatus::TimedOut,
-            }]
+            [
+                outcome(
+                    "panicked",
+                    ShutdownStatus::Failed(
+                        "shutdown task panicked: shutdown task panic".to_owned()
+                    )
+                ),
+                outcome("clean", ShutdownStatus::Clean),
+            ]
+        );
+    }
+
+    #[test]
+    fn typed_task_failure_is_preserved_verbatim() {
+        let receipt = join(
+            Instant::now() + DAEMON_TASK_ABORT_DEADLINE + COOPERATIVE_WINDOW,
+            vec![(
+                "drain",
+                async { ShutdownStatus::Failed("project request drain timed out".to_owned()) }
+                    .boxed(),
+            )],
+        );
+
+        assert_eq!(
+            receipt.outcomes,
+            [outcome(
+                "drain",
+                ShutdownStatus::Failed("project request drain timed out".to_owned())
+            )]
+        );
+    }
+
+    #[test]
+    fn stragglers_are_dropped_after_the_cooperative_window_and_named_exactly() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let started = Instant::now();
+        let deadline = started + DAEMON_TASK_ABORT_DEADLINE + COOPERATIVE_WINDOW;
+
+        let receipt = join(
+            deadline,
+            vec![
+                ("straggler", straggler(&dropped)),
+                (
+                    "late-drain",
+                    async move {
+                        native_runtime::sleep_until(started + COOPERATIVE_WINDOW / 5)
+                            .await
+                            .expect("native timer");
+                        ShutdownStatus::Clean
+                    }
+                    .boxed(),
+                ),
+            ],
+        );
+        let returned = Instant::now();
+
+        assert_eq!(
+            receipt.outcomes,
+            [
+                outcome("straggler", ShutdownStatus::TimedOut),
+                outcome("late-drain", ShutdownStatus::Clean),
+            ]
+        );
+        assert!(
+            dropped.load(Ordering::Acquire),
+            "the straggler is dropped before the receipt returns"
+        );
+        assert!(
+            returned >= started + COOPERATIVE_WINDOW,
+            "stragglers keep their cooperative window"
+        );
+        assert!(
+            returned < deadline,
+            "the abort reserve stays inside the caller's deadline"
+        );
+    }
+
+    #[test]
+    fn a_deadline_inside_the_abort_reserve_drops_stragglers_without_waiting() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let deadline = Instant::now() + DAEMON_TASK_ABORT_DEADLINE;
+
+        let receipt = join(deadline, vec![("short-budget-owner", straggler(&dropped))]);
+
+        assert!(
+            Instant::now() < deadline,
+            "the join returns without spending the caller's remaining budget"
+        );
+        assert_eq!(
+            receipt.outcomes,
+            [outcome("short-budget-owner", ShutdownStatus::TimedOut)]
         );
         assert!(dropped.load(Ordering::Acquire));
     }

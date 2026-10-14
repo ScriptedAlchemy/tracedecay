@@ -174,49 +174,22 @@ async fn schema_version(db_path: &Path) -> i64 {
 async fn schema_version_on(conn: &Connection) -> i64 {
     let mut rows = conn
         .query(
-            "SELECT version FROM session_schema_migrations WHERE name = 'lcm'",
+            "SELECT version FROM tracedecay_schema_version WHERE component = 'lcm'",
             (),
         )
         .await
         .unwrap();
     let row = rows.next().await.unwrap().unwrap();
     row.get(0).unwrap()
-}
-
-async fn migration_applied_at(db_path: &Path) -> i64 {
-    let db = TestConnection::open(db_path);
-    let conn = (*db).clone();
-    let mut rows = conn
-        .query(
-            "SELECT applied_at FROM session_schema_migrations WHERE name = 'lcm'",
-            (),
-        )
-        .await
-        .unwrap();
-    let row = rows.next().await.unwrap().unwrap();
-    row.get(0).unwrap()
-}
-
-async fn set_migration_applied_at(db_path: &Path, applied_at: i64) {
-    let db = TestConnection::open(db_path);
-    let conn = (*db).clone();
-    conn.execute(
-        "UPDATE session_schema_migrations
-         SET applied_at = ?1
-         WHERE name = 'lcm'",
-        params![applied_at],
-    )
-    .await
-    .unwrap();
 }
 
 async fn set_migration_version(db_path: &Path, version: i64) {
     let db = TestConnection::open(db_path);
     let conn = (*db).clone();
     conn.execute(
-        "UPDATE session_schema_migrations
+        "UPDATE tracedecay_schema_version
          SET version = ?1
-         WHERE name = 'lcm'",
+         WHERE component = 'lcm'",
         params![version],
     )
     .await
@@ -341,8 +314,8 @@ async fn temporal_schema_version(db_path: &Path) -> i64 {
     let mut rows = conn
         .query(
             "SELECT version
-             FROM session_temporal_schema_migrations
-             WHERE name = 'session-temporal'",
+             FROM tracedecay_schema_version
+             WHERE component = 'session-temporal'",
             (),
         )
         .await

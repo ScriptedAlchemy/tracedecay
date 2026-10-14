@@ -53,8 +53,9 @@ impl ProjectRuntimeRegistryV1 {
     }
 
     async fn drain_roots(&self, roots: &BTreeSet<PathBuf>) -> bool {
-        let retired =
-            tokio::time::timeout(tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE, async {
+        let retired = tracedecay_runtime_core::native_runtime::timeout(
+            tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE,
+            async {
                 loop {
                     let mut changed = self.reservation_changed.subscribe();
                     let retired = {
@@ -82,8 +83,9 @@ impl ProjectRuntimeRegistryV1 {
                         break BTreeMap::new();
                     }
                 }
-            })
-            .await;
+            },
+        )
+        .await;
         match retired {
             Ok(mut runtimes) => {
                 let mut clean = shut_down_advisory(&runtimes).await;
@@ -175,7 +177,7 @@ impl ProjectRuntimeRegistryV1 {
             self.shutdown_complete.send_replace(ShutdownState::Pending);
             let task = tokio::spawn(async move {
                 let drain_registry = registry.clone();
-                let drained = tokio::task::spawn_blocking(move || {
+                let drained = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         drain_registry.take_all_blocking()
                     }))
@@ -423,10 +425,10 @@ fn shut_down_runtimes(
 /// grace. Every owner was already cancelled and joined by the shutdown phases
 /// ahead of `shut_down_runtimes`; the blocking pool releases the memory while
 /// shutdown proceeds, and process exit reclaims whatever is still being freed.
-fn release_drained_runtimes(runtimes: BTreeMap<PathBuf, ProjectRuntime>) {
+fn release_drained_runtimes<R: Send + 'static>(runtimes: BTreeMap<PathBuf, R>) {
     let count = runtimes.len();
     let started = std::time::Instant::now();
-    drop(tokio::task::spawn_blocking(move || {
+    let release = move || {
         drop(runtimes);
         tracedecay_runtime_core::logging::log_daemon_event(
             "daemon_shutdown",
@@ -436,5 +438,39 @@ fn release_drained_runtimes(runtimes: BTreeMap<PathBuf, ProjectRuntime>) {
                 ("elapsed_ms", started.elapsed().as_millis().to_string()),
             ],
         );
-    }));
+    };
+    // Queued here rather than through the awaitable helper, which would only
+    // start the release once polled. Without a pool the runtimes drop inline.
+    let _ = tracedecay_runtime_core::native_runtime::handle()
+        .and_then(|runtime| runtime.spawn_blocking(release));
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::thread::{self, ThreadId};
+    use std::time::Duration;
+
+    use super::*;
+
+    struct ReleaseProbe(mpsc::Sender<ThreadId>);
+
+    impl Drop for ReleaseProbe {
+        fn drop(&mut self) {
+            let _ = self.0.send(thread::current().id());
+        }
+    }
+
+    #[test]
+    fn drained_runtimes_are_released_off_the_shutdown_thread() {
+        let (released, released_on) = mpsc::channel();
+        release_drained_runtimes(BTreeMap::from([(
+            PathBuf::from("/project"),
+            ReleaseProbe(released),
+        )]));
+        let released_on = released_on
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the drained runtimes are released");
+        assert_ne!(released_on, thread::current().id());
+    }
 }

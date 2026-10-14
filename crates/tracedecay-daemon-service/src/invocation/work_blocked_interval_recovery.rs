@@ -21,7 +21,7 @@ use tracedecay_contracts::{
 use tracedecay_domain::{ActorId, WorkBlockedIntervalReceiptV1};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
-use super::recovery_schedule::{RecoveryWarningTrackerV1, run_recovery_loop};
+use super::recovery_schedule::{RecoveryScheduleV1, RecoveryWarningTrackerV1, run_recovery_loop};
 use super::work_blocked_interval_recovery_context;
 
 const RECOVERY_PAGE_LIMIT: u32 = 32;
@@ -154,7 +154,7 @@ async fn run_recovery(
     run_recovery_loop(
         signal,
         cancellation,
-        SAFETY_INTERVAL,
+        RecoveryScheduleV1::with_safety_interval(SAFETY_INTERVAL),
         "Work blocked-interval recovery",
         move |_| {
             let database = database.clone();
@@ -179,12 +179,13 @@ async fn recover_once(
 ) -> Result<(), String> {
     let read_database = database.clone();
     let read_context = context.clone();
-    let mut read =
-        tokio::task::spawn_blocking(move || read_pending_receipts(&read_database, &read_context));
+    let read = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        read_pending_receipts(&read_database, &read_context)
+    });
+    tokio::pin!(read);
     let receipts = tokio::select! {
         biased;
         () = cancellation.cancelled() => {
-            read.abort();
             read.await
                 .map_err(|error| format!("cancelled scan worker did not join: {error}"))?
                 .map_err(|error| format!("cancelled scan completed with failure: {error}"))?;
@@ -247,13 +248,13 @@ async fn recover_once(
 
         let mark_database = database.clone();
         let mark_context = context.clone();
-        let mut mark = tokio::task::spawn_blocking(move || {
+        let mark = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             mark_receipt_durable(&mark_database, &mark_context, &receipt)
         });
+        tokio::pin!(mark);
         tokio::select! {
             biased;
             () = cancellation.cancelled() => {
-                mark.abort();
                 mark.await
                     .map_err(|error| format!("cancelled marker worker did not join: {error}"))?
                     .map_err(|error| {

@@ -969,21 +969,23 @@ impl GitRepositoryAuthority {
             let _span = tracing::trace_span!("runtime_core.git.repository_discover.walk").entered();
             crate::git_open::discover(path)
         }
-        .map_err(|error| match error {
-            // Like git without GIT_DISCOVERY_ACROSS_FILESYSTEM, a walk that
-            // stops at a mount boundary (a tmpfs /tmp, say) or a ceiling has
-            // found no repository; nothing on disk was unreadable.
-            gix::discover::Error::Discover(
-                gix::discover::upwards::Error::NoGitRepository { .. }
-                | gix::discover::upwards::Error::NoGitRepositoryWithinFs { .. }
-                | gix::discover::upwards::Error::NoGitRepositoryWithinCeiling { .. },
-            ) => GitRepositoryError::NotARepository {
-                path: path.display().to_string(),
-            },
-            error => GitRepositoryError::UnreadableRepository {
-                path: path.display().to_string(),
-                detail: error.to_string(),
-            },
+        .map_err(|error| {
+            match error.downcast_any_ref::<gix::discover::upwards::Error>() {
+                // Like git without GIT_DISCOVERY_ACROSS_FILESYSTEM, a walk that
+                // stops at a mount boundary (a tmpfs /tmp, say) or a ceiling has
+                // found no repository; nothing on disk was unreadable.
+                Some(
+                    gix::discover::upwards::Error::NoGitRepository { .. }
+                    | gix::discover::upwards::Error::NoGitRepositoryWithinFs { .. }
+                    | gix::discover::upwards::Error::NoGitRepositoryWithinCeiling { .. },
+                ) => GitRepositoryError::NotARepository {
+                    path: path.display().to_string(),
+                },
+                _ => GitRepositoryError::UnreadableRepository {
+                    path: path.display().to_string(),
+                    detail: error.to_string(),
+                },
+            }
         })?;
         let (worktree_root, git_dir, common_dir) = {
             let _span =

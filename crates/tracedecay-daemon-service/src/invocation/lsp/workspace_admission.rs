@@ -64,7 +64,8 @@ impl DaemonInvocationService {
             return None;
         }
         let mut expected_owner_matched = expected_owner.is_none();
-        for (root, factory) in &authorized.factories {
+        let mut factories = Vec::with_capacity(authorized.factories.len());
+        for (root, _) in &authorized.factories {
             // LSP roots are ordered by scope digest; the application scope set
             // orders exact project identities. Bind authorities by identity,
             // since their positions need not agree.
@@ -75,22 +76,34 @@ impl DaemonInvocationService {
             let locator = authorized_root.locator()?;
             let path = url::Url::parse(root.uri()).ok()?.to_file_path().ok()?;
             let current_owner = self.lsp_owner(Some(&path)).await?;
+            // A root's owner is republished under the same authority once its
+            // first generation seals, so authorization binds the owner's
+            // identity and scope, and the session opens on the live factory.
             if !current_owner.project_identity.matches_locator(locator)
-                || !std::sync::Arc::ptr_eq(&current_owner.factory, factory)
+                || current_owner
+                    .scope_grant
+                    .as_ref()
+                    .is_none_or(|grant| grant.scope != *authorized_root.scope())
             {
                 return None;
             }
             if expected_owner.is_some_and(|expected| {
                 expected.project_identity.matches_locator(locator)
-                    && std::sync::Arc::ptr_eq(factory, &expected.factory)
+                    && std::sync::Arc::ptr_eq(&current_owner.factory, &expected.factory)
             }) {
                 expected_owner_matched = true;
             }
+            factories.push((root.clone(), current_owner.factory));
         }
         if !expected_owner_matched {
             return None;
         }
-        Some(CurrentLspWorkspaceAuthorityV1::Federated(authorized))
+        Some(CurrentLspWorkspaceAuthorityV1::Federated(
+            AuthorizedDaemonLspWorkspace {
+                scope_set: authorized.scope_set,
+                factories,
+            },
+        ))
     }
 
     #[tracing::instrument(

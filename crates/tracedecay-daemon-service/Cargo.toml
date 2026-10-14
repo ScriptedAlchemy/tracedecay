@@ -17,10 +17,8 @@ doctest = false
 test-helpers = []
 
 [dependencies]
-hyper = { version = "1", features = ["http1", "server"] }
-hyper-util = { version = "0.1", features = ["service", "tokio"] }
+asupersync = { workspace = true, features = ["tls"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tower = { version = "0.5", features = ["util"] }
 tracedecay-daemon-control = { path = "../tracedecay-daemon-control" }
@@ -31,7 +29,7 @@ tracedecay-maintenance = { path = "../tracedecay-maintenance" }
 tracedecay-code-index-retention = { path = "../tracedecay-code-index-retention" }
 tracedecay-session-runtime = { path = "../tracedecay-session-runtime" }
 axum = "0.8"
-getrandom = "0.2"
+getrandom = "0.4"
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

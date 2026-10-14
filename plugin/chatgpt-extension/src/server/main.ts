@@ -5,9 +5,9 @@ import { createServer as createHttpServer, type IncomingMessage, type ServerResp
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { McpServer } from "@modelcontextprotocol/server";
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
+import { NodeStreamableHTTPServerTransport } from "@modelcontextprotocol/node";
 import { resolveProfileRoot } from "./authority.js";
 import { DaemonBridge } from "./bridge.js";
 import { registerTraceDecayExtension } from "./register.js";
@@ -104,12 +104,13 @@ async function handleHttp(createServer: () => McpServer, request: IncomingMessag
     response.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32001, message: "unauthorized: a Bearer token is required" }, id: null }));
     return;
   }
-  const transport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: undefined,
-    enableJsonResponse: true,
-    enableDnsRebindingProtection: true,
-    allowedHosts: [`${host}:${port}`, `localhost:${port}`, `127.0.0.1:${port}`, `[::1]:${port}`],
-  });
+  const allowedHosts = [`${host}:${port}`, `localhost:${port}`, `127.0.0.1:${port}`, `[::1]:${port}`];
+  if (!allowedHosts.includes(request.headers.host ?? "")) {
+    response.writeHead(403, { "content-type": "application/json" });
+    response.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32000, message: `Invalid Host header: ${request.headers.host ?? ""}` }, id: null }));
+    return;
+  }
+  const transport = new NodeStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
   const server = createServer();
   response.on("close", () => {
     void transport.close().finally(() => server.close());

@@ -481,11 +481,12 @@ impl BoundedHookOrchestratorV1 {
             }
         }
         let deadline =
-            tokio::time::Instant::now() + tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE;
+            std::time::Instant::now() + tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE;
         for mut task in tasks {
-            match tokio::time::timeout_at(deadline, &mut task).await {
+            match tracedecay_runtime_core::native_runtime::timeout_at(deadline, &mut task).await {
                 Ok(Ok(())) => {}
                 Ok(Err(_)) => clean = false,
+                // An unavailable timer aborts the task as if its deadline passed.
                 Err(_) => {
                     task.abort();
                     let _ = task.await;
@@ -668,7 +669,12 @@ pub(super) async fn run_registered_context_scout_request(
     let outcome = tokio::select! {
         biased;
         () = request_cancellation.cancelled() => Err(ApplicationProblem::cancelled_before_admission()),
-        () = tokio::time::sleep_until(deadline.instant().into()) => Err(ApplicationProblem::timed_out_before_admission()),
+        fired = tracedecay_runtime_core::native_runtime::sleep_until(deadline.instant()) => {
+            if let Err(error) = fired {
+                tracing::error!(%error, "Context Scout admission timer unavailable; timing out");
+            }
+            Err(ApplicationProblem::timed_out_before_admission())
+        }
         () = operation_cancellation.cancelled() => Err(unavailable()),
         completed = completion => completed.map_err(|_| unavailable()),
     };
@@ -1026,15 +1032,16 @@ struct LspLeaseTask {
 }
 
 impl LspLeaseTask {
-    async fn stop(self) -> Result<(), DaemonInvocationProblem> {
+    async fn stop(mut self) -> Result<(), DaemonInvocationProblem> {
         self.cancellation.cancel();
-        self.handle
+        (&mut self.handle)
             .await
             .map_err(|_| DaemonInvocationProblem::Unavailable)
     }
+}
 
-    fn abort(&self) {
-        self.cancellation.cancel();
+impl Drop for LspLeaseTask {
+    fn drop(&mut self) {
         self.handle.abort();
     }
 }
@@ -1067,9 +1074,59 @@ impl Default for LspLeaseTaskRegistryState {
 #[derive(Default)]
 pub struct LspLeaseTaskRegistry {
     state: StdMutex<LspLeaseTaskRegistryState>,
+    /// Wall-clock milliseconds tests have moved lease time forward to.
+    #[cfg(any(test, feature = "test-helpers"))]
+    lease_clock: tokio::sync::watch::Sender<u64>,
+}
+
+/// Waits out one disconnected session's lease.
+pub(super) struct LspLeaseTimer {
+    #[cfg(any(test, feature = "test-helpers"))]
+    lease_clock: tokio::sync::watch::Receiver<u64>,
+}
+
+impl LspLeaseTimer {
+    /// Completes when wall-clock time reaches `expires_at_ms`, timed on the
+    /// native runtime. A lease whose timer cannot start ends now rather than
+    /// hold its session forever.
+    pub(super) async fn expire(self, expires_at_ms: u64) {
+        let remaining = Duration::from_millis(expires_at_ms.saturating_sub(now_millis()));
+        let timer = async {
+            if let Err(error) = tracedecay_runtime_core::native_runtime::sleep_until(
+                std::time::Instant::now() + remaining,
+            )
+            .await
+            {
+                tracing::error!(%error, "LSP lease timer unavailable; reclaiming the session now");
+            }
+        };
+        #[cfg(any(test, feature = "test-helpers"))]
+        let timer = async {
+            let mut lease_clock = self.lease_clock;
+            tokio::select! {
+                () = timer => {}
+                _ = lease_clock.wait_for(|now_ms| *now_ms >= expires_at_ms) => {}
+            }
+        };
+        timer.await;
+    }
 }
 
 impl LspLeaseTaskRegistry {
+    pub(super) fn lease_timer(&self) -> LspLeaseTimer {
+        LspLeaseTimer {
+            #[cfg(any(test, feature = "test-helpers"))]
+            lease_clock: self.lease_clock.subscribe(),
+        }
+    }
+
+    /// Ends every lease that expires by wall-clock `now_ms`, as if that time
+    /// had come.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn expire_leases_through(&self, now_ms: u64) {
+        self.lease_clock.send_replace(now_ms);
+    }
+
     pub async fn start<F>(
         self: &Arc<Self>,
         session_id: LspSessionId,
@@ -1230,19 +1287,6 @@ impl LspLeaseTaskRegistry {
     }
 }
 
-impl Drop for LspLeaseTaskRegistry {
-    fn drop(&mut self) {
-        let state = match self.state.get_mut() {
-            Ok(state) => state,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        state.accepting = false;
-        for task in state.tasks.values() {
-            task.abort();
-        }
-    }
-}
-
 pub type RuntimeLspActor = DaemonLspRuntimeSession;
 
 #[derive(Clone)]
@@ -1342,10 +1386,8 @@ impl LspSessionAdmissionPort for AdmittedWorkspaceSessionAdmission {
     ) -> Result<AuthorizedLspSession, LspEndpointError> {
         let mut session_bytes = [0_u8; 16];
         let mut credential_bytes = [0_u8; 32];
-        getrandom::getrandom(&mut session_bytes)
-            .map_err(|_| LspEndpointError::AdmissionRejected)?;
-        getrandom::getrandom(&mut credential_bytes)
-            .map_err(|_| LspEndpointError::AdmissionRejected)?;
+        getrandom::fill(&mut session_bytes).map_err(|_| LspEndpointError::AdmissionRejected)?;
+        getrandom::fill(&mut credential_bytes).map_err(|_| LspEndpointError::AdmissionRejected)?;
         let session_id = LspSessionId::new(format!("lsp-{}", hex::encode(session_bytes)))?;
         let credential = LspSessionCredential::new(credential_bytes.to_vec())?;
         Ok(AuthorizedLspSession {

@@ -382,9 +382,9 @@ async fn malformed_snapshot_is_never_defaulted_or_overwritten() {
     let memory =
         MemoryApplication::new(FactOwnerV1::Profile, DatabaseFactStore::new(&database)).unwrap();
     let path = automation_outcomes_path(&dashboard_root);
-    tokio::fs::create_dir_all(&dashboard_root).await.unwrap();
+    std::fs::create_dir_all(&dashboard_root).unwrap();
     let malformed = b"{not-valid-json";
-    tokio::fs::write(&path, malformed).await.unwrap();
+    std::fs::write(&path, malformed).unwrap();
     let now = tracedecay_runtime_core::tracedecay::current_timestamp();
     let run_control = outcome_read_control();
 
@@ -392,12 +392,12 @@ async fn malformed_snapshot_is_never_defaulted_or_overwritten() {
         .await
         .unwrap_err();
     assert!(skill_error.to_string().contains("failed to parse"));
-    assert_eq!(tokio::fs::read(&path).await.unwrap(), malformed);
+    assert_eq!(std::fs::read(&path).unwrap(), malformed);
 
     let fact_error =
         refresh_fact_outcomes(&dashboard_root, &memory, now, run_control.read_control())
             .await
             .unwrap_err();
     assert!(fact_error.to_string().contains("failed to parse"));
-    assert_eq!(tokio::fs::read(&path).await.unwrap(), malformed);
+    assert_eq!(std::fs::read(&path).unwrap(), malformed);
 }

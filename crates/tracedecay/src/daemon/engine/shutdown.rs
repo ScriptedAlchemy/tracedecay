@@ -245,7 +245,7 @@ impl DaemonEngine {
                             (
                                 "deadline_remaining_ms",
                                 deadline
-                                    .saturating_duration_since(tokio::time::Instant::now())
+                                    .saturating_duration_since(std::time::Instant::now())
                                     .as_millis()
                                     .to_string(),
                             ),
@@ -285,10 +285,10 @@ impl DaemonEngine {
     #[tracing::instrument(name = "daemon.engine.shutdown.servers", level = "trace", skip_all)]
     pub(in crate::daemon) async fn shutdown_servers(
         &self,
-        deadline: tokio::time::Instant,
+        deadline: std::time::Instant,
     ) -> ShutdownTaskReceipt {
         shutdown_project_servers(
-            deadline,
+            tokio::time::Instant::from_std(deadline),
             &self.store_administration,
             &self.http_application_registry,
         )
@@ -297,22 +297,18 @@ impl DaemonEngine {
 
     #[cfg(test)]
     pub(in crate::daemon) async fn shutdown_all(&self) -> Arc<DaemonShutdownReceipt> {
-        let deadline = tokio::time::Instant::now() + DAEMON_SHUTDOWN_DEADLINE;
+        let deadline = std::time::Instant::now() + DAEMON_SHUTDOWN_DEADLINE;
         let lifecycle = self.lifecycle.clone();
         let shutdown_engine = self.clone();
         coordinate_daemon_shutdown(&lifecycle, deadline, async move {
             let owner_phases = shutdown_engine.shutdown_owner_phases().await;
             let terminal_owner = shutdown_engine.memory_graph_reconciliation_shutdown_owner();
             let server_engine = shutdown_engine.clone();
-            DaemonShutdownPlan::new(
-                tokio::task::JoinSet::<tracedecay_domain::errors::Result<()>>::new(),
-                owner_phases,
-                move |project_server_deadline| async move {
-                    server_engine
-                        .shutdown_servers(project_server_deadline)
-                        .await
-                },
-            )
+            DaemonShutdownPlan::new(owner_phases, move |project_server_deadline| async move {
+                server_engine
+                    .shutdown_servers(project_server_deadline)
+                    .await
+            })
             .with_terminal_owner_phases(vec![vec![terminal_owner]])
         })
         .await

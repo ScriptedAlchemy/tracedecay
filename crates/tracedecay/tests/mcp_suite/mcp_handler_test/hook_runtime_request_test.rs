@@ -9,22 +9,14 @@
 use serde_json::{Value, json};
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
-use crate::support::{ProductionCompositionFixture, production_composition_fixture};
+use crate::support::{
+    ProductionCompositionFixture, call_tool_when_ready, production_composition_fixture,
+};
 
 const TOOL: &str = "tracedecay_hook_runtime";
 
 async fn call(fixture: &ProductionCompositionFixture, tool: &str, arguments: Value) -> Value {
-    let response = fixture
-        .harness
-        .call_tool(&fixture.project_root, tool, arguments)
-        .await
-        .unwrap_or_else(|error| panic!("{tool} production invocation failed: {error}"));
-    assert!(
-        response.error.is_none(),
-        "{tool} answers through its owner, never a JSON-RPC error: {:?}",
-        response.error
-    );
-    response.result.expect("tool result")
+    call_tool_when_ready(&fixture.harness, &fixture.project_root, tool, arguments).await
 }
 
 async fn answer_tool(
@@ -116,22 +108,12 @@ async fn hook_runtime_answers_typed_results_and_refuses_what_no_host_sends() {
     assert_eq!(
         refusal(&fixture, json!({"action": "codex_stop", "session_id": "s"})).await,
         invalid(
-            "invalid arguments for tracedecay_hook_runtime: unknown variant `codex_stop`, expected one of `reset_counter`, `hook_v2_admit`, `hook_v2_delivery_receipt`, `hook_v2_feedback_notice_delivery`, `ingest_transcript`, `codex_compact`, `claude_compact`, `cursor_compact`, `user_review`, `hermes_receipt`, `hook_v2_profile_admit`"
+            "invalid arguments for tracedecay_hook_runtime: unknown variant `codex_stop`, expected one of `reset_counter`, `hook_v2_admit`, `hook_v2_delivery_receipt`, `hook_v2_feedback_notice_delivery`, `ingest_transcript`, `codex_compact`, `claude_compact`, `cursor_compact`, `hermes_receipt`, `hook_v2_profile_admit`"
         )
     );
 
     // A hook with no project route selects the profile; the daemon's profile
     // owner answers it even on a project connection.
-    assert_eq!(
-        refusal(
-            &fixture,
-            json!({"action": "user_review", "provider": "codex", "session_id": null})
-        )
-        .await,
-        invalid(
-            "projectless Hermes review is unavailable: automation requires a pinned project configuration"
-        )
-    );
     assert_eq!(
         refusal(
             &fixture,
@@ -204,10 +186,19 @@ async fn project_transcript_ingest_settles_emitted_hints_in_the_served_profile()
         }),
     )
     .await;
-    assert_eq!(ingest["status"], "committed", "ingest: {ingest}");
-    // Admission is the commit; `messages_upserted` counts only the projections
-    // this request drained, which the catch-up worker may take first.
-    assert_eq!(ingest["observations_committed"], 2, "ingest: {ingest}");
+    // A missed live-refresh join is retried after the ingest committed, and
+    // the retry answers the same rollout as an exact duplicate. The searched
+    // text and the settled hint analytics below prove the first pass either way.
+    let committed = ingest["status"] == "committed";
+    assert!(
+        committed || ingest["status"] == "exact_duplicate",
+        "ingest: {ingest}"
+    );
+    if committed {
+        // Admission is the commit; `messages_upserted` counts only the projections
+        // this request drained, which the catch-up worker may take first.
+        assert_eq!(ingest["observations_committed"], 2, "ingest: {ingest}");
+    }
     let envelope = answer_tool(
         &fixture,
         "tracedecay_message_search",
@@ -234,19 +225,21 @@ async fn project_transcript_ingest_settles_emitted_hints_in_the_served_profile()
     );
     assert_eq!(question["message"]["session_id"], "cursor-session");
     assert_eq!(question["message"]["provider"], "cursor");
-    assert_eq!(
-        ingest["hint_outcomes"],
-        json!({
-            "status": "ok",
-            "imported_events": 1,
-            "import_errors": [],
-            "scanned": 1,
-            "acted": 1,
-            "ignored": 0,
-            "unresolved": 0,
-            "written": 1,
-        })
-    );
+    if committed {
+        assert_eq!(
+            ingest["hint_outcomes"],
+            json!({
+                "status": "ok",
+                "imported_events": 1,
+                "import_errors": [],
+                "scanned": 1,
+                "acted": 1,
+                "ignored": 0,
+                "unresolved": 0,
+                "written": 1,
+            })
+        );
+    }
 
     let analytics = answer_tool(
         &fixture,

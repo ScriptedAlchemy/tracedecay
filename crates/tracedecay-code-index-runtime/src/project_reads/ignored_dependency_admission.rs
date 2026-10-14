@@ -103,7 +103,7 @@ impl CodeIndexIgnoredDependencyAdmissionPortV1
                 .expires_at
                 .0
                 .saturating_sub(now_micros().0);
-            let deadline = tokio::time::Instant::now()
+            let deadline = std::time::Instant::now()
                 + Duration::from_micros(u64::try_from(remaining_micros).unwrap_or(0));
             match self
                 .schedulers

@@ -16,9 +16,7 @@ use crate::automation::run_ledger::{
 async fn corrupt_jobs_file_surfaces_error_instead_of_no_work() {
     let temp = tempfile::TempDir::new().unwrap();
     let root = temp.path();
-    tokio::fs::write(jobs_path(root), b"{ this is not valid json")
-        .await
-        .unwrap();
+    std::fs::write(jobs_path(root), b"{ this is not valid json").unwrap();
     let err = jobs_configured_for_scheduler(root)
         .await
         .expect_err("corrupt jobs file must surface an error");
@@ -49,17 +47,11 @@ async fn valid_schedulable_job_reports_work_and_recovers_after_corruption() {
             "delivery": { "mode": "file" }
         }]
     });
-    tokio::fs::write(jobs_path(root), serde_json::to_vec(&job).unwrap())
-        .await
-        .unwrap();
+    std::fs::write(jobs_path(root), serde_json::to_vec(&job).unwrap()).unwrap();
     assert!(jobs_configured_for_scheduler(root).await.unwrap());
-    tokio::fs::write(jobs_path(root), b"nonsense")
-        .await
-        .unwrap();
+    std::fs::write(jobs_path(root), b"nonsense").unwrap();
     assert!(jobs_configured_for_scheduler(root).await.is_err());
-    tokio::fs::write(jobs_path(root), serde_json::to_vec(&job).unwrap())
-        .await
-        .unwrap();
+    std::fs::write(jobs_path(root), serde_json::to_vec(&job).unwrap()).unwrap();
     assert!(jobs_configured_for_scheduler(root).await.unwrap());
 }
 

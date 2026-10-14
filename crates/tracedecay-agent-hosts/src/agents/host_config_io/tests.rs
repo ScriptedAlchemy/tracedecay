@@ -857,4 +857,32 @@ mod format_preserving_edit_tests {
         assert!(error.to_string().contains("cannot parse"), "{error}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
     }
+
+    #[test]
+    fn edit_parse_refuses_json5_syntax_in_both_dialects() {
+        let path = Path::new("settings.json");
+        for dialect in [JsonConfigDialect::Json, JsonConfigDialect::Jsonc] {
+            for json5 in [
+                r#"{"a": .5}"#,
+                r#"{"a": 5.}"#,
+                r#"{"a": Infinity}"#,
+                r#"{"a": -Infinity}"#,
+                r#"{"a": "\x41"}"#,
+                r#"{"a": "\v"}"#,
+                "{\"a\": \"line\\\ncontinued\"}",
+                r#"{true: 1}"#,
+            ] {
+                assert!(
+                    dialect.parse_for_edit(path, json5).is_err(),
+                    "{dialect:?} accepted {json5}"
+                );
+            }
+            assert_eq!(
+                dialect
+                    .parse_for_edit(path, r#"{"a": 0.5, "b": "\u0041"}"#)
+                    .unwrap(),
+                serde_json::json!({"a": 0.5, "b": "A"})
+            );
+        }
+    }
 }

@@ -120,6 +120,18 @@ fn application_errors_map_to_bounded_static_outcomes() {
     assert!(storage.retryable);
     assert_eq!(storage.reason_code, Some("authority_write_failed"));
     assert_eq!(
+        classify_error(&ObservationApplicationError::Store(
+            ObservationStoreError::WriterSaturated {
+                operation: "submit observation batch",
+            },
+        )),
+        admission_outcome(
+            HostAdmissionStatus::Backpressured,
+            true,
+            Some("writer_lane_saturated"),
+        )
+    );
+    assert_eq!(
         storage.cause.as_deref(),
         Some("write: provider content must not escape")
     );

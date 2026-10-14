@@ -961,32 +961,30 @@ async fn federated_lsp_admission_preserves_exact_profile_factory_and_root_pairin
         .register_lsp_owner(roots[1].0.clone(), owners[1].clone())
         .await
         .expect("restore exact owner");
-    let substituted_factory = owners[0].factory();
-    assert!(!Arc::ptr_eq(&substituted_factory, &owners[1].factory()));
     registrar
         .register_lsp_owner(
             roots[1].0.clone(),
             DaemonLspInvocationOwner::for_test_project(
-                substituted_factory,
+                owners[1].factory(),
                 profile,
                 roots[1].2.project_id.clone(),
                 roots[1].0.clone(),
             )
-            .with_scope_grant(grants[1].clone()),
+            .with_scope_grant(grants[0].clone()),
         )
         .await
-        .expect("replace owner with another root's factory");
+        .expect("replace owner with another root's grant");
     assert_lsp_authorization_refusal(
         open_authorized_workspace(
             &service,
             &registry,
             Some(workspace),
-            "request.workspace-substituted-factory",
+            "request.workspace-substituted-grant",
             &root_uris,
             &owners[0],
         )
         .await,
-        "request.workspace-substituted-factory",
+        "request.workspace-substituted-grant",
     );
 
     assert_eq!(registry.lock().await.active_sessions(), 1);

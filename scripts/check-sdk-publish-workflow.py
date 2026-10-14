@@ -132,15 +132,15 @@ def assert_build_job(job: dict[str, Any]) -> None:
     if "secrets." in policy_text or "github.token" in policy_text:
         fail(f"'{BUILD_JOB}' must not receive repository credentials")
     for required in (
-        "npm install -g npm@12.0.2",
+        "npm install -g npm@12.2.0",
         "pnpm install --frozen-lockfile",
         "pnpm run contracts:check",
         "pnpm run typecheck",
         "pnpm test",
         "npm pack --dry-run --json --ignore-scripts",
         "npm pack --json --ignore-scripts",
-        "npm pack npm@12.0.2 --ignore-scripts",
-        "5dbb86c71d07a1957f2e90734092dd6a58bdcd9ebc2d8d41ca1c6e6a21d364e1",
+        "npm pack npm@12.2.0 --ignore-scripts",
+        "6666b48816b39b86c3febac7b51a4ee4de6c5ca589c382ad8004b6b113f86677",
         "TRACEDECAY_SDK_TARBALL",
         "sha256sum --",
         "actions/upload-artifact@",
@@ -209,7 +209,7 @@ def assert_publish_job(job: dict[str, Any]) -> None:
 
     publish_command = str(publish_step.get("run", ""))
     for required in (
-        "npm-12.0.2.tgz",
+        "npm-12.2.0.tgz",
         "node npm-cli/package/bin/npm-cli.js",
         'publish "$tarball"',
         "--access public",

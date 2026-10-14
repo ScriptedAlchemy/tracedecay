@@ -12,6 +12,7 @@ mod metadata;
 pub mod migrations;
 mod purpose;
 mod retrieval_anchor_authority;
+pub mod schema_version;
 pub use retrieval_anchor_authority::append_retrieval_anchor_disposition_on;
 pub mod retrieval_anchor_schema;
 mod sql;

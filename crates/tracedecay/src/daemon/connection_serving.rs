@@ -141,8 +141,8 @@ fn serve_routed_rmcp_connection_inner(
     lifecycle: &DaemonLifecycle,
     activity: Option<DaemonActivity>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
-    // Erase the deeply nested rmcp service future before it reaches the
-    // measured wrapper so every profiling feature can compute its layout.
+    // Erase the deeply nested session future before it reaches the measured
+    // wrapper so every profiling feature can compute its layout.
     Box::pin(async move {
         let RoutedRmcpReplay {
             first_request_line,
@@ -170,38 +170,9 @@ fn serve_routed_rmcp_connection_inner(
         let transport = transport
             .with_rmcp_selected_project_responses(adapter.selected_project_responses())
             .with_rmcp_work_delivery_settlement(adapter.work_delivery_settlement());
-        let running = match transport.serve(adapter).await {
-            Ok(running) => running,
-            // The client left before a request settled the handshake; every
-            // frame it sent was already answered or refused on the wire.
-            Err(error)
-                if matches!(
-                    *error,
-                    rmcp::service::ServerInitializeError::ConnectionClosed(_)
-                ) =>
-            {
-                return Ok(());
-            }
-            Err(error) => {
-                return Err(TraceDecayError::Config {
-                    message: format!("rmcp server initialization failed: {error}"),
-                });
-            }
-        };
-        let cancellation = running.cancellation_token();
-        let waiting = running.waiting();
-        tokio::pin!(waiting);
-        let result = tokio::select! {
-            result = &mut waiting => result,
-            () = lifecycle.wait_for_draining() => {
-                { let _span = tracing::trace_span!("daemon.engine.transport.cancel").entered(); cancellation.cancel() };
-                waiting.await
-            }
-        };
-        result.map_err(|error| TraceDecayError::Config {
-            message: format!("rmcp server task failed: {error}"),
-        })?;
-        Ok(())
+        adapter
+            .serve(transport, lifecycle.wait_for_draining())
+            .await
     })
 }
 

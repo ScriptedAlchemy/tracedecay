@@ -51,8 +51,8 @@ Add these repository secrets:
   release exists.
 npm publication is tokenless: no npm secret exists anywhere in the repository
 or its workflows. The publish job authenticates through npm trusted publishing
-(OIDC), it holds `id-token: write`, and the pinned npm CLI (12.0.2, above the
-11.5.1 trusted-publishing floor; Node 22.23.2, above the 22.14.0 floor)
+(OIDC), it holds `id-token: write`, and the pinned npm CLI (12.2.0, above the
+11.5.1 trusted-publishing floor; Node 26.11.1, above the 22.14.0 floor)
 exchanges the GitHub OIDC token for a short-lived publish credential itself.
 Provenance is attached automatically by trusted publishing. No
 `NPM_TOKEN`/`NODE_AUTH_TOKEN`, `registry-url`, or `.npmrc` auth may be added

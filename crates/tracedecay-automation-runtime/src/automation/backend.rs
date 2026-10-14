@@ -185,8 +185,14 @@ pub async fn run_agent_task_with_retry_report(
                 if !should_retry {
                     return Err(error);
                 }
-                if !backoff.is_zero() {
-                    tokio::time::sleep(backoff).await;
+                if !backoff.is_zero()
+                    && let Err(timer_error) = tracedecay_runtime_core::native_runtime::sleep_until(
+                        Instant::now() + backoff,
+                    )
+                    .await
+                {
+                    tracing::warn!(%timer_error, "agent task retry backoff could not wait");
+                    return Err(error);
                 }
                 attempt += 1;
             }

@@ -226,13 +226,18 @@ fn append_message(
         .and_then(Value::as_str)
         .map(str::to_owned);
     match role {
-        "user" | "custom" => push_text_message(
-            facts,
-            CanonicalMessageRoleV1::User,
-            message.get("content"),
-            None,
-            timestamp,
-        ),
+        "user" | "custom" => {
+            // Empty text is still a turn. `push_text_message` would refuse the record.
+            facts.push(CanonicalObservationFactV1::Message {
+                role: CanonicalMessageRoleV1::User,
+                content: message
+                    .get("content")
+                    .map(visible_content)
+                    .unwrap_or(Value::Null),
+                model: None,
+                timestamp,
+            });
+        }
         "assistant" => {
             let blocks = message
                 .get("content")
@@ -273,14 +278,22 @@ fn append_message(
                 .map(ObservationId::new)
                 .transpose()
                 .map_err(|_| invalid())?;
+            let content = visible_content(message.get("content").unwrap_or(&Value::Null));
             facts.push(crate::accounted_tool_result(
                 invocation_id,
-                visible_content(message.get("content").unwrap_or(&Value::Null)),
+                content.clone(),
                 message
                     .get("isError")
                     .and_then(Value::as_bool)
                     .map(|is_error| !is_error),
             ));
+            // The same row is the conversational turn for this line.
+            facts.push(CanonicalObservationFactV1::Message {
+                role: CanonicalMessageRoleV1::Tool,
+                content,
+                model: None,
+                timestamp,
+            });
         }
         "bashExecution" => {
             facts.push(CanonicalObservationFactV1::ToolInvocation {

@@ -993,10 +993,14 @@ impl SharedJsonlPathPin {
         self.prefetches
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .extend(start_shared_jsonl_page_prefetch_with_cancellation(
-                paths,
-                Some(Arc::clone(&self.cancelled)),
-            ));
+            .extend(
+                start_shared_jsonl_page_prefetch_with_cancellation(
+                    paths,
+                    Some(Arc::clone(&self.cancelled)),
+                )
+                .into_iter()
+                .map(|(abort, _task)| abort),
+            );
     }
 }
 
@@ -1696,14 +1700,22 @@ async fn shared_jsonl_page_with_frame_limit_and_cancellation(
 /// ordered source admission; the canonical admission call waits on the exact
 /// in-flight page it needs and preserves per-source cursor order.
 #[cfg(test)]
-pub(crate) fn start_shared_jsonl_page_prefetch(paths: &[PathBuf]) -> Vec<AbortHandle> {
+pub(crate) fn start_shared_jsonl_page_prefetch(paths: &[PathBuf]) -> Vec<SharedJsonlPrefetchTask> {
     start_shared_jsonl_page_prefetch_with_cancellation(paths, None)
+        .into_iter()
+        .map(|(_abort, task)| task)
+        .collect()
 }
+
+/// Dropping the handle detaches the page task; joining it observes the end
+/// of any build the task started.
+type SharedJsonlPrefetchTask =
+    asupersync::runtime::TaskHandle<Result<(), futures_util::future::Aborted>>;
 
 fn start_shared_jsonl_page_prefetch_with_cancellation(
     paths: &[PathBuf],
     cancellation: Option<Arc<std::sync::atomic::AtomicBool>>,
-) -> Vec<AbortHandle> {
+) -> Vec<(AbortHandle, SharedJsonlPrefetchTask)> {
     let Some(cx) = tracedecay_runtime_core::native_runtime::cx() else {
         return Vec::new();
     };
@@ -1737,8 +1749,8 @@ fn start_shared_jsonl_page_prefetch_with_cancellation(
                 );
             }
         });
-        if cx.spawn(move |_cx| prefetch).is_ok() {
-            prefetches.push(abort);
+        if let Ok(task) = cx.spawn(move |_cx| prefetch) {
+            prefetches.push((abort, task));
         }
     }
     prefetches

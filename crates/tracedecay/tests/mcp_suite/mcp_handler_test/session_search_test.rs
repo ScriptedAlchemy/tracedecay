@@ -227,13 +227,7 @@ pub(super) async fn call_production_tool(
     tool: &str,
     arguments: Value,
 ) -> Value {
-    let response = harness
-        .call_tool(project, tool, arguments)
-        .await
-        .unwrap_or_else(|error| panic!("{tool} invocation failed: {error}"));
-    let result = response
-        .result
-        .unwrap_or_else(|| panic!("{tool} returned transport error: {:?}", response.error));
+    let result = call_tool_when_ready(harness, project, tool, arguments).await;
     assert_ne!(
         result["isError"], true,
         "{tool} returned an error: {result}"
@@ -543,18 +537,13 @@ async fn production_codex_hook_ingest_survives_message_search_reopen() {
     )
     .await
     .expect("production composition harness");
-    let response = harness
-        .call_tool(
-            &project,
-            "tracedecay_hook_runtime",
-            json!({"action": "ingest_transcript", "provider": "codex", "user_scope": false, "format": "json"}),
-        )
-        .await
-        .expect("production Codex hook ingest invocation");
-    let result = match response.result {
-        Some(result) => result,
-        None => panic!("production Codex hook ingest failed: {:?}", response.error),
-    };
+    let result = call_tool_when_ready(
+        &harness,
+        &project,
+        "tracedecay_hook_runtime",
+        json!({"action": "ingest_transcript", "provider": "codex", "user_scope": false, "format": "json"}),
+    )
+    .await;
     let ingest: Value = serde_json::from_str(
         result["content"][0]["text"]
             .as_str()

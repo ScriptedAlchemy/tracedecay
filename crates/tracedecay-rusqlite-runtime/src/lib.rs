@@ -4,6 +4,7 @@ mod admission;
 mod authority;
 mod checkpoint;
 mod connection;
+pub mod schema_version;
 pub use connection::{
     ConnectionPolicyError, OpenedDatabaseFileError, VerifiedReader, VerifiedReaderError,
     open_immutable_reader, open_verified_immutable_reader, open_verified_read_snapshot,
@@ -17,7 +18,6 @@ mod ledger;
 pub mod runtime_ledger {
     pub use crate::ledger::{RETIRE_RUNTIME_EFFECTS_V1, RUNTIME_LEDGER_SCHEMA};
 }
-pub mod maintenance;
 pub mod native_runtime;
 mod operation;
 mod persistence;
@@ -43,7 +43,6 @@ pub use authority::{
 pub use checkpoint::{
     CheckpointBlocker, CheckpointBlockers, CheckpointFrameReport, CheckpointInterruption,
     CheckpointKind, CheckpointOutcome, CheckpointPressure, CheckpointStatus, CheckpointWal,
-    MaintenanceCheckpointMode,
 };
 pub use operation::{StorageOperationError, StorageOperationExecutor};
 pub use telemetry::{
@@ -55,6 +54,5 @@ pub use telemetry::{
 };
 pub use writer::{
     CheckpointControlError, CheckpointHandle, CheckpointRequest, CheckpointTicket,
-    ExistingWriterLocator, MaintenanceCheckpointRequest, PersistentWriter, WriterActorError,
-    WriterStartError, WriterState,
+    ExistingWriterLocator, PersistentWriter, WriterActorError, WriterStartError, WriterState,
 };

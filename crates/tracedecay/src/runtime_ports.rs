@@ -8,11 +8,9 @@
 //! call for a process: it hands the client to the project crate, which fills
 //! every slot the extracted crates read. [`hook_runtime`] builds the explicit
 //! [`HookRuntimeV1`] the CLI passes into each
-//! `tracedecay_agent_hosts::hooks::hook_*` entry point, and
-//! [`session_review_port`] the [`SessionReviewPort`] the daemon hands its
-//! profile ingestor. A hook path or user ingest pass cannot run without a
-//! complete handle, and two fixtures can hold two different handles in one
-//! process.
+//! `tracedecay_agent_hosts::hooks::hook_*` entry point. A hook path cannot
+//! run without a complete handle, and two fixtures can hold two different
+//! handles in one process.
 
 use std::future::Future;
 use std::path::Path;
@@ -24,7 +22,6 @@ use serde_json::Value;
 use tracedecay_agent_hosts::ports::hook_runtime::HookRuntimeV1;
 use tracedecay_domain::errors::Result;
 use tracedecay_project::runtime_ports::DaemonClientPortsV1;
-use tracedecay_sessions::host_ports::session_review::SessionReviewPort;
 
 /// Installs every runtime port with this root's daemon client. Idempotent;
 /// first call wins.
@@ -41,40 +38,6 @@ pub fn register_runtime_ports() -> Result<()> {
 #[must_use]
 pub fn hook_runtime(profile: tracedecay_runtime_core::config::ProfileRoot) -> HookRuntimeV1 {
     tracedecay_project::runtime_ports::hook_runtime_with(profile, daemon_client_ports())
-}
-
-/// The root's session review port: the post-ingest review hint routed through
-/// the daemon client. The daemon hands it to the profile ingestor at
-/// construction, so a user pass without one is a typed refusal in
-/// `tracedecay-sessions`, never a silent skip.
-#[must_use]
-pub const fn session_review_port() -> SessionReviewPort {
-    SessionReviewPort::new(schedule_user_session_review)
-}
-
-fn schedule_user_session_review<'a>(
-    provider: &'a str,
-    session_id: Option<&'a str>,
-) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-    Box::pin(tracing::Instrument::instrument(
-        async move {
-            // Review runs inside the ingest pass that just wrote the sessions,
-            // which is scoped to the owning transcript source profile.
-            let Some(profile) = tracedecay_sessions::runtime::transcript_source_profile() else {
-                tracing::warn!(
-                    provider,
-                    "session review not scheduled: ingest ran outside a transcript source profile"
-                );
-                return;
-            };
-            let runtime = hook_runtime(profile);
-            tracedecay_agent_hosts::hooks::schedule_user_session_review(
-                &runtime, provider, session_id,
-            )
-            .await;
-        },
-        tracing::trace_span!("runtime_ports.session_review"),
-    ))
 }
 
 /// The daemon-client adapters only this root composes: one-shot tool calls
