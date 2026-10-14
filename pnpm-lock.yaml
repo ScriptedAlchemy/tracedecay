@@ -249,8 +249,8 @@ importers:
         specifier: ^14.6.1
         version: 14.6.8(@testing-library/dom@10.4.2)
       '@types/node':
-        specifier: ^24.0.0
-        version: 24.19.2
+        specifier: ^26.6.5
+        version: 26.6.5
       '@types/react':
         specifier: ^19.0.0
         version: 19.3.0
@@ -262,7 +262,7 @@ importers:
         version: 30.1.2
       msw:
         specifier: ^3.0.0
-        version: 3.0.3(@types/node@24.19.2)(typescript@7.0.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
+        version: 3.0.3(@types/node@26.6.5)(typescript@7.0.2)(vite@8.3.4(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
       pixelmatch:
         specifier: ^8.0.0
         version: 8.0.0
@@ -280,7 +280,7 @@ importers:
         version: 7.0.2
       vitest:
         specifier: ^5.0.0
-        version: 5.0.4(@types/node@24.19.2)(jsdom@30.1.2)(msw@3.0.3(@types/node@24.19.2)(typescript@7.0.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)))(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
+        version: 5.0.4(@types/node@26.6.5)(jsdom@30.1.2)(msw@3.0.3(@types/node@26.6.5)(typescript@7.0.2)(vite@8.3.4(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)))(vite@8.3.4(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
 
   plugin/chatgpt-extension:
     dependencies:
@@ -316,14 +316,14 @@ importers:
         specifier: ^1.0.0
         version: 1.0.3(typescript@7.0.2)
       '@types/node':
-        specifier: ^24.0.0
-        version: 24.19.2
+        specifier: ^26.6.5
+        version: 26.6.5
       typescript:
         specifier: ^7.0.0
         version: 7.0.2
       vitest:
         specifier: ^5.0.0
-        version: 5.0.4(@types/node@24.19.2)(jsdom@30.1.2)(msw@3.0.3(@types/node@24.19.2)(typescript@7.0.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)))(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
+        version: 5.0.4(@types/node@26.6.5)(jsdom@30.1.2)(msw@3.0.3(@types/node@26.6.5)(typescript@7.0.2)(vite@8.3.4(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)))(vite@8.3.4(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
 
   plugin/cursor-native-extension:
     dependencies:
@@ -360,7 +360,7 @@ importers:
         version: 7.0.2
       vitest:
         specifier: ^5.0.0
-        version: 5.0.4(@types/node@26.6.5)(jsdom@30.1.2)(vite@8.3.4(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
+        version: 5.0.4(@types/node@26.6.5)(jsdom@30.1.2)(msw@3.0.3(@types/node@26.6.5)(typescript@7.0.2)(vite@8.3.4(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)))(vite@8.3.4(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
 
 packages:
 
@@ -1473,9 +1473,6 @@ packages:
 
   '@types/ms@2.1.0':
     resolution: {integrity: sha512-GsCCIZDE/p3i96vtEqx+7dBUGXrc7zeSK3wwPHIaRThS+9OhWIXRqzs4d6k1SVU8g91DrNRWxWUGhp5KXQb2VA==}
-
-  '@types/node@24.19.2':
-    resolution: {integrity: sha512-93d49wCWJkCyN87MxLpNN6KXPCwFw7bVUg79mGUV1OS40JGWwVCr8n61DXCSqz7CV6/VfPkb7xec7uP2M+QHWQ==}
 
   '@types/node@26.6.5':
     resolution: {integrity: sha512-uMzsv9stDdofIZBx4UGh4Z9ZgXnGC9seRDscilBcTHAeOFk67MZg/k9bWVfO+bk4qZmG+l52hRnLwUiH2LnJTg==}
@@ -2687,9 +2684,6 @@ packages:
     engines: {node: '>=16.20.0'}
     hasBin: true
 
-  undici-types@7.24.6:
-    resolution: {integrity: sha512-WRNW+sJgj5OBN4/0JpHFqtqzhpbnV0GuB+OozA9gCL7a993SmU+1JBZCzLNxYsbMfIeDL+lTsphD5jN5N+n0zg==}
-
   undici-types@8.9.0:
     resolution: {integrity: sha512-KTDyRTYX8sWmKXAikPHHSyc63CRPETMctyjKFupcC6OBLXT3xsN0e9aF7m+mIXutFWpUXuedtowG7iLOzp0kQg==}
 
@@ -3247,30 +3241,30 @@ snapshots:
 
   '@inquirer/ansi@2.0.9': {}
 
-  '@inquirer/confirm@6.3.3(@types/node@24.19.2)':
+  '@inquirer/confirm@6.3.3(@types/node@26.6.5)':
     dependencies:
-      '@inquirer/core': 12.0.4(@types/node@24.19.2)
-      '@inquirer/type': 4.2.0(@types/node@24.19.2)
+      '@inquirer/core': 12.0.4(@types/node@26.6.5)
+      '@inquirer/type': 4.2.0(@types/node@26.6.5)
     optionalDependencies:
-      '@types/node': 24.19.2
+      '@types/node': 26.6.5
 
-  '@inquirer/core@12.0.4(@types/node@24.19.2)':
+  '@inquirer/core@12.0.4(@types/node@26.6.5)':
     dependencies:
       '@inquirer/ansi': 2.0.9
       '@inquirer/figures': 2.0.9
-      '@inquirer/type': 4.2.0(@types/node@24.19.2)
+      '@inquirer/type': 4.2.0(@types/node@26.6.5)
       cli-width: 4.1.0
       fast-wrap-ansi: 0.2.2
       mute-stream: 3.0.0
       signal-exit: 4.1.0
     optionalDependencies:
-      '@types/node': 24.19.2
+      '@types/node': 26.6.5
 
   '@inquirer/figures@2.0.9': {}
 
-  '@inquirer/type@4.2.0(@types/node@24.19.2)':
+  '@inquirer/type@4.2.0(@types/node@26.6.5)':
     optionalDependencies:
-      '@types/node': 24.19.2
+      '@types/node': 26.6.5
 
   '@jridgewell/gen-mapping@0.3.13':
     dependencies:
@@ -3821,10 +3815,6 @@ snapshots:
 
   '@types/ms@2.1.0': {}
 
-  '@types/node@24.19.2':
-    dependencies:
-      undici-types: 7.24.6
-
   '@types/node@26.6.5':
     dependencies:
       undici-types: 8.9.0
@@ -3903,23 +3893,14 @@ snapshots:
   '@typescript/typescript-win32-x64@7.0.2':
     optional: true
 
-  '@vitest/mocker@5.0.4(msw@3.0.3(@types/node@24.19.2)(typescript@7.0.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)))(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))':
+  '@vitest/mocker@5.0.4(msw@3.0.3(@types/node@26.6.5)(typescript@7.0.2)(vite@8.3.4(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)))(vite@8.3.4(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))':
     dependencies:
       '@jridgewell/trace-mapping': 0.3.31
       '@vitest/spy': 5.0.4
       estree-walker: 3.0.3
       magic-string: 1.4.3
     optionalDependencies:
-      msw: 3.0.3(@types/node@24.19.2)(typescript@7.0.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
-      vite: 8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)
-
-  '@vitest/mocker@5.0.4(vite@8.3.4(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))':
-    dependencies:
-      '@jridgewell/trace-mapping': 0.3.31
-      '@vitest/spy': 5.0.4
-      estree-walker: 3.0.3
-      magic-string: 1.4.3
-    optionalDependencies:
+      msw: 3.0.3(@types/node@26.6.5)(typescript@7.0.2)(vite@8.3.4(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
       vite: 8.3.4(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)
 
   '@vitest/spy@5.0.4': {}
@@ -4595,9 +4576,9 @@ snapshots:
 
   ms@2.1.3: {}
 
-  msw@3.0.3(@types/node@24.19.2)(typescript@7.0.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)):
+  msw@3.0.3(@types/node@26.6.5)(typescript@7.0.2)(vite@8.3.4(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)):
     dependencies:
-      '@inquirer/confirm': 6.3.3(@types/node@24.19.2)
+      '@inquirer/confirm': 6.3.3(@types/node@26.6.5)
       '@msw/url': 0.1.2
       '@mswjs/interceptors': 0.45.8
       cookie: 2.0.1
@@ -4611,7 +4592,7 @@ snapshots:
       yargs: 18.2.0
     optionalDependencies:
       typescript: 7.0.2
-      vite: 8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)
+      vite: 8.3.4(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)
     transitivePeerDependencies:
       - '@types/node'
       - supports-color
@@ -4997,8 +4978,6 @@ snapshots:
       '@typescript/typescript-win32-arm64': 7.0.2
       '@typescript/typescript-win32-x64': 7.0.2
 
-  undici-types@7.24.6: {}
-
   undici-types@8.9.0: {}
 
   undici@8.11.2: {}
@@ -5028,20 +5007,6 @@ snapshots:
 
   verkit@0.5.0: {}
 
-  vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15):
-    dependencies:
-      lightningcss: 1.33.0
-      picomatch: 4.0.7
-      postcss: 8.5.30
-      rolldown: 1.2.13
-      tinyglobby: 0.2.17
-    optionalDependencies:
-      '@types/node': 24.19.2
-      esbuild: 0.28.2
-      fsevents: 2.3.3
-      jiti: 2.7.0
-      tsx: 4.23.15
-
   vite@8.3.4(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15):
     dependencies:
       lightningcss: 1.33.0
@@ -5056,32 +5021,10 @@ snapshots:
       jiti: 2.7.0
       tsx: 4.23.15
 
-  vitest@5.0.4(@types/node@24.19.2)(jsdom@30.1.2)(msw@3.0.3(@types/node@24.19.2)(typescript@7.0.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)))(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)):
+  vitest@5.0.4(@types/node@26.6.5)(jsdom@30.1.2)(msw@3.0.3(@types/node@26.6.5)(typescript@7.0.2)(vite@8.3.4(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)))(vite@8.3.4(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)):
     dependencies:
       '@types/chai': 5.2.3
-      '@vitest/mocker': 5.0.4(msw@3.0.3(@types/node@24.19.2)(typescript@7.0.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)))(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
-      chai: 6.3.0
-      es-module-lexer: 2.3.2
-      expect-type: 1.4.0
-      magic-string: 1.4.3
-      obug: 3.0.0
-      picomatch: 4.0.7
-      std-env: 4.3.0
-      tinybench: 6.2.2
-      tinyexec: 1.3.1
-      tinyglobby: 0.2.17
-      vite: 8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)
-      why-is-node-running: 3.2.1
-    optionalDependencies:
-      '@types/node': 24.19.2
-      jsdom: 30.1.2
-    transitivePeerDependencies:
-      - msw
-
-  vitest@5.0.4(@types/node@26.6.5)(jsdom@30.1.2)(vite@8.3.4(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)):
-    dependencies:
-      '@types/chai': 5.2.3
-      '@vitest/mocker': 5.0.4(vite@8.3.4(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
+      '@vitest/mocker': 5.0.4(msw@3.0.3(@types/node@26.6.5)(typescript@7.0.2)(vite@8.3.4(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)))(vite@8.3.4(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
       chai: 6.3.0
       es-module-lexer: 2.3.2
       expect-type: 1.4.0
