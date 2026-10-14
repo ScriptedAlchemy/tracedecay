@@ -673,10 +673,10 @@ jobs:
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24.21.0"
+          node-version: "26.11.1"
 
       - name: Install reviewed npm
-        run: npm install -g npm@12.0.2
+        run: npm install -g npm@12.2.0
 
       - uses: ./.github/actions/setup-pnpm
 
@@ -714,8 +714,8 @@ jobs:
         working-directory: sdks/typescript
         run: |
           set -euo pipefail
-          npm pack npm@12.0.2 --ignore-scripts
-          echo "5dbb86c71d07a1957f2e90734092dd6a58bdcd9ebc2d8d41ca1c6e6a21d364e1  npm-12.0.2.tgz" \
+          npm pack npm@12.2.0 --ignore-scripts
+          echo "6666b48816b39b86c3febac7b51a4ee4de6c5ca589c382ad8004b6b113f86677  npm-12.2.0.tgz" \
             | sha256sum -c -
 
       # The conformance suite spawns target/debug/tracedecay; Bazel builds the
@@ -738,7 +738,7 @@ jobs:
         run: |
           sha256sum -- "${{ steps.pack.outputs.filename }}" \
             > "${{ steps.pack.outputs.filename }}.sha256"
-          sha256sum -- npm-12.0.2.tgz > npm-12.0.2.tgz.sha256
+          sha256sum -- npm-12.2.0.tgz > npm-12.2.0.tgz.sha256
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -746,8 +746,8 @@ jobs:
           path: |
             sdks/typescript/${{ steps.pack.outputs.filename }}
             sdks/typescript/${{ steps.pack.outputs.filename }}.sha256
-            sdks/typescript/npm-12.0.2.tgz
-            sdks/typescript/npm-12.0.2.tgz.sha256
+            sdks/typescript/npm-12.2.0.tgz
+            sdks/typescript/npm-12.2.0.tgz.sha256
           if-no-files-found: error
           retention-days: 7
 
@@ -773,7 +773,7 @@ jobs:
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24.21.0"
+          node-version: "26.11.1"
 
       # Prerelease SDK versions mirror the beta release convention: they take
       # the beta dist-tag and never take latest. Recovery re-runs are
@@ -796,7 +796,7 @@ jobs:
             dist_tag=beta
           fi
           mkdir npm-cli
-          tar -xzf npm-12.0.2.tgz -C npm-cli
+          tar -xzf npm-12.2.0.tgz -C npm-cli
           local_integrity="sha512-$(openssl dgst -sha512 -binary "$tarball" | base64 -w0)"
           if published_integrity="$(node npm-cli/package/bin/npm-cli.js view "@tracedecay/sdk@${version}" dist.integrity 2>/dev/null)" \
             && [[ -n "$published_integrity" ]]; then
