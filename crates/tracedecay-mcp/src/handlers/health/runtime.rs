@@ -5,6 +5,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::native_runtime::{self, TimeoutError};
 use tracedecay_session_temporal_store::SessionTemporalAccess;
 
 use tracedecay_contracts::doctor::LanguageServerReadV1;
@@ -22,7 +23,7 @@ async fn session_temporal_health_value(
     project_session_db: Option<&tracedecay_global_db::RegisteredGlobalDb>,
 ) -> Value {
     match project_session_db {
-        Some(db) => match tokio::time::timeout(
+        Some(db) => match native_runtime::timeout(
             SESSION_TEMPORAL_HEALTH_BUDGET,
             SessionTemporalAccess::new(db).session_temporal_doctor_health(),
         )
@@ -35,10 +36,15 @@ async fn session_temporal_health_value(
                     "message": "session temporal health serialization failed",
                 })
             }),
-            Err(_) => json!({
+            Err(TimeoutError::Elapsed) => json!({
                 "status": "timed_out",
                 "findings": [],
                 "message": "session temporal health exceeded deadline",
+            }),
+            Err(TimeoutError::TimerUnavailable(error)) => json!({
+                "status": "unavailable",
+                "findings": [],
+                "message": format!("session temporal health deadline is unenforceable: {error}"),
             }),
         },
         None => json!({

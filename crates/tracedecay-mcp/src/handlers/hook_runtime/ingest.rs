@@ -308,8 +308,14 @@ async fn admit_codex_rollouts_for_compaction(
 ) -> Result<u64> {
     let mut last_retryable = None;
     for attempt in 0..COMPACTION_INGEST_ATTEMPTS {
-        if attempt > 0 {
-            tokio::time::sleep(COMPACTION_INGEST_RETRY_DELAY).await;
+        if attempt > 0
+            && tracedecay_runtime_core::native_runtime::sleep_until(
+                std::time::Instant::now() + COMPACTION_INGEST_RETRY_DELAY,
+            )
+            .await
+            .is_err()
+        {
+            break;
         }
         match admit_codex_rollouts_once(cg, session_authorities.clone()).await {
             Ok(messages_upserted) => return Ok(messages_upserted),
