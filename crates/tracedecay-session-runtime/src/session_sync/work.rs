@@ -208,7 +208,13 @@ impl DaemonSessionSyncService {
                             return;
                         }
                         () = &mut journal_changed => {}
-                        () = tokio::time::sleep(COALESCED_JOURNAL_RECHECK_INTERVAL) => {}
+                        fired = native_runtime::sleep_until(Instant::now() + COALESCED_JOURNAL_RECHECK_INTERVAL) => {
+                            // The interruption wait times out on the same
+                            // missing timer, so this loop cannot spin.
+                            if let Err(error) = fired {
+                                tracing::warn!(%error, "coalesced session sync recheck has no native timer");
+                            }
+                        }
                     }
                 }
             };

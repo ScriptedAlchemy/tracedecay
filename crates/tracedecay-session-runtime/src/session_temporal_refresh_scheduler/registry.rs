@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::PoisonError;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::history::SharedSessionHistoricalIngestor;
 use super::projector::{
@@ -19,6 +19,7 @@ use super::worker::run_session_temporal_refresh_scheduler;
 use crate::StoreOwnerKey;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
+use tracedecay_runtime_core::native_runtime;
 use tracedecay_sessions::admission::session_ingest_disabled;
 
 #[cfg(test)]
@@ -378,7 +379,10 @@ impl SessionTemporalRefreshSchedulerRegistry {
                         ) => joined,
                         () = async {
                             worker_state.wait_for_cancellation().await;
-                            tokio::time::sleep(crate::DAEMON_CLIENT_DRAIN_DEADLINE).await;
+                            let grace = Instant::now() + crate::DAEMON_CLIENT_DRAIN_DEADLINE;
+                            if let Err(error) = native_runtime::sleep_until(grace).await {
+                                tracing::warn!(%error, "session temporal refresh workers abort without a drain grace");
+                            }
                         } => {
                             // An abort only requests cancellation; joining the
                             // aborted worker proves its lease clones dropped.
@@ -407,10 +411,17 @@ impl SessionTemporalRefreshSchedulerRegistry {
                             worker_state.recover_history_after_worker_panic();
                             tokio::select! {
                                 () = tracing::Instrument::instrument(worker_state.wait_for_cancellation(), tracing::trace_span!("daemon.scheduler.session_temporal.supervisor_retry_cancel")) => return,
-                                () = tracing::Instrument::instrument(tokio::time::sleep(session_refresh_retry_delay(
+                                fired = tracing::Instrument::instrument(native_runtime::sleep_until(Instant::now() + session_refresh_retry_delay(
                                         SessionTemporalRefreshRetryClass::Projector,
                                         panic_attempt,
-                                    )), tracing::trace_span!("daemon.scheduler.session_temporal.supervisor_retry_wait")) => {}
+                                    )), tracing::trace_span!("daemon.scheduler.session_temporal.supervisor_retry_wait")) => {
+                                    // Without a timer a panicking worker would restart in a tight loop.
+                                    if let Err(error) = fired {
+                                        tracing::error!(%error, "session temporal refresh supervisor stopped without a native timer");
+                                        worker_state.mark_stopped();
+                                        return;
+                                    }
+                                }
                             }
                         }
                         Ok(()) | Err(_) => {

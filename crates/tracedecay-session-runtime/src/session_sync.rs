@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tracedecay_contracts::session_sync::{
     SessionGitSyncV1, SessionSyncAdmissionErrorV1, SessionSyncCommandV1,
@@ -21,6 +21,7 @@ use crate::session_temporal_refresh_scheduler::wake::HistoricalAdmissionView;
 use tracedecay_global_db::GlobalDbGitCorrelationStore;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
+use tracedecay_runtime_core::native_runtime;
 use tracedecay_sessions::admission::{SESSION_INGEST_DISABLED_REASON_V1, session_ingest_disabled};
 
 const MAX_SESSION_SYNC_OPERATIONS: usize = 128;
@@ -911,7 +912,7 @@ impl SessionSyncServicePort for DaemonSessionSyncService {
             self.shutdown.cancel();
             self.shutdown_notify.notify_waiters();
             let mut tasks = SessionSyncTaskShutdownV1::take(&self.tasks);
-            let grace_deadline = tokio::time::Instant::now() + SESSION_SYNC_SHUTDOWN_ABORT_GRACE;
+            let grace_deadline = Instant::now() + SESSION_SYNC_SHUTDOWN_ABORT_GRACE;
             tokio::select! {
                 results = futures_util::future::join_all(
                     tasks.tasks.iter_mut().map(|task| &mut task.task)
@@ -925,7 +926,11 @@ impl SessionSyncServicePort for DaemonSessionSyncService {
                         .clear();
                     return;
                 }
-                () = tokio::time::sleep_until(grace_deadline) => {}
+                fired = native_runtime::sleep_until(grace_deadline) => {
+                    if let Err(error) = fired {
+                        tracing::warn!(%error, "session sync shutdown aborts its tasks without a grace period");
+                    }
+                }
             }
             for task in &tasks.tasks {
                 task.task.abort();
@@ -1132,7 +1137,14 @@ impl DaemonSessionSyncService {
             biased;
             () = &mut shutdown => work::SessionSyncInterruption::Shutdown,
             () = cancellation.cancelled() => work::SessionSyncInterruption::Cancelled,
-            () = sleep_until_deadline(deadline) => work::SessionSyncInterruption::TimedOut,
+            fired = sleep_until_deadline(deadline) => {
+                // Without a timer the deadline cannot be observed, so the
+                // operation ends rather than run unbounded.
+                if let Err(error) = fired {
+                    tracing::error!(%error, "session sync deadline has no native timer");
+                }
+                work::SessionSyncInterruption::TimedOut
+            }
         }
     }
 }
@@ -1150,10 +1162,12 @@ fn transcript_import_requested_coverage() -> Vec<SessionSyncSourceCoverageV1> {
         .collect()
 }
 
-fn sleep_until_deadline(deadline: &tracedecay_contracts::Deadline) -> impl Future<Output = ()> {
+fn sleep_until_deadline(
+    deadline: &tracedecay_contracts::Deadline,
+) -> impl Future<Output = Result<(), String>> {
     let remaining_micros = deadline.expires_at.0.saturating_sub(now_micros().0);
     let remaining = u64::try_from(remaining_micros).unwrap_or(0);
-    tokio::time::sleep(Duration::from_micros(remaining))
+    native_runtime::sleep_until(Instant::now() + Duration::from_micros(remaining))
 }
 
 fn journal_prefix(scope: &SessionSyncScopeV1) -> String {
