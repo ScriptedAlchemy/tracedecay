@@ -265,8 +265,7 @@ impl BashExtractor {
     fn visit_command(state: &mut ExtractionState, node: TsNode<'_>) {
         let cmd_name = node
             .child_by_field_name("name")
-            .map(|n| state.node_text(n))
-            .unwrap_or_default();
+            .map_or_default(|n| state.node_text(n));
 
         if cmd_name == "source" || cmd_name == "." {
             // Extract the source/dot import path from the first argument.

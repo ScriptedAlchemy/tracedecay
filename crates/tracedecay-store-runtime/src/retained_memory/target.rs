@@ -1,6 +1,8 @@
 //! Exact retained-memory target selection for one admitted profile.
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 
 use tracedecay_contracts::retained_surfaces::{MemoryScopeV1, RetainedProjectSelectorV1};
@@ -75,11 +77,10 @@ pub async fn open_project_retained_memory_target(
         if selector.is_some() {
             return denied();
         }
-        let database = authority
-            .registry
-            .profile_memory()
-            .await
-            .map_err(map_execution_error)?;
+        let opened: Pin<
+            Box<dyn Future<Output = tracedecay_domain::errors::Result<Arc<Database>>> + Send + '_>,
+        > = Box::pin(authority.registry.profile_memory());
+        let database = opened.await.map_err(map_execution_error)?;
         return Ok(RetainedMemoryTargetV1::new(
             ProjectMemoryDbHandle::Owned(Box::new(Arc::unwrap_or_clone(database))),
             FactOwnerV1::Profile,
@@ -141,7 +142,21 @@ pub async fn open_project_retained_memory_target(
             },
         ));
     }
-    open_selected_project_read_only(authority, selected_project_id).await
+    let opened: Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        RetainedMemoryTargetV1<'static>,
+                        RetainedSurfaceExecutionErrorV1,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > = Box::pin(open_selected_project_read_only(
+        authority,
+        selected_project_id,
+    ));
+    opened.await
 }
 
 #[tracing::instrument(
@@ -153,9 +168,21 @@ async fn open_selected_project_read_only(
     authority: &RetainedMemoryTargetAuthorityV1,
     selected_project_id: &ProjectId,
 ) -> Result<RetainedMemoryTargetV1<'static>, RetainedSurfaceExecutionErrorV1> {
-    let context = authority
-        .profile_database
-        .project_registry_context_by_id(selected_project_id.as_str())
+    let loaded: Pin<
+        Box<
+            dyn Future<
+                    Output = tracedecay_domain::errors::Result<
+                        Option<tracedecay_global_db::ProjectRegistryContext>,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > = Box::pin(
+        authority
+            .profile_database
+            .project_registry_context_by_id(selected_project_id.as_str()),
+    );
+    let context = loaded
         .await
         .map_err(map_target_infrastructure_error)?
         .ok_or(RetainedSurfaceExecutionErrorV1::NotFoundOrNotAuthorized)?;
@@ -170,11 +197,14 @@ async fn open_selected_project_read_only(
     if roots.is_empty() {
         return denied();
     }
-    let database = authority
-        .registry
-        .project_memory_read_only(selected_project_id.clone(), roots)
-        .await
-        .map_err(map_target_infrastructure_error)?;
+    let opened: Pin<
+        Box<dyn Future<Output = tracedecay_domain::errors::Result<Database>> + Send + '_>,
+    > = Box::pin(
+        authority
+            .registry
+            .project_memory_read_only(selected_project_id.clone(), roots),
+    );
+    let database = opened.await.map_err(map_target_infrastructure_error)?;
     let exact_scope = matches!(
         &database.registered_binding().shard_id.scope,
         StoreShardScopeV1::Project { project_id } if project_id == selected_project_id

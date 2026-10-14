@@ -67,8 +67,11 @@ edition = "2024"
 version = "1.0.0-beta.87"
 
 [workspace.dependencies]
+# nightly-outcome-try is an asupersync default (Outcome's Try impls). It
+# compiles only on the pinned nightly. native-runtime stays explicit because
+# it is not part of that default set.
 # Switch back to `version = "=0.6.0"` once 0.6.0 is published to crates.io (#3874).
-asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "432e2c3b2cf2bad02fc88e380d29a6b0b5c01422", default-features = false, features = ["proc-macros", "native-runtime"] }
+asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "432e2c3b2cf2bad02fc88e380d29a6b0b5c01422", default-features = false, features = ["proc-macros", "native-runtime", "nightly-outcome-try"] }
 # grafeo 0.5.43 from our fork (ScriptedAlchemy/grafeo, main). The
 # published crates carry a tiered-storage
 # arena whose `HotVersionRef` addresses a single 1 MiB chunk, which caps an

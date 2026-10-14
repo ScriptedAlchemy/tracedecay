@@ -5,6 +5,9 @@
 //! a new generation; once that generation has been read to the end of the
 //! file, every record it did not offer again is retired from projection.
 
+use std::future::Future;
+use std::pin::Pin;
+
 use tracedecay_domain::{
     CanonicalObservationIdV1, ObservationScopeV1, ObservationSourceGenerationV1,
     ObservationSourceIdentityV1,
@@ -255,7 +258,10 @@ impl RegisteredGlobalDb {
             let page_len = page.len();
             after_observation_id = page[page_len - 1].clone();
             for observation_id in &page {
-                if retire_source_record(&transaction, observation_id).await? {
+                let retired_one: Pin<
+                    Box<dyn Future<Output = ProjectionStoreResult<bool>> + Send + '_>,
+                > = Box::pin(retire_source_record(&transaction, observation_id));
+                if retired_one.await? {
                     retired += 1;
                 }
             }

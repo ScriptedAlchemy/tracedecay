@@ -474,8 +474,7 @@ async fn ensure_current_raw_payload_ref(
         let value: Option<String> = row.get(index).unwrap_or(None);
         if value
             .as_deref()
-            .map(extract_payload_refs_from_text)
-            .unwrap_or_default()
+            .map_or_default(extract_payload_refs_from_text)
             .iter()
             .any(|reference| reference == &payload.payload_ref)
         {

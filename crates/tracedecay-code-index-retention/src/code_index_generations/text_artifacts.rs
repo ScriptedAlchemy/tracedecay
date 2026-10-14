@@ -237,10 +237,7 @@ pub(super) fn plan_collectable_text_artifacts_cancellable(
     // build authority: every staging and sidecar file in its
     // staging directory is crash debris and therefore a candidate.
     let mut referenced = BTreeMap::new();
-    for entry in active_pointer
-        .map(|pointer| pointer.generation_index.as_slice())
-        .unwrap_or_default()
-    {
+    for entry in active_pointer.map_or_default(|pointer| pointer.generation_index.as_slice()) {
         if let Some(descriptor) = entry.text_artifact() {
             validate_text_artifact_descriptor(descriptor)?;
             // Generations that sealed the same content name one artifact.

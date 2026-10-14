@@ -1,7 +1,9 @@
 //! Registered-database composition adapter for bounded session ingest.
 
 use std::borrow::Borrow;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use tracedecay_sessions::admission::HostAdmission;
@@ -143,14 +145,18 @@ where
         skip_all
     )]
     async fn registered_project_roots(&self) -> Option<Vec<PathBuf>> {
-        let mut roots = self.db().try_list_project_paths().await.ok()?;
-        roots.extend(
-            self.db()
-                .try_list_code_project_paths(usize::MAX)
-                .await
-                .ok()?,
-        );
-        roots.extend(self.db().try_list_project_alias_paths().await.ok()?);
+        let paths: Pin<
+            Box<dyn Future<Output = tracedecay_domain::errors::Result<Vec<PathBuf>>> + Send + '_>,
+        > = Box::pin(self.db().try_list_project_paths());
+        let mut roots = paths.await.ok()?;
+        let code_paths: Pin<
+            Box<dyn Future<Output = tracedecay_domain::errors::Result<Vec<PathBuf>>> + Send + '_>,
+        > = Box::pin(self.db().try_list_code_project_paths(usize::MAX));
+        roots.extend(code_paths.await.ok()?);
+        let aliases: Pin<
+            Box<dyn Future<Output = tracedecay_domain::errors::Result<Vec<PathBuf>>> + Send + '_>,
+        > = Box::pin(self.db().try_list_project_alias_paths());
+        roots.extend(aliases.await.ok()?);
         Some(roots)
     }
 }

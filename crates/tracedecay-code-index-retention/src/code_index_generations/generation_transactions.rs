@@ -491,13 +491,10 @@ pub(super) fn path_still_names_open_file(
         return Ok(false);
     }
     let opened_metadata = opened.metadata().map_err(storage)?;
-    if !metadata_identity_matches(admitted, &opened_metadata)
-        || !metadata_identity_matches(&current, &opened_metadata)
-    {
-        return Ok(false);
-    }
+    let identity_matches = metadata_identity_matches(admitted, &opened_metadata)
+        && metadata_identity_matches(&current, &opened_metadata);
     #[cfg(windows)]
-    {
+    if identity_matches {
         let named = match File::open(path) {
             Ok(file) => file,
             Err(error)
@@ -521,7 +518,7 @@ pub(super) fn path_still_names_open_file(
             return Ok(false);
         }
     }
-    Ok(true)
+    Ok(identity_matches)
 }
 
 /// Whether two metadata snapshots name the same stable file identity. On

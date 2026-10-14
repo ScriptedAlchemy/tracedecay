@@ -2390,36 +2390,34 @@ fn resolve_file_references(
             .copied()
             .flatten()
             .map(|from| from.span);
-        let compatible = candidates
-            .map(|candidates| {
-                candidates
-                    .iter()
-                    .copied()
-                    .filter(|target| {
-                        reference_target_kind_is_compatible(reference.reference_kind, &target.kind)
-                            && (language != "rust"
-                                || reference.reference_kind != EdgeKind::Calls
-                                || target.kind != NodeKind::Struct.as_str()
-                                || target.arity.is_some())
-                            && (language != "java"
-                                || reference
-                                    .argument_count
-                                    .zip(target.arity)
-                                    .is_none_or(|(arguments, arity)| arity.accepts(arguments)))
-                            && !(typescript
-                                && target.kind == NodeKind::Function.as_str()
-                                && target
-                                    .signature
-                                    .as_deref()
-                                    .is_some_and(is_test_framework_call_signature))
-                            && (!shadows_import
-                                || from_span.is_some_and(|from| {
-                                    encloses_in_function_scope(symbols, target, from)
-                                }))
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let compatible = candidates.map_or_default(|candidates| {
+            candidates
+                .iter()
+                .copied()
+                .filter(|target| {
+                    reference_target_kind_is_compatible(reference.reference_kind, &target.kind)
+                        && (language != "rust"
+                            || reference.reference_kind != EdgeKind::Calls
+                            || target.kind != NodeKind::Struct.as_str()
+                            || target.arity.is_some())
+                        && (language != "java"
+                            || reference
+                                .argument_count
+                                .zip(target.arity)
+                                .is_none_or(|(arguments, arity)| arity.accepts(arguments)))
+                        && !(typescript
+                            && target.kind == NodeKind::Function.as_str()
+                            && target
+                                .signature
+                                .as_deref()
+                                .is_some_and(is_test_framework_call_signature))
+                        && (!shadows_import
+                            || from_span.is_some_and(|from| {
+                                encloses_in_function_scope(symbols, target, from)
+                            }))
+                })
+                .collect::<Vec<_>>()
+        });
         match compatible.as_slice() {
             // Rust admits one definition per name and scope, so same-named
             // same-kind definitions are `#[cfg]` variants of one identity; the
@@ -2578,14 +2576,13 @@ fn cross_file_reference_candidate(
         ),
         kind,
         evidence_span: reference_evidence_span(source, offsets, references_by_site, reference)
-            .map(|span| match computed_member {
+            .map_or(from.span, |span| match computed_member {
                 Some(member) => SourceSpan {
                     start_byte: span.end_byte - member.len() as u64,
                     ..span
                 },
                 None => span,
-            })
-            .unwrap_or(from.span),
+            }),
         unmodeled_import: reference.unmodeled_import,
         argument_count: reference.argument_count,
         ambiguous_local: false,
@@ -4672,8 +4669,7 @@ pub fn real_symbol() {}
                 .symbols
                 .iter()
                 .find(|symbol| &symbol.occurrence == occurrence)
-                .map(|symbol| symbol.qualified_name.as_str())
-                .unwrap_or("<missing>")
+                .map_or("<missing>", |symbol| symbol.qualified_name.as_str())
         };
         let mut calls = artifacts
             .edges
@@ -4791,8 +4787,7 @@ pub fn real_symbol() {}
                 .symbols
                 .iter()
                 .find(|symbol| &symbol.occurrence == occurrence)
-                .map(|symbol| symbol.qualified_name.as_str())
-                .unwrap_or("<missing>")
+                .map_or("<missing>", |symbol| symbol.qualified_name.as_str())
         };
         let mut calls = artifacts
             .edges
@@ -4851,8 +4846,7 @@ pub fn real_symbol() {}
                 .symbols
                 .iter()
                 .find(|symbol| &symbol.occurrence == occurrence)
-                .map(|symbol| symbol.qualified_name.as_str())
-                .unwrap_or("<missing>")
+                .map_or("<missing>", |symbol| symbol.qualified_name.as_str())
         };
         let mut calls = artifacts
             .edges

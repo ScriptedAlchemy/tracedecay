@@ -1,5 +1,9 @@
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 
+use super::RegisteredGlobalDb;
+use tracedecay_domain::ObservationScopeV1;
 use tracedecay_domain::SessionId;
 use tracedecay_lcm::{
     LcmCompressionRequest, LcmCompressionResponse, LcmDescribeRequest, LcmDescribeResponse,
@@ -11,15 +15,94 @@ use tracedecay_lcm::{
     payload,
     types::{LcmImmutableSummaryPublication, LcmSummaryPublicationReceipt},
 };
-use tracedecay_sessions::runtime::{SessionMessageRecord, SessionStoreAccess};
-use tracedecay_temporal_query::execution::ExecutionControl;
-use tracedecay_temporal_query::execution::TemporalPortError;
-
-use super::RegisteredGlobalDb;
 use tracedecay_session_temporal_store::SessionTemporalAccess;
 use tracedecay_session_temporal_store::operations as session_temporal_operations;
 use tracedecay_session_temporal_store::seed_session_relation_projection;
 use tracedecay_session_temporal_store::store::execution_control_graph_cancellation;
+use tracedecay_sessions::runtime::{SessionMessageRecord, SessionStoreAccess};
+use tracedecay_temporal_query::execution::ExecutionControl;
+use tracedecay_temporal_query::execution::TemporalPortError;
+
+fn drive_lcm_compression<'a>(
+    transaction: &'a crate::RegisteredGlobalDbWriteTransaction<'a>,
+    scope: &'a ObservationScopeV1,
+    publisher: &'a session_temporal_operations::GlobalDbLcmSummaryPublication<
+        'a,
+        crate::RegisteredGlobalDbWriteTransaction<'a>,
+    >,
+    storage_root: &'a Path,
+    request: &'a LcmCompressionRequest,
+    payload_rollback: &'a mut payload::PayloadFileRollback,
+    retained: Option<compression::RetainedCompressionGuard>,
+) -> Pin<
+    Box<
+        dyn Future<
+                Output = Result<
+                    tracedecay_lcm::summary_convergence::LcmBoundedCompressionResponse,
+                    LcmError,
+                >,
+            > + Send
+            + 'a,
+    >,
+> {
+    Box::pin(async move {
+        let begun: Pin<
+            Box<
+                dyn Future<Output = Result<compression::CompressionAdmission, LcmError>>
+                    + Send
+                    + '_,
+            >,
+        > = Box::pin(compression::begin_compression_pass(
+            transaction,
+            scope,
+            storage_root,
+            request,
+            payload_rollback,
+            retained,
+        ));
+        let classified = match begun.await? {
+            compression::CompressionAdmission::Finished(response) => return Ok(response),
+            compression::CompressionAdmission::Classify(publish) => {
+                let classified: Pin<
+                    Box<
+                        dyn Future<
+                                Output = Result<compression::CompressionClassification, LcmError>,
+                            > + Send
+                            + '_,
+                    >,
+                > = Box::pin(compression::classify_compression_pass(
+                    transaction,
+                    publisher,
+                    request,
+                    publish,
+                ));
+                classified.await?
+            }
+        };
+        match classified {
+            compression::CompressionClassification::Finished(response) => Ok(response),
+            compression::CompressionClassification::Publish(publish) => {
+                let published: Pin<
+                    Box<
+                        dyn Future<
+                                Output = Result<
+                                    tracedecay_lcm::summary_convergence::LcmBoundedCompressionResponse,
+                                    LcmError,
+                                >,
+                            > + Send
+                            + '_,
+                    >,
+                > = Box::pin(compression::publish_compression_pass(
+                    transaction,
+                    publisher,
+                    request,
+                    publish,
+                ));
+                published.await
+            }
+        }
+    })
+}
 
 fn check_execution(control: &ExecutionControl) -> Result<(), LcmError> {
     control.checkpoint().map_err(|error| match error {
@@ -129,9 +212,10 @@ impl RegisteredGlobalDb {
         deep: bool,
         gc_config: &LcmGcConfig,
     ) -> Result<LcmStatus, LcmError> {
-        SessionStoreAccess::new(self)
-            .lcm_status_with_options(provider, session_id, deep, gc_config)
-            .await
+        let access = SessionStoreAccess::new(self);
+        let status: Pin<Box<dyn Future<Output = Result<LcmStatus, LcmError>> + Send + '_>> =
+            Box::pin(access.lcm_status_with_options(provider, session_id, deep, gc_config));
+        status.await
     }
 
     /// Publishes one immutable summary and advances its native relation
@@ -251,15 +335,19 @@ impl RegisteredGlobalDb {
             &transaction,
             relation_projection,
         );
-        let mut response = compression::compress(
-            &transaction,
-            &scope,
-            &publisher,
-            storage_root,
-            request,
-            &mut payload_rollback,
-        )
-        .await?;
+        let compressed = tracing::Instrument::instrument(
+            drive_lcm_compression(
+                &transaction,
+                &scope,
+                &publisher,
+                storage_root,
+                request,
+                &mut payload_rollback,
+                None,
+            ),
+            tracing::trace_span!("sessions.lcm.compress"),
+        );
+        let mut response = compressed.await?.response;
         check_execution(control)?;
         before_commit()?;
         transaction.commit().await?;
@@ -303,27 +391,47 @@ impl RegisteredGlobalDb {
                 request.session_id
             ))
         })?;
-        let transaction = self
-            .begin_write_transaction()
+        let begun: Pin<
+            Box<
+                dyn Future<
+                        Output = tracedecay_domain::errors::Result<
+                            crate::RegisteredGlobalDbWriteTransaction<'_>,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > = Box::pin(self.begin_write_transaction());
+        let transaction = begun
             .await
             .map_err(|error| LcmError::Db(error.to_string()))?;
         let mut payload_rollback =
             payload::PayloadFileRollback::begin_cancellation_safe(storage_root);
         if let Some(candidate) = convergence_candidate {
-            tracedecay_lcm::summary_convergence::require_candidate_revision(
-                &transaction,
-                candidate,
-            )
-            .await?;
+            let revision: Pin<Box<dyn Future<Output = Result<(), LcmError>> + Send + '_>> =
+                Box::pin(
+                    tracedecay_lcm::summary_convergence::require_candidate_revision(
+                        &transaction,
+                        candidate,
+                    ),
+                );
+            revision.await?;
         }
-        let relation_projection = seed_session_relation_projection(
+        let seeded: Pin<
+            Box<
+                dyn Future<
+                        Output = tracedecay_store::SessionStoreResult<
+                            tracedecay_session_temporal_store::relations::SessionRelationProjection,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > = Box::pin(seed_session_relation_projection(
             self,
             &transaction,
             &session_id,
             execution_control_graph_cancellation(control),
-        )
-        .await
-        .map_err(|error| {
+        ));
+        let relation_projection = seeded.await.map_err(|error| {
             LcmError::Db(format!(
                 "seed native retained LCM relation projection: {error}"
             ))
@@ -333,16 +441,19 @@ impl RegisteredGlobalDb {
             &transaction,
             relation_projection,
         );
-        let bounded = compression::compress_retained_page(
-            &transaction,
-            &scope,
-            &publisher,
-            storage_root,
-            request,
-            &mut payload_rollback,
-            guard,
-        )
-        .await?;
+        let compressed = tracing::Instrument::instrument(
+            drive_lcm_compression(
+                &transaction,
+                &scope,
+                &publisher,
+                storage_root,
+                request,
+                &mut payload_rollback,
+                Some(guard),
+            ),
+            tracing::trace_span!("sessions.lcm.compress"),
+        );
+        let bounded = compressed.await?;
         if bounded.response.status != "needs_summary"
             && let Some(candidate) = convergence_candidate
         {
@@ -351,21 +462,25 @@ impl RegisteredGlobalDb {
             } else {
                 tracedecay_lcm::summary_convergence::LcmSummaryConvergenceQueueState::Current
             };
-            let settled = tracedecay_lcm::summary_convergence::record_outcome(
-                &transaction,
-                candidate,
-                state,
-                None,
-                0,
-                0,
-            )
-            .await?;
-            if !settled {
-                tracedecay_lcm::summary_convergence::require_candidate_revision(
+            let settled_outcome: Pin<Box<dyn Future<Output = Result<bool, LcmError>> + Send + '_>> =
+                Box::pin(tracedecay_lcm::summary_convergence::record_outcome(
                     &transaction,
                     candidate,
-                )
-                .await?;
+                    state,
+                    None,
+                    0,
+                    0,
+                ));
+            let settled = settled_outcome.await?;
+            if !settled {
+                let revision: Pin<Box<dyn Future<Output = Result<(), LcmError>> + Send + '_>> =
+                    Box::pin(
+                        tracedecay_lcm::summary_convergence::require_candidate_revision(
+                            &transaction,
+                            candidate,
+                        ),
+                    );
+                revision.await?;
                 return Err(LcmError::Db(
                     "retained convergence queue settlement affected no row".to_string(),
                 ));
@@ -373,7 +488,10 @@ impl RegisteredGlobalDb {
         }
         check_execution(control)?;
         before_commit()?;
-        transaction.commit().await?;
+        let committed: Pin<
+            Box<dyn Future<Output = tracedecay_runtime_core::db::engine::Result<()>> + Send + '_>,
+        > = Box::pin(transaction.commit());
+        committed.await?;
         payload_rollback.disarm();
         // Retained convergence publishes the durable relation effect journal
         // atomically with the summary, lifecycle frontier, and queue outcome.

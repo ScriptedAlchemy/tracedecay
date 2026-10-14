@@ -87,20 +87,18 @@ impl FakeNative {
         apply_modes: impl IntoIterator<Item = NativeMode>,
         recovery_modes: impl IntoIterator<Item = RecoveryMode>,
     ) -> Self {
-        let preview_results = preview
-            .map(|preview| {
-                VecDeque::from([GitIndexPreviewPortResultV1 {
-                    execution: OperationReceipt::completed(
-                        preview.created_at,
-                        preview.created_at,
-                        Deadline::new(preview.expires_at).expect("preview deadline"),
-                        OperationBudgetUsage::default(),
-                    )
-                    .expect("preview execution"),
-                    preview,
-                }])
-            })
-            .unwrap_or_default();
+        let preview_results = preview.map_or_default(|preview| {
+            VecDeque::from([GitIndexPreviewPortResultV1 {
+                execution: OperationReceipt::completed(
+                    preview.created_at,
+                    preview.created_at,
+                    Deadline::new(preview.expires_at).expect("preview deadline"),
+                    OperationBudgetUsage::default(),
+                )
+                .expect("preview execution"),
+                preview,
+            }])
+        });
         Self {
             preview_results: Mutex::new(preview_results),
             apply_modes: Mutex::new(apply_modes.into_iter().collect()),

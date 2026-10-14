@@ -9,12 +9,10 @@ pub fn edge_pairs(
     kind: tracedecay_domain::EdgeKind,
 ) -> Vec<(&str, &str)> {
     let name_of = |id: &str| {
-        result
-            .nodes
-            .iter()
-            .find(|n| n.id == id)
-            .map(|n| n.name.as_str())
-            .unwrap_or_else(|| panic!("edge endpoint {id} is not an extracted node"))
+        result.nodes.iter().find(|n| n.id == id).map_or_else(
+            || panic!("edge endpoint {id} is not an extracted node"),
+            |n| n.name.as_str(),
+        )
     };
     result
         .edges

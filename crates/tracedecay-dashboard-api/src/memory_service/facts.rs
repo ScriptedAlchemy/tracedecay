@@ -1,5 +1,8 @@
 //! Memory fact, entity, and overview payloads for the dashboard memory API.
 
+use std::future::Future;
+use std::pin::Pin;
+
 use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -13,7 +16,7 @@ use tracedecay_store::{
     FactReadControl, ProjectMemoryDashboardEntityV1, ProjectMemoryDashboardFactSummaryV1,
     ProjectMemoryDashboardMemoryOverviewV1, ProjectMemoryFactProjectionV1,
     ProjectMemoryFactSearchGraphCoverageV1, ProjectMemoryFactSearchKindV1,
-    ProjectMemoryFactSearchQuery,
+    ProjectMemoryFactSearchPageV1, ProjectMemoryFactSearchQuery,
 };
 
 pub const MEMORY_FACT_LIMIT_MINIMUM: i64 = 1;
@@ -177,20 +180,26 @@ pub async fn fetch_facts(
     if !query.trim().is_empty() {
         let application = memory_application_for_db(state.memory_owner.clone(), &state.mem_db)
             .map_err(|error| error.to_string())?;
-        let page = application
-            .search_project_memory_facts(
-                ProjectMemoryFactSearchQuery::new(
-                    state.memory_owner.clone(),
-                    ProjectMemoryFactSearchKindV1::Search,
-                    Some(query.trim().to_owned()),
-                    None,
-                    limit,
-                )
-                .map_err(|error| error.to_string())?,
-                read_control,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
+        let search = ProjectMemoryFactSearchQuery::new(
+            state.memory_owner.clone(),
+            ProjectMemoryFactSearchKindV1::Search,
+            Some(query.trim().to_owned()),
+            None,
+            limit,
+        )
+        .map_err(|error| error.to_string())?;
+        let page: Pin<
+            Box<
+                dyn Future<
+                        Output = std::result::Result<
+                            ProjectMemoryFactSearchPageV1,
+                            tracedecay_session_memory::memory::MemoryApplicationError,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > = Box::pin(application.search_project_memory_facts(search, read_control));
+        let page = page.await.map_err(|error| error.to_string())?;
         let rows = page
             .hits()
             .iter()

@@ -835,9 +835,8 @@ pub fn search_eval_bin(name: &str) -> PathBuf {
         "tracedecay-search-eval-direct" => "TRACEDECAY_SEARCH_EVAL_DIRECT_TEST_BIN",
         _ => "TRACEDECAY_SEARCH_EVAL_TEST_BIN",
     };
-    let binary = std::env::var_os(override_env)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
+    let binary = std::env::var_os(override_env).map_or_else(
+        || {
             let test_executable =
                 std::env::current_exe().expect("test executable path should resolve");
             let profile_dir = test_executable
@@ -845,7 +844,9 @@ pub fn search_eval_bin(name: &str) -> PathBuf {
                 .and_then(Path::parent)
                 .expect("integration test should run from a Cargo profile directory");
             profile_dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
-        });
+        },
+        PathBuf::from,
+    );
     assert!(
         binary.is_file(),
         "search-eval binary `{name}` is missing at {}; build it with `cargo build --workspace --bins --locked --features tracedecay/test-helpers` or set {override_env}.          A `-p tracedecay-search-eval` build resolves `tracedecay-code-index` without its default language tiers and yields an evaluator that cannot parse Rust, so the package selection must match the test lane's.",

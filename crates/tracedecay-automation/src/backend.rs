@@ -740,9 +740,7 @@ pub fn validate_response_schema(value: &Value, contract: &AgentTaskContract) -> 
             _ => property_value.is_some(),
         };
         if !valid_type {
-            let suffix = expected_type
-                .map(|kind| format!(" {kind}"))
-                .unwrap_or_default();
+            let suffix = expected_type.map_or_default(|kind| format!(" {kind}"));
             return Err(config_error(format!(
                 "automation backend output must include a {property}{suffix}"
             )));

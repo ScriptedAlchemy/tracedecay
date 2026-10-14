@@ -1,4 +1,6 @@
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -6,9 +8,9 @@ use tracedecay_contracts::retained_surfaces::{
     GitScopeV1, HydrationStateResultV1, MessageSearchHitV1, MessageSearchRequestV1,
     MessageSearchResultV1, RetainedNextActionV1, RetainedOutcomeStatusV1, RetainedSurfaceOperation,
     RetainedSurfaceResultV1, SessionMessageV1, SessionRecordV1, SessionRefreshRequestV1,
-    SessionRefreshScopeV1, SessionsForRequestV1, TemporalCoverageOmissionV1, TemporalExplanationV1,
-    TemporalFreshnessV1, TemporalMetadataV1, TemporalOmissionV1, TemporalPopulationCountV1,
-    WorkflowsRequestV1,
+    SessionRefreshScopeV1, SessionsForRequestV1, SessionsForResultV1, TemporalCoverageOmissionV1,
+    TemporalExplanationV1, TemporalFreshnessV1, TemporalMetadataV1, TemporalOmissionV1,
+    TemporalPopulationCountV1, WorkflowsRequestV1, WorkflowsResultV1,
 };
 use tracedecay_contracts::{
     ApplicationOutcome, RequestAdmission, RetainedSessionExecutionPortV1, RetainedSessionRequestV1,
@@ -273,16 +275,18 @@ impl<'a> DirectRetainedSessionPortV1<'a> {
             return Err(RetainedSurfaceExecutionErrorV1::Unsupported);
         };
         ensure_mounted_project_context(context, authorities)?;
+        let queried: Pin<
+            Box<
+                dyn Future<Output = Result<SessionsForResultV1, RetainedSurfaceExecutionErrorV1>>
+                    + Send
+                    + '_,
+            >,
+        > = Box::pin(crate::session_queries::sessions_for(
+            Some(authorities.session_database.as_ref()),
+            request,
+        ));
         let result = self
-            .bounded(context, async {
-                Ok::<_, TraceDecayError>(
-                    crate::session_queries::sessions_for(
-                        Some(authorities.session_database.as_ref()),
-                        request,
-                    )
-                    .await,
-                )
-            })
+            .bounded(context, async { Ok::<_, TraceDecayError>(queried.await) })
             .await??;
         evidence_outcome(
             context,
@@ -305,16 +309,18 @@ impl<'a> DirectRetainedSessionPortV1<'a> {
             return Err(RetainedSurfaceExecutionErrorV1::Unsupported);
         };
         ensure_mounted_project_context(context, authorities)?;
+        let queried: Pin<
+            Box<
+                dyn Future<Output = Result<WorkflowsResultV1, RetainedSurfaceExecutionErrorV1>>
+                    + Send
+                    + '_,
+            >,
+        > = Box::pin(crate::session_queries::workflows(
+            Some(authorities.workflow_index.as_ref()),
+            request,
+        ));
         let result = self
-            .bounded(context, async {
-                Ok::<_, TraceDecayError>(
-                    crate::session_queries::workflows(
-                        Some(authorities.workflow_index.as_ref()),
-                        request,
-                    )
-                    .await,
-                )
-            })
+            .bounded(context, async { Ok::<_, TraceDecayError>(queried.await) })
             .await??;
         if result.status == RetainedOutcomeStatusV1::Unavailable {
             let detail = result.error.as_ref().map_or_else(

@@ -116,13 +116,12 @@ fn str_vec(value: &Value, key: &str) -> Vec<String> {
     value
         .get(key)
         .and_then(Value::as_array)
-        .map(|arr| {
+        .map_or_default(|arr| {
             arr.iter()
                 .filter_map(Value::as_str)
                 .map(str::to_string)
                 .collect()
         })
-        .unwrap_or_default()
 }
 
 fn index_of(ranked: &[String], id: &str) -> Option<usize> {

@@ -633,8 +633,7 @@ impl CodeGraphInteractiveReader {
                 .first()
                 .and_then(|id| catalog.symbols.get(id))
                 .and_then(|symbol| symbol.metadata.as_ref())
-                .map(|metadata| metadata.simple_name.clone())
-                .unwrap_or_else(|| key.clone());
+                .map_or_else(|| key.clone(), |metadata| metadata.simple_name.clone());
             hits.push((distance, display));
         }
         hits.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));

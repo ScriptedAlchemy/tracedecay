@@ -322,8 +322,7 @@ impl MarkdownExtractor {
         // field, which points to an `(inline)` node containing the text.
         let title = node
             .child_by_field_name("heading_content")
-            .map(|n| state.node_text(n).trim().to_string())
-            .unwrap_or_default();
+            .map_or_default(|n| state.node_text(n).trim().to_string());
 
         if title.is_empty() {
             // Still recurse into the heading body so any `(inline)` children

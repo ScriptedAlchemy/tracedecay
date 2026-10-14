@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{Arc, atomic::Ordering};
 
 use tracedecay_runtime_core::native_runtime::{NativeTask, NativeTaskOutcome};
@@ -44,7 +46,9 @@ impl ProjectRuntimeRegistryV1 {
             }
             fences.quiesced.extend(roots.iter().cloned());
         }
-        if !self.drain_roots(roots).await {
+        let drained: Pin<Box<dyn Future<Output = bool> + Send + '_>> =
+            Box::pin(self.drain_roots(roots));
+        if !drained.await {
             self.release_quiesced_roots(roots);
             return None;
         }
@@ -376,7 +380,13 @@ async fn shut_down_observability(runtimes: &mut BTreeMap<PathBuf, ProjectRuntime
         let Some(observability) = runtime.observability.take() else {
             continue;
         };
-        if let Err(error) = observability.shutdown().await {
+        let shutdown: Pin<
+            Box<
+                dyn Future<Output = Result<(), tracedecay_contracts::ApplicationContractError>>
+                    + Send,
+            >,
+        > = Box::pin(observability.shutdown());
+        if let Err(error) = shutdown.await {
             tracing::warn!(
                 project = %project_root.display(),
                 %error,

@@ -169,8 +169,7 @@ pub(super) fn bound_tagged_union(
     let mut description = union
         .get("description")
         .and_then(Value::as_str)
-        .map(str::to_owned)
-        .unwrap_or_default();
+        .map_or_default(str::to_owned);
     if !description.is_empty() {
         description.push(' ');
     }

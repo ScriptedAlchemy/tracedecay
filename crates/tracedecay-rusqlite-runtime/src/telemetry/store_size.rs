@@ -113,16 +113,22 @@ impl SqliteStoreSizeTelemetryPort {
         store: &'a StoreKeyV1,
         observation: TableGrowthObservation,
     ) -> StorageTelemetryFuture<'a, TableGrowthTelemetryReadV1> {
+        // A future that borrows `self` proves `RuntimeHandle: Sync`, which
+        // overflows the recursion limit (rust-lang/rust#159228).
+        let cx = self
+            .admits(context, store)
+            .then(|| self.runtime.try_request_cx_with_budget(Budget::INFINITE));
+        let handle = self.handle.clone();
+        let reader_wait = self.reader_wait;
+        let table_watermarks = &self.table_watermarks;
         Box::pin(async move {
-            if !self.admits(context, store) {
+            let Some(cx) = cx else {
                 return TableGrowthTelemetryReadV1::Denied {
                     store: store.clone(),
                 };
-            }
-            let handle = self.handle.clone();
-            let reader_wait = self.reader_wait;
+            };
             let context = context.clone();
-            let Ok(cx) = self.runtime.try_request_cx_with_budget(Budget::INFINITE) else {
+            let Ok(cx) = cx else {
                 return TableGrowthTelemetryReadV1::Unknown {
                     store: store.clone(),
                 };
@@ -149,8 +155,7 @@ impl SqliteStoreSizeTelemetryPort {
                 };
                 current_tables.insert(table, StorageByteSizeV1(sample.bytes));
             }
-            let mut watermarks = self
-                .table_watermarks
+            let mut watermarks = table_watermarks
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             compare_table_growth(
@@ -170,16 +175,20 @@ impl StoreSizeTelemetryPort for SqliteStoreSizeTelemetryPort {
         context: &'a RequestContext,
         store: &'a StoreKeyV1,
     ) -> StorageTelemetryFuture<'a, StorageTelemetryReadV1> {
+        // Same `RuntimeHandle: Sync` overflow as `read_table_growth`.
+        let cx = self
+            .admits(context, store)
+            .then(|| self.runtime.try_request_cx_with_budget(Budget::INFINITE));
+        let handle = self.handle.clone();
+        let reader_wait = self.reader_wait;
         Box::pin(async move {
-            if !self.admits(context, store) {
+            let Some(cx) = cx else {
                 return StorageTelemetryReadV1::Denied {
                     store: store.clone(),
                 };
-            }
-            let handle = self.handle.clone();
-            let reader_wait = self.reader_wait;
+            };
             let context = context.clone();
-            let Ok(cx) = self.runtime.try_request_cx_with_budget(Budget::INFINITE) else {
+            let Ok(cx) = cx else {
                 return StorageTelemetryReadV1::Unknown {
                     store: store.clone(),
                 };

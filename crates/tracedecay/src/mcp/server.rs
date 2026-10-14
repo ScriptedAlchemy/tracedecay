@@ -1367,8 +1367,7 @@ impl McpServer {
         let file_token_entries = self
             .file_token_map
             .lock()
-            .map(|tokens| tokens.len())
-            .unwrap_or_default();
+            .map_or_default(|tokens| tokens.len());
         let ratio = |n: u64| {
             if total_requests == 0 {
                 0.0

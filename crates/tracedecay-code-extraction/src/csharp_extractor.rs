@@ -722,8 +722,7 @@ impl CSharpExtractor {
 
         let type_str = node
             .child_by_field_name("type")
-            .map(|n| state.node_text(n).to_string())
-            .unwrap_or_default();
+            .map_or_default(|n| state.node_text(n).to_string());
         let sig = format!("{type_str} {name}");
 
         let graph_node = Node {

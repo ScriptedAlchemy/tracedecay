@@ -1101,9 +1101,7 @@ fn child_output(
     stderr: Option<JoinHandle<Vec<u8>>>,
 ) -> Output {
     let join = |handle: Option<JoinHandle<Vec<u8>>>| {
-        handle
-            .map(|handle| handle.join().expect("child pipe drain thread panicked"))
-            .unwrap_or_default()
+        handle.map_or_default(|handle| handle.join().expect("child pipe drain thread panicked"))
     };
     Output {
         status,
@@ -1507,19 +1505,17 @@ fn install_codex_automation_enables_daemon_owned_project_configuration_nonintera
     );
 
     let projects_dir = profile_root(home.path()).join("projects");
-    let sidecars = std::fs::read_dir(&projects_dir)
-        .map(|entries| {
-            entries
-                .map(|entry| {
-                    entry
-                        .unwrap()
-                        .path()
-                        .join("dashboard/automation_config.json")
-                })
-                .filter(|path| path.is_file())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let sidecars = std::fs::read_dir(&projects_dir).map_or_default(|entries| {
+        entries
+            .map(|entry| {
+                entry
+                    .unwrap()
+                    .path()
+                    .join("dashboard/automation_config.json")
+            })
+            .filter(|path| path.is_file())
+            .collect::<Vec<_>>()
+    });
     assert!(
         sidecars.is_empty(),
         "automation install must not write retired dashboard sidecars: {sidecars:?}"

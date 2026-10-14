@@ -753,8 +753,7 @@ fn unsupported_hunk_selection(
             return Some(GitIndexUnsupportedStateV1::RenameOrCopy);
         }
         let line_count = parse_hunk_header(&hunk.hunk_header)
-            .map(|header| header.old_count.max(header.new_count))
-            .unwrap_or_default();
+            .map_or_default(|header| header.old_count.max(header.new_count));
         if hunk.selected_line_bitmap != tracedecay_domain::full_hunk_selection_bitmap(line_count) {
             return Some(GitIndexUnsupportedStateV1::PartialHunkSelection);
         }

@@ -421,8 +421,7 @@ fn spelled_identifiers(words: &[ExactQueryAtom]) -> [String; 3] {
         let mut chars = word.chars();
         chars
             .next()
-            .map(|first| first.to_ascii_uppercase().to_string() + chars.as_str())
-            .unwrap_or_default()
+            .map_or_default(|first| first.to_ascii_uppercase().to_string() + chars.as_str())
     };
     let snake = words
         .iter()

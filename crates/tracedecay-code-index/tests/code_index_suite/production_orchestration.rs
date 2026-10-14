@@ -73,13 +73,16 @@ impl SharedPublicationStore {
         &self,
         published: &CodeIndexPublishedBuildV1,
     ) -> Arc<CodeIndexPublishedGenerationV1> {
-        published.decoded().map(Arc::clone).unwrap_or_else(|| {
-            Arc::new(
-                self.sealed
-                    .decode(published.manifest_bytes())
-                    .expect("published generation decodes"),
-            )
-        })
+        published.decoded().map_or_else(
+            || {
+                Arc::new(
+                    self.sealed
+                        .decode(published.manifest_bytes())
+                        .expect("published generation decodes"),
+                )
+            },
+            Arc::clone,
+        )
     }
 }
 

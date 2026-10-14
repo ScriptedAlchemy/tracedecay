@@ -389,8 +389,7 @@ impl PerlExtractor {
             if is_our {
                 let var_name = left_node
                     .child_by_field_name("variable_name")
-                    .map(|n| state.node_text(n))
-                    .unwrap_or_default();
+                    .map_or_default(|n| state.node_text(n));
 
                 // Only treat ALL_CAPS variables as constants.
                 let bare_name = var_name.trim_start_matches('$');

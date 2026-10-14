@@ -1,5 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+
+use tracing::Instrument;
 
 use std::fmt::Write as _;
 
@@ -653,52 +657,53 @@ pub(super) async fn list_registered_lossless_paths(
     list_lossless_paths_from(ProjectRegistryDatabase(db), sql, operation).await
 }
 
-#[tracing::instrument(
-    name = "global_db.registry.query.list_paths",
-    level = "trace",
-    skip_all
-)]
-async fn list_lossless_paths_from(
-    db: ProjectRegistryDatabase<'_>,
-    sql: &str,
+fn list_lossless_paths_from<'a>(
+    db: ProjectRegistryDatabase<'a>,
+    sql: &'a str,
     operation: &'static str,
-) -> tracedecay_domain::errors::Result<Vec<PathBuf>> {
-    let read = db.read_snapshot(operation).await?;
-    let mut rows = read
-        .query(sql, ())
-        .await
-        .map_err(|error| global_db_operation_error(operation, error))?;
-    let mut paths = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(operation, error))?
-    {
-        let encoded = row
-            .get::<String>(0)
-            .map_err(|error| global_db_operation_error(operation, error))?;
-        let path = match decode_native_project_path_alias(&encoded) {
-            Ok(Some(path)) => Some(path),
-            Ok(None) if Path::new(&encoded).is_absolute() => Some(PathBuf::from(encoded)),
-            Ok(None) => None,
-            Err(error) => {
-                return Err(global_db_operation_message(
-                    operation,
-                    format!("invalid native project path alias: {error}"),
-                ));
+) -> Pin<Box<dyn Future<Output = tracedecay_domain::errors::Result<Vec<PathBuf>>> + Send + 'a>> {
+    let span = tracing::trace_span!("global_db.registry.query.list_paths");
+    Box::pin(
+        async move {
+            let read = db.read_snapshot(operation).await?;
+            let mut rows = read
+                .query(sql, ())
+                .await
+                .map_err(|error| global_db_operation_error(operation, error))?;
+            let mut paths = Vec::new();
+            while let Some(row) = rows
+                .next()
+                .await
+                .map_err(|error| global_db_operation_error(operation, error))?
+            {
+                let encoded = row
+                    .get::<String>(0)
+                    .map_err(|error| global_db_operation_error(operation, error))?;
+                let path = match decode_native_project_path_alias(&encoded) {
+                    Ok(Some(path)) => Some(path),
+                    Ok(None) if Path::new(&encoded).is_absolute() => Some(PathBuf::from(encoded)),
+                    Ok(None) => None,
+                    Err(error) => {
+                        return Err(global_db_operation_message(
+                            operation,
+                            format!("invalid native project path alias: {error}"),
+                        ));
+                    }
+                };
+                if let Some(path) = path {
+                    if !path.is_absolute() {
+                        return Err(global_db_operation_message(
+                            operation,
+                            "native project path alias is not absolute",
+                        ));
+                    }
+                    paths.push(path);
+                }
             }
-        };
-        if let Some(path) = path {
-            if !path.is_absolute() {
-                return Err(global_db_operation_message(
-                    operation,
-                    "native project path alias is not absolute",
-                ));
-            }
-            paths.push(path);
+            Ok(paths)
         }
-    }
-    Ok(paths)
+        .instrument(span),
+    )
 }
 
 impl RegisteredGlobalDb {
@@ -742,115 +747,118 @@ impl RegisteredGlobalDb {
     /// [`TraceDecayError::ProjectRoute`]: tracedecay_domain::errors::TraceDecayError::ProjectRoute
     /// [`TraceDecayError::ResetRequired`]: tracedecay_domain::errors::TraceDecayError::ResetRequired
     /// [`TraceDecayError::Database`]: tracedecay_domain::errors::TraceDecayError::Database
-    #[tracing::instrument(name = "global_db.registry.persist.upsert", level = "trace", skip_all)]
-    pub async fn upsert_code_project(
-        &self,
-        project_id: &str,
-        project_root: &Path,
-        git_common_dir: Option<&Path>,
-        git_remote_url: Option<&str>,
-        default_branch: Option<&str>,
-    ) -> tracedecay_domain::errors::Result<CodeProjectRecord> {
-        const OPERATION: &str = "upsert code project";
-        // The one door through which a project authority is minted. Enforcing
-        // admission here rather than at each caller means an ephemeral root
-        // cannot become a durable authority even from a call site that has
-        // never heard of the policy.
-        if let Some(reason) = self.ephemeral_root_rejection(project_root) {
-            return Err(tracedecay_domain::errors::TraceDecayError::project_route(
-                EPHEMERAL_PROJECT_ROOT_REASON_CODE,
-                false,
-                reason,
-            ));
-        }
-        let now = tracedecay_runtime_core::tracedecay::current_timestamp();
-        let canonical_project_root = canonical_project_path(project_root);
-        let canonical_root = canonical_project_root.to_string_lossy().into_owned();
-        let current_root_alias = project_path_alias_key(&canonical_project_root);
-        let canonical_git_common_dir = git_common_dir.map(canonical_project_path);
-        let git_common_dir_text = canonical_git_common_dir
-            .as_deref()
-            .map(|path| path.to_string_lossy().into_owned());
-        let git_common_dir_alias =
-            super::repo_identity_aliases(canonical_git_common_dir.as_deref())
+    pub fn upsert_code_project<'a>(
+        &'a self,
+        project_id: &'a str,
+        project_root: &'a Path,
+        git_common_dir: Option<&'a Path>,
+        git_remote_url: Option<&'a str>,
+        default_branch: Option<&'a str>,
+    ) -> Pin<
+        Box<dyn Future<Output = tracedecay_domain::errors::Result<CodeProjectRecord>> + Send + 'a>,
+    > {
+        Box::pin(
+            async move {
+                const OPERATION: &str = "upsert code project";
+                // The one door through which a project authority is minted. Enforcing
+                // admission here rather than at each caller means an ephemeral root
+                // cannot become a durable authority even from a call site that has
+                // never heard of the policy.
+                if let Some(reason) = self.ephemeral_root_rejection(project_root) {
+                    return Err(tracedecay_domain::errors::TraceDecayError::project_route(
+                        EPHEMERAL_PROJECT_ROOT_REASON_CODE,
+                        false,
+                        reason,
+                    ));
+                }
+                let now = tracedecay_runtime_core::tracedecay::current_timestamp();
+                let canonical_project_root = canonical_project_path(project_root);
+                let canonical_root = canonical_project_root.to_string_lossy().into_owned();
+                let current_root_alias = project_path_alias_key(&canonical_project_root);
+                let canonical_git_common_dir = git_common_dir.map(canonical_project_path);
+                let git_common_dir_text = canonical_git_common_dir
+                    .as_deref()
+                    .map(|path| path.to_string_lossy().into_owned());
+                let git_common_dir_alias =
+                    super::repo_identity_aliases(canonical_git_common_dir.as_deref())
+                        .into_iter()
+                        .next();
+                let transaction = self
+                    .begin_write_transaction()
+                    .await
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+
+                let mut existing_authorities = BTreeSet::new();
+                for alias in [
+                    Some(current_root_alias.as_str()),
+                    git_common_dir_alias.as_deref(),
+                ]
                 .into_iter()
-                .next();
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+                .flatten()
+                {
+                    let mut rows = transaction
+                        .query(
+                            "SELECT project_id FROM project_aliases WHERE alias_path = ?1",
+                            params![alias],
+                        )
+                        .await
+                        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+                    if let Some(row) = rows
+                        .next()
+                        .await
+                        .map_err(|error| global_db_operation_error(OPERATION, error))?
+                    {
+                        existing_authorities.insert(
+                            row.get::<String>(0)
+                                .map_err(|error| global_db_operation_error(OPERATION, error))?,
+                        );
+                    }
+                }
+                if let Some(git_common_dir_text) = git_common_dir_text.as_deref() {
+                    let mut rows = transaction
+                        .query(
+                            "SELECT project_id FROM code_projects WHERE git_common_dir = ?1",
+                            params![git_common_dir_text],
+                        )
+                        .await
+                        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+                    while let Some(row) = rows
+                        .next()
+                        .await
+                        .map_err(|error| global_db_operation_error(OPERATION, error))?
+                    {
+                        existing_authorities.insert(
+                            row.get::<String>(0)
+                                .map_err(|error| global_db_operation_error(OPERATION, error))?,
+                        );
+                    }
+                }
+                if existing_authorities.len() > 1 {
+                    // Two ids already claim this root or its repository. Picking one
+                    // would fabricate a consolidation the caller never asked for, so
+                    // the conflict is surfaced with the ids that produced it.
+                    return Err(tracedecay_domain::errors::TraceDecayError::reset_required(
+                        PROJECT_REGISTRY_AUTHORITY,
+                        format!(
+                            "conflicting project authorities [{}] already claim '{}'",
+                            existing_authorities
+                                .iter()
+                                .map(String::as_str)
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                            canonical_project_root.display()
+                        ),
+                    ));
+                }
+                let authority_project_id = existing_authorities
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| project_id.to_string());
 
-        let mut existing_authorities = BTreeSet::new();
-        for alias in [
-            Some(current_root_alias.as_str()),
-            git_common_dir_alias.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            let mut rows = transaction
-                .query(
-                    "SELECT project_id FROM project_aliases WHERE alias_path = ?1",
-                    params![alias],
-                )
-                .await
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            if let Some(row) = rows
-                .next()
-                .await
-                .map_err(|error| global_db_operation_error(OPERATION, error))?
-            {
-                existing_authorities.insert(
-                    row.get::<String>(0)
-                        .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                );
-            }
-        }
-        if let Some(git_common_dir_text) = git_common_dir_text.as_deref() {
-            let mut rows = transaction
-                .query(
-                    "SELECT project_id FROM code_projects WHERE git_common_dir = ?1",
-                    params![git_common_dir_text],
-                )
-                .await
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            while let Some(row) = rows
-                .next()
-                .await
-                .map_err(|error| global_db_operation_error(OPERATION, error))?
-            {
-                existing_authorities.insert(
-                    row.get::<String>(0)
-                        .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                );
-            }
-        }
-        if existing_authorities.len() > 1 {
-            // Two ids already claim this root or its repository. Picking one
-            // would fabricate a consolidation the caller never asked for, so
-            // the conflict is surfaced with the ids that produced it.
-            return Err(tracedecay_domain::errors::TraceDecayError::reset_required(
-                PROJECT_REGISTRY_AUTHORITY,
-                format!(
-                    "conflicting project authorities [{}] already claim '{}'",
-                    existing_authorities
-                        .iter()
-                        .map(String::as_str)
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    canonical_project_root.display()
-                ),
-            ));
-        }
-        let authority_project_id = existing_authorities
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| project_id.to_string());
-
-        if authority_project_id == project_id {
-            transaction
-                .execute(
-                    "INSERT INTO code_projects
+                if authority_project_id == project_id {
+                    transaction
+                        .execute(
+                            "INSERT INTO code_projects
                  (project_id, canonical_root, display_root, primary_root_platform,
                   primary_root_bytes, primary_root_last_seen_at, git_common_dir,
                   git_remote_url, default_branch, created_at, last_seen_at)
@@ -865,64 +873,75 @@ impl RegisteredGlobalDb {
                     git_remote_url = excluded.git_remote_url,
                     default_branch = excluded.default_branch,
                     last_seen_at = excluded.last_seen_at",
-                    params![
-                        authority_project_id.as_str(),
-                        canonical_root,
-                        native_project_path_platform(),
-                        encode_native_project_path(&canonical_project_root),
-                        now,
-                        git_common_dir_text,
-                        git_remote_url,
-                        default_branch
-                    ],
-                )
-                .await
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        } else {
-            transaction
-                .execute(
-                    "UPDATE code_projects SET last_seen_at = ?2 WHERE project_id = ?1",
-                    params![authority_project_id.as_str(), now],
-                )
-                .await
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        }
-        let mut aliases = vec![current_root_alias];
-        aliases.extend(git_common_dir_alias);
-        if let Some(alias) = super::git_remote_search_alias(git_remote_url) {
-            aliases.push(alias);
-        }
-        for alias in aliases {
-            transaction
-                .execute(
-                    "INSERT INTO project_aliases (alias_path, project_id, last_seen_at)
+                            params![
+                                authority_project_id.as_str(),
+                                canonical_root,
+                                native_project_path_platform(),
+                                encode_native_project_path(&canonical_project_root),
+                                now,
+                                git_common_dir_text,
+                                git_remote_url,
+                                default_branch
+                            ],
+                        )
+                        .await
+                        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+                } else {
+                    transaction
+                        .execute(
+                            "UPDATE code_projects SET last_seen_at = ?2 WHERE project_id = ?1",
+                            params![authority_project_id.as_str(), now],
+                        )
+                        .await
+                        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+                }
+                let mut aliases = vec![current_root_alias];
+                aliases.extend(git_common_dir_alias);
+                if let Some(alias) = super::git_remote_search_alias(git_remote_url) {
+                    aliases.push(alias);
+                }
+                for alias in aliases {
+                    transaction
+                        .execute(
+                            "INSERT INTO project_aliases (alias_path, project_id, last_seen_at)
                      VALUES (?1, ?2, ?3)
                      ON CONFLICT(alias_path) DO UPDATE SET
                         project_id = excluded.project_id,
                         last_seen_at = excluded.last_seen_at",
-                    params![alias, authority_project_id.as_str(), now],
-                )
-                .await
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        }
-        transaction
-            .commit()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        // A committed authority that cannot be read back is a registry
-        // inconsistency, not an "unregistered project", say so rather than
-        // handing the caller an absence it would read as a clean refusal.
-        self.get_code_project(&authority_project_id)
-            .await?
-            .ok_or_else(|| {
-                global_db_operation_message(
-                    OPERATION,
-                    format!(
-                        "project '{authority_project_id}' is not readable after its \
-                         registration committed"
-                    ),
-                )
-            })
+                            params![alias, authority_project_id.as_str(), now],
+                        )
+                        .await
+                        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+                }
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+                // A committed authority that cannot be read back is a registry
+                // inconsistency, not an "unregistered project", say so rather than
+                // handing the caller an absence it would read as a clean refusal.
+                let recorded: Pin<
+                    Box<
+                        dyn Future<
+                                Output = tracedecay_domain::errors::Result<
+                                    Option<CodeProjectRecord>,
+                                >,
+                            > + Send
+                            + '_,
+                    >,
+                > = Box::pin(self.get_code_project(&authority_project_id));
+                recorded.await?.ok_or_else(|| {
+                    global_db_operation_message(
+                        OPERATION,
+                        format!(
+                            "project '{authority_project_id}' is not readable after its \
+                     registration committed"
+                        ),
+                    )
+                })
+            }
+            .instrument(tracing::trace_span!("global_db.registry.persist.upsert")),
+        )
     }
 
     /// Mints or refreshes a `project_aliases` row.
@@ -1570,13 +1589,21 @@ impl RegisteredGlobalDb {
         project_root: &Path,
         git_common_dir: Option<&Path>,
     ) -> tracedecay_domain::errors::Result<Option<ProjectStoreResolution>> {
-        let Some(project_id) = self
-            .project_id_by_identity(project_root, git_common_dir)
-            .await?
-        else {
+        let identified: Pin<
+            Box<dyn Future<Output = tracedecay_domain::errors::Result<Option<String>>> + Send + '_>,
+        > = Box::pin(self.project_id_by_identity(project_root, git_common_dir));
+        let Some(project_id) = identified.await? else {
             return Ok(None);
         };
-        let Some(context) = self.project_registry_context_by_id(&project_id).await? else {
+        let context_read: Pin<
+            Box<
+                dyn Future<
+                        Output = tracedecay_domain::errors::Result<Option<ProjectRegistryContext>>,
+                    > + Send
+                    + '_,
+            >,
+        > = Box::pin(self.project_registry_context_by_id(&project_id));
+        let Some(context) = context_read.await? else {
             return Ok(None);
         };
         if context.stores.len() > 1 {
@@ -1650,13 +1677,21 @@ impl RegisteredGlobalDb {
         project_root: &Path,
         git_common_dir: Option<&Path>,
     ) -> tracedecay_domain::errors::Result<Option<ProjectRegistryContext>> {
-        let Some(project_id) = self
-            .project_id_by_identity(project_root, git_common_dir)
-            .await?
-        else {
+        let identified: Pin<
+            Box<dyn Future<Output = tracedecay_domain::errors::Result<Option<String>>> + Send + '_>,
+        > = Box::pin(self.project_id_by_identity(project_root, git_common_dir));
+        let Some(project_id) = identified.await? else {
             return Ok(None);
         };
-        self.project_registry_context_by_id(&project_id).await
+        let context: Pin<
+            Box<
+                dyn Future<
+                        Output = tracedecay_domain::errors::Result<Option<ProjectRegistryContext>>,
+                    > + Send
+                    + '_,
+            >,
+        > = Box::pin(self.project_registry_context_by_id(&project_id));
+        context.await
     }
 
     async fn project_id_by_identity(

@@ -216,6 +216,44 @@ struct ObservabilityProducerCoreV1 {
     worker: Mutex<Option<NativeTask<()>>>,
 }
 
+// Proving these fields `Send + Sync` walks the registered database lease past
+// the recursion limit (rust-lang/rust#159228). The const is that field proof;
+// the impls keep every registry that stores this producer from repeating it.
+unsafe impl Send for ObservabilityProducerCoreV1 {}
+unsafe impl Sync for ObservabilityProducerCoreV1 {}
+
+const _: fn(&ObservabilityProducerCoreV1) = |value| {
+    fn assert_send_sync<T: Send + Sync>(_: &T) {}
+    let ObservabilityProducerCoreV1 {
+        db,
+        identity,
+        data,
+        control,
+        pending_drops,
+        total_dropped,
+        next_sequence,
+        state,
+        final_coverage_persisted,
+        durable_emission_lock,
+        deadlines,
+        emission_lock,
+        worker,
+    } = value;
+    assert_send_sync(db);
+    assert_send_sync(identity);
+    assert_send_sync(data);
+    assert_send_sync(control);
+    assert_send_sync(pending_drops);
+    assert_send_sync(total_dropped);
+    assert_send_sync(next_sequence);
+    assert_send_sync(state);
+    assert_send_sync(final_coverage_persisted);
+    assert_send_sync(durable_emission_lock);
+    assert_send_sync(deadlines);
+    assert_send_sync(emission_lock);
+    assert_send_sync(worker);
+};
+
 pub struct BoundedObservabilityProducerV1 {
     core: Arc<ObservabilityProducerCoreV1>,
     /// The identity this frontend stamps on admitted envelopes. It differs
@@ -923,12 +961,13 @@ async fn record_batch(
         return false;
     }
     let count = u64::try_from(envelopes.len()).unwrap_or(u64::MAX);
-    match timeout(
-        persistence_deadline,
+    // Erased so the worker's `Send` proof does not nest the batch write
+    // (rust-lang/rust#159228).
+    let recorded = tracedecay_runtime_core::erase_send!(
         record_observability_batch(db, envelopes),
-    )
-    .await
-    {
+        Result<Vec<String>, ApplicationContractError>
+    );
+    match timeout(persistence_deadline, recorded).await {
         Ok(Ok(_)) => {
             *persisted = persisted.saturating_add(count);
             true
@@ -998,10 +1037,10 @@ async fn settle_worker(
             for carried_drop in carried_drops {
                 push_drop_range(&mut ranges, carried_drop);
             }
-            let emission_identity = owner_fact
-                .as_ref()
-                .map(|owner| owner.emission_identity.clone())
-                .unwrap_or_else(|| identity_from_envelope(&envelope));
+            let emission_identity = owner_fact.as_ref().map_or_else(
+                || identity_from_envelope(&envelope),
+                |owner| owner.emission_identity.clone(),
+            );
             let sequence = if owner_fact.is_some() {
                 state.next_sequence.fetch_add(1, Ordering::AcqRel)
             } else {

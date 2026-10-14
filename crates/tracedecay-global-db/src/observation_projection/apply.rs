@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 
 use serde::Deserialize;
 use tracedecay_domain::{
@@ -15,12 +17,16 @@ use tracedecay_store::{
 
 use tracedecay_lcm::contracts::LcmError;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_runtime_core::db::{
+    DatabaseEngineReadConnection, DatabaseEngineReadSnapshot, DatabaseWriteTransaction,
+};
 use tracedecay_sessions::runtime::store_access::find_preceding_codex_goal_response;
 
 use super::state::{
-    canonicalize_session_project_paths, read_message, read_observation, read_output_state,
-    read_session, reaggregate_output_state_for_output, reconcile_session_rows_detailed, storage,
-    storage_message, stored_output_digest, verify_output_state,
+    canonicalize_session_project_paths, message_projection, read_message, read_observation,
+    read_output_state, read_session, reaggregate_output_state_for_output,
+    reconcile_session_rows_detailed, storage, storage_message, stored_output_digest,
+    verify_output_state, verify_projection_rows,
 };
 use super::transition::{
     MessageTransition, MessageTransitionState, WorkflowFactTarget, WorkflowFactTransition,
@@ -42,9 +48,9 @@ pub(in super::super) fn derive_projection(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ProjectionOutputAlias {
-    provider: String,
-    message_id: String,
+pub(crate) struct ProjectionOutputAlias {
+    pub(crate) provider: String,
+    pub(crate) message_id: String,
 }
 
 const LIVE_PROJECTION_AUTHORITY_SQL: &str = "SELECT disposition.reason,
@@ -70,12 +76,12 @@ const REBUILD_PROJECTION_AUTHORITY_SQL: &str = "SELECT disposition.reason,
           AND alias.generation = target.generation
           AND alias.observation_id = target.observation_id";
 
-struct ProjectionAuthority {
-    disposition: Option<ProjectionSkipReason>,
-    alias: Option<ProjectionOutputAlias>,
+pub(crate) struct ProjectionAuthority {
+    pub(crate) disposition: Option<ProjectionSkipReason>,
+    pub(crate) alias: Option<ProjectionOutputAlias>,
 }
 
-async fn read_projection_authority(
+pub(crate) async fn read_projection_authority(
     conn: &impl QueryExecutor,
     observation_id: &CanonicalObservationIdV1,
     rebuild_generation: Option<&str>,
@@ -140,7 +146,7 @@ async fn read_projection_authority(
     })
 }
 
-async fn read_projection_alias(
+pub(crate) async fn read_projection_alias(
     conn: &impl QueryExecutor,
     observation_id: &CanonicalObservationIdV1,
     rebuild_generation: Option<&str>,
@@ -184,96 +190,494 @@ async fn read_projection_alias(
     }))
 }
 
-pub(in super::super) async fn derive_projection_with_alias(
-    conn: &impl QueryExecutor,
-    observation: &DurableObservationV1,
-) -> ProjectionStoreResult<ObservationProjection> {
-    derive_projection_with_alias_from_generation(conn, observation, None).await
+/// Connection that can derive a projection as one erased `Send` future.
+///
+/// Native-source verification calls derivation, and derivation calls
+/// verification. A generic `async fn` makes that a structural `Send` cycle the
+/// next trait solver walks until the recursion limit. Each connection type
+/// builds the future here, so the cycle is a `dyn Future + Send` instead.
+pub(crate) trait SendProjectionDerive: QueryExecutor + Sync {
+    fn derive_projection_alias<'a>(
+        &'a self,
+        observation: &'a DurableObservationV1,
+        rebuild_generation: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = ProjectionStoreResult<ObservationProjection>> + Send + 'a>>;
+
+    fn verify_native_source_supersession<'a>(
+        &'a self,
+        predecessor: &'a DurableObservationV1,
+    ) -> Pin<Box<dyn Future<Output = ProjectionStoreResult<()>> + Send + 'a>>;
 }
 
-pub(super) async fn derive_projection_for_rebuild(
-    conn: &impl QueryExecutor,
-    observation: &DurableObservationV1,
-    generation: &str,
-) -> ProjectionStoreResult<ObservationProjection> {
-    derive_projection_with_alias_from_generation(conn, observation, Some(generation)).await
+pub(in super::super) fn derive_projection_with_alias<'a>(
+    conn: &'a impl SendProjectionDerive,
+    observation: &'a DurableObservationV1,
+) -> Pin<Box<dyn Future<Output = ProjectionStoreResult<ObservationProjection>> + Send + 'a>> {
+    conn.derive_projection_alias(observation, None)
 }
 
-#[tracing::instrument(
-    name = "global_db.observation_apply.derive.alias",
-    level = "trace",
-    skip_all
-)]
-async fn derive_projection_with_alias_from_generation(
-    conn: &impl QueryExecutor,
-    observation: &DurableObservationV1,
-    rebuild_generation: Option<&str>,
-) -> ProjectionStoreResult<ObservationProjection> {
-    let authority =
-        read_projection_authority(conn, observation.observation_id(), rebuild_generation).await?;
-    if authority.disposition == Some(ProjectionSkipReason::NativeSourceSuperseded) {
-        Box::pin(super::source_transition::verify_native_source_supersession(
-            conn,
-            observation,
-        ))
-        .await?;
-        return Ok(ObservationProjection::Skipped(
-            ProjectionSkipReason::NativeSourceSuperseded,
-        ));
-    }
-    if let Some(reason) = authority.disposition
-        && matches!(
-            reason,
-            ProjectionSkipReason::OutputCollision
-                | ProjectionSkipReason::InvalidContract
-                | ProjectionSkipReason::SanitizationRefused
-                | ProjectionSkipReason::SourceRecordRetired
-        )
-    {
-        return Ok(ObservationProjection::Skipped(reason));
-    }
-    let projection = derive_projection(observation)?;
-    // Collapse Codex-style token/time goal ticks at projection time so every
-    // raw observation stays durable while current goal state follows the
-    // established (thread, objective, status) transition semantics.
-    let projection =
-        collapse_consecutive_goal_ticks(conn, observation, projection, rebuild_generation).await?;
-    let mut alias = authority.alias;
-    if alias.is_none()
-        && let Some(predecessor) =
-            super::source_transition::read_native_source_predecessor(conn, observation).await?
-    {
-        alias =
-            read_projection_alias(conn, predecessor.observation_id(), rebuild_generation).await?;
-    }
-    let Some(alias) = alias else {
-        return Ok(projection);
-    };
-    let (projection, workflow_facts) = match projection {
-        ObservationProjection::Message(projection) => (projection, Vec::new()),
-        ObservationProjection::Composite {
-            message: Some(projection),
-            workflow_facts,
-        } => (projection, workflow_facts),
-        ObservationProjection::Composite { message: None, .. }
-        | ObservationProjection::Skipped(_) => {
-            return Err(ProjectionStoreError::ProvenanceCollision);
+pub(super) fn derive_projection_for_rebuild<'a>(
+    conn: &'a impl SendProjectionDerive,
+    observation: &'a DurableObservationV1,
+    generation: &'a str,
+) -> Pin<Box<dyn Future<Output = ProjectionStoreResult<ObservationProjection>> + Send + 'a>> {
+    conn.derive_projection_alias(observation, Some(generation))
+}
+
+macro_rules! impl_send_projection_derive {
+    ($ty:ty) => {
+        impl $crate::observation_projection::SendProjectionDerive for $ty {
+            fn derive_projection_alias<'a>(
+                &'a self,
+                observation: &'a tracedecay_domain::DurableObservationV1,
+                rebuild_generation: Option<&'a str>,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = tracedecay_store::ProjectionStoreResult<
+                                tracedecay_store::ObservationProjection,
+                            >,
+                        > + Send
+                        + 'a,
+                >,
+            > {
+                Box::pin(tracing::Instrument::instrument(
+                    async move {
+                        let authority: std::pin::Pin<
+                            Box<
+                                dyn std::future::Future<
+                                        Output = tracedecay_store::ProjectionStoreResult<
+                                            $crate::observation_projection::apply::ProjectionAuthority,
+                                        >,
+                                    > + Send
+                                    + '_,
+                            >,
+                        > = Box::pin(
+                            $crate::observation_projection::apply::read_projection_authority(
+                                self,
+                                observation.observation_id(),
+                                rebuild_generation,
+                            ),
+                        );
+                        let authority = authority.await?;
+                        if authority.disposition
+                            == Some(tracedecay_store::ProjectionSkipReason::NativeSourceSuperseded)
+                        {
+                            self.verify_native_source_supersession(observation).await?;
+                            return Ok(tracedecay_store::ObservationProjection::Skipped(
+                                tracedecay_store::ProjectionSkipReason::NativeSourceSuperseded,
+                            ));
+                        }
+                        if let Some(reason) = authority.disposition
+                            && matches!(
+                                reason,
+                                tracedecay_store::ProjectionSkipReason::OutputCollision
+                                    | tracedecay_store::ProjectionSkipReason::InvalidContract
+                                    | tracedecay_store::ProjectionSkipReason::SanitizationRefused
+                                    | tracedecay_store::ProjectionSkipReason::SourceRecordRetired
+                            )
+                        {
+                            return Ok(tracedecay_store::ObservationProjection::Skipped(reason));
+                        }
+                        let projection =
+                            $crate::observation_projection::derive_projection(observation)?;
+                        // Collapse Codex-style token/time goal ticks at projection time so every
+                        // raw observation stays durable while current goal state follows the
+                        // established (thread, objective, status) transition semantics.
+                        let collapsed: std::pin::Pin<
+                            Box<
+                                dyn std::future::Future<
+                                        Output = tracedecay_store::ProjectionStoreResult<
+                                            tracedecay_store::ObservationProjection,
+                                        >,
+                                    > + Send
+                                    + '_,
+                            >,
+                        > = Box::pin(
+                            $crate::observation_projection::apply::collapse_consecutive_goal_ticks(
+                                self,
+                                observation,
+                                projection,
+                                rebuild_generation,
+                            ),
+                        );
+                        let projection = collapsed.await?;
+                        let mut alias = authority.alias;
+                        if alias.is_none() {
+                            let predecessor: std::pin::Pin<
+                                Box<
+                                    dyn std::future::Future<
+                                            Output = tracedecay_store::ProjectionStoreResult<
+                                                Option<tracedecay_domain::DurableObservationV1>,
+                                            >,
+                                        > + Send
+                                        + '_,
+                                >,
+                            > = Box::pin(
+                                $crate::observation_projection::source_transition::read_native_source_predecessor(
+                                    self,
+                                    observation,
+                                ),
+                            );
+                            if let Some(predecessor) = predecessor.await? {
+                                let aliased: std::pin::Pin<
+                                    Box<
+                                        dyn std::future::Future<
+                                                Output = tracedecay_store::ProjectionStoreResult<
+                                                    Option<
+                                                        $crate::observation_projection::apply::ProjectionOutputAlias,
+                                                    >,
+                                                >,
+                                            > + Send
+                                            + '_,
+                                    >,
+                                > = Box::pin(
+                                    $crate::observation_projection::apply::read_projection_alias(
+                                        self,
+                                        predecessor.observation_id(),
+                                        rebuild_generation,
+                                    ),
+                                );
+                                alias = aliased.await?;
+                            }
+                        }
+                        let Some(alias) = alias else {
+                            return Ok(projection);
+                        };
+                        let (projection, workflow_facts) = match projection {
+                            tracedecay_store::ObservationProjection::Message(projection) => {
+                                (projection, Vec::new())
+                            }
+                            tracedecay_store::ObservationProjection::Composite {
+                                message: Some(projection),
+                                workflow_facts,
+                            } => (projection, workflow_facts),
+                            tracedecay_store::ObservationProjection::Composite { message: None, .. }
+                            | tracedecay_store::ObservationProjection::Skipped(_) => {
+                                return Err(tracedecay_store::ProjectionStoreError::ProvenanceCollision);
+                            }
+                        };
+                        let mut session = projection.session().clone();
+                        let mut message = projection.message().clone();
+                        session.provider.clone_from(&alias.provider);
+                        message.provider = alias.provider;
+                        message.message_id = alias.message_id;
+                        tracedecay_store::ObservationProjection::for_outputs(
+                            observation,
+                            Some((session, message)),
+                            workflow_facts
+                                .into_iter()
+                                .map(|projection| {
+                                    (projection.session().clone(), projection.fact().clone())
+                                })
+                                .collect(),
+                        )
+                    },
+                    tracing::trace_span!("global_db.observation_apply.derive.alias"),
+                ))
+            }
+
+            fn verify_native_source_supersession<'a>(
+                &'a self,
+                predecessor: &'a tracedecay_domain::DurableObservationV1,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = tracedecay_store::ProjectionStoreResult<()>,
+                        > + Send
+                        + 'a,
+                >,
+            > {
+                Box::pin(async move {
+                    let successor: std::pin::Pin<
+                        Box<
+                            dyn std::future::Future<
+                                    Output = tracedecay_store::ProjectionStoreResult<
+                                        Option<tracedecay_domain::DurableObservationV1>,
+                                    >,
+                                > + Send
+                                + '_,
+                        >,
+                    > = Box::pin(
+                        $crate::observation_projection::source_transition::read_native_source_successor(
+                            self,
+                            predecessor,
+                        ),
+                    );
+                    let successor = successor
+                        .await?
+                        .ok_or(tracedecay_store::ProjectionStoreError::ProvenanceCollision)?;
+                    let effect = self.derive_projection_alias(&successor, None).await?;
+                    if matches!(effect.skip_reason(), Some(reason) if reason != tracedecay_store::ProjectionSkipReason::NonConversationalRecord)
+                    {
+                        return Err(tracedecay_store::ProjectionStoreError::ProvenanceCollision);
+                    }
+                    if effect.skip_reason().is_some() {
+                        let verified: std::pin::Pin<
+                            Box<
+                                dyn std::future::Future<
+                                        Output = tracedecay_store::ProjectionStoreResult<()>,
+                                    > + Send
+                                    + '_,
+                            >,
+                        > = Box::pin($crate::observation_projection::apply::verify_effect(
+                            self,
+                            &successor,
+                            &effect,
+                        ));
+                        verified.await?;
+                    } else {
+                        let usage: std::pin::Pin<
+                            Box<
+                                dyn std::future::Future<
+                                        Output = tracedecay_store::ProjectionStoreResult<()>,
+                                    > + Send
+                                    + '_,
+                            >,
+                        > = Box::pin(
+                            $crate::observation_projection::apply::verify_observation_provider_usage(
+                                self,
+                                &successor,
+                            ),
+                        );
+                        usage.await?;
+                        // Reopen audits use read-only connections without the live writer's
+                        // temporary cache. Resolve retained ownership through the same bounded
+                        // authority used by the canonical projection audit.
+                        let outputs = effect
+                            .message()
+                            .into_iter()
+                            .map(|projection| {
+                                (
+                                    projection.message().provider.clone(),
+                                    projection.message().message_id.clone(),
+                                )
+                            })
+                            .collect::<std::collections::BTreeSet<_>>();
+                        let authorities: std::pin::Pin<
+                            Box<
+                                dyn std::future::Future<
+                                        Output = tracedecay_store::ProjectionStoreResult<
+                                            std::collections::HashMap<
+                                                (String, String),
+                                                $crate::observation_projection::ProjectionOutputAuthority,
+                                            >,
+                                        >,
+                                    > + Send
+                                    + '_,
+                            >,
+                        > = Box::pin(
+                            $crate::observation_projection::read_output_authorities(
+                                self,
+                                &outputs,
+                            ),
+                        );
+                        let authorities = authorities.await?;
+                        for projection in effect.message().into_iter() {
+                            $crate::observation_projection::apply::verify_provenance(
+                                self,
+                                projection,
+                            )
+                            .await?;
+                            let message = projection.message();
+                            let authority = authorities
+                                .get(&(message.provider.clone(), message.message_id.clone()))
+                                .ok_or(tracedecay_store::ProjectionStoreError::ProvenanceCollision)?;
+                            let owner: std::pin::Pin<
+                                Box<
+                                    dyn std::future::Future<
+                                            Output = tracedecay_store::ProjectionStoreResult<
+                                                tracedecay_store::SessionMessageProjection,
+                                            >,
+                                        > + Send
+                                        + '_,
+                                >,
+                            > = Box::pin(
+                                $crate::observation_projection::resolve_output_projection(
+                                    self,
+                                    authority,
+                                    Some((successor.observation_id().as_str(), &effect)),
+                                    projection,
+                                ),
+                            );
+                            let owner = owner.await?;
+                            $crate::observation_projection::apply::verify_provenance(self, &owner)
+                                .await?;
+                            $crate::observation_projection::state::verify_projection_rows(
+                                self,
+                                &owner,
+                            )
+                            .await?;
+                        }
+                        let workflow: std::pin::Pin<
+                            Box<
+                                dyn std::future::Future<
+                                        Output = tracedecay_store::ProjectionStoreResult<()>,
+                                    > + Send
+                                    + '_,
+                            >,
+                        > = Box::pin(
+                            $crate::observation_projection::apply::verify_workflow_effects(
+                                self,
+                                effect.workflow_facts(),
+                            ),
+                        );
+                        workflow.await?;
+                    }
+                    let anchors: std::pin::Pin<
+                        Box<
+                            dyn std::future::Future<
+                                    Output = tracedecay_store::ProjectionStoreResult<(
+                                        tracedecay_domain::RetrievalAnchorRecord,
+                                        tracedecay_domain::RetrievalAnchorRecord,
+                                    )>,
+                                > + Send
+                                + '_,
+                        >,
+                    > = Box::pin(
+                        $crate::observation_projection::source_transition::read_transition_anchors(
+                            self,
+                            predecessor,
+                            &successor,
+                        ),
+                    );
+                    let (old_anchor, new_anchor) = anchors.await?;
+                    let owner = old_anchor.owner_column_json().map_err(|error| {
+                        $crate::observation_projection::state::storage(
+                            "encode native source owner",
+                            error,
+                        )
+                    })?;
+                    let mut disposition = self
+                        .query(
+                            "SELECT state, superseded_by, reason_class FROM retrieval_anchor_dispositions
+         WHERE anchor_id = ?1 AND owner_json = ?2 ORDER BY sequence DESC LIMIT 1",
+                            tracedecay_runtime_core::db::engine::params![
+                                old_anchor.anchor_id().as_str(),
+                                owner.as_str()
+                            ],
+                        )
+                        .await
+                        .map_err(|error| {
+                            $crate::observation_projection::state::storage(
+                                "verify native source anchor supersession",
+                                error,
+                            )
+                        })?;
+                    let current = disposition
+                        .next()
+                        .await
+                        .map_err(|error| {
+                            $crate::observation_projection::state::storage(
+                                "verify native source anchor supersession",
+                                error,
+                            )
+                        })?
+                        .ok_or(tracedecay_store::ProjectionStoreError::ProvenanceCollision)?;
+                    if current.get::<String>(0).map_err(|error| {
+                        $crate::observation_projection::state::storage(
+                            "verify native source anchor supersession",
+                            error,
+                        )
+                    })? != "superseded"
+                        || current.get::<Option<String>>(1).map_err(|error| {
+                            $crate::observation_projection::state::storage(
+                                "verify native source anchor supersession",
+                                error,
+                            )
+                        })?.as_deref()
+                            != Some(new_anchor.anchor_id().as_str())
+                        || current.get::<String>(2).map_err(|error| {
+                            $crate::observation_projection::state::storage(
+                                "verify native source anchor supersession",
+                                error,
+                            )
+                        })? != "correction"
+                    {
+                        return Err(tracedecay_store::ProjectionStoreError::ProvenanceCollision);
+                    }
+                    drop(disposition);
+                    let mut aliases = self
+                        .query(
+                            "SELECT COUNT(*) FROM retrieval_anchor_aliases WHERE owner_json = ?1 AND anchor_id = ?2",
+                            tracedecay_runtime_core::db::engine::params![
+                                owner,
+                                new_anchor.anchor_id().as_str()
+                            ],
+                        )
+                        .await
+                        .map_err(|error| {
+                            $crate::observation_projection::state::storage(
+                                "verify native source current alias",
+                                error,
+                            )
+                        })?;
+                    let count: i64 = aliases
+                        .next()
+                        .await
+                        .map_err(|error| {
+                            $crate::observation_projection::state::storage(
+                                "verify native source current alias",
+                                error,
+                            )
+                        })?
+                        .ok_or(tracedecay_store::ProjectionStoreError::ProvenanceCollision)?
+                        .get(0)
+                        .map_err(|error| {
+                            $crate::observation_projection::state::storage(
+                                "verify native source current alias",
+                                error,
+                            )
+                        })?;
+                    if usize::try_from(count).ok() != Some(new_anchor.aliases().len()) {
+                        return Err(tracedecay_store::ProjectionStoreError::ProvenanceCollision);
+                    }
+                    drop(aliases);
+                    let mut rows = self
+                        .query(
+                            "SELECT 1 FROM observation_projection_provenance WHERE projector_version = ?1 AND observation_id = ?2
+             UNION ALL SELECT 1 FROM observation_workflow_facts WHERE projector_version = ?1 AND observation_id = ?2
+             UNION ALL SELECT 1 FROM observation_projection_aliases WHERE projector_version = ?1 AND observation_id = ?2
+             LIMIT 1",
+                            tracedecay_runtime_core::db::engine::params![
+                                tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION,
+                                predecessor.observation_id().as_str()
+                            ],
+                        )
+                        .await
+                        .map_err(|error| {
+                            $crate::observation_projection::state::storage(
+                                "verify superseded native source effects",
+                                error,
+                            )
+                        })?;
+                    if rows
+                        .next()
+                        .await
+                        .map_err(|error| {
+                            $crate::observation_projection::state::storage(
+                                "verify superseded native source effects",
+                                error,
+                            )
+                        })?
+                        .is_some()
+                    {
+                        return Err(tracedecay_store::ProjectionStoreError::ProvenanceCollision);
+                    }
+                    drop(rows);
+                    Ok(())
+                })
+            }
         }
     };
-    let mut session = projection.session().clone();
-    let mut message = projection.message().clone();
-    session.provider.clone_from(&alias.provider);
-    message.provider = alias.provider;
-    message.message_id = alias.message_id;
-    ObservationProjection::for_outputs(
-        observation,
-        Some((session, message)),
-        workflow_facts
-            .into_iter()
-            .map(|projection| (projection.session().clone(), projection.fact().clone()))
-            .collect(),
-    )
 }
+#[cfg(test)]
+pub(crate) use impl_send_projection_derive;
+
+impl_send_projection_derive!(DatabaseWriteTransaction<'_>);
+impl_send_projection_derive!(DatabaseEngineReadConnection);
+impl_send_projection_derive!(DatabaseEngineReadSnapshot);
+impl_send_projection_derive!(crate::registered::RegisteredGlobalDbWriteTransaction<'_>);
 
 /// Objective used for goal-state dedupe: prefer native `/objective` (Codex),
 /// else the already-extracted `content_text`.
@@ -389,7 +793,7 @@ async fn read_latest_goal_dedupe_key(
     level = "trace",
     skip_all
 )]
-async fn collapse_consecutive_goal_ticks(
+pub(crate) async fn collapse_consecutive_goal_ticks(
     conn: &impl QueryExecutor,
     observation: &DurableObservationV1,
     projection: ObservationProjection,
@@ -959,7 +1363,7 @@ async fn retire_quarantined_projection(
     skip_all
 )]
 async fn apply_rows(
-    conn: &impl Executor,
+    conn: &DatabaseWriteTransaction<'_>,
     sequence: u64,
     observation: &DurableObservationV1,
     projection: &SessionMessageProjection,
@@ -974,7 +1378,37 @@ async fn apply_rows(
     if existing.is_some()
         && let Some(state) = state.as_ref()
     {
-        verify_output_state(conn, state, projection).await?;
+        // Erase the projection child here. `verify_output_state` stays generic
+        // over `QueryExecutor`, whose futures are not `Send`, so the write
+        // transaction is the boundary that can prove the child on its own.
+        let verified: Pin<Box<dyn Future<Output = ProjectionStoreResult<()>> + Send + '_>> =
+            Box::pin(async {
+                if state.owner_count == 0 {
+                    return Err(ProjectionStoreError::ProvenanceCollision);
+                }
+                let message = projection.message();
+                let owner: Pin<
+                    Box<
+                        dyn Future<Output = ProjectionStoreResult<SessionMessageProjection>>
+                            + Send
+                            + '_,
+                    >,
+                > = Box::pin(message_projection(
+                    conn,
+                    &state.canonical,
+                    &message.provider,
+                    &message.message_id,
+                ));
+                let owner_projection = owner.await?;
+                let provenance: Pin<
+                    Box<dyn Future<Output = ProjectionStoreResult<()>> + Send + '_>,
+                > = Box::pin(verify_provenance(conn, &owner_projection));
+                provenance.await?;
+                let rows: Pin<Box<dyn Future<Output = ProjectionStoreResult<()>> + Send + '_>> =
+                    Box::pin(verify_projection_rows(conn, &owner_projection));
+                rows.await
+            });
+        verified.await?;
     }
     let transition_state = state.as_ref().map(|state| {
         MessageTransitionState::new(
@@ -984,14 +1418,16 @@ async fn apply_rows(
             state.projector_owned,
         )
     });
-    let transition = message_transition(
+    let decided: Pin<
+        Box<dyn Future<Output = ProjectionStoreResult<MessageTransition>> + Send + '_>,
+    > = Box::pin(message_transition(
         conn,
         sequence,
         projection,
         existing.as_ref(),
         transition_state,
-    )
-    .await?;
+    ));
+    let transition = decided.await?;
     match transition {
         MessageTransition::Insert => upsert_projected_raw_message(conn, message).await?,
         MessageTransition::Supersede => supersede_projected_message(conn, message).await?,
@@ -1194,7 +1630,7 @@ async fn apply_workflow_fact(
     level = "trace",
     skip_all
 )]
-pub(super) async fn verify_provenance(
+pub(crate) async fn verify_provenance(
     conn: &impl QueryExecutor,
     projection: &SessionMessageProjection,
 ) -> ProjectionStoreResult<()> {
@@ -1493,7 +1929,7 @@ async fn apply_skip_disposition_for_receipt(
 }
 
 async fn verify_message_effect(
-    conn: &impl QueryExecutor,
+    conn: &impl SendProjectionDerive,
     projection: &SessionMessageProjection,
 ) -> ProjectionStoreResult<()> {
     verify_provenance(conn, projection).await?;
@@ -1504,14 +1940,16 @@ async fn verify_message_effect(
 }
 
 async fn apply_message_effect(
-    conn: &impl Executor,
+    conn: &DatabaseWriteTransaction<'_>,
     sequence: u64,
     observation: &DurableObservationV1,
     projection: &SessionMessageProjection,
 ) -> ProjectionStoreResult<()> {
     let message = projection.message();
     let previous_owner = read_canonical_owner(conn, &message.provider, &message.message_id).await?;
-    let message_created = apply_rows(conn, sequence, observation, projection).await?;
+    let rows: Pin<Box<dyn Future<Output = ProjectionStoreResult<bool>> + Send + '_>> =
+        Box::pin(apply_rows(conn, sequence, observation, projection));
+    let message_created = rows.await?;
     apply_provenance(conn, sequence, projection, message_created).await?;
     // The session-temporal store materialized the previous owner's
     // occurrence; once another observation owns the message, that occurrence
@@ -1560,7 +1998,7 @@ async fn read_canonical_owner(
 /// was retired; an observation the store never held, or one already settled
 /// by another disposition, has no projection to retire.
 pub(in super::super) async fn retire_source_record(
-    conn: &impl Executor,
+    conn: &(impl Executor + SendProjectionDerive),
     observation_id: &str,
 ) -> ProjectionStoreResult<bool> {
     let mut rows = conn
@@ -2040,7 +2478,7 @@ async fn provider_usage_observation_sequence(
         .map_err(|error| storage("read provider usage observation sequence", error))
 }
 
-pub(super) async fn verify_observation_provider_usage(
+pub(crate) async fn verify_observation_provider_usage(
     conn: &impl QueryExecutor,
     observation: &DurableObservationV1,
 ) -> ProjectionStoreResult<()> {
@@ -2050,7 +2488,7 @@ pub(super) async fn verify_observation_provider_usage(
 
 #[tracing::instrument(name = "global_db.observation_apply.query", level = "trace", skip_all)]
 pub async fn verify_effect(
-    conn: &impl QueryExecutor,
+    conn: &impl SendProjectionDerive,
     observation: &DurableObservationV1,
     effect: &ObservationProjection,
 ) -> ProjectionStoreResult<()> {
@@ -2102,7 +2540,7 @@ pub async fn verify_workflow_effects(
     skip_all
 )]
 pub(super) async fn apply_effect(
-    conn: &impl Executor,
+    conn: &DatabaseWriteTransaction<'_>,
     sequence: u64,
     observation: &DurableObservationV1,
     effect: &ObservationProjection,
@@ -2126,20 +2564,23 @@ pub(super) async fn apply_effect(
     // into that already-deep composition overflows the base-opt worker stack.
     match effect {
         ObservationProjection::Message(projection) => {
-            Box::pin(apply_message_effect(
-                conn,
-                sequence,
-                observation,
-                projection,
-            ))
-            .await
+            let applied: Pin<Box<dyn Future<Output = ProjectionStoreResult<()>> + Send + '_>> =
+                Box::pin(apply_message_effect(
+                    conn,
+                    sequence,
+                    observation,
+                    projection,
+                ));
+            applied.await
         }
         ObservationProjection::Composite {
             message,
             workflow_facts,
         } => {
             if let Some(message) = message {
-                Box::pin(apply_message_effect(conn, sequence, observation, message)).await?;
+                let applied: Pin<Box<dyn Future<Output = ProjectionStoreResult<()>> + Send + '_>> =
+                    Box::pin(apply_message_effect(conn, sequence, observation, message));
+                applied.await?;
             }
             for projection in workflow_facts {
                 apply_workflow_fact(conn, sequence, projection).await?;

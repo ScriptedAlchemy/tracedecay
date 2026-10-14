@@ -1,6 +1,10 @@
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+
 use std::sync::{Arc, LazyLock, OnceLock, RwLock};
+use tracing::Instrument;
 
 use tracedecay_contracts::clock::now_micros;
 use tracedecay_domain::ProjectId;
@@ -757,26 +761,32 @@ fn config_error(message: impl Into<String>) -> TraceDecayError {
     }
 }
 
-#[tracing::instrument(name = "daemon.config.discover", level = "trace", skip_all)]
-pub async fn discover_project_root_with_identity(
-    profile: &tracedecay_runtime_core::config::ProfileRoot,
-    start: &Path,
-) -> Option<PathBuf> {
-    if let Some(root) = profile.discover_project_root(start) {
-        return Some(root);
-    }
-    let candidate = tracedecay_runtime_core::worktree::git_worktree_root(start)
-        .unwrap_or_else(|| start.to_path_buf());
-    if crate::project::TraceDecay::has_initialized_store_with_options(
-        &candidate,
-        &crate::project::TraceDecayOpenOptions::for_profile(profile),
+pub fn discover_project_root_with_identity<'a>(
+    profile: &'a tracedecay_runtime_core::config::ProfileRoot,
+    start: &'a Path,
+) -> Pin<Box<dyn Future<Output = Option<PathBuf>> + Send + 'a>> {
+    let span = tracing::trace_span!("daemon.config.discover");
+    Box::pin(
+        async move {
+            if let Some(root) = profile.discover_project_root(start) {
+                return Some(root);
+            }
+            let candidate = tracedecay_runtime_core::worktree::git_worktree_root(start)
+                .unwrap_or_else(|| start.to_path_buf());
+            let options = crate::project::TraceDecayOpenOptions::for_profile(profile);
+            let initialized: Pin<Box<dyn Future<Output = bool> + Send + '_>> = Box::pin(
+                crate::project::TraceDecay::has_initialized_store_with_options(
+                    &candidate, &options,
+                ),
+            );
+            if initialized.await {
+                Some(candidate)
+            } else {
+                None
+            }
+        }
+        .instrument(span),
     )
-    .await
-    {
-        Some(candidate)
-    } else {
-        None
-    }
 }
 
 #[cfg(test)]

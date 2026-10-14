@@ -590,23 +590,17 @@ where
                 return;
             }
         };
-        let mounted_context = self
-            .context
-            .port
-            .as_ref()
-            .map(|context| {
-                context
-                    .registrations()
-                    .into_iter()
-                    .filter(|registration| {
-                        is_supported_context_projection(&registration.kind)
-                            && registration.revision > 0
-                    })
-                    .take(MAX_CONTEXT_PROJECTION_KINDS)
-                    .map(|registration| (registration.kind, registration.revision))
-                    .collect::<BTreeMap<_, _>>()
-            })
-            .unwrap_or_default();
+        let mounted_context = self.context.port.as_ref().map_or_default(|context| {
+            context
+                .registrations()
+                .into_iter()
+                .filter(|registration| {
+                    is_supported_context_projection(&registration.kind) && registration.revision > 0
+                })
+                .take(MAX_CONTEXT_PROJECTION_KINDS)
+                .map(|registration| (registration.kind, registration.revision))
+                .collect::<BTreeMap<_, _>>()
+        });
         let mut gateway_capabilities = self.lifecycle.gateway_capabilities.clone();
         let dynamic_workspace_diagnostics = client.diagnostic_dynamic_registration
             && client.supports_document_diagnostics

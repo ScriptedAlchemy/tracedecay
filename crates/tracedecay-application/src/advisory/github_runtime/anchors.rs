@@ -798,8 +798,7 @@ fn safe_github_review_url(value: &str) -> bool {
     };
     let segments = url
         .path_segments()
-        .map(std::iter::Iterator::collect::<Vec<_>>)
-        .unwrap_or_default();
+        .map_or_default(std::iter::Iterator::collect::<Vec<_>>);
     url.scheme() == "https"
         && url.host_str() == Some("github.com")
         && url.port().is_none()

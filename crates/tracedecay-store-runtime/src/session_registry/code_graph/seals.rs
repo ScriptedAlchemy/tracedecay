@@ -82,13 +82,13 @@ fn staged_identity_matches(
     let handle_metadata = file
         .metadata()
         .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
-    if staged_fingerprint(&path_metadata)? != *expected
-        || staged_fingerprint(&handle_metadata)? != *expected
-    {
-        return Ok(false);
-    }
+    let fingerprint_matches = staged_fingerprint(&path_metadata)? == *expected
+        && staged_fingerprint(&handle_metadata)? == *expected;
     #[cfg(windows)]
     {
+        if !fingerprint_matches {
+            return Ok(false);
+        }
         let path_file =
             File::open(path).map_err(|error| GraphDbError::unavailable(error.to_string()))?;
         let path_identity = tracedecay_private_fs::windows_file::information(&path_file)
@@ -102,7 +102,7 @@ fn staged_identity_matches(
     }
     #[cfg(unix)]
     {
-        Ok(true)
+        Ok(fingerprint_matches)
     }
     #[cfg(not(any(unix, windows)))]
     {

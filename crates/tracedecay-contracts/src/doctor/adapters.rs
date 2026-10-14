@@ -123,8 +123,7 @@ pub fn advisory_feedback_read_from_publication(
         .result
         .impact
         .as_ref()
-        .map(|impact| impact.evidence_anchors.as_slice())
-        .unwrap_or_default();
+        .map_or_default(|impact| impact.evidence_anchors.as_slice());
     let findings = publication
         .result
         .findings

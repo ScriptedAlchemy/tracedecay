@@ -228,11 +228,10 @@ impl Inner {
     /// Delete the engine's heap once the engine itself is dropped, returning
     /// every page it built on whichever thread freed it.
     fn release_engine_heap(&self) {
-        let heap = self
-            .engine_heap
-            .lock()
-            .map(|mut heap| heap.take())
-            .unwrap_or_else(|poisoned| poisoned.into_inner().take());
+        let heap = self.engine_heap.lock().map_or_else(
+            |poisoned| poisoned.into_inner().take(),
+            |mut heap| heap.take(),
+        );
         drop(heap);
     }
 }
@@ -1128,8 +1127,7 @@ impl GraphDb {
             .inner
             .sealed_generations
             .write()
-            .map(|mut sealed| std::mem::take(&mut *sealed))
-            .unwrap_or_default();
+            .map_or_default(|mut sealed| std::mem::take(&mut *sealed));
         for store in sealed.into_values() {
             let _ = store.close();
         }
@@ -1283,8 +1281,7 @@ impl GraphDb {
             .inner
             .sealed_generations
             .read()
-            .map(|sealed| sealed.values().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
+            .map_or_default(|sealed| sealed.values().cloned().collect::<Vec<_>>());
         for store in sealed {
             let _ = store.hibernate_if_lazy();
         }
@@ -1828,8 +1825,7 @@ pub(crate) enum GraphEngineOpenSite {
 /// In-memory engines have no container path; the label keeps the operator log
 /// field present so open/release events pair up per engine.
 fn container_label(path: Option<&std::path::Path>) -> String {
-    path.map(|path| path.display().to_string())
-        .unwrap_or_else(|| "memory".to_owned())
+    path.map_or_else(|| "memory".to_owned(), |path| path.display().to_string())
 }
 
 impl GraphEngineOpenSite {

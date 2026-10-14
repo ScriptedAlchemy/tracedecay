@@ -1401,7 +1401,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             continue;
                         }
                         Ok(Ok(Some(RetainedTextGenerationRestoreV1::Refused(metadata)))) => {
-                            Some(metadata)
+                            Some(*metadata)
                         }
                         Ok(Ok(Some(RetainedTextGenerationRestoreV1::Failed(error)))) => {
                             tracing::error!(

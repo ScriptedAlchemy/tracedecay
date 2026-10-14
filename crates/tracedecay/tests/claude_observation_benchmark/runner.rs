@@ -64,16 +64,18 @@ fn benchmark_tempdir(prefix: &str) -> TempDir {
     // Bazel's executable tree is read-only; TEST_TMPDIR is its writable,
     // per-test scratch authority. Native benchmark runs retain target locality.
     let root = std::env::var_os("TEST_TMPDIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let executable =
-                fs::canonicalize(std::env::current_exe().expect("resolve test executable"))
-                    .expect("canonicalize test executable");
-            executable
-                .parent()
-                .expect("test executable parent")
-                .to_path_buf()
-        })
+        .map_or_else(
+            || {
+                let executable =
+                    fs::canonicalize(std::env::current_exe().expect("resolve test executable"))
+                        .expect("canonicalize test executable");
+                executable
+                    .parent()
+                    .expect("test executable parent")
+                    .to_path_buf()
+            },
+            PathBuf::from,
+        )
         .join("tracedecay-benchmark-data");
     fs::create_dir_all(&root).expect("create benchmark scratch root");
     tempfile::Builder::new()

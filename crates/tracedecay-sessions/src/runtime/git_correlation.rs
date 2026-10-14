@@ -867,22 +867,20 @@ pub fn canonical_observation_git_evidence(
     let session_id = envelope.relations().session_id().as_str().to_owned();
     let timestamp = envelope.evidence().native_timestamp();
     let worktree = worktrees.worktree_for(canonical_session_location(&envelope));
-    let spans = timestamp
-        .map(|ts| {
-            vec![SpanObservation {
-                provider: provider.clone(),
-                session_id: session_id.clone(),
-                thread_id: envelope
-                    .relations()
-                    .thread_id()
-                    .map(|thread_id| thread_id.as_str().to_owned()),
-                branch: branch.clone(),
-                worktree: worktree.clone(),
-                ts,
-                source: SpanSource::Ingest,
-            }]
-        })
-        .unwrap_or_default();
+    let spans = timestamp.map_or_default(|ts| {
+        vec![SpanObservation {
+            provider: provider.clone(),
+            session_id: session_id.clone(),
+            thread_id: envelope
+                .relations()
+                .thread_id()
+                .map(|thread_id| thread_id.as_str().to_owned()),
+            branch: branch.clone(),
+            worktree: worktree.clone(),
+            ts,
+            source: SpanSource::Ingest,
+        }]
+    });
     if commit_references.is_empty() {
         return Ok((Vec::new(), spans));
     }

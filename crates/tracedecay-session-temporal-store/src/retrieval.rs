@@ -1,4 +1,6 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
 
 /// `(session_id, generation, provider)` -> the `(state, frozen_watermarks_json)`
 /// rows the join produced for that participant key.
@@ -281,18 +283,17 @@ impl<'a> SessionTemporalReadPort<'a> {
                 Some(field_caps),
                 CANDIDATE_READ_BUDGET,
             );
-            let status = await_controlled(
-                control,
-                Box::pin(self.produce_candidates_from_request(
-                    &TemporalRetrievalScope::AllSessionsInAuthorizedRoot,
-                    request,
-                    1,
-                    plan,
-                    &page_request,
-                    &mut sink,
-                )),
-            )
-            .await?;
+            let produced: Pin<
+                Box<dyn Future<Output = Result<PageStatus, TemporalPortError>> + Send + '_>,
+            > = Box::pin(self.produce_candidates_from_request(
+                &TemporalRetrievalScope::AllSessionsInAuthorizedRoot,
+                request,
+                1,
+                plan,
+                &page_request,
+                &mut sink,
+            ));
+            let status = await_controlled(control, produced).await?;
             let page = sink.finish(status)?;
             if page.status() == PageStatus::More && state.consumed_items() == limits.candidate_limit
             {
