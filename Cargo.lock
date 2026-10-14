@@ -6937,6 +6937,7 @@ dependencies = [
  "asupersync",
  "async-channel",
  "dunce",
+ "futures-util",
  "proptest",
  "ring",
  "rusqlite",

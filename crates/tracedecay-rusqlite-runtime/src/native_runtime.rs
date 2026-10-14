@@ -8,11 +8,16 @@
 //! channel receivers, which wake through ordinary `Waker`s, so a foreign
 //! executor never blocks on the native runtime.
 
+use std::future::poll_fn;
+use std::pin::pin;
 use std::sync::OnceLock;
-use std::time::Instant;
+use std::task::Poll;
+use std::time::{Duration, Instant};
 
-use asupersync::runtime::{Runtime, RuntimeBuilder, RuntimeHandle};
+use asupersync::runtime::{JoinError, Runtime, RuntimeBuilder, RuntimeHandle};
+use asupersync::types::PanicPayload;
 use asupersync::{Budget, Cx};
+use futures_util::future::{AbortHandle, Aborted, BoxFuture, FutureExt, Shared, abortable};
 
 /// Tokio's default blocking-pool ceiling. Shard closes and SQL reads park a
 /// blocking thread for their whole duration.
@@ -101,6 +106,125 @@ pub async fn sleep_until(deadline: Instant) -> Result<(), String> {
         .map_err(|error| format!("native timer ended without firing: {error}"))
 }
 
+/// Why [`timeout_at`] stopped waiting for its future.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum TimeoutError {
+    #[error("deadline elapsed")]
+    Elapsed,
+    /// The native timer could not start, so the wait fails closed rather than
+    /// run unbounded.
+    #[error("native timer unavailable: {0}")]
+    TimerUnavailable(String),
+}
+
+/// Awaits `future` until `deadline`, timed by [`sleep_until`]. The future is
+/// polled first, so one that is already ready wins even past its deadline and
+/// never starts a timer.
+pub async fn timeout_at<F: Future>(
+    deadline: Instant,
+    future: F,
+) -> Result<F::Output, TimeoutError> {
+    race_timer(future, sleep_until(deadline)).await
+}
+
+/// [`timeout_at`] `duration` from now. A duration past the clock's range waits
+/// without a deadline.
+pub async fn timeout<F: Future>(duration: Duration, future: F) -> Result<F::Output, TimeoutError> {
+    match Instant::now().checked_add(duration) {
+        Some(deadline) => timeout_at(deadline, future).await,
+        None => Ok(future.await),
+    }
+}
+
+async fn race_timer<F: Future>(
+    future: F,
+    timer: impl Future<Output = Result<(), String>>,
+) -> Result<F::Output, TimeoutError> {
+    let mut future = pin!(future);
+    let mut timer = pin!(timer);
+    poll_fn(|task| {
+        if let Poll::Ready(output) = future.as_mut().poll(task) {
+            return Poll::Ready(Ok(output));
+        }
+        timer.as_mut().poll(task).map(|fired| {
+            Err(fired.map_or_else(TimeoutError::TimerUnavailable, |()| TimeoutError::Elapsed))
+        })
+    })
+    .await
+}
+
+/// How a [`NativeTask`] ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NativeTaskOutcome<T> {
+    Completed(T),
+    /// Aborted through [`NativeTask::abort`], or dropped by its runtime.
+    Cancelled,
+    Panicked(PanicPayload),
+}
+
+/// A task on the native runtime that any executor can abort and await.
+///
+/// The runtime's own `JoinHandle` has no abort and panics when awaited after
+/// its task was cancelled or dropped; this handle reports both as an outcome.
+/// Every waiter shares the one terminal outcome, and a cancelled wait loses
+/// nothing. Dropping the handle detaches the task: it runs to completion
+/// unless aborted first.
+pub struct NativeTask<T> {
+    outcome: Shared<BoxFuture<'static, NativeTaskOutcome<T>>>,
+    abort: AbortHandle,
+}
+
+impl<T: Clone + Send + Sync + 'static> NativeTask<T> {
+    /// Spawns `work` on the runtime the caller runs on, or the process
+    /// runtime. The runtime owns it, not the caller's region, so it outlives
+    /// the request that started it.
+    pub fn spawn<F>(work: F) -> Result<Self, String>
+    where
+        F: Future<Output = T> + Send + 'static,
+    {
+        let runtime = handle().ok_or("native execution runtime unavailable")?;
+        let (work, abort) = abortable(work);
+        let join = runtime
+            .try_spawn_checked(work)
+            .map_err(|error| format!("native task was not admitted: {error}"))?;
+        let outcome = async move {
+            match join.await {
+                Ok(Ok(value)) => NativeTaskOutcome::Completed(value),
+                Err(JoinError::Panicked(payload)) => NativeTaskOutcome::Panicked(payload),
+                // `Shared` never polls a finished join again.
+                Ok(Err(Aborted))
+                | Err(JoinError::Cancelled(_) | JoinError::PolledAfterCompletion) => {
+                    NativeTaskOutcome::Cancelled
+                }
+            }
+        };
+        Ok(Self {
+            outcome: outcome.boxed().shared(),
+            abort,
+        })
+    }
+
+    /// Drops the work at its next poll. Work inside a synchronous call runs on
+    /// until it yields.
+    pub fn abort(&self) {
+        self.abort.abort();
+    }
+
+    pub async fn wait(&self) -> NativeTaskOutcome<T> {
+        self.outcome.clone().await
+    }
+
+    #[must_use]
+    pub fn try_finished(&self) -> Option<NativeTaskOutcome<T>> {
+        self.outcome.clone().now_or_never()
+    }
+
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.try_finished().is_some()
+    }
+}
+
 fn started_process_runtime() -> Result<&'static Runtime, String> {
     PROCESS_RUNTIME
         .get_or_init(|| {
@@ -120,9 +244,193 @@ fn started_process_runtime() -> Result<&'static Runtime, String> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
+
+    const HANG_GUARD: Duration = Duration::from_secs(10);
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn timeout_returns_a_value_that_lands_before_the_deadline() {
+        let output = timeout(HANG_GUARD, async {
+            sleep_until(Instant::now() + Duration::from_millis(10))
+                .await
+                .expect("native timer");
+            7
+        })
+        .await;
+        assert_eq!(output, Ok(7));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn timeout_elapses_at_the_deadline_for_a_tokio_caller() {
+        let deadline = Instant::now() + Duration::from_millis(50);
+        let outcome = tokio::time::timeout(
+            HANG_GUARD,
+            timeout_at(deadline, std::future::pending::<()>()),
+        )
+        .await
+        .expect("a Tokio waiter must wake when the native deadline passes");
+        assert_eq!(outcome, Err(TimeoutError::Elapsed));
+        assert!(
+            Instant::now() >= deadline,
+            "the deadline must not fire early"
+        );
+    }
+
+    #[test]
+    fn timeout_runs_inside_a_native_task() {
+        let task = NativeTask::spawn(async {
+            let ready = timeout(HANG_GUARD, async { 7 }).await;
+            let deadline = Instant::now() + Duration::from_millis(50);
+            let pending = timeout_at(deadline, std::future::pending::<()>()).await;
+            (ready, pending, Instant::now() >= deadline)
+        })
+        .expect("native task");
+        let outcome = block_on(task.wait()).expect("process runtime");
+        assert_eq!(
+            outcome,
+            NativeTaskOutcome::Completed((Ok(7), Err(TimeoutError::Elapsed), true))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_past_deadline_takes_a_ready_value_and_elapses_a_pending_one() {
+        let past = Instant::now() - Duration::from_millis(1);
+        assert_eq!(timeout_at(past, async { 7 }).await, Ok(7));
+        assert_eq!(
+            timeout_at(past, std::future::pending::<()>()).await,
+            Err(TimeoutError::Elapsed)
+        );
+    }
+
+    #[test]
+    fn an_unavailable_timer_fails_closed_after_a_ready_value() {
+        let unavailable = || async { Err::<(), _>("runtime stopped".to_owned()) };
+        assert_eq!(
+            race_timer(async { 7 }, unavailable()).now_or_never(),
+            Some(Ok(7))
+        );
+        assert_eq!(
+            race_timer(std::future::pending::<()>(), unavailable()).now_or_never(),
+            Some(Err(TimeoutError::TimerUnavailable(
+                "runtime stopped".to_owned()
+            )))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn every_waiter_shares_the_completed_value() {
+        let (release, released) = tokio::sync::oneshot::channel::<u32>();
+        let task = NativeTask::spawn(async move { released.await.expect("released value") })
+            .expect("native task");
+        assert!(
+            task.wait().now_or_never().is_none(),
+            "a dropped wait must leave the task running"
+        );
+        assert!(!task.is_finished());
+        let (first, second) = tokio::join!(task.wait(), async {
+            release.send(7).expect("task waits for its value");
+            task.wait().await
+        });
+        assert_eq!(first, NativeTaskOutcome::Completed(7));
+        assert_eq!(second, NativeTaskOutcome::Completed(7));
+        assert!(task.is_finished());
+        assert_eq!(task.try_finished(), Some(NativeTaskOutcome::Completed(7)));
+    }
+
+    #[test]
+    fn an_abort_before_the_first_poll_never_runs_the_work() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("test runtime");
+        let ran = Arc::new(AtomicBool::new(false));
+        let outcome = runtime.block_on({
+            let ran = Arc::clone(&ran);
+            async move {
+                let task = NativeTask::spawn(async move { ran.store(true, Ordering::Release) })
+                    .expect("native task");
+                task.abort();
+                task.wait().await
+            }
+        });
+        assert_eq!(outcome, NativeTaskOutcome::Cancelled);
+        assert!(!ran.load(Ordering::Acquire), "aborted work must not run");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_abort_drops_running_work() {
+        struct SignalOnDrop(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for SignalOnDrop {
+            fn drop(&mut self) {
+                if let Some(signal) = self.0.take() {
+                    let _ = signal.send(());
+                }
+            }
+        }
+        let (started, running) = tokio::sync::oneshot::channel();
+        let (dropping, dropped) = tokio::sync::oneshot::channel();
+        let task = NativeTask::spawn(async move {
+            let _signal = SignalOnDrop(Some(dropping));
+            let _ = started.send(());
+            std::future::pending::<()>().await;
+        })
+        .expect("native task");
+        running.await.expect("work started");
+        task.abort();
+        let outcome = tokio::time::timeout(HANG_GUARD, task.wait())
+            .await
+            .expect("an aborted task must settle");
+        assert_eq!(outcome, NativeTaskOutcome::Cancelled);
+        tokio::time::timeout(HANG_GUARD, dropped)
+            .await
+            .expect("abort must drop the running work")
+            .expect("the work signals its drop");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_panic_is_an_outcome_not_a_resumed_panic() {
+        let task =
+            NativeTask::<()>::spawn(async { panic!("native task failure") }).expect("native task");
+        let outcome = tokio::time::timeout(HANG_GUARD, task.wait())
+            .await
+            .expect("a panicked task must settle");
+        let NativeTaskOutcome::Panicked(payload) = outcome else {
+            panic!("expected a panic outcome, got {outcome:?}");
+        };
+        assert!(payload.message().contains("native task failure"));
+    }
+
+    #[test]
+    fn a_task_dropped_by_its_runtime_reports_cancelled() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("test runtime");
+        let task = runtime.block_on(async {
+            NativeTask::spawn(std::future::pending::<()>()).expect("native task")
+        });
+        drop(runtime);
+        assert_eq!(task.try_finished(), Some(NativeTaskOutcome::Cancelled));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dropping_the_handle_detaches_the_work() {
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let (finishing, finished) = tokio::sync::oneshot::channel::<()>();
+        drop(
+            NativeTask::spawn(async move {
+                released.await.expect("released");
+                finishing.send(()).expect("test awaits completion");
+            })
+            .expect("native task"),
+        );
+        release.send(()).expect("detached work still waits");
+        tokio::time::timeout(HANG_GUARD, finished)
+            .await
+            .expect("detached work must finish")
+            .expect("detached work runs to completion");
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn foreign_executor_awaits_native_settlement() {
