@@ -42,13 +42,12 @@ use tracedecay_code_index_retention::code_index_generations::{
     plan_code_generation_retention_with_verification, scoped_code_index_store_root,
 };
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+use tracedecay_runtime_core::config::GLOBAL_DB_FILENAME;
 use tracedecay_runtime_core::native_runtime;
-use tracedecay_runtime_core::storage::SESSIONS_DB_FILENAME;
+use tracedecay_runtime_core::storage::{SESSIONS_DB_FILENAME, USER_SESSIONS_DB_FILENAME};
 
 use crate::store_maintenance::{CodeGenerationProtectionUnavailableV1, code_generation_protection};
 
-const GLOBAL_DB_FILENAME: &str = "global.db";
-const USER_SESSIONS_DB_FILENAME: &str = "user-sessions.db";
 pub const MAX_STORAGE_REPORT_PAGE_LIMIT: usize = 64;
 const CODE_GENERATION_RETENTION_DIGEST_SCAN_MAX_BYTES: u64 = 32 * 1024 * 1024;
 const CODE_GENERATIONS_DIRECTORY: &str = "code-generations-v1";
@@ -278,9 +277,9 @@ impl StorageReport {
         // Store rows size every file under `projects/<id>/`. Profile-level
         // files beside `global.db` and `user-sessions.db` (spools, daemon
         // state) are only sized by the full census, so this total is a floor.
-        let mut excluded_families = vec![
-            "profile-level files outside global.db, user-sessions.db, and projects/".to_owned(),
-        ];
+        let mut excluded_families = vec![format!(
+            "profile-level files outside {GLOBAL_DB_FILENAME}, {USER_SESSIONS_DB_FILENAME}, and projects/"
+        )];
         if self.coverage.state == StorageReportCoverageState::Partial {
             excluded_families.push("registered stores beyond this page".to_owned());
         }

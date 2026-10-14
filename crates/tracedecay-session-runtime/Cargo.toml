@@ -100,3 +100,12 @@ required-features = ["test-helpers"]
 [[test]]
 name = "session_retention_read_cost"
 required-features = ["test-helpers"]
+
+# Read-cost probes populate their stores through production ingest, so the
+# fixture sets their cost. CI runs a probe beside other actions on four vCPUs
+# at up to three times its cost pinned alone to four CPUs on tmpfs. The two
+# probes above 80 s pinned (index 97-101 s, refresh 89 s) reached 237-300 s
+# in CI. Drain (55 s), retention (60 s) and backlog (38 s) stay medium.
+[package.metadata.bazel.test_sizes]
+session_ingest_index_read_cost = "large"
+session_refresh_read_cost = "large"

@@ -19,6 +19,7 @@ mod retention;
 mod schema;
 mod types;
 
+pub(crate) use retention::expire_observability_rollups;
 pub(crate) use schema::OBSERVABILITY_ROLLUP_SCHEMA_V1;
 pub use types::*;
 
