@@ -115,83 +115,70 @@ impl<T: McpTransport + Send> McpTransport for ReplayTransport<T> {
     }
 }
 
-/// Read half of the stdio transport.
-///
-/// The frame accumulator lives in the reader, not in the `read_line` future, so
-/// a read dropped by a lost `tokio::select!` race resumes rather than truncating
-/// the frame. See [`tracedecay_framing::BoundedLineReader`].
-type StdinLineReader =
-    tracedecay_framing::BoundedLineReader<tokio::io::BufReader<tokio::io::Stdin>>;
+type StdinLines = tracedecay_framing::pump::ReadPump<std::io::Result<String>>;
+type Stdout = tracedecay_framing::pump::WritePump;
 
-/// Real stdio transport, reads from stdin, writes to stdout.
+/// Real stdio transport. Dedicated threads own stdin and stdout, so the
+/// transport runs on any executor; see [`tracedecay_framing::pump`].
 pub struct StdioTransport {
-    reader: StdinLineReader,
-    writer: tokio::io::Stdout,
-}
-
-impl Default for StdioTransport {
-    fn default() -> Self {
-        Self {
-            reader: tracedecay_framing::BoundedLineReader::new(tokio::io::BufReader::new(
-                tokio::io::stdin(),
-            )),
-            writer: tokio::io::stdout(),
-        }
-    }
+    reader: StdinLines,
+    writer: Stdout,
 }
 
 impl StdioTransport {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new() -> std::io::Result<Self> {
+        Self::over(std::io::stdin(), std::io::stdout())
+    }
+
+    fn over(
+        input: impl std::io::Read + Send + 'static,
+        output: impl std::io::Write + Send + 'static,
+    ) -> std::io::Result<Self> {
+        Ok(Self {
+            reader: StdinLines::mcp_lines("tracedecay-mcp-stdin", input)?,
+            writer: Stdout::spawn("tracedecay-mcp-stdout", output)?,
+        })
     }
 }
 
 impl McpTransport for StdioTransport {
     #[tracing::instrument(name = "mcp.server.read", level = "trace", skip_all)]
     async fn read_line(&mut self) -> std::io::Result<Option<String>> {
-        self.reader.read_mcp_line_tokio().await
+        self.reader.recv().await.transpose()
     }
 
     async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
-        use tokio::io::AsyncWriteExt;
-        self.writer.write_all(line.as_bytes()).await
+        self.writer.write_flushed(line.as_bytes().to_vec()).await
     }
 
-    async fn flush(&mut self) -> std::io::Result<()> {
-        use tokio::io::AsyncWriteExt;
-        self.writer.flush().await
+    /// Every line is flushed before `write_line` resolves.
+    fn flush(&mut self) -> impl std::future::Future<Output = std::io::Result<()>> {
+        std::future::ready(Ok(()))
     }
 }
 
-/// Any resumable bounded reader is a transport read half. The blanket impl
-/// keeps the split read path on the same cancellation-safe accumulator the
-/// unsplit transport uses; a bare `&mut BufReader` would put the partial frame
-/// back on the future's stack.
-impl<R> McpTransportReader for &mut tracedecay_framing::BoundedLineReader<R>
-where
-    R: tokio::io::AsyncBufRead + Unpin + Send,
-{
+impl McpTransportReader for &StdinLines {
     async fn read_line(&mut self) -> std::io::Result<Option<String>> {
-        (**self).read_mcp_line_tokio().await
+        self.recv().await.transpose()
     }
 }
 
-impl McpTransportWriter for &mut tokio::io::Stdout {
+impl McpTransportWriter for &Stdout {
     async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
-        tokio::io::AsyncWriteExt::write_all(&mut **self, line.as_bytes()).await
+        self.write_flushed(line.as_bytes().to_vec()).await
     }
 
-    async fn flush(&mut self) -> std::io::Result<()> {
-        tokio::io::AsyncWriteExt::flush(&mut **self).await
+    fn flush(&mut self) -> impl std::future::Future<Output = std::io::Result<()>> {
+        std::future::ready(Ok(()))
     }
 }
 
 impl McpDuplexTransport for StdioTransport {
-    type Reader<'a> = &'a mut StdinLineReader;
-    type Writer<'a> = &'a mut tokio::io::Stdout;
+    type Reader<'a> = &'a StdinLines;
+    type Writer<'a> = &'a Stdout;
 
     fn split(&mut self) -> (Self::Reader<'_>, Self::Writer<'_>) {
-        (&mut self.reader, &mut self.writer)
+        (&self.reader, &self.writer)
     }
 }
 
@@ -622,5 +609,55 @@ mod tests {
             serde_json::from_str(rx.recv().await.unwrap().trim()).unwrap();
         assert!(rejection["id"].is_null());
         assert_eq!(rejection["error"]["code"], json!(-32700));
+    }
+
+    /// Polls with a no-op waker, so the transport is proven to need no runtime.
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        let mut future = std::pin::pin!(future);
+        loop {
+            if let std::task::Poll::Ready(output) = future.as_mut().poll(&mut context) {
+                return output;
+            }
+            std::thread::yield_now();
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedOutput(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedOutput {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn stdio_transport_pumps_lines_without_a_runtime() {
+        let output = SharedOutput::default();
+        let input = std::io::Cursor::new(b"first\nsecond\n".to_vec());
+        let mut transport = StdioTransport::over(input, output.clone()).unwrap();
+
+        assert_eq!(
+            block_on(transport.read_line()).unwrap().as_deref(),
+            Some("first")
+        );
+        block_on(transport.write_line("one\n")).unwrap();
+        {
+            let (mut reader, mut writer) = transport.split();
+            assert_eq!(
+                block_on(reader.read_line()).unwrap().as_deref(),
+                Some("second")
+            );
+            block_on(writer.write_line("two\n")).unwrap();
+            assert_eq!(block_on(reader.read_line()).unwrap(), None);
+        }
+        assert_eq!(block_on(transport.read_line()).unwrap(), None);
+        assert_eq!(*output.0.lock().unwrap(), b"one\ntwo\n");
     }
 }

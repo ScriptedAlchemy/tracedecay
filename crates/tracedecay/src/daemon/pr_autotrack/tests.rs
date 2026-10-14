@@ -1197,6 +1197,93 @@ async fn manual_branch_missing_ref_is_typed_failure() {
     schedulers.shutdown().await;
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn manual_branch_head_git_failure_is_retryable_not_missing_ref() {
+    use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
+
+    let repo = tempfile::tempdir().unwrap();
+    let branch = "feature-present";
+    init_manual_branch_repo(repo.path(), branch);
+    let graph = Arc::new(
+        tracedecay_project::project::TraceDecay::open_with_options_for_test(
+            repo.path(),
+            tracedecay_project::project::TraceDecayOpenOptions::default(),
+        )
+        .await
+        .expect("open project graph"),
+    );
+    let data_root = graph.store_layout().data_root.clone();
+    let schedulers = CodeIndexSchedulerRegistryV1::new(2);
+    let cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
+    cancellation.cancel();
+    let failing_controls = [
+        ("deadline", PrCommandControl::with_timeout(Duration::ZERO)),
+        (
+            "cancelled",
+            PrCommandControl::with_cancellation(cancellation),
+        ),
+    ];
+
+    for (label, control) in failing_controls {
+        let lifecycle = acquire_manual_branch_lifecycle(&data_root, branch)
+            .await
+            .expect("lifecycle owner");
+        let error = activate_manual_branch_head_with_lifecycle(
+            repo.path(),
+            &graph,
+            Some(&schedulers),
+            branch,
+            &lifecycle,
+            &control,
+        )
+        .await
+        .expect_err("failed Git head resolution must not activate the branch");
+
+        assert!(
+            matches!(
+                &error,
+                ManualBranchActivationError::GitAuthorityUnavailable { .. }
+            ),
+            "{label}: {error}"
+        );
+        assert_eq!(error.reason_code(), "git_authority_unavailable", "{label}");
+        assert!(
+            error.retryable(),
+            "{label}: a transient Git failure must stay retryable"
+        );
+        assert!(
+            !data_root.join("branch-worktrees").exists(),
+            "{label}: no artifacts are staged without a resolved head"
+        );
+        drop(lifecycle);
+    }
+
+    let lifecycle = acquire_manual_branch_lifecycle(&data_root, branch)
+        .await
+        .expect("lifecycle owner");
+    let activation = activate_manual_branch_head_with_lifecycle(
+        repo.path(),
+        &graph,
+        Some(&schedulers),
+        branch,
+        &lifecycle,
+        default_pr_command_control(),
+    )
+    .await
+    .expect("the same branch activates once Git is available");
+    cleanup_manual_branch_activation(
+        repo.path(),
+        &data_root,
+        &schedulers,
+        &activation,
+        &lifecycle,
+    )
+    .await
+    .expect("retire activated branch");
+    drop(lifecycle);
+    schedulers.shutdown().await;
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn cancelled_activation_keeps_its_lifecycle_owner_bounded_during_stalled_exact_read() {
