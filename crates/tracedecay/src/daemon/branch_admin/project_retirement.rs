@@ -401,8 +401,16 @@ impl StoreAdministration {
                     )
                 })
                 .collect::<Vec<_>>(),
-            Err(_) => {
+            Err(TimeoutError::Elapsed) => {
                 return ShutdownTaskReceipt::timed_out("project_server_retirement_registry");
+            }
+            Err(error @ TimeoutError::TimerUnavailable(_)) => {
+                return ShutdownTaskReceipt {
+                    outcomes: vec![ShutdownTaskOutcome {
+                        owner: "project_server_retirement_registry".to_owned(),
+                        status: ShutdownStatus::Failed(error.to_string()),
+                    }],
+                };
             }
         };
         let receipt = shutdown_receipt(completions, deadline).await;

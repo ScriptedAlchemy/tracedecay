@@ -136,6 +136,8 @@ impl ShutdownTaskReceipt {
     }
 }
 
+/// Tasks are polled in place on the caller's task, so a task that blocks its
+/// thread holds up the others and the deadline. Move blocking work off-thread.
 // The `AbortHandle` element is unused; it goes away with the Tokio runtime in
 // the final native-runtime cutover PR.
 pub async fn join_shutdown_tasks_until<Tasks, Task>(
