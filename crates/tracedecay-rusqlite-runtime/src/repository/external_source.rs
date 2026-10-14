@@ -1314,7 +1314,7 @@ fn validate_revision_collisions(
             probe_params.push(mutation.observation().revision().digest().as_str());
         }
         sql.push(')');
-        let mut statement = connection.prepare_cached(&sql)?;
+        let mut statement = connection.prepare(&sql)?;
         let mut stored = BTreeMap::new();
         let mut rows = statement.query(rusqlite::params_from_iter(probe_params))?;
         while let Some(row) = rows.next()? {

@@ -287,11 +287,16 @@ async fn state_count(
     project_id: &str,
     state: GitHubStackDeliveryStateV1,
 ) -> Result<usize, String> {
+    // The state is a literal so the per-state partial indexes stay usable; the
+    // planner does not match a bound value against an index predicate.
     let mut rows = executor
         .query(
-            "SELECT COUNT(*) FROM github_stack_delivery_recipients
-             WHERE project_id = ?1 AND state = ?2",
-            params![project_id, state.as_str()],
+            &format!(
+                "SELECT COUNT(*) FROM github_stack_delivery_recipients
+                 WHERE project_id = ?1 AND state = '{}'",
+                state.as_str()
+            ),
+            params![project_id],
         )
         .await
         .map_err(|error| format!("count GitHub stack {state:?} deliveries: {error}"))?;

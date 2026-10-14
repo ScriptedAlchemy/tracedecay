@@ -5,9 +5,6 @@ use rusqlite::types::{ToSqlOutput, Type, Value, ValueRef};
 use rusqlite::{OptionalExtension, ToSql};
 use serde::{Serialize, de::DeserializeOwned};
 
-/// `execute` and `query_row` through the connection's statement cache. The
-/// repository write paths run once per ingested message, and rusqlite's
-/// one-shot forms compile their SQL again on every call.
 pub(super) trait CachedStatements {
     fn execute_cached<P: rusqlite::Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize>;
 
