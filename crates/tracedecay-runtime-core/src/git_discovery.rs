@@ -982,7 +982,12 @@ mod tests {
     async fn a_probe_over_its_budget_publishes_for_the_next_resolution() {
         let cx = Cx::current().expect("test task context");
         let tmp = tempdir().unwrap();
-        let repository = slow_volume_repository(tmp.path());
+        let repository = tmp.path().join("repository");
+        fs::create_dir_all(&repository).unwrap();
+        run_git(&repository, &["init", "-b", "main", "--quiet"]);
+        // The walk stays parked until released, so it is still running when
+        // the deferral returns however late a loaded host schedules either.
+        let block = crate::git_repository::block_repository_discovery_for_test(&repository);
 
         let deferred = discover_repository_identity(
             &repository,
@@ -999,6 +1004,7 @@ mod tests {
             identity_resolution_elapsed(&repository).is_some(),
             "the abandoned resolution must still be running, not discarded with its caller"
         );
+        block.release();
 
         // Joining the abandoned walk waits for its publication without a
         // timer; a walk that already retired is answered by what it retained.
@@ -1073,9 +1079,7 @@ mod tests {
             GitRepositoryIdentityOutcome::Resolved(_)
         ));
 
-        let started = Instant::now();
         let branch = crate::branch::current_branch(&repository);
-        let elapsed = started.elapsed();
         let walks = crate::git_repository::repository_discovery_count_for_test(&repository);
         crate::git_repository::reset_repository_discovery_for_test(&repository);
 
@@ -1083,10 +1087,6 @@ mod tests {
         assert_eq!(
             walks, 1,
             "the HEAD read walked the volume again instead of opening the published Git directory"
-        );
-        assert!(
-            elapsed < SLOW_WALK,
-            "the HEAD read took {elapsed:?}, the cost of a fresh discovery walk"
         );
     }
 
