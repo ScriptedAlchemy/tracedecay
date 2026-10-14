@@ -198,8 +198,9 @@ impl TopologyWalk {
 
 /// Retained checkout-root topologies.
 ///
-/// Bounded by [`MAX_RETAINED_CHECKOUT_TOPOLOGIES`]; a full map drops its least
-/// recently used settled slot. Clearing it whole instead let a burst of
+/// Bounded by [`MAX_RETAINED_CHECKOUT_TOPOLOGIES`]; a full map drops a settled
+/// slot that retains nothing before one that retains a root, least recently
+/// used first within each. Clearing it whole, or plain LRU, let a burst of
 /// one-off probes evict the roots a daemon keeps serving, so a deferred route
 /// on a slow volume walked again instead of converging.
 static CHECKOUT_TOPOLOGY: LazyLock<Mutex<HashMap<PathBuf, Arc<CheckoutTopologySlot>>>> =
@@ -454,8 +455,9 @@ fn checkout_topology_slot(path: &Path) -> Arc<CheckoutTopologySlot> {
     slot
 }
 
-/// Drop the least recently used slot whose walk has settled, reporting
-/// whether one was dropped. A slot with a walk in flight stays, because its
+/// Drop a settled slot, reporting whether one was dropped: the least recently
+/// used vacant slot, else the least recently used retained root, whose loss
+/// costs a discovery walk. A slot with a walk in flight stays, because its
 /// owner publishes into that slot and an evicted one would discard the
 /// answer; the map may then exceed its bound until those walks settle and a
 /// later insertion evicts back down to it. `try_lock` skips a slot another
@@ -465,13 +467,16 @@ fn evict_least_recently_used_settled_slot(
 ) -> bool {
     let victim = slots
         .iter()
-        .filter(|(_, slot)| {
-            slot.state
-                .try_lock()
-                .is_ok_and(|state| !matches!(*state, CheckoutTopologyState::Resolving(_)))
+        .filter_map(|(path, slot)| {
+            let retains = match &*slot.state.try_lock().ok()? {
+                CheckoutTopologyState::Resolving(_) => return None,
+                CheckoutTopologyState::Vacant => false,
+                CheckoutTopologyState::Ready(_) => true,
+            };
+            Some((path, retains, slot.last_used.load(Ordering::Relaxed)))
         })
-        .min_by_key(|(_, slot)| slot.last_used.load(Ordering::Relaxed))
-        .map(|(path, _)| path.clone());
+        .min_by_key(|&(_, retains, last_used)| (retains, last_used))
+        .map(|(path, _, _)| path.clone());
     victim.is_some_and(|victim| slots.remove(&victim).is_some())
 }
 
@@ -1672,12 +1677,13 @@ mod tests {
         wait_for_topology_callers_for_test,
     };
 
-    /// A full memo makes room by dropping its least recently used path, so a
-    /// root that keeps being asked for survives churn from many one-off
-    /// probes. Clearing the whole memo instead dropped that root too, and a
-    /// deferred route on a slow volume walked again instead of converging.
+    /// A full memo makes room by dropping slots that retain nothing, so a
+    /// root survives a burst of one-off probes however long the burst runs.
+    /// Clearing the whole memo, or plain LRU once the burst outgrew the
+    /// bound, dropped that root too, and a deferred route on a slow volume
+    /// walked again instead of converging.
     #[test]
-    fn a_full_topology_memo_keeps_a_recently_used_root() {
+    fn a_full_topology_memo_keeps_a_retained_root() {
         let temporary = tempfile::tempdir().expect("temporary directory");
         let repository = temporary.path().join("repository");
         std::fs::create_dir_all(&repository).expect("repository directory");
@@ -1696,15 +1702,13 @@ mod tests {
             let path = probes.path().join(probe.to_string());
             std::fs::create_dir_all(&path).expect("probe path");
             let _ = repository_topology(&path);
-            if probe % 8 == 0 {
-                repository_topology(&repository).expect("repository topology");
-            }
         }
+        repository_topology(&repository).expect("repository topology");
 
         assert_eq!(
             repository_topology_resolution_count_for_test(&repository),
             1,
-            "a root asked for between probes must stay retained"
+            "a burst of one-off probes evicted the retained root"
         );
         reset_repository_discovery_for_test(&repository);
     }

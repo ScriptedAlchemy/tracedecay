@@ -1,17 +1,20 @@
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use tracedecay_runtime_core::config::ProfileRoot;
 
-use futures_util::StreamExt;
 use serde_json::Value;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::time::{Duration, interval};
-use tokio_util::codec::FramedRead;
+use tokio_util::bytes::BytesMut;
+use tokio_util::codec::Decoder;
 use tracedecay_contracts::{CancellationSignal, Deadline, InvocationError};
 use tracedecay_daemon_protocol::{
-    DaemonLspSessionClient, FramePoll, FrameSend, ProcessLocalRequestSequence,
+    DaemonLspSessionClient, FramePoll, FrameSend, LspFrame, ProcessLocalRequestSequence,
 };
+use tracedecay_framing::pump::{ReadPump, WritePump};
 use tracedecay_lsp::analyzer::{adapters as lsp_adapters, broker as lsp_broker};
-use tracedecay_lsp::{ContentLengthCodec, DEFAULT_LSP_REQUEST_DEADLINE_MS};
+use tracedecay_lsp::{
+    AsyncContentLengthError, ContentLengthCodec, DEFAULT_LSP_REQUEST_DEADLINE_MS,
+};
 
 use crate::cli::LspAction;
 
@@ -57,9 +60,9 @@ async fn run_stdio_bridge(
     profile: &ProfileRoot,
     project_root: Option<PathBuf>,
 ) -> tracedecay_domain::errors::Result<()> {
-    let mut stdin = FramedRead::new(tokio::io::stdin(), ContentLengthCodec::new());
+    let stdin = client_frames(std::io::stdin())?;
     let initialize = if project_root.is_none() {
-        Some(read_initialize_binding(&mut stdin).await?)
+        Some(read_initialize_binding(&stdin).await?)
     } else {
         None
     };
@@ -88,9 +91,10 @@ async fn run_stdio_bridge(
     )
     .await
     .map_err(lsp_invocation_error)?;
+    let stdout = WritePump::spawn("tracedecay-lsp-stdout", std::io::stdout())?;
     let bridge_result = pump_stdio_bridge(
-        &mut stdin,
-        &mut tokio::io::stdout(),
+        &stdin,
+        &stdout,
         &mut session,
         initialize.map(|binding| binding.frame),
     )
@@ -99,19 +103,50 @@ async fn run_stdio_bridge(
     finish_stdio_bridge(bridge_result, detach_result)
 }
 
+type ClientFrames = ReadPump<Result<LspFrame, AsyncContentLengthError>>;
+
+/// Strict `Content-Length` frames read from `source` on a dedicated thread.
+/// Like `FramedRead`, the frames end at EOF or after the first failure.
+fn client_frames(mut source: impl Read + Send + 'static) -> std::io::Result<ClientFrames> {
+    let mut codec = ContentLengthCodec::new();
+    let mut buffered = BytesMut::new();
+    let mut chunk = vec![0; 8 * 1024];
+    let mut ended = false;
+    ReadPump::spawn("tracedecay-lsp-stdin", move || {
+        while !ended {
+            let decoded = match codec.decode(&mut buffered) {
+                Ok(None) => match source.read(&mut chunk) {
+                    Ok(0) => {
+                        ended = true;
+                        codec.decode_eof(&mut buffered)
+                    }
+                    Ok(read) => {
+                        buffered.extend_from_slice(&chunk[..read]);
+                        continue;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => Err(error.into()),
+                },
+                decoded => decoded,
+            };
+            ended |= decoded.is_err();
+            if let Some(frame) = decoded.transpose() {
+                return Some(frame);
+            }
+        }
+        None
+    })
+}
+
 /// Forwards frames until either side closes. At most one client frame is held
 /// while the daemon backpressures, and a daemon frame is acknowledged only
 /// after stdout has flushed it.
-async fn pump_stdio_bridge<R, W>(
-    stdin: &mut FramedRead<R, ContentLengthCodec>,
-    stdout: &mut W,
+async fn pump_stdio_bridge(
+    stdin: &ClientFrames,
+    stdout: &WritePump,
     session: &mut DaemonLspSessionClient,
     mut pending_client_frame: Option<String>,
-) -> tracedecay_domain::errors::Result<()>
-where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
-{
+) -> tracedecay_domain::errors::Result<()> {
     let mut poll_timer = interval(Duration::from_millis(25));
     loop {
         // Keep each pump fair: a queued daemon burst must not starve host input.
@@ -137,7 +172,7 @@ where
         }
 
         tokio::select! {
-            frame = stdin.next(), if pending_client_frame.is_none() => {
+            frame = stdin.recv(), if pending_client_frame.is_none() => {
                 let Some(frame) = frame else {
                     return Ok(());
                 };
@@ -181,11 +216,11 @@ struct InitializeBinding {
     frame: String,
 }
 
-async fn read_initialize_binding<R: AsyncRead + Unpin>(
-    reader: &mut FramedRead<R, ContentLengthCodec>,
+async fn read_initialize_binding(
+    reader: &ClientFrames,
 ) -> tracedecay_domain::errors::Result<InitializeBinding> {
     let frame = reader
-        .next()
+        .recv()
         .await
         .ok_or_else(|| {
             bridge_config_error(
@@ -347,9 +382,9 @@ fn canonicalize_workspace_root(path: &Path) -> tracedecay_domain::errors::Result
         .ok_or_else(|| bridge_config_error("LSP workspace root must be a directory"))
 }
 
-async fn flush_daemon_frame<W: AsyncWrite + Unpin>(
+async fn flush_daemon_frame(
     session: &mut DaemonLspSessionClient,
-    stdout: &mut W,
+    stdout: &WritePump,
 ) -> tracedecay_domain::errors::Result<bool> {
     let polled = with_reconnect(session, async |session, deadline, cancellation| {
         session.poll_daemon_frame(deadline, cancellation).await
@@ -359,8 +394,7 @@ async fn flush_daemon_frame<W: AsyncWrite + Unpin>(
         FramePoll::Frame(frame) => {
             let encoded = ContentLengthCodec::encode(&frame)
                 .map_err(|error| bridge_error("encode", error))?;
-            stdout.write_all(&encoded).await?;
-            stdout.flush().await?;
+            stdout.write_flushed(encoded).await?;
             with_reconnect(session, async |session, deadline, cancellation| {
                 session
                     .acknowledge_daemon_frame(deadline, cancellation)
@@ -800,6 +834,28 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn client_frames_decode_back_to_back_and_end_after_a_truncated_frame() {
+        use tracedecay_lsp::{
+            AsyncContentLengthError, ContentLengthCodec, ContentLengthCodecError,
+        };
+
+        let mut wire = ContentLengthCodec::encode(b"{\"id\":1}").unwrap();
+        wire.extend(ContentLengthCodec::encode(b"{\"id\":2}").unwrap());
+        wire.extend_from_slice(b"Content-Length: 9\r\n\r\n{\"id\"");
+        let frames = super::client_frames(std::io::Cursor::new(wire)).unwrap();
+
+        assert_eq!(frames.recv().await.unwrap().unwrap(), b"{\"id\":1}");
+        assert_eq!(frames.recv().await.unwrap().unwrap(), b"{\"id\":2}");
+        assert!(matches!(
+            frames.recv().await.unwrap(),
+            Err(AsyncContentLengthError::Codec(
+                ContentLengthCodecError::UnexpectedEof
+            ))
+        ));
+        assert!(frames.recv().await.is_none());
+    }
+
     #[test]
     fn initialize_root_binding_rejects_non_file_authority() {
         let frame = json!({
@@ -821,14 +877,12 @@ mod tests {
 
     #[cfg(unix)]
     mod pump {
-        use std::pin::Pin;
+        use std::io::Write;
         use std::sync::{Arc, Mutex};
-        use std::task::{Context, Poll};
         use std::time::Duration;
 
         use serde_json::{Value, json};
-        use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, duplex};
-        use tokio_util::codec::FramedRead;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         use tracedecay_daemon_protocol::{
             BrokerListener, DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION,
             DaemonAuthPreface, DaemonClientIdentity, DaemonConnection, DaemonHandshake,
@@ -837,7 +891,9 @@ mod tests {
         };
         use tracedecay_lsp::ContentLengthCodec;
 
-        use super::super::{lsp_request_control, pump_stdio_bridge};
+        use tracedecay_framing::pump::WritePump;
+
+        use super::super::{client_frames, lsp_request_control, pump_stdio_bridge};
 
         const TOKEN: &str = "lsp-pump-test-token";
         const DAEMON_FRAME: &str = r#"{"jsonrpc":"2.0","method":"window/logMessage","params":{"type":3,"message":"daemon"}}"#;
@@ -850,32 +906,21 @@ mod tests {
         #[derive(Clone, Default)]
         struct TrickleStdout(Arc<Mutex<(Vec<u8>, usize)>>);
 
-        impl AsyncWrite for TrickleStdout {
-            fn poll_write(
-                self: Pin<&mut Self>,
-                _: &mut Context<'_>,
-                buf: &[u8],
-            ) -> Poll<std::io::Result<usize>> {
+        impl Write for TrickleStdout {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
                 let accepted = buf.len().min(3);
                 self.0
                     .lock()
                     .expect("stdout lock")
                     .0
                     .extend_from_slice(&buf[..accepted]);
-                Poll::Ready(Ok(accepted))
+                Ok(accepted)
             }
 
-            fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            fn flush(&mut self) -> std::io::Result<()> {
                 let mut state = self.0.lock().expect("stdout lock");
                 state.1 = state.0.len();
-                Poll::Ready(Ok(()))
-            }
-
-            fn poll_shutdown(
-                self: Pin<&mut Self>,
-                cx: &mut Context<'_>,
-            ) -> Poll<std::io::Result<()>> {
-                self.poll_flush(cx)
+                Ok(())
             }
         }
 
@@ -966,7 +1011,7 @@ mod tests {
             let (listener, endpoint) = BrokerListener::bind(&default_loopback_endpoint())
                 .await
                 .expect("loopback listener");
-            let mut stdout = TrickleStdout::default();
+            let stdout = TrickleStdout::default();
             let daemon = tokio::spawn(scripted_daemon(listener, stdout.clone()));
 
             let profile = tempfile::TempDir::new().expect("profile");
@@ -1002,16 +1047,15 @@ mod tests {
             .await
             .expect("open LSP session");
 
-            let (mut host, stdin) = duplex(4096);
+            let mut host = Vec::new();
             for frame in [FIRST_CLIENT_FRAME, SECOND_CLIENT_FRAME] {
-                let encoded = ContentLengthCodec::encode(frame.as_bytes()).expect("encode");
-                host.write_all(&encoded).await.expect("write host frame");
+                host.extend(ContentLengthCodec::encode(frame.as_bytes()).expect("encode"));
             }
-            drop(host);
-            let mut stdin = FramedRead::new(stdin, ContentLengthCodec::new());
+            let stdin = client_frames(std::io::Cursor::new(host)).expect("stdin pump");
+            let stdout_pump = WritePump::spawn("test-stdout", stdout.clone()).expect("stdout pump");
             tokio::time::timeout(
                 Duration::from_secs(10),
-                pump_stdio_bridge(&mut stdin, &mut stdout, &mut session, None),
+                pump_stdio_bridge(&stdin, &stdout_pump, &mut session, None),
             )
             .await
             .expect("pump stops when the daemon closes")

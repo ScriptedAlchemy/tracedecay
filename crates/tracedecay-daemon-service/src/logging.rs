@@ -415,9 +415,12 @@ mod stderr_tracing_tests {
             super::stderr_tracing_layer(parse(Some("tracedecay=debug")), span_timings, move || {
                 writer.clone()
             });
-        tracing::subscriber::with_default(tracing_subscriber::registry().with(layer), || {
+        {
+            let _capture = tracedecay_runtime_core::logging::set_tracing_capture(
+                tracing_subscriber::registry().with(layer),
+            );
             let _span = tracing::debug_span!(target: "tracedecay::probe", "probe_span").entered();
-        });
+        }
         String::from_utf8(captured.0.lock().unwrap().clone()).unwrap()
     }
 
