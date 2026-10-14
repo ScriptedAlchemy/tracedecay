@@ -736,6 +736,7 @@ async fn projectless_project_list_reads_the_empty_profile_registry() {
         &client_identity.profile_root,
         "projectless-registry-test",
     );
+    prewarm_test_profile_runtime(&engine.store_administration).await;
 
     let handshake = DaemonHandshake {
         client_identity,
@@ -872,6 +873,7 @@ async fn projectless_and_project_route_refusals_place_the_problem_identically() 
     let engine = test_daemon_engine_for_profile(&client_identity.profile_root);
     let _database_scope =
         enter_test_daemon_database_scope(&client_identity.profile_root, "problem-placement-test");
+    prewarm_test_profile_runtime(&engine.store_administration).await;
 
     let handshake = DaemonHandshake {
         client_identity,
@@ -960,6 +962,7 @@ async fn projectless_tools_list_advertises_registry_tools() {
         &client_identity.profile_root,
         "projectless-tools-list-test",
     );
+    prewarm_test_profile_runtime(&engine.store_administration).await;
 
     let handshake = DaemonHandshake {
         client_identity,

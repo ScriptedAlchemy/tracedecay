@@ -239,6 +239,11 @@ fn test_store_administration_for_profile(profile_root: &std::path::Path) -> Stor
         .with_profile_identity(profile_identity)
 }
 
+/// Finishes the profile's cold session-runtime open before a client connects.
+///
+/// The handshake's profile binding answers `project_warming` when that open
+/// outlasts its 10 s liveness bound, which a loaded suite run can reach. A
+/// test that is not about warming waits for the open here instead.
 async fn prewarm_test_profile_runtime(store_administration: &StoreAdministration) {
     store_administration
         .registered_profile_database()

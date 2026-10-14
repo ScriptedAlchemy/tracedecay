@@ -14,7 +14,7 @@ use tracedecay_store::{
     apply_source_projection_owned, build_source_projection,
 };
 
-use super::support::{decode, encode, invalid, same_json};
+use super::support::{CachedStatements, decode, encode, invalid, same_json};
 
 // Only current state keeps full documents. Every commit keeps its replay
 // identity (key, request, receipt, and mutation digests) in an insert-only
@@ -336,7 +336,7 @@ impl ExternalSourceExecutor {
             .next()
             .active()
             .map(|scheduled| scheduled.not_before().0);
-        savepoint.execute(
+        savepoint.execute_cached(
             "INSERT INTO external_source_acquisition_queue_v1 (
                  binding_id, state_digest, not_before_micros, state_json
              ) VALUES (?1, ?2, ?3, ?4)
@@ -400,7 +400,7 @@ impl ExternalSourceExecutor {
                     .map(|state| ExternalSourceReadResultV1::AcquisitionState(state.map(Box::new)))
             }
             ExternalSourceReadOperationV1::AcquisitionPendingCount => snapshot
-                .query_row(
+                .query_row_cached(
                     "SELECT COUNT(*)
                      FROM external_source_acquisition_queue_v1
                     WHERE not_before_micros IS NOT NULL",
@@ -551,7 +551,7 @@ fn load_definition(
     source_id: &str,
     revision: i64,
 ) -> rusqlite::Result<tracedecay_domain::SourceDefinitionV1> {
-    let encoded: String = connection.query_row(
+    let encoded: String = connection.query_row_cached(
         "SELECT definition_json
          FROM external_source_definition_revisions_v1
          WHERE source_id = ?1 AND definition_revision = ?2",
@@ -571,7 +571,7 @@ fn load_binding(
     binding_id: &str,
     revision: i64,
 ) -> rusqlite::Result<tracedecay_domain::SourceBindingV1> {
-    let encoded: String = connection.query_row(
+    let encoded: String = connection.query_row_cached(
         "SELECT binding_json
          FROM external_source_binding_revisions_v1
          WHERE binding_id = ?1 AND binding_revision = ?2",
@@ -682,7 +682,7 @@ fn persist_source_commit(
     // `INSERT OR IGNORE` reports zero changed rows only when a conflict was
     // swallowed; only then can the stored row differ from this write, so the
     // read-back proof is needed only on that path.
-    let changed = savepoint.execute(
+    let changed = savepoint.execute_cached(
         "INSERT OR IGNORE INTO external_source_commit_receipts_v2 (
             binding_id, idempotency_key, request_digest, receipt_digest,
             mutation_digests_json
@@ -701,7 +701,7 @@ fn persist_source_commit(
     {
         return Err(invalid("external source commit receipt collision"));
     }
-    savepoint.execute(
+    savepoint.execute_cached(
         "INSERT OR IGNORE INTO external_source_retained_receipts_v1 (
             binding_id, receipt_digest, predecessor_frontier_digest,
             successor_frontier_digest, receipt_json
@@ -723,7 +723,7 @@ fn persist_source_commit(
             None => slim::slim_mutation(mutation, &binding)?,
         };
         let native_object = mutation.observation().native_object();
-        let changed = savepoint.execute(
+        let changed = savepoint.execute_cached(
             "INSERT OR IGNORE INTO external_source_mutations_v1 (
                 binding_id, mutation_digest, native_object_digest,
                 revision_digest, mutation_json
@@ -747,7 +747,7 @@ fn persist_source_commit(
                 "external source mutation collision",
             )?;
         }
-        savepoint.execute(
+        savepoint.execute_cached(
             "INSERT INTO external_source_objects_v2 (
                 binding_id, native_object_digest, partition_digest, mutation_digest
              ) VALUES (?1, ?2, ?3, ?4)
@@ -764,7 +764,7 @@ fn persist_source_commit(
     }
     for edge in receipt.lineage() {
         let encoded = encode(edge)?;
-        let changed = savepoint.execute(
+        let changed = savepoint.execute_cached(
             "INSERT OR IGNORE INTO external_source_lineage_v1 (
                 binding_id, lineage_digest, source_receipt_digest, lineage_json
              ) VALUES (?1, ?2, ?3, ?4)",
@@ -792,7 +792,7 @@ fn persist_source_commit(
         .partition(receipt.partition())
         .ok_or_else(|| invalid("external source receipt partition frontier is missing"))?
         .sequence();
-    let pending_changed = savepoint.execute(
+    let pending_changed = savepoint.execute_cached(
         "INSERT OR IGNORE INTO external_source_pending_projections_v1 (
             binding_id, predecessor_frontier_digest, successor_frontier_digest,
             successor_sequence, source_receipt_digest
@@ -807,7 +807,7 @@ fn persist_source_commit(
         ],
     )?;
     if pending_changed == 0 {
-        let pending: (String, String) = savepoint.query_row(
+        let pending: (String, String) = savepoint.query_row_cached(
             "SELECT successor_frontier_digest, source_receipt_digest
              FROM external_source_pending_projections_v1
              WHERE binding_id = ?1 AND predecessor_frontier_digest = ?2",
@@ -824,7 +824,7 @@ fn persist_source_commit(
         }
     }
     let displaced_receipt: Option<String> = savepoint
-        .query_row(
+        .query_row_cached(
             "SELECT latest_source_receipt_digest FROM external_source_states_v1
              WHERE binding_id = ?1",
             [binding.binding_id.as_str()],
@@ -895,7 +895,7 @@ fn retire_superseded_history(
             "external_source_projection_effects_v2",
             "external_source_projection_lineage_v1",
         ] {
-            savepoint.execute(
+            savepoint.execute_cached(
                 &format!("DELETE FROM {table} WHERE binding_id = ?1 AND projection_digest = ?2"),
                 params![binding_id, projection],
             )?;
@@ -908,7 +908,7 @@ fn retire_superseded_history(
         collect_frontiers(retire.query(params![binding_id, projection])?)?;
     }
     for frontier in &frontiers {
-        savepoint.execute(
+        savepoint.execute_cached(
             "DELETE FROM external_source_frontiers_v1
              WHERE binding_id = ?1
                AND frontier_digest = ?2
@@ -954,7 +954,7 @@ fn persist_projection(
         frontiers,
     } = slim::slim_projection_receipt(projection)?;
     persist_frontiers(savepoint, binding.binding_id.as_str(), &frontiers)?;
-    savepoint.execute(
+    savepoint.execute_cached(
         "INSERT OR IGNORE INTO external_source_projection_publications_v2 (
             binding_id, projection_digest, source_receipt_digest,
             predecessor_frontier_digest, successor_frontier_digest, receipt_json
@@ -1004,7 +1004,7 @@ fn persist_projection(
                 "external source projection names a mutation absent from history",
             ));
         }
-        savepoint.execute(
+        savepoint.execute_cached(
             "INSERT INTO external_source_projection_effects_v2 (
                 binding_id, projection_digest, effect_index,
                 native_object_digest, mutation_digest, effect_json
@@ -1018,7 +1018,7 @@ fn persist_projection(
                 effect_json,
             ],
         )?;
-        savepoint.execute(
+        savepoint.execute_cached(
             "INSERT INTO external_source_projected_objects_v2 (
                 binding_id, native_object_digest, mutation_digest
              ) VALUES (?1, ?2, ?3)
@@ -1032,7 +1032,7 @@ fn persist_projection(
         )?;
     }
     for (index, edge) in projection.lineage().iter().enumerate() {
-        savepoint.execute(
+        savepoint.execute_cached(
             "INSERT INTO external_source_projection_lineage_v1 (
                 binding_id, projection_digest, lineage_index,
                 lineage_digest, lineage_json
@@ -1048,7 +1048,7 @@ fn persist_projection(
             ],
         )?;
     }
-    let deleted = savepoint.execute(
+    let deleted = savepoint.execute_cached(
         "DELETE FROM external_source_pending_projections_v1
          WHERE binding_id = ?1
            AND predecessor_frontier_digest = ?2
@@ -1067,7 +1067,7 @@ fn persist_projection(
         ));
     }
     let displaced_projection: Option<String> = savepoint
-        .query_row(
+        .query_row_cached(
             "SELECT latest_projection_receipt_digest FROM external_source_states_v1
              WHERE binding_id = ?1",
             [binding.binding_id.as_str()],
@@ -1075,7 +1075,7 @@ fn persist_projection(
         )
         .optional()?
         .flatten();
-    savepoint.execute(
+    savepoint.execute_cached(
         "UPDATE external_source_states_v1
          SET projection_frontier_digest = ?1,
              latest_projection_receipt_digest = ?2
@@ -1111,7 +1111,7 @@ fn persist_authority_publication(
     let binding = state.binding().immutable_identity().map_err(invalid)?;
     persist_definition_and_binding(savepoint, state.definition(), state.binding())?;
     let encoded = encode(receipt)?;
-    savepoint.execute(
+    savepoint.execute_cached(
         "INSERT OR IGNORE INTO external_source_authority_receipts_v1 (
             binding_id, idempotency_key, request_digest,
             definition_digest, binding_digest, receipt_json
@@ -1134,7 +1134,7 @@ fn persist_authority_publication(
         &encoded,
         "external source authority receipt collision",
     )?;
-    let changed = savepoint.execute(
+    let changed = savepoint.execute_cached(
         "UPDATE external_source_states_v1
          SET definition_revision = ?1, definition_digest = ?2,
              binding_revision = ?3, binding_digest = ?4
@@ -1164,7 +1164,7 @@ fn persist_definition_and_binding(
     let definition_revision = i64::try_from(definition.revision)
         .map_err(|_| invalid("external source definition revision exceeds SQLite INTEGER"))?;
     let definition_json = encode(definition)?;
-    let changed = savepoint.execute(
+    let changed = savepoint.execute_cached(
         "INSERT OR IGNORE INTO external_source_definition_revisions_v1 (
             source_id, definition_revision, definition_digest, definition_json
          ) VALUES (?1, ?2, ?3, ?4)",
@@ -1189,7 +1189,7 @@ fn persist_definition_and_binding(
     let binding_revision = i64::try_from(binding.binding_revision)
         .map_err(|_| invalid("external source binding revision exceeds SQLite INTEGER"))?;
     let binding_json = encode(binding)?;
-    let changed = savepoint.execute(
+    let changed = savepoint.execute_cached(
         "INSERT OR IGNORE INTO external_source_binding_revisions_v1 (
             binding_id, binding_revision, definition_revision,
             binding_digest, binding_json
@@ -1228,7 +1228,7 @@ fn upsert_current_state(
     let projection_receipt = state
         .projection()
         .map(|projection| projection.receipt_digest().as_str());
-    savepoint.execute(
+    savepoint.execute_cached(
         "INSERT INTO external_source_states_v1 (
             binding_id, source_id, owner_kind, owner_id,
             definition_revision, definition_digest,
@@ -1358,7 +1358,7 @@ fn persist_frontiers(
     frontiers: &[(String, String)],
 ) -> rusqlite::Result<()> {
     for (digest, frontier_json) in frontiers {
-        savepoint.execute(
+        savepoint.execute_cached(
             "INSERT OR IGNORE INTO external_source_frontiers_v1 (
                 binding_id, frontier_digest, frontier_json
              ) VALUES (?1, ?2, ?3)",

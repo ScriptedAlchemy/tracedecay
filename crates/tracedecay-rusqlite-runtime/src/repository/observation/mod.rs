@@ -22,7 +22,7 @@ use tracedecay_store::{
 
 use crate::operation::StorageOperationError;
 
-use super::support::{decode, encode, invalid};
+use super::support::{CachedStatements, decode, encode, invalid};
 
 mod authority;
 pub mod cursor_authority;
@@ -63,7 +63,7 @@ impl ObservationExecutor {
         let receipt_id = receipt.receipt().receipt_id().as_str();
         let payload_digest = observation.payload_reference().digest().as_str();
         let existing = savepoint
-            .query_row(
+            .query_row_cached(
                 "SELECT payload_digest, receipt_id, observation_json
                  FROM observations WHERE observation_id = ?1",
                 [observation.observation_id().as_str()],
@@ -114,7 +114,7 @@ impl ObservationExecutor {
             {
                 return Err(invalid("observation identity collision").into());
             }
-            let stored_receipt: String = savepoint.query_row(
+            let stored_receipt: String = savepoint.query_row_cached(
                 "SELECT receipt_json FROM sanitization_receipts WHERE receipt_id = ?1",
                 [receipt_id],
                 |row| row.get(0),
@@ -136,7 +136,7 @@ impl ObservationExecutor {
 
         persist_sanitization_receipt(savepoint, receipt)?;
 
-        let sequence: i64 = savepoint.query_row(
+        let sequence: i64 = savepoint.query_row_cached(
             "INSERT INTO observations (
                 observation_id, payload_digest, receipt_id,
                 observation_json, committed_cursor_json
@@ -152,7 +152,7 @@ impl ObservationExecutor {
             |row| row.get(0),
         )?;
         persist_retrieval_anchor(savepoint, write.retrieval_anchor())?;
-        savepoint.execute(
+        savepoint.execute_cached(
             "INSERT INTO observation_retrieval_anchors (observation_id, anchor_id)
              VALUES (?1, ?2)",
             params![
@@ -165,15 +165,15 @@ impl ObservationExecutor {
             observation.observation_id().as_str(),
             write.repository_provenance_attachment(),
         )?;
-        savepoint.execute(
+        savepoint.execute_cached(
             COMMIT_SOURCE_CURSOR_SQL,
             params![source_json, scope_json, committed_cursor_json],
         )?;
-        savepoint.execute(
+        savepoint.execute_cached(
             PRUNE_SUPERSEDED_CURSOR_ADVANCES_SQL,
             params![source_json, scope_json],
         )?;
-        savepoint.execute(
+        savepoint.execute_cached(
             "INSERT INTO projection_queue (observation_id, observation_sequence)
              VALUES (?1, ?2)",
             params![observation.observation_id().as_str(), sequence],
@@ -210,7 +210,7 @@ impl ObservationExecutor {
             persist_sanitization_receipt(savepoint, receipt)?;
         }
         let coverage_json = encode(&advance.coverage())?;
-        savepoint.execute(
+        savepoint.execute_cached(
             RECORD_CURSOR_ADVANCE_SQL,
             params![
                 source_json,
@@ -230,11 +230,11 @@ impl ObservationExecutor {
         if !cursor_advance_receipt_matches(savepoint, &source_json, &scope_json, advance)? {
             return Err(StorageOperationError::ObservationCursorAdvanceCollision);
         }
-        savepoint.execute(
+        savepoint.execute_cached(
             COMMIT_SOURCE_CURSOR_SQL,
             params![source_json, scope_json, encode(advance.next_cursor())?],
         )?;
-        savepoint.execute(
+        savepoint.execute_cached(
             PRUNE_SUPERSEDED_CURSOR_ADVANCES_SQL,
             params![source_json, scope_json],
         )?;
@@ -258,7 +258,7 @@ impl ObservationExecutor {
             }
             ObservationReadOperationV1::Observation { observation_id } => {
                 let row = snapshot
-                    .query_row(
+                    .query_row_cached(
                         &format!(
                             "{}
                              WHERE observation.observation_id = ?1",
@@ -281,7 +281,7 @@ impl ObservationExecutor {
             }
             ObservationReadOperationV1::RetrievalAnchorByAlias { scope, alias } => {
                 let anchor_id = snapshot
-                    .query_row(
+                    .query_row_cached(
                         "SELECT anchor_id FROM retrieval_anchor_aliases
                          WHERE owner_json = ?1 AND alias_kind = ?2 AND locator_digest = ?3",
                         params![
@@ -308,7 +308,7 @@ impl ObservationExecutor {
                 }
                 let after_sequence = i64::try_from(*after_sequence)
                     .map_err(|_| invalid("observation replay frontier exceeds SQLite integer"))?;
-                let mut statement = snapshot.prepare(&format!(
+                let mut statement = snapshot.prepare_cached(&format!(
                     "{}
                      WHERE observation.sequence > ?1
                      ORDER BY observation.sequence ASC LIMIT ?2",
@@ -326,7 +326,7 @@ impl ObservationExecutor {
             }
             ObservationReadOperationV1::NextQueuedProjection { now_micros } => {
                 let observation_id = snapshot
-                    .query_row(
+                    .query_row_cached(
                         "SELECT observation_id FROM projection_queue
                          WHERE next_retry_at_micros <= ?2
                            AND observation_sequence = (
@@ -355,7 +355,7 @@ impl ObservationExecutor {
             }
             ObservationReadOperationV1::ProjectionCheckpoint => {
                 let checkpoint = snapshot
-                    .query_row(
+                    .query_row_cached(
                         "SELECT last_sequence FROM observation_projection_checkpoints
                          WHERE projector_version = ?1",
                         [SESSION_MESSAGE_PROJECTOR_VERSION],
@@ -372,7 +372,7 @@ impl ObservationExecutor {
             }
             ObservationReadOperationV1::ProjectionRebuildProgress => {
                 let progress = snapshot
-                    .query_row(
+                    .query_row_cached(
                         "SELECT generation, frontier_sequence, aliases_staged_through, staged_through,
                                 projected_rows, skipped_observations, state
                          FROM observation_projection_rebuilds WHERE projector_version = ?1",
@@ -427,7 +427,7 @@ fn committed_source_cursors(
     source: &ObservationSourceIdentityV1,
     scope: &ObservationScopeV1,
 ) -> rusqlite::Result<Vec<ObservationSourceCursorV1>> {
-    let mut statement = snapshot.prepare(
+    let mut statement = snapshot.prepare_cached(
         "SELECT committed_cursor_json FROM observations
          WHERE json_valid(observation_json)
            AND json_extract(observation_json, '$.identity.source.session_id') = ?1
@@ -453,7 +453,7 @@ fn cursor_advance_ledger_disagreement(
     advance: &ObservationCursorAdvance,
 ) -> Result<Option<StorageOperationError>, StorageOperationError> {
     let stored = savepoint
-        .query_row(
+        .query_row_cached(
             READ_CURSOR_ADVANCE_SQL,
             params![source_json, scope_json, encode(&advance.coverage())?],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
@@ -502,7 +502,7 @@ fn canonical_ledger_receipt(
         return Ok(None);
     };
     let receipt_json = savepoint
-        .query_row(
+        .query_row_cached(
             "SELECT receipt_json FROM sanitization_receipts WHERE receipt_id = ?1",
             [stored_receipt_id],
             |row| row.get::<_, String>(0),
@@ -529,7 +529,7 @@ fn encode_stored_observation(
     let encoded = encode(observation)?;
     let (slim, bodies) = slim_stored_json(&encoded).map_err(|error| invalid(error.to_string()))?;
     for body in &bodies {
-        savepoint.execute(
+        savepoint.execute_cached(
             UPSERT_CANONICAL_BODY_SQL,
             params![
                 body.content_hash.as_str(),
@@ -550,7 +550,7 @@ fn decode_stored_observation(
         json,
         |hash| -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
             let (encoding, blob, uncompressed): (String, Vec<u8>, i64) = connection
-                .query_row(LOAD_CANONICAL_BODY_SQL, [hash], |row| {
+                .query_row_cached(LOAD_CANONICAL_BODY_SQL, [hash], |row| {
                     Ok((row.get(0)?, row.get(1)?, row.get(2)?))
                 })
                 .optional()?

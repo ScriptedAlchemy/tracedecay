@@ -53,7 +53,7 @@ A `PATH` override alone only fixes (1). The harness must control all three.
 | tracedecay graph/data home | `TRACEDECAY_DATA_DIR` | `src/config.rs::user_data_dir()` returns `$TRACEDECAY_DATA_DIR` when set, else `~/.tracedecay`. |
 | tracedecay daemon socket | derives from the data dir; also pinned via `TRACEDECAY_DAEMON_SOCKET` | `src/daemon/service.rs::default_socket_path()` = `tracedecay_data_dir()/daemon.sock`, overridable by `TRACEDECAY_DAEMON_SOCKET`. Isolating the data dir already isolates the socket, so the harness never fights the real daemon. |
 | Which binary the installer bakes | **staged copy of the dev binary at a non-cargo-target path** | `src/agents/mod.rs::which_tracedecay_from()` deliberately **refuses** a path under a cargo target dir (`target/{debug,release}`) and falls back to `PATH`, which would bake the *system* binary. See below. |
-| Auth for `claude -p` | copy `~/.claude/.credentials.json` into the isolated config (or `ANTHROPIC_API_KEY`) | Smoke test: without it the isolated session prints `Not logged in`; with the copied credential it returns a real result and `session_id`. |
+| Auth for `claude -p` | `CLAUDE_CODE_OAUTH_TOKEN`, a `claude setup-token` grant saved as `$REAL_CLAUDE_DIR/.claude_code_oauth_token`, or `ANTHROPIC_API_KEY`. The harness never copies `.credentials.json`: its refresh token is shared with the real login, so a refresh in the isolated session would sign the real one out. | Smoke test: without a credential the isolated session prints `Not logged in`; with the setup-token it returns a real result and `session_id`. |
 
 `HOME` and `CLAUDE_CONFIG_DIR` are pointed at the **same** physical directory
 (`<env>/home/.claude`) so the installer's `$HOME/.claude` writes and Claude

@@ -567,6 +567,27 @@ def test_repeated_query_hints_and_usage():
     check("cost: unreported spend is null, not zero",
           off_cell.get("mean_cost_usd") is None and off_cell.get("hints_total") == 0)
 
+    classed = grade.score_scenario({**scn, "repeated_query_class": "stuck_loop"}, tr, {},
+                                   {"model": "sonnet", "repeated_query_hints": "on"})
+    unanswered_run = grade.score_scenario(scn, unanswered, {}, {"model": "sonnet"})
+    per_scenario = grade.aggregate_cost_and_hints([classed, unanswered_run], by_scenario=True)
+    check("cost: per-scenario cells name the scenario and its class",
+          set(per_scenario) == {"s (stuck_loop) claude/sonnet full hints-on", "s (None) claude/sonnet full hints-off"},
+          str(set(per_scenario)))
+    check("cost: completion counts runs that end with an answer",
+          per_scenario.get("s (stuck_loop) claude/sonnet full hints-on", {}).get("completion_rate") == 1.0
+          and per_scenario.get("s (None) claude/sonnet full hints-off", {}).get("completion_rate") == 0.0,
+          str(per_scenario))
+
+    denied = transcript([
+        claude_tool("Bash", {"command": "cargo check"}),
+        json.dumps({"type": "system", "subtype": "permission_denied",
+                    "message": "Permission to use Bash has been denied"}),
+        claude_result("done"),
+    ])
+    check("parse: a permission_denied event with a string message",
+          denied.final_text == "done" and len(denied.tools) == 1)
+
 
 def test_transcript_base_repetitions():
     check("reps: hints-on suffix carries no identity",

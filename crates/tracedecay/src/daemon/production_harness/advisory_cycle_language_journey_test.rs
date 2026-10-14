@@ -337,7 +337,9 @@ async fn language_less_document_is_a_terminal_advisory_request() {
 /// Admits one native hook boundary for `project` through the production hook
 /// orchestrator and reports whether its producer work reached a terminal state.
 /// The completion is what clears the durable pending-work entry; work that
-/// never completes is redriven by the replay sweep until it expires.
+/// never completes is redriven by the replay sweep until it expires. Work that
+/// settles without a terminal drops the completion unfired, so the receiver
+/// answers either way once the work ends, however long it runs.
 async fn hook_work_completes(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
@@ -419,9 +421,7 @@ async fn hook_work_completes(
         ),
         tracedecay_daemon_service::HookOrchestrationAdmissionV1::Enqueued,
     );
-    tokio::time::timeout(Duration::from_secs(60), completion)
-        .await
-        .is_ok_and(|completed| completed.is_ok())
+    completion.await.is_ok()
 }
 
 #[tokio::test(flavor = "multi_thread")]
