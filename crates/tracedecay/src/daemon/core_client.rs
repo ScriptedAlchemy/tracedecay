@@ -6,8 +6,8 @@
 
 use std::path::{Path, PathBuf};
 
+use asupersync::io::AsyncWriteExt;
 use serde_json::json;
-use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, Instant, timeout};
 use tracedecay_daemon_control::{default_socket_path, with_unavailable_daemon_advice};
 use tracedecay_daemon_identity::{
@@ -19,15 +19,18 @@ pub(crate) use tracedecay_daemon_protocol::connection::{
     DAEMON_RESTART_GRACE, DAEMON_RESTART_POLL_INTERVAL, daemon_connect_failure_advice,
     is_transient_daemon_connect_error,
 };
-use tracedecay_daemon_protocol::{daemon_tool_response_bound, tool_request_deadline};
+use tracedecay_daemon_protocol::{
+    DaemonClientStream, daemon_tool_response_bound, tool_request_deadline,
+};
+use tracedecay_framing::BoundedLineReader;
 use tracedecay_mcp::server::attach_stateless_request_context;
 use tracedecay_mcp::tool_errors::tool_result_problem;
 use tracedecay_runtime_core::config::ProfileRoot;
 
 use super::{
-    BrokerStream, DaemonClientDeadline, DaemonHandshake, JsonRpcError, JsonRpcRequest,
-    JsonRpcResponse, PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL, Result,
-    TraceDecayError, error_is_project_open_retryable, tool_call_transport_error_is_retryable,
+    DaemonClientDeadline, DaemonHandshake, JsonRpcError, JsonRpcRequest, JsonRpcResponse,
+    PROJECT_OPEN_RETRY_GRACE, PROJECT_OPEN_RETRY_INTERVAL, Result, TraceDecayError,
+    error_is_project_open_retryable, tool_call_transport_error_is_retryable,
 };
 #[cfg(unix)]
 use tracedecay_daemon_service::logging::unavailable_error;
@@ -78,7 +81,7 @@ pub(crate) async fn ensure_daemon_connection_live(
 
     timeout(
         DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT,
-        BrokerStream::connect(connection.endpoint()),
+        DaemonClientStream::connect(connection.endpoint()),
     )
     .await
     .map_err(|_| TraceDecayError::Config {
@@ -98,13 +101,13 @@ pub(crate) async fn ensure_daemon_connection_live(
 
 #[tracing::instrument(name = "daemon.core.next_response", level = "trace", skip_all)]
 pub(crate) async fn next_daemon_response_line<R>(
-    reader: &mut R,
+    reader: &mut BoundedLineReader<R>,
     connection: &ResolvedDaemonConnection,
     request_label: &str,
     liveness_poll_interval: Duration,
 ) -> Result<Option<String>>
 where
-    R: tokio::io::AsyncBufRead + Unpin,
+    R: asupersync::io::AsyncBufRead + Unpin,
 {
     tracedecay_daemon_protocol::poll_daemon_response_line(
         reader,
@@ -116,7 +119,7 @@ where
 }
 
 pub(crate) async fn write_daemon_preamble(
-    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+    writer: &mut (impl asupersync::io::AsyncWrite + Unpin),
     connection: &ResolvedDaemonConnection,
     handshake: &DaemonHandshake,
 ) -> Result<()> {
@@ -197,7 +200,7 @@ pub(crate) async fn connect_to_current_daemon_within(
     profile_root: &Path,
     socket_path: &Path,
     client_deadline: Option<DaemonClientDeadline>,
-) -> Result<(ResolvedDaemonConnection, BrokerStream)> {
+) -> Result<(ResolvedDaemonConnection, DaemonClientStream)> {
     let grace = match client_deadline {
         Some(deadline) => deadline.remaining()?.min(DAEMON_RESTART_GRACE),
         None => DAEMON_RESTART_GRACE,
@@ -220,7 +223,7 @@ pub(crate) async fn connect_with_restart_grace(
     socket_path: &Path,
     grace: Duration,
     poll_interval: Duration,
-) -> Result<BrokerStream> {
+) -> Result<DaemonClientStream> {
     let (_, stream) = connect_with_restart_grace_resolving(
         || client_connection(profile_root, socket_path),
         grace,
@@ -238,7 +241,7 @@ async fn connect_with_restart_grace_resolving(
     mut resolve: impl FnMut() -> Result<ResolvedDaemonConnection>,
     grace: Duration,
     poll_interval: Duration,
-) -> Result<(ResolvedDaemonConnection, BrokerStream)> {
+) -> Result<(ResolvedDaemonConnection, DaemonClientStream)> {
     let deadline = Instant::now() + grace;
     loop {
         let connection = match resolve() {
@@ -249,7 +252,7 @@ async fn connect_with_restart_grace_resolving(
             }
             Err(error) => return Err(error),
         };
-        match BrokerStream::connect(connection.endpoint()).await {
+        match DaemonClientStream::connect(connection.endpoint()).await {
             Ok(stream) => return Ok((connection, stream)),
             Err(TraceDecayError::Io(err)) => {
                 if !is_transient_daemon_connect_error(err.kind()) || Instant::now() >= deadline {
@@ -311,7 +314,7 @@ pub(crate) async fn call_tool_with_liveness_poll(
         ),
     )
     .await?;
-    let (reader, mut writer) = stream.into_owned_split();
+    let (reader, mut writer) = stream.into_split();
     let id = json!(1);
     let mut params = json!({
         "name": tool_name,
@@ -344,7 +347,7 @@ pub(crate) async fn call_tool_with_liveness_poll(
     };
     DaemonClientDeadline::run_optional(client_deadline, "write", tool_name, write).await?;
 
-    let mut reader = tokio::io::BufReader::new(reader);
+    let mut reader = BoundedLineReader::new(asupersync::io::BufReader::new(reader));
     loop {
         let read =
             next_daemon_response_line(&mut reader, &connection, tool_name, liveness_poll_interval);

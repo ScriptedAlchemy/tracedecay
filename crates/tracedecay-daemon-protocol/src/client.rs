@@ -10,8 +10,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::io::{AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
+use asupersync::io::{AsyncWriteExt, BufReader};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tracedecay_framing::BoundedLineReader;
 
 use tracedecay_contracts::{
     ApplicationInvocation, ApplicationInvocationExecutor, ApplicationInvocationFuture,
@@ -433,8 +434,8 @@ impl Drop for DaemonInvocationClientActivityGuard {
 }
 
 struct DaemonInvocationConnection {
-    reader: BufReader<ReadHalf<crate::transport::BrokerStream>>,
-    writer: WriteHalf<crate::transport::BrokerStream>,
+    reader: BoundedLineReader<BufReader<crate::transport::DaemonClientReadHalf>>,
+    writer: crate::transport::DaemonClientWriteHalf,
 }
 
 /// Keeps one client well below the daemon's 64-connection per-client
@@ -650,7 +651,7 @@ impl DaemonInvocationClient {
                 )
                 .await?;
                 DaemonInvocationConnection {
-                    reader: BufReader::new(reader),
+                    reader: BoundedLineReader::new(BufReader::new(reader)),
                     writer,
                 }
             }

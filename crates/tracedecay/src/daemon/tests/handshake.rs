@@ -150,9 +150,7 @@ async fn portable_broker_rejects_missing_auth_before_routing() {
     });
     let mut handshake = test_handshake_defaults();
     handshake.project_path = Some(PathBuf::from("/must-not-route"));
-    let mut client = tracedecay_daemon_protocol::BrokerStream::connect(&endpoint)
-        .await
-        .expect("connect client");
+    let mut client = super::connect_loopback_test_peer(&endpoint).await;
     client
         .write_all(handshake.to_line().expect("handshake").as_bytes())
         .await
@@ -213,9 +211,7 @@ async fn socket_client_requires_authentication_before_routing() {
         .await
     });
 
-    let mut client = tracedecay_daemon_protocol::BrokerStream::connect(&endpoint)
-        .await
-        .expect("connect client");
+    let mut client = super::connect_loopback_test_peer(&endpoint).await;
     client
         .write_all(
             test_handshake_defaults()

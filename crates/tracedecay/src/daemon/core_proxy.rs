@@ -7,8 +7,8 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
+use asupersync::io::AsyncWriteExt;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, Instant};
 
 use super::binary_version;
@@ -872,7 +872,7 @@ async fn send_daemon_request_with_liveness_poll(
         connect_to_current_daemon_within(profile_root, socket_path, client_deadline),
     )
     .await?;
-    let (reader, mut writer) = stream.into_owned_split();
+    let (reader, mut writer) = stream.into_split();
 
     let write = async {
         write_daemon_preamble(&mut writer, &connection, handshake).await?;
@@ -885,7 +885,8 @@ async fn send_daemon_request_with_liveness_poll(
     };
     DaemonClientDeadline::run_optional(client_deadline, "write", &request_label, write).await?;
 
-    let mut reader = tokio::io::BufReader::new(reader);
+    let mut reader =
+        tracedecay_framing::BoundedLineReader::new(asupersync::io::BufReader::new(reader));
     let mut responses = Vec::new();
     let mut matched_response = request_id.is_none();
     let mut cancellation_open = true;
@@ -942,7 +943,7 @@ async fn read_forwarding_cancellation<W>(
     writer: &mut W,
 ) -> Result<Option<String>>
 where
-    W: tokio::io::AsyncWrite + Unpin,
+    W: asupersync::io::AsyncWrite + Unpin,
 {
     tokio::pin!(read);
     loop {

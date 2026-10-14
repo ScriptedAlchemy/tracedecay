@@ -79,7 +79,7 @@ mod wire_bound_tests {
     use tracedecay_framing::{WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error};
     use tracedecay_mcp::McpTransport;
 
-    use tracedecay_daemon_protocol::{BrokerListener, BrokerStream, default_loopback_endpoint};
+    use tracedecay_daemon_protocol::{BrokerListener, default_loopback_endpoint};
 
     #[tokio::test]
     async fn broker_transport_streams_hostile_frame_and_typed_rejection_has_no_payload() {
@@ -87,7 +87,7 @@ mod wire_bound_tests {
             .await
             .expect("bind");
 
-        let client = BrokerStream::connect(&bound).await.expect("connect");
+        let client = crate::daemon::tests::connect_loopback_test_peer(&bound).await;
         let server = listener.accept().await.expect("accept");
         let mut server_transport = BrokerStreamTransport::new(server);
 
@@ -120,7 +120,7 @@ mod wire_bound_tests {
         let (listener, bound) = BrokerListener::bind(&default_loopback_endpoint())
             .await
             .expect("bind");
-        let mut client = BrokerStream::connect(&bound).await.expect("connect");
+        let mut client = crate::daemon::tests::connect_loopback_test_peer(&bound).await;
         let server = listener.accept().await.expect("accept");
         let mut transport = BrokerStreamTransport::new(server);
 
@@ -150,7 +150,7 @@ mod wire_bound_tests {
         let (listener, bound) = BrokerListener::bind(&default_loopback_endpoint())
             .await
             .expect("bind");
-        let mut client = BrokerStream::connect(&bound).await.expect("connect");
+        let mut client = crate::daemon::tests::connect_loopback_test_peer(&bound).await;
         let server = listener.accept().await.expect("accept");
         let mut transport = BrokerStreamTransport::new(server);
 
@@ -180,7 +180,7 @@ mod wire_bound_tests {
         let (listener, bound) = BrokerListener::bind(&default_loopback_endpoint())
             .await
             .expect("bind");
-        let mut client = BrokerStream::connect(&bound).await.expect("connect");
+        let mut client = crate::daemon::tests::connect_loopback_test_peer(&bound).await;
         let server = listener.accept().await.expect("accept");
         let mut transport = BrokerStreamTransport::new(server);
 
@@ -220,7 +220,7 @@ mod wire_bound_tests {
         let (listener, bound) = BrokerListener::bind(&default_loopback_endpoint())
             .await
             .expect("bind");
-        let client = BrokerStream::connect(&bound).await.expect("connect");
+        let client = crate::daemon::tests::connect_loopback_test_peer(&bound).await;
         let server = listener.accept().await.expect("accept");
         let initialize = serde_json::json!({
             "jsonrpc": "2.0",
@@ -323,7 +323,7 @@ mod wire_bound_tests {
             .await
             .expect("bind");
 
-        let client = BrokerStream::connect(&bound).await.expect("connect");
+        let client = crate::daemon::tests::connect_loopback_test_peer(&bound).await;
         let server = listener.accept().await.expect("accept");
         let mut server_transport = BrokerStreamTransport::new(server);
 
@@ -387,7 +387,7 @@ mod wire_bound_tests {
             .await
             .expect("bind");
 
-        let mut client = BrokerStream::connect(&bound).await.expect("connect");
+        let mut client = crate::daemon::tests::connect_loopback_test_peer(&bound).await;
         let server = listener.accept().await.expect("accept");
         let mut server_transport = BrokerStreamTransport::new(server);
 
