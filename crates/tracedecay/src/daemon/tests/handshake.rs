@@ -150,9 +150,7 @@ async fn portable_broker_rejects_missing_auth_before_routing() {
     });
     let mut handshake = test_handshake_defaults();
     handshake.project_path = Some(PathBuf::from("/must-not-route"));
-    let mut client = tracedecay_daemon_protocol::BrokerStream::connect(&endpoint)
-        .await
-        .expect("connect client");
+    let mut client = super::connect_loopback_test_peer(&endpoint).await;
     client
         .write_all(handshake.to_line().expect("handshake").as_bytes())
         .await
@@ -213,9 +211,7 @@ async fn socket_client_requires_authentication_before_routing() {
         .await
     });
 
-    let mut client = tracedecay_daemon_protocol::BrokerStream::connect(&endpoint)
-        .await
-        .expect("connect client");
+    let mut client = super::connect_loopback_test_peer(&endpoint).await;
     client
         .write_all(
             test_handshake_defaults()
@@ -407,7 +403,8 @@ async fn rejected_auth_preface_reads_typed_refusal_then_clean_eof() {
     let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
     let server_task = tokio::spawn(async move {
         Box::pin(super::super::serve_authenticated_socket_client_with_class(
-            tracedecay_daemon_protocol::transport::BrokerStream::Unix(server),
+            tracedecay_daemon_protocol::transport::BrokerStream::from_tokio_unix(server)
+                .expect("daemon end of the test socket"),
             engine,
             "daemon-minted-token".to_string(),
             super::super::core_admission::DaemonClientAdmissionClass::General,
@@ -919,7 +916,8 @@ async fn saturated_daemon_refuses_wire_drifted_handshake_instead_of_resetting() 
     let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
     let server_task = tokio::spawn(async move {
         super::super::reject_saturated_daemon_client(
-            tracedecay_daemon_protocol::BrokerStream::Unix(server),
+            tracedecay_daemon_protocol::BrokerStream::from_tokio_unix(server)
+                .expect("daemon end of the test socket"),
             super::super::DaemonClientSaturationResponse {
                 kind: super::super::DaemonClientSaturationKind::ClientCapacityReached,
                 retryable: true,

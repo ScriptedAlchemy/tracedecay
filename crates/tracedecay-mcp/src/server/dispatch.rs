@@ -1,6 +1,6 @@
 //! The typed internal dispatch envelope in front of the handler catalog.
 //!
-//! The `rmcp` adapter's server callbacks are handed already-typed request
+//! The MCP session decodes standard requests into `rmcp`'s typed request
 //! DTOs; custom notifications and in-process replay arrive as a raw
 //! [`JsonRpcRequest`]. The envelope carries the request identity, the method,
 //! its classification, and a method-specific payload that is *either* the raw
@@ -9,9 +9,9 @@
 //! through the accessors below, each of which answers the same question on
 //! both representations, so there is exactly one dispatch authority.
 //!
-//! Response rendering stays at the wire edge: the `rmcp` adapter materializes
-//! the handler's [`JsonRpcResponse`] into the typed result DTO its
-//! `ServerHandler` signature requires.
+//! Response rendering stays at the wire edge: the MCP adapter materializes
+//! the handler's [`JsonRpcResponse`] into the typed result DTO of the
+//! request it answers.
 
 use crate::transport::JsonRpcRequest;
 use rmcp::model::{CallToolRequestParams, InitializeRequestParams, ReadResourceRequestParams};
@@ -23,10 +23,10 @@ use super::protocol::{McpMethod, classify_mcp_method};
 /// already owns.
 pub enum McpDispatchParams<'a> {
     /// Raw JSON-RPC params, borrowed from a parsed request. This is how
-    /// `rmcp` delivers hook-event and cancellation notifications, which are
-    /// custom (untyped) methods on that transport.
+    /// `rmcp` decodes hook-event and cancellation notifications, which are
+    /// custom (untyped) methods.
     Raw(Option<&'a Value>),
-    /// Typed `initialize` params from the `rmcp` server callback.
+    /// Typed `initialize` params.
     Initialize(&'a InitializeRequestParams),
     /// Typed `tools/call` params. Owned, so the tool name and the argument map
     /// move into dispatch instead of being re-encoded and cloned back out.

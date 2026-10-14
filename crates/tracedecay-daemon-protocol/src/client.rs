@@ -10,8 +10,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::io::{AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
+use asupersync::io::{AsyncWriteExt, BufReader};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tracedecay_framing::BoundedLineReader;
 
 use tracedecay_contracts::{
     ApplicationInvocation, ApplicationInvocationExecutor, ApplicationInvocationFuture,
@@ -375,6 +376,10 @@ pub struct DaemonInvocationClient {
     handshake: crate::handshake::DaemonHandshake,
     pool: Arc<DaemonInvocationConnectionPool>,
     activity: Arc<DaemonInvocationClientActivity>,
+    liveness_poll_interval: Duration,
+    /// How long an interrupted authoritative effect waits for the daemon's
+    /// settlement before it reports the effect indeterminate.
+    response_grace: Duration,
 }
 
 #[derive(Default)]
@@ -433,8 +438,8 @@ impl Drop for DaemonInvocationClientActivityGuard {
 }
 
 struct DaemonInvocationConnection {
-    reader: BufReader<ReadHalf<crate::transport::BrokerStream>>,
-    writer: WriteHalf<crate::transport::BrokerStream>,
+    reader: BoundedLineReader<BufReader<crate::transport::DaemonClientReadHalf>>,
+    writer: crate::transport::DaemonClientWriteHalf,
 }
 
 /// Keeps one client well below the daemon's 64-connection per-client
@@ -593,6 +598,8 @@ impl DaemonInvocationClient {
             handshake,
             pool: DaemonInvocationConnectionPool::shared(),
             activity: Arc::new(DaemonInvocationClientActivity::default()),
+            liveness_poll_interval: crate::connection::DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
+            response_grace: crate::connection::DAEMON_TOOL_RESPONSE_GRACE,
         }
     }
 
@@ -601,12 +608,7 @@ impl DaemonInvocationClient {
         connection: crate::connection::DaemonConnection,
         handshake: crate::handshake::DaemonHandshake,
     ) -> Self {
-        Self {
-            connection,
-            handshake,
-            pool: DaemonInvocationConnectionPool::shared(),
-            activity: Arc::new(DaemonInvocationClientActivity::default()),
-        }
+        Self::new(connection, handshake)
     }
 
     async fn checkout_connection(
@@ -650,7 +652,7 @@ impl DaemonInvocationClient {
                 )
                 .await?;
                 DaemonInvocationConnection {
-                    reader: BufReader::new(reader),
+                    reader: BoundedLineReader::new(BufReader::new(reader)),
                     writer,
                 }
             }
@@ -711,7 +713,7 @@ impl DaemonInvocationClient {
                 &mut connection.reader,
                 &self.connection,
                 request_label,
-                crate::connection::DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
+                self.liveness_poll_interval,
             ),
             tracing::trace_span!("daemon.invocation.client.response.wait"),
         )

@@ -33,6 +33,7 @@ use tracedecay_contracts::CallableCodeOperationKind;
 use tracedecay_domain::{RelationEdgeKindV1, SymbolOccurrenceId};
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_runtime_core::db::engine::params;
+use tracedecay_runtime_core::native_runtime;
 use tracedecay_session_memory::memory::entities::normalize_entity;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
@@ -430,7 +431,7 @@ async fn strata(
                     };
                     let observed_generation = graph_generation.clone();
                     let computed_generation = graph_generation.clone();
-                    let snapshot = tokio::task::spawn_blocking(move || {
+                    let snapshot = native_runtime::spawn_blocking(move || {
                         let _span =
                             tracing::trace_span!("dashboard_api.graph.strata_compute").entered();
                         {

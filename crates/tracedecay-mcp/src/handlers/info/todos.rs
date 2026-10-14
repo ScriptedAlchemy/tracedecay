@@ -102,7 +102,9 @@ pub async fn compute_todos(
         touched,
         by_kind,
     } = tracing::Instrument::instrument(
-        tokio::task::spawn_blocking(move || scan_markers(&project_root, &files, &kinds, limit)),
+        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+            scan_markers(&project_root, &files, &kinds, limit)
+        }),
         tracing::trace_span!("mcp.info.todos.scan"),
     )
     .await

@@ -912,9 +912,7 @@ impl WriterPageCache {
             .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
             .map_err(|source| policy("page cache authorizer", source))?;
         let resized = connection.pragma_update(None, "cache_size", pages);
-        connection
-            .authorizer(Some(authorize_writer))
-            .map_err(|source| policy("restore writer authorizer", source))?;
+        install_authorizer(connection, ConnectionMode::Writer)?;
         resized.map_err(|source| policy("page cache size", source))?;
         self.fitted_schema_version = Some(schema_version);
         Ok(())
@@ -1011,28 +1009,16 @@ fn apply_limits(
     Ok(())
 }
 
-fn install_authorizer(
+pub(crate) fn install_authorizer(
     connection: &Connection,
     mode: ConnectionMode,
 ) -> Result<(), ConnectionPolicyError> {
-    let result = match mode {
-        ConnectionMode::Writer => connection.authorizer(Some(authorize_writer)),
-        ConnectionMode::Reader => connection.authorizer(Some(authorize_reader)),
-        ConnectionMode::Maintenance => connection.authorizer(Some(authorize_maintenance)),
-    };
-    result.map_err(|source| policy("authorizer", source))
-}
-
-pub(crate) fn authorize_writer(context: AuthContext<'_>) -> Authorization {
-    authorize(ConnectionMode::Writer, context)
-}
-
-pub(crate) fn authorize_reader(context: AuthContext<'_>) -> Authorization {
-    authorize(ConnectionMode::Reader, context)
-}
-
-fn authorize_maintenance(_: AuthContext<'_>) -> Authorization {
-    Authorization::Allow
+    let identity = crate::exact_sql::connection_identity(connection);
+    connection
+        .authorizer(Some(move |context: AuthContext<'_>| {
+            crate::exact_sql::authorize_connection(identity, mode, context)
+        }))
+        .map_err(|source| policy("authorizer", source))
 }
 
 /// Schema-introspection and integrity-diagnostic pragmas that cannot mutate the
@@ -1071,7 +1057,7 @@ fn is_safe_writer_pragma(pragma_name: &str, pragma_value: &str) -> bool {
             && (pragma_value.eq_ignore_ascii_case("incremental") || pragma_value == "2"))
 }
 
-fn authorize(mode: ConnectionMode, context: AuthContext<'_>) -> Authorization {
+pub(crate) fn authorize(mode: ConnectionMode, context: AuthContext<'_>) -> Authorization {
     if mode == ConnectionMode::Maintenance {
         return Authorization::Allow;
     }

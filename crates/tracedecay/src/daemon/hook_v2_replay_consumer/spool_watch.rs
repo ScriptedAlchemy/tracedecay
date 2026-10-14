@@ -20,7 +20,7 @@ use notify::{EventKind, RecursiveMode, Watcher};
 use tokio::sync::{Notify, mpsc};
 use tracedecay_hooks::{
     HOOK_SPOOL_RECORDS_FILE, hook_delivery_publication_name, hook_delivery_spool_directory,
-    hook_v2_spool_directory,
+    hook_spool_staged_name, hook_v2_spool_directory,
 };
 
 /// A project whose spool the daemon should drain.
@@ -128,8 +128,9 @@ pub(super) fn watch_project(project: &SpooledProject, consumer: Option<Arc<Notif
     });
 }
 
-/// Wakes for an in-place data write to a host's records file (an append)
-/// and for a delivery receipt arriving under its published or readied name.
+/// Wakes for an in-place data write to a host's records file (an append),
+/// for an envelope a hook staged past a busy spool, and for a delivery
+/// receipt arriving under its published or readied name.
 /// The drain's own acknowledgements, cursors, and compaction touch other
 /// files, remove receipts, or publish records by rename, so they never wake
 /// it again; only its adoption of a readied receipt does, once.
@@ -150,7 +151,9 @@ fn wake_for_append(targets: &StdMutex<WatchTargets>, event: &notify::Event) {
         )) => |path| {
             path.file_name()
                 .and_then(OsStr::to_str)
-                .is_some_and(hook_delivery_publication_name)
+                .is_some_and(|name| {
+                    hook_delivery_publication_name(name) || hook_spool_staged_name(name)
+                })
         },
         _ => return,
     };

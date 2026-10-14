@@ -1,23 +1,20 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tracedecay_daemon_protocol::BrokerStream;
+use tracedecay_daemon_protocol::{BrokerListener, DaemonEndpoint, default_loopback_endpoint};
 use tracedecay_mcp::{BrokerStreamTransport, McpTransport};
 
 #[tokio::test]
 async fn tcp_broker_transport_preserves_bidirectional_line_framing() {
-    let listener =
-        tokio::net::TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
-            .await
-            .expect("bind loopback listener");
-    let address = listener.local_addr().expect("listener address");
-    let client = tokio::spawn(tokio::net::TcpStream::connect(address));
-    let (server, _) = listener.accept().await.expect("accept loopback client");
-    let mut client = client
+    let (listener, endpoint) = BrokerListener::bind(&default_loopback_endpoint())
         .await
-        .expect("join client connect")
+        .expect("bind loopback listener");
+    let DaemonEndpoint::Loopback(address) = endpoint else {
+        panic!("loopback bind returned {endpoint}");
+    };
+    let mut client = tokio::net::TcpStream::connect(address)
+        .await
         .expect("connect loopback client");
-    let mut transport = BrokerStreamTransport::new(BrokerStream::Tcp(server));
+    let server = listener.accept().await.expect("accept loopback client");
+    let mut transport = BrokerStreamTransport::new(server);
 
     client
         .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n")

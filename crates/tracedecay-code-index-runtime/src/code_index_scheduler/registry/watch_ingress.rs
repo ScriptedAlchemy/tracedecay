@@ -12,6 +12,7 @@ use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 use super::super::CodeIndexCadenceTriggerV1;
 use super::CodeIndexSchedulerRegistryV1;
 use crate::code_index_scheduler::reconcile::FreshnessProbeVerdictV1;
+use tracedecay_runtime_core::native_runtime;
 
 /// Result of routing one watcher frontier into a mounted scheduler.
 ///
@@ -41,7 +42,7 @@ impl CodeIndexSchedulerRegistryV1 {
     ) -> GitStateChangeRequestV1 {
         let registry = self.clone();
         let identity = identity.clone();
-        match tokio::task::spawn_blocking(move || registry.request_for_root_blocking(&identity))
+        match native_runtime::spawn_blocking(move || registry.request_for_root_blocking(&identity))
             .await
         {
             Ok(request) => request,

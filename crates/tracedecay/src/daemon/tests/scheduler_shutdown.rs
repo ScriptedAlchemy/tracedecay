@@ -25,7 +25,7 @@ async fn pr_autotrack_is_cancelled_before_invocation_join() {
     );
 
     let _ = prepared
-        .join(tokio::time::Instant::now() + std::time::Duration::from_secs(1))
+        .join(std::time::Instant::now() + std::time::Duration::from_secs(1))
         .await;
 }
 
@@ -73,7 +73,7 @@ async fn manual_branch_add_journey_is_joined_by_daemon_shutdown() {
 
     let shutdown = tokio::spawn(async move {
         prepared
-            .join(tokio::time::Instant::now() + std::time::Duration::from_secs(1))
+            .join(std::time::Instant::now() + std::time::Duration::from_secs(1))
             .await
     });
     tokio::task::yield_now().await;
@@ -90,14 +90,17 @@ async fn manual_branch_add_journey_is_joined_by_daemon_shutdown() {
     );
 }
 
+// Real time, not a paused clock: shutdown waits on native blocking work that
+// a paused Tokio clock cannot see, so auto-advance would fire the deadline.
 #[cfg(unix)]
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn stalled_manual_branch_publication_settles_before_shutdown_receipt() {
     let engine = DaemonEngine::default();
     let administration = engine.store_administration.clone();
     let mutation_after_terminal = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mutation = std::sync::Arc::clone(&mutation_after_terminal);
     let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
+    let (late_release, late_released) = tokio::sync::oneshot::channel::<()>();
     let request = tokio::spawn(async move {
         administration
             .run_manual_branch_publication(
@@ -111,7 +114,7 @@ async fn stalled_manual_branch_publication_settles_before_shutdown_receipt() {
                             "manual branch publication cancelled by daemon shutdown",
                         ))
                     }
-                    () = tokio::time::sleep(std::time::Duration::from_mins(1)) => {
+                    _ = late_released => {
                         mutation.store(true, std::sync::atomic::Ordering::Release);
                         Ok(tracedecay_runtime_core::branch::BranchAddOutcome::Added)
                     }
@@ -129,10 +132,9 @@ async fn stalled_manual_branch_publication_settles_before_shutdown_receipt() {
     );
     let shutdown = tokio::spawn(async move {
         prepared
-            .join(tokio::time::Instant::now() + std::time::Duration::from_secs(15))
+            .join(std::time::Instant::now() + std::time::Duration::from_secs(15))
             .await
     });
-    tokio::time::advance(std::time::Duration::from_secs(16)).await;
     let receipt = shutdown.await.expect("shutdown joins");
     assert!(
         receipt.unfinished().is_empty(),
@@ -142,7 +144,7 @@ async fn stalled_manual_branch_publication_settles_before_shutdown_receipt() {
         request.await.expect("publication request joins").is_err(),
         "cancelled publication must report failure"
     );
-    tokio::time::advance(std::time::Duration::from_mins(1)).await;
+    let _ = late_release.send(());
     assert!(
         !mutation_after_terminal.load(std::sync::atomic::Ordering::Acquire),
         "manual publication mutated state after shutdown terminal receipt"
@@ -770,7 +772,7 @@ async fn manual_branch_publication_panic_survives_reaping_in_shutdown_receipt() 
     let mut phases = engine.shutdown_owner_phases().await;
     let receipt =
         tracedecay_daemon_service::shutdown::prepare_shutdown_owner_phases(vec![phases.remove(0)])
-            .join(tokio::time::Instant::now() + std::time::Duration::from_secs(1))
+            .join(std::time::Instant::now() + std::time::Duration::from_secs(1))
             .await;
     assert!(
         matches!(&receipt.owners[0].status, tracedecay_daemon_service::shutdown::ShutdownStatus::Failed(reason) if reason.contains("failed to join"))

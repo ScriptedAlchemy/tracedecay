@@ -15,9 +15,10 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tracedecay_runtime_core::logging::log_daemon_event;
+use tracedecay_runtime_core::native_runtime;
 
 /// Size at which the daemon rotates its own stderr file. A generation can
 /// overshoot the bound by at most one check interval of writes before it is
@@ -119,39 +120,49 @@ impl BoundedStderrLog {
                 ("retained_generations", "1".to_owned()),
             ],
         );
-        tokio::spawn(async move {
-            let mut last_failure: Option<String> = None;
-            loop {
-                match self.rotate_if_oversized() {
-                    Ok(StderrLogRotation::Rotated { size_bytes }) => {
-                        last_failure = None;
+        tokio::spawn(self.hold_bound(DAEMON_STDERR_LOG_CHECK_INTERVAL))
+    }
+
+    /// Checks the bound now and then once per `interval`, timed on the native
+    /// runtime, until the future is dropped or the timer is unavailable.
+    async fn hold_bound(self, interval: Duration) {
+        let mut last_failure: Option<String> = None;
+        loop {
+            match self.rotate_if_oversized() {
+                Ok(StderrLogRotation::Rotated { size_bytes }) => {
+                    last_failure = None;
+                    log_daemon_event(
+                        "daemon_stderr_log_rotated",
+                        &[
+                            ("path", self.path.display().to_string()),
+                            ("rotated_bytes", size_bytes.to_string()),
+                            ("rotate_bytes", self.rotate_bytes.to_string()),
+                        ],
+                    );
+                }
+                Ok(StderrLogRotation::WithinBound { .. }) => last_failure = None,
+                Err(error) => {
+                    let failure = error.to_string();
+                    if last_failure.as_deref() != Some(failure.as_str()) {
                         log_daemon_event(
-                            "daemon_stderr_log_rotated",
+                            "daemon_stderr_log_rotation_failed",
                             &[
                                 ("path", self.path.display().to_string()),
-                                ("rotated_bytes", size_bytes.to_string()),
-                                ("rotate_bytes", self.rotate_bytes.to_string()),
+                                ("error", failure.clone()),
                             ],
                         );
-                    }
-                    Ok(StderrLogRotation::WithinBound { .. }) => last_failure = None,
-                    Err(error) => {
-                        let failure = error.to_string();
-                        if last_failure.as_deref() != Some(failure.as_str()) {
-                            log_daemon_event(
-                                "daemon_stderr_log_rotation_failed",
-                                &[
-                                    ("path", self.path.display().to_string()),
-                                    ("error", failure.clone()),
-                                ],
-                            );
-                            last_failure = Some(failure);
-                        }
+                        last_failure = Some(failure);
                     }
                 }
-                tokio::time::sleep(DAEMON_STDERR_LOG_CHECK_INTERVAL).await;
             }
-        })
+            if let Err(error) = native_runtime::sleep_until(Instant::now() + interval).await {
+                log_daemon_event(
+                    "daemon_stderr_log_rotation_stopped",
+                    &[("path", self.path.display().to_string()), ("error", error)],
+                );
+                return;
+            }
+        }
     }
 }
 
@@ -197,7 +208,9 @@ fn fd_path(_fd: RawFd) -> io::Result<PathBuf> {
 mod tests {
     use std::io::Write;
     use std::os::fd::AsRawFd;
+    use std::time::Duration;
 
+    use tracedecay_runtime_core::native_runtime;
     use tracedecay_runtime_core::path_safety::canonical_root_identity;
 
     use super::{BoundedStderrLog, StderrLogRotation};
@@ -312,5 +325,53 @@ mod tests {
             "peak {peak_on_disk} exceeds twice the bound plus one check interval per generation"
         );
         assert!(unbounded_bytes > 10 * peak_on_disk);
+    }
+
+    /// Runs with no Tokio runtime entered: the loop times its checks on the
+    /// native runtime.
+    #[test]
+    fn the_rotation_loop_rechecks_the_bound_on_its_interval() {
+        let root = tempfile::tempdir().expect("log root");
+        let path = root.path().join("daemon.err.log");
+        let rotated = root.path().join("daemon.err.log.1");
+        let mut stderr = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .expect("open stderr file");
+        let log = BoundedStderrLog::for_fd(stderr.as_raw_fd(), 64)
+            .expect("inspectable")
+            .expect("bounded");
+        stderr.write_all(&[b'a'; 80]).expect("write past bound");
+
+        native_runtime::block_on(async {
+            let mut checks = std::pin::pin!(log.hold_bound(Duration::from_millis(1)));
+            std::future::poll_fn(|cx| {
+                assert!(
+                    checks.as_mut().poll(cx).is_pending(),
+                    "the loop returned after one check"
+                );
+                std::task::Poll::Ready(())
+            })
+            .await;
+            assert_eq!(
+                std::fs::metadata(&rotated).expect("first rotation").len(),
+                80
+            );
+
+            stderr
+                .write_all(&[b'b'; 70])
+                .expect("write past bound again");
+            assert_eq!(
+                native_runtime::timeout(Duration::from_millis(500), checks).await,
+                Err(native_runtime::TimeoutError::Elapsed)
+            );
+        })
+        .expect("native runtime");
+        assert_eq!(
+            std::fs::metadata(&rotated).expect("second rotation").len(),
+            70,
+            "a later check rotated the second generation"
+        );
     }
 }

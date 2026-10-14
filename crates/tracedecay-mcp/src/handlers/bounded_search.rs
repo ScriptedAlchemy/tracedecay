@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use tokio::sync::Semaphore;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::native_runtime::{self, TimeoutError};
 
 const SEARCH_SCAN_CEILING: Duration = Duration::from_secs(10);
 static SEARCH_SCAN_SEMAPHORE: LazyLock<Arc<Semaphore>> =
@@ -84,7 +85,7 @@ where
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancel_on_drop = SetFlagOnDrop(Arc::clone(&cancelled));
     let worker_cancellation = cancellation.clone();
-    let outcome = tokio::time::timeout(budget, async move {
+    let outcome = native_runtime::timeout(budget, async move {
         let permit = capacity
             .acquire_owned()
             .await
@@ -92,7 +93,7 @@ where
                 message: format!("{tool_name} concurrency gate closed: {error}"),
                 query: query.clone(),
             })?;
-        tokio::task::spawn_blocking(move || {
+        native_runtime::spawn_blocking(move || {
             let _permit = permit;
             worker(cancelled, worker_cancellation)
         })
@@ -119,7 +120,10 @@ where
                 result
             }
         }
-        Err(_) => Err(TraceDecayError::project_route(
+        Err(TimeoutError::TimerUnavailable(error)) => Err(TraceDecayError::Config {
+            message: format!("{tool_name} source-scan deadline is unenforceable: {error}"),
+        }),
+        Err(TimeoutError::Elapsed) => Err(TraceDecayError::project_route(
             "source_search_deadline_exceeded",
             true,
             format!(
@@ -214,5 +218,73 @@ mod tests {
         started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         task.abort();
         cancelled_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    }
+
+    #[test]
+    fn a_scan_completes_and_expires_without_a_tokio_runtime() {
+        let (cancelled_tx, cancelled_rx) = std::sync::mpsc::channel();
+        let (value, expired) = tracedecay_runtime_core::native_runtime::block_on(async {
+            let value = run_bounded_search_with_capacity(
+                Arc::new(Semaphore::new(1)),
+                Duration::from_secs(5),
+                "test_search",
+                "needle".to_owned(),
+                None,
+                |_, _| Ok::<_, String>(7_u8),
+            )
+            .await;
+            let expired = run_bounded_search_with_capacity(
+                Arc::new(Semaphore::new(1)),
+                Duration::from_millis(20),
+                "test_search",
+                "needle".to_owned(),
+                None,
+                move |cancelled, _| -> std::result::Result<(), String> {
+                    while !cancelled.load(Ordering::Acquire) {
+                        std::thread::yield_now();
+                    }
+                    cancelled_tx.send(()).unwrap();
+                    Ok(())
+                },
+            )
+            .await;
+            (value, expired)
+        })
+        .expect("the native runtime drives the scan");
+
+        assert_eq!(value.unwrap(), 7);
+        assert_eq!(
+            expired
+                .unwrap_err()
+                .project_route_context()
+                .map(|problem| problem.0),
+            Some("source_search_deadline_exceeded")
+        );
+        cancelled_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the expired scan's worker is told to stop");
+    }
+
+    #[tokio::test]
+    async fn a_panicking_worker_is_a_search_error() {
+        let error = run_bounded_search_with_capacity(
+            Arc::new(Semaphore::new(1)),
+            Duration::from_secs(5),
+            "test_search",
+            "needle".to_owned(),
+            None,
+            |_, _| -> std::result::Result<(), String> { panic!("scan exploded") },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(
+                &error,
+                TraceDecayError::Search { message, query }
+                    if message.starts_with("test_search worker failed") && query == "needle"
+            ),
+            "{error:?}"
+        );
     }
 }

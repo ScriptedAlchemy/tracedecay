@@ -5,10 +5,11 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tracedecay_runtime_core::path_safety::{canonical_existing_identity, same_canonical_path};
 
 use serde::{Deserialize, Serialize};
-use tokio::time::{Duration, Instant, timeout, timeout_at};
+use tokio::time::timeout;
 
 use super::{
     AuthenticatedFirstRequest, BrokerStream, BrokerStreamTransport, DaemonAuthPreface,
@@ -67,7 +68,8 @@ impl DaemonClientDeadline {
     where
         F: std::future::Future<Output = Result<T>>,
     {
-        match timeout_at(self.deadline, fut).await {
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        match asupersync::time::timeout(asupersync::time::wall_now(), remaining, fut).await {
             Ok(result) => result,
             Err(_) => Err(tracedecay_daemon_protocol::daemon_response_stalled_during(
                 stage,
@@ -213,32 +215,6 @@ where
     F: std::future::Future,
 {
     tracedecay_code_index_runtime::park_admission(future).await
-}
-
-/// Capture the calling connection's admission lease, if it has one.
-///
-/// Needed because `rmcp` serves each connection from a task it spawns itself.
-/// A task-local does not cross that spawn, so the adapter captures the lease
-/// while it is still constructed on the connection task and re-enters the scope
-/// per request with [`in_connection_admission`]. Without that, every MCP
-/// `tools/call`, the daemon's main serving path, would park on a generation
-/// decode while still holding its admission slot.
-pub(crate) fn current_connection_admission() -> Option<Arc<ParkableConnectionAdmission>> {
-    CONNECTION_ADMISSION.try_with(Arc::clone).ok()
-}
-
-/// Re-enter a captured connection's admission scope on another task.
-pub(crate) async fn in_connection_admission<F>(
-    lease: Option<Arc<ParkableConnectionAdmission>>,
-    future: F,
-) -> F::Output
-where
-    F: std::future::Future,
-{
-    match lease {
-        Some(lease) => with_dual_connection_admission_scope(lease, future).await,
-        None => future.await,
-    }
 }
 
 /// Serve one accepted connection under its admission permit.

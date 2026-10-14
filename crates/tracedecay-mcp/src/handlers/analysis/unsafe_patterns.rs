@@ -166,7 +166,7 @@ pub(super) async fn compute_unsafe_patterns(
     // it belongs on a blocking worker like the sibling analysis scans.
     let scan_project_root = project_root.to_path_buf();
     let (matches, by_kind, touched, omissions) = tracing::Instrument::instrument(
-        tokio::task::spawn_blocking(move || -> Result<_> {
+        tracedecay_runtime_core::native_runtime::spawn_blocking(move || -> Result<_> {
             let mut files = symbols_by_file.keys().cloned().collect::<Vec<_>>();
             files.sort();
             let mut matches: Vec<UnsafePatternMatchV1> = Vec::new();

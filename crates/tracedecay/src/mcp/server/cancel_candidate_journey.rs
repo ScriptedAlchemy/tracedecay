@@ -1,4 +1,4 @@
-//! Large-candidate cancel journey on the production `rmcp` adapter.
+//! Large-candidate cancel journey on the production MCP session.
 //!
 //! A unit checkpoint inside one scan finishes cancellation, and the search
 //! permit is released when the scan observes the signal. This journey starts
@@ -342,16 +342,27 @@ async fn drive_rmcp(
         server.delivery_settlement_recorder.clone(),
     )
     .expect("RMCP adapter");
-    let (server_io, client_io) = tokio::io::duplex(2 * 1024 * 1024);
+    let (listener, bound) = tracedecay_daemon_protocol::BrokerListener::bind(
+        &tracedecay_daemon_protocol::default_loopback_endpoint(),
+    )
+    .await
+    .expect("bind loopback broker");
+    let tracedecay_daemon_protocol::DaemonEndpoint::Loopback(address) = bound else {
+        panic!("loopback bind returned {bound}");
+    };
+    let client_io = tokio::net::TcpStream::connect(address)
+        .await
+        .expect("connect broker client");
+    let server_io = listener.accept().await.expect("accept broker client");
     let client_messages = Arc::new(StdMutex::new(Vec::new()));
     let serving = tokio::spawn(async move {
-        let running = adapter
+        adapter
             .serve(
-                rmcp::transport::IntoTransport::<rmcp::RoleServer, _, _>::into_transport(server_io),
+                tracedecay_mcp::BrokerStreamTransport::new(server_io),
+                std::future::pending(),
             )
             .await
-            .expect("serve RMCP");
-        running.waiting().await.expect("RMCP server task");
+            .expect("serve MCP session");
     });
     let mut client = ()
         .serve(RecordingTransport::new(

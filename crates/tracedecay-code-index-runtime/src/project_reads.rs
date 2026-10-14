@@ -15,6 +15,7 @@ use tracedecay_code_index::graph_projection::{
 use tracedecay_contracts::{Deadline, ResolvedScope, now_micros};
 use tracedecay_graph_query::{CodeGraphReadError, CodeGraphReadRequest, VerifiedCodeGraphRead};
 use tracedecay_query::retrieval::RetrievalPortError;
+use tracedecay_runtime_core::native_runtime;
 
 use crate::code_index_scheduler::{
     CodeIndexAutomaticAdmissionV1, CodeIndexSchedulerRegistryV1, LatestCodeTextGenerationV1,
@@ -90,7 +91,7 @@ async fn await_rewarm(
     let budget =
         Duration::from_micros(u64::try_from(expires_at.0.saturating_sub(now.0)).unwrap_or(0));
     let waiting = Arc::clone(store);
-    let wait = tokio::task::spawn_blocking(move || {
+    let wait = native_runtime::spawn_blocking(move || {
         waiting.await_rewarm_and_retain_for(budget, requirement)
     });
     let settled = match request.live_cancellation {
@@ -117,8 +118,11 @@ pub(crate) async fn sleep_until_deadline(deadline: &Deadline) {
     if deadline.is_elapsed_at(now) {
         return;
     }
-    let remaining = deadline.expires_at.0.saturating_sub(now.0);
-    tokio::time::sleep(Duration::from_micros(remaining as u64)).await;
+    let remaining = Duration::from_micros(deadline.expires_at.0.saturating_sub(now.0) as u64);
+    // Without a timer the deadline cannot be watched, so it counts as elapsed.
+    if let Err(error) = native_runtime::sleep_until(std::time::Instant::now() + remaining).await {
+        tracing::warn!(%error, "request deadline treated as elapsed");
+    }
 }
 
 struct ProjectCodeGraphProjectionReadPortV1 {
