@@ -2543,23 +2543,19 @@ impl DaemonSessionRuntimeRegistryV1 {
                 }
             }
         }
-        let opened: Pin<
-            Box<
-                dyn Future<
-                        Output = Result<(
-                            GraphDbOwnerAttachmentV1,
-                            CanonicalGraphStoreOwnerRetirementTargetV1,
-                        )>,
-                    > + Send
-                    + '_,
-            >,
-        > = Box::pin(graph_attachment::open_session_relation_owner(
-            &self.registry,
-            &self.graph_registry,
-            &self.graph_lifecycle_cancelled,
-            self.incarnation,
-            project_shard.clone(),
-        ));
+        let opened = tracedecay_runtime_core::erase_send!(
+            graph_attachment::open_session_relation_owner(
+                &self.registry,
+                &self.graph_registry,
+                &self.graph_lifecycle_cancelled,
+                self.incarnation,
+                project_shard.clone(),
+            ),
+            Result<(
+                GraphDbOwnerAttachmentV1,
+                CanonicalGraphStoreOwnerRetirementTargetV1,
+            )>
+        );
         match opened.await {
             Ok((attachment, target)) => {
                 tracing::info!(

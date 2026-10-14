@@ -1118,20 +1118,13 @@ async fn commit_deferred_begins<'a>(
         .map(|deferred| (deferred.item, deferred.prepared))
         .unzip();
     let outcomes = match commit_refresh_groups(items.len(), policy.operation_deadline, |range| {
-        let committed: Pin<
-            Box<
-                dyn Future<
-                        Output = SessionStoreResult<
-                            Vec<SessionStoreResult<SessionRefreshBeginBatchOutcomeV1>>,
-                        >,
-                    > + Send
-                    + '_,
-            >,
-        > =
-            Box::pin(access.commit_session_refresh_begin_batch_group(
+        let committed = tracedecay_runtime_core::erase_send!(
+            access.commit_session_refresh_begin_batch_group(
                 &items[range],
                 state.completion_control(),
-            ));
+            ),
+            SessionStoreResult<Vec<SessionStoreResult<SessionRefreshBeginBatchOutcomeV1>>>
+        );
         committed
     })
     .await
@@ -1201,17 +1194,9 @@ async fn drain_staged_completions<'a>(
     let receipt_control = state.completion_control();
     let receipt_outcomes =
         match commit_refresh_groups(projections.len(), policy.operation_deadline, |range| {
-            let recorded: Pin<
-                Box<
-                    dyn Future<
-                            Output = SessionStoreResult<
-                                Vec<SessionStoreResult<tracedecay_graph_db::GraphWatermark>>,
-                            >,
-                        > + Send
-                        + '_,
-                >,
-            > = Box::pin(
+            let recorded = tracedecay_runtime_core::erase_send!(
                 access.record_relation_receipts_group(&projections[range], &receipt_control),
+                SessionStoreResult<Vec<SessionStoreResult<tracedecay_graph_db::GraphWatermark>>>
             );
             recorded
         })
@@ -1284,19 +1269,15 @@ async fn drain_staged_completions<'a>(
         .collect::<Vec<_>>();
     let outcomes =
         match commit_refresh_groups(complete_items.len(), policy.operation_deadline, |range| {
-            let completed: Pin<
-                Box<
-                    dyn Future<
-                            Output = SessionStoreResult<
-                                Vec<SessionStoreResult<tracedecay_store::SessionRefreshReceiptV1>>,
-                            >,
-                        > + Send
-                        + '_,
-                >,
-            > = Box::pin(access.complete_session_refresh_group(
-                &complete_items[range],
-                state.completion_control(),
-            ));
+            let completed = tracedecay_runtime_core::erase_send!(
+                access.complete_session_refresh_group(
+                    &complete_items[range],
+                    state.completion_control(),
+                ),
+                SessionStoreResult<
+                    Vec<SessionStoreResult<tracedecay_store::SessionRefreshReceiptV1>>,
+                >
+            );
             completed
         })
         .await
@@ -1757,24 +1738,14 @@ pub async fn run_session_temporal_refresh_pass(
             &mut report,
         ));
     let mut prepared = begins.await;
-    let recovered: Pin<
-        Box<
-            dyn Future<
-                    Output = Option<(
-                        Vec<SessionRefreshRecoveryV1>,
-                        Vec<PreparedSessionRefresh<'_>>,
-                        bool,
-                    )>,
-                > + Send
-                + '_,
-        >,
-    > = Box::pin(recoveries_for_pass(
-        database,
-        &store,
-        state,
-        policy,
-        &mut report,
-    ));
+    let recovered = tracedecay_runtime_core::erase_send!(
+        recoveries_for_pass(database, &store, state, policy, &mut report,),
+        Option<(
+            Vec<SessionRefreshRecoveryV1>,
+            Vec<PreparedSessionRefresh<'_>>,
+            bool,
+        )>
+    );
     let Some((mut recoveries, admitted, discovery_deferred)) = recovered.await else {
         return report;
     };

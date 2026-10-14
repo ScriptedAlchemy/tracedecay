@@ -1,8 +1,5 @@
 //! Typed retained session-query mappers over mounted daemon authorities.
 
-use std::future::Future;
-use std::pin::Pin;
-
 use tracedecay_contracts::RetainedSurfaceExecutionErrorV1;
 use tracedecay_contracts::retained_surfaces::{
     CorrelationIndexCountModeV1, CorrelationIndexV1, GitScopeV1, RetainedErrorV1,
@@ -68,17 +65,10 @@ pub async fn sessions_for(
         limit,
     };
     let correlation = GlobalDbGitCorrelationStore::new(database);
-    let queried: Pin<
-        Box<
-            dyn Future<
-                    Output = Result<
-                        (Vec<SessionGitCorrelationHit>, CorrelationIndexPresence),
-                        GitCorrelationError,
-                    >,
-                > + Send
-                + '_,
-        >,
-    > = Box::pin(correlation.sessions_for_with_relation_and_presence(&query, relation));
+    let queried = tracedecay_runtime_core::erase_send!(
+        correlation.sessions_for_with_relation_and_presence(&query, relation),
+        Result<(Vec<SessionGitCorrelationHit>, CorrelationIndexPresence), GitCorrelationError>
+    );
     let (results, index_presence) = match tracing::Instrument::instrument(
         queried,
         tracing::trace_span!("daemon.retained.session.sessions_for.query"),
@@ -98,19 +88,10 @@ pub async fn sessions_for(
         && matches!(query.git_ref, GitRefFilter::Commit(_))
         && relation == CommitRelationFilter::Produced
     {
-        let observed: Pin<
-            Box<
-                dyn Future<
-                        Output = Result<
-                            (Vec<SessionGitCorrelationHit>, CorrelationIndexPresence),
-                            GitCorrelationError,
-                        >,
-                    > + Send
-                    + '_,
-            >,
-        > = Box::pin(
+        let observed = tracedecay_runtime_core::erase_send!(
             correlation
                 .sessions_for_with_relation_and_presence(&query, CommitRelationFilter::Observed),
+            Result<(Vec<SessionGitCorrelationHit>, CorrelationIndexPresence), GitCorrelationError>
         );
         match tracing::Instrument::instrument(
             observed,

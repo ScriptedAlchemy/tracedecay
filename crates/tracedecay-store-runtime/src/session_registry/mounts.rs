@@ -936,9 +936,10 @@ impl DaemonSessionRuntimeRegistryV1 {
             tracing::trace_span!("daemon.store.profile_memory.open"),
         )
         .await?;
-        let published: Pin<
-            Box<dyn Future<Output = Result<(MemoryStoreOwnerV1, Arc<Database>)>> + Send + '_>,
-        > = Box::pin(self.publish_memory_owner(shard_id, runtime));
+        let published = tracedecay_runtime_core::erase_send!(
+            self.publish_memory_owner(shard_id, runtime),
+            Result<(MemoryStoreOwnerV1, Arc<Database>)>
+        );
         let (owner, database) = published.await?;
         *self
             .profile_memory
@@ -1063,18 +1064,19 @@ impl DaemonSessionRuntimeRegistryV1 {
                     Box<dyn Future<Output = Result<super::ProfileAuthorityPin>> + Send + '_>,
                 > = Box::pin(self.profile_authority_pin("mount Remote Brain node store"));
                 let pin = pin.await?;
-                let opened: Pin<
-                    Box<dyn Future<Output = Result<(StoreRuntimeClientLease, bool)>> + Send + '_>,
-                > = Box::pin(open_runtime_with_presence(
-                    &self.registry,
-                    self.resolver.as_ref(),
-                    shard_id,
-                    self.incarnation,
-                    Some(pin),
-                    None,
-                    true,
-                    "mount Remote Brain node store",
-                ));
+                let opened = tracedecay_runtime_core::erase_send!(
+                    open_runtime_with_presence(
+                        &self.registry,
+                        self.resolver.as_ref(),
+                        shard_id,
+                        self.incarnation,
+                        Some(pin),
+                        None,
+                        true,
+                        "mount Remote Brain node store",
+                    ),
+                    Result<(StoreRuntimeClientLease, bool)>
+                );
                 let (runtime, existed) = tracing::Instrument::instrument(
                     opened,
                     tracing::trace_span!("daemon.store.remote_node.open"),

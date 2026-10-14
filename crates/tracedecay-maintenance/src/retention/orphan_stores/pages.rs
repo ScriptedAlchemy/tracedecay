@@ -172,18 +172,10 @@ pub async fn build_store_census(
         >,
     > = Box::pin(db.list_code_projects(usize::MAX));
     let projects = listed.await?;
-    let census: Pin<
-        Box<
-            dyn Future<Output = tracedecay_domain::errors::Result<Option<Vec<StoreCensusEntry>>>>
-                + Send
-                + '_,
-        >,
-    > = Box::pin(build_store_census_for_projects(
-        db,
-        profile_root,
-        &projects,
-        None,
-    ));
+    let census = tracedecay_runtime_core::erase_send!(
+        build_store_census_for_projects(db, profile_root, &projects, None,),
+        tracedecay_domain::errors::Result<Option<Vec<StoreCensusEntry>>>
+    );
     census
         .await?
         .ok_or_else(|| tracedecay_domain::errors::TraceDecayError::Config {

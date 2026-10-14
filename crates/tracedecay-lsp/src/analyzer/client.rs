@@ -748,13 +748,8 @@ impl StdioLspClient {
         // Boxed: with profiling enabled `request` is the widest I/O future in
         // this client. Awaiting it by value inflates every semantic wrapper
         // and the dispatch match (a match future is as large as its widest
-        // arm). Erased so the dispatch's `Send` proof stops here
-        // (rust-lang/rust#159228).
-        let response = tracedecay_runtime_core::erase_send!(
-            self.request::<R>(params, cancellation, timeouts),
-            std::result::Result<R::Result, LspSemanticRequestError>
-        )
-        .await?;
+        // arm).
+        let response = Box::pin(self.request::<R>(params, cancellation, timeouts)).await?;
         serde_json::to_value(response).map_err(|error| LspSemanticRequestError::InvalidResponse {
             class: error.to_string(),
         })

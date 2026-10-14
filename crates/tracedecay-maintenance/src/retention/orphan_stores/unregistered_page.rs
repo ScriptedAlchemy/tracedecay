@@ -98,24 +98,18 @@ pub async fn sweep_unregistered_store_page(
     {
         return Ok(interrupted_report(completion, CollectionOutcome::default()));
     }
-    let census_page: Pin<
-        Box<
-            dyn Future<
-                    Output = tracedecay_domain::errors::Result<
-                        Option<(Vec<UnregisteredStoreFinding>, Option<String>)>,
-                    >,
-                > + Send
-                + '_,
-        >,
-    > = Box::pin(census_unregistered_project_dirs_page(
-        db,
-        profile_root,
-        request.cursor.as_deref(),
-        limit,
-        request.now,
-        request.cancellation,
-        request.deadline,
-    ));
+    let census_page = tracedecay_runtime_core::erase_send!(
+        census_unregistered_project_dirs_page(
+            db,
+            profile_root,
+            request.cursor.as_deref(),
+            limit,
+            request.now,
+            request.cancellation,
+            request.deadline,
+        ),
+        tracedecay_domain::errors::Result<Option<(Vec<UnregisteredStoreFinding>, Option<String>)>>
+    );
     let census = census_page.await?;
     let Some((findings, next_cursor)) = census else {
         return Ok(interrupted_report(

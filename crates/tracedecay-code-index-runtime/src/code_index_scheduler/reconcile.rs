@@ -904,7 +904,7 @@ pub(super) enum FreshnessProbeVerdictV1 {
 
 pub(super) enum RetainedTextGenerationRestoreV1 {
     Servable(LatestCodeTextGenerationV1),
-    Refused(VerifiedSealedTextGenerationMetadataV1),
+    Refused(Box<VerifiedSealedTextGenerationMetadataV1>),
     Failed(CodeIndexPublicationStoreErrorV1),
 }
 
@@ -2660,7 +2660,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         if !compatibility.may_serve_while_rebuilding() {
             text_control.retire();
             self.request_background_reconcile();
-            return Some(RetainedTextGenerationRestoreV1::Refused(metadata));
+            return Some(RetainedTextGenerationRestoreV1::Refused(Box::new(metadata)));
         }
         if !compatibility.is_reusable() {
             self.request_background_reconcile();

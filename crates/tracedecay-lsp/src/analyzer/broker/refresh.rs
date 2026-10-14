@@ -175,27 +175,15 @@ impl PreparedRefresh {
             .map(|(ordinal, batch)| {
                 let project_root = self.project_root.clone();
                 let spawn = self.spawn.clone();
-                // Erased so a spawned refresh's `Send` proof does not nest
-                // every batch (rust-lang/rust#159228).
-                AssertUnwindSafe(tracedecay_runtime_core::erase_send!(
-                    async move {
-                        let run_permit = reservation.acquire_run().await.ok_or_else(|| {
-                            RefreshFailure::crashed_message(
-                                "broker run capacity unavailable".to_owned(),
-                            )
-                        })?;
-                        collect_refresh_batch(
-                            ordinal,
-                            batch,
-                            project_root,
-                            spawn,
-                            timeouts,
-                            run_permit,
+                AssertUnwindSafe(async move {
+                    let run_permit = reservation.acquire_run().await.ok_or_else(|| {
+                        RefreshFailure::crashed_message(
+                            "broker run capacity unavailable".to_owned(),
                         )
+                    })?;
+                    collect_refresh_batch(ordinal, batch, project_root, spawn, timeouts, run_permit)
                         .await
-                    },
-                    std::result::Result<(usize, Vec<CodeDiagnostic>), RefreshFailure>
-                ))
+                })
                 .catch_unwind()
             })
             .collect::<FuturesUnordered<_>>();

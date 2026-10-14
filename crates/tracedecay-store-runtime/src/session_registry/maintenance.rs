@@ -687,20 +687,16 @@ impl DaemonSessionRuntimeRegistryV1 {
             // reset deletes it.
             let long_lived = self.long_lived_session_maintenance;
             let (database, convergence) = if long_lived {
-                let admitted: Pin<
-                    Box<
-                        dyn Future<
-                                Output = Result<(
-                                    RegisteredGlobalDbOwnerV1,
-                                    Option<RegisteredSchemaConvergence>,
-                                )>,
-                            > + Send
-                            + '_,
-                    >,
-                > = Box::pin(RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(
-                    database,
-                    self.registry.open_cancellation(),
-                ));
+                let admitted = tracedecay_runtime_core::erase_send!(
+                    RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(
+                        database,
+                        self.registry.open_cancellation(),
+                    ),
+                    Result<(
+                        RegisteredGlobalDbOwnerV1,
+                        Option<RegisteredSchemaConvergence>,
+                    )>
+                );
                 admitted.await?
             } else {
                 let admitted: Pin<

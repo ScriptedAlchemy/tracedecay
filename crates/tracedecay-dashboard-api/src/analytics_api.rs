@@ -241,12 +241,10 @@ pub async fn overview(
             let agents: Pin<
                 Box<dyn Future<Output = Result<AnalyticsAgentsPayloadV1, String>> + Send>,
             > = Box::pin(agent_usage_summary(&state.host_io, state.lcm_db.as_deref()));
-            let underused: Pin<
-                Box<
-                    dyn Future<Output = Result<Option<Vec<AnalyticsUnderusedFamilyV1>>, String>>
-                        + Send,
-                >,
-            > = Box::pin(underused_tool_families(state.lcm_db.as_deref()));
+            let underused = tracedecay_runtime_core::erase_send!(
+                underused_tool_families(state.lcm_db.as_deref()),
+                Result<Option<Vec<AnalyticsUnderusedFamilyV1>>, String>
+            );
             let (durable_events, observatory, agents, underused) =
                 tokio::join!(durable_events, observatory, agents, underused);
             let observatory = Some(observatory);

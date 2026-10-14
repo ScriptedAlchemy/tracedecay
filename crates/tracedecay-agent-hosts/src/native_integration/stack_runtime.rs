@@ -803,13 +803,11 @@ const _: fn(&DaemonGitHubStackRuntimeV1) = |value| {
         scope,
         coordinator,
         ports,
-        cancellation,
         tick_task,
     } = value;
     assert_send_sync(scope);
     assert_send_sync(coordinator);
     assert_send_sync(ports);
-    assert_send_sync(cancellation);
     assert_send_sync(tick_task);
 };
 

@@ -182,7 +182,11 @@ const _: fn(&WatchState) = |value| {
         task,
         retirement,
         #[cfg(test)]
+        retained_tasks,
+        #[cfg(test)]
         entered_debounce,
+        #[cfg(test)]
+        heartbeat,
         #[cfg(test)]
         drained_plans,
         #[cfg(test)]
@@ -207,7 +211,11 @@ const _: fn(&WatchState) = |value| {
     assert_send_sync(task);
     assert_send_sync(retirement);
     #[cfg(test)]
+    assert_send_sync(retained_tasks);
+    #[cfg(test)]
     assert_send_sync(entered_debounce);
+    #[cfg(test)]
+    assert_send_sync(heartbeat);
     #[cfg(test)]
     assert_send_sync(drained_plans);
     #[cfg(test)]

@@ -510,6 +510,9 @@ pub(crate) fn task_skip_reason(
     None
 }
 
+/// The scheduler's gate and, when it admitted a run, that run's ledger task.
+type GatedTask = (SchedulerGate, Option<AutomationRunLedgerTaskSummary>);
+
 fn scheduler_gate_with_lock_retention<'a>(
     config: &'a AutomationConfig,
     executable: Option<&'a Path>,
@@ -518,13 +521,7 @@ fn scheduler_gate_with_lock_retention<'a>(
     task: AgentTaskKind,
     trigger: AutomationTrigger,
     retained_state: Option<&'a RetainedAutomationState>,
-) -> Pin<
-    Box<
-        dyn Future<Output = Result<(SchedulerGate, Option<AutomationRunLedgerTaskSummary>)>>
-            + Send
-            + 'a,
-    >,
-> {
+) -> Pin<Box<dyn Future<Output = Result<GatedTask>> + Send + 'a>> {
     let span = tracing::trace_span!("automation.scheduler.gate");
     Box::pin(
         async move {
@@ -602,7 +599,7 @@ pub(crate) async fn task_run_gate(
     sessions_db: &RegisteredGlobalDb,
     task: AgentTaskKind,
     trigger: AutomationTrigger,
-) -> Result<(SchedulerGate, Option<AutomationRunLedgerTaskSummary>)> {
+) -> Result<GatedTask> {
     task_run_gate_with_lock_retention(
         config,
         executable,
@@ -623,7 +620,7 @@ pub(crate) async fn task_run_gate_for_retained_settlement(
     task: AgentTaskKind,
     trigger: AutomationTrigger,
     settlement_guard: &AutomationRunSettlementGuard,
-) -> Result<(SchedulerGate, Option<AutomationRunLedgerTaskSummary>)> {
+) -> Result<GatedTask> {
     let retention = settlement_guard.retention();
     task_run_gate_with_lock_retention(
         config,
@@ -645,7 +642,7 @@ async fn task_run_gate_with_lock_retention(
     task: AgentTaskKind,
     trigger: AutomationTrigger,
     retained_state: Option<&RetainedAutomationState>,
-) -> Result<(SchedulerGate, Option<AutomationRunLedgerTaskSummary>)> {
+) -> Result<GatedTask> {
     let (gate, records) = scheduler_gate_with_lock_retention(
         config,
         executable,

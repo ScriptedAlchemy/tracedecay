@@ -1,5 +1,3 @@
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
@@ -963,21 +961,13 @@ async fn record_batch(
         return false;
     }
     let count = u64::try_from(envelopes.len()).unwrap_or(u64::MAX);
-    let recorded: Pin<
-        Box<
-            dyn Future<
-                    Output = Result<
-                        Result<Vec<String>, ApplicationContractError>,
-                        tokio::time::error::Elapsed,
-                    >,
-                > + Send
-                + '_,
-        >,
-    > = Box::pin(timeout(
-        persistence_deadline,
+    // Erased so the worker's `Send` proof does not nest the batch write
+    // (rust-lang/rust#159228).
+    let recorded = tracedecay_runtime_core::erase_send!(
         record_observability_batch(db, envelopes),
-    ));
-    match recorded.await {
+        Result<Vec<String>, ApplicationContractError>
+    );
+    match timeout(persistence_deadline, recorded).await {
         Ok(Ok(_)) => {
             *persisted = persisted.saturating_add(count);
             true
