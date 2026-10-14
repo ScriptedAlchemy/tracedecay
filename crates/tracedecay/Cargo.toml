@@ -294,7 +294,7 @@ zeroize = "1.9.0"
 keyring = { version = "4.1.5", features = ["v1"] }
 tempfile = "3"
 futures-util = "0.3.33"
-rmcp = { version = "3.0.1", default-features = false, features = ["server"] }
+rmcp = { version = "3.5.1", default-features = false, features = ["server"] }
 # Opt-in. Cargo rejects optional dev-dependencies, and an unconditional one
 # links the evaluator into every test target. Default and `production` builds
 # leave it off, so the shipped CLI does not link it.
@@ -316,7 +316,7 @@ regex = "1.12.3"
 filetime = "0.2"
 shell-words = "1.1"
 socket2 = "0.6"
-rmcp = { version = "3.0.1", default-features = false, features = ["client", "server", "transport-async-rw"] }
+rmcp = { version = "3.5.1", default-features = false, features = ["client", "server", "transport-async-rw"] }
 criterion = { version = "0.8", features = ["async_tokio"] }
 # test-util enables tokio::test(start_paused = true) so timer-driven unit
 # tests (daemon restart-grace windows) run on virtual time instead of real

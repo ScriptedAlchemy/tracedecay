@@ -43,7 +43,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use rmcp::model::{
-        CallToolRequestParams, CallToolResponse, CallToolResult, ReadResourceRequestParams,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ClientConfig, ProtocolVersion,
+        ReadResourceRequestParams,
     };
     use rmcp::transport::{IntoTransport, Transport};
     use rmcp::{RoleClient, ServiceExt};
@@ -155,7 +156,7 @@ mod tests {
     }
 
     struct RmcpWireFixture {
-        client: rmcp::service::RunningService<RoleClient, ()>,
+        client: rmcp::service::RunningService<RoleClient, ClientConfig>,
         server: Arc<McpServer>,
         client_messages: Arc<std::sync::Mutex<Vec<Value>>>,
         server_messages: Arc<std::sync::Mutex<Vec<Value>>>,
@@ -165,7 +166,7 @@ mod tests {
     }
 
     impl RmcpWireFixture {
-        async fn start() -> Self {
+        async fn start(client_config: ClientConfig) -> Self {
             tracedecay_project::product_runtime::register_fixture_product_runtime();
             let (cg, repo, authority) =
                 crate::mcp::server::writer_test_support::init_indexed_repo().await;
@@ -191,7 +192,10 @@ mod tests {
                 sent: Arc::clone(&client_messages),
                 received: Arc::clone(&server_messages),
             };
-            let client = ().serve(client_transport).await.expect("initialize RMCP client");
+            let client = client_config
+                .serve(client_transport)
+                .await
+                .expect("initialize RMCP client");
             Self {
                 client,
                 server,
@@ -361,6 +365,12 @@ mod tests {
         let listed: Value = serde_json::from_str(&line).expect("tools/list frame");
         assert_eq!(listed["id"], json!(1), "{line}");
         assert!(listed["result"]["tools"].is_array(), "{line}");
+        for field in ["resultType", "ttlMs", "cacheScope"] {
+            assert!(
+                listed["result"].get(field).is_none(),
+                "stateless requests speak a handshake revision, so {field} is absent: {line}"
+            );
+        }
 
         for (request, id) in [
             (
@@ -397,8 +407,8 @@ mod tests {
 
     #[tokio::test]
     async fn rmcp_wire_matrix_matches_raw_dispatch_initialize_tools_and_resources() {
-        let fixture = RmcpWireFixture::start().await;
-        let requested_protocol = fixture
+        let fixture = RmcpWireFixture::start(ClientConfig::default()).await;
+        let requested = fixture
             .last_request()
             .params
             .as_ref()
@@ -406,9 +416,14 @@ mod tests {
             .cloned()
             .expect("RMCP client initialize names a protocol version");
         assert_eq!(
+            requested,
+            json!(ProtocolVersion::LATEST),
+            "a default RMCP client asks for the newest revision even over initialize",
+        );
+        assert_eq!(
             fixture.last_response()["result"]["protocolVersion"],
-            requested_protocol,
-            "a supported client version is echoed on the RMCP wire",
+            json!(ProtocolVersion::LATEST_WITH_INITIALIZE),
+            "a revision without a handshake negotiates down to the newest one that has it",
         );
         assert_eq!(
             fixture.last_response()["result"]["_meta"]["tracedecayInitializeRoute"],
@@ -607,11 +622,27 @@ mod tests {
         fixture.shutdown().await;
     }
 
+    #[tokio::test]
+    async fn rmcp_initialize_echoes_a_supported_handshake_revision() {
+        let fixture = RmcpWireFixture::start(
+            ClientConfig::default().with_protocol_version(ProtocolVersion::V_2025_06_18),
+        )
+        .await;
+        assert_eq!(
+            fixture.last_response()["result"]["protocolVersion"],
+            json!("2025-06-18"),
+        );
+        fixture
+            .assert_last_response_matches_raw_dispatch(true)
+            .await;
+        fixture.shutdown().await;
+    }
+
     /// The session lifts wire `params._meta` into the request context; the
     /// caller deadline it carries must still reach dispatch as on the raw path.
     #[tokio::test]
     async fn rmcp_tool_call_honours_the_request_meta_caller_deadline() {
-        let fixture = RmcpWireFixture::start().await;
+        let fixture = RmcpWireFixture::start(ClientConfig::default()).await;
         let mut params = CallToolRequestParams::new("tracedecay_status").with_arguments(
             json!({"admission_only": true, "format": "json"})
                 .as_object()
