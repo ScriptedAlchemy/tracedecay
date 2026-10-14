@@ -389,22 +389,26 @@ fixture_dir_for() {
 
 # ---- seed facts (scoped to fixture-main project) --------------------------- #
 seed_fact() {
-  # $1 = content ; echoes canonical fact_id (fact.v1....)
-  ( cd "$fixture_main" && "$TD" tool fact_store_add \
-      --content "$1" --category decision --trust 0.9 --format json 2>/dev/null ) \
-    | python3 -c 'import json,sys
+  # $1 = content ; echoes canonical fact_id (fact.v1....), or fails the run
+  # with the CLI's own error so no scenario grades against a missing fact.
+  local out
+  out="$(cd "$fixture_main" && "$TD" tool fact_store_add \
+      --content "$1" --category decision --trust 0.9 --format json)" || {
+    echo "error: fact_store_add failed while seeding facts" >&2
+    return 1
+  }
+  printf '%s' "$out" | python3 -c 'import json,sys
+raw = sys.stdin.read()
 try:
-    d = json.load(sys.stdin)
-except Exception:
-    raise SystemExit(0)
-fact = d.get("fact") if isinstance(d.get("fact"), dict) else {}
-print(fact.get("fact_id") or d.get("fact_id") or "")'
+    print(json.loads(raw)["outcome"]["value"]["payload"]["result"]["commit"]["fact_id"])
+except (ValueError, KeyError, TypeError):
+    sys.exit("error: fact_store_add committed no fact_id:\n" + raw)'
 }
 echo "seeding facts..."
 discount_id="$(seed_fact "The 2026-06 pricing review decided that order discounts are capped at 25 percent for all orders; apply_discount clamps anything larger than the 25 percent cap.")"
 currency_id="$(seed_fact "Order totals are always denominated in USD cents. Multi-currency support was explicitly rejected in the 2026-05 architecture review, so every total is USD.")"
-python3 -c 'import json,sys; print(json.dumps({"discount_fact_id": sys.argv[1] or None, "currency_fact_id": sys.argv[2] or None}))' \
-  "${discount_id:-}" "${currency_id:-}" > "$run_dir/seeded_facts.json"
+python3 -c 'import json,sys; print(json.dumps({"discount_fact_id": sys.argv[1], "currency_fact_id": sys.argv[2]}))' \
+  "$discount_id" "$currency_id" > "$run_dir/seeded_facts.json"
 echo "  discount_fact_id=$discount_id currency_fact_id=$currency_id"
 
 # Each serve session reads this profile setting when it starts, so it must be
