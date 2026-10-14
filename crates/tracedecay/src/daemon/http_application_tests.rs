@@ -990,9 +990,10 @@ async fn daemon_http_saturated_cold_resolution_preserves_curate_request_identity
     service.shutdown().await.expect("shutdown HTTP service");
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn daemon_http_timed_out_cold_resolution_preserves_curate_request_identity() {
-    let registry = DaemonHttpApplicationRegistry::default();
+    let registry = DaemonHttpApplicationRegistry::default()
+        .with_cold_resolution_deadline(std::time::Duration::from_millis(50));
     let resolver_calls = Arc::new(AtomicUsize::new(0));
     let observed_resolver_calls = Arc::clone(&resolver_calls);
     registry
@@ -1024,12 +1025,9 @@ async fn daemon_http_timed_out_cold_resolution_preserves_curate_request_identity
         )
         .await
     });
-    while resolver_calls.load(Ordering::Relaxed) < 1 {
-        tokio::task::yield_now().await;
-    }
-    tokio::time::advance(std::time::Duration::from_secs(6)).await;
     let response = request.await.expect("timed-out cold-resolution request");
 
+    assert_eq!(resolver_calls.load(Ordering::Relaxed), 1);
     assert_eq!(status(&response), StatusCode::GATEWAY_TIMEOUT);
     assert_eq!(json_body(&response)["value"]["request_id"], supplied);
     assert_eq!(
