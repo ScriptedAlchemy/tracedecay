@@ -12,6 +12,12 @@
       "matchStrings": ["pnpm\\.pnpm\\(pnpm_version = \"(?<currentValue>[^\"]+)\"\\)"],
       "depNameTemplate": "pnpm",
       "datasourceTemplate": "npm"
+    },
+    {
+      "description": "Workflow env pins annotated with a `# renovate:` comment on the line above",
+      "customType": "regex",
+      "managerFilePatterns": ["/^\\.github/workflows/[^/]+\\.ya?ml$/"],
+      "matchStrings": ["# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+[A-Z_]+: \"?(?<currentValue>[^\\s\"]+)\"?"]
     }
   ],
   "packageRules": [

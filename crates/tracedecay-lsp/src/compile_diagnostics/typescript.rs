@@ -19,10 +19,18 @@
 //! for diagnostics must learn that nothing checked the project.
 
 use std::path::Path;
-use std::process::Stdio;
+use std::process::Command;
+use std::time::{Duration, Instant};
 
 use super::{Diagnostic, is_diagnostic_level};
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::git::{GitCommandBounds, GitCommandError, bounded_command_output};
+use tracedecay_runtime_core::native_runtime;
+
+/// tsc has no deadline of its own: a check runs until it finishes or its
+/// caller drops it. This only satisfies the bounded runner's required field.
+const UNBOUNDED_CHECK: Duration = Duration::from_hours(365 * 24);
 
 /// Installs the project's own compiler where the producer looks for it; the
 /// command for a package with no workspace lockfile to install from.
@@ -54,7 +62,7 @@ pub async fn run_compiler(
     tsconfig: &Path,
     build_info: Option<&Path>,
 ) -> Result<Vec<Diagnostic>> {
-    let mut cmd = tokio::process::Command::new(compiler);
+    let mut cmd = Command::new(compiler);
     cmd.arg("-p")
         .arg(tsconfig)
         .arg("--noEmit")
@@ -65,16 +73,32 @@ pub async fn run_compiler(
             .arg("--tsBuildInfoFile")
             .arg(build_info);
     }
-    cmd.current_dir(project_root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    let output = cmd
-        .output()
+    cmd.current_dir(project_root);
+    // Dropping this future cancels the token, and the runner then kills and
+    // reaps tsc.
+    let cancel = CancellationToken::new();
+    let _cancel_on_drop = CancelOnDrop(cancel.clone());
+    let bounds = GitCommandBounds {
+        deadline: Instant::now() + UNBOUNDED_CHECK,
+        cancel: Some(cancel),
+        max_stdout_bytes: usize::MAX,
+        max_stderr_bytes: usize::MAX,
+    };
+    let output = native_runtime::spawn_blocking(move || bounded_command_output(cmd, None, &bounds))
         .await
         .map_err(|error| TraceDecayError::Config {
-            message: format!("failed to spawn `{}`: {error}", compiler.display()),
+            message: format!("failed to run `{}`: {error}", compiler.display()),
+        })?
+        .map_err(|error| TraceDecayError::Config {
+            message: match error {
+                GitCommandError::Unavailable(error) => {
+                    format!("failed to spawn `{}`: {error}", compiler.display())
+                }
+                GitCommandError::ReadOutput { stream, source } => {
+                    format!("failed to read `{}` {stream}: {source}", compiler.display())
+                }
+                other => format!("`{}` did not finish: {other}", compiler.display()),
+            },
         })?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     if let Some(global) = stdout
@@ -103,6 +127,14 @@ pub async fn run_compiler(
         });
     }
     Ok(parse_tsc_output(&stdout))
+}
+
+struct CancelOnDrop(CancellationToken);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
 }
 
 /// A tsc report line that carries no file location (`error TS18003: …`);
@@ -239,9 +271,13 @@ src/b.ts(2,2): warning TS6133: Second.
     /// `tsc --noEmit` exits 2 (`DiagnosticsPresent_OutputsGenerated`) for a
     /// project with errors; treating only 0 and 1 as answers turned every
     /// real finding into a producer failure.
+    fn block<T>(future: impl Future<Output = T>) -> T {
+        native_runtime::block_on(future).expect("native runtime")
+    }
+
     #[cfg(unix)]
-    #[tokio::test]
-    async fn run_compiler_accepts_every_diagnostics_present_exit_code() {
+    #[test]
+    fn run_compiler_accepts_every_diagnostics_present_exit_code() {
         for exit in [0, 1, 2] {
             let project = tempfile::tempdir().unwrap();
             let tsconfig = project.path().join("packages/app/tsconfig.json");
@@ -255,8 +291,7 @@ src/b.ts(2,2): warning TS6133: Second.
                 ),
             ).unwrap();
 
-            let diagnostics = run_compiler(&compiler, project.path(), &tsconfig, None)
-                .await
+            let diagnostics = block(run_compiler(&compiler, project.path(), &tsconfig, None))
                 .unwrap_or_else(|error| panic!("exit {exit} is a checked project: {error}"));
             assert_eq!(diagnostics.len(), 1, "exit {exit}");
             assert_eq!(diagnostics[0].code, "TS4023");
@@ -265,8 +300,8 @@ src/b.ts(2,2): warning TS6133: Second.
     }
 
     #[cfg(unix)]
-    #[tokio::test]
-    async fn run_compiler_refuses_a_check_that_named_no_inputs() {
+    #[test]
+    fn run_compiler_refuses_a_check_that_named_no_inputs() {
         let project = tempfile::tempdir().unwrap();
         let compiler = project.path().join("tsc");
         write_executable_script(
@@ -275,17 +310,64 @@ src/b.ts(2,2): warning TS6133: Second.
         )
         .unwrap();
 
-        let error = run_compiler(
+        let error = block(run_compiler(
             &compiler,
             project.path(),
             &project.path().join("tsconfig.json"),
             None,
-        )
-        .await
+        ))
         .expect_err("a file-less tsc error is not a clean project");
         assert!(
             error.to_string().contains("TS18003"),
             "the refusal names the compiler's own error: {error}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_a_check_kills_the_compiler() {
+        let project = tempfile::tempdir().unwrap();
+        let compiler = project.path().join("tsc");
+        let pid_file = project.path().join("tsc.pid");
+        write_executable_script(
+            &compiler,
+            "#!/bin/sh\necho $$ > tsc.pid.tmp && mv tsc.pid.tmp tsc.pid\nexec sleep 60\n",
+        )
+        .unwrap();
+        let tsconfig = project.path().join("tsconfig.json");
+
+        let pid = block(async {
+            let check = std::pin::pin!(run_compiler(&compiler, project.path(), &tsconfig, None));
+            let started = std::pin::pin!(async {
+                loop {
+                    if let Ok(pid) = std::fs::read_to_string(&pid_file) {
+                        return pid.trim().to_owned();
+                    }
+                    native_runtime::sleep_until(Instant::now() + Duration::from_millis(10))
+                        .await
+                        .unwrap();
+                }
+            });
+            match futures_util::future::select(check, started).await {
+                futures_util::future::Either::Left((result, _)) => {
+                    panic!("the check finished before it was dropped: {result:?}")
+                }
+                futures_util::future::Either::Right((pid, _check)) => pid,
+            }
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Command::new("kill")
+            .args(["-0", &pid])
+            .status()
+            .unwrap()
+            .success()
+        {
+            assert!(
+                Instant::now() < deadline,
+                "tsc {pid} outlived its dropped check"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }

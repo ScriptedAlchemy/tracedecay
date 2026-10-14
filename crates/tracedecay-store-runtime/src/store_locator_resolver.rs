@@ -21,6 +21,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 #[cfg(test)]
 use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::sha256_hex;
+use tracedecay_runtime_core::config::GLOBAL_DB_FILENAME;
 use tracedecay_runtime_core::db::DatabaseAuthority;
 use tracedecay_runtime_core::path_safety::canonicalize_path_or_existing_parent;
 use tracedecay_runtime_core::shard_runtime::registry::{
@@ -37,8 +38,6 @@ use tracedecay_store::{
 
 mod graph;
 
-const PROFILE_DATABASE_FILENAME: &str = "global.db";
-const REMOTE_NODE_DATABASE_FILENAME: &str = "remote.db";
 /// Explicit local authority for one typed profile.
 ///
 /// `profile_root` is a locator supplied by the daemon's profile authority. It
@@ -268,7 +267,7 @@ impl LocalStoreRuntimeResolverV1 {
         match &shard_id.scope {
             StoreShardScopeV1::Profile => {
                 let locator_path = canonical_or_prospective_regular_file(
-                    &canonical_profile_root.join(PROFILE_DATABASE_FILENAME),
+                    &canonical_profile_root.join(GLOBAL_DB_FILENAME),
                     &canonical_profile_root,
                 )?;
                 verified_locator(
@@ -352,7 +351,7 @@ impl LocalStoreRuntimeResolverV1 {
             canonical_profile_root,
         )?;
         let locator_path = canonical_or_prospective_regular_file(
-            &canonical_store_root.join(REMOTE_NODE_DATABASE_FILENAME),
+            &canonical_store_root.join(storage::REMOTE_DB_FILENAME),
             &canonical_store_root,
         )?;
         verified_locator(
@@ -1510,7 +1509,7 @@ mod tests {
         let profile = resolved(resolve_as_local(&resolver, &profile_key));
         assert_eq!(
             profile.locator().path(),
-            fixture.profile_root.join(PROFILE_DATABASE_FILENAME)
+            fixture.profile_root.join(GLOBAL_DB_FILENAME)
         );
         assert_eq!(
             profile.metadata().kind,
@@ -1568,7 +1567,7 @@ mod tests {
                 .join("remote")
                 .join("nodes")
                 .join(hex::encode(Sha256::digest(node_id.as_str().as_bytes())))
-                .join(REMOTE_NODE_DATABASE_FILENAME)
+                .join(storage::REMOTE_DB_FILENAME)
         );
         assert_eq!(
             remote_node.metadata().kind,

@@ -2279,7 +2279,7 @@ async fn read_git_projections(
         );
     };
     let root = state.project_root.clone();
-    tokio::task::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         let authority = GitReadAuthorityV1::new(root, scope.clone());
         let bounds = GitQueryBounds {
             max_entries: 100,

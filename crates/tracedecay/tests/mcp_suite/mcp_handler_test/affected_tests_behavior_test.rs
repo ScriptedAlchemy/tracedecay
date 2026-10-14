@@ -16,7 +16,7 @@ use tracedecay_mcp::ToolResult;
 use url::Url;
 
 use crate::support::{
-    ProductionCompositionFixture, extract_text, peer_production_composition,
+    ProductionCompositionFixture, call_tool_when_ready, extract_text, peer_production_composition,
     production_composition_fixture_with_sources, wait_for_current_graph,
 };
 
@@ -73,20 +73,14 @@ async fn call_tool(
     tool_name: &str,
     arguments: Value,
 ) -> ToolResult {
-    let response = fixture
-        .harness
-        .call_tool(&fixture.project_root, tool_name, arguments)
-        .await
-        .unwrap_or_else(|error| panic!("{tool_name} production invocation failed: {error}"));
-    assert!(
-        response.error.is_none(),
-        "{tool_name} returned a production MCP error: {:?}",
-        response.error.as_ref().map(|error| &error.message)
-    );
     ToolResult::new(
-        response
-            .result
-            .unwrap_or_else(|| panic!("{tool_name} returned no production MCP result")),
+        call_tool_when_ready(
+            &fixture.harness,
+            &fixture.project_root,
+            tool_name,
+            arguments,
+        )
+        .await,
         Vec::new(),
     )
 }
@@ -588,26 +582,12 @@ async fn loom_temporal(dashboard: String) -> Value {
     .expect("Loom session authority mount deadline")
 }
 
-/// Ingests the composed Codex rollout, retrying only the typed
-/// `application.runtime.mounting` refusal the session stores answer while the
-/// full project server is still mounting.
+/// Ingests the composed Codex rollout through the shared not-ready retry.
 async fn ingest_codex_transcripts(fixture: &ProductionCompositionFixture) {
     let arguments = json!({"action": "ingest_transcript", "provider": "codex", "user_scope": false, "format": "json"});
-    let ingest = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        loop {
-            let result = call_tool(fixture, "tracedecay_hook_runtime", arguments.clone()).await;
-            if result.value["structuredContent"]["problem"]["code"]
-                == json!("application.runtime.mounting")
-            {
-                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                continue;
-            }
-            assert_ne!(result.value["isError"], json!(true), "{}", result.value);
-            break parse_tool_json("tracedecay_hook_runtime", &result);
-        }
-    })
-    .await
-    .expect("project session stores mount deadline");
+    let result = call_tool(fixture, "tracedecay_hook_runtime", arguments).await;
+    assert_ne!(result.value["isError"], json!(true), "{}", result.value);
+    let ingest = parse_tool_json("tracedecay_hook_runtime", &result);
     assert_eq!(ingest["completed"], json!(true), "{ingest}");
 }
 

@@ -26,6 +26,7 @@ pub use admission_ledger::{
 };
 pub use capture::{
     NativeHookCaptureOutcomeV1, NativeHookCaptureSourceV1, capture_native_event_for_replay,
+    spool_hook_event,
 };
 pub use config::{
     HOOK_CONFIGURATION_SCHEMA_VERSION, HookConfigurationFileReaderV1,
@@ -63,7 +64,7 @@ pub use runtime::{
 };
 pub use spool::{
     HOOK_SPOOL_RECORDS_FILE, HookSpoolAckDispositionV1, HookSpoolAckV1, HookSpoolConfigV1,
-    HookSpoolError, HookSpoolRecordV1, HookSpoolResetReasonV1, HookSpoolV1,
+    HookSpoolError, HookSpoolRecordV1, HookSpoolResetReasonV1, HookSpoolV1, hook_spool_staged_name,
 };
 
 use serde::{Deserialize, Serialize};

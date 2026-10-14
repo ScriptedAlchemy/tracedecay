@@ -4,6 +4,7 @@ use tracedecay_lsp::{LspRuntimeFailure, LspRuntimeFuture};
 
 use super::super::identity::IndexingIdentityV1;
 use super::CodeIndexSchedulerRegistryV1;
+use tracedecay_runtime_core::native_runtime;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 impl tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort
@@ -25,7 +26,7 @@ impl tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort
                 .map_err(|_| LspRuntimeFailure::new("lsp-code-index-root-unavailable"))?;
             let identity_root = root.clone();
             let live_identity =
-                tokio::task::spawn_blocking(move || IndexingIdentityV1::resolve(&identity_root))
+                native_runtime::spawn_blocking(move || IndexingIdentityV1::resolve(&identity_root))
                     .await
                     .map_err(|_| LspRuntimeFailure::new("lsp-code-index-identity-task-failed"))?
                     .map_err(|_| LspRuntimeFailure::new("lsp-code-index-identity-unavailable"))?;
@@ -52,7 +53,7 @@ impl tracedecay_application::lsp_runtime::LspCodeIndexProjectionIdentityPort
                 .map(|(current, _)| current)
                 .ok_or_else(|| LspRuntimeFailure::new("lsp-code-index-generation-unavailable"))?;
             let confirmation_root = root.clone();
-            let confirmed_identity = tokio::task::spawn_blocking(move || {
+            let confirmed_identity = native_runtime::spawn_blocking(move || {
                 IndexingIdentityV1::resolve(&confirmation_root)
             })
             .await

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tracedecay_contracts::{ApplicationProblem, RequestContext};
 use tracedecay_domain::UtcMicros;
 
-use super::super::recovery_schedule::run_recovery_loop;
+use super::super::recovery_schedule::{RecoveryScheduleV1, run_recovery_loop};
 use super::RegisteredWorkRuntime;
 use super::workflow_run_control::workflow_runtime_unavailable;
 
@@ -468,7 +468,7 @@ impl WorkflowFanOutCensusObservationRecoveryOwnerV1 {
             run_recovery_loop(
                 signal,
                 worker_cancellation,
-                SAFETY_INTERVAL,
+                RecoveryScheduleV1::with_safety_interval(SAFETY_INTERVAL),
                 "Workflow fan-out census recovery",
                 move |_| {
                     let database = database.clone();

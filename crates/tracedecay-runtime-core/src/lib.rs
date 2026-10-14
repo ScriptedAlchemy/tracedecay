@@ -97,6 +97,7 @@ pub mod background_cpu;
 pub mod branch;
 pub mod branch_meta;
 pub mod cancellation;
+pub mod child_pipe;
 pub mod config;
 pub mod db;
 pub mod git;

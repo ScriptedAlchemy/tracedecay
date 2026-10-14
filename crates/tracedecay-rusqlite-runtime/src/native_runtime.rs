@@ -4,7 +4,8 @@
 //! work on an Asupersync runtime so accepted work outlives a cancelled request.
 //! Callers that already run on a native runtime use it. Every other caller
 //! (the Tokio daemon, CLI commands, and Tokio tests) shares one process
-//! runtime, started on first use. Callers only await native join handles and
+//! runtime: the one the host [`install`]s at startup, or a default one started
+//! on first use when the host never installs. Callers only await native join handles and
 //! channel receivers, which wake through ordinary `Waker`s, so a foreign
 //! executor never blocks on the native runtime.
 
@@ -14,14 +15,15 @@ use std::sync::OnceLock;
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
-use asupersync::runtime::{JoinError, Runtime, RuntimeBuilder, RuntimeHandle};
+use asupersync::runtime::{JoinError, RuntimeHandle};
+pub use asupersync::runtime::{Runtime, RuntimeBuilder};
 use asupersync::types::PanicPayload;
 use asupersync::{Budget, Cx};
 use futures_util::future::{AbortHandle, Aborted, BoxFuture, FutureExt, Shared, abortable};
 
 /// Tokio's default blocking-pool ceiling. Shard closes and SQL reads park a
 /// blocking thread for their whole duration.
-const MAX_BLOCKING_THREADS: usize = 512;
+pub const MAX_BLOCKING_THREADS: usize = 512;
 
 static PROCESS_RUNTIME: OnceLock<Result<Runtime, String>> = OnceLock::new();
 
@@ -239,21 +241,54 @@ impl<T: Clone + Send + Sync + 'static> NativeTask<T> {
     }
 }
 
+/// Why [`install`] refused a runtime.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum InstallError {
+    /// A native helper already started the default runtime, or a runtime was
+    /// already installed. Helpers would otherwise run on a runtime the host did
+    /// not configure.
+    #[error("native execution runtime already started")]
+    AlreadyStarted,
+    #[error("{0}")]
+    StartFailed(String),
+}
+
+/// Builds `builder` and makes it the process runtime every helper here uses.
+/// A host installs it at startup, before any native helper runs; a host that
+/// never installs gets a default runtime on first use.
+pub fn install(builder: RuntimeBuilder) -> Result<&'static Runtime, InstallError> {
+    let mut installed = false;
+    let runtime = PROCESS_RUNTIME.get_or_init(|| {
+        installed = true;
+        start(builder)
+    });
+    if !installed {
+        return Err(InstallError::AlreadyStarted);
+    }
+    runtime
+        .as_ref()
+        .map_err(|message| InstallError::StartFailed(message.clone()))
+}
+
 fn started_process_runtime() -> Result<&'static Runtime, String> {
     PROCESS_RUNTIME
         .get_or_init(|| {
-            RuntimeBuilder::multi_thread()
-                .thread_name_prefix("tracedecay-native")
-                .blocking_threads(1, MAX_BLOCKING_THREADS)
-                .build()
-                .map_err(|error| {
-                    let message = format!("native execution runtime failed to start: {error}");
-                    tracing::error!(%message);
-                    message
-                })
+            start(
+                RuntimeBuilder::multi_thread()
+                    .thread_name_prefix("tracedecay-native")
+                    .blocking_threads(1, MAX_BLOCKING_THREADS),
+            )
         })
         .as_ref()
         .map_err(Clone::clone)
+}
+
+fn start(builder: RuntimeBuilder) -> Result<Runtime, String> {
+    builder.build().map_err(|error| {
+        let message = format!("native execution runtime failed to start: {error}");
+        tracing::error!(%message);
+        message
+    })
 }
 
 #[cfg(test)]
@@ -543,6 +578,15 @@ mod tests {
                 .recv_timeout(Duration::from_secs(5))
                 .expect("queued work must still run after its caller's region is cancelled");
         });
+    }
+
+    #[test]
+    fn install_after_the_default_runtime_started_is_refused() {
+        process_runtime().expect("default process runtime");
+        assert_eq!(
+            install(RuntimeBuilder::multi_thread()).err(),
+            Some(InstallError::AlreadyStarted)
+        );
     }
 
     #[test]
