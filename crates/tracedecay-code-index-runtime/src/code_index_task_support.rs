@@ -100,18 +100,6 @@ pub async fn settle_owned_blocking_task<T, O>(
     }
 }
 
-/// Starts `work` on the native blocking pool now, for work the caller does not
-/// await right away or at all: [`native_runtime::spawn_blocking`] starts only
-/// at its first poll. Dropping the task detaches the work. `None`, with `work`
-/// dropped, when the native runtime is unavailable.
-pub(crate) fn start_blocking(
-    work: impl FnOnce() + Send + 'static,
-) -> Option<native_runtime::NativeTask<Result<(), String>>> {
-    native_runtime::NativeTask::spawn(native_runtime::spawn_blocking(work))
-        .inspect_err(|error| tracing::warn!(%error, "native blocking work did not start"))
-        .ok()
-}
-
 pub fn exact_source_is_complete(
     reference: Option<&tracedecay_domain::RefId>,
     commit: Option<&tracedecay_domain::GitOidV1>,
