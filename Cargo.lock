@@ -212,11 +212,11 @@ dependencies = [
 
 [[package]]
 name = "ast-grep-core"
-version = "0.44.1"
+version = "0.50.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44135ff8104e5fbdcd5e0a8a8850b083694762530aa0212cac3a71158ac90a42"
+checksum = "293d10e919afafbe2a6f9551de33e464cbd2aaff6cb81e7885d74bf08f82592b"
 dependencies = [
- "bit-set 0.10.0",
+ "bit-set 0.11.1",
  "regex",
  "thiserror",
  "tree-sitter",
@@ -576,11 +576,11 @@ dependencies = [
 
 [[package]]
 name = "bit-set"
-version = "0.10.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09ec2f926cc3060f09db9ebc5b52823d85268d24bb917e472c0c4bea35780a7d"
+checksum = "56d87354e4229f54a44f7bf2435906a4656dba36026ab6eaca629a2c436a691c"
 dependencies = [
- "bit-vec 0.9.1",
+ "bit-vec 0.10.1",
 ]
 
 [[package]]
@@ -591,10 +591,11 @@ checksum = "5e764a1d40d510daf35e07be9eb06e75770908c27d411ee6c92109c9840eaaf7"
 
 [[package]]
 name = "bit-vec"
-version = "0.9.1"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b71798fca2c1fe1086445a7258a4bc81e6e49dcd24c8d0dd9a1e57395b603f51"
+checksum = "5727b15fa97d4f4fee0a3b7c3d550ed0269f54329207b86388de918604e31269"
 dependencies = [
+ "borsh",
  "serde",
 ]
 
@@ -656,6 +657,30 @@ name = "borrow-or-share"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc0b364ead1874514c8c2855ab558056ebfeb775653e7ae45ff72f28f8f3166c"
+
+[[package]]
+name = "borsh"
+version = "1.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "553c5d846a6ba5150c65e3b1b8ec073bcf1abc20f9b7220de384a4443ea4e20a"
+dependencies = [
+ "borsh-derive",
+ "bytes",
+ "cfg_aliases",
+]
+
+[[package]]
+name = "borsh-derive"
+version = "1.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12cdfe656708a01f89b451a7d36466e6fe6c414de0aa18fc54f864f6f9ca9f56"
+dependencies = [
+ "once_cell",
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
+]
 
 [[package]]
 name = "bstr"
@@ -2265,7 +2290,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c91d8cffac8849493a82233811bd02b2b183b8cf39bf704de0fa0841b737595"
 dependencies = [
  "bstr",
- "hashbrown 0.17.1",
+ "hashbrown 0.16.1",
 ]
 
 [[package]]
@@ -5436,7 +5461,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -5591,7 +5616,7 @@ dependencies = [
 [[package]]
 name = "tokensave-large-treesitters"
 version = "0.5.0"
-source = "git+https://github.com/ScriptedAlchemy/tokensave-large-treesitters?rev=102d0103b6fd093c1e5989cceede1ed9f08fe6a9#102d0103b6fd093c1e5989cceede1ed9f08fe6a9"
+source = "git+https://github.com/ScriptedAlchemy/tokensave-large-treesitters?rev=c79cf9b77a4ec49d1d30af2d1a8279a37ca1aea4#c79cf9b77a4ec49d1d30af2d1a8279a37ca1aea4"
 dependencies = [
  "arborium-kotlin",
  "arborium-lean",
@@ -5625,38 +5650,26 @@ dependencies = [
 ]
 
 [[package]]
-name = "tokensave-lite-treesitters"
+name = "tokensave-medium-treesitters"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b645134fbb55b21381bde082fcdd09f300123506239333fd81ac1c7c82b72314"
 dependencies = [
- "tree-sitter",
+ "tree-sitter-bash",
  "tree-sitter-c",
+ "tree-sitter-c-sharp",
+ "tree-sitter-cpp",
+ "tree-sitter-dart-orchard",
  "tree-sitter-go",
  "tree-sitter-java",
  "tree-sitter-javascript",
  "tree-sitter-language",
- "tree-sitter-python",
- "tree-sitter-rust",
- "tree-sitter-typescript",
-]
-
-[[package]]
-name = "tokensave-medium-treesitters"
-version = "0.2.0"
-dependencies = [
- "tokensave-lite-treesitters",
- "tree-sitter",
- "tree-sitter-bash",
- "tree-sitter-c-sharp",
- "tree-sitter-cpp",
- "tree-sitter-dart-orchard",
- "tree-sitter-language",
  "tree-sitter-lua",
  "tree-sitter-php",
+ "tree-sitter-python",
  "tree-sitter-ruby",
+ "tree-sitter-rust",
  "tree-sitter-scala",
  "tree-sitter-swift",
+ "tree-sitter-typescript",
 ]
 
 [[package]]
@@ -7304,13 +7317,12 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter"
-version = "0.26.13"
+version = "0.27.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17ebdd3a5a7e28a1890b876fdbd0c3c0fe0a6336cffaa104f11b9f720c9daa29"
+checksum = "a5129de2ccc97808c4583d48f1fb44576d015cf241e432800572bda11ef30c3b"
 dependencies = [
  "cc",
  "regex",
- "regex-syntax",
  "serde_json",
  "streaming-iterator",
  "tree-sitter-language",
@@ -7595,11 +7607,9 @@ dependencies = [
 [[package]]
 name = "tree-sitter-perl"
 version = "1.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e79d4ae71b42e595c24c354b59905ade8162bd400ebc53ab916ea8aec54da92d"
+source = "git+https://github.com/ganezdragon/tree-sitter-perl?rev=5b97493ce70686e22ec8b9ea261437147e342b49#5b97493ce70686e22ec8b9ea261437147e342b49"
 dependencies = [
  "cc",
- "tree-sitter",
  "tree-sitter-language",
 ]
 

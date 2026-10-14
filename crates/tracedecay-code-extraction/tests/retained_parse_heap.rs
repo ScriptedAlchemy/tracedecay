@@ -122,12 +122,12 @@ fn retained_documents_hold_their_trees_and_no_parser() {
     // SAFETY: installed before this binary's first tree-sitter allocation;
     // every call pairs with the counted functions above.
     unsafe {
-        tree_sitter::set_allocator(
-            Some(counted_malloc),
-            Some(counted_calloc),
-            Some(counted_realloc),
-            Some(counted_free),
-        );
+        tree_sitter::set_allocator(Some(tree_sitter::Allocator {
+            malloc: counted_malloc,
+            calloc: counted_calloc,
+            realloc: counted_realloc,
+            free: counted_free,
+        }));
     }
     let sources: Vec<String> = (0..8).map(source).collect();
 

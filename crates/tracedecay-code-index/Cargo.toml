@@ -65,7 +65,7 @@ lang-toml = ["tracedecay-code-extraction/lang-toml"]
 lang-lean = ["tracedecay-code-extraction/lang-lean"]
 
 [dependencies]
-ast-grep-core = "0.44"
+ast-grep-core = "0.50"
 flate2 = "1"
 base64 = "0.22"
 hex = "0.4"
@@ -83,7 +83,7 @@ tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-graph-db = { path = "../tracedecay-graph-db" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
 tracing = "0.1"
-tree-sitter = "0.26"
+tree-sitter = "0.27"
 
 [dev-dependencies]
 # Self dev-dependency: the integration suite forces indexing width through

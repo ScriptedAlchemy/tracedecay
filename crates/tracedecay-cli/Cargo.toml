@@ -180,7 +180,7 @@ tracedecay-sessions = { path = "../tracedecay-sessions" }
 tracedecay-store-runtime = { path = "../tracedecay-store-runtime" }
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 tracing = "0.1"
-tree-sitter = "0.26"
+tree-sitter = "0.27"
 # Self-update authenticates a release archive by its GitHub build-provenance
 # attestation against the embedded Sigstore public-good trust root; without
 # `tuf` the root is pinned by this version rather than fetched at runtime.
