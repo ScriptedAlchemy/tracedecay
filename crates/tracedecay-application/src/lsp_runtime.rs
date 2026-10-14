@@ -24,15 +24,15 @@ use tracedecay_lsp::{
     AdmittedRoot, ContextCoverage, ContextProducerState, ContextProjectionChange,
     ContextProjectionIdentity, ContextProjectionKind, ContextProjectionRegistration,
     FeedbackCycleRuntimePort, GatewayCapabilities, LspAnalyzerCancellationAuthority, LspPosition,
-    LspRuntimeFailure, LspRuntimeSpawner, SemanticProviderPort, TRACEDECAY_CONTEXT_REVISION,
-    UpstreamCapabilities, byte_offset_to_utf16_position,
+    LspRuntimeFailure, SemanticProviderPort, TRACEDECAY_CONTEXT_REVISION, UpstreamCapabilities,
+    byte_offset_to_utf16_position,
 };
 
 use crate::feedback::concrete::{FeedbackRuntime, ProjectFeedbackStore};
 use crate::feedback::owner::FeedbackReadOperationV1;
 pub use crate::lsp_support::{
     BrokerDiagnosticSnapshotAuthority, DaemonLspSessionFactory, LspDiagnosticDocumentPort,
-    LspWorkspaceDocumentIndexPort, UpstreamCapabilityInitializationAuthority, native_lsp_runtime,
+    LspWorkspaceDocumentIndexPort, UpstreamCapabilityInitializationAuthority,
 };
 const LSP_CONTEXT_EXPANSION_HANDLE_SCHEMA_VERSION: u16 = 1;
 const LSP_TEST_RUN_EXPANSION_HANDLE_SCHEMA_VERSION: u16 = 2;
@@ -344,11 +344,9 @@ pub(crate) struct StoredLspTestRunExpansionV1 {
 /// Mount-ready bundle construction. The same concrete feedback source is
 /// shared by cycle triggers, managed diagnostics, and context projections.
 /// `test_run_store` is the project sessions store managed test runs are
-/// recorded in. `runtime` runs the feedback-cycle and diagnostic work, which
-/// runs the advisory cycle.
+/// recorded in.
 #[allow(clippy::too_many_arguments)]
 pub fn lsp_session_factory<F>(
-    runtime: Arc<dyn LspRuntimeSpawner>,
     feedback_runtime: Arc<FeedbackRuntime>,
     test_run_store: RegisteredGlobalDbLeaseV1,
     code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
@@ -389,7 +387,6 @@ where
         diagnostics_quiet_window,
     ));
     Ok(DaemonLspSessionFactory::new(
-        runtime,
         feedback.clone(),
         semantics,
         diagnostics,
