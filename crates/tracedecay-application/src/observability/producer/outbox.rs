@@ -104,26 +104,56 @@ impl BoundedObservabilityProducerV1 {
 
     /// Admit a bounded owner batch under one persistence deadline. A claim
     /// committed before cancellation remains pending for worker recovery.
-    pub async fn emit_owner_facts(
+    ///
+    /// The batch future only awaits already-erased admissions. Nesting each
+    /// owner fact's storage future inside this batch overflowed the next
+    /// solver's `Send` proof.
+    pub fn emit_owner_facts(
         &self,
         envelopes: Vec<ObservabilityEnvelopeV1>,
-    ) -> Result<Vec<ObservabilityOwnerEmissionOutcomeV1>, ApplicationContractError> {
-        if envelopes.is_empty() || envelopes.len() > MAX_PRODUCER_CAPACITY {
-            return Err(ApplicationContractError::Domain(
-                "observability_owner_batch_bounds".to_owned(),
-            ));
-        }
-        timeout(self.core.deadlines.persistence, async {
-            let mut outcomes = Vec::with_capacity(envelopes.len());
-            for envelope in envelopes {
-                outcomes.push(self.emit_owner_fact_unbounded(envelope).await?);
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        Vec<ObservabilityOwnerEmissionOutcomeV1>,
+                        ApplicationContractError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        let persistence = self.core.deadlines.persistence;
+        Box::pin(async move {
+            if envelopes.is_empty() || envelopes.len() > MAX_PRODUCER_CAPACITY {
+                return Err(ApplicationContractError::Domain(
+                    "observability_owner_batch_bounds".to_owned(),
+                ));
             }
-            Ok(outcomes)
+            timeout(persistence, async {
+                let mut outcomes = Vec::with_capacity(envelopes.len());
+                for envelope in envelopes {
+                    let admitted: Pin<
+                        Box<
+                            dyn Future<
+                                    Output = Result<
+                                        ObservabilityOwnerEmissionOutcomeV1,
+                                        ApplicationContractError,
+                                    >,
+                                > + Send
+                                + '_,
+                        >,
+                    > = Box::pin(self.emit_owner_fact_unbounded(envelope));
+                    outcomes.push(admitted.await?);
+                }
+                Ok(outcomes)
+            })
+            .await
+            .map_err(|_| {
+                ApplicationContractError::Domain(
+                    "observability_outbox_admission_deadline".to_owned(),
+                )
+            })?
         })
-        .await
-        .map_err(|_| {
-            ApplicationContractError::Domain("observability_outbox_admission_deadline".to_owned())
-        })?
     }
 
     async fn emit_owner_fact_unbounded(

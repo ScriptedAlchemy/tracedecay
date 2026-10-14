@@ -1,5 +1,8 @@
 //! Typed retained session-query mappers over mounted daemon authorities.
 
+use std::future::Future;
+use std::pin::Pin;
+
 use tracedecay_contracts::RetainedSurfaceExecutionErrorV1;
 use tracedecay_contracts::retained_surfaces::{
     CorrelationIndexCountModeV1, CorrelationIndexV1, GitScopeV1, RetainedErrorV1,
@@ -8,8 +11,9 @@ use tracedecay_contracts::retained_surfaces::{
     WorkflowQueryModeV1, WorkflowRunV1, WorkflowStatusV1, WorkflowsRequestV1, WorkflowsResultV1,
 };
 use tracedecay_sessions::runtime::git_correlation::{
-    CommitEvidence, CommitRelation, CommitRelationFilter, GitCorrelationError, GitRefFilter,
-    SessionGitCorrelationHit, SessionsForQuery, SpanOverlapKind, git_scope_filter_from_args,
+    CommitEvidence, CommitRelation, CommitRelationFilter, CorrelationIndexPresence,
+    GitCorrelationError, GitRefFilter, SessionGitCorrelationHit, SessionsForQuery, SpanOverlapKind,
+    git_scope_filter_from_args,
 };
 use tracedecay_sessions::{
     WorkflowAgent, WorkflowGitScope, WorkflowIndexReadPort, WorkflowIndexState, WorkflowRun,
@@ -64,8 +68,19 @@ pub async fn sessions_for(
         limit,
     };
     let correlation = GlobalDbGitCorrelationStore::new(database);
+    let queried: Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        (Vec<SessionGitCorrelationHit>, CorrelationIndexPresence),
+                        GitCorrelationError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > = Box::pin(correlation.sessions_for_with_relation_and_presence(&query, relation));
     let (results, index_presence) = match tracing::Instrument::instrument(
-        correlation.sessions_for_with_relation_and_presence(&query, relation),
+        queried,
         tracing::trace_span!("daemon.retained.session.sessions_for.query"),
     )
     .await
@@ -83,9 +98,22 @@ pub async fn sessions_for(
         && matches!(query.git_ref, GitRefFilter::Commit(_))
         && relation == CommitRelationFilter::Produced
     {
-        match tracing::Instrument::instrument(
+        let observed: Pin<
+            Box<
+                dyn Future<
+                        Output = Result<
+                            (Vec<SessionGitCorrelationHit>, CorrelationIndexPresence),
+                            GitCorrelationError,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > = Box::pin(
             correlation
                 .sessions_for_with_relation_and_presence(&query, CommitRelationFilter::Observed),
+        );
+        match tracing::Instrument::instrument(
+            observed,
             tracing::trace_span!("daemon.retained.session.sessions_for.observed_fallback"),
         )
         .await

@@ -1590,6 +1590,9 @@ impl Executor for RegisteredGlobalDbTestFixture {
 }
 
 #[cfg(test)]
+crate::observation_projection::impl_send_projection_derive!(RegisteredGlobalDbTestFixture);
+
+#[cfg(test)]
 pub(crate) async fn open_registered_test_fixture(
     path: &std::path::Path,
     scope: tracedecay_runtime_core::db::TestDatabaseRuntimeScope,

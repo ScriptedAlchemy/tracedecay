@@ -1,3 +1,5 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use tracedecay_contracts::{ApplicationProblem, RequestContext};
@@ -476,8 +478,14 @@ impl WorkflowFanOutCensusObservationRecoveryOwnerV1 {
                     let producer = Arc::clone(&producer);
                     let cancellation = task_cancellation.clone();
                     async move {
-                        recover_pending_census_once(database, project_id, producer, cancellation)
-                            .await
+                        let recovered: Pin<Box<dyn Future<Output = Result<(), String>> + Send>> =
+                            Box::pin(recover_pending_census_once(
+                                database,
+                                project_id,
+                                producer,
+                                cancellation,
+                            ));
+                        recovered.await
                     }
                 },
             )

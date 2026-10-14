@@ -1,14 +1,17 @@
-mod apply;
+pub(crate) mod apply;
 #[cfg(test)]
 mod rearm_tests;
 mod rebuild;
 mod schema;
-mod source_transition;
-mod state;
+pub(crate) mod source_transition;
+pub(crate) mod state;
 mod transition;
 
+pub(crate) use apply::SendProjectionDerive;
 #[cfg(test)]
 pub(crate) use apply::apply_provider_usage_effects;
+#[cfg(test)]
+pub(crate) use apply::impl_send_projection_derive;
 pub(crate) use apply::provider_usage_scope;
 pub(super) use apply::{
     ConvergedRendering, converge_released_output_rendering, derive_projection,
@@ -23,7 +26,6 @@ pub(super) use schema::{
     ensure_observation_projection_performance_indexes, ensure_observation_projection_schema,
 };
 pub(crate) use source_transition::verify_native_source_supersession;
-#[cfg(test)]
 pub(crate) use state::RearmedProjectionRetries;
 pub(super) use state::ensure_projection_output_state_cache;
 #[cfg(test)]

@@ -1,4 +1,6 @@
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::PoisonError;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -360,15 +362,17 @@ impl SessionTemporalRefreshSchedulerRegistry {
                 let mut workers = tokio::task::JoinSet::new();
                 let mut panic_attempt = 0u32;
                 loop {
-                    workers.spawn(tracing::Instrument::instrument(
-                        run_session_temporal_refresh_scheduler(
+                    let worker: Pin<Box<dyn Future<Output = ()> + Send>> =
+                        Box::pin(run_session_temporal_refresh_scheduler(
                             database.clone(),
                             Arc::clone(&worker_state),
                             Arc::clone(&projector),
                             Arc::clone(&worker_history),
                             Arc::clone(&history_admission),
                             policy,
-                        ),
+                        ));
+                    workers.spawn(tracing::Instrument::instrument(
+                        worker,
                         tracing::trace_span!("daemon.scheduler.session_temporal.worker"),
                     ));
                     let joined = tokio::select! {

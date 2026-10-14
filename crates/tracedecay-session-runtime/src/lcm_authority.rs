@@ -67,15 +67,17 @@ impl LcmDaemonStore for RegisteredLcmDaemonStore {
     }
 
     fn status(&self, query: LcmStatusQuery) -> StoreFuture<'_, LcmStatus> {
+        let database = self.database.clone();
         Box::pin(async move {
-            self.database
-                .lcm_status_with_options(
+            let gc_config = LcmGcConfig::default();
+            let status: Pin<Box<dyn Future<Output = Result<LcmStatus, LcmError>> + Send>> =
+                Box::pin(database.lcm_status_with_options(
                     &query.provider,
                     query.session_id.as_deref(),
                     query.deep,
-                    &LcmGcConfig::default(),
-                )
-                .await
+                    &gc_config,
+                ));
+            status.await
         })
     }
 

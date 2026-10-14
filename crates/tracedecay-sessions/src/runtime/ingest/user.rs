@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use tracedecay_runtime_core::erase_send;
+
 use super::authority::{IngestAdmissionBinding, SessionIngestAuthority};
 use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
@@ -536,7 +538,6 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots_bounded_a
     .await
 }
 
-#[tracing::instrument(name = "sessions.ingest.user", level = "trace", skip_all)]
 async fn ingest_user_global_sources_for_provider_with_roots_bounded_inner<
     A: SessionIngestAuthority,
 >(
@@ -570,9 +571,11 @@ async fn ingest_user_global_sources_for_provider_with_roots_bounded_inner<
         .filter(|candidate| provider_selected(provider, *candidate))
         .collect();
     let transcript_store = registered.transcript_store();
-    let Some(frontier) =
-        read_ingest_frontier(&transcript_store, USER_INGEST_PROVIDER_FRONTIER_KEY).await
-    else {
+    let frontier = erase_send!(
+        read_ingest_frontier(&transcript_store, USER_INGEST_PROVIDER_FRONTIER_KEY),
+        Option<u64>
+    );
+    let Some(frontier) = frontier.await else {
         return IngestPassOutcome::failed(TranscriptCatchUpFailure::pass_frontier_unavailable());
     };
     let plan = plan_provider_rotation_admission(selected.len(), frontier, bounds);
@@ -661,13 +664,18 @@ async fn ingest_user_global_sources_for_provider_with_roots_bounded_inner<
     }
 
     if !cancelled {
-        match claude_observation::drain_projection_queue(
-            facade,
-            &ObservationScopeV1::Profile,
-            cancellation,
-        )
-        .await
-        {
+        let drained = erase_send!(
+            claude_observation::drain_projection_queue(
+                facade,
+                &ObservationScopeV1::Profile,
+                cancellation,
+            ),
+            Result<
+                claude_observation::ClaudeObservationIngestStats,
+                claude_observation::ClaudeObservationIngestError,
+            >
+        );
+        match drained.await {
             Ok(projection_stats) => {
                 provider_runs.stats = provider_runs.stats.merge(
                     projection_stats
@@ -714,9 +722,11 @@ async fn ingest_user_global_sources_for_provider_with_roots_bounded_inner<
         );
     }
     if provider_runs.stats.messages_upserted > 0 {
-        session_review
-            .schedule(provider.map_or("all", SessionProvider::id), None)
-            .await;
+        let review = erase_send!(
+            session_review.schedule(provider.map_or("all", SessionProvider::id), None),
+            ()
+        );
+        review.await;
     }
 
     if matches!(coverage, IngestPassCoverage::Backpressured { .. })
@@ -732,11 +742,14 @@ async fn ingest_user_global_sources_for_provider_with_roots_bounded_inner<
 
     let write = scheduling_write_required(coverage, attempted, cancelled);
     let scheduling_state_written = if write {
-        write_ingest_frontier(
-            &transcript_store,
-            USER_INGEST_PROVIDER_FRONTIER_KEY,
-            frontier,
-            attempted,
+        erase_send!(
+            write_ingest_frontier(
+                &transcript_store,
+                USER_INGEST_PROVIDER_FRONTIER_KEY,
+                frontier,
+                attempted,
+            ),
+            bool
         )
         .await
     } else {

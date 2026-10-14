@@ -1,7 +1,9 @@
 //! Extended primitive port: module API, qualified names, diagnostics, and storage status history.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use sha2::{Digest, Sha256};
@@ -44,7 +46,7 @@ use super::{
 };
 use crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use crate::diagnostics_query::{DiagnosticPageRequest, DiagnosticQueryCoverage, DiagnosticsQuery};
-use crate::graph_health_delta::compute_verified_health_delta;
+use crate::graph_health_delta::{HealthDeltaError, compute_verified_health_delta};
 use crate::lsp_runtime::LspCodeIndexProjectionIdentityPort;
 
 pub(super) fn public_module_symbols(
@@ -806,15 +808,21 @@ impl ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                     }
                 };
                 let query = GraphQueryManager::new(&reader, cancellation);
-                match compute_verified_health_delta(
+                let verified_delta: Pin<
+                    Box<
+                        dyn Future<
+                                Output = std::result::Result<HealthDeltaResult, HealthDeltaError>,
+                            > + Send
+                            + '_,
+                    >,
+                > = Box::pin(compute_verified_health_delta(
                     Some(context.request.scope().project_id.as_str().to_owned()),
                     &query,
                     self.observation_database.as_ref(),
                     request.before_cursor.as_deref(),
                     request.path_prefix.as_deref(),
-                )
-                .await
-                {
+                ));
+                match verified_delta.await {
                     Ok(result) => completed(result, EvidenceDomain::Operational, now_observed()),
                     Err(error) => health_delta_outcome(&error, observed_at),
                 }

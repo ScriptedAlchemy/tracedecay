@@ -7,6 +7,8 @@
 //! recorded Git evidence is the typed empty start, never an error.
 
 use std::collections::BTreeSet;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use tracedecay_dashboard_api::{
@@ -34,8 +36,18 @@ async fn read_sessions(
     session_ids: &BTreeSet<String>,
 ) -> Result<DashboardGitCorrelationReadV1, DashboardGitCorrelationReadErrorV1> {
     let read_error = |detail: String| DashboardGitCorrelationReadErrorV1 { detail };
-    let Some(evidence) = store
-        .git_evidence_for_sessions(session_ids)
+    let evidence: Pin<
+        Box<
+            dyn Future<
+                    Output = std::result::Result<
+                        Option<tracedecay_global_db::GitSessionEvidence>,
+                        tracedecay_sessions::runtime::git_correlation::GitCorrelationError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > = Box::pin(store.git_evidence_for_sessions(session_ids));
+    let Some(evidence) = evidence
         .await
         .map_err(|error| read_error(error.to_string()))?
     else {

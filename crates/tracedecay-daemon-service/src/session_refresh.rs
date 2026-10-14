@@ -141,9 +141,13 @@ impl DaemonSessionRefreshService {
         );
         let outcome = match command.action {
             SessionRefreshAction::Begin => {
-                service
-                    .begin_or_join(&command.context, &command.binding, command.target)
-                    .await
+                let began: Pin<Box<dyn Future<Output = SessionRefreshOutcome> + Send + '_>> =
+                    Box::pin(service.begin_or_join(
+                        &command.context,
+                        &command.binding,
+                        command.target,
+                    ));
+                began.await
             }
             SessionRefreshAction::Status => {
                 let handle = match command.handle.as_deref().map(|token| self.handle(token)) {
@@ -155,9 +159,9 @@ impl DaemonSessionRefreshService {
                         return SessionRefreshServiceOutcome::NotFound;
                     }
                 };
-                service
-                    .status(&command.context, &command.binding, &handle)
-                    .await
+                let read: Pin<Box<dyn Future<Output = SessionRefreshOutcome> + Send + '_>> =
+                    Box::pin(service.status(&command.context, &command.binding, &handle));
+                read.await
             }
             SessionRefreshAction::Cancel => {
                 let handle = match command.handle.as_deref().map(|token| self.handle(token)) {
@@ -169,9 +173,9 @@ impl DaemonSessionRefreshService {
                         return SessionRefreshServiceOutcome::NotFound;
                     }
                 };
-                service
-                    .cancel(&command.context, &command.binding, &handle)
-                    .await
+                let cancelled: Pin<Box<dyn Future<Output = SessionRefreshOutcome> + Send + '_>> =
+                    Box::pin(service.cancel(&command.context, &command.binding, &handle));
+                cancelled.await
             }
         };
         self.public_outcome(outcome)

@@ -929,7 +929,7 @@ enum RebuildBatchStage {
 }
 
 async fn activate_projection_rebuild_transaction(
-    transaction: &impl Executor,
+    transaction: &(impl Executor + super::apply::SendProjectionDerive),
     frontier_sequence: u64,
 ) -> ProjectionStoreResult<ProjectionRebuildOutcome> {
     validate_rebuild_frontier(transaction, frontier_sequence).await?;
@@ -1899,7 +1899,7 @@ async fn stage_rebuild_disposition(
 }
 
 async fn stage_rebuild_effect(
-    conn: &impl Executor,
+    conn: &(impl Executor + super::apply::SendProjectionDerive),
     generation: &str,
     sequence: u64,
     observation: &DurableObservationV1,
