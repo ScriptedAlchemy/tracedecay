@@ -7,7 +7,7 @@
 //! child pipes are Unix-only, so std threads are also what Windows runs.
 
 use std::future::poll_fn;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::pin::pin;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,6 +18,7 @@ use std::time::Instant;
 use tokio_util::bytes::BytesMut;
 use tokio_util::codec::Decoder;
 use tracedecay_daemon_protocol::{FramePoll, LspFrame};
+use tracedecay_runtime_core::child_pipe::{ChildPipeStop, child_pipe_stop};
 use tracedecay_runtime_core::native_runtime;
 
 use super::error::{AnalyzerResult as Result, AnalyzerRuntimeError as TraceDecayError};
@@ -52,10 +53,26 @@ impl AnalyzerProcess {
         let (lifeline, requests) = mpsc::channel();
         let (started_sender, started) = async_channel::bounded(1);
         let (exited_sender, exited) = async_channel::bounded(1);
+        let stop_pipe = |pipe: &str, error: io::Error| TraceDecayError::Config {
+            message: format!(
+                "failed to open the {pipe} stop pipe for LSP server '{name}': {error}"
+            ),
+        };
+        let (stdout_stop, stdout_watch) =
+            child_pipe_stop().map_err(|error| stop_pipe("stdout", error))?;
+        let (stderr_stop, stderr_watch) =
+            child_pipe_stop().map_err(|error| stop_pipe("stderr", error))?;
         // The supervisor spawns the child itself, so a thread that fails to
         // start never strands a child nobody kills.
         spawn_thread("tracedecay-lsp-analyzer", name, move || {
-            supervise(command, &started_sender, &requests, &exited_sender);
+            supervise(
+                command,
+                &started_sender,
+                &requests,
+                &exited_sender,
+                stdout_stop,
+                stderr_stop,
+            );
         })?;
         let spawned = started.recv().await.map_err(|_| TraceDecayError::Config {
             message: format!("LSP server '{name}' supervisor exited before spawning it"),
@@ -79,14 +96,23 @@ impl AnalyzerProcess {
         let (frame_sender, frames) = async_channel::bounded(1);
         let partial_frame = Arc::new(AtomicBool::new(false));
         let partial = Arc::clone(&partial_frame);
+        let mut stdout_watch = stdout_watch;
         spawn_thread("tracedecay-lsp-analyzer-stdout", name, move || {
-            read_frames(&mut stdout, &frame_sender, &partial);
+            read_frames(
+                &mut |buf: &mut [u8]| stdout_watch.read(&mut stdout, buf),
+                &frame_sender,
+                &partial,
+            );
         })?;
         let capture = Arc::new(Mutex::new(Vec::new()));
         let (stderr_closed_sender, stderr_closed) = async_channel::bounded::<()>(1);
         let captured = Arc::clone(&capture);
+        let mut stderr_watch = stderr_watch;
         spawn_thread("tracedecay-lsp-analyzer-stderr", name, move || {
-            drain_stderr(&mut stderr, &captured);
+            drain_stderr(
+                &mut |buf: &mut [u8]| stderr_watch.read(&mut stderr, buf),
+                &captured,
+            );
             drop(stderr_closed_sender);
         })?;
 
@@ -190,6 +216,8 @@ fn supervise(
     started: &async_channel::Sender<io::Result<Pipes>>,
     requests: &mpsc::Receiver<StatusRequest>,
     exited: &async_channel::Sender<io::Result<ExitStatus>>,
+    mut stdout_stop: ChildPipeStop,
+    mut stderr_stop: ChildPipeStop,
 ) {
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -203,7 +231,12 @@ fn supervise(
     while let Ok(reply) = requests.recv() {
         let _ = reply.send_blocking(child.try_wait());
     }
-    let _ = exited.send_blocking(reap_child(&mut child));
+    let status = reap_child(&mut child);
+    // The child is reaped, so its own writes are done. A descendant can still
+    // hold the pipes; stopping the readers lets `terminate` finish.
+    stdout_stop.abandon();
+    stderr_stop.abandon();
+    let _ = exited.send_blocking(status);
 }
 
 /// Kills `child` if it is still running, then reaps it.
@@ -226,7 +259,7 @@ fn reap_child(child: &mut Child) -> io::Result<ExitStatus> {
 /// client hanging up. The channel holds one frame, so an unread stdout
 /// backpressures the analyzer as an unpolled reader did.
 fn read_frames(
-    stdout: &mut impl Read,
+    mut read: impl FnMut(&mut [u8]) -> io::Result<usize>,
     frames: &async_channel::Sender<FrameResult>,
     partial: &AtomicBool,
 ) {
@@ -237,7 +270,7 @@ fn read_frames(
         let decoded = match codec.decode(&mut buffered) {
             Ok(None) => {
                 partial.store(!buffered.is_empty(), Ordering::Release);
-                match stdout.read(&mut chunk) {
+                match read(&mut chunk) {
                     Ok(0) => match codec.decode_eof(&mut buffered) {
                         Ok(None) => return,
                         decoded => decoded,
@@ -270,10 +303,10 @@ fn read_frames(
 
 /// Keeps the first `STDERR_CAPTURE_BYTES` and drains the rest, so a chatty
 /// analyzer never blocks on a full stderr pipe.
-fn drain_stderr(stderr: &mut impl Read, capture: &Mutex<Vec<u8>>) {
+fn drain_stderr(mut read: impl FnMut(&mut [u8]) -> io::Result<usize>, capture: &Mutex<Vec<u8>>) {
     let mut buffer = [0_u8; 1024];
     loop {
-        let read = match stderr.read(&mut buffer) {
+        let read = match read(&mut buffer) {
             Ok(0) => return,
             Ok(read) => read,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
@@ -304,6 +337,7 @@ async fn until<F: Future>(deadline: Instant, work: F) -> io::Result<Option<F::Ou
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
     use std::time::Duration;
 
     use super::*;
@@ -327,7 +361,11 @@ mod tests {
         let partial = Arc::clone(&partial_frame);
         std::thread::spawn(move || {
             let mut feed = feed;
-            read_frames(&mut feed, &frame_sender, &partial);
+            read_frames(
+                &mut |buf: &mut [u8]| feed.read(buf),
+                &frame_sender,
+                &partial,
+            );
         });
         let (_, exited) = async_channel::bounded(1);
         let (writes, _) = async_channel::bounded(1);
@@ -397,5 +435,81 @@ mod tests {
         let mut child = Command::new("sleep").arg("30").spawn().unwrap();
         let status = reap_child(&mut child).unwrap();
         assert!(!status.success());
+    }
+
+    /// A background grandchild inherits the shell's pipes. After the shell
+    /// exits, `terminate` has to finish while that grandchild is still alive.
+    #[cfg(unix)]
+    #[test]
+    fn terminate_returns_while_a_grandchild_holds_the_pipes() {
+        let pid_path = std::env::temp_dir().join(format!(
+            "tracedecay-analyzer-grandchild-{}.pid",
+            std::process::id()
+        ));
+        let script = format!("sleep 30 & echo $! > '{}'; exec true", pid_path.display());
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", &script]);
+        let mut process = native_runtime::block_on(AnalyzerProcess::spawn(command, "grandchild"))
+            .unwrap()
+            .unwrap();
+        let spawned = Instant::now();
+        loop {
+            assert!(
+                spawned.elapsed() < Duration::from_secs(5),
+                "the shell did not exit"
+            );
+            if native_runtime::block_on(process.try_wait())
+                .unwrap()
+                .unwrap()
+                .is_some()
+            {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        let pid: u32 = std::fs::read_to_string(&pid_path)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let _cleanup = KillGrandchild {
+            pid,
+            pid_path: &pid_path,
+        };
+        assert!(
+            Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .status()
+                .unwrap()
+                .success(),
+            "the grandchild must still be alive, or the pipes may already be closed"
+        );
+
+        let outcome = native_runtime::block_on(until(
+            Instant::now() + Duration::from_secs(2),
+            process.terminate(),
+        ))
+        .unwrap()
+        .unwrap();
+        let Some(Ok(status)) = outcome else {
+            panic!("terminate waited on a descendant-held pipe: {outcome:?}");
+        };
+        assert!(status.success(), "{status}");
+    }
+
+    #[cfg(unix)]
+    struct KillGrandchild<'a> {
+        pid: u32,
+        pid_path: &'a std::path::Path,
+    }
+
+    #[cfg(unix)]
+    impl Drop for KillGrandchild<'_> {
+        fn drop(&mut self) {
+            let _ = Command::new("kill")
+                .args(["-KILL", &self.pid.to_string()])
+                .status();
+            let _ = std::fs::remove_file(self.pid_path);
+        }
     }
 }

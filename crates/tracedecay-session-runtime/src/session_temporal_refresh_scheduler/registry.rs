@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::PoisonError;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::history::SharedSessionHistoricalIngestor;
 use super::projector::{
@@ -19,6 +19,7 @@ use super::worker::run_session_temporal_refresh_scheduler;
 use crate::StoreOwnerKey;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
+use tracedecay_runtime_core::native_runtime::{self, NativeTask, NativeTaskOutcome};
 use tracedecay_sessions::admission::session_ingest_disabled;
 
 #[cfg(test)]
@@ -99,7 +100,9 @@ struct SessionTemporalRefreshSchedulerEntry {
     /// `wake` plus these — into the handoff it owes the new owner.
     extra_routes: Vec<SessionTemporalRefreshWake>,
     history: Arc<std::sync::RwLock<Option<SharedSessionHistoricalIngestor>>>,
-    task: tokio::task::JoinHandle<()>,
+    /// `None` when the native runtime refused the supervisor; the entry then
+    /// counts as finished, so the next `ensure_*` replaces it.
+    supervisor: Option<NativeTask<()>>,
 }
 
 fn cancel_supervisor(
@@ -125,6 +128,10 @@ impl SessionTemporalRefreshSchedulerEntry {
     /// with its primary wake.
     fn routes(&self) -> impl Iterator<Item = &SessionTemporalRefreshWake> {
         self.extra_routes.iter().chain(std::iter::once(&self.wake))
+    }
+
+    fn supervisor_finished(&self) -> bool {
+        self.supervisor.as_ref().is_none_or(NativeTask::is_finished)
     }
 }
 
@@ -172,8 +179,10 @@ impl<'a> SessionTemporalRefreshRetirement<'a> {
     /// Each supervisor bounds its own drain grace and joins its aborted
     /// workers, so awaiting it proves the worker released its leases.
     async fn join(mut self) {
-        while let Some((_, entry)) = self.entries.last_mut() {
-            let _ = (&mut entry.task).await;
+        while let Some((_, entry)) = self.entries.last() {
+            if let Some(supervisor) = &entry.supervisor {
+                supervisor.wait().await;
+            }
             self.entries.pop();
         }
     }
@@ -181,7 +190,8 @@ impl<'a> SessionTemporalRefreshRetirement<'a> {
 
 impl Drop for SessionTemporalRefreshRetirement<'_> {
     fn drop(&mut self) {
-        self.entries.retain(|(_, entry)| !entry.task.is_finished());
+        self.entries
+            .retain(|(_, entry)| !entry.supervisor_finished());
         self.retired
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -357,10 +367,9 @@ impl SessionTemporalRefreshSchedulerRegistry {
                     worker_state.mark_stopped();
                     return;
                 }
-                let mut workers = tokio::task::JoinSet::new();
                 let mut panic_attempt = 0u32;
                 loop {
-                    workers.spawn(tracing::Instrument::instrument(
+                    let worker = match NativeTask::spawn(tracing::Instrument::instrument(
                         run_session_temporal_refresh_scheduler(
                             database.clone(),
                             Arc::clone(&worker_state),
@@ -370,33 +379,39 @@ impl SessionTemporalRefreshSchedulerRegistry {
                             policy,
                         ),
                         tracing::trace_span!("daemon.scheduler.session_temporal.worker"),
-                    ));
-                    let joined = tokio::select! {
-                        joined = tracing::Instrument::instrument(
-                            workers.join_next(),
-                            tracing::trace_span!("daemon.scheduler.session_temporal.worker_join_wait"),
-                        ) => joined,
-                        () = async {
-                            worker_state.wait_for_cancellation().await;
-                            tokio::time::sleep(crate::DAEMON_CLIENT_DRAIN_DEADLINE).await;
-                        } => {
-                            // An abort only requests cancellation; joining the
-                            // aborted worker proves its lease clones dropped.
-                            workers.abort_all();
-                            while workers.join_next().await.is_some() {}
+                    )) {
+                        Ok(worker) => worker,
+                        Err(error) => {
+                            tracing::error!(%error, "session temporal refresh worker did not start");
                             worker_state.mark_stopped();
                             return;
                         }
                     };
-                    let Some(result) = joined else {
-                        worker_state.mark_stopped();
-                        return;
+                    let outcome = tokio::select! {
+                        outcome = tracing::Instrument::instrument(
+                            worker.wait(),
+                            tracing::trace_span!("daemon.scheduler.session_temporal.worker_join_wait"),
+                        ) => outcome,
+                        () = async {
+                            worker_state.wait_for_cancellation().await;
+                            let grace = Instant::now() + crate::DAEMON_CLIENT_DRAIN_DEADLINE;
+                            if let Err(error) = native_runtime::sleep_until(grace).await {
+                                tracing::warn!(%error, "session temporal refresh workers abort without a drain grace");
+                            }
+                        } => {
+                            // An abort only requests cancellation; waiting on
+                            // the aborted worker proves its lease clones dropped.
+                            worker.abort();
+                            worker.wait().await;
+                            worker_state.mark_stopped();
+                            return;
+                        }
                     };
-                    match result {
-                        Err(error)
-                            if error.is_panic()
-                                && !worker_state.cancelled.load(Ordering::Acquire) =>
+                    match outcome {
+                        NativeTaskOutcome::Panicked(payload)
+                            if !worker_state.cancelled.load(Ordering::Acquire) =>
                         {
+                            tracing::warn!(%payload, "session temporal refresh worker panicked");
                             panic_attempt = panic_attempt.saturating_add(1);
                             worker_state.mark_worker_idle();
                             worker_state.mark_recovering(
@@ -407,13 +422,22 @@ impl SessionTemporalRefreshSchedulerRegistry {
                             worker_state.recover_history_after_worker_panic();
                             tokio::select! {
                                 () = tracing::Instrument::instrument(worker_state.wait_for_cancellation(), tracing::trace_span!("daemon.scheduler.session_temporal.supervisor_retry_cancel")) => return,
-                                () = tracing::Instrument::instrument(tokio::time::sleep(session_refresh_retry_delay(
+                                fired = tracing::Instrument::instrument(native_runtime::sleep_until(Instant::now() + session_refresh_retry_delay(
                                         SessionTemporalRefreshRetryClass::Projector,
                                         panic_attempt,
-                                    )), tracing::trace_span!("daemon.scheduler.session_temporal.supervisor_retry_wait")) => {}
+                                    )), tracing::trace_span!("daemon.scheduler.session_temporal.supervisor_retry_wait")) => {
+                                    // Without a timer a panicking worker would restart in a tight loop.
+                                    if let Err(error) = fired {
+                                        tracing::error!(%error, "session temporal refresh supervisor stopped without a native timer");
+                                        worker_state.mark_stopped();
+                                        return;
+                                    }
+                                }
                             }
                         }
-                        Ok(()) | Err(_) => {
+                        NativeTaskOutcome::Completed(())
+                        | NativeTaskOutcome::Cancelled
+                        | NativeTaskOutcome::Panicked(_) => {
                             worker_state.mark_stopped();
                             return;
                         }
@@ -422,13 +446,18 @@ impl SessionTemporalRefreshSchedulerRegistry {
             },
             tracing::trace_span!("daemon.scheduler.session_temporal.supervisor"),
         );
-        let task = tokio::spawn(supervisor);
+        let supervisor = NativeTask::spawn(supervisor)
+            .inspect_err(|error| {
+                tracing::error!(%error, "session temporal refresh supervisor did not start");
+                state.mark_stopped();
+            })
+            .ok();
         SessionTemporalRefreshSchedulerEntry {
             state,
             wake,
             extra_routes: Vec::new(),
             history,
-            task,
+            supervisor,
         }
     }
 
@@ -574,7 +603,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
         let retired_owner = SessionTemporalRefreshOwner::Project(owner.clone());
         if project
             .get(&owner)
-            .is_some_and(|entry| entry.task.is_finished())
+            .is_some_and(SessionTemporalRefreshSchedulerEntry::supervisor_finished)
         {
             // Confirmed present by the check above while holding the lock.
             #[allow(clippy::expect_used)]
@@ -628,7 +657,7 @@ impl SessionTemporalRefreshSchedulerRegistry {
         let retired_owner = SessionTemporalRefreshOwner::Profile(database_path.clone());
         if profile
             .get(&database_path)
-            .is_some_and(|entry| entry.task.is_finished())
+            .is_some_and(SessionTemporalRefreshSchedulerEntry::supervisor_finished)
         {
             // Confirmed present by the check above while holding the lock.
             #[allow(clippy::expect_used)]

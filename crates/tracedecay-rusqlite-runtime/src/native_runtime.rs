@@ -4,7 +4,8 @@
 //! work on an Asupersync runtime so accepted work outlives a cancelled request.
 //! Callers that already run on a native runtime use it. Every other caller
 //! (the Tokio daemon, CLI commands, and Tokio tests) shares one process
-//! runtime, started on first use. Callers only await native join handles and
+//! runtime: the one the host [`install`]s at startup, or a default one started
+//! on first use when the host never installs. Callers only await native join handles and
 //! channel receivers, which wake through ordinary `Waker`s, so a foreign
 //! executor never blocks on the native runtime.
 
@@ -14,14 +15,15 @@ use std::sync::OnceLock;
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
-use asupersync::runtime::{JoinError, Runtime, RuntimeBuilder, RuntimeHandle};
+use asupersync::runtime::{JoinError, RuntimeHandle};
+pub use asupersync::runtime::{Runtime, RuntimeBuilder};
 use asupersync::types::PanicPayload;
 use asupersync::{Budget, Cx};
 use futures_util::future::{AbortHandle, Aborted, BoxFuture, FutureExt, Shared, abortable};
 
 /// Tokio's default blocking-pool ceiling. Shard closes and SQL reads park a
 /// blocking thread for their whole duration.
-const MAX_BLOCKING_THREADS: usize = 512;
+pub const MAX_BLOCKING_THREADS: usize = 512;
 
 static PROCESS_RUNTIME: OnceLock<Result<Runtime, String>> = OnceLock::new();
 
@@ -62,29 +64,43 @@ pub fn block_on<F: Future>(future: F) -> Result<F::Output, String> {
     Ok(started_process_runtime()?.block_on(future))
 }
 
-/// Runs `work` on the runtime's blocking pool and awaits its result.
+/// Queues `work` on the runtime's blocking pool now, at the call, and returns
+/// a future of its result, like Tokio's `spawn_blocking`.
 ///
 /// The work is owned by the runtime, not by the caller's region: cancelling or
-/// dropping the caller abandons only the wait. Work spawned through a request
-/// `Cx` can instead be cancelled with that region before it starts, which
-/// would strand anything the caller had already queued for it.
-pub async fn spawn_blocking<T, F>(work: F) -> Result<T, String>
+/// dropping the returned future abandons only the wait, and work whose future
+/// is never polled still runs. Work spawned through a request `Cx` can instead
+/// be cancelled with that region before it starts, which would strand anything
+/// the caller had already queued for it.
+pub fn spawn_blocking<T, F>(work: F) -> impl Future<Output = Result<T, String>> + Send + 'static
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let queued = queue_blocking(work);
+    async move {
+        let (cx, mut receiver) = queued?;
+        receiver
+            .recv(&cx)
+            .await
+            .map_err(|error| format!("native blocking work ended without a result: {error}"))
+    }
+}
+
+fn queue_blocking<T, F>(work: F) -> Result<(Cx, asupersync::channel::oneshot::Receiver<T>), String>
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
     let runtime = handle().ok_or("native execution runtime unavailable")?;
     let cx = cx().ok_or("native execution context unavailable")?;
-    let (sender, mut receiver) = asupersync::channel::oneshot::channel();
+    let (sender, receiver) = asupersync::channel::oneshot::channel();
     runtime
         .spawn_blocking(move || {
             let _ = sender.send_blocking(work());
         })
         .ok_or("native blocking pool unavailable")?;
-    receiver
-        .recv(&cx)
-        .await
-        .map_err(|error| format!("native blocking work ended without a result: {error}"))
+    Ok((cx, receiver))
 }
 
 /// Completes at `deadline` on a native timer task, so a foreign executor never
@@ -225,21 +241,54 @@ impl<T: Clone + Send + Sync + 'static> NativeTask<T> {
     }
 }
 
+/// Why [`install`] refused a runtime.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum InstallError {
+    /// A native helper already started the default runtime, or a runtime was
+    /// already installed. Helpers would otherwise run on a runtime the host did
+    /// not configure.
+    #[error("native execution runtime already started")]
+    AlreadyStarted,
+    #[error("{0}")]
+    StartFailed(String),
+}
+
+/// Builds `builder` and makes it the process runtime every helper here uses.
+/// A host installs it at startup, before any native helper runs; a host that
+/// never installs gets a default runtime on first use.
+pub fn install(builder: RuntimeBuilder) -> Result<&'static Runtime, InstallError> {
+    let mut installed = false;
+    let runtime = PROCESS_RUNTIME.get_or_init(|| {
+        installed = true;
+        start(builder)
+    });
+    if !installed {
+        return Err(InstallError::AlreadyStarted);
+    }
+    runtime
+        .as_ref()
+        .map_err(|message| InstallError::StartFailed(message.clone()))
+}
+
 fn started_process_runtime() -> Result<&'static Runtime, String> {
     PROCESS_RUNTIME
         .get_or_init(|| {
-            RuntimeBuilder::multi_thread()
-                .thread_name_prefix("tracedecay-native")
-                .blocking_threads(1, MAX_BLOCKING_THREADS)
-                .build()
-                .map_err(|error| {
-                    let message = format!("native execution runtime failed to start: {error}");
-                    tracing::error!(%message);
-                    message
-                })
+            start(
+                RuntimeBuilder::multi_thread()
+                    .thread_name_prefix("tracedecay-native")
+                    .blocking_threads(1, MAX_BLOCKING_THREADS),
+            )
         })
         .as_ref()
         .map_err(Clone::clone)
+}
+
+fn start(builder: RuntimeBuilder) -> Result<Runtime, String> {
+    builder.build().map_err(|error| {
+        let message = format!("native execution runtime failed to start: {error}");
+        tracing::error!(%message);
+        message
+    })
 }
 
 #[cfg(test)]
@@ -452,6 +501,19 @@ mod tests {
         assert_eq!(blocking.join(&cx).await.expect("native blocking join"), 7);
     }
 
+    #[test]
+    fn blocking_work_starts_at_the_call_even_when_never_awaited() {
+        let (ran, settled) = std::sync::mpsc::channel::<()>();
+        drop(spawn_blocking(move || {
+            let _ = ran.send(());
+        }));
+        assert_eq!(
+            settled.recv_timeout(Duration::from_secs(10)),
+            Ok(()),
+            "work must run although its result future was dropped unpolled"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn foreign_executor_wakes_at_a_native_deadline() {
         let deadline = Instant::now() + Duration::from_millis(50);
@@ -516,6 +578,15 @@ mod tests {
                 .recv_timeout(Duration::from_secs(5))
                 .expect("queued work must still run after its caller's region is cancelled");
         });
+    }
+
+    #[test]
+    fn install_after_the_default_runtime_started_is_refused() {
+        process_runtime().expect("default process runtime");
+        assert_eq!(
+            install(RuntimeBuilder::multi_thread()).err(),
+            Some(InstallError::AlreadyStarted)
+        );
     }
 
     #[test]

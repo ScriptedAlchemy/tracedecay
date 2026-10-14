@@ -32,6 +32,7 @@ use tracedecay_lsp::{
     run_typescript_compiler, typescript_build_info_program, typescript_file_owner,
     typescript_install_command, typescript_projects,
 };
+use tracedecay_runtime_core::native_runtime;
 
 use crate::diagnose::{Diagnostic, Severity};
 use crate::diagnostics_publication::{
@@ -359,7 +360,11 @@ async fn check_projects(
     if stale.is_empty() {
         return BTreeMap::new();
     }
-    if let Err(error) = tokio::fs::create_dir_all(build_info_dir).await {
+    let build_info = build_info_dir.to_path_buf();
+    if let Err(error) = native_runtime::spawn_blocking(move || std::fs::create_dir_all(build_info))
+        .await
+        .unwrap_or_else(|error| Err(std::io::Error::other(error)))
+    {
         let reason = format!(
             "cannot create the TypeScript build-info directory '{}': {error}",
             build_info_dir.display()

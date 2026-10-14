@@ -136,6 +136,7 @@ pub struct ObservabilityRollupRetentionReceiptV1 {
     pub expired_generations: u64,
     pub expired_journal_entries: u64,
     pub expired_dirty_days: u64,
+    pub advanced_frontiers: u64,
 }
 
 #[derive(Clone)]

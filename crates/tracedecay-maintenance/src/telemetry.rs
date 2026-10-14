@@ -586,6 +586,7 @@ impl StoreTelemetrySamplingRegistry {
         &self,
         active_paths: &BTreeSet<PathBuf>,
         sampled_paths: &BTreeSet<PathBuf>,
+        cancellation: &tracedecay_runtime_core::cancellation::CancellationToken,
     ) -> StoreTelemetrySamplingOutcome {
         let ports = {
             let mut ports = self
@@ -601,6 +602,9 @@ impl StoreTelemetrySamplingRegistry {
         };
         let mut outcome = StoreTelemetrySamplingOutcome::default();
         for cached in ports {
+            if cancellation.is_cancelled() {
+                break;
+            }
             let Ok(context) = storage_telemetry_request_context(cached.scope.clone()) else {
                 outcome.unavailable = outcome.unavailable.saturating_add(1);
                 continue;
