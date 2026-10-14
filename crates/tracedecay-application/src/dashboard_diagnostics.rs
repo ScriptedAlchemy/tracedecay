@@ -13,7 +13,7 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tracedecay_contracts::{ApplicationOperation, CancellationSignal, Deadline, RequestId};
 use tracedecay_domain::{ManifestDigest, canonical_sha256};
-use tracedecay_runtime_core::native_runtime::NativeTask;
+use tracedecay_runtime_core::native_runtime::{self, NativeTask};
 
 use tracedecay_code_index::graph_projection::CodeGraphInteractiveReader;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -484,15 +484,18 @@ impl DashboardDiagnosticsAuthorityV1 {
             return;
         }
         let authority = self.clone();
-        // Stays on Tokio: opening the graph reaches the code index's Tokio
-        // blocking pool and timers (`project_reads.rs`).
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(750)).await;
+        let started = NativeTask::spawn(async move {
+            // Without a timer the backfill starts at once rather than never.
+            let _ =
+                native_runtime::sleep_until(std::time::Instant::now() + Duration::from_millis(750))
+                    .await;
             for language in languages {
                 let _ = authority.refresh_language(&request, &language).await;
-                tokio::task::yield_now().await;
             }
         });
+        if let Err(error) = started {
+            tracing::warn!(%error, "code diagnostics idle backfill did not start");
+        }
     }
 }
 
