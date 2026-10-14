@@ -1,14 +1,14 @@
 //! Broker-side MCP transport over the daemon protocol's native stream.
 //!
-//! The transport owns bounded framing, RMCP translation, response revocation,
-//! and delivery settlement at the write-and-flush boundary. Daemon-owned
+//! The transport owns bounded framing, decoding into the `rmcp` wire model,
+//! response revocation, and delivery settlement at the write-and-flush
+//! boundary. Daemon-owned
 //! lifecycle authorities implement the narrow collaboration traits below.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use rmcp::model::{ClientNotification, ClientRequest, ProtocolVersion, ServerConfig, ServerResult};
-use rmcp::service::{NotificationContext, RequestContext};
+use rmcp::model::{ClientJsonRpcMessage, ServerJsonRpcMessage};
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
 use tracedecay_daemon_protocol::{BrokerReadHalf, BrokerStream, BrokerWriteHalf};
@@ -118,17 +118,12 @@ struct ActiveRmcpRequest {
 }
 
 #[derive(Clone)]
-struct BrokerResponseWriter {
+pub(crate) struct BrokerResponseWriter {
     writer: Arc<tokio::sync::Mutex<Option<BrokerWriteHalf>>>,
     active_requests: ActiveRmcpRequests,
     response_lifecycle: Option<Arc<dyn BrokerResponseLifecycle>>,
     selected_project_responses: Option<Arc<dyn BrokerSelectedResponseAuthority>>,
     work_delivery_settlement: Option<Arc<dyn BrokerWorkDeliverySettlement>>,
-}
-
-struct BrokerStreamService<S> {
-    inner: S,
-    responses: BrokerResponseWriter,
 }
 
 enum RmcpResponseWrite {
@@ -167,7 +162,7 @@ impl BrokerStreamTransport {
         }
     }
 
-    fn response_writer(&self) -> BrokerResponseWriter {
+    pub(crate) fn response_writer(&self) -> BrokerResponseWriter {
         BrokerResponseWriter {
             writer: Arc::clone(&self.writer),
             active_requests: Arc::clone(&self.active_requests),
@@ -175,24 +170,6 @@ impl BrokerStreamTransport {
             selected_project_responses: self.selected_project_responses.clone(),
             work_delivery_settlement: self.work_delivery_settlement.clone(),
         }
-    }
-
-    /// RMCP suppresses cancelled responses; the broker still owes a settled terminal.
-    pub async fn serve<S>(
-        self,
-        service: S,
-    ) -> Result<
-        rmcp::service::RunningService<rmcp::RoleServer, impl rmcp::Service<rmcp::RoleServer>>,
-        Box<rmcp::service::ServerInitializeError>,
-    >
-    where
-        S: rmcp::Service<rmcp::RoleServer>,
-    {
-        let service = BrokerStreamService {
-            inner: service,
-            responses: self.response_writer(),
-        };
-        crate::server::serve_guarded_rmcp_connection(service, self).await
     }
 
     pub fn push_replay(&mut self, line: String) -> std::io::Result<()> {
@@ -249,9 +226,7 @@ impl BrokerStreamTransport {
             .flatten()
     }
 
-    fn outbound_response_id(
-        item: &rmcp::service::TxJsonRpcMessage<rmcp::RoleServer>,
-    ) -> Option<serde_json::Value> {
+    fn outbound_response_id(item: &ServerJsonRpcMessage) -> Option<serde_json::Value> {
         match item {
             rmcp::model::JsonRpcMessage::Response(response) => {
                 Some(response.id.clone().into_json_value())
@@ -266,7 +241,7 @@ impl BrokerStreamTransport {
     }
 
     fn typed_response_request_key(
-        item: &rmcp::service::TxJsonRpcMessage<rmcp::RoleServer>,
+        item: &ServerJsonRpcMessage,
         response_id: Option<&serde_json::Value>,
     ) -> Option<String> {
         match item {
@@ -404,9 +379,9 @@ impl BrokerStreamTransport {
 }
 
 impl BrokerResponseWriter {
-    fn send(
+    pub(crate) fn send(
         self,
-        item: rmcp::service::TxJsonRpcMessage<rmcp::RoleServer>,
+        item: ServerJsonRpcMessage,
     ) -> impl std::future::Future<Output = std::result::Result<(), std::io::Error>> + Send + 'static
     {
         let writer = Arc::clone(&self.writer);
@@ -543,50 +518,6 @@ impl BrokerResponseWriter {
     }
 }
 
-impl<S: rmcp::Service<rmcp::RoleServer>> rmcp::Service<rmcp::RoleServer>
-    for BrokerStreamService<S>
-{
-    async fn handle_request(
-        &self,
-        request: ClientRequest,
-        context: RequestContext<rmcp::RoleServer>,
-    ) -> Result<ServerResult, rmcp::ErrorData> {
-        let id = context.id.clone();
-        let result = self.inner.handle_request(request, context).await;
-        let response = match &result {
-            Ok(result) => rmcp::model::JsonRpcMessage::response(result.clone(), id),
-            Err(error) => rmcp::model::JsonRpcMessage::error(error.clone(), Some(id)),
-        };
-        self.responses
-            .clone()
-            .send(response)
-            .await
-            .map_err(|error| {
-                rmcp::ErrorData::internal_error(
-                    format!("broker response delivery failed: {error}"),
-                    None,
-                )
-            })?;
-        result
-    }
-
-    fn handle_notification(
-        &self,
-        notification: ClientNotification,
-        context: NotificationContext<rmcp::RoleServer>,
-    ) -> impl std::future::Future<Output = Result<(), rmcp::ErrorData>> + Send + '_ {
-        self.inner.handle_notification(notification, context)
-    }
-
-    fn get_info(&self) -> ServerConfig {
-        self.inner.get_info()
-    }
-
-    fn supported_protocol_versions(&self) -> std::borrow::Cow<'static, [ProtocolVersion]> {
-        self.inner.supported_protocol_versions()
-    }
-}
-
 impl McpTransport for BrokerStreamTransport {
     async fn read_line(&mut self) -> std::io::Result<Option<String>> {
         if let Some(line) = self.replay.pop_front() {
@@ -624,27 +555,29 @@ impl McpTransport for BrokerStreamTransport {
     }
 }
 
-impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
-    type Error = std::io::Error;
-
-    fn send(
-        &mut self,
-        item: rmcp::service::TxJsonRpcMessage<rmcp::RoleServer>,
+impl BrokerStreamTransport {
+    /// Writes one server message through the response write boundary.
+    pub fn send(
+        &self,
+        item: ServerJsonRpcMessage,
     ) -> impl std::future::Future<Output = std::io::Result<()>> + Send + 'static {
         self.response_writer().send(item)
     }
 
+    /// The next decoded client message, or `None` once the connection has
+    /// nothing left to deliver. Undecodable frames are answered here and
+    /// skipped. Cancel-safe: the bounded reader keeps a partial frame.
     #[tracing::instrument(name = "daemon.broker.receive", level = "trace", skip_all)]
-    async fn receive(&mut self) -> Option<rmcp::service::RxJsonRpcMessage<rmcp::RoleServer>> {
+    pub async fn receive(&mut self) -> Option<ClientJsonRpcMessage> {
         loop {
             let line = match self.read_line().await {
                 Ok(Some(line)) => line,
                 Ok(None) => {
                     // A one-shot client may half-close its request side while
-                    // still waiting for an in-flight response. Keep rmcp's
-                    // receive loop alive until the native transport observes
-                    // the peer's full close; otherwise rmcp tears down the
-                    // service and strands the request permit. Once every
+                    // still waiting for an in-flight response. Keep the
+                    // session's receive loop alive until the native transport
+                    // observes the peer's full close; otherwise the session
+                    // ends and strands the request permit. Once every
                     // accepted request has settled, though, the half-open
                     // connection has nothing left to deliver, and a client
                     // that reads until daemon EOF, a cancelling client does,
@@ -692,11 +625,6 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
                 }
             }
         }
-    }
-
-    async fn close(&mut self) -> std::result::Result<(), Self::Error> {
-        self.writer.lock().await.take();
-        Ok(())
     }
 }
 

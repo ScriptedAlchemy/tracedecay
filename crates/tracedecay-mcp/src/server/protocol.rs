@@ -48,10 +48,7 @@ pub fn initialize_result(
     instructions: &str,
     requested_protocol: Option<&str>,
 ) -> Value {
-    let protocol = ProtocolVersion::known_up_to(&ProtocolVersion::LATEST)
-        .iter()
-        .find(|known| Some(known.as_str()) == requested_protocol)
-        .unwrap_or(&ProtocolVersion::LATEST);
+    let protocol = requested_protocol.map_or(ProtocolVersion::LATEST, negotiate_protocol_version);
     json!({
         "protocolVersion": protocol,
         "capabilities": {
@@ -66,6 +63,17 @@ pub fn initialize_result(
         },
         "instructions": instructions,
     })
+}
+
+/// The version `initialize` agrees to: the client's request when it is a
+/// known revision that still has an `initialize` handshake, else the newest
+/// such revision (`2026-07-28` replaced the handshake with per-request context).
+pub(crate) fn negotiate_protocol_version(requested: &str) -> ProtocolVersion {
+    ProtocolVersion::known_up_to(&ProtocolVersion::LATEST)
+        .iter()
+        .find(|known| known.as_str() == requested)
+        .cloned()
+        .unwrap_or(ProtocolVersion::LATEST)
 }
 
 /// The protocol version a request names in its own `params._meta`.
