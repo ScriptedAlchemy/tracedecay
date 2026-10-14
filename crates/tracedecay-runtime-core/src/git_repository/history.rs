@@ -346,7 +346,7 @@ fn commit_touches_path(
         .for_each_to_obtain_tree(&tree, |change| {
             if cancellation.is_cancelled() {
                 stopped = Some(GitHistoryTermination::Cancelled);
-                return Ok::<_, std::convert::Infallible>(ControlFlow::Break(()));
+                return Ok(ControlFlow::Break(()));
             }
             use gix::object::tree::diff::Change;
             match change {
@@ -474,7 +474,7 @@ fn bounded_tree_inventory(
     };
     match tree.traverse().breadthfirst(&mut visitor) {
         Ok(()) => Ok(None),
-        Err(gix::traverse::tree::breadthfirst::Error::Cancelled) => Ok(visitor.termination.take()),
+        Err(error) if error.is_cancelled() => Ok(visitor.termination.take()),
         Err(error) => Err(operation("history", error)),
     }
 }

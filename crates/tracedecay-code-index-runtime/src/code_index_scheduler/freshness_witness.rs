@@ -455,10 +455,10 @@ impl Delegate for DirectoryEvidenceV1 {
             worktree_root_is_repository,
         );
         if recurse && self.settled {
-            let directory = self
-                .root
-                .join(gix::path::from_bstr(entry.rela_path.as_ref()));
-            self.record_directory(directory);
+            match gix::path::from_bstr(entry.rela_path.as_ref()) {
+                Ok(relative) => self.record_directory(self.root.join(relative)),
+                Err(_) => self.settled = false,
+            }
         }
         recurse
     }
@@ -604,7 +604,7 @@ impl SourceSweepCacheV1 {
             }
         };
         let present_unrepresentable = stat_concurrently(&unrepresentable, |git_path| {
-            gix::path::try_from_byte_slice(git_path)
+            gix::path::from_byte_slice(git_path)
                 .is_ok_and(|relative| project_root.join(relative).is_file())
         })
         .into_iter()

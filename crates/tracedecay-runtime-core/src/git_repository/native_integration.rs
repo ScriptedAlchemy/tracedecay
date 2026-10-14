@@ -223,6 +223,12 @@ impl GitRepositoryAuthority {
         let merge_base = repository
             .merge_base(source_tip, destination_tip)
             .map_err(|error| operation("native integration merge base", error))?
+            .ok_or_else(|| {
+                operation(
+                    "native integration merge base",
+                    format!("no merge-base between commits {source_tip} and {destination_tip}"),
+                )
+            })?
             .detach();
         let merge_base_tree = repository
             .find_commit(merge_base)
