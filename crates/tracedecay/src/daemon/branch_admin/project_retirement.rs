@@ -1,7 +1,7 @@
 use super::{StoreAdministration, StoreOwnerKey};
 use std::time::Instant;
 
-use tracedecay_runtime_core::native_runtime::{self, TimeoutError};
+use tracedecay_runtime_core::native_runtime::{self, NativeTask, NativeTaskOutcome, TimeoutError};
 use tracedecay_store_runtime::{ShutdownStatus, ShutdownTaskOutcome, ShutdownTaskReceipt};
 
 /// Drops the process-global Context Scout owner when this project's other
@@ -24,7 +24,6 @@ pub(crate) fn retire_registered_context_scout_owner(
 pub(super) struct ProjectServerRetirement {
     pub(super) owner: StoreOwnerKey,
     completion: tokio::sync::watch::Receiver<ProjectServerRetirementStatus>,
-    _task: tokio::task::JoinHandle<()>,
 }
 
 pub(crate) struct ProjectServerCapacityRetirementCompletion {
@@ -95,7 +94,11 @@ impl ProjectServerRetirementAdmission<'_> {
         Task: std::future::Future<Output = ()> + Send + 'static,
     {
         let task = tokio::spawn(retirement);
-        track_project_server_retirement_after_admission(&mut self.retirements, owner, task, false);
+        track_project_server_retirement_after_admission(
+            &mut self.retirements,
+            owner,
+            tokio_retirement_status(task, false),
+        );
     }
 
     /// Track one capacity retirement whose outcome the retiring open awaits.
@@ -114,11 +117,10 @@ impl ProjectServerRetirementAdmission<'_> {
                 ProjectServerRetirementStatus::Failed(_) => tracked.owner != owner,
                 ProjectServerRetirementStatus::Pending => true,
             });
-        let (task, completion) = spawn_fallible_retirement(retirement);
+        let completion = spawn_fallible_retirement(retirement);
         self.retirements.push(ProjectServerRetirement {
             owner,
             completion: completion.clone(),
-            _task: task,
         });
         ProjectServerCapacityRetirementCompletion { completion }
     }
@@ -126,10 +128,7 @@ impl ProjectServerRetirementAdmission<'_> {
 
 fn spawn_fallible_retirement<Task>(
     retirement: Task,
-) -> (
-    tokio::task::JoinHandle<()>,
-    tokio::sync::watch::Receiver<ProjectServerRetirementStatus>,
-)
+) -> tokio::sync::watch::Receiver<ProjectServerRetirementStatus>
 where
     Task: std::future::Future<Output = tracedecay_domain::errors::Result<()>> + Send + 'static,
 {
@@ -139,14 +138,14 @@ where
         completion: task_completion,
         terminal: false,
     };
-    let task = tokio::spawn(async move {
+    tokio::spawn(async move {
         let status = match retirement.await {
             Ok(()) => ProjectServerRetirementStatus::Clean,
             Err(error) => ProjectServerRetirementStatus::Failed(error.to_string()),
         };
         finalizer.complete(status);
     });
-    (task, completion)
+    completion
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -202,11 +201,39 @@ async fn wait_for_project_server_retirement(
     }
 }
 
+async fn tokio_retirement_status(
+    task: tokio::task::JoinHandle<()>,
+    cancelled_is_clean: bool,
+) -> ProjectServerRetirementStatus {
+    match task.await {
+        Ok(()) => ProjectServerRetirementStatus::Clean,
+        Err(error) if cancelled_is_clean && error.is_cancelled() => {
+            ProjectServerRetirementStatus::Clean
+        }
+        Err(error) => ProjectServerRetirementStatus::Failed(error.to_string()),
+    }
+}
+
+/// The receipt of a native owner aborted for retirement: its cancellation is
+/// the clean outcome.
+async fn aborted_native_retirement_status(task: NativeTask<()>) -> ProjectServerRetirementStatus {
+    match task.wait().await {
+        NativeTaskOutcome::Completed(()) | NativeTaskOutcome::Cancelled => {
+            ProjectServerRetirementStatus::Clean
+        }
+        NativeTaskOutcome::Panicked(panic) => {
+            ProjectServerRetirementStatus::Failed(format!("task panicked: {panic}"))
+        }
+    }
+}
+
+/// Records one retirement and publishes `joined`'s status from a native
+/// task. When the native runtime refuses that task, its finalizer publishes
+/// a failed receipt.
 fn track_project_server_retirement_after_admission(
     retirements: &mut Vec<ProjectServerRetirement>,
     owner: StoreOwnerKey,
-    task: tokio::task::JoinHandle<()>,
-    cancelled_is_clean: bool,
+    joined: impl std::future::Future<Output = ProjectServerRetirementStatus> + Send + 'static,
 ) {
     retirements.retain(|retirement| {
         !matches!(
@@ -220,36 +247,20 @@ fn track_project_server_retirement_after_admission(
         completion: task_completion,
         terminal: false,
     };
-    let task = tokio::spawn(async move {
-        let status = match task.await {
-            Ok(()) => ProjectServerRetirementStatus::Clean,
-            Err(error) if cancelled_is_clean && error.is_cancelled() => {
-                ProjectServerRetirementStatus::Clean
-            }
-            Err(error) => ProjectServerRetirementStatus::Failed(error.to_string()),
-        };
-        finalizer.complete(status);
-    });
-    retirements.push(ProjectServerRetirement {
-        owner,
-        completion,
-        _task: task,
-    });
+    // Detached: the receipt, not the task, is what callers wait on.
+    if let Err(error) = NativeTask::spawn(async move { finalizer.complete(joined.await) }) {
+        tracing::error!(%error, "project server retirement tracker was refused");
+    }
+    retirements.push(ProjectServerRetirement { owner, completion });
 }
 
 async fn track_project_server_retirement(
     retirements: &tokio::sync::Mutex<Vec<ProjectServerRetirement>>,
     owner: StoreOwnerKey,
-    task: tokio::task::JoinHandle<()>,
-    cancelled_is_clean: bool,
+    joined: impl std::future::Future<Output = ProjectServerRetirementStatus> + Send + 'static,
 ) {
     let mut retirements = retirements.lock().await;
-    track_project_server_retirement_after_admission(
-        &mut retirements,
-        owner,
-        task,
-        cancelled_is_clean,
-    );
+    track_project_server_retirement_after_admission(&mut retirements, owner, joined);
 }
 
 pub(super) async fn track_retirement_task(
@@ -257,7 +268,7 @@ pub(super) async fn track_retirement_task(
     owner: StoreOwnerKey,
     task: tokio::task::JoinHandle<()>,
 ) {
-    track_project_server_retirement(retirements, owner, task, false).await;
+    track_project_server_retirement(retirements, owner, tokio_retirement_status(task, false)).await;
 }
 
 pub(super) async fn track_aborted_retirement_task(
@@ -265,7 +276,16 @@ pub(super) async fn track_aborted_retirement_task(
     owner: StoreOwnerKey,
     task: tokio::task::JoinHandle<()>,
 ) {
-    track_project_server_retirement(retirements, owner, task, true).await;
+    track_project_server_retirement(retirements, owner, tokio_retirement_status(task, true)).await;
+}
+
+pub(super) async fn track_aborted_native_retirement_task(
+    retirements: &tokio::sync::Mutex<Vec<ProjectServerRetirement>>,
+    owner: StoreOwnerKey,
+    task: NativeTask<()>,
+) {
+    track_project_server_retirement(retirements, owner, aborted_native_retirement_status(task))
+        .await;
 }
 
 async fn shutdown_receipt(
@@ -350,7 +370,12 @@ impl StoreAdministration {
         owner: StoreOwnerKey,
         task: tokio::task::JoinHandle<()>,
     ) {
-        track_project_server_retirement(&self.project_server_retirements, owner, task, false).await;
+        track_project_server_retirement(
+            &self.project_server_retirements,
+            owner,
+            tokio_retirement_status(task, false),
+        )
+        .await;
     }
 
     // pub(crate): the test-transport production harness joins retirements from
@@ -1048,5 +1073,57 @@ mod tests {
             idle_witness.upgrade().is_none(),
             "joined retirement must release the exact evicted server"
         );
+    }
+
+    /// The tracker of a Tokio-owned retirement runs on the native runtime, so
+    /// a caller with no Tokio runtime can track and settle it.
+    #[test]
+    fn a_tokio_retirement_is_tracked_and_settled_without_a_tokio_runtime() {
+        let tokio = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .expect("tokio runtime");
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio.spawn(async move {
+            let _ = released.await;
+        });
+        let hazards = crate::test_support::native_runtime_hazards();
+        let receipt = native_runtime::block_on(async {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            let administration = StoreAdministration::default();
+            let retirements = &administration.project_server_retirements;
+            track_retirement_task(retirements, owner("project-a"), task).await;
+            let _ = release.send(());
+            settle_project_retirements(
+                retirements,
+                std::path::Path::new("/profile"),
+                "project-a",
+                Instant::now() + std::time::Duration::from_secs(5),
+            )
+            .await
+        })
+        .expect("native runtime");
+        assert_eq!(crate::test_support::native_runtime_hazards(), hazards);
+        assert_eq!(receipt.status(), ShutdownStatus::Clean);
+    }
+
+    #[test]
+    fn an_aborted_native_owner_settles_its_retirement_clean() {
+        let receipt = native_runtime::block_on(async {
+            let administration = StoreAdministration::default();
+            let retirements = &administration.project_server_retirements;
+            let task = NativeTask::spawn(std::future::pending::<()>()).expect("native task");
+            task.abort();
+            track_aborted_native_retirement_task(retirements, owner("project-a"), task).await;
+            settle_project_retirements(
+                retirements,
+                std::path::Path::new("/profile"),
+                "project-a",
+                Instant::now() + std::time::Duration::from_secs(5),
+            )
+            .await
+        })
+        .expect("native runtime");
+        assert_eq!(receipt.status(), ShutdownStatus::Clean);
     }
 }

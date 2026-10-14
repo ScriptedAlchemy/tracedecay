@@ -208,9 +208,9 @@ impl DaemonEngine {
 
     pub(super) async fn with_pr_autotrack_task(
         self,
-        task: crate::daemon::pr_autotrack::PrAutotrackTask,
+        task: Option<crate::daemon::pr_autotrack::PrAutotrackTask>,
     ) -> Self {
-        *self.pr_autotrack_task.lock().await = Some(task);
+        *self.pr_autotrack_task.lock().await = task;
         self
     }
 

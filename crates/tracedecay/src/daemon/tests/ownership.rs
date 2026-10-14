@@ -1325,8 +1325,7 @@ async fn project_rekey_awaits_stale_automation_owner_before_replacement() {
     };
     let mut new = old.clone();
     new.owner.graph_db_path = PathBuf::from("/store/new.db");
-    let task = tokio::spawn(std::future::pending::<()>());
-    let stale_task = task.abort_handle();
+    let (task, stale_task) = probed_native_test_task(std::future::pending::<()>());
     engine
         .store_administration
         .automation_schedulers()
@@ -1366,11 +1365,11 @@ async fn shutdown_waits_for_blocked_automation_retirement_reaper_and_is_idempote
         project_root: PathBuf::from("/project"),
         scope_prefix: None,
     };
-    let (task, started_rx, completed_rx, release) = spawn_noncooperative_test_task();
+    let (task, stale_task, started_rx, completed_rx, release) =
+        spawn_noncooperative_native_test_task();
     started_rx
         .await
         .expect("noncooperative automation owner started");
-    let stale_task = task.abort_handle();
     engine
         .store_administration
         .automation_schedulers()
@@ -1454,9 +1453,9 @@ async fn automation_retirement_timeout_retains_owner_tombstone_until_join_finish
     };
     let mut new = old.clone();
     new.owner.graph_db_path = PathBuf::from("/store/new.db");
-    let (task, started_rx, completed_rx, release) = spawn_noncooperative_test_task();
+    let (task, stale_task, started_rx, completed_rx, release) =
+        spawn_noncooperative_native_test_task();
     started_rx.await.expect("noncooperative owner started");
-    let stale_task = task.abort_handle();
     engine
         .store_administration
         .automation_schedulers()
@@ -1595,7 +1594,7 @@ async fn released_automation_tombstone_allows_one_eventual_replacement() {
     let mut old = new.clone();
     old.owner.graph_db_path = old.owner.graph_db_path.with_extension("retiring.db");
 
-    let (task, started_rx, completed_rx, release) = spawn_noncooperative_test_task();
+    let (task, _, started_rx, completed_rx, release) = spawn_noncooperative_native_test_task();
     tokio::time::timeout(std::time::Duration::from_secs(2), started_rx)
         .await
         .expect("noncooperative owner start timed out")

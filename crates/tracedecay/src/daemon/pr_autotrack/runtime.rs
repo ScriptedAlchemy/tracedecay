@@ -25,7 +25,7 @@ const BASE_TICK: Duration = Duration::from_mins(1);
 /// before joining the task.
 pub(crate) struct PrAutotrackTask {
     cancellation: CancellationToken,
-    task: tokio::task::JoinHandle<()>,
+    task: native_runtime::NativeTask<()>,
 }
 
 impl PrAutotrackTask {
@@ -33,18 +33,21 @@ impl PrAutotrackTask {
         self.cancellation.clone()
     }
 
-    pub(crate) async fn shutdown(mut self) {
+    pub(crate) async fn shutdown(self) {
         self.cancellation.cancel();
-        if let Err(error) = (&mut self.task).await {
-            log_daemon_event(
-                "pr_autotrack",
-                &[
-                    ("action", "shutdown".to_string()),
-                    ("outcome", "task_join_failed".to_string()),
-                    ("reason", error.to_string()),
-                ],
-            );
-        }
+        let reason = match self.task.wait().await {
+            native_runtime::NativeTaskOutcome::Completed(()) => return,
+            native_runtime::NativeTaskOutcome::Cancelled => "task cancelled".to_string(),
+            native_runtime::NativeTaskOutcome::Panicked(panic) => panic.to_string(),
+        };
+        log_daemon_event(
+            "pr_autotrack",
+            &[
+                ("action", "shutdown".to_string()),
+                ("outcome", "task_join_failed".to_string()),
+                ("reason", reason),
+            ],
+        );
     }
 }
 
@@ -56,19 +59,20 @@ impl Drop for PrAutotrackTask {
 
 /// Spawns the PR-autotrack poll loop with the daemon's shared store coordinator
 /// and the retained code-index scheduler used for PR-head worktree activation.
+/// The loop runs on the native runtime; the error is that runtime's refusal.
 pub(crate) fn spawn_with_administration(
     administration: StoreAdministration,
     schedulers: CodeIndexSchedulerRegistryV1,
-) -> PrAutotrackTask {
+) -> Result<PrAutotrackTask, String> {
     let cancellation = CancellationToken::new();
     let task_cancellation = cancellation.clone();
-    let task = tokio::spawn(tracing::Instrument::instrument(
+    let task = native_runtime::NativeTask::spawn(tracing::Instrument::instrument(
         async move {
             run(administration, schedulers, task_cancellation).await;
         },
         tracing::trace_span!("daemon.pr_autotrack.loop"),
-    ));
-    PrAutotrackTask { cancellation, task }
+    ))?;
+    Ok(PrAutotrackTask { cancellation, task })
 }
 
 async fn run(
