@@ -946,11 +946,8 @@ mod tests {
             listener: BrokerListener,
             stdout: TrickleStdout,
         ) -> (Option<Vec<u8>>, Vec<String>) {
-            let (reader, mut writer) = listener
-                .accept()
-                .await
-                .expect("accept bridge connection")
-                .into_split();
+            let (reader, mut writer) =
+                tokio::io::split(listener.accept().await.expect("accept bridge connection"));
             let mut lines = BufReader::new(reader).lines();
             let preface = lines.next_line().await.expect("read preface");
             let preface = preface.expect("auth preface");
