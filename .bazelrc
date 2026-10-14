@@ -64,6 +64,7 @@ build:clippy --aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect
 # Lint outputs need dependency metadata, not linked test executables.
 build:clippy --output_groups=clippy_checks
 build:clippy --@rules_rust//rust/settings:clippy_flag=-Dwarnings
+build:clippy --@rules_rust//rust/settings:clippy.toml=//:clippy.toml
 
 # Externals return to opt-level 3 over the perf overrides below.
 build:release --compilation_mode=opt

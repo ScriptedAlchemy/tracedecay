@@ -1,4 +1,5 @@
-use rmcp::model::ProtocolVersion;
+use rmcp::model::{ProtocolVersion, RequestMetaObject};
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 /// Every JSON-RPC method surface the MCP server understands. This is the
@@ -65,6 +66,48 @@ pub fn initialize_result(
         },
         "instructions": instructions,
     })
+}
+
+/// The protocol version a request names in its own `params._meta`.
+pub fn request_protocol_version(params: Option<&Value>) -> Option<ProtocolVersion> {
+    RequestMetaObject::deserialize(params?.get("_meta")?)
+        .ok()?
+        .protocol_version()
+}
+
+/// Whether `version` is MCP `2026-07-28` or newer, the revision whose results
+/// carry `resultType` (SEP-2322) and whose cacheable results carry `ttlMs`
+/// and `cacheScope` (SEP-2549).
+pub fn speaks_2026_07_28(version: Option<&ProtocolVersion>) -> bool {
+    version.is_some_and(|version| version.as_str() >= ProtocolVersion::V_2026_07_28.as_str())
+}
+
+/// Adds the fields MCP `2026-07-28` requires to a `method` result. Stamp
+/// only an answer to a request on that revision: older revisions keep the
+/// wire shape that predates these fields, and strict peers reject them.
+///
+/// Every list and read reflects one session's catalog or one project's
+/// state, so a cacheable result is stale at once and private to its caller.
+pub fn stamp_2026_07_28_result(method: &str, result: &mut Value) {
+    let Some(result) = result.as_object_mut() else {
+        return;
+    };
+    result
+        .entry("resultType")
+        .or_insert_with(|| json!("complete"));
+    if matches!(
+        method,
+        "tools/list"
+            | "resources/list"
+            | "resources/templates/list"
+            | "resources/read"
+            | "prompts/list"
+    ) {
+        result.entry("ttlMs").or_insert_with(|| json!(0));
+        result
+            .entry("cacheScope")
+            .or_insert_with(|| json!("private"));
+    }
 }
 
 /// The `resources/list` result payload.

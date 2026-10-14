@@ -227,6 +227,10 @@ where
     S: tracing::Subscriber + Send + Sync + 'static,
 {
     install_tracing_callsite_keepalive();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the keepalive above makes this the safe scoped install"
+    )]
     tracing::subscriber::set_default(subscriber)
 }
 
