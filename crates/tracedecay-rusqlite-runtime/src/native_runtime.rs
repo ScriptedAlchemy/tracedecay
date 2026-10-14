@@ -10,7 +10,7 @@
 
 use std::pin::Pin;
 use std::sync::OnceLock;
-use std::task::{Context, Poll, ready};
+use std::task::{Context, Poll};
 use std::time::Instant;
 
 use asupersync::runtime::{Runtime, RuntimeBuilder, RuntimeHandle};
@@ -117,16 +117,15 @@ impl<T: Send + 'static> Future for Settlement<T> {
     type Output = T;
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<T> {
+        // Held outside `self` while polled: a panic unwinds it on the caller
+        // instead of leaving it for `Drop` to hand to the runtime.
         let pending = &mut self.get_mut().0;
-        let output = ready!(
-            pending
-                .as_mut()
-                .expect("settlement polled after completion")
-                .as_mut()
-                .poll(context)
-        );
-        *pending = None;
-        Poll::Ready(output)
+        let mut settlement = pending.take().expect("settlement polled after completion");
+        let poll = settlement.as_mut().poll(context);
+        if poll.is_pending() {
+            *pending = Some(settlement);
+        }
+        poll
     }
 }
 
@@ -247,6 +246,38 @@ mod tests {
             settled.recv_timeout(Duration::from_secs(10)),
             Ok(()),
             "a settlement its caller dropped must still finish"
+        );
+    }
+
+    #[test]
+    fn panicking_settlement_unwinds_on_the_caller_and_is_never_polled_again() {
+        struct PanicsWhenPolled {
+            polls: usize,
+            dropped: std::sync::mpsc::Sender<usize>,
+        }
+        impl Future for PanicsWhenPolled {
+            type Output = ();
+            fn poll(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<()> {
+                self.polls += 1;
+                panic!("settlement panicked");
+            }
+        }
+        impl Drop for PanicsWhenPolled {
+            fn drop(&mut self) {
+                let _ = self.dropped.send(self.polls);
+            }
+        }
+        let (dropped, polls) = std::sync::mpsc::channel();
+        let unwound = std::panic::catch_unwind(move || {
+            let mut settlement = settle(PanicsWhenPolled { polls: 0, dropped });
+            let _ =
+                Pin::new(&mut settlement).poll(&mut Context::from_waker(std::task::Waker::noop()));
+        });
+        assert!(unwound.is_err(), "the panic must reach the caller");
+        assert_eq!(
+            polls.recv_timeout(Duration::from_secs(10)),
+            Ok(1),
+            "a panicked settlement must not be handed to the runtime and polled again"
         );
     }
 
