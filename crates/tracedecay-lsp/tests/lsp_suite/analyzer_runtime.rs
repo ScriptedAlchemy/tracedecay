@@ -494,6 +494,28 @@ async fn stdio_client_collects_publish_diagnostics() {
     assert_eq!(diagnostics[0].code.as_deref(), Some("E_FAKE"));
 }
 
+#[test]
+fn stdio_client_collects_diagnostics_without_a_tokio_runtime() {
+    let temp = tempfile::tempdir().unwrap();
+    let script_path = temp.path().join("fake_lsp.py");
+    std::fs::write(&script_path, fake_lsp_script()).unwrap();
+
+    let diagnostics = tracedecay_runtime_core::native_runtime::block_on(
+        lsp::client::collect_document_diagnostics(
+            python_command(),
+            &[script_path.display().to_string()],
+            temp.path(),
+            vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
+            FAKE_LSP_TIMEOUT,
+        ),
+    )
+    .expect("native runtime")
+    .unwrap();
+
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].code.as_deref(), Some("E_FAKE"));
+}
+
 #[tokio::test]
 async fn stdio_client_keeps_listening_after_initial_empty_publish() {
     let temp = tempfile::tempdir().unwrap();
