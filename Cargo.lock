@@ -6068,6 +6068,7 @@ dependencies = [
  "tower",
  "tracedecay-contracts",
  "tracedecay-domain",
+ "tracedecay-rusqlite-runtime",
  "tracedecay-tool-catalog",
  "tracing",
 ]

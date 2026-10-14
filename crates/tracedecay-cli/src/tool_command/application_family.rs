@@ -11,7 +11,7 @@ use std::sync::{Mutex, PoisonError};
 use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::Value;
-use tokio::time::Instant;
+use std::time::Instant;
 use tracedecay_api::WorkOperation;
 use tracedecay_contracts::feedback::observations::FeedbackSourceEventV1;
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
@@ -126,7 +126,7 @@ pub(super) async fn dispatch_cli_family_tool(
         {
             break result;
         }
-        tokio::time::sleep(OWNER_MOUNT_RESEND_DELAY).await;
+        super::sleep_before_retry(OWNER_MOUNT_RESEND_DELAY).await?;
     };
     tracedecay_mcp::tool_errors::mark_semantic_tool_error(&mut result);
     let rendered = rendered_tool_output(&result, CliToolOutput::for_args(raw_json, &tool_args))?;

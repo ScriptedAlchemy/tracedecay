@@ -58,7 +58,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 RemoteWriterPublicationErrorV1::ProjectUnavailable
             })?;
         let replay = Arc::clone(&self.remote_replay_transaction);
-        tokio::task::spawn_blocking(move || {
+        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             publish_first_writer(
                 &storage,
                 &replay,

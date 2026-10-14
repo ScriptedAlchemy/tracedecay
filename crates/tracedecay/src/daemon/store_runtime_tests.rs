@@ -963,6 +963,45 @@ async fn republishing_a_writer_restores_a_lost_project_writer_fence_before_failo
     assert_eq!((republished, failover), (Ok(()), Ok((1, 2, true))));
 }
 
+/// The remote HTTP routes run writer publication and failover on the native
+/// blocking pool, so neither may reach Tokio from there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_writer_publication_and_failover_settle_without_an_entered_tokio_runtime() {
+    let fixture = provisioned_writer_fixture().await;
+    let promotion = fixture.promotion("request.cancel-test.native-failover");
+    let outcome = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                tracedecay_runtime_core::native_runtime::block_on(async {
+                    assert!(tokio::runtime::Handle::try_current().is_err());
+                    let published = fixture.publish().await;
+                    let promote_recovery = Arc::clone(&fixture.recovery);
+                    let promote_caller = fixture.caller.clone();
+                    let failover =
+                        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+                            assert!(tokio::runtime::Handle::try_current().is_err());
+                            promote_recovery
+                                .promote(&promotion, &promote_caller, &PromotionControl(None))
+                                .map(|committed| {
+                                    (
+                                        committed.output.previous_epoch,
+                                        committed.output.installed_epoch,
+                                    )
+                                })
+                        })
+                        .await
+                        .expect("native failover thread");
+                    (published, failover)
+                })
+                .expect("native runtime")
+            })
+            .join()
+            .expect("native caller thread")
+    });
+
+    assert_eq!(outcome, (Ok(()), Ok((1, 2))));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failover_names_the_promoted_node_credential_as_the_authority_credential() {
     let fixture = provisioned_writer_fixture().await;
