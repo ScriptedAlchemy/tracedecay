@@ -400,17 +400,6 @@ pub trait TranscriptSource: Send + Sync {
     }
 }
 
-/// Completes after `duration` on a native timer task, so a Tokio caller never
-/// polls an Asupersync timer. Dropping the returned future cancels the timer.
-pub(crate) async fn native_sleep(duration: std::time::Duration) -> Result<(), String> {
-    let cx = tracedecay_runtime_core::native_runtime::cx()
-        .ok_or_else(|| "native runtime unavailable".to_owned())?;
-    let mut timer = cx
-        .spawn(move |cx| async move { asupersync::time::sleep(cx.now(), duration).await })
-        .map_err(|error| format!("timer was not admitted: {error}"))?;
-    timer.join(&cx).await.map_err(|error| error.to_string())
-}
-
 /// Runs one synchronous transcript discovery/parse section on the native
 /// blocking pool so historical ingest cannot pin a request-runtime worker.
 ///
