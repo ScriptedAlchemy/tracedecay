@@ -478,7 +478,6 @@ pub(super) async fn register_project_open_production_owners(
         let analysis = Arc::new(DaemonNativeIntegrationAnalysisV1::new(
             invocation.code_index_schedulers.clone(),
             scope.clone(),
-            tokio::runtime::Handle::current(),
         ));
         let native_owner = tracing::Instrument::instrument(async {
                 let native_owner = native_integration
