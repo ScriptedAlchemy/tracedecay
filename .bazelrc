@@ -5,7 +5,7 @@ startup --windows_enable_symlinks
 common --enable_bzlmod
 common --announce_rc
 common --show_progress_rate_limit=15
-# MODULE.bazel registers only nightly/2026-09-27. Without this, rules_rust
+# MODULE.bazel registers only nightly/2026-10-14. Without this, rules_rust
 # resolves the stable channel and the build fails closed.
 build --@rules_rust//rust/toolchain/channel=nightly
 build --incompatible_enable_cc_toolchain_resolution

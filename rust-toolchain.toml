@@ -1,6 +1,6 @@
 [toolchain]
 # Dated nightly: asupersync's nightly-outcome-try default needs try_trait_v2.
 # 2026-09-27 includes rust-lang/rust#162275; 2026-08-25 does not.
-channel = "nightly-2026-09-27"
+channel = "nightly-2026-10-14"
 # LSP acceptance negotiates capabilities with the pinned upstream analyzer.
 components = ["clippy", "rustfmt", "rust-analyzer", "rust-src"]
