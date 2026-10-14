@@ -432,21 +432,18 @@ where
         })
 }
 
-/// Spawns a task on `handle` and waits for it from a blocking section.
+/// Asserts that a section runs off `caller`, the thread polling ingest.
 ///
-/// On a one-worker multi-thread runtime this only succeeds when the caller
-/// is inside [`run_blocking_transcript_section`]: the native blocking pool
-/// leaves the worker free so the spawned task can run. An inline filesystem/JSONL
-/// section deadlocks until the receive timeout fails.
+/// Only [`run_blocking_transcript_section`] moves filesystem/JSONL work onto
+/// the native blocking pool. An inline or `block_in_place` section runs on
+/// the polling thread and pins that executor worker for its whole duration.
 #[cfg(test)]
-pub(crate) fn require_blocking_section_releases_worker(handle: tokio::runtime::Handle) {
-    let (sender, receiver) = std::sync::mpsc::channel();
-    handle.spawn(async move {
-        let _ = sender.send(());
-    });
-    receiver
-        .recv_timeout(std::time::Duration::from_secs(2))
-        .expect("host transcript filesystem work must release the only Tokio worker");
+pub(crate) fn require_blocking_section_releases_worker(caller: std::thread::ThreadId) {
+    assert_ne!(
+        std::thread::current().id(),
+        caller,
+        "host transcript filesystem work must leave the thread polling ingest"
+    );
 }
 
 mod discovery;

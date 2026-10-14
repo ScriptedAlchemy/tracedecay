@@ -8,10 +8,9 @@ use tracedecay_hooks::{
 };
 use tracedecay_runtime_core::config::{GLOBAL_DB_FILENAME, ProfileRoot};
 use tracedecay_runtime_core::storage::{
-    SESSIONS_DB_FILENAME, STORE_MANIFEST_FILENAME, profile_sharded_data_root, read_store_manifest,
-    validate_project_id,
+    SESSIONS_DB_FILENAME, STORE_MANIFEST_FILENAME, USER_SESSIONS_DB_FILENAME,
+    profile_sharded_data_root, read_store_manifest, validate_project_id,
 };
-use tracedecay_sessions::runtime::USER_SESSIONS_DB_FILENAME;
 
 use super::storage::{
     ProfileOfflineAuthority, RestoreWording, join_outcome_and_restore, remove_fixed_profile_path,

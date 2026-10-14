@@ -294,7 +294,7 @@ pub(super) async fn await_session_sync_completion(
     mut outcome: AdminCliSessionSyncV1,
 ) -> tracedecay_domain::errors::Result<()> {
     let label = surface.label();
-    let client_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(35);
+    let client_deadline = std::time::Instant::now() + std::time::Duration::from_secs(35);
     // Poll with exponential backoff so a long-running sync costs dozens of
     // daemon round trips instead of one every 50 ms for up to 35 s.
     let mut poll_interval = std::time::Duration::from_millis(50);
@@ -326,7 +326,7 @@ pub(super) async fn await_session_sync_completion(
                 operation_id,
                 idempotency_key,
             } => {
-                if tokio::time::Instant::now() >= client_deadline {
+                if std::time::Instant::now() >= client_deadline {
                     return Err(tracedecay_domain::errors::TraceDecayError::Config {
                         message: session_sync_timeout_message(
                             project_root,
@@ -336,7 +336,13 @@ pub(super) async fn await_session_sync_completion(
                         ),
                     });
                 }
-                tokio::time::sleep(poll_interval).await;
+                tracedecay_runtime_core::native_runtime::sleep_until(
+                    std::time::Instant::now() + poll_interval,
+                )
+                .await
+                .map_err(|message| {
+                    tracedecay_domain::errors::TraceDecayError::Config { message }
+                })?;
                 poll_interval = (poll_interval * 2).min(MAX_POLL_INTERVAL);
                 outcome = session_sync_action(
                     profile,
