@@ -185,6 +185,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RetainedOwnerTestE
                 cancellation,
                 None,
                 policy,
+                tracedecay_daemon_protocol::DAEMON_TOOL_RESPONSE_GRACE,
             )
             .await
         })

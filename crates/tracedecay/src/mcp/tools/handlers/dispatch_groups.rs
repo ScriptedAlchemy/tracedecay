@@ -31,6 +31,7 @@ use tracedecay_mcp::{
     AdmittedCodeIndex, McpAdmittedProjectV1, McpDoctorReportV1, McpProjectIdentityV1,
     McpRequestAuthoritiesV1, McpToolBinding, McpToolContext, RequestControls, ToolResult,
 };
+use tracedecay_runtime_core::native_runtime::{self, TimeoutError};
 use tracedecay_runtime_core::runtime_telemetry::GenerationCensusSnapshot;
 use tracedecay_sessions::serving::{RefreshWorkerMissing, SessionProjectionServingStatusPort};
 
@@ -256,25 +257,27 @@ pub(crate) fn compute_graph_tool_for_owner<'a>(
             ));
         };
         if operation.owner_side_effect().is_some() {
-            return match tokio::time::timeout(
+            return match native_runtime::timeout(
                 budget,
-                compute_owner_side_effect(cg, operation, args, &options),
+                Box::pin(compute_owner_side_effect(cg, operation, args, &options)),
             )
             .await
             {
                 Ok(result) => result,
-                Err(_elapsed) => Err(tool_dispatch_deadline_error(tool_name, budget)),
+                Err(error) => Err(dispatch_timeout_error(tool_name, budget, error)),
             };
         }
         if dispatch_controls::is_automation_read(operation) {
-            return match tokio::time::timeout(
+            return match native_runtime::timeout(
                 budget,
-                dispatch_controls::compute_automation_read(cg, operation, &args, &options),
+                Box::pin(dispatch_controls::compute_automation_read(
+                    cg, operation, &args, &options,
+                )),
             )
             .await
             {
                 Ok(result) => result,
-                Err(_elapsed) => Err(tool_dispatch_deadline_error(tool_name, budget)),
+                Err(error) => Err(dispatch_timeout_error(tool_name, budget, error)),
             };
         }
         if matches!(
@@ -285,7 +288,7 @@ pub(crate) fn compute_graph_tool_for_owner<'a>(
                 | ApplicationSurfaceOperation::Runtime
         ) {
             let computed = compute_project_info(cg, operation, &args, scope_prefix, &options);
-            return match tokio::time::timeout(budget, Box::pin(computed)).await {
+            return match native_runtime::timeout(budget, Box::pin(computed)).await {
                 Ok(result) => {
                     result.map(
                         |result| tracedecay_contracts::graph_tool::GraphToolCompletionV1 {
@@ -297,7 +300,7 @@ pub(crate) fn compute_graph_tool_for_owner<'a>(
                         },
                     )
                 }
-                Err(_elapsed) => Err(tool_dispatch_deadline_error(tool_name, budget)),
+                Err(error) => Err(dispatch_timeout_error(tool_name, budget, error)),
             };
         }
         let project = admitted_project_authorities(cg, &options)?;
@@ -339,11 +342,24 @@ pub(crate) fn compute_graph_tool_for_owner<'a>(
             }
             Ok(completion)
         };
-        match tokio::time::timeout(budget, computed).await {
+        match native_runtime::timeout(budget, Box::pin(computed)).await {
             Ok(result) => result,
-            Err(_elapsed) => Err(tool_dispatch_deadline_error(tool_name, budget)),
+            Err(error) => Err(dispatch_timeout_error(tool_name, budget, error)),
         }
     })
+}
+
+fn dispatch_timeout_error(
+    tool_name: &str,
+    budget: std::time::Duration,
+    error: TimeoutError,
+) -> TraceDecayError {
+    match error {
+        TimeoutError::Elapsed => tool_dispatch_deadline_error(tool_name, budget),
+        TimeoutError::TimerUnavailable(_) => TraceDecayError::Config {
+            message: error.to_string(),
+        },
+    }
 }
 
 /// The project-info and runtime reads the owner answers from the daemon
