@@ -6108,7 +6108,6 @@ dependencies = [
  "crossterm",
  "dirs",
  "flate2",
- "futures-util",
  "hex",
  "libc",
  "mimalloc",
@@ -6501,6 +6500,7 @@ name = "tracedecay-framing"
 version = "0.1.0"
 dependencies = [
  "asupersync",
+ "async-channel",
  "tokio",
  "tracing",
 ]
