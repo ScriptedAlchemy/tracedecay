@@ -115,15 +115,40 @@ pub struct ExactSqlHandle {
 /// (current-thread runtimes, plain threads) keeps the previous inline
 /// behavior. The remaining `block_in_place` panic case is a `LocalSet` on a
 /// multi-thread runtime, which this workspace does not use.
+///
+/// Asupersync has no `block_in_place`, so a wait on a native runtime thread
+/// (a worker or a `block_on` caller; its blocking pool carries no runtime
+/// handle) still parks that thread. Each such wait is logged and counted in
+/// [`native_thread_writer_waits`] so the caller can be moved onto
+/// `native_runtime::spawn_blocking`.
+#[track_caller]
 fn recv_writer_reply<T>(
     response: async_channel::Receiver<T>,
 ) -> Result<T, async_channel::RecvError> {
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(|| response.recv_blocking())
-        }
-        _ => response.recv_blocking(),
+    if let Ok(handle) = tokio::runtime::Handle::try_current()
+        && handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+    {
+        return tokio::task::block_in_place(|| response.recv_blocking());
     }
+    if asupersync::runtime::Runtime::current_handle().is_some() {
+        NATIVE_THREAD_WRITER_WAITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tracing::error!(
+            call_site = %std::panic::Location::caller(),
+            backtrace = %std::backtrace::Backtrace::force_capture(),
+            "synchronous storage port parked a native runtime thread waiting on the writer"
+        );
+    }
+    response.recv_blocking()
+}
+
+static NATIVE_THREAD_WRITER_WAITS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Synchronous writer waits this process ran on a native runtime thread. Each
+/// one parked that thread; zero is the only healthy value.
+#[must_use]
+pub fn native_thread_writer_waits() -> u64 {
+    NATIVE_THREAD_WRITER_WAITS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 impl ExactSqlHandle {
