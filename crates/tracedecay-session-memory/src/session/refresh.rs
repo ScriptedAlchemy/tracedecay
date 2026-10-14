@@ -669,10 +669,10 @@ fn request_interruption(
     }
 }
 
-async fn await_with_request_controls<T>(
+async fn await_with_request_controls<T: Send>(
     context: &RequestContext,
     binding: &SessionRequestBinding,
-    future: impl std::future::Future<Output = T>,
+    future: impl std::future::Future<Output = T> + Send,
 ) -> Result<T, Box<SessionRefreshOutcome>> {
     if let Some(outcome) = request_interruption(context, binding) {
         return Err(Box::new(outcome));

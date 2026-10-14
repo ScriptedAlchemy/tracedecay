@@ -1,3 +1,6 @@
+use std::future::Future;
+use std::pin::Pin;
+
 use super::*;
 
 impl BoundedObservabilityProducerV1 {
@@ -76,18 +79,27 @@ impl BoundedObservabilityProducerV1 {
 
     /// Durably admit one owner-derived fact before offering its exact delivery
     /// to the bounded worker.
-    pub async fn emit_owner_fact(
+    pub fn emit_owner_fact(
         &self,
         envelope: ObservabilityEnvelopeV1,
-    ) -> Result<ObservabilityOwnerEmissionOutcomeV1, ApplicationContractError> {
-        timeout(
-            self.core.deadlines.persistence,
-            self.emit_owner_fact_unbounded(envelope),
-        )
-        .await
-        .map_err(|_| {
-            ApplicationContractError::Domain("observability_outbox_admission_deadline".to_owned())
-        })?
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<ObservabilityOwnerEmissionOutcomeV1, ApplicationContractError>,
+                > + Send
+                + '_,
+        >,
+    > {
+        let persistence = self.core.deadlines.persistence;
+        Box::pin(async move {
+            timeout(persistence, self.emit_owner_fact_unbounded(envelope))
+                .await
+                .map_err(|_| {
+                    ApplicationContractError::Domain(
+                        "observability_outbox_admission_deadline".to_owned(),
+                    )
+                })?
+        })
     }
 
     /// Admit a bounded owner batch under one persistence deadline. A claim

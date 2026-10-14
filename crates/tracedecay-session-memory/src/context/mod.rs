@@ -9,7 +9,10 @@ mod registered_scope;
 
 use std::fmt;
 use std::future::Future;
+use std::pin::Pin;
 use std::task::Poll;
+
+use tracing::Instrument;
 
 use tracedecay_contracts::now_micros;
 use tracedecay_domain::{
@@ -411,35 +414,45 @@ pub fn application_request_interruption(
 
 /// Runs one awaitable application step against the exact immutable deadline
 /// and the live cancellation token owned by the transport/runtime boundary.
-#[tracing::instrument(name = "usecases.context.interruptible", level = "trace", skip_all)]
-pub async fn run_application_request_interruptible<T, F>(
-    context: &tracedecay_contracts::RequestContext,
-    cancellation: &CancellationToken,
-    future: impl std::future::Future<Output = T>,
+pub fn run_application_request_interruptible<'a, T, F>(
+    context: &'a tracedecay_contracts::RequestContext,
+    cancellation: &'a CancellationToken,
+    future: impl Future<Output = T> + Send + 'a,
     on_interruption: F,
-) -> Result<T, RequestInterruption>
+) -> Pin<Box<dyn Future<Output = Result<T, RequestInterruption>> + Send + 'a>>
 where
-    F: FnOnce(),
+    T: Send + 'a,
+    F: FnOnce() + Send + 'a,
 {
-    if let Some(interruption) = application_request_interruption(context, cancellation) {
-        on_interruption();
-        return Err(interruption);
-    }
+    // The awaited step is erased before this wait is built. Leaving the
+    // concrete step in the wait makes every caller re-prove `Send` through
+    // that step's whole state (rust-lang/rust#159228).
+    let future: Pin<Box<dyn Future<Output = T> + Send + 'a>> = Box::pin(future);
+    let span = tracing::trace_span!("usecases.context.interruptible");
+    Box::pin(
+        async move {
+            if let Some(interruption) = application_request_interruption(context, cancellation) {
+                on_interruption();
+                return Err(interruption);
+            }
 
-    let terminal_at = context
-        .deadline()
-        .expires_at
-        .0
-        .min(context.grant().expires_at.0);
-    let remaining_micros = terminal_at.saturating_sub(application_observed_at().0);
-    let remaining_micros = u64::try_from(remaining_micros).unwrap_or(0);
-    race_application_request_wait(
-        remaining_micros,
-        cancellation.cancelled(),
-        future,
-        on_interruption,
+            let terminal_at = context
+                .deadline()
+                .expires_at
+                .0
+                .min(context.grant().expires_at.0);
+            let remaining_micros = terminal_at.saturating_sub(application_observed_at().0);
+            let remaining_micros = u64::try_from(remaining_micros).unwrap_or(0);
+            race_application_request_wait(
+                remaining_micros,
+                cancellation.cancelled(),
+                future,
+                on_interruption,
+            )
+            .await
+        }
+        .instrument(span),
     )
-    .await
 }
 
 /// Races one awaitable step against a wall-clock deadline and a live

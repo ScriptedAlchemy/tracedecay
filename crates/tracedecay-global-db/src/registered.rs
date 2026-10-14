@@ -352,6 +352,25 @@ pub struct RegisteredGlobalDb {
     refused_authority: Option<RefusedAuthorityV1>,
 }
 
+// Futures that capture this client were proving the database lease and the
+// graph binding in one walk, past the recursion limit (rust-lang/rust#159228).
+unsafe impl Send for RegisteredGlobalDb {}
+unsafe impl Sync for RegisteredGlobalDb {}
+
+const _: fn(&RegisteredGlobalDb) = |value| {
+    fn assert_send_sync<T: Send + Sync>(_: &T) {}
+    let RegisteredGlobalDb {
+        database,
+        project_graph,
+        session_relation_graph,
+        refused_authority,
+    } = value;
+    assert_send_sync(database);
+    assert_send_sync(project_graph);
+    assert_send_sync(session_relation_graph);
+    assert_send_sync(refused_authority);
+};
+
 impl RegisteredGlobalDb {
     #[tracing::instrument(name = "global_db.registered.schema", level = "trace", skip_all)]
     pub async fn converge_schema(

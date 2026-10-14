@@ -371,8 +371,7 @@ pub struct LatestCompleteCodeIndexV1 {
 
 pub(super) type ParkedGraphReleaseCallback = Arc<dyn Fn() + Send + Sync>;
 
-#[derive(Clone)]
-pub struct LatestCodeTextGenerationV1 {
+pub struct CodeTextGenerationSharedV1 {
     pub(super) metadata: Arc<VerifiedSealedTextGenerationMetadataV1>,
     pub(super) sealed_format_revision: u32,
     pub(super) query_owners: Arc<RwLock<Option<Arc<ProductionCodeIndexQueryOwnersV1>>>>,
@@ -403,9 +402,6 @@ pub struct LatestCodeTextGenerationV1 {
     /// decoded merely to discover text metadata or source layout.
     pub(super) preopened_source: Arc<std::sync::Mutex<Option<VerifiedSealedLexicalPageSourceV1>>>,
     pub(super) publication_binding: Option<Arc<DurableActiveSealedGenerationBindingV1>>,
-    /// The outgoing owner whose warm graph serves reads, stale, until this
-    /// generation's own graph first warms.
-    pub(super) graph_predecessor: Arc<RwLock<Option<LatestCodeTextGenerationV1>>>,
     /// The first catalog warm finishes on a blocking task that does not
     /// wake the parked worker. One permit lets that worker retry park-release
     /// without posting a cadence arrival.
@@ -416,6 +412,32 @@ pub struct LatestCodeTextGenerationV1 {
     /// Bound by the parked worktree so the first catalog warm can retry
     /// park-release on this owner without a cadence arrival.
     pub(super) parked_graph_release: Arc<RwLock<Option<ParkedGraphReleaseCallback>>>,
+}
+
+#[derive(Clone)]
+pub struct LatestCodeTextGenerationV1 {
+    shared: Arc<CodeTextGenerationSharedV1>,
+    /// Nearest predecessor first. The chain is shared generation state, not
+    /// `Self`: a field of type `Self` makes `Send`/`Sync` recurse with no base
+    /// case (rust-lang/rust#159228).
+    predecessors: Arc<RwLock<Vec<Arc<CodeTextGenerationSharedV1>>>>,
+}
+
+impl std::ops::Deref for LatestCodeTextGenerationV1 {
+    type Target = CodeTextGenerationSharedV1;
+
+    fn deref(&self) -> &Self::Target {
+        &self.shared
+    }
+}
+
+impl LatestCodeTextGenerationV1 {
+    pub(super) fn from_shared(shared: CodeTextGenerationSharedV1) -> Self {
+        Self {
+            shared: Arc::new(shared),
+            predecessors: Arc::new(RwLock::new(Vec::new())),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1630,6 +1652,25 @@ pub(super) struct ProductionCodeGraphServingV1 {
     _graph_authority: CodeGraphServingAuthorityV1,
 }
 
+// The serving graph's fields are `Send + Sync`, but proving that walks the
+// canonical graph lease and the evidence lane past the recursion limit
+// (rust-lang/rust#159228). The const check below is the field proof; these
+// impls stop that walk from repeating inside every owner that holds this graph.
+unsafe impl Send for ProductionCodeGraphServingV1 {}
+unsafe impl Sync for ProductionCodeGraphServingV1 {}
+
+const _: fn(&ProductionCodeGraphServingV1) = |value| {
+    fn assert_send_sync<T: Send + Sync>(_: &T) {}
+    let ProductionCodeGraphServingV1 {
+        graph,
+        store,
+        _graph_authority,
+    } = value;
+    assert_send_sync(graph);
+    assert_send_sync(store);
+    assert_send_sync(_graph_authority);
+};
+
 pub(super) enum CodeGraphActivationStateV1 {
     Pending,
     Refused(&'static str),
@@ -2277,22 +2318,24 @@ impl LatestCodeTextGenerationV1 {
         let Some(outgoing) = outgoing.filter(|outgoing| !outgoing.same_text_owner(self)) else {
             return;
         };
-        let inherited = outgoing.take_graph_predecessor();
+        let inherited = outgoing.take_predecessors();
         // An activated outgoing still serves: a released engine or catalog
         // reports `warming` but a read re-warms it, while a cold store passes
         // the hold down to the graph it was itself holding.
         let serves_warm_graph = outgoing.interactive_graph_store().is_ok()
             && outgoing.code_graph_serving_readiness().is_activated();
-        let held = if serves_warm_graph {
-            Some(outgoing.clone())
+        let mut held = if serves_warm_graph {
+            vec![Arc::clone(&outgoing.shared)]
         } else {
             inherited
+        };
+        if held.first().is_some_and(|head| {
+            head.metadata.manifest().generation_id == self.metadata.manifest().generation_id
+        }) {
+            held.clear();
         }
-        .filter(|held| {
-            held.metadata().manifest().generation_id != self.metadata().manifest().generation_id
-        });
         *self
-            .graph_predecessor
+            .predecessors
             .write()
             .unwrap_or_else(PoisonError::into_inner) = held;
     }
@@ -2308,11 +2351,7 @@ impl LatestCodeTextGenerationV1 {
                 CodeGraphServingReadinessV1::Pending | CodeGraphServingReadinessV1::Warming { .. }
             )
         {
-            return self
-                .graph_predecessor
-                .read()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone();
+            return self.held_graph_predecessor();
         }
         self.release_graph_predecessor();
         None
@@ -2322,21 +2361,32 @@ impl LatestCodeTextGenerationV1 {
     /// resident-memory inventory must see it: it holds its graph until
     /// released or dropped, not until a read next checks readiness.
     pub(super) fn held_graph_predecessor(&self) -> Option<Self> {
-        self.graph_predecessor
+        let chain = self
+            .predecessors
             .read()
             .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+            .clone();
+        let (head, tail) = chain.split_first()?;
+        Some(Self {
+            shared: Arc::clone(head),
+            predecessors: Arc::new(RwLock::new(tail.to_vec())),
+        })
     }
 
     pub(super) fn release_graph_predecessor(&self) {
-        drop(self.take_graph_predecessor());
-    }
-
-    fn take_graph_predecessor(&self) -> Option<Self> {
-        self.graph_predecessor
+        self.predecessors
             .write()
             .unwrap_or_else(PoisonError::into_inner)
-            .take()
+            .clear();
+    }
+
+    fn take_predecessors(&self) -> Vec<Arc<CodeTextGenerationSharedV1>> {
+        std::mem::take(
+            &mut *self
+                .predecessors
+                .write()
+                .unwrap_or_else(PoisonError::into_inner),
+        )
     }
 
     /// Return a graph refused for resident memory to `Pending`, so the next

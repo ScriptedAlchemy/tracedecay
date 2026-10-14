@@ -1,7 +1,9 @@
 //! Concrete one-shot feedback-cycle composition over existing authorities.
 
+use std::future::Future;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -380,14 +382,25 @@ impl FeedbackCycleRuntime {
         invocation: FeedbackCycleInvocation,
     ) -> Result<CanonicalFeedbackResultV1, FeedbackCycleRuntimeError> {
         invocation.validate()?;
-        if !self.admits_current_provider_set(&invocation.request).await
-            || !self.admits_provider_set(&invocation.request.providers)
-        {
+        let admitted: Pin<Box<dyn Future<Output = bool> + Send + '_>> =
+            Box::pin(self.admits_current_provider_set(&invocation.request));
+        if !admitted.await || !self.admits_provider_set(&invocation.request.providers) {
             return Err(FeedbackCycleRuntimeError::ProviderSetMismatch);
         }
         let FeedbackCycleInvocation { context, request } = invocation;
         let requested_durability = request.input.request.durability();
-        let execution = self.service.execute(&context, request).await?;
+        let execution: Pin<
+            Box<
+                dyn Future<
+                        Output = Result<
+                            tracedecay_contracts::feedback::FeedbackCycleExecutionResult,
+                            tracedecay_contracts::ApplicationContractError,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > = Box::pin(self.service.execute(&context, request));
+        let execution = execution.await?;
         compose_canonical_result(&self.feedback, execution, requested_durability)
     }
 
@@ -660,7 +673,14 @@ impl FeedbackCycleRuntimePort for FeedbackCycleRuntime {
                     admission_duration_micros,
                 ),
             );
-            let result = Box::pin(runtime.run_once(invocation)).await;
+            let result: Pin<
+                Box<
+                    dyn Future<
+                            Output = Result<CanonicalFeedbackResultV1, FeedbackCycleRuntimeError>,
+                        > + Send,
+                >,
+            > = Box::pin(runtime.run_once(invocation));
+            let result = result.await;
             let duration_micros = tracedecay_runtime_core::tracedecay::saturating_duration_micros(
                 started_at.elapsed(),
             );

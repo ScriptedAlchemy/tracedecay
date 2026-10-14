@@ -3758,10 +3758,7 @@ async fn a_memory_refused_graph_releases_the_outgoing_warm_graph() {
     .await;
     let held = || {
         second_text
-            .graph_predecessor
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
+            .held_graph_predecessor()
             .map(|held| held.metadata().manifest().generation_id.as_str().to_owned())
     };
     assert_eq!(

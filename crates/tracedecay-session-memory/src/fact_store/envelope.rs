@@ -22,10 +22,37 @@ use super::primitives::{
 /// The runtime retains both the settlement task and its join while the caller
 /// holds only a receipt. Dropping that receipt cannot interrupt an admitted
 /// commit or its graph publication.
-pub(in crate::fact_store) async fn settle_fact_write<T, F, Fut>(
+struct FactSettlementReceipt<T> {
+    cx: Cx,
+    receipt: oneshot::Receiver<FactStoreResult<T>>,
+}
+
+pub(in crate::fact_store) fn settle_fact_write<T, F, Fut>(
     operation: &'static str,
     work: F,
-) -> FactStoreResult<T>
+) -> Pin<Box<dyn Future<Output = FactStoreResult<T>> + Send>>
+where
+    T: Send + 'static,
+    F: FnOnce(Cx) -> Fut + Send + 'static,
+    Fut: Future<Output = FactStoreResult<T>> + Send + 'static,
+{
+    // `RuntimeHandle` stays in this synchronous admission. Holding it across
+    // the caller's await makes every `Send` proof enter `BrowserWorkerPump`'s
+    // self-reference (rust-lang/rust#159228).
+    let admitted = admit_fact_settlement(operation, work);
+    Box::pin(async move {
+        let FactSettlementReceipt { cx, mut receipt } = admitted?;
+        receipt
+            .recv(&cx)
+            .await
+            .map_err(|error| storage_error(operation, error))?
+    })
+}
+
+fn admit_fact_settlement<T, F, Fut>(
+    operation: &'static str,
+    work: F,
+) -> FactStoreResult<FactSettlementReceipt<T>>
 where
     T: Send + 'static,
     F: FnOnce(Cx) -> Fut + Send + 'static,
@@ -37,7 +64,7 @@ where
         .try_request_cx_with_budget(Budget::INFINITE)
         .map_err(|error| storage_error(operation, error))?;
     let receipt_cx = settlement_cx.clone();
-    let (completed, mut receipt) = oneshot::channel();
+    let (completed, receipt) = oneshot::channel();
     runtime
         .try_spawn_with_cx(move |reaper_cx| async move {
             let outcome = match settlement_cx.spawn(work) {
@@ -56,10 +83,10 @@ where
             }
         })
         .map_err(|error| storage_error(operation, error))?;
-    receipt
-        .recv(&receipt_cx)
-        .await
-        .map_err(|error| storage_error(operation, error))?
+    Ok(FactSettlementReceipt {
+        cx: receipt_cx,
+        receipt,
+    })
 }
 
 pub(super) async fn finish_read_snapshot<T>(

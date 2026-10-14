@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::ops::Range;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::PoisonError;
 use std::sync::atomic::Ordering;
@@ -404,22 +405,27 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                     };
                     let summary_result = {
                         let permit = summary_admission;
-                        let page = async {
-                            match convergence_page {
-                            LcmConvergencePage::PredecessorRangeRewrite => {
+                        let page: Pin<
+                            Box<
+                                dyn Future<
+                                        Output = Result<
+                                            crate::lcm_summary_convergence::LcmSummaryConvergencePage,
+                                            LcmError,
+                                        >,
+                                    > + Send,
+                            >,
+                        > = match convergence_page {
+                            LcmConvergencePage::PredecessorRangeRewrite => Box::pin(
                                 crate::lcm_summary_convergence::run_predecessor_range_rewrite_page(
                                     database.clone(),
-                                )
-                                .await
-                            }
-                            LcmConvergencePage::Full => {
+                                ),
+                            ),
+                            LcmConvergencePage::Full => Box::pin(
                                 crate::lcm_summary_convergence::run_summary_convergence_page(
                                     database.clone(),
                                     crate::lcm_summary_convergence::LCM_SUMMARY_CONVERGENCE_PAGE_LIMIT,
-                                )
-                                .await
-                            }
-                        }
+                                ),
+                            ),
                         };
                         tokio::pin!(page);
                         let result = tokio::select! {

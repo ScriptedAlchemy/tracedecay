@@ -1,5 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+
+use tracing::Instrument;
 
 use std::fmt::Write as _;
 
@@ -653,52 +657,53 @@ pub(super) async fn list_registered_lossless_paths(
     list_lossless_paths_from(ProjectRegistryDatabase(db), sql, operation).await
 }
 
-#[tracing::instrument(
-    name = "global_db.registry.query.list_paths",
-    level = "trace",
-    skip_all
-)]
-async fn list_lossless_paths_from(
-    db: ProjectRegistryDatabase<'_>,
-    sql: &str,
+fn list_lossless_paths_from<'a>(
+    db: ProjectRegistryDatabase<'a>,
+    sql: &'a str,
     operation: &'static str,
-) -> tracedecay_domain::errors::Result<Vec<PathBuf>> {
-    let read = db.read_snapshot(operation).await?;
-    let mut rows = read
-        .query(sql, ())
-        .await
-        .map_err(|error| global_db_operation_error(operation, error))?;
-    let mut paths = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(operation, error))?
-    {
-        let encoded = row
-            .get::<String>(0)
-            .map_err(|error| global_db_operation_error(operation, error))?;
-        let path = match decode_native_project_path_alias(&encoded) {
-            Ok(Some(path)) => Some(path),
-            Ok(None) if Path::new(&encoded).is_absolute() => Some(PathBuf::from(encoded)),
-            Ok(None) => None,
-            Err(error) => {
-                return Err(global_db_operation_message(
-                    operation,
-                    format!("invalid native project path alias: {error}"),
-                ));
+) -> Pin<Box<dyn Future<Output = tracedecay_domain::errors::Result<Vec<PathBuf>>> + Send + 'a>> {
+    let span = tracing::trace_span!("global_db.registry.query.list_paths");
+    Box::pin(
+        async move {
+            let read = db.read_snapshot(operation).await?;
+            let mut rows = read
+                .query(sql, ())
+                .await
+                .map_err(|error| global_db_operation_error(operation, error))?;
+            let mut paths = Vec::new();
+            while let Some(row) = rows
+                .next()
+                .await
+                .map_err(|error| global_db_operation_error(operation, error))?
+            {
+                let encoded = row
+                    .get::<String>(0)
+                    .map_err(|error| global_db_operation_error(operation, error))?;
+                let path = match decode_native_project_path_alias(&encoded) {
+                    Ok(Some(path)) => Some(path),
+                    Ok(None) if Path::new(&encoded).is_absolute() => Some(PathBuf::from(encoded)),
+                    Ok(None) => None,
+                    Err(error) => {
+                        return Err(global_db_operation_message(
+                            operation,
+                            format!("invalid native project path alias: {error}"),
+                        ));
+                    }
+                };
+                if let Some(path) = path {
+                    if !path.is_absolute() {
+                        return Err(global_db_operation_message(
+                            operation,
+                            "native project path alias is not absolute",
+                        ));
+                    }
+                    paths.push(path);
+                }
             }
-        };
-        if let Some(path) = path {
-            if !path.is_absolute() {
-                return Err(global_db_operation_message(
-                    operation,
-                    "native project path alias is not absolute",
-                ));
-            }
-            paths.push(path);
+            Ok(paths)
         }
-    }
-    Ok(paths)
+        .instrument(span),
+    )
 }
 
 impl RegisteredGlobalDb {

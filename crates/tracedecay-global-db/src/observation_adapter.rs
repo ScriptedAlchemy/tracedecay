@@ -1,4 +1,6 @@
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -759,7 +761,28 @@ impl GlobalDbObservationStore {
     /// Persists the longest prefix of `writes` that settles in one runtime
     /// batch, returning its outcomes in input order and the writes that must
     /// be prepared again once that prefix is durable.
-    async fn persist_observation_segment(
+    ///
+    /// The segment future is erased here. A concrete child future would be
+    /// part of every caller's `Send` proof, and that chain exceeds the
+    /// recursion limit (rust-lang/rust#159228).
+    fn persist_observation_segment<'a>(
+        &'a self,
+        writes: Vec<AnchoredObservationWrite>,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = ObservationStoreResult<(
+                        Vec<ObservationBatchPersistOutcome>,
+                        Vec<AnchoredObservationWrite>,
+                    )>,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move { Self::persist_observation_segment_body(self, writes).await })
+    }
+
+    async fn persist_observation_segment_body(
         &self,
         writes: Vec<AnchoredObservationWrite>,
     ) -> ObservationStoreResult<(

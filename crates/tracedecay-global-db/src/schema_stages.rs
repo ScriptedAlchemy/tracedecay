@@ -1,3 +1,6 @@
+use std::future::Future;
+use std::pin::Pin;
+
 use super::schema_contract::{
     authority_invariant_triggers_intact, ensure_authority_audit_checkpoint_schema,
     ensure_authority_invariant_schema, ensure_authority_invariants,
@@ -1066,14 +1069,18 @@ pub async fn converge_registered_schema(
     database: &Database,
     convergence: RegisteredSchemaConvergence,
 ) -> tracedecay_domain::errors::Result<()> {
-    observation::converge_canonical_bodies(database).await?;
+    let bodies: Pin<Box<dyn Future<Output = tracedecay_domain::errors::Result<()>> + Send + '_>> =
+        Box::pin(observation::converge_canonical_bodies(database));
+    bodies.await?;
     if convergence.lcm_status_performance_indexes {
-        converge_migration_batches(
+        let batches: Pin<
+            Box<dyn Future<Output = tracedecay_domain::errors::Result<()>> + Send + '_>,
+        > = Box::pin(converge_migration_batches(
             database,
             "converge LCM status performance indexes",
             tracedecay_lcm::schema::LCM_STATUS_PERFORMANCE_INDEX_SQL,
-        )
-        .await?;
+        ));
+        batches.await?;
     }
     // The invariant pass pages historical authority rows and can legitimately
     // outlive an ordinary open on a large store. The admission phase has
@@ -1081,7 +1088,10 @@ pub async fn converge_registered_schema(
     // guarded writes may proceed while these idempotent repairs advance.
     // Completed repairs survive interruption, while the trusted checkpoint is
     // still written only after every audit succeeds.
-    converge_registered_schema_on(database, convergence).await
+    let invariants: Pin<
+        Box<dyn Future<Output = tracedecay_domain::errors::Result<()>> + Send + '_>,
+    > = Box::pin(converge_registered_schema_on(database, convergence));
+    invariants.await
 }
 
 /// Runs one store-sized migration as a sequence of independently durable

@@ -254,31 +254,34 @@ impl DaemonLcmAuthority {
 
         match invocation.request {
             LcmAuthorityRequest::Compact(command) => {
-                self.execute_compaction(
-                    &invocation.context,
-                    &invocation.cancellation,
-                    started_at,
-                    *command,
-                )
-                .await
+                let compaction: Pin<Box<dyn Future<Output = LcmAuthorityResponse> + Send + '_>> =
+                    Box::pin(self.execute_compaction(
+                        &invocation.context,
+                        &invocation.cancellation,
+                        started_at,
+                        *command,
+                    ));
+                compaction.await
             }
             LcmAuthorityRequest::Status(query) => {
-                self.execute_status(
-                    &invocation.context,
-                    &invocation.cancellation,
-                    started_at,
-                    query,
-                )
-                .await
+                let status: Pin<Box<dyn Future<Output = LcmAuthorityResponse> + Send + '_>> =
+                    Box::pin(self.execute_status(
+                        &invocation.context,
+                        &invocation.cancellation,
+                        started_at,
+                        query,
+                    ));
+                status.await
             }
             LcmAuthorityRequest::Doctor(query) => {
-                self.execute_doctor(
-                    &invocation.context,
-                    &invocation.cancellation,
-                    started_at,
-                    query,
-                )
-                .await
+                let doctor: Pin<Box<dyn Future<Output = LcmAuthorityResponse> + Send + '_>> =
+                    Box::pin(self.execute_doctor(
+                        &invocation.context,
+                        &invocation.cancellation,
+                        started_at,
+                        query,
+                    ));
+                doctor.await
             }
         }
     }

@@ -1,5 +1,7 @@
 //! Restart-safe background convergence of retained LCM summary state.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
@@ -58,23 +60,77 @@ pub(crate) async fn run_summary_convergence_page(
     // Relation effects from a prior summary transaction are their own
     // session-bounded, work-budgeted page. The scheduler calls this function
     // only while holding the daemon-wide historical-work admission.
-    let relation_recovery =
-        super::lcm_effects::DaemonLcmEffectService::new(database.clone(), None, None)
-            .recover_retained_relation_projection_page()
-            .await?;
-    let backfill = backfill_queue(&database).await?;
-    let parked_requeue = requeue_parked_sessions(&database).await?;
-    let predecessor_range_rewrite = rewrite_predecessor_ranges(&database).await?;
+    let effects = super::lcm_effects::DaemonLcmEffectService::new(database.clone(), None, None);
+    let relation_recovery: Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        tracedecay_session_temporal_store::SessionRelationRecoveryPage,
+                        LcmError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > = Box::pin(effects.recover_retained_relation_projection_page());
+    let relation_recovery = relation_recovery.await?;
+    let backfill: Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        tracedecay_lcm::summary_convergence::LcmSummaryQueueBackfillPage,
+                        LcmError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > = Box::pin(backfill_queue(&database));
+    let backfill = backfill.await?;
+    let parked_requeue: Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        tracedecay_lcm::summary_convergence::LcmParkedRequeuePage,
+                        LcmError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > = Box::pin(requeue_parked_sessions(&database));
+    let parked_requeue = parked_requeue.await?;
+    let predecessor_range_rewrite: Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        tracedecay_lcm::summary_convergence::LcmPredecessorRangeRewritePage,
+                        LcmError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > = Box::pin(rewrite_predecessor_ranges(&database));
+    let predecessor_range_rewrite = predecessor_range_rewrite.await?;
     let now_unix_ms = unix_millis()?;
     let page_limit = page_limit.max(1);
     let mut sessions = Vec::with_capacity(page_limit);
     for _ in 0..page_limit {
-        let Some(candidate) = load_candidate(&database, now_unix_ms).await? else {
+        let loaded: Pin<
+            Box<
+                dyn Future<Output = Result<Option<LcmSummaryConvergenceCandidate>, LcmError>>
+                    + Send
+                    + '_,
+            >,
+        > = Box::pin(load_candidate(&database, now_unix_ms));
+        let Some(candidate) = loaded.await? else {
             break;
         };
-        sessions.push(process_candidate(&database, candidate, now_unix_ms).await?);
+        let processed: Pin<
+            Box<dyn Future<Output = Result<LcmSummaryConvergenceSession, LcmError>> + Send + '_>,
+        > = Box::pin(process_candidate(&database, candidate, now_unix_ms));
+        sessions.push(processed.await?);
     }
-    let summary_retry_at = load_next_retry(&database).await?;
+    let summary_retry: Pin<Box<dyn Future<Output = Result<Option<i64>, LcmError>> + Send + '_>> =
+        Box::pin(load_next_retry(&database));
+    let summary_retry_at = summary_retry.await?;
     let relation_retry_at = relation_recovery
         .next_retry_at_unix_seconds
         .map(|seconds| seconds.saturating_mul(1_000));

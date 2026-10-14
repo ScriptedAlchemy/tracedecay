@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 
 use serde::Deserialize;
 use tracedecay_domain::{
@@ -14,6 +16,7 @@ use tracedecay_store::{
 };
 
 use tracedecay_lcm::contracts::LcmError;
+use tracedecay_runtime_core::db::DatabaseWriteTransaction;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use tracedecay_sessions::runtime::store_access::find_preceding_codex_goal_response;
 
@@ -959,7 +962,7 @@ async fn retire_quarantined_projection(
     skip_all
 )]
 async fn apply_rows(
-    conn: &impl Executor,
+    conn: &DatabaseWriteTransaction<'_>,
     sequence: u64,
     observation: &DurableObservationV1,
     projection: &SessionMessageProjection,
@@ -974,7 +977,9 @@ async fn apply_rows(
     if existing.is_some()
         && let Some(state) = state.as_ref()
     {
-        verify_output_state(conn, state, projection).await?;
+        let verified: Pin<Box<dyn Future<Output = ProjectionStoreResult<()>> + Send + '_>> =
+            Box::pin(verify_output_state(conn, state, projection));
+        verified.await?;
     }
     let transition_state = state.as_ref().map(|state| {
         MessageTransitionState::new(
@@ -984,14 +989,16 @@ async fn apply_rows(
             state.projector_owned,
         )
     });
-    let transition = message_transition(
+    let decided: Pin<
+        Box<dyn Future<Output = ProjectionStoreResult<MessageTransition>> + Send + '_>,
+    > = Box::pin(message_transition(
         conn,
         sequence,
         projection,
         existing.as_ref(),
         transition_state,
-    )
-    .await?;
+    ));
+    let transition = decided.await?;
     match transition {
         MessageTransition::Insert => upsert_projected_raw_message(conn, message).await?,
         MessageTransition::Supersede => supersede_projected_message(conn, message).await?,
@@ -1504,14 +1511,16 @@ async fn verify_message_effect(
 }
 
 async fn apply_message_effect(
-    conn: &impl Executor,
+    conn: &DatabaseWriteTransaction<'_>,
     sequence: u64,
     observation: &DurableObservationV1,
     projection: &SessionMessageProjection,
 ) -> ProjectionStoreResult<()> {
     let message = projection.message();
     let previous_owner = read_canonical_owner(conn, &message.provider, &message.message_id).await?;
-    let message_created = apply_rows(conn, sequence, observation, projection).await?;
+    let rows: Pin<Box<dyn Future<Output = ProjectionStoreResult<bool>> + Send + '_>> =
+        Box::pin(apply_rows(conn, sequence, observation, projection));
+    let message_created = rows.await?;
     apply_provenance(conn, sequence, projection, message_created).await?;
     // The session-temporal store materialized the previous owner's
     // occurrence; once another observation owns the message, that occurrence
@@ -2102,7 +2111,7 @@ pub async fn verify_workflow_effects(
     skip_all
 )]
 pub(super) async fn apply_effect(
-    conn: &impl Executor,
+    conn: &DatabaseWriteTransaction<'_>,
     sequence: u64,
     observation: &DurableObservationV1,
     effect: &ObservationProjection,
@@ -2126,20 +2135,23 @@ pub(super) async fn apply_effect(
     // into that already-deep composition overflows the base-opt worker stack.
     match effect {
         ObservationProjection::Message(projection) => {
-            Box::pin(apply_message_effect(
-                conn,
-                sequence,
-                observation,
-                projection,
-            ))
-            .await
+            let applied: Pin<Box<dyn Future<Output = ProjectionStoreResult<()>> + Send + '_>> =
+                Box::pin(apply_message_effect(
+                    conn,
+                    sequence,
+                    observation,
+                    projection,
+                ));
+            applied.await
         }
         ObservationProjection::Composite {
             message,
             workflow_facts,
         } => {
             if let Some(message) = message {
-                Box::pin(apply_message_effect(conn, sequence, observation, message)).await?;
+                let applied: Pin<Box<dyn Future<Output = ProjectionStoreResult<()>> + Send + '_>> =
+                    Box::pin(apply_message_effect(conn, sequence, observation, message));
+                applied.await?;
             }
             for projection in workflow_facts {
                 apply_workflow_fact(conn, sequence, projection).await?;
