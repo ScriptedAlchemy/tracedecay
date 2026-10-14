@@ -976,13 +976,13 @@ impl DaemonHttpApplicationService {
         if let Some(shutdown) = self.remote_tls_shutdown.take() {
             let _ = shutdown.send(());
         }
-        let Some(task) = self.task.take() else {
+        let Some(task) = self.task.as_mut() else {
             return Ok(());
         };
         task.await.map_err(|error| TraceDecayError::Config {
             message: format!("daemon HTTP application service task failed: {error}"),
         })??;
-        let Some(task) = self.remote_tls_task.take() else {
+        let Some(task) = self.remote_tls_task.as_mut() else {
             return Ok(());
         };
         task.await.map_err(|error| TraceDecayError::Config {
