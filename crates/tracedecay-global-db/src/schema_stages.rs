@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use super::schema_contract::{
     authority_invariant_triggers_intact, ensure_authority_audit_checkpoint_schema,
     ensure_authority_invariant_schema, ensure_authority_invariants,
@@ -1478,6 +1480,90 @@ pub async fn validate_observation_authority_connection(
 ) -> tracedecay_domain::errors::Result<()> {
     validate_authority_schema_contract(conn).await?;
     validate_authority_rows_exhaustive(conn).await
+}
+
+/// Wall-clock budget for one diagnostic run of the exhaustive authority audit.
+///
+/// Doctor and `tracedecay_runtime` answer an interactive caller, the CLI waits
+/// 90 s for the whole runtime reply. On a store too large to audit inside
+/// this budget the audit reports [`ObservationAuthorityAuditV1::BudgetExceeded`];
+/// schema convergence still runs the same audit without a deadline.
+pub const OBSERVATION_AUTHORITY_AUDIT_BUDGET: Duration = Duration::from_secs(60);
+
+/// Outcome of one diagnostic exhaustive observation-authority audit.
+#[derive(Debug)]
+pub enum ObservationAuthorityAuditV1 {
+    /// The audit ran to completion and every invariant held.
+    Held,
+    /// The audit ran and an invariant failed.
+    Violated(tracedecay_domain::errors::TraceDecayError),
+    /// The audit did not finish inside its budget. This says nothing about
+    /// the stored rows.
+    BudgetExceeded { budget: Duration },
+    /// The authority would not yield a read snapshot to audit.
+    Unavailable(tracedecay_domain::errors::TraceDecayError),
+}
+
+impl ObservationAuthorityAuditV1 {
+    /// `Some(true)` held, `Some(false)` violated, `None` not finished.
+    #[must_use]
+    pub fn verdict(&self) -> Option<bool> {
+        match self {
+            Self::Held => Some(true),
+            Self::Violated(_) => Some(false),
+            Self::BudgetExceeded { .. } | Self::Unavailable(_) => None,
+        }
+    }
+
+    /// The typed `authority_audit_reason` wire value.
+    #[must_use]
+    pub fn reason(&self) -> Option<&'static str> {
+        match self {
+            Self::Held => None,
+            Self::Violated(_) => Some("authority_invariant_failed"),
+            Self::BudgetExceeded { .. } => Some("authority_audit_budget_exceeded"),
+            Self::Unavailable(_) => Some("authority_store_unavailable"),
+        }
+    }
+
+    /// The observed `authority_audit_error` detail.
+    #[must_use]
+    pub fn detail(&self) -> Option<String> {
+        match self {
+            Self::Held => None,
+            Self::Violated(error) | Self::Unavailable(error) => Some(error.to_string()),
+            Self::BudgetExceeded { budget } => Some(format!(
+                "audit skipped: store too large for the {} s doctor budget; schema \
+                 convergence runs the exhaustive audit without a deadline",
+                budget.as_secs()
+            )),
+        }
+    }
+}
+
+/// Runs the exhaustive observation-authority audit on a health snapshot whose
+/// statements are all interrupted once `budget` has elapsed.
+pub async fn audit_observation_authority(
+    database: &Database,
+    budget: Duration,
+) -> ObservationAuthorityAuditV1 {
+    let snapshot = match database.begin_engine_health_read_snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return ObservationAuthorityAuditV1::Unavailable(global_db_operation_error(
+                "begin observation authority audit",
+                error,
+            ));
+        }
+    };
+    let audit = async {
+        validate_authority_schema_contract(&snapshot).await?;
+        validate_authority_rows_exhaustive(&snapshot).await
+    };
+    match audit.await {
+        Ok(()) => ObservationAuthorityAuditV1::Held,
+        Err(error) => ObservationAuthorityAuditV1::Violated(error),
+    }
 }
 
 #[cfg(test)]
