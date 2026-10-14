@@ -846,7 +846,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
 
 #[tracing::instrument(name = "session_temporal.doctor.diagnose", level = "trace", skip_all)]
 async fn diagnose_snapshot(
-    conn: &(impl crate::handle::SessionTemporalQuery + QueryExecutor + Sync),
+    conn: &(impl crate::handle::SessionTemporalQuery + QueryExecutor),
 ) -> SessionTemporalHealthReport {
     let inventory = match snapshot_schema_inventory(conn).await {
         Ok(inventory) => inventory,
