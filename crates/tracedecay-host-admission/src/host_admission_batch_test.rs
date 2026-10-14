@@ -250,7 +250,7 @@ async fn mounted_capture_batch_reduces_writer_transactions() {
 /// Every general reader held is a capacity answer about this pool, not a
 /// failed authority write: a retry backoff keyed on the reason must see
 /// backpressure, and the same capture must commit once readers return.
-#[tokio::test]
+#[asupersync::test]
 async fn saturated_reader_pool_reports_backpressure_not_authority_write_failure() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
