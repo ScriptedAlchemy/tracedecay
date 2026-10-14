@@ -48,7 +48,11 @@ pub(crate) async fn run(profile: &ProfileRoot, args: WorkInvocationArgs) -> Resu
         }
         match job_state(&outcome)? {
             JobState::Advancing => {}
-            JobState::Waiting => tokio::time::sleep(SETTLE_POLL_INTERVAL).await,
+            JobState::Waiting => tracedecay_runtime_core::native_runtime::sleep_until(
+                std::time::Instant::now() + SETTLE_POLL_INTERVAL,
+            )
+            .await
+            .map_err(|message| TraceDecayError::Config { message })?,
             JobState::Completed => return Ok(()),
             JobState::Refused { code, message } => {
                 return Err(TraceDecayError::tool_refused(
