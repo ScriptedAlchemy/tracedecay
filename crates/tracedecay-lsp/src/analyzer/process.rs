@@ -9,7 +9,7 @@
 use std::future::poll_fn;
 use std::io::{self, Read, Write};
 use std::pin::pin;
-use std::process::{ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::task::Poll;
@@ -203,8 +203,23 @@ fn supervise(
     while let Ok(reply) = requests.recv() {
         let _ = reply.send_blocking(child.try_wait());
     }
-    // `kill` succeeds on a child that already exited, so `wait` reaps either.
-    let _ = exited.send_blocking(child.kill().and_then(|()| child.wait()));
+    let _ = exited.send_blocking(reap_child(&mut child));
+}
+
+/// Kills `child` if it is still running, then reaps it.
+///
+/// `try_wait` reaps a child that has already exited. Windows `kill` returns
+/// `InvalidInput` for an exited child, including one that exits between
+/// `try_wait` and `kill`, so that error still has to `wait`.
+fn reap_child(child: &mut Child) -> io::Result<ExitStatus> {
+    match child.try_wait()? {
+        Some(status) => Ok(status),
+        None => match child.kill() {
+            Ok(()) => child.wait(),
+            Err(error) if error.kind() == io::ErrorKind::InvalidInput => child.wait(),
+            Err(error) => Err(error),
+        },
+    }
 }
 
 /// Decodes strict frames from `stdout` until EOF, the first failure, or the
@@ -237,6 +252,10 @@ fn read_frames(
             }
             decoded => decoded,
         };
+        // Publish the buffer the reader will see before it observes this
+        // outcome. Otherwise a finished envelope still looks partial, and the
+        // next deadline reports `DeadlineElapsed` for an idle pipe.
+        partial.store(!buffered.is_empty(), Ordering::Release);
         let failed = decoded.is_err();
         if let Some(frame) = decoded.transpose()
             && frames.send_blocking(frame).is_err()
@@ -348,8 +367,35 @@ mod tests {
 
         send.send(b"}".to_vec()).unwrap();
         assert_eq!(read(settled).unwrap(), FramePoll::Frame(b"{}".to_vec()));
+        assert!(
+            !process.partial_frame.load(Ordering::Acquire),
+            "a completed frame must clear the partial-frame flag before the reader observes it"
+        );
+        assert_eq!(
+            read(idle).unwrap(),
+            FramePoll::Pending,
+            "an idle pipe after a completed frame is retryable"
+        );
 
         drop(send);
         assert_eq!(read(settled).unwrap(), FramePoll::Closed);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reap_collects_a_child_that_already_exited() {
+        let mut child = Command::new("true").spawn().unwrap();
+        while child.try_wait().unwrap().is_none() {
+            std::thread::yield_now();
+        }
+        assert!(reap_child(&mut child).unwrap().success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reap_kills_a_running_child() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let status = reap_child(&mut child).unwrap();
+        assert!(!status.success());
     }
 }
