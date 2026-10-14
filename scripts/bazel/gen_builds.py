@@ -115,6 +115,10 @@ TEST_DATA = {
     ("tracedecay", "session_suite"): ["//scripts:run-session-temporal-benchmark.sh"],
     ("tracedecay", "session_temporal"): ["benchmark_data/session-temporal/workload-v1.json"],
     ("tracedecay-agent-hosts", "unit_test"): ["//plugin:sources"],
+    ("tracedecay-capture", "capture_suite"): [
+        "benchmark_data/runtime/fixtures/providers/home/.codex/sessions/2026/07/fixture-session.jsonl",
+        "benchmark_data/runtime/fixtures/providers/home/.cursor/projects/fixture-runtime-project/agent-transcripts/fixture-session.jsonl",
+    ],
     ("tracedecay-cli", "core_cli_suite"): [
         "//:product_git_sha",
         ":build-support/source_provenance.rs",
