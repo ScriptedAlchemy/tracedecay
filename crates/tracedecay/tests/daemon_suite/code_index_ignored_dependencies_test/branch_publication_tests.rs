@@ -4,6 +4,7 @@ use std::sync::atomic::Ordering;
 use tracedecay_domain::{CodeGenerationId, GitOidV1, RefId};
 
 use super::*;
+use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexWorkerPhaseV1;
 use tracedecay_code_index_runtime::code_index_scheduler::branch_generations::{
     BranchGenerationPairV1, BranchGenerationReadControlV1,
 };
@@ -377,6 +378,15 @@ export function CompetingTrackedEdit(value: PublicWidget) { return value.value; 
         }
         () = tokio::task::yield_now() => {}
     }
+    assert_eq!(
+        registry
+            .subscribe_owner_activity(fixture.path())
+            .await
+            .expect("mounted owner activity")
+            .worker_phase(),
+        CodeIndexWorkerPhaseV1::Parked,
+        "the follow-up hold must be the next waiter for the sole reconcile permit"
+    );
     release_activation_tx
         .send(())
         .expect("release candidate graph activation");
