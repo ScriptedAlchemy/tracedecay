@@ -522,12 +522,13 @@ async fn recover_pending_census_once(
     cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
 ) -> Result<(), String> {
     let read_database = database.clone();
-    let mut read =
-        tokio::task::spawn_blocking(move || read_pending_census_observations(&read_database));
+    let read = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        read_pending_census_observations(&read_database)
+    });
+    tokio::pin!(read);
     let observations = tokio::select! {
         biased;
         () = cancellation.cancelled() => {
-            read.abort();
             read.await
                 .map_err(|error| format!("cancelled pending read worker did not join: {error}"))?
                 .map_err(|error| {
@@ -553,13 +554,13 @@ async fn recover_pending_census_once(
             .map_err(|error| format!("durable claim failed: {error:?}"))?,
     };
     let mark_database = database.clone();
-    let mut mark = tokio::task::spawn_blocking(move || {
+    let mark = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         mark_durable_census_observations(&mark_database, &observations)
     });
+    tokio::pin!(mark);
     tokio::select! {
         biased;
         () = cancellation.cancelled() => {
-            mark.abort();
             mark.await
                 .map_err(|error| {
                     format!("cancelled durable marker worker did not join: {error}")

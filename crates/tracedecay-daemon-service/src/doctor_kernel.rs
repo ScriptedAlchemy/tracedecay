@@ -643,7 +643,7 @@ pub async fn collect_code_generation_retention_findings(
     // live container until the next publication holds it open.
     let deferred_retirements = deferred_native_retirements(graph).await;
     let graph_container = graph.database_path().with_extension("grafeo");
-    let Ok(census) = tokio::task::spawn_blocking(move || {
+    let Ok(census) = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         let live_container_bytes = live_graph_container_bytes(&graph_container);
         let sealed = head_generations.and_then(|heads| {
             tracedecay_graph_db::census_sealed_store(&graph_container, &heads).ok()
@@ -1132,7 +1132,7 @@ pub fn production_doctor_report_reader(
                 })?
                 .source()
                 .full_sha;
-            let host_scan = tokio::task::spawn_blocking(move || {
+            let host_scan = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
                 let _span = tracing::trace_span!("daemon.doctor.host_scan").entered();
                 {
                     host_profile
