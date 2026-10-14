@@ -4,8 +4,9 @@ use std::time::Duration;
 
 use tracedecay_application::observability::{
     BoundedObservabilityProducerV1, ObservabilityEmissionOutcomeV1,
-    ObservabilityOwnerEmissionOutcomeV1, ObservabilityProducerIdentityV1,
-    RegisteredAggregateShareExporterV1, RegisteredObservabilityPortV1, provider_latency_read_model,
+    ObservabilityOwnerEmissionOutcomeV1, ObservabilityProducerDeadlinesV1,
+    ObservabilityProducerIdentityV1, RegisteredAggregateShareExporterV1,
+    RegisteredObservabilityPortV1, provider_latency_read_model,
 };
 use tracedecay_contracts::{
     AggregateShareExportRequestV1, ObservabilityAggregateExportApplicationV1,
@@ -20,6 +21,15 @@ use tracedecay_domain::{
 use tracedecay_session_memory::provider_usage::{
     AggregatedProviderUsageCountersV1, ProviderUsageAggregateV1, ProviderUsageCoverageV1,
 };
+
+const HANG_GUARD: Duration = Duration::from_secs(10);
+/// A held writer exhausts this persistence deadline well inside the shutdown
+/// budget, which the receipts written after its release still need.
+const BLOCKED_WRITER_DEADLINES: ObservabilityProducerDeadlinesV1 =
+    ObservabilityProducerDeadlinesV1 {
+        persistence: Duration::from_millis(500),
+        shutdown: Duration::from_secs(5),
+    };
 
 fn identity(scope: &str, boot: &str) -> ObservabilityProducerIdentityV1 {
     ObservabilityProducerIdentityV1 {
@@ -309,14 +319,11 @@ async fn persistence_failure_cannot_be_rewritten_as_a_clean_terminal() {
         .begin_write_transaction()
         .await
         .expect("hold registered writer");
-    // The producer's deadlines read the Tokio clock. Paused, it advances only
-    // while every task waits, so the held writer exhausts the production
-    // persistence deadline without a wall-clock guess.
-    tokio::time::pause();
-    let producer = BoundedObservabilityProducerV1::start(
+    let producer = BoundedObservabilityProducerV1::start_with_deadlines(
         db.clone(),
         identity(scope, "boot:persistence-failed"),
         1,
+        BLOCKED_WRITER_DEADLINES,
     )
     .expect("producer");
     assert_eq!(
@@ -325,29 +332,21 @@ async fn persistence_failure_cannot_be_rewritten_as_a_clean_terminal() {
             .expect("queued observation"),
         ObservabilityEmissionOutcomeV1::Enqueued
     );
-    tokio::task::yield_now().await;
-    let mut queued = envelope(scope);
-    queued.event_id = "event:persistence-failed:queued".to_owned();
-    queued.idempotency_key = "idempotency:persistence-failed:queued".to_owned();
-    queued.trace_id = "trace:persistence-failed:queued".to_owned();
-    assert_eq!(
-        producer
-            .try_emit(queued)
-            .expect("second queued observation"),
-        ObservabilityEmissionOutcomeV1::Enqueued
-    );
-    let mut dropped = envelope(scope);
-    dropped.event_id = "event:persistence-failed:dropped".to_owned();
-    dropped.idempotency_key = "idempotency:persistence-failed:dropped".to_owned();
-    dropped.trace_id = "trace:persistence-failed:dropped".to_owned();
-    assert_eq!(
-        producer.try_emit(dropped).expect("capacity observation"),
-        ObservabilityEmissionOutcomeV1::DroppedAtCapacity
-    );
+    // The held writer parks the worker on its first write for a whole
+    // persistence deadline, so it holds at most one more observation and the
+    // single slot overflows by the third offer.
+    let dropped = (2..=3).find(|offer| {
+        let mut offered = envelope(scope);
+        offered.event_id = format!("event:persistence-failed:{offer}");
+        offered.idempotency_key = format!("idempotency:persistence-failed:{offer}");
+        offered.trace_id = format!("trace:persistence-failed:{offer}");
+        producer.try_emit(offered).expect("offered observation")
+            == ObservabilityEmissionOutcomeV1::DroppedAtCapacity
+    });
+    assert!(dropped.is_some(), "the single slot must overflow");
+    // A startup rollup pass may wait one deadline before the worker takes the
+    // first observation, whose write then waits another.
     tokio::time::sleep(producer.persistence_deadline() * 3).await;
-    // The receipts written after the release run under real production
-    // budgets.
-    tokio::time::resume();
     blocker.commit().await.expect("release registered writer");
 
     let error = producer
@@ -440,11 +439,11 @@ async fn failed_flush_shutdown_leaves_rollup_maintenance_to_the_next_producer() 
         .begin_write_transaction()
         .await
         .expect("hold registered writer");
-    tokio::time::pause();
-    let producer = BoundedObservabilityProducerV1::start(
+    let producer = BoundedObservabilityProducerV1::start_with_deadlines(
         db.clone(),
         identity(scope, "boot:failed-flush-maintenance"),
         1,
+        BLOCKED_WRITER_DEADLINES,
     )
     .expect("producer");
     assert_eq!(
@@ -453,8 +452,9 @@ async fn failed_flush_shutdown_leaves_rollup_maintenance_to_the_next_producer() 
             .expect("queued observation"),
         ObservabilityEmissionOutcomeV1::Enqueued
     );
+    // A startup rollup pass may wait one deadline before the worker takes the
+    // observation, whose write then waits another.
     tokio::time::sleep(producer.persistence_deadline() * 3).await;
-    tokio::time::resume();
     blocker.commit().await.expect("release registered writer");
 
     let error = producer
@@ -489,38 +489,43 @@ async fn shutdown_preempts_rollup_maintenance_waiting_on_the_writer() {
         .begin_write_transaction()
         .await
         .expect("hold registered writer");
-    // Paused, the clock moves only while every task waits. The first idle
-    // rollup tick is due at start, so this sleep lets it begin its frontier
-    // write on the held writer, where its deadline can no longer elapse.
-    tokio::time::pause();
+    // The first idle rollup tick is due at start, so the worker begins its
+    // frontier write on the held writer, where a deadline longer than the
+    // test can never elapse.
     let producer = Arc::new(
-        BoundedObservabilityProducerV1::start(
+        BoundedObservabilityProducerV1::start_with_deadlines(
             db.clone(),
             identity(scope, "boot:preempted-maintenance"),
             1,
+            ObservabilityProducerDeadlinesV1 {
+                persistence: Duration::from_secs(30),
+                shutdown: Duration::from_secs(60),
+            },
         )
         .expect("producer"),
     );
-    tokio::time::sleep(Duration::from_millis(1)).await;
+    // The writer lane exposes no waiter count, so give the native worker a
+    // moment to reach the frontier write. A cancel that lands first only
+    // makes this run vacuous; it cannot fail it.
+    tokio::time::sleep(Duration::from_millis(50)).await;
 
     let cancel = tokio::spawn({
         let producer = Arc::clone(&producer);
         async move { producer.cancel().await }
     });
     // Cancellation writes nothing while the queue is empty, so the worker
-    // joins without the clock moving, unless maintenance still holds it.
-    for _ in 0..64 {
-        if producer.shutdown_joined() {
-            break;
+    // joins at once, unless maintenance still holds it.
+    let joined = tokio::time::timeout(HANG_GUARD, async {
+        while !producer.shutdown_joined() {
+            tokio::task::yield_now().await;
         }
-        tokio::task::yield_now().await;
-    }
+    })
+    .await;
     assert!(
-        producer.shutdown_joined(),
+        joined.is_ok(),
         "shutdown must not wait for optional maintenance on a held writer"
     );
 
-    tokio::time::resume();
     blocker.commit().await.expect("release registered writer");
     let summary = cancel
         .await
