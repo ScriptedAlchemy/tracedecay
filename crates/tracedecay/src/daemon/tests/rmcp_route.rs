@@ -734,10 +734,7 @@ async fn portable_one_request(fixture: &RmcpRouteFixture, request: &Value) -> Ve
         ))
         .await
     });
-    let stream = tracedecay_daemon_protocol::BrokerStream::connect(&endpoint)
-        .await
-        .expect("connect portable client");
-    let (reader, mut writer) = stream.into_split();
+    let (reader, mut writer) = tokio::io::split(super::connect_loopback_test_peer(&endpoint).await);
     let preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(AUTH_TOKEN)
         .to_line()
         .expect("portable auth preface");
@@ -784,10 +781,7 @@ async fn portable_production_route_serves_initialize_and_stateless_requests_over
         ))
         .await
     });
-    let stream = tracedecay_daemon_protocol::BrokerStream::connect(&endpoint)
-        .await
-        .expect("connect portable client");
-    let (reader, mut writer) = stream.into_split();
+    let (reader, mut writer) = tokio::io::split(super::connect_loopback_test_peer(&endpoint).await);
     let preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(AUTH_TOKEN)
         .to_line()
         .expect("portable auth preface");

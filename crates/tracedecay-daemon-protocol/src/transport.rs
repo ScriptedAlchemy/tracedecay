@@ -126,6 +126,130 @@ impl DaemonAuthPreface {
     }
 }
 
+/// The client end of a daemon connection.
+#[derive(Debug)]
+pub enum DaemonClientStream {
+    #[cfg(unix)]
+    Unix(asupersync::net::unix::UnixStream),
+    Tcp(asupersync::net::TcpStream),
+}
+
+pub enum DaemonClientReadHalf {
+    #[cfg(unix)]
+    Unix(asupersync::net::unix::OwnedReadHalf),
+    Tcp(asupersync::net::tcp::split::OwnedReadHalf),
+}
+
+pub enum DaemonClientWriteHalf {
+    #[cfg(unix)]
+    Unix(asupersync::net::unix::OwnedWriteHalf),
+    Tcp(asupersync::net::tcp::split::OwnedWriteHalf),
+}
+
+impl DaemonClientStream {
+    pub async fn connect(endpoint: &DaemonEndpoint) -> Result<Self> {
+        match endpoint {
+            #[cfg(unix)]
+            DaemonEndpoint::Unix(path) => Ok(Self::Unix(connect_unix(path)?)),
+            DaemonEndpoint::Loopback(address) => {
+                if !address.ip().is_loopback() {
+                    return Err(config_error("refusing non-loopback daemon endpoint"));
+                }
+                // Boxed: the connect state machine would otherwise inflate
+                // every caller's future past the large-future lint.
+                Ok(Self::Tcp(
+                    Box::pin(asupersync::net::TcpStream::connect(*address)).await?,
+                ))
+            }
+        }
+    }
+
+    /// Dropping the write half shuts down the write direction, so the daemon
+    /// reads EOF while the read half stays open.
+    pub fn into_split(self) -> (DaemonClientReadHalf, DaemonClientWriteHalf) {
+        match self {
+            #[cfg(unix)]
+            Self::Unix(stream) => {
+                let (reader, writer) = stream.into_split();
+                (
+                    DaemonClientReadHalf::Unix(reader),
+                    DaemonClientWriteHalf::Unix(writer),
+                )
+            }
+            Self::Tcp(stream) => {
+                let (reader, writer) = stream.into_split();
+                (
+                    DaemonClientReadHalf::Tcp(reader),
+                    DaemonClientWriteHalf::Tcp(writer),
+                )
+            }
+        }
+    }
+}
+
+/// A Unix stream socket connects synchronously or not at all, so one
+/// non-blocking `connect(2)` settles it. A full listen backlog fails with
+/// `EAGAIN` (`WouldBlock`), the saturated-daemon signal. Asupersync 0.5.0's
+/// own `UnixStream::connect` treats `EAGAIN` as an in-progress connect and,
+/// polled without its native I/O driver, re-wakes itself forever.
+///
+/// Upstream fixed this in asupersync commit 40a12bea0 (2026-10-03), which
+/// first ships in 0.6.0. When this workspace moves to asupersync 0.6.0, delete
+/// this workaround and `full_listen_backlog_fails_fast_as_saturated`, and
+/// connect with `UnixStream::connect`.
+#[cfg(unix)]
+fn connect_unix(path: &Path) -> std::io::Result<asupersync::net::unix::UnixStream> {
+    let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)?;
+    socket.set_nonblocking(true)?;
+    socket.connect(&socket2::SockAddr::unix(path)?)?;
+    asupersync::net::unix::UnixStream::from_std(socket.into())
+}
+
+impl asupersync::io::AsyncRead for DaemonClientReadHalf {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut asupersync::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            #[cfg(unix)]
+            Self::Unix(reader) => Pin::new(reader).poll_read(context, buffer),
+            Self::Tcp(reader) => Pin::new(reader).poll_read(context, buffer),
+        }
+    }
+}
+
+impl asupersync::io::AsyncWrite for DaemonClientWriteHalf {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            #[cfg(unix)]
+            Self::Unix(writer) => Pin::new(writer).poll_write(context, buffer),
+            Self::Tcp(writer) => Pin::new(writer).poll_write(context, buffer),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            #[cfg(unix)]
+            Self::Unix(writer) => Pin::new(writer).poll_flush(context),
+            Self::Tcp(writer) => Pin::new(writer).poll_flush(context),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            #[cfg(unix)]
+            Self::Unix(writer) => Pin::new(writer).poll_shutdown(context),
+            Self::Tcp(writer) => Pin::new(writer).poll_shutdown(context),
+        }
+    }
+}
+
+/// The daemon's end of an accepted connection.
 #[derive(Debug)]
 pub enum BrokerStream {
     #[cfg(unix)]
@@ -150,25 +274,6 @@ pub enum BrokerWriteHalf {
 }
 
 impl BrokerStream {
-    pub async fn connect(endpoint: &DaemonEndpoint) -> Result<Self> {
-        match endpoint {
-            #[cfg(unix)]
-            DaemonEndpoint::Unix(path) => {
-                Ok(Self::Unix(tokio::net::UnixStream::connect(path).await?))
-            }
-            DaemonEndpoint::Loopback(address) => {
-                if !address.ip().is_loopback() {
-                    return Err(config_error("refusing non-loopback daemon endpoint"));
-                }
-                Ok(Self::Tcp(tokio::net::TcpStream::connect(address).await?))
-            }
-        }
-    }
-
-    pub fn into_split(self) -> (tokio::io::ReadHalf<Self>, tokio::io::WriteHalf<Self>) {
-        tokio::io::split(self)
-    }
-
     pub fn into_owned_split(self) -> (BrokerReadHalf, BrokerWriteHalf) {
         match self {
             #[cfg(unix)]
@@ -429,7 +534,7 @@ pub fn default_loopback_endpoint() -> DaemonEndpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, BufReader};
 
     #[test]
     fn loopback_endpoint_round_trips_and_rejects_remote_addresses() {
@@ -562,11 +667,16 @@ mod tests {
         for _ in 0..CLIENTS {
             let endpoint = endpoint.clone();
             clients.spawn(async move {
-                let mut stream = BrokerStream::connect(&endpoint).await.unwrap();
+                use asupersync::io::AsyncWriteExt;
+
+                let (_reader, mut writer) = DaemonClientStream::connect(&endpoint)
+                    .await
+                    .unwrap()
+                    .into_split();
                 let line = DaemonAuthPreface::new(TOKEN).to_line().unwrap();
-                stream.write_all(line.as_bytes()).await.unwrap();
-                stream.write_all(b"\n").await.unwrap();
-                stream.shutdown().await.unwrap();
+                writer.write_all(line.as_bytes()).await.unwrap();
+                writer.write_all(b"\n").await.unwrap();
+                writer.shutdown().await.unwrap();
             });
         }
         while let Some(client) = clients.join_next().await {

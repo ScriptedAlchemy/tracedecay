@@ -369,6 +369,19 @@ async fn serve_authenticated_test_client(
     .await
 }
 
+/// Dials a portable server fixture. Like the Unix fixtures' socket pairs, these
+/// server tests drive the daemon from a plain Tokio peer.
+pub(super) async fn connect_loopback_test_peer(
+    endpoint: &tracedecay_daemon_protocol::DaemonEndpoint,
+) -> tokio::net::TcpStream {
+    let tracedecay_daemon_protocol::DaemonEndpoint::Loopback(address) = endpoint else {
+        panic!("portable server fixtures bind loopback, got {endpoint}");
+    };
+    tokio::net::TcpStream::connect(address)
+        .await
+        .expect("connect loopback test peer")
+}
+
 /// Writes the auth preface an authenticated client sends before its handshake.
 async fn write_test_auth_preface(writer: &mut (impl tokio::io::AsyncWrite + Unpin)) {
     let preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(TEST_AUTH_TOKEN)

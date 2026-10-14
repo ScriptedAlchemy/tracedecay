@@ -70,7 +70,8 @@ pub(super) async fn cursor_pre_compact_via_daemon_with_telemetry(
     if let Some(telemetry) = telemetry {
         telemetry.note_timeout_budget(CURSOR_PRE_COMPACT_BUDGET);
     }
-    if let Ok(outcome) = tokio::time::timeout(
+    if let Ok(outcome) = asupersync::time::timeout(
+        asupersync::time::wall_now(),
         CURSOR_PRE_COMPACT_BUDGET,
         cursor_pre_compact_via_daemon_inner(runtime, event_json, telemetry),
     )

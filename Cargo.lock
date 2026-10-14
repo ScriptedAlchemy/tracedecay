@@ -5903,6 +5903,7 @@ dependencies = [
 name = "tracedecay-agent-hosts"
 version = "0.1.0"
 dependencies = [
+ "asupersync",
  "cap-fs-ext",
  "cap-std",
  "flate2",
@@ -6090,6 +6091,7 @@ dependencies = [
 name = "tracedecay-cli"
 version = "1.0.0-beta.87"
 dependencies = [
+ "asupersync",
  "aws-lc-rs",
  "axum",
  "clap",
@@ -6352,11 +6354,13 @@ dependencies = [
 name = "tracedecay-daemon-protocol"
 version = "0.1.0"
 dependencies = [
+ "asupersync",
  "hex",
  "semver",
  "serde",
  "serde_json",
  "serde_path_to_error",
+ "socket2",
  "tempfile",
  "thiserror",
  "tokio",

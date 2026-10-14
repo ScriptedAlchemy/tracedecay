@@ -212,7 +212,8 @@ impl AsyncHookAdmissionPortV1 for DaemonAdmissionPort<'_> {
             let Ok(native_lifecycle) = self.lifecycle.map(serde_json::to_value).transpose() else {
                 return HookImmediateAdmissionV1::Unavailable;
             };
-            let response = tokio::time::timeout(
+            let response = asupersync::time::timeout(
+                asupersync::time::wall_now(),
                 Duration::from_micros(deadline.remaining_micros()),
                 super::daemon_hook_action(
                     self.runtime,
@@ -282,7 +283,8 @@ async fn timed_daemon_hook_action(
     deadline: HookSynchronousDeadlineV1,
     telemetry: Option<&HookTimingSpan>,
 ) -> HookFeedbackDeliveryOutcomeV1 {
-    let response = tokio::time::timeout(
+    let response = asupersync::time::timeout(
+        asupersync::time::wall_now(),
         Duration::from_micros(deadline.remaining_micros()),
         super::daemon_hook_action(runtime, Some(project_root), action, telemetry),
     )
