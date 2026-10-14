@@ -155,8 +155,10 @@ impl DaemonClientStream {
                 if !address.ip().is_loopback() {
                     return Err(config_error("refusing non-loopback daemon endpoint"));
                 }
+                // Boxed: the connect state machine would otherwise inflate
+                // every caller's future past the large-future lint.
                 Ok(Self::Tcp(
-                    asupersync::net::TcpStream::connect(*address).await?,
+                    Box::pin(asupersync::net::TcpStream::connect(*address)).await?,
                 ))
             }
         }
