@@ -49,7 +49,7 @@ pub(super) fn skill_usage_record_path(profile_root: &Path, skill_id: &str) -> Pa
 
 pub(super) async fn load_ledger(profile_root: &Path) -> Result<SkillUsageLedger> {
     let root = profile_root.to_path_buf();
-    tokio::task::spawn_blocking(move || load_ledger_sync(&root))
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || load_ledger_sync(&root))
         .await
         .map_err(|error| config_error(format!("skill usage load task failed: {error}")))?
 }
@@ -62,7 +62,7 @@ pub(super) async fn update_record(
 ) -> Result<SkillUsageRecord> {
     let root = profile_root.to_path_buf();
     let skill_id = skill_id.to_string();
-    tokio::task::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         with_skill_lock(
             &root,
             &skill_id,
@@ -87,7 +87,7 @@ pub(super) async fn record_imported_event(
 ) -> Result<Option<SkillUsageRecord>> {
     let root = profile_root.to_path_buf();
     let skill_id = skill_id.to_string();
-    tokio::task::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         let mut applied = false;
         let record = with_skill_lock(
             &root,

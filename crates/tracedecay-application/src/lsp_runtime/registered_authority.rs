@@ -6,7 +6,6 @@ use std::sync::Arc;
 use cap_std::ambient_authority;
 use cap_std::fs::Dir;
 use same_file::Handle;
-use tokio::io::AsyncReadExt;
 use tracedecay_domain::ContentDigest;
 use tracedecay_lsp::analyzer::adapters::builtin_adapters;
 use tracedecay_lsp::analyzer::client::LspDocument;
@@ -14,6 +13,7 @@ use tracedecay_lsp::{
     AdmittedRoot, CanonicalDiagnosticRefreshRequest, LspRuntimeFailure, LspRuntimeFuture,
     strict_file_uri_path,
 };
+use tracedecay_runtime_core::native_runtime;
 use tracedecay_runtime_core::path_safety::canonical_root_identity;
 use url::Url;
 
@@ -155,12 +155,12 @@ impl RegisteredProjectLspAuthority {
         relative: &Path,
     ) -> Result<String, LspRuntimeFailure> {
         let (_canonical, file) = open_project_file(&self.project_dir, relative)?;
-        let mut file = tokio::fs::File::from_std(file.into_std());
-        let mut text = String::new();
-        file.read_to_string(&mut text)
+        let file = file.into_std();
+        native_runtime::spawn_blocking(move || std::io::read_to_string(file))
             .await
-            .map_err(|_| LspRuntimeFailure::new("document-unavailable"))?;
-        Ok(text)
+            .ok()
+            .and_then(Result::ok)
+            .ok_or_else(|| LspRuntimeFailure::new("document-unavailable"))
     }
 
     #[tracing::instrument(name = "usecases.lsp.scope.current", level = "trace", skip_all)]

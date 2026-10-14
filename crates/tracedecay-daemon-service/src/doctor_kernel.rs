@@ -88,38 +88,19 @@ pub fn configuration_read_from_pin<E>(
     }
 }
 
-/// Run the exhaustive observation-authority invariant pass over an already
-/// acquired read snapshot of the registered profile authority.
-///
-/// This is the same pass the `tracedecay_runtime` producers run
-/// ([`tracedecay_global_db::schema_stages::validate_observation_authority_connection`]):
-/// read-only, so Doctor observes the invariant without owning any repair of it.
-/// `true` means the audit ran and every invariant held; `false` means it ran and
-/// an invariant failed. "Could not run" is not representable here, the caller
-/// owns that distinction.
-async fn observation_authority_audit_passed(
-    snapshot: &impl tracedecay_runtime_core::db::engine::QueryExecutor,
-) -> bool {
-    tracedecay_global_db::schema_stages::validate_observation_authority_connection(snapshot)
-        .await
-        .is_ok()
-}
-
 /// Observe the storage authority audit signal the daemon-side Doctor reader
 /// reports as [`DaemonRuntimeHealthSignalV1::authority_audit_ok`].
 ///
-/// Tri-state, matching the vocabulary the `tracedecay_runtime` producers already
-/// publish: `Some(true)` only when the audit ran and passed, `Some(false)` when
-/// it ran and an invariant failed, and `None` when it could not run at all
-/// because the registered authority would not yield a read snapshot. A not-run
-/// audit weakens runtime coverage to partial rather than claiming health.
+/// This is the same read-only pass the `tracedecay_runtime` producers run, so
+/// Doctor observes the invariant without owning any repair of it. Tri-state:
+/// `Some(true)` only when the audit ran and passed, `Some(false)` when it ran
+/// and an invariant failed, and `None` when it could not run or did not finish
+/// inside its budget. A not-run audit weakens runtime coverage to partial
+/// rather than claiming health or a stuck runtime.
 async fn observation_authority_audit_ok(
     registry: &tracedecay_global_db::RegisteredGlobalDb,
 ) -> Option<bool> {
-    match registry.health_read_snapshot().await {
-        Ok(snapshot) => Some(observation_authority_audit_passed(&snapshot).await),
-        Err(_) => None,
-    }
+    registry.observation_authority_audit().await.verdict()
 }
 
 // === Host/agent integration conformance (Advisory family) ====================
@@ -643,7 +624,7 @@ pub async fn collect_code_generation_retention_findings(
     // live container until the next publication holds it open.
     let deferred_retirements = deferred_native_retirements(graph).await;
     let graph_container = graph.database_path().with_extension("grafeo");
-    let Ok(census) = tokio::task::spawn_blocking(move || {
+    let Ok(census) = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         let live_container_bytes = live_graph_container_bytes(&graph_container);
         let sealed = head_generations.and_then(|heads| {
             tracedecay_graph_db::census_sealed_store(&graph_container, &heads).ok()
@@ -1132,7 +1113,7 @@ pub fn production_doctor_report_reader(
                 })?
                 .source()
                 .full_sha;
-            let host_scan = tokio::task::spawn_blocking(move || {
+            let host_scan = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
                 let _span = tracing::trace_span!("daemon.doctor.host_scan").entered();
                 {
                     host_profile

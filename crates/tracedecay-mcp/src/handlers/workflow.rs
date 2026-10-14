@@ -671,23 +671,16 @@ async fn wait_for_test_run_cancellation(
     mut emitter: OperationEmitter,
     cancellation: Option<CancellationSignal>,
 ) {
-    // CancellationSignal is still a polled atomic (no event wait API on this
-    // type without changing application crate callers we do not own). When no
-    // signal is attached, wait only on the emitter. Otherwise poll at 50ms.
-    // Same cancel semantics, ~10x fewer timers than the prior 5ms wakeups.
     let Some(cancellation) = cancellation else {
         emitter.cancelled().await;
         return;
     };
-    loop {
-        if cancellation.is_cancelled() {
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => {
             let _ = emitter.request_managed_test_cancellation().await;
-            return;
         }
-        tokio::select! {
-            () = emitter.cancelled() => return,
-            () = tokio::time::sleep(Duration::from_millis(50)) => {}
-        }
+        () = emitter.cancelled() => {}
     }
 }
 
@@ -864,7 +857,14 @@ async fn managed_test_document_content_digests(
 
     let mut outcomes = stream::iter(validated.into_iter().enumerate())
         .map(|(index, (changed_path, absolute))| async move {
-            let outcome = match tokio::fs::read(&absolute).await {
+            let read_path = absolute.clone();
+            let read = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+                std::fs::read(read_path)
+            })
+            .await
+            .map_err(std::io::Error::other)
+            .and_then(std::convert::identity);
+            let outcome = match read {
                 Ok(bytes) => match Url::from_file_path(&absolute) {
                     Ok(uri) => Ok(Some((uri.to_string(), content_digest(&bytes)))),
                     Err(()) => Err(TraceDecayError::Config {

@@ -51,16 +51,16 @@ use std::convert::Infallible;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
-use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::sse::{Event, Sse};
 use serde::Serialize;
-use tokio_stream::wrappers::ReceiverStream;
 
 use tracedecay_runtime_core::db::engine::QueryExecutor;
+use tracedecay_runtime_core::native_runtime;
 
 use super::DashboardState;
 use super::read_model::{
@@ -575,15 +575,23 @@ impl SharedSourcePoll {
             return sender.subscribe();
         }
         let (sender, _initial) = tokio::sync::watch::channel(SourcePollSnapshot::default());
-        let poller_state = state.clone();
+        // Only the two stores: the last `DashboardState` clone must not drop
+        // on a native worker, where daemon-owned ports may expect Tokio.
+        let savings_db = state.savings_db.clone();
+        let mem_db = Arc::clone(&state.mem_db);
         let poller_sender = sender.clone();
         let poller_slot = Arc::clone(&self.sender);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(POLL_INTERVAL);
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let poller = native_runtime::NativeTask::spawn(async move {
+            let mut due = Instant::now();
             loop {
-                interval.tick().await;
-                if poller_sender.receiver_count() == 0 {
+                let timer = native_runtime::sleep_until(due).await;
+                due = Instant::now() + POLL_INTERVAL;
+                if let Err(error) = &timer {
+                    // Without a timer the poller would spin; it stops and the
+                    // next subscriber arms a fresh one.
+                    tracing::error!(%error, "dashboard shared source poller timer unavailable");
+                }
+                if timer.is_err() || poller_sender.receiver_count() == 0 {
                     // The exit re-check runs under the same lock `subscribe`
                     // holds while attaching a receiver: a stream that lands in
                     // between either bumps the count (keep polling) or sees
@@ -595,13 +603,13 @@ impl SharedSourcePoll {
                             poisoned.into_inner()
                         }
                     };
-                    if poller_sender.receiver_count() == 0 {
+                    if timer.is_err() || poller_sender.receiver_count() == 0 {
                         *slot = None;
                         return;
                     }
                 }
-                let registry = registry_snapshot(&poller_state).await;
-                let total_store_bytes = project_store_bytes(&poller_state).await;
+                let registry = registry_snapshot(savings_db.as_ref()).await;
+                let total_store_bytes = store_total_bytes(&mem_db.read_connection()).await;
                 let _ = poller_sender.send(SourcePollSnapshot {
                     initialized: true,
                     registry,
@@ -610,7 +618,12 @@ impl SharedSourcePoll {
             }
         });
         let receiver = sender.subscribe();
-        *slot = Some(sender);
+        match poller {
+            Ok(_detached) => *slot = Some(sender),
+            // The receiver's sender drops here, so streams skip source
+            // events and the next subscriber retries.
+            Err(error) => tracing::error!(%error, "dashboard shared source poller not admitted"),
+        }
         receiver
     }
 }
@@ -664,10 +677,10 @@ pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> 
             }
             _ => Ok(None),
         };
-        let mut interval = tokio::time::interval(POLL_INTERVAL);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut flush = tokio::time::interval(ACTIVITY_FLUSH_INTERVAL);
-        flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let poll_due = native_runtime::sleep_until(Instant::now());
+        tokio::pin!(poll_due);
+        let flush_due = native_runtime::sleep_until(Instant::now());
+        tokio::pin!(flush_due);
         let mut tick: u64 = 0;
         let mut pending: std::collections::BTreeMap<ActivityBucketKeyV1, ActivityBucketV1> =
             std::collections::BTreeMap::new();
@@ -736,7 +749,12 @@ pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> 
 
         loop {
             let batch: Vec<DashboardEventV1> = tokio::select! {
-                _ = interval.tick() => {
+                fired = &mut poll_due => {
+                    poll_due.set(native_runtime::sleep_until(Instant::now() + POLL_INTERVAL));
+                    if let Err(error) = fired {
+                        tracing::error!(%error, "dashboard event stream timer unavailable");
+                        return;
+                    }
                     tick = tick.saturating_add(1);
                     let mut batch = Vec::new();
                     if tick.is_multiple_of(HEARTBEAT_EVERY_TICKS) {
@@ -745,7 +763,12 @@ pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> 
                     batch.extend(stream_state.poll_sources(&scope).await);
                     batch
                 }
-                _ = flush.tick() => {
+                fired = &mut flush_due => {
+                    flush_due.set(native_runtime::sleep_until(Instant::now() + ACTIVITY_FLUSH_INTERVAL));
+                    if let Err(error) = fired {
+                        tracing::error!(%error, "dashboard event stream timer unavailable");
+                        return;
+                    }
                     if pending.is_empty() {
                         continue;
                     }
@@ -844,11 +867,29 @@ pub async fn events(State(state): State<DashboardState>, headers: HeaderMap) -> 
         }
     });
 
-    Sse::new(ReceiverStream::new(rx)).keep_alive(
-        KeepAlive::new()
-            .interval(KEEP_ALIVE_INTERVAL)
-            .text("keep-alive"),
-    )
+    keep_alive_sse(rx, KEEP_ALIVE_INTERVAL)
+}
+
+/// Sends a keep-alive comment after each `interval` without an event, as
+/// axum's `KeepAlive` does, but on a native timer: axum's arms a Tokio timer,
+/// which panics on a runtime without one.
+fn keep_alive_sse(
+    rx: tokio::sync::mpsc::Receiver<Result<Event, Infallible>>,
+    interval: Duration,
+) -> impl IntoResponse {
+    Sse::new(futures_util::stream::unfold(rx, move |mut rx| async move {
+        let event = match native_runtime::timeout(interval, rx.recv()).await {
+            Ok(event) => event?,
+            Err(native_runtime::TimeoutError::Elapsed) => {
+                Ok(Event::default().comment("keep-alive"))
+            }
+            Err(native_runtime::TimeoutError::TimerUnavailable(error)) => {
+                tracing::error!(%error, "dashboard event stream keep-alive timer unavailable");
+                return None;
+            }
+        };
+        Some((event, rx))
+    }))
 }
 
 async fn send_event(
@@ -1021,8 +1062,10 @@ struct RegistrySnapshot {
 }
 
 /// Compute a stable digest of the project-registry snapshot plus its count.
-async fn registry_snapshot(state: &DashboardState) -> Option<RegistrySnapshot> {
-    let db = state.savings_db.as_ref()?;
+async fn registry_snapshot(
+    db: Option<&tracedecay_global_db::RegisteredGlobalDbLeaseV1>,
+) -> Option<RegistrySnapshot> {
+    let db = db?;
     let projects = db.list_code_projects(250).await.ok()?;
     let count = projects.len() as u64;
     let mut hasher = DefaultHasher::new();
@@ -1055,10 +1098,6 @@ async fn registry_snapshot(state: &DashboardState) -> Option<RegistrySnapshot> {
 /// Observed size of the always-held project store as a coarse storage-change
 /// signal. `graph_conn` is a read connection onto `mem_db`, so the shared
 /// database is measured once. Returns `None` when a pragma read fails.
-async fn project_store_bytes(state: &DashboardState) -> Option<u64> {
-    store_total_bytes(&state.mem_db.read_connection()).await
-}
-
 async fn store_total_bytes(conn: &(impl QueryExecutor + ?Sized)) -> Option<u64> {
     let page_size = pragma_u64(conn, "page_size").await?;
     let page_count = pragma_u64(conn, "page_count").await?;
@@ -1189,6 +1228,46 @@ mod tests {
     use std::hash::{Hash, Hasher};
 
     use super::*;
+
+    async fn next_frame(
+        body: &mut (impl futures_util::Stream<Item = Result<axum::body::Bytes, axum::Error>> + Unpin),
+    ) -> Option<String> {
+        let frame = futures_util::StreamExt::next(body)
+            .await?
+            .expect("sse body frame");
+        Some(String::from_utf8(frame.to_vec()).expect("utf-8 sse frame"))
+    }
+
+    #[test]
+    fn event_stream_keeps_alive_without_a_tokio_timer() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("tokio runtime without a time driver");
+        runtime.block_on(async {
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            let mut body = keep_alive_sse(rx, Duration::from_millis(20))
+                .into_response()
+                .into_body()
+                .into_data_stream();
+            tx.send(Ok(Event::default().data("first")))
+                .await
+                .expect("stream open");
+            assert_eq!(
+                next_frame(&mut body).await.as_deref(),
+                Some("data: first\n\n")
+            );
+            assert_eq!(
+                next_frame(&mut body).await.as_deref(),
+                Some(": keep-alive\n\n")
+            );
+            drop(tx);
+            assert_eq!(
+                next_frame(&mut body).await,
+                None,
+                "the stream ends with its producer"
+            );
+        });
+    }
 
     async fn registered_database_for_test(
         path: &Path,
@@ -1724,21 +1803,21 @@ mod tests {
     #[tokio::test]
     async fn shared_source_poller_releases_its_state_after_the_last_stream() {
         let (_project, dash) = dashboard_state_fixture("project.dashboard-events-retire").await;
-        let baseline = Arc::strong_count(&dash.delivery_settlements);
+        let baseline = Arc::strong_count(&dash.mem_db);
         let receiver = dash.event_source_poll.subscribe(&dash);
         assert!(
-            Arc::strong_count(&dash.delivery_settlements) > baseline,
-            "the running poller holds a state clone"
+            Arc::strong_count(&dash.mem_db) > baseline,
+            "the running poller holds the project store"
         );
 
         drop(receiver);
         // Generous ceiling: the loop exits as soon as the poller's next tick
         // retires it, so only a genuine leak waits this long.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-        while Arc::strong_count(&dash.delivery_settlements) > baseline {
+        while Arc::strong_count(&dash.mem_db) > baseline {
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "the poller must release its state once no stream reads it"
+                "the poller must release the project store once no stream reads it"
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -1750,6 +1829,26 @@ mod tests {
             .await
             .expect("re-armed poller publishes")
             .expect("re-armed poller sender is alive");
+    }
+
+    #[test]
+    fn shared_source_poller_publishes_without_a_tokio_runtime() {
+        let tokio = tokio::runtime::Runtime::new().expect("fixture runtime");
+        let (_project, dash) =
+            tokio.block_on(dashboard_state_fixture("project.dashboard-events-native"));
+        let initialized = native_runtime::block_on(async {
+            let mut receiver = dash.event_source_poll.subscribe(&dash);
+            native_runtime::timeout(Duration::from_secs(60), receiver.changed())
+                .await
+                .expect("shared poller publishes its first snapshot")
+                .expect("shared poller sender is alive");
+            receiver.borrow().initialized
+        })
+        .expect("native block_on");
+        assert!(
+            initialized,
+            "the first published snapshot is a real observation"
+        );
     }
 
     #[tokio::test]
@@ -1764,6 +1863,9 @@ mod tests {
         let database_bytes = page_size * page_count;
         assert!(database_bytes > 0, "fixture database has pages");
 
-        assert_eq!(project_store_bytes(&dash).await, Some(database_bytes));
+        assert_eq!(
+            store_total_bytes(&dash.mem_db.read_connection()).await,
+            Some(database_bytes)
+        );
     }
 }

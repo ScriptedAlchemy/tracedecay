@@ -775,7 +775,7 @@ pub(crate) async fn await_within_stop_budget<T>(
     if let Some(telemetry) = telemetry {
         telemetry.note_timeout_budget(budget);
     }
-    match tokio::time::timeout(budget, work).await {
+    match asupersync::time::timeout(asupersync::time::wall_now(), budget, work).await {
         Ok(value) => {
             if let Some(telemetry) = telemetry {
                 telemetry.note_timed_out(false);
@@ -990,7 +990,12 @@ pub async fn schedule_user_session_review(
         },
         None,
     );
-    let _ = tokio::time::timeout(std::time::Duration::from_millis(25), hint).await;
+    let _ = asupersync::time::timeout(
+        asupersync::time::wall_now(),
+        std::time::Duration::from_millis(25),
+        hint,
+    )
+    .await;
 }
 
 #[cfg(test)]

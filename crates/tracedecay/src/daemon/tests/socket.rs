@@ -156,7 +156,7 @@ async fn dropping_lsp_client_closes_transport_without_spawning_detach() {
     .expect("loopback listener");
     let server = tokio::spawn(async move {
         let stream = listener.accept().await.expect("accept client");
-        let (reader, mut writer) = stream.into_split();
+        let (reader, mut writer) = tokio::io::split(stream);
         let mut lines = tokio::io::BufReader::new(reader).lines();
         super::read_authenticated_handshake(&mut lines, LSP_TEST_TOKEN).await;
         let open: Value = serde_json::from_str(
@@ -216,29 +216,18 @@ async fn dropping_lsp_client_closes_transport_without_spawning_detach() {
 #[cfg(unix)]
 enum LspOpenInterrupt {
     Cancel,
-    /// Jumps the frozen clock to the deadline instead of spending it in wall
-    /// time. Real time resumes before the client notifies cancellation and
-    /// closes its stream, so that I/O never races an auto-advanced timer.
+    /// Lets the open's own deadline run out.
     ExpireDeadline,
 }
 
 #[cfg(unix)]
 impl LspOpenInterrupt {
-    async fn fire(
-        self,
-        cancellation: &tracedecay_contracts::CancellationSignal,
-        expiry: tokio::time::Instant,
-    ) {
+    fn fire(self, cancellation: &tracedecay_contracts::CancellationSignal) {
         match self {
             Self::Cancel => {
                 cancellation.cancel(tracedecay_contracts::clock::now_micros());
             }
-            Self::ExpireDeadline => {
-                tokio::time::pause();
-                tokio::time::advance(expiry.saturating_duration_since(tokio::time::Instant::now()))
-                    .await;
-                tokio::time::resume();
-            }
+            Self::ExpireDeadline => {}
         }
     }
 }
@@ -283,7 +272,7 @@ async fn interrupt_unanswered_lsp_open(
         let Ok(stream) = tokio::time::timeout_at(expiry, listener.accept()).await else {
             return (None, None);
         };
-        let (reader, _writer) = stream.expect("accept client").into_split();
+        let (reader, _writer) = tokio::io::split(stream.expect("accept client"));
         let mut lines = tokio::io::BufReader::new(reader).lines();
         super::read_authenticated_handshake(&mut lines, LSP_TEST_TOKEN).await;
         let Some(open) = lines.next_line().await.expect("read open") else {
@@ -295,7 +284,7 @@ async fn interrupt_unanswered_lsp_open(
             "carries_deadline": open["deadline"]["expires_at"] == expected_deadline,
             "cancellation": open["cancellation"]["state"]["state"],
         });
-        interrupt.fire(&daemon_cancellation, expiry).await;
+        interrupt.fire(&daemon_cancellation);
         (
             Some(control),
             lines.next_line().await.expect("read after interruption"),
@@ -364,7 +353,7 @@ async fn lsp_gateway_open_returns_typed_unavailable_when_daemon_disconnects() {
     .expect("loopback listener");
     let server = tokio::spawn(async move {
         let stream = listener.accept().await.expect("accept client");
-        let (reader, _writer) = stream.into_split();
+        let (reader, _writer) = tokio::io::split(stream);
         let mut lines = tokio::io::BufReader::new(reader).lines();
         super::read_authenticated_handshake(&mut lines, LSP_TEST_TOKEN).await;
         lines
@@ -408,7 +397,7 @@ async fn stdio_bridge_session_reconnects_on_a_fresh_socket_and_resumes_frames() 
     .expect("loopback listener");
     let server = tokio::spawn(async move {
         let first = listener.accept().await.expect("accept first connection");
-        let (reader, mut writer) = first.into_split();
+        let (reader, mut writer) = tokio::io::split(first);
         let mut lines = tokio::io::BufReader::new(reader).lines();
         super::read_authenticated_handshake(&mut lines, LSP_TEST_TOKEN).await;
         let open: Value = serde_json::from_str(
@@ -451,7 +440,7 @@ async fn stdio_bridge_session_reconnects_on_a_fresh_socket_and_resumes_frames() 
         drop(writer);
 
         let second = listener.accept().await.expect("accept fresh connection");
-        let (reader, mut writer) = second.into_split();
+        let (reader, mut writer) = tokio::io::split(second);
         let mut lines = tokio::io::BufReader::new(reader).lines();
         super::read_authenticated_handshake(&mut lines, LSP_TEST_TOKEN).await;
         let reconnect: Value = serde_json::from_str(
@@ -1596,10 +1585,7 @@ async fn portable_broker_routes_multiple_closed_invocations_without_falling_back
         .await
     });
 
-    let stream = tracedecay_daemon_protocol::BrokerStream::connect(&endpoint)
-        .await
-        .expect("connect client");
-    let (reader, mut writer) = stream.into_split();
+    let (reader, mut writer) = tokio::io::split(super::connect_loopback_test_peer(&endpoint).await);
     let preface = tracedecay_daemon_protocol::DaemonAuthPreface::new(TOKEN)
         .to_line()
         .expect("auth preface");

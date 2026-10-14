@@ -199,3 +199,17 @@ fn session_review_hint_routes_exact_identity_to_the_daemon() {
         );
     });
 }
+
+#[test]
+fn stop_budget_deadline_fires_without_a_tokio_runtime() {
+    let outcome =
+        tracedecay_runtime_core::native_runtime::block_on(super::await_within_stop_budget(
+            std::future::pending::<&str>(),
+            std::time::Duration::from_millis(20),
+            None,
+            || "timed out",
+        ))
+        .expect("native runtime");
+
+    assert_eq!(outcome, "timed out");
+}

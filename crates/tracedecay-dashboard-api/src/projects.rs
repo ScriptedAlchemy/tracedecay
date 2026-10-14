@@ -90,7 +90,7 @@ impl DashboardRuntime {
                 event = "dashboard_session_authorities_mounted",
                 project_root = %state.project_root.display(),
             );
-            crate::token_count::spawn_warm(state.clone());
+            crate::token_count::spawn_warm(&state);
         }
         state
     }

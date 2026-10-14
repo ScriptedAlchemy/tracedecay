@@ -345,9 +345,9 @@ async fn co_change_evidence(
         bounds.deadline = bounds.deadline.min(std::time::Instant::now() + remaining);
     }
     let root = ctx.project_root().to_path_buf();
-    let mut worker = tokio::task::spawn_blocking(move || {
-        missing_co_change_partners(&root, &history, &tree, &changed_files, &bounds)
-    });
+    let mut worker = std::pin::pin!(tracedecay_runtime_core::native_runtime::spawn_blocking(
+        move || missing_co_change_partners(&root, &history, &tree, &changed_files, &bounds)
+    ));
     let joined = match ctx.cancellation() {
         Some(signal) => tokio::select! {
             biased;
@@ -491,16 +491,16 @@ fn all_symbols_in_files(
 /// synchronous and unbounded on a large or pathological repository. Running
 /// them inline on a runtime worker starves every other request sharing that
 /// worker. The sharper problem makes the carried git dispatch deadline
-/// unenforceable: `tokio::time::timeout` can only preempt at an await point, so
-/// an inline blocking call runs to completion regardless. Awaiting the
-/// `spawn_blocking` join handle restores exactly that composition, which
-/// `compute_pr_context` already relied on.
+/// unenforceable: a timeout can only preempt at an await point, so an inline
+/// blocking call runs to completion regardless. Awaiting the blocking pool
+/// restores exactly that composition, which `compute_pr_context` already
+/// relied on.
 async fn blocking_git_span<T, F>(label: &str, work: F) -> Result<T>
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
-    tokio::task::spawn_blocking(work)
+    tracedecay_runtime_core::native_runtime::spawn_blocking(work)
         .await
         .map_err(|join_error| TraceDecayError::Config {
             message: format!("git {label} task failed: {join_error}"),
@@ -558,7 +558,7 @@ where
     let worker_exited = Arc::clone(&state.exited);
     let worker_request_cancellation = request_cancellation.clone();
     let worker_request_deadline = request_deadline.clone();
-    let mut worker = tokio::task::spawn_blocking(move || {
+    let joined = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         let _mark_exited = SetFlagOnDrop::new(worker_exited);
         let checkpoint = || {
             worker_cancelled.load(Ordering::Acquire)
@@ -570,23 +570,8 @@ where
                 })
         };
         work(&checkpoint)
-    });
-    let joined = loop {
-        tokio::select! {
-            joined = &mut worker => break joined,
-            () = tokio::time::sleep(std::time::Duration::from_millis(2)) => {
-                let request_stopped = request_cancellation.as_ref().is_some_and(
-                    tracedecay_contracts::CancellationSignal::is_cancelled,
-                ) || request_deadline.as_ref().is_some_and(|deadline| {
-                    tracedecay_daemon_protocol::deadline_remaining(deadline).is_none()
-                });
-                if request_stopped {
-                    state.cancelled.store(true, Ordering::Release);
-                    break worker.await;
-                }
-            }
-        }
-    }
+    })
+    .await
     .map_err(|join_error| TraceDecayError::Config {
         message: format!("git {label} task failed: {join_error}"),
     })?;
@@ -2071,6 +2056,27 @@ mod blocking_git_span_tests {
             "a concurrent task must have run while the gix span was blocking"
         );
         ticker.await.expect("ticker joins");
+    }
+
+    #[test]
+    fn a_git_span_runs_and_reports_a_panic_without_a_tokio_runtime() {
+        let (value, panicked) = tracedecay_runtime_core::native_runtime::block_on(async {
+            (
+                blocking_git_span("test", || 7_u8).await,
+                blocking_git_span("panic test", || -> u8 { panic!("gix exploded") }).await,
+            )
+        })
+        .expect("the native runtime drives the span");
+
+        assert_eq!(value.expect("the span returns its value"), 7);
+        assert!(
+            matches!(
+                &panicked,
+                Err(tracedecay_domain::errors::TraceDecayError::Config { message })
+                    if message.starts_with("git panic test task failed")
+            ),
+            "{panicked:?}"
+        );
     }
 
     #[tokio::test]

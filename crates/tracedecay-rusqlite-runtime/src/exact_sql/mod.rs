@@ -24,7 +24,9 @@ use crate::{
 
 const MAX_QUERY_ROWS: usize = 10_000;
 const MAX_QUERY_BYTES: usize = 64 * 1024 * 1024;
-const MAX_SQL_BYTES: usize = 1024 * 1024;
+/// SQLite's statement-length limit, less the authority suffix
+/// [`guard::prepare_cached`] appends to a cached statement's text.
+const MAX_SQL_BYTES: usize = 1024 * 1024 - guard::MAX_CACHE_KEY_SUFFIX_BYTES;
 const MAX_SQL_PARAMETERS: usize = 32_766;
 const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 const MAX_EXACT_SQL_ATTACHMENTS: i32 = 4;
@@ -53,7 +55,10 @@ pub use types::*;
 pub(crate) use command::{WriterCommand, reject_writer_command, run_writer_command};
 
 use command::{TransactionCommand, TransactionLeaseState};
-use guard::{AuthorizedDatabaseOperation, with_exact_sql_guard};
+pub(crate) use guard::{authorize_connection, connection_identity};
+
+use crate::connection::ConnectionMode;
+use guard::{AuthorizedDatabaseOperation, ExactSqlAuthority, with_exact_sql_guard};
 
 type ExactSqlQuery = dyn Fn(ExactSqlStatement, OperationPriorityV1, Duration) -> Result<ExactSqlRows, ExactSqlError>
     + Send
@@ -110,15 +115,40 @@ pub struct ExactSqlHandle {
 /// (current-thread runtimes, plain threads) keeps the previous inline
 /// behavior. The remaining `block_in_place` panic case is a `LocalSet` on a
 /// multi-thread runtime, which this workspace does not use.
+///
+/// Asupersync has no `block_in_place`, so a wait on a native runtime thread
+/// (a worker or a `block_on` caller; its blocking pool carries no runtime
+/// handle) still parks that thread. Each such wait is logged and counted in
+/// [`native_thread_writer_waits`] so the caller can be moved onto
+/// `native_runtime::spawn_blocking`.
+#[track_caller]
 fn recv_writer_reply<T>(
     response: async_channel::Receiver<T>,
 ) -> Result<T, async_channel::RecvError> {
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(|| response.recv_blocking())
-        }
-        _ => response.recv_blocking(),
+    if let Ok(handle) = tokio::runtime::Handle::try_current()
+        && handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+    {
+        return tokio::task::block_in_place(|| response.recv_blocking());
     }
+    if asupersync::runtime::Runtime::current_handle().is_some() {
+        NATIVE_THREAD_WRITER_WAITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tracing::error!(
+            call_site = %std::panic::Location::caller(),
+            backtrace = %std::backtrace::Backtrace::force_capture(),
+            "synchronous storage port parked a native runtime thread waiting on the writer"
+        );
+    }
+    response.recv_blocking()
+}
+
+static NATIVE_THREAD_WRITER_WAITS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Synchronous writer waits this process ran on a native runtime thread. Each
+/// one parked that thread; zero is the only healthy value.
+#[must_use]
+pub fn native_thread_writer_waits() -> u64 {
+    NATIVE_THREAD_WRITER_WAITS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 impl ExactSqlHandle {
@@ -1047,18 +1077,16 @@ fn execute_request(
     validate_request(&request)?;
     with_exact_sql_guard(
         connection,
-        pinned_transaction,
-        false,
+        ExactSqlAuthority::Writer {
+            allow_savepoints: pinned_transaction,
+            database_operation: None,
+        },
         shutdown_requested,
         execution_deadline,
         enforce_statement_limit,
         repeated_authority,
-        crate::connection::authorize_writer,
-        true,
-        None,
         || match request {
-            SqlRequest::Validate(statement) => connection
-                .prepare_cached(&statement.sql)
+            SqlRequest::Validate(statement) => guard::prepare_cached(connection, &statement.sql)
                 .map(|_| SqlResult::Validated)
                 .map_err(|error| sqlite_error("validate statement", error)),
             SqlRequest::Execute(statement) => {
@@ -1136,8 +1164,7 @@ fn execute_statement(
         .params
         .into_iter()
         .map(ExactSqlValue::into_rusqlite);
-    let mut prepared = connection
-        .prepare_cached(&statement.sql)
+    let mut prepared = guard::prepare_cached(connection, &statement.sql)
         .map_err(|error| sqlite_error("prepare execute", error))?;
     let changed_rows = prepared
         .execute(params_from_iter(values))
@@ -1160,15 +1187,14 @@ fn attach_database(
     )?;
     with_exact_sql_guard(
         connection,
-        pinned_transaction,
-        false,
+        ExactSqlAuthority::Writer {
+            allow_savepoints: pinned_transaction,
+            database_operation: Some(AuthorizedDatabaseOperation::Attach),
+        },
         shutdown_requested,
         execution_deadline,
         true,
         None,
-        crate::connection::authorize_writer,
-        true,
-        Some(AuthorizedDatabaseOperation::Attach),
         || execute_statement(connection, statement).map(|_| ()),
     )
 }
@@ -1184,17 +1210,16 @@ fn detach_database(
     let sql = format!("DETACH DATABASE \"{database_name}\"");
     with_exact_sql_guard(
         connection,
-        false,
-        false,
+        ExactSqlAuthority::Writer {
+            allow_savepoints: false,
+            database_operation: Some(AuthorizedDatabaseOperation::Detach(
+                database_name.to_owned(),
+            )),
+        },
         shutdown_requested,
         None,
         true,
         None,
-        crate::connection::authorize_writer,
-        true,
-        Some(AuthorizedDatabaseOperation::Detach(
-            database_name.to_owned(),
-        )),
         || execute_batch(connection, &sql).map(|_| ()),
     )
 }
@@ -1220,16 +1245,28 @@ pub(crate) fn execute_query(
     budget: ExactSqlStatementBudget,
 ) -> Result<ExactSqlRows, ExactSqlError> {
     request.validate()?;
+    let (execution_deadline, enforce_statement_limit) = match budget {
+        ExactSqlStatementBudget::Request => (None, true),
+        ExactSqlStatementBudget::Convergence => (None, false),
+        // The progress handler never runs for a statement shorter than its
+        // interval, so it alone cannot stop a run of short statements.
+        ExactSqlStatementBudget::Until(deadline) if clock::now() >= deadline => {
+            return Err(sqlite_error(
+                "advance query",
+                rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_INTERRUPT),
+                    None,
+                ),
+            ));
+        }
+        ExactSqlStatementBudget::Until(deadline) => (Some(deadline), false),
+    };
     with_exact_sql_guard(
         connection,
-        false,
-        false,
+        ExactSqlAuthority::Canonical(ConnectionMode::Reader),
         None,
-        None,
-        budget == ExactSqlStatementBudget::Request,
-        None,
-        crate::connection::authorize_reader,
-        false,
+        execution_deadline,
+        enforce_statement_limit,
         None,
         || execute_query_unchecked(connection, request),
     )
@@ -1251,7 +1288,7 @@ fn prepare_read_statement<'c>(
     const BACKOFF: std::time::Duration = std::time::Duration::from_millis(25);
     let mut attempt = 0;
     loop {
-        match connection.prepare_cached(sql) {
+        match guard::prepare_cached(connection, sql) {
             Ok(statement) => return Ok(statement),
             Err(rusqlite::Error::SqliteFailure(failure, _))
                 if attempt < ATTEMPTS

@@ -1,7 +1,10 @@
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::FutureExt;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::{MutexGuard, OwnedSemaphorePermit, Semaphore};
 
 use super::super::client::{LspDocument, LspRefreshError, LspRefreshTimeouts, StdioLspClient};
@@ -30,8 +33,8 @@ pub const MAX_ANALYZER_CONCURRENT_ROOT_FANOUTS: usize = 4;
 
 /// Broker-owned capacity shared by every refresh prepared from one broker.
 /// Queue permits reserve bounded work before a caller can retain it; run
-/// permits live inside spawned batches, so completion, cancellation, and task
-/// abortion release them without a separate cleanup path.
+/// permits live inside each batch future, so completion and cancellation
+/// release them without a separate cleanup path.
 #[derive(Clone)]
 pub(crate) struct BrokerRefreshCapacity {
     running: Arc<Semaphore>,
@@ -160,47 +163,36 @@ impl PreparedRefresh {
         self,
         timeouts: LspRefreshTimeouts,
     ) -> std::result::Result<Vec<CodeDiagnostic>, RefreshFailure> {
-        let mut pending = tokio::task::JoinSet::new();
-        let mut batches = self.batches.into_iter().enumerate();
-        let mut completed = Vec::new();
-
-        while pending.len() < MAX_ANALYZER_CONCURRENT_ROOT_FANOUTS {
-            let Some((ordinal, batch)) = batches.next() else {
-                break;
-            };
-            let run_permit = self.reservation.acquire_run().await.ok_or_else(|| {
-                RefreshFailure::crashed_message("broker run capacity unavailable".to_owned())
-            })?;
-            pending.spawn(collect_refresh_batch(
-                ordinal,
-                batch,
-                self.project_root.clone(),
-                self.spawn.clone(),
-                timeouts,
-                run_permit,
-            ));
-        }
-
-        while let Some(result) = pending.join_next().await {
-            let result = result.map_err(|error| {
-                RefreshFailure::crashed_message(format!(
-                    "analyzer refresh task terminated: {error}"
-                ))
+        // Batches run concurrently inside this future rather than as spawned
+        // tasks, so dropping the refresh drops every batch with it. Each batch
+        // waits for its run permit inside the set, which keeps the batches
+        // already holding permits polled while later ones queue.
+        let reservation = &self.reservation;
+        let mut pending = self
+            .batches
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, batch)| {
+                let project_root = self.project_root.clone();
+                let spawn = self.spawn.clone();
+                AssertUnwindSafe(async move {
+                    let run_permit = reservation.acquire_run().await.ok_or_else(|| {
+                        RefreshFailure::crashed_message(
+                            "broker run capacity unavailable".to_owned(),
+                        )
+                    })?;
+                    collect_refresh_batch(ordinal, batch, project_root, spawn, timeouts, run_permit)
+                        .await
+                })
+                .catch_unwind()
+            })
+            .collect::<FuturesUnordered<_>>();
+        let mut completed = Vec::with_capacity(pending.len());
+        while let Some(result) = pending.next().await {
+            let result = result.map_err(|_| {
+                RefreshFailure::crashed_message("analyzer refresh task panicked".to_owned())
             })?;
             completed.push(result?);
-            if let Some((ordinal, batch)) = batches.next() {
-                let run_permit = self.reservation.acquire_run().await.ok_or_else(|| {
-                    RefreshFailure::crashed_message("broker run capacity unavailable".to_owned())
-                })?;
-                pending.spawn(collect_refresh_batch(
-                    ordinal,
-                    batch,
-                    self.project_root.clone(),
-                    self.spawn.clone(),
-                    timeouts,
-                    run_permit,
-                ));
-            }
         }
         completed.sort_by_key(|(ordinal, _)| *ordinal);
         Ok(completed

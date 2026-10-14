@@ -1297,7 +1297,7 @@ impl StoreAdministration {
         broker: &tracedecay_host_admission::SharedHostAdmissionBroker,
     ) {
         let is_user_sessions = broker_path.file_name().and_then(|name| name.to_str())
-            == Some(tracedecay_sessions::runtime::USER_SESSIONS_DB_FILENAME);
+            == Some(tracedecay_runtime_core::storage::USER_SESSIONS_DB_FILENAME);
         if !is_user_sessions {
             return;
         }

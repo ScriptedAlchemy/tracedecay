@@ -6,16 +6,17 @@
 
 use std::path::Path;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use asupersync::io::{AsyncWriteExt, BufReader};
+use tracedecay_framing::BoundedLineReader;
 use tracedecay_hooks::core_events::{DaemonHookEvent, HOOK_EVENT_METHOD, HookEventNotifyOutcomeV1};
 
 use tracedecay_daemon_identity::{
     ResolvedDaemonConnection, client_connection, current_daemon_connection,
 };
-use tracedecay_daemon_protocol::SOCKET_ENV;
+use tracedecay_daemon_protocol::{DaemonClientStream, SOCKET_ENV};
 use tracedecay_mcp::server::attach_stateless_request_context;
 
-use super::{BrokerStream, JsonRpcRequest, write_daemon_preamble};
+use super::{JsonRpcRequest, write_daemon_preamble};
 
 /// Delivers `event` and resolves once the daemon acknowledges it, however
 /// long admission takes. A host hook that must not block its agent bounds
@@ -72,10 +73,10 @@ async fn notify_hook_event_to_connection(
     let Ok(line) = serde_json::to_string(&request) else {
         return HookEventNotifyOutcomeV1::Malformed;
     };
-    let Ok(stream) = BrokerStream::connect(connection.endpoint()).await else {
+    let Ok(stream) = DaemonClientStream::connect(connection.endpoint()).await else {
         return HookEventNotifyOutcomeV1::Unavailable;
     };
-    let (reader, mut writer) = stream.into_owned_split();
+    let (reader, mut writer) = stream.into_split();
     if write_daemon_preamble(&mut writer, &connection, &handshake)
         .await
         .is_err()
@@ -91,14 +92,11 @@ async fn notify_hook_event_to_connection(
     if writer.flush().await.is_err() {
         return HookEventNotifyOutcomeV1::Unavailable;
     }
-    let mut reader = BufReader::new(reader);
-    let mut response = String::new();
+    let mut reader = BoundedLineReader::new(BufReader::new(reader));
     loop {
-        response.clear();
-        match reader.read_line(&mut response).await {
-            Ok(0) | Err(_) => return HookEventNotifyOutcomeV1::Unavailable,
-            Ok(_) => {}
-        }
+        let Ok(Some(response)) = reader.read_mcp_line().await else {
+            return HookEventNotifyOutcomeV1::Unavailable;
+        };
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&response) else {
             return HookEventNotifyOutcomeV1::Malformed;
         };
@@ -116,6 +114,8 @@ async fn notify_hook_event_to_connection(
 #[cfg(all(test, unix))]
 mod tests {
     use std::time::{Duration, Instant};
+
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     use super::*;
 

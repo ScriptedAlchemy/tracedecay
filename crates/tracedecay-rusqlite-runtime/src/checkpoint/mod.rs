@@ -2,7 +2,7 @@
 //!
 //! The persistent shard writer is the only intended owner of this controller.
 //! It disables SQLite's connection-local automatic checkpointing and makes WAL
-//! pressure, reader blockers, and maintenance-only checkpoint modes explicit.
+//! pressure and reader blockers explicit.
 //! This module never deletes a database sidecar and does not create a writer,
 //! scheduler, thread, or connection.
 
@@ -15,7 +15,6 @@ pub(crate) use driver::{RusqliteCheckpointDriver, RusqliteCheckpointError};
 pub use types::{
     CheckpointBlocker, CheckpointBlockers, CheckpointFrameReport, CheckpointInterruption,
     CheckpointKind, CheckpointOutcome, CheckpointPressure, CheckpointStatus, CheckpointWal,
-    MaintenanceCheckpointMode,
 };
 pub(crate) use types::{
     CheckpointBlockerSource, CheckpointConfig, CheckpointDecision, CheckpointError,

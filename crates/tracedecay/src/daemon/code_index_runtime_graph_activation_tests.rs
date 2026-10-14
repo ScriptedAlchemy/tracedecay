@@ -384,6 +384,8 @@ async fn persistent_graph_activation_publishes_a_small_generation() {
     // asynchronously after `project_memory` returns, so an unawaited bind
     // races activation into "not ready for verified reads".
     tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
+        &graph_runtime,
+        &project_id,
         &project_database,
         "bind small persistent activation graph runtime",
     )
@@ -527,6 +529,8 @@ async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generat
         .await
         .expect("project database");
     tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
+        &graph_runtime,
+        &project_id,
         &project_database,
         "bind persistent historical cursor graph runtime",
     )
@@ -564,21 +568,24 @@ async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generat
         )
         .await
         .expect("mount persistent generation A");
-    let ready_deadline = std::time::Instant::now() + Duration::from_secs(20);
-    loop {
-        if registry
-            .retained_text_owner_freshness_for_scope(&scope)
-            .await
-            .is_some_and(|(latest, current)| current && latest.interactive_graph_store().is_ok())
-        {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() <= ready_deadline,
-            "generation A graph did not become ready"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    // Head recovery installs the graph store before its worker pass records
+    // the seat, so a graph that already serves does not prove the seat yet.
+    // `Ready` also waits for that pass to finish.
+    let reached = registry
+        .wait_for_readiness(
+            fixture.path(),
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessTargetV1::Ready,
+            Duration::from_secs(20),
+        )
+        .await
+        .expect("generation A readiness read");
+    assert!(
+        matches!(
+            reached,
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Reached { .. }
+        ),
+        "generation A graph did not become ready: {reached:?}"
+    );
     // A recovered head seats no decoded generation, so only the seated graph
     // keeps generation A a retention root for its successor's refresh.
     let mounted_scope = registry
@@ -645,35 +652,58 @@ async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generat
         "pub fn hub() {}\npub fn caller_a() { hub(); }\npub fn caller_b() { hub(); }\npub fn caller_c() { hub(); }\n",
     );
     git(fixture.path(), &["commit", "-qam", "publish generation B"]);
-    let (generation_b, hub_b) = loop {
-        if let Some((latest, true)) = registry
-            .retained_text_owner_freshness_for_scope(&scope)
+    // `Ready` accepts generation A's cached reading as is; only `Fresh`
+    // sweeps the source, which wakes the worker for the commit.
+    for target in [
+        tracedecay_contracts::code_index_freshness::CodeIndexReadinessTargetV1::Fresh,
+        tracedecay_contracts::code_index_freshness::CodeIndexReadinessTargetV1::Ready,
+    ] {
+        let reached = registry
+            .wait_for_readiness(fixture.path(), target, Duration::from_secs(20))
             .await
-            && latest.metadata().manifest().generation_id != generation_a
-            && let Ok(store) = latest.interactive_graph_store()
-            && let Ok(reader) = store.interactive_reader_with_cancellation(
-                &latest.metadata().manifest().generation_id,
-                Arc::new(tracedecay_graph_db::NeverCancelled),
-            )
-            && let Ok(hubs) = reader.resolve_simple_name(
-                "hub",
-                None,
-                2,
-                Arc::new(tracedecay_graph_db::NeverCancelled),
-            )
-            && hubs.len() == 1
-        {
-            break (
-                latest.metadata().manifest().generation_id.clone(),
-                hubs[0].occurrence.as_str().to_owned(),
-            );
-        }
+            .expect("generation B readiness read");
         assert!(
-            std::time::Instant::now() <= ready_deadline + Duration::from_secs(20),
-            "generation B graph did not become ready"
+            matches!(
+                reached,
+                tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Reached { .. }
+            ),
+            "generation B did not reach {target:?}: {reached:?}"
         );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    };
+    }
+    let (latest, current) = registry
+        .retained_text_owner_freshness_for_scope(&scope)
+        .await
+        .expect("generation B text owner");
+    assert!(current, "generation B serves the committed source");
+    let generation_b = latest.metadata().manifest().generation_id.clone();
+    assert_ne!(generation_b, generation_a);
+    let store_b = latest
+        .interactive_graph_store()
+        .expect("generation B graph store");
+    // The parked worker released B's engine; hold it through the re-warm
+    // the way registry graph reads do.
+    let retain_b = store_b
+        .await_rewarm_and_retain_for(
+            Duration::from_secs(20),
+            CodeGraphReadinessRequirement::Catalog,
+        )
+        .expect("generation B graph re-warms");
+    let hubs = store_b
+        .interactive_reader_with_cancellation(
+            &generation_b,
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("generation B graph reader")
+        .resolve_simple_name(
+            "hub",
+            None,
+            2,
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("generation B hub");
+    assert_eq!(hubs.len(), 1, "generation B resolves one hub");
+    let hub_b = hubs[0].occurrence.as_str().to_owned();
+    drop(retain_b);
 
     let continuation = registry
         .callers(
@@ -836,6 +866,8 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
         .await
         .expect("writable project database");
     tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
+        &graph_runtime,
+        &project_id,
         &project_database,
         "bind stale graph status projection",
     )
@@ -916,6 +948,8 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
         .await
         .expect("restarted writable project database");
     tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
+        &graph_runtime,
+        &project_id,
         &project_database,
         "bind restarted graph status projection",
     )
@@ -1536,6 +1570,8 @@ async fn restart_with_published_graph_head(
         .await
         .expect("writable project database");
     tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
+        &graph_runtime,
+        &project_id,
         &project_database,
         "bind graph projection before restart",
     )
@@ -1582,10 +1618,12 @@ async fn restart_with_published_graph_head(
             .expect("restarted graph runtime registry"),
     );
     let project_database = graph_runtime
-        .project_memory(project_id, [fixture.path().to_path_buf()])
+        .project_memory(project_id.clone(), [fixture.path().to_path_buf()])
         .await
         .expect("restarted writable project database");
     tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
+        &graph_runtime,
+        &project_id,
         &project_database,
         "bind restarted graph projection",
     )
@@ -1882,6 +1920,8 @@ async fn first_index_serves_graph_reads_without_decoding_the_generation() {
         .await
         .expect("writable project database");
     tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
+        &graph_runtime,
+        &project_id,
         &project_database,
         "bind first index graph runtime",
     )
@@ -2185,6 +2225,8 @@ impl PersistentGraphMountV1 {
             .await
             .expect("writable project database");
         tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
+            &graph_runtime,
+            &project_id,
             &project_database,
             "bind persistent graph runtime",
         )
@@ -2471,7 +2513,24 @@ async fn an_idle_release_reports_warming_until_a_read_restores_the_graph() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     };
-    until_ready("first activation").await;
+    // A read-driven re-warm finishes on background threads that still hold a
+    // catalog reader lease after status reports `ready`, so the idle release
+    // below would find the catalog busy. Restore both on this thread instead.
+    let restored = mount
+        .registry
+        .retained_text_owner_for_root(fixture.path())
+        .await
+        .expect("text owner")
+        .interactive_graph_store()
+        .expect("serving graph store");
+    restored.warm_serving_engine().expect("restore the engine");
+    restored
+        .warm_interactive_catalog_with_cancellation(
+            None,
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("restore the catalog");
+    assert_eq!(serving().await, (ready.clone(), fresh));
     let warm = resolve_alpha()
         .await
         .expect("the warm graph resolves `alpha`");
@@ -2795,6 +2854,8 @@ async fn ignored_dependency_admission_answers_once_the_successor_catalog_serves(
         .await
         .expect("writable project database");
     tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
+        &graph_runtime,
+        &project_id,
         &project_database,
         "bind admission graph runtime",
     )

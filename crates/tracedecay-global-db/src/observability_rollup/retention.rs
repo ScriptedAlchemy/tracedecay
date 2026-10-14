@@ -1,88 +1,62 @@
-use tracedecay_runtime_core::db::engine::QueryExecutor;
-
-use crate::RegisteredGlobalDb;
+use crate::RegisteredGlobalDbWriteTransaction;
 
 use super::{
     OBSERVABILITY_ROLLUP_RETENTION_DAYS_V1, ObservabilityRollupRetentionReceiptV1, SECONDS_PER_DAY,
 };
 
-impl RegisteredGlobalDb {
-    #[tracing::instrument(
-        name = "global_db.observability_rollup.persist.prune",
-        level = "trace",
-        skip_all
-    )]
-    pub async fn prune_observability_rollups(
-        &self,
-        now_seconds: i64,
-    ) -> Result<ObservabilityRollupRetentionReceiptV1, String> {
-        if now_seconds < 0 {
-            return Err("invalid observability rollup retention time".to_owned());
-        }
-        let cutoff =
-            now_seconds.saturating_sub(OBSERVABILITY_ROLLUP_RETENTION_DAYS_V1 * SECONDS_PER_DAY);
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| format!("failed to begin observability rollup retention: {error}"))?;
-        let expired_generations =
-            count_before_day(&transaction, "observability_rollup_generations", cutoff).await?;
-        let expired_journal_entries =
-            count_before_day(&transaction, "observability_rollup_rebuild_journal", cutoff).await?;
-        let expired_dirty_days =
-            count_before_day(&transaction, "observability_rollup_dirty_days", cutoff).await?;
-        transaction
-            .execute(
-                "DELETE FROM observability_rollup_generations WHERE day_start_seconds < ?1",
-                tracedecay_runtime_core::db::engine::params![cutoff],
-            )
-            .await
-            .map_err(|error| format!("failed to expire observability rollup cells: {error}"))?;
-        transaction
-            .execute(
-                "DELETE FROM observability_rollup_rebuild_journal WHERE day_start_seconds < ?1",
-                tracedecay_runtime_core::db::engine::params![cutoff],
-            )
-            .await
-            .map_err(|error| format!("failed to expire observability rollup journal: {error}"))?;
-        transaction
-            .execute(
-                "DELETE FROM observability_rollup_dirty_days WHERE day_start_seconds < ?1",
-                tracedecay_runtime_core::db::engine::params![cutoff],
-            )
-            .await
-            .map_err(|error| format!("failed to expire observability dirty days: {error}"))?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| format!("failed to commit observability rollup retention: {error}"))?;
-        Ok(ObservabilityRollupRetentionReceiptV1 {
-            expired_generations,
-            expired_journal_entries,
-            expired_dirty_days,
-        })
-    }
-}
-
-async fn count_before_day(
-    executor: &impl QueryExecutor,
-    table: &str,
-    cutoff: i64,
-) -> Result<u64, String> {
-    let mut rows = executor
-        .query(
-            &format!("SELECT COUNT(*) FROM {table} WHERE day_start_seconds < ?1"),
+/// Expires daily rollup generations, their rebuild journal, and dirty-day
+/// markers older than the rollup horizon inside the caller's retention
+/// transaction, and moves any frontier still behind the horizon to the first
+/// retained day. Without that, a scope idle past the horizon would close each
+/// expired day as known-empty from already-pruned events. A query reaching
+/// past the horizon reports partial coverage.
+pub(crate) async fn expire_observability_rollups(
+    transaction: &RegisteredGlobalDbWriteTransaction<'_>,
+    now_seconds: i64,
+) -> Result<ObservabilityRollupRetentionReceiptV1, String> {
+    let cutoff =
+        now_seconds.saturating_sub(OBSERVABILITY_ROLLUP_RETENTION_DAYS_V1 * SECONDS_PER_DAY);
+    let expired_generations = transaction
+        .execute(
+            "DELETE FROM observability_rollup_generations WHERE day_start_seconds < ?1",
             tracedecay_runtime_core::db::engine::params![cutoff],
         )
         .await
-        .map_err(|error| format!("failed to count expired observability rollups: {error}"))?;
-    let row = rows
-        .next()
+        .map_err(|error| format!("failed to expire observability rollup cells: {error}"))?;
+    let expired_journal_entries = transaction
+        .execute(
+            "DELETE FROM observability_rollup_rebuild_journal WHERE day_start_seconds < ?1",
+            tracedecay_runtime_core::db::engine::params![cutoff],
+        )
         .await
-        .map_err(|error| format!("failed to read expired observability rollups: {error}"))?
-        .ok_or_else(|| "observability rollup retention count returned no row".to_owned())?;
-    let value = row
-        .get::<i64>(0)
-        .map_err(|error| format!("failed to decode rollup retention count: {error}"))?;
-    u64::try_from(value).map_err(|_| "rollup retention count was negative".to_owned())
+        .map_err(|error| format!("failed to expire observability rollup journal: {error}"))?;
+    let expired_dirty_days = transaction
+        .execute(
+            "DELETE FROM observability_rollup_dirty_days WHERE day_start_seconds < ?1",
+            tracedecay_runtime_core::db::engine::params![cutoff],
+        )
+        .await
+        .map_err(|error| format!("failed to expire observability dirty days: {error}"))?;
+    // The day containing the cutoff lost events before it, so it is expired too.
+    let cutoff_day = cutoff.div_euclid(SECONDS_PER_DAY) * SECONDS_PER_DAY;
+    let first_retained_day = if cutoff_day < cutoff {
+        cutoff_day + SECONDS_PER_DAY
+    } else {
+        cutoff_day
+    };
+    let advanced_frontiers = transaction
+        .execute(
+            "UPDATE observability_rollup_frontiers
+             SET next_day_start_seconds = ?1, claimant_id = NULL, lease_until_seconds = NULL
+             WHERE next_day_start_seconds < ?1",
+            tracedecay_runtime_core::db::engine::params![first_retained_day],
+        )
+        .await
+        .map_err(|error| format!("failed to advance expired observability frontiers: {error}"))?;
+    Ok(ObservabilityRollupRetentionReceiptV1 {
+        expired_generations,
+        expired_journal_entries,
+        expired_dirty_days,
+        advanced_frontiers,
+    })
 }

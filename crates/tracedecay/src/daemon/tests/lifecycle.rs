@@ -222,10 +222,7 @@ async fn authenticated_daemon_shutdown_acks_and_begins_draining() {
         .expect("serve shutdown client");
     });
 
-    let stream = tracedecay_daemon_protocol::BrokerStream::connect(&endpoint)
-        .await
-        .expect("connect shutdown client");
-    let (reader, mut writer) = stream.into_split();
+    let (reader, mut writer) = tokio::io::split(super::connect_loopback_test_peer(&endpoint).await);
     write_test_auth_preface(&mut writer).await;
     writer
         .write_all(
@@ -466,10 +463,7 @@ async fn reserved_response_under_general_saturation(
         .expect("serve reserved client");
     });
 
-    let stream = tracedecay_daemon_protocol::BrokerStream::connect(&endpoint)
-        .await
-        .expect("connect reserved client");
-    let (reader, mut writer) = stream.into_split();
+    let (reader, mut writer) = tokio::io::split(super::connect_loopback_test_peer(&endpoint).await);
     write_test_auth_preface(&mut writer).await;
     writer
         .write_all(
@@ -567,7 +561,8 @@ async fn one_shot_tool_call_receives_a_matching_saturation_response() {
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept tool call");
         super::super::reject_saturated_daemon_client(
-            tracedecay_daemon_protocol::BrokerStream::Unix(stream),
+            tracedecay_daemon_protocol::BrokerStream::from_tokio_unix(stream)
+                .expect("daemon end of the test socket"),
             super::super::DaemonClientSaturationResponse {
                 kind: super::super::DaemonClientSaturationKind::ClientCapacityReached,
                 retryable: true,
@@ -722,10 +717,8 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
         let endpoint = endpoint.clone();
         let handshake = handshake.clone();
         async move {
-            let stream = tracedecay_daemon_protocol::BrokerStream::connect(&endpoint)
-                .await
-                .expect("connect client");
-            let (reader, mut writer) = stream.into_split();
+            let (reader, mut writer) =
+                tokio::io::split(super::connect_loopback_test_peer(&endpoint).await);
             write_test_auth_preface(&mut writer).await;
             writer
                 .write_all(handshake.to_line().expect("handshake").as_bytes())

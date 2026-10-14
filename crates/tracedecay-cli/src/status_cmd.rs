@@ -186,7 +186,7 @@ async fn daemon_tool_json_within(
         tool_name,
         commands::daemon_tool_json_until(
             profile,
-            request_deadline,
+            request_deadline.into_std(),
             Some(project_path),
             tool_name,
             arguments,

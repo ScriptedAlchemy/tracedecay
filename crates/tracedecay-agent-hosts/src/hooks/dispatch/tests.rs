@@ -950,7 +950,6 @@ async fn events_spooled_before_a_binding_republication_replay_after_it() {
             stop,
             native_capture_material(source, stop, observed_at).unwrap(),
             observed_at,
-            tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
         ),
         tracedecay_hooks::NativeHookCaptureOutcomeV1::Captured,
     );

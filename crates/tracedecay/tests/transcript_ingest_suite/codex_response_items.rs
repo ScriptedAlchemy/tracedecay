@@ -180,7 +180,7 @@ async fn codex_response_item_tool_arguments_are_sanitized_before_observation_and
 }
 
 #[tokio::test]
-async fn codex_regular_response_item_goal_words_are_not_cataloged() {
+async fn codex_non_goal_response_item_message_is_searchable_and_not_a_goal() {
     let tmp = TempDir::new().unwrap();
     let (home, project) = setup(&tmp);
     write_codex_rollout_with_non_goal_response_item(&home, &project, "codex-non-goal-context");
@@ -197,7 +197,9 @@ async fn codex_regular_response_item_goal_words_are_not_cataloged() {
             10,
         )
         .await;
-    assert!(results.is_empty());
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].message.kind.as_deref(), Some("message"));
+    assert_eq!(results[0].message.role, "user");
 }
 
 #[tokio::test]
@@ -415,6 +417,14 @@ Budget:
     assert_eq!(metadata["source_role"], "user");
     assert_eq!(metadata["codex_goal"]["token_budget"], 60000);
     assert_eq!(metadata["codex_goal"]["tokens_remaining"], 59923);
+    let assistant_goal_quote = hits
+        .iter()
+        .find(|hit| hit.message.role == "assistant")
+        .expect("an assistant response_item that quotes a goal is a message");
+    assert_eq!(
+        assistant_goal_quote.message.kind.as_deref(),
+        Some("message")
+    );
 
     let developer_hits = db
         .search_session_messages(
@@ -429,7 +439,7 @@ Budget:
         "developer context must not be searchable: {developer_hits:?}"
     );
 
-    let assistant_hits = db
+    let mut assistant_hits = db
         .search_session_messages(
             "codex",
             Some(db.project_id().as_str()),
@@ -440,14 +450,27 @@ Budget:
         .into_iter()
         .map(|hit| (hit.message.role, hit.message.kind, hit.message.text))
         .collect::<Vec<_>>();
+    assistant_hits.sort();
+    let visible_replies = assistant_hits
+        .iter()
+        .filter(|(_, _, text)| text == "Visible assistant reply")
+        .cloned()
+        .collect::<Vec<_>>();
     assert_eq!(
-        assistant_hits,
-        vec![(
-            "assistant".to_owned(),
-            Some("message".to_owned()),
-            "Visible assistant reply".to_owned(),
-        )],
-        "the event message is searchable once; its response_item echo and empty protocol rows are not"
+        visible_replies,
+        vec![
+            (
+                "assistant".to_owned(),
+                Some("message".to_owned()),
+                "Visible assistant reply".to_owned(),
+            ),
+            (
+                "assistant".to_owned(),
+                Some("message".to_owned()),
+                "Visible assistant reply".to_owned(),
+            ),
+        ],
+        "the response_item message and the event_msg agent_message are both turns"
     );
 
     assert_eq!(

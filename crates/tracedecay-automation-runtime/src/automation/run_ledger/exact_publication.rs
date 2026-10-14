@@ -371,7 +371,7 @@ pub async fn publish_staged_run_record_exact(
     let root = dashboard_root.to_path_buf();
     let run_id = run_id.to_owned();
     let publication = publication.clone();
-    tokio::task::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         publish_staged_run_record_exact_blocking(&root, &run_id, &publication)
     })
     .await
@@ -394,7 +394,7 @@ pub async fn discard_staged_run_record_exact(
     let root = dashboard_root.to_path_buf();
     let run_id = run_id.to_owned();
     let expected = expected.clone();
-    tokio::task::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         discard_staged_run_record_exact_blocking(&root, &run_id, &expected)
     })
     .await
@@ -422,7 +422,7 @@ where
     validate_run_id_component(run_id)?;
     let root = dashboard_root.to_path_buf();
     let run_id = run_id.to_owned();
-    tokio::task::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         with_spool_lock(&root, || {
             if !validate_unbound()? {
                 return Ok(ExactRunUnboundDiscardOutcome::Retained);
@@ -578,7 +578,7 @@ where
     let root = dashboard_root.to_path_buf();
     let run_id = run_id.to_owned();
     let expected = expected.clone();
-    tokio::task::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         discard_stale_staged_run_record_exact_after_terminal_blocking(
             &root,
             &run_id,

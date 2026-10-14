@@ -36,7 +36,7 @@ pub async fn compute_config(project_root: &Path, args: Value) -> Result<GraphToo
 
     let scan_root = project_root.to_path_buf();
     let (result, touched) = tracing::Instrument::instrument(
-        tokio::task::spawn_blocking(move || -> Result<_> {
+        tracedecay_runtime_core::native_runtime::spawn_blocking(move || -> Result<_> {
             let mut files: Vec<String> = Vec::new();
             if let Some(p) = path {
                 let project_path = ProjectPath::resolve(&scan_root, Path::new(&p))?;
