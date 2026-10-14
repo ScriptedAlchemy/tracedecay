@@ -212,10 +212,10 @@ async fn fetch_cost_snapshot(profile: &ProfileRoot) -> Result<Option<CostSnapsho
         )?;
         map_cost_payloads(week, today).map_err(|message| TraceDecayError::Config { message })
     };
-    tokio::time::timeout(FETCH_TIMEOUT, fetch)
+    tracedecay_runtime_core::native_runtime::timeout(FETCH_TIMEOUT, fetch)
         .await
-        .map_err(|_| TraceDecayError::Config {
-            message: "daemon cost refresh timed out after 5 seconds".to_string(),
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("daemon cost refresh did not answer within 5 seconds: {error}"),
         })?
 }
 
@@ -240,6 +240,8 @@ async fn cost_summary(
 }
 
 fn fetch_cost_snapshot_blocking(profile: &ProfileRoot) -> RefreshResult {
+    // The daemon client still connects through Tokio sockets, so the refresh
+    // needs a Tokio reactor rather than `native_runtime::block_on`.
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
