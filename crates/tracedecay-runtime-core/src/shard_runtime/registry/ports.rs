@@ -138,16 +138,16 @@ impl ShardRuntimePublisher for LifecycleShardRuntimePublisher {
                 .map_err(runtime_lifecycle_failure)?;
             // A `RuntimeHandle` held across the await overflows the `Send`
             // proof (rust-lang/rust#159228), so it drops before publication.
-            let physical =
-                {
-                    let executor = crate::native_runtime::handle().ok_or(
-                        StoreRuntimeRegistryFailure::RuntimeUnavailable {
-                            operation: "publish physical registered runtime",
-                        },
-                    )?;
-                    LifecycleShardRuntimeAttachment::new(RepositoryPhysicalAttachmentFactory)
-                        .attach(&executor, &request, AdmissionConfigV1::default())?
-                };
+            let attachment =
+                LifecycleShardRuntimeAttachment::new(RepositoryPhysicalAttachmentFactory);
+            let physical = {
+                let executor = crate::native_runtime::handle().ok_or(
+                    StoreRuntimeRegistryFailure::RuntimeUnavailable {
+                        operation: "publish physical registered runtime",
+                    },
+                )?;
+                attachment.attach(&executor, &request, AdmissionConfigV1::default())?
+            };
             publish_lifecycle_runtime(request, runtime, physical).await
         })
     }

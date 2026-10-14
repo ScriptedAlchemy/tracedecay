@@ -1,6 +1,11 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use futures_util::future::BoxFuture;
+
+/// Checkpoint, provenance, disposition, and alias counts, then completion.
+type ProjectionPage = (AuditCheckpoint, i64, i64, i64, bool);
+
 use tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION;
 
 use super::super::global_db_operation_error;
@@ -508,18 +513,9 @@ async fn converge_authority_invariants(
                 "audit observation projection authority page",
                 async |conn| {
                     let released = ReleasedRenderingLedger::default();
-                    let projected: Pin<
-                        Box<
-                            dyn Future<
-                                    Output = tracedecay_domain::errors::Result<(
-                                        AuditCheckpoint,
-                                        i64,
-                                        i64,
-                                        i64,
-                                        bool,
-                                    )>,
-                                > + Send,
-                        >,
+                    let projected: BoxFuture<
+                        '_,
+                        tracedecay_domain::errors::Result<ProjectionPage>,
                     > = Box::pin(validate_projection_authority_chunk(
                         conn, progress, &released,
                     ));
@@ -554,17 +550,9 @@ async fn converge_authority_invariants(
             "audit observation projection authority suffix",
             async |conn| {
                 let released = ReleasedRenderingLedger::default();
-                let projected: Pin<
-                    Box<
-                        dyn Future<
-                                Output = tracedecay_domain::errors::Result<(
-                                    AuditCheckpoint,
-                                    i64,
-                                    i64,
-                                    i64,
-                                )>,
-                            > + Send,
-                    >,
+                let projected: BoxFuture<
+                    '_,
+                    tracedecay_domain::errors::Result<(AuditCheckpoint, i64, i64, i64)>,
                 > = Box::pin(validate_projection_authority_suffix(
                     conn,
                     projection_start,

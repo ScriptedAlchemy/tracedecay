@@ -10,6 +10,8 @@ use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
 
+use futures_util::future::BoxFuture;
+
 use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_store::StoreShardScopeV1;
 
@@ -253,20 +255,16 @@ where
         let snapshot = opened.await?;
         let backfill_watermark =
             read_meta_value(&snapshot, GIT_HISTORY_SEQUENCE_FRONTIER_KEY).await?;
-        let viewed: Pin<
-            Box<
-                dyn Future<
-                        Output = Result<
-                            Option<
-                                tracedecay_sessions::runtime::git_correlation::GitEvidenceView<
-                                    '_,
-                                    DatabaseEngineReadSnapshot,
-                                >,
-                            >,
-                            GitCorrelationError,
-                        >,
-                    > + Send
-                    + '_,
+        let viewed: BoxFuture<
+            '_,
+            Result<
+                Option<
+                    tracedecay_sessions::runtime::git_correlation::GitEvidenceView<
+                        '_,
+                        DatabaseEngineReadSnapshot,
+                    >,
+                >,
+                GitCorrelationError,
             >,
         > = Box::pin(open_git_evidence_view(&snapshot));
         Ok(match viewed.await? {

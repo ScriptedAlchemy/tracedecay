@@ -1,6 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -769,16 +767,12 @@ impl GlobalDbObservationStore {
     fn persist_observation_segment<'a>(
         &'a self,
         writes: Vec<AnchoredObservationWrite>,
-    ) -> Pin<
-        Box<
-            dyn Future<
-                    Output = ObservationStoreResult<(
-                        Vec<ObservationBatchPersistOutcome>,
-                        Vec<AnchoredObservationWrite>,
-                    )>,
-                > + Send
-                + 'a,
-        >,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        ObservationStoreResult<(
+            Vec<ObservationBatchPersistOutcome>,
+            Vec<AnchoredObservationWrite>,
+        )>,
     > {
         Box::pin(async move { Self::persist_observation_segment_body(self, writes).await })
     }
