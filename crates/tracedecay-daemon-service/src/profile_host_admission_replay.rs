@@ -1864,9 +1864,9 @@ mod tests {
             Some(pending_count_override),
         ));
         let task_worker = Arc::clone(&worker);
-        let task = tokio_runtime.spawn(async move {
+        let task = AbortOnDropHandle::new(tokio_runtime.spawn(async move {
             task_worker.run(Duration::from_secs(30)).await;
-        });
+        }));
         registry
             .workers
             .try_lock()
