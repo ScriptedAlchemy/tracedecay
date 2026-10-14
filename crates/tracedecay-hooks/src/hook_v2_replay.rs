@@ -669,6 +669,35 @@ mod tests {
         assert_eq!(pending_records(data_root.path(), current), 0);
     }
 
+    /// A loaded runner's fsync can outlast a hook's whole synchronous budget.
+    /// The appender's commit holds the commit lock across that sync while the
+    /// drain's acknowledgement queues behind it.
+    #[asupersync::test]
+    async fn a_drain_acknowledging_behind_a_slow_appender_commit_replays_its_record() {
+        let data_root = TestRoot::new("slow-commit");
+        let current = UtcMicros(10);
+        let binding = binding(7);
+        publish_binding(data_root.path(), &binding, current);
+        let spool_root = hook_v2_spool_root(data_root.path(), HOST);
+        let slow_disk = tracedecay_private_fs::framed_log::sync_latency::inject(
+            &spool_root,
+            2 * crate::HOOK_SYNCHRONOUS_BUDGET,
+        );
+        let writer = hold_writer_lease(
+            spool_root,
+            Some((envelope(9, &binding), binding.clone())),
+            current,
+            std::time::Duration::ZERO,
+        );
+
+        let report = drain(data_root.path(), current, |_, _| async { admitted() }).await;
+
+        writer.join().unwrap();
+        drop(slow_disk);
+        assert_eq!(report.committed, 1);
+        assert_eq!(pending_records(data_root.path(), current), 0);
+    }
+
     #[asupersync::test]
     async fn a_writer_holding_the_lease_at_acknowledgement_delays_it_without_retaining() {
         let data_root = TestRoot::new("ack-held");
