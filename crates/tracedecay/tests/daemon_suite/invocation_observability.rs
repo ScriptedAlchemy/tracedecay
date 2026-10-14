@@ -1332,15 +1332,14 @@ async fn registered_persistence_failure_releases_only_after_join_and_writer_fenc
         .begin_write_transaction()
         .await
         .expect("hold registered writer");
-    // Paused, the clock advances only while every task waits, so the held
-    // writer exhausts the persistence deadline before shutdown begins.
-    tokio::time::pause();
+    // The held writer exhausts the persistence deadline before shutdown
+    // begins: a startup rollup pass may wait one deadline before the worker
+    // takes the event, whose write then waits another.
     registered
         .producer()
         .try_emit(envelope(&project_id, "shutdown:blocked"))
         .expect("enqueue blocked event");
     tokio::time::sleep(persistence * 6).await;
-    tokio::time::resume();
 
     let retained = registered.producer();
     assert!(!retained.shutdown_settled());
@@ -1455,15 +1454,14 @@ async fn assert_blocked_writer_retirement(
         .expect("hold registered writer");
     if worker_settled {
         // The worker must reply inside the shutdown budget, so the blocked
-        // batch fails before shutdown begins. Paused, the clock advances only
-        // while every task waits.
-        tokio::time::pause();
+        // batch fails before shutdown begins: a startup rollup pass may wait
+        // one deadline before the worker takes the event, whose write then
+        // waits another.
         registered
             .producer()
             .try_emit(envelope(&project_id, "shutdown:blocked"))
             .expect("enqueue blocked event");
         tokio::time::sleep(deadlines.persistence * 6).await;
-        tokio::time::resume();
     } else {
         // The shutdown deadline must elapse first, so the blocked batch is
         // still in flight when shutdown begins.
