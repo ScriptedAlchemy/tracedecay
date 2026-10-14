@@ -1727,8 +1727,7 @@ pub fn service_status(
         .as_ref()
         .ok()
         .and_then(ServiceRunner::service_detail_hint)
-        .map(|hint| format!("service-detail: {hint}\n"))
-        .unwrap_or_default();
+        .map_or_default(|hint| format!("service-detail: {hint}\n"));
     let logs = match &service_observation {
         Ok(Err(ServiceStateError::ManagerUnreachable(_))) if serving => {
             "foreground daemon output (systemd user journal is unreachable)".to_owned()

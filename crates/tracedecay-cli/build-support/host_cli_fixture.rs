@@ -24,8 +24,9 @@ fn main() -> ExitCode {
     let raw_args: Vec<String> = env::args().collect();
     let (program, args) = raw_args
         .split_first()
-        .map(|(program, args)| (program.as_str(), args.to_vec()))
-        .unwrap_or(("", Vec::new()));
+        .map_or(("", Vec::new()), |(program, args)| {
+            (program.as_str(), args.to_vec())
+        });
 
     let Some(home) = admitted_home() else {
         eprintln!("host-cli fixture requires HOME or USERPROFILE");

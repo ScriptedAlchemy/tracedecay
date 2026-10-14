@@ -1,3 +1,5 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use tracedecay_contracts::{ApplicationProblem, RequestContext};
@@ -330,34 +332,26 @@ fn census_readiness(
             &registered.work_topology_policy,
         )
         .ok()?;
-    let mut global_remaining = capacities
-        .values()
-        .next()
-        .map(|capacity| {
-            u64::from(
-                registered
-                    .work_topology_policy
-                    .concurrency
-                    .maximum_global_active
-                    .get(),
-            )
-            .saturating_sub(capacity.global_active())
-        })
-        .unwrap_or_default();
-    let mut repository_remaining = capacities
-        .values()
-        .next()
-        .map(|capacity| {
-            u64::from(
-                registered
-                    .work_topology_policy
-                    .concurrency
-                    .maximum_active_per_repository
-                    .get(),
-            )
-            .saturating_sub(capacity.repository_active())
-        })
-        .unwrap_or_default();
+    let mut global_remaining = capacities.values().next().map_or_default(|capacity| {
+        u64::from(
+            registered
+                .work_topology_policy
+                .concurrency
+                .maximum_global_active
+                .get(),
+        )
+        .saturating_sub(capacity.global_active())
+    });
+    let mut repository_remaining = capacities.values().next().map_or_default(|capacity| {
+        u64::from(
+            registered
+                .work_topology_policy
+                .concurrency
+                .maximum_active_per_repository
+                .get(),
+        )
+        .saturating_sub(capacity.repository_active())
+    });
     if capacities.values().any(|capacity| {
         capacity.concurrency() != &registered.work_topology_policy.concurrency
             || capacities.values().next().is_some_and(|first| {
@@ -476,8 +470,14 @@ impl WorkflowFanOutCensusObservationRecoveryOwnerV1 {
                     let producer = Arc::clone(&producer);
                     let cancellation = task_cancellation.clone();
                     async move {
-                        recover_pending_census_once(database, project_id, producer, cancellation)
-                            .await
+                        let recovered: Pin<Box<dyn Future<Output = Result<(), String>> + Send>> =
+                            Box::pin(recover_pending_census_once(
+                                database,
+                                project_id,
+                                producer,
+                                cancellation,
+                            ));
+                        recovered.await
                     }
                 },
             )

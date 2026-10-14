@@ -228,8 +228,7 @@ impl ProximityAssembly<'_> {
             let ranges = self
                 .session_edit_spans
                 .get(&((*key).clone(), path.clone()))
-                .map(Vec::as_slice)
-                .unwrap_or_default();
+                .map_or_default(Vec::as_slice);
             let (span, symbol) = participant_graph_address(participant_nodes, ranges);
             let source = ObservationSourceIdentityV1::for_provider(
                 observation.envelope.provider().clone(),

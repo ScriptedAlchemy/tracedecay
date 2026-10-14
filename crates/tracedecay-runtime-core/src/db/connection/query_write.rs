@@ -154,16 +154,29 @@ impl Database {
     ///
     /// Writable handles opened for the same database share one `DatabaseInner`,
     /// so this guard coordinates MCP, dashboard, and automation mutations.
-    pub async fn writer(&self) -> Result<asupersync::sync::OwnedMutexGuard<()>> {
-        let cx = crate::native_runtime::cx().ok_or_else(|| TraceDecayError::Config {
-            message: "database writer admission requires an Asupersync context".to_owned(),
-        })?;
-        asupersync::sync::OwnedMutexGuard::lock(std::sync::Arc::clone(&self.inner.writer), &cx)
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                message: format!("database writer admission failed: {error}"),
-                operation: "acquire database writer lane".to_owned(),
-            })
+    /// Boxed: the context and lock wait sit dozens of levels deep, and every
+    /// write future would otherwise repeat that `Send` proof
+    /// (rust-lang/rust#159228).
+    pub fn writer(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<asupersync::sync::OwnedMutexGuard<()>>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            let cx = crate::native_runtime::cx().ok_or_else(|| TraceDecayError::Config {
+                message: "database writer admission requires an Asupersync context".to_owned(),
+            })?;
+            asupersync::sync::OwnedMutexGuard::lock(std::sync::Arc::clone(&self.inner.writer), &cx)
+                .await
+                .map_err(|error| TraceDecayError::Database {
+                    message: format!("database writer admission failed: {error}"),
+                    operation: "acquire database writer lane".to_owned(),
+                })
+        })
     }
 
     pub(super) fn require_active_write_scope(&self, operation: &str) -> Result<()> {

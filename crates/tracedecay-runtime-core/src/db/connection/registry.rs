@@ -278,6 +278,39 @@ pub(super) struct DatabaseInner {
         std::sync::Mutex<Option<super::graph_binding::MemoryGraphSourceStampedWatermarkV1>>,
 }
 
+// One `Send` proof of every attachment field exceeds the recursion limit
+// (rust-lang/rust#159228). Each field below is a separate proof.
+unsafe impl Send for DatabaseInner {}
+unsafe impl Sync for DatabaseInner {}
+
+const _: fn(&DatabaseInner) = |value| {
+    fn assert_send_sync<T: Send + Sync>(_: &T) {}
+    let DatabaseInner {
+        conn,
+        write_conn,
+        runtime,
+        opened_file_identity,
+        writer,
+        memory_graph_reconciliation,
+        memory_graph_reconciliation_telemetry,
+        canonical_path,
+        _authority,
+        memory_graph_runtime,
+        memory_graph_source_watermark,
+    } = value;
+    assert_send_sync(conn);
+    assert_send_sync(write_conn);
+    assert_send_sync(runtime);
+    assert_send_sync(opened_file_identity);
+    assert_send_sync(writer);
+    assert_send_sync(memory_graph_reconciliation);
+    assert_send_sync(memory_graph_reconciliation_telemetry);
+    assert_send_sync(canonical_path);
+    assert_send_sync(_authority);
+    assert_send_sync(memory_graph_runtime);
+    assert_send_sync(memory_graph_source_watermark);
+};
+
 impl DatabaseInner {
     /// Publishes an already-open canonical registry runtime without reopening
     /// the `SQLite` path.

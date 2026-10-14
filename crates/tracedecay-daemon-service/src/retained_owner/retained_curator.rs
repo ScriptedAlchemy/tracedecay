@@ -1,5 +1,7 @@
 //! Retained application adapter for the canonical Memory Curator.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::DaemonInvocationService;
@@ -90,7 +92,16 @@ pub async fn execute_retained_memory_curator(
                 "the automation project context could not be composed: {error}"
             ))
         })?;
-    let admission = crate::automation_effect::prepare(
+    let prepared: Pin<
+        Box<
+            dyn Future<
+                    Output = tracedecay_domain::errors::Result<
+                        tracedecay_automation_runtime::automation::effect_runtime::AutomationEffectAdmission,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > = Box::pin(crate::automation_effect::prepare(
         invocation_service,
         cg,
         automation_context.project_root(),
@@ -101,9 +112,8 @@ pub async fn execute_retained_memory_curator(
         context.observed_at,
         configuration_digest,
         automation_request,
-    )
-    .await
-    .map_err(|error| {
+    ));
+    let admission = prepared.await.map_err(|error| {
         RetainedSurfaceExecutionErrorV1::unavailable(format!(
             "the automation effect authority could not be prepared: {error}"
         ))

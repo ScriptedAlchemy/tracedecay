@@ -122,18 +122,10 @@ impl CodeLexicalArtifactReaderV1 {
         let fetch = limit.checked_add(1).ok_or_else(|| {
             CodeLexicalArtifactErrorV1::Contract("clone family page limit overflowed".to_owned())
         })?;
-        let after_reviewable = after
-            .map(|position| position.reviewable_source_bytes)
-            .unwrap_or_default();
-        let after_members = after
-            .map(|position| position.member_count)
-            .unwrap_or_default();
-        let after_class = after
-            .map(|position| position.class as u8)
-            .unwrap_or_default();
-        let after_revision = after
-            .map(|position| position.normalization_revision)
-            .unwrap_or_default();
+        let after_reviewable = after.map_or_default(|position| position.reviewable_source_bytes);
+        let after_members = after.map_or_default(|position| position.member_count);
+        let after_class = after.map_or_default(|position| position.class as u8);
+        let after_revision = after.map_or_default(|position| position.normalization_revision);
         let after_digest = after
             .map(|position| digest_key(&position.digest))
             .transpose()?

@@ -563,8 +563,7 @@ pub(super) fn build_projection(
         .collect::<HashSet<_>>();
     let file_rows = files
         .as_ref()
-        .map(|files| files.values().copied().collect::<Vec<_>>())
-        .unwrap_or_default();
+        .map_or_default(|files| files.values().copied().collect::<Vec<_>>());
     let context = CodeGraphRowContext {
         projection,
         generation,

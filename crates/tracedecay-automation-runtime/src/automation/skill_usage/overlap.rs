@@ -136,13 +136,12 @@ fn overlap_candidate(a: &ManagedSkill, b: &ManagedSkill) -> Option<SkillOverlapC
     let shared_tokens = content_payload
         .get("shared_tokens")
         .and_then(serde_json::Value::as_array)
-        .map(|tokens| {
+        .map_or_default(|tokens| {
             tokens
                 .iter()
                 .filter_map(|token| token.as_str().map(str::to_string))
                 .collect()
-        })
-        .unwrap_or_default();
+        });
     Some(SkillOverlapCandidate {
         skill_a: a.metadata.id.clone(),
         skill_b: b.metadata.id.clone(),

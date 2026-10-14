@@ -4,6 +4,8 @@
 //! opening an admitted, generation-pinned graph reader.
 
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
 
 use tracedecay_contracts::retrieval::{
     HealthDeltaCoverageV1, HealthDeltaCurrentnessV1, HealthDeltaPointV1, HealthDeltaResult,
@@ -278,7 +280,18 @@ async fn find_health_delta_point(
 ) -> Result<Option<HealthDeltaPointV1>> {
     health_delta_digest_from_cursor(cursor)?;
     let port = RegisteredObservabilityPortV1::new(db);
-    port.read_exact(scope.scope_digest.as_str(), cursor)
+    let stored: Pin<
+        Box<
+            dyn Future<
+                    Output = std::result::Result<
+                        Option<ObservabilityEnvelopeV1>,
+                        ApplicationContractError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > = Box::pin(port.read_exact(scope.scope_digest.as_str(), cursor));
+    stored
         .await
         .map_err(|error| storage("failed to read health-delta observation", error))?
         .map(|envelope| verify_health_delta_point(scope, envelope))
@@ -427,29 +440,30 @@ pub async fn compute_verified_health_delta(
     let scope = health_delta_scope(project_id, path_prefix)?;
     let current_cursor = health_delta_cursor(&scope, graph.generation().as_str())?;
     let pinned_before = if let Some(cursor) = before_cursor {
-        let stored = tracing::Instrument::instrument(
-            load_health_delta_point(db, &scope, cursor),
-            tracing::trace_span!("usecases.graph.health_delta.load"),
-        )
-        .await?;
+        let stored: Pin<Box<dyn Future<Output = Result<HealthDeltaPointV1>> + Send + '_>> =
+            Box::pin(load_health_delta_point(db, &scope, cursor));
+        let stored = stored.await?;
         Some((stored, cursor.to_owned()))
     } else {
         None
     };
-    let current = tracing::Instrument::instrument(
-        find_health_delta_point(db, &scope, &current_cursor),
-        tracing::trace_span!("usecases.graph.health_delta.find"),
-    )
-    .await?;
+    let current: Pin<Box<dyn Future<Output = Result<Option<HealthDeltaPointV1>>> + Send + '_>> =
+        Box::pin(find_health_delta_point(db, &scope, &current_cursor));
+    let current = current.await?;
     let after = if let Some(after) = current {
         after
     } else {
-        let snapshot = tracing::Instrument::instrument(
-            compute_verified_health_snapshot(graph, scope.path_prefix.as_deref()),
-            tracing::trace_span!("usecases.graph.health_delta.snapshot"),
-        )
-        .await
-        .map_err(HealthDeltaError::Graph)?;
+        let snapshot: Pin<
+            Box<
+                dyn Future<Output = tracedecay_domain::errors::Result<VerifiedHealthSnapshotV1>>
+                    + Send
+                    + '_,
+            >,
+        > = Box::pin(compute_verified_health_snapshot(
+            graph,
+            scope.path_prefix.as_deref(),
+        ));
+        let snapshot = snapshot.await.map_err(HealthDeltaError::Graph)?;
         let observed_at = tracedecay_contracts::now_micros();
         let dimensions = health_delta_dimensions(&snapshot);
         let watermark = health_delta_watermark(

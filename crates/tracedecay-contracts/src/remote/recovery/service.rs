@@ -512,24 +512,23 @@ impl_recovery_protocol!(
     REMOTE_PROMOTION_USE_CASE_ID_V1,
     "remote.promotion.result",
     |request: &RemoteProtocolRequestV1<PromotionConfirmationV1>| {
-        request
-            .expected_authority
-            .as_ref()
-            .map(|writer| RecoveryAuthorityExpectationV1 {
-                brain_id: writer.brain_id.as_str().to_owned(),
-                shard_id: writer.shard_id.as_str().to_owned(),
-                generation_id: writer.generation_id.as_str().to_owned(),
-                authority_node_id: writer.authority_node_id.as_str().to_owned(),
-                placement_revision: request.body.expected_placement_revision,
-                authority_epoch: request.body.expected_authority_epoch,
-            })
-            .unwrap_or_else(|| RecoveryAuthorityExpectationV1 {
+        request.expected_authority.as_ref().map_or_else(
+            || RecoveryAuthorityExpectationV1 {
                 brain_id: request.brain_id.as_str().to_owned(),
                 shard_id: "unavailable".to_owned(),
                 generation_id: "unavailable".to_owned(),
                 authority_node_id: "unavailable".to_owned(),
                 placement_revision: request.body.expected_placement_revision,
                 authority_epoch: request.body.expected_authority_epoch,
-            })
+            },
+            |writer| RecoveryAuthorityExpectationV1 {
+                brain_id: writer.brain_id.as_str().to_owned(),
+                shard_id: writer.shard_id.as_str().to_owned(),
+                generation_id: writer.generation_id.as_str().to_owned(),
+                authority_node_id: writer.authority_node_id.as_str().to_owned(),
+                placement_revision: request.body.expected_placement_revision,
+                authority_epoch: request.body.expected_authority_epoch,
+            },
+        )
     }
 );

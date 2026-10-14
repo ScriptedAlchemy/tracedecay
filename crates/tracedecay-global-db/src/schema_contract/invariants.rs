@@ -1,3 +1,11 @@
+use std::future::Future;
+use std::pin::Pin;
+
+use futures_util::future::BoxFuture;
+
+/// Checkpoint, provenance, disposition, and alias counts, then completion.
+type ProjectionPage = (AuditCheckpoint, i64, i64, i64, bool);
+
 use tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION;
 
 use super::super::global_db_operation_error;
@@ -440,13 +448,23 @@ async fn converge_authority_invariants(
     };
 
     authority_invariant_step(provider, "repair committed source cursors", async |conn| {
-        repair_committed_source_cursors(conn, audited_from_sequence).await
+        let repaired: Pin<Box<dyn Future<Output = tracedecay_domain::errors::Result<()>> + Send>> =
+            Box::pin(repair_committed_source_cursors(conn, audited_from_sequence));
+        repaired.await
     })
     .await?;
     authority_invariant_step(
         provider,
         "validate observation cursor coverage",
-        async |conn| validate_observation_cursor_coverage(conn, audited_from_sequence).await,
+        async |conn| {
+            let covered: Pin<
+                Box<dyn Future<Output = tracedecay_domain::errors::Result<()>> + Send>,
+            > = Box::pin(validate_observation_cursor_coverage(
+                conn,
+                audited_from_sequence,
+            ));
+            covered.await
+        },
     )
     .await?;
 
@@ -454,11 +472,24 @@ async fn converge_authority_invariants(
         provider,
         "repair observation projection frontier",
         async |conn| {
-            repair_projection_frontier(conn, checkpoint.projection_checkpoint).await?;
+            let repaired: Pin<
+                Box<dyn Future<Output = tracedecay_domain::errors::Result<i64>> + Send>,
+            > = Box::pin(repair_projection_frontier(
+                conn,
+                checkpoint.projection_checkpoint,
+            ));
+            repaired.await?;
             if exhaustive {
-                validate_invariant_rows(&ConvergenceReads(conn)).await
+                let reads = ConvergenceReads(conn);
+                let rows: Pin<
+                    Box<dyn Future<Output = tracedecay_domain::errors::Result<()>> + Send>,
+                > = Box::pin(validate_invariant_rows(&reads));
+                rows.await
             } else {
-                validate_mutable_invariant_rows(conn).await
+                let rows: Pin<
+                    Box<dyn Future<Output = tracedecay_domain::errors::Result<()>> + Send>,
+                > = Box::pin(validate_mutable_invariant_rows(conn));
+                rows.await
             }
         },
     )
@@ -482,8 +513,13 @@ async fn converge_authority_invariants(
                 "audit observation projection authority page",
                 async |conn| {
                     let released = ReleasedRenderingLedger::default();
-                    let result =
-                        validate_projection_authority_chunk(conn, progress, &released).await?;
+                    let projected: BoxFuture<
+                        '_,
+                        tracedecay_domain::errors::Result<ProjectionPage>,
+                    > = Box::pin(validate_projection_authority_chunk(
+                        conn, progress, &released,
+                    ));
+                    let result = projected.await?;
                     released.converge(conn).await?;
                     write_audit_checkpoint(
                         conn,
@@ -514,8 +550,15 @@ async fn converge_authority_invariants(
             "audit observation projection authority suffix",
             async |conn| {
                 let released = ReleasedRenderingLedger::default();
-                let audited =
-                    validate_projection_authority_suffix(conn, projection_start, &released).await?;
+                let projected: BoxFuture<
+                    '_,
+                    tracedecay_domain::errors::Result<(AuditCheckpoint, i64, i64, i64)>,
+                > = Box::pin(validate_projection_authority_suffix(
+                    conn,
+                    projection_start,
+                    &released,
+                ));
+                let audited = projected.await?;
                 released.converge(conn).await?;
                 Ok(audited)
             },
@@ -783,7 +826,7 @@ async fn foreign_key_violation_exists_read_only(
 }
 
 pub async fn validate_authority_rows_exhaustive(
-    conn: &impl QueryExecutor,
+    conn: &impl crate::observation_projection::SendProjectionDerive,
 ) -> tracedecay_domain::errors::Result<()> {
     validate_receipt_authority_rows(conn, 0).await?;
     validate_observation_authority_rows(conn, 0).await?;

@@ -170,8 +170,8 @@ pub(crate) fn run_host_cli(program: &Path, args: &[&str], home: &Path) -> Result
         }
     };
 
-    let stdout = stdout_handle.map(join_reader).unwrap_or_default();
-    let stderr = stderr_handle.map(join_reader).unwrap_or_default();
+    let stdout = stdout_handle.map_or_default(join_reader);
+    let stderr = stderr_handle.map_or_default(join_reader);
 
     Ok(HostCliOutcomeV1 {
         program: rendered_program,

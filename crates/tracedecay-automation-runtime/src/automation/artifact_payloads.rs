@@ -79,22 +79,18 @@ pub(super) fn traces_payload(ctx: &ArtifactPayloadContext<'_>) -> Value {
         "input_hash": ctx.record.input_hash,
         "output_hash": ctx.record.output_hash,
         "context_keys": ctx.request.context.as_object()
-            .map(|object| object.keys().cloned().collect::<Vec<_>>())
-            .unwrap_or_default(),
+            .map_or_default(|object| object.keys().cloned().collect::<Vec<_>>()),
         "curation_result": curation_result,
     })
 }
 
 fn context_evidence_mode(context: &Value) -> Value {
-    let modes = context
-        .as_object()
-        .map(|object| {
-            object
-                .values()
-                .filter_map(|value| value.get("evidence_mode").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let modes = context.as_object().map_or_default(|object| {
+        object
+            .values()
+            .filter_map(|value| value.get("evidence_mode").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+    });
     if modes.contains(&"session_replay_with_grep") {
         json!("session_replay_with_grep")
     } else if modes.contains(&"grep_only") {

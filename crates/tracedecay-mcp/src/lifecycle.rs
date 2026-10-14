@@ -197,7 +197,7 @@ impl StartupCatchUpStateV1 {
     }
 
     fn take_tasks(&mut self) -> StartupCatchUpTasksV1 {
-        self.tasks_mut().map(std::mem::take).unwrap_or_default()
+        self.tasks_mut().map_or_default(std::mem::take)
     }
 }
 

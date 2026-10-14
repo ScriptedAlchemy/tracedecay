@@ -85,9 +85,10 @@ pub(super) fn wait_for_workflow_mount(client: &Client, run_id: &RunId) {
 pub(super) fn spawn_project_daemon(home: &Path, project: &Path) -> common::DaemonProcess {
     let profile = home.join(".tracedecay");
     PrivateStoreIo::create_dir_all(&profile).expect("advanced workflow daemon profile");
-    let log_path = std::env::var_os("TRACEDECAY_TEST_DAEMON_LOG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| profile.join("advanced-workflow-daemon.log"));
+    let log_path = std::env::var_os("TRACEDECAY_TEST_DAEMON_LOG").map_or_else(
+        || profile.join("advanced-workflow-daemon.log"),
+        PathBuf::from,
+    );
     let stderr = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

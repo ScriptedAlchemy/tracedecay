@@ -513,13 +513,12 @@ mod tests {
             let (blob_oid, bytes) = self
                 .blobs
                 .get(&(request.commit.clone(), request.path.clone()))
-                .map(|(oid, bytes)| {
+                .map_or((None, None), |(oid, bytes)| {
                     (
                         Some(oid.clone()),
                         request.include_bytes.then(|| bytes.clone()),
                     )
-                })
-                .unwrap_or((None, None));
+                });
             Ok(GitHistoricalBlobV1 {
                 repository: self.scope.repository_id.clone(),
                 worktree: self.scope.worktree_id.clone(),

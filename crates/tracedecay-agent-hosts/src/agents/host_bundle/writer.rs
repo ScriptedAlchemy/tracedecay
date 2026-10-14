@@ -739,14 +739,11 @@ impl HostBundleWriterV1 {
         )?;
         let mut component_manifests = previous
             .as_ref()
-            .map(|receipt| receipt.component_manifests.clone())
-            .unwrap_or_default();
+            .map_or_default(|receipt| receipt.component_manifests.clone());
         component_manifests.retain(|previous| previous.component != manifest.component);
         component_manifests.push(manifest.clone());
         component_manifests.sort_by_key(|manifest| manifest.component);
-        let mut component_receipts = previous
-            .map(|receipt| receipt.component_receipts)
-            .unwrap_or_default();
+        let mut component_receipts = previous.map_or_default(|receipt| receipt.component_receipts);
         component_receipts.retain(|previous| previous.component != component_receipt.component);
         component_receipts.push(component_receipt.clone());
         component_receipts.sort_by_key(|receipt| receipt.component);

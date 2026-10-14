@@ -1535,21 +1535,19 @@ impl<'a> ArtifactQueryV1<'a> {
                     field_texts
                         .iter()
                         .find(|(matched, _)| *matched == field)
-                        .map(|(_, text)| substring_count(text, phrase))
-                        .unwrap_or(0)
+                        .map_or(0, |(_, text)| substring_count(text, phrase))
                 },
                 |field, proximity| {
                     field_tokens
                         .iter()
                         .find(|(matched, _)| *matched == field)
-                        .map(|(_, tokens)| {
+                        .map_or(0, |(_, tokens)| {
                             proximity_count_tokens(
                                 tokens,
                                 &proximity.terms,
                                 proximity.original.maximum_gap,
                             )
                         })
-                        .unwrap_or(0)
                 },
                 !prepared.echo_query.is_empty()
                     && prepared.echo_query == row.normalized_text().trim(),

@@ -30,17 +30,13 @@ struct FakeStore {
 
 impl FakeStore {
     fn calls(&self) -> Vec<LcmAuthorityOperation> {
-        self.calls
-            .lock()
-            .map(|calls| calls.clone())
-            .unwrap_or_default()
+        self.calls.lock().map_or_default(|calls| calls.clone())
     }
 
     fn compact_requests(&self) -> Vec<LcmCompressionRequest> {
         self.compact_requests
             .lock()
-            .map(|requests| requests.clone())
-            .unwrap_or_default()
+            .map_or_default(|requests| requests.clone())
     }
 }
 

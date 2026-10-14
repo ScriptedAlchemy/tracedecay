@@ -104,8 +104,7 @@ impl<'s> ExtractionState<'s> {
             .or_else(|| find_direct_child_by_kind(node, "field_declaration_list"))
             .or_else(|| find_direct_child_by_kind(node, "declaration_list"))
             .or_else(|| find_direct_child_by_kind(node, "enumerator_list"))
-            .map(|body| body.start_byte())
-            .unwrap_or_else(|| node.end_byte());
+            .map_or_else(|| node.end_byte(), |body| body.start_byte());
         self.text_before(node, end)
             .trim()
             .trim_end_matches(';')

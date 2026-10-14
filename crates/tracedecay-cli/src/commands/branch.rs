@@ -123,8 +123,7 @@ fn handle_branch_action_inner(
                     let parent = branch
                         .get("parent")
                         .and_then(serde_json::Value::as_str)
-                        .map(|p| format!(" (from {p})"))
-                        .unwrap_or_default();
+                        .map_or_default(|p| format!(" (from {p})"));
                     let is_ready = branch
                         .get("is_ready")
                         .and_then(serde_json::Value::as_bool)
@@ -470,9 +469,9 @@ async fn handle_branch_autotrack_action(
                     message: "PR auto-tracking poll interval is not unsigned".to_owned(),
                 });
             };
-            let effective_poll_secs = poll_secs
-                .map(|secs| secs.max(MIN_AUTO_TRACK_PR_POLL_SECS))
-                .unwrap_or(current_poll_secs);
+            let effective_poll_secs = poll_secs.map_or(current_poll_secs, |secs| {
+                secs.max(MIN_AUTO_TRACK_PR_POLL_SECS)
+            });
             let mut mutations = Vec::new();
             if !current_enabled {
                 mutations.push(super::settings::project_configuration_set(

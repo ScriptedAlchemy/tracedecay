@@ -232,10 +232,13 @@ async fn cancellation_observed_after_a_committed_effect_does_not_replace_its_res
     let control = LcmEffectControl::new(None, Some(&cancellation));
     let execution = control.execution_control();
     let result = control
-        .execute(&execution, async {
-            assert!(cancellation.cancel(tracedecay_domain::UtcMicros(2)));
-            Ok::<_, LcmError>("committed")
-        })
+        .execute(
+            &execution,
+            Box::pin(async {
+                assert!(cancellation.cancel(tracedecay_domain::UtcMicros(2)));
+                Ok::<_, LcmError>("committed")
+            }),
+        )
         .await;
 
     assert_eq!(result.unwrap(), "committed");

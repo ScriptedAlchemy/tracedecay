@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use asupersync::{Budget, channel::mpsc as actor_mpsc, runtime::RuntimeHandle};
+use asupersync::{Cx, channel::mpsc as actor_mpsc};
 use rusqlite::{Connection, TransactionBehavior, params_from_iter};
 use tracedecay_store::{
     OperationPriorityV1, StoreRuntimeBindingV1, UnavailableReasonV1, VerifiedStoreLocatorV1,
@@ -500,17 +500,14 @@ impl ExactSqlHandle {
     /// awaits the same serialized command protocol as ordinary writes.
     pub async fn release_connection_memory_async(
         &self,
-        runtime: &RuntimeHandle,
+        cx: &Cx,
     ) -> Result<MemoryReleaseOutcome, ExactSqlError> {
         let release_readers = Arc::clone(&self.release_reader_memory);
-        let cx = runtime
-            .try_request_cx_with_budget(Budget::INFINITE)
-            .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
         let mut task = cx
             .spawn_blocking(move |_| release_readers())
             .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
         let readers = task
-            .join(&cx)
+            .join(cx)
             .await
             .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))??;
         let writer = if self.writer.is_some() {

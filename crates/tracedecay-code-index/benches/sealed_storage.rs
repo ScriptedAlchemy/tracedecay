@@ -188,9 +188,10 @@ struct LinkedWorktreeReport {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let repository = std::env::var_os(REPO_ENV)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")));
+    let repository = std::env::var_os(REPO_ENV).map_or_else(
+        || PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")),
+        PathBuf::from,
+    );
     let revision = std::env::var(REV_ENV).unwrap_or_else(|_| "HEAD".to_owned());
     let revision = git_output(&repository, &["rev-parse", "--verify", &revision])?;
     let sources = git_sources(&repository, &revision)?;

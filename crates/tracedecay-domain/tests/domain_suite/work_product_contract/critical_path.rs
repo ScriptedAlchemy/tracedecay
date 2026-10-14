@@ -141,8 +141,7 @@ fn a_dependency_chain_at_the_item_cap_projects_its_whole_path() {
         .map(|(ordinal, task_id)| {
             let dependencies = ordinal
                 .checked_sub(1)
-                .map(|previous| vec![task_ids[previous].as_str()])
-                .unwrap_or_default();
+                .map_or_default(|previous| vec![task_ids[previous].as_str()]);
             item(task_id, &dependencies, 1)
         })
         .collect();

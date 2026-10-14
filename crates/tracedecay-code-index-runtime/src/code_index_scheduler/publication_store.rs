@@ -3137,8 +3137,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         let exact_git_evidence = self.exact_git_evidence(generation.snapshot())?;
         let mut generation_index = prior_pointer
             .as_ref()
-            .map(|pointer| pointer.generation_index.clone())
-            .unwrap_or_default();
+            .map_or_default(|pointer| pointer.generation_index.clone());
         generation_index.retain(|entry| {
             entry.generation_id != generation.manifest().generation_id.as_str()
                 && exact_git_evidence

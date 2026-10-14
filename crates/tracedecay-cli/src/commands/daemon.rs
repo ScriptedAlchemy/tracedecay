@@ -179,13 +179,23 @@ pub(crate) async fn daemon_tool_json(
 ) -> tracedecay_domain::errors::Result<serde_json::Value> {
     tracing::trace!(name: "cli.daemon.tool", value = ?tool_name);
     let handshake = client_handshake(profile, project_path)?;
+    // Both calls are erased so every command's `Send` proof stops here
+    // (rust-lang/rust#159228).
     let result = tracing::Instrument::instrument(
-        tracedecay::daemon::call_default_tool(profile, &handshake, tool_name, arguments),
+        tracedecay_runtime_core::erase_send!(
+            tracedecay::daemon::call_default_tool(profile, &handshake, tool_name, arguments),
+            tracedecay_domain::errors::Result<serde_json::Value>
+        ),
         tracing::trace_span!("cli.daemon.request"),
     )
     .await?;
-    tracedecay::daemon::recover_truncated_tool_payload(profile, &handshake, tool_name, result, None)
-        .await
+    tracedecay_runtime_core::erase_send!(
+        tracedecay::daemon::recover_truncated_tool_payload(
+            profile, &handshake, tool_name, result, None
+        ),
+        tracedecay_domain::errors::Result<serde_json::Value>
+    )
+    .await
 }
 
 /// Deadline-carrying variant for CLI journeys that deliberately trigger a cold

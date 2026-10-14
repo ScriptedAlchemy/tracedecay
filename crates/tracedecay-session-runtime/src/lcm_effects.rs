@@ -1,3 +1,5 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::time::Duration;
 
 use tracedecay_contracts::{CancellationSignal, Deadline};
@@ -57,10 +59,10 @@ impl LcmEffectControl {
         Ok(())
     }
 
-    async fn execute<T>(
+    async fn execute<T: Send>(
         &self,
         execution: &ExecutionControl,
-        mutation: impl std::future::Future<Output = Result<T, LcmError>>,
+        mutation: Pin<Box<dyn Future<Output = Result<T, LcmError>> + Send + '_>>,
     ) -> Result<T, LcmError> {
         self.checkpoint()?;
         let result = mutation.await;
@@ -111,11 +113,11 @@ impl DaemonLcmEffectService {
         self.control
             .execute(
                 &execution,
-                tracing::Instrument::instrument(
+                Box::pin(tracing::Instrument::instrument(
                     self.db
                         .lcm_protect_session_raw_messages(&request.provider, &request.session_id),
                     tracing::trace_span!("daemon.lcm.hydrate"),
-                ),
+                )),
             )
             .await?;
         if matches!(
@@ -260,12 +262,12 @@ impl DaemonLcmEffectService {
         self.control
             .execute(
                 &execution,
-                tracing::Instrument::instrument(
+                Box::pin(tracing::Instrument::instrument(
                     self.db.lcm_compress_guarded(request, &execution, move || {
                         before_commit.checkpoint()
                     }),
                     tracing::trace_span!("daemon.lcm.commit"),
-                ),
+                )),
             )
             .await
     }
@@ -285,23 +287,33 @@ impl DaemonLcmEffectService {
         const RETAINED_PHASE_BYTES: u64 = tracedecay_lcm::LCM_SCAN_PAGE_MAX_BYTES as u64 / 2;
         let execution = self.control.execution_control();
         let before_commit = self.control.clone();
+        let compressed: Pin<
+            Box<
+                dyn Future<
+                        Output = Result<
+                            tracedecay_lcm::summary_convergence::LcmBoundedCompressionResponse,
+                            LcmError,
+                        >,
+                    > + Send,
+            >,
+        > = Box::pin(self.db.lcm_compress_retained_page_guarded(
+            request,
+            &execution,
+            move || before_commit.checkpoint(),
+            tracedecay_lcm::compression::RetainedCompressionGuard {
+                row_limit: RETAINED_PHASE_ROWS,
+                byte_limit: RETAINED_PHASE_BYTES,
+                expected_summary_source_range: expected_summary_source_range.cloned(),
+            },
+            convergence_candidate,
+        ));
         self.control
             .execute(
                 &execution,
-                tracing::Instrument::instrument(
-                    self.db.lcm_compress_retained_page_guarded(
-                        request,
-                        &execution,
-                        move || before_commit.checkpoint(),
-                        tracedecay_lcm::compression::RetainedCompressionGuard {
-                            row_limit: RETAINED_PHASE_ROWS,
-                            byte_limit: RETAINED_PHASE_BYTES,
-                            expected_summary_source_range: expected_summary_source_range.cloned(),
-                        },
-                        convergence_candidate,
-                    ),
+                Box::pin(tracing::Instrument::instrument(
+                    compressed,
                     tracing::trace_span!("daemon.lcm.retained_commit"),
-                ),
+                )),
             )
             .await
     }
@@ -313,7 +325,7 @@ impl DaemonLcmEffectService {
         let execution = self.control.execution_control();
         let recovered = self
             .control
-            .execute(&execution, async {
+            .execute(&execution, Box::pin(async {
                 SessionTemporalAccess::new(&*self.db)
                     .recover_pending_session_relation_projection_page(
                         RELATION_PAGE_LIMIT,
@@ -331,7 +343,7 @@ impl DaemonLcmEffectService {
                             "recover bounded retained LCM relation projection: {error}"
                         )),
                     })
-            })
+            }))
             .await?;
         self.control.checkpoint()?;
         Ok(recovered)
@@ -347,11 +359,11 @@ impl DaemonLcmEffectService {
         self.control
             .execute(
                 &execution,
-                tracing::Instrument::instrument(
+                Box::pin(tracing::Instrument::instrument(
                     self.db
                         .lcm_session_boundary_guarded(request, move || before_commit.checkpoint()),
                     tracing::trace_span!("daemon.lcm.boundary"),
-                ),
+                )),
             )
             .await
     }

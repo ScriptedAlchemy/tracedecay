@@ -1,6 +1,10 @@
 //! Canonical fact search, ranking, cursors, and retrieval recording.
 
 use std::collections::BTreeSet;
+use std::future::Future;
+use std::pin::Pin;
+
+use tracing::Instrument;
 
 use crate::memory::entities::normalize_entity;
 
@@ -259,8 +263,7 @@ async fn project_memory_rank_facts_tx(
         .unwrap_or(Confidence::new(0.3).map_err(FactStoreError::from)?);
     let fts_scores = candidates
         .as_mut()
-        .map(|candidates| std::mem::take(&mut candidates.fts_scores))
-        .unwrap_or_default();
+        .map_or_default(|candidates| std::mem::take(&mut candidates.fts_scores));
     let mut facts = if let Some(candidates) = candidates.take() {
         ensure_project_memory_read_active(read_control)?;
         let projections = load_project_memory_projections_controlled_tx(
@@ -490,55 +493,63 @@ async fn project_memory_candidates_snapshot(
     finish_read_snapshot(transaction, result).await
 }
 
-#[tracing::instrument(name = "runtime_core.memory.graph_assist", level = "trace", skip_all)]
-async fn project_memory_graph_assist(
-    db: &Database,
-    query: &ProjectMemoryFactSearchQuery,
-    candidates: &mut SearchCandidates,
-    read_control: &FactReadControl,
-) -> FactStoreResult<ProjectMemoryFactSearchGraphCoverageV1> {
-    if db.issue_memory_graph_runtime_operation().is_err() {
-        return Ok(ProjectMemoryFactSearchGraphCoverageV1::NotMounted);
-    }
-    let roots = candidates
-        .relation_roots
-        .iter()
-        .cloned()
-        .collect::<Vec<_>>();
-    if roots.is_empty() {
-        return Ok(ProjectMemoryFactSearchGraphCoverageV1::Complete {
-            root_count: 0,
-            relation_count: 0,
-            expanded_fact_count: 0,
-        });
-    }
-    let graph_query = ProjectMemoryGraphQueryV1::new(
-        query.owner().clone(),
-        roots.clone(),
-        MAX_PROJECT_MEMORY_GRAPH_RELATIONS,
-    )?;
-    let page = match super::graph::project_memory_graph(db, graph_query, read_control).await {
-        Ok(page) => page,
-        Err(FactStoreError::GraphCancelled) => return Err(FactStoreError::GraphCancelled),
-        Err(error) => match project_memory_graph_degradation(&error) {
-            Some(reason) => {
-                return Ok(ProjectMemoryFactSearchGraphCoverageV1::Degraded { reason });
+fn project_memory_graph_assist<'a>(
+    db: &'a Database,
+    query: &'a ProjectMemoryFactSearchQuery,
+    candidates: &'a mut SearchCandidates,
+    read_control: &'a FactReadControl,
+) -> Pin<
+    Box<dyn Future<Output = FactStoreResult<ProjectMemoryFactSearchGraphCoverageV1>> + Send + 'a>,
+> {
+    let span = tracing::trace_span!("runtime_core.memory.graph_assist");
+    Box::pin(
+        async move {
+            if db.issue_memory_graph_runtime_operation().is_err() {
+                return Ok(ProjectMemoryFactSearchGraphCoverageV1::NotMounted);
             }
-            None => return Err(error),
-        },
-    };
-    let before = candidates.fact_ids.len();
-    candidates.fact_ids.extend(
-        page.facts()
-            .iter()
-            .filter(|&fact| matches!(fact, ProjectMemoryFactProjectionV1::Available(_)))
-            .map(|fact| fact.fact_id().clone()),
-    );
-    Ok(ProjectMemoryFactSearchGraphCoverageV1::Complete {
-        root_count: roots.len(),
-        relation_count: page.relations().len(),
-        expanded_fact_count: candidates.fact_ids.len().saturating_sub(before),
-    })
+            let roots = candidates
+                .relation_roots
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>();
+            if roots.is_empty() {
+                return Ok(ProjectMemoryFactSearchGraphCoverageV1::Complete {
+                    root_count: 0,
+                    relation_count: 0,
+                    expanded_fact_count: 0,
+                });
+            }
+            let graph_query = ProjectMemoryGraphQueryV1::new(
+                query.owner().clone(),
+                roots.clone(),
+                MAX_PROJECT_MEMORY_GRAPH_RELATIONS,
+            )?;
+            let page = match super::graph::project_memory_graph(db, graph_query, read_control).await
+            {
+                Ok(page) => page,
+                Err(FactStoreError::GraphCancelled) => return Err(FactStoreError::GraphCancelled),
+                Err(error) => match project_memory_graph_degradation(&error) {
+                    Some(reason) => {
+                        return Ok(ProjectMemoryFactSearchGraphCoverageV1::Degraded { reason });
+                    }
+                    None => return Err(error),
+                },
+            };
+            let before = candidates.fact_ids.len();
+            candidates.fact_ids.extend(
+                page.facts()
+                    .iter()
+                    .filter(|&fact| matches!(fact, ProjectMemoryFactProjectionV1::Available(_)))
+                    .map(|fact| fact.fact_id().clone()),
+            );
+            Ok(ProjectMemoryFactSearchGraphCoverageV1::Complete {
+                root_count: roots.len(),
+                relation_count: page.relations().len(),
+                expanded_fact_count: candidates.fact_ids.len().saturating_sub(before),
+            })
+        }
+        .instrument(span),
+    )
 }
 
 pub(super) fn project_memory_graph_degradation(
@@ -572,14 +583,16 @@ async fn project_memory_rank_snapshot(
         .begin_memory_read_transaction(PROJECT_MEMORY_READ_OPERATION)
         .await
         .map_err(|error| storage_error(PROJECT_MEMORY_READ_OPERATION, error))?;
-    let result = project_memory_rank_facts_tx(
+    let result: Pin<
+        Box<dyn Future<Output = FactStoreResult<ProjectMemoryFactSearchPageV1>> + Send + '_>,
+    > = Box::pin(project_memory_rank_facts_tx(
         &transaction,
         query,
         Some(candidates),
         graph_coverage,
         read_control,
-    )
-    .await;
+    ));
+    let result = result.await;
     finish_read_snapshot(transaction, result).await
 }
 

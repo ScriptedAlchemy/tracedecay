@@ -1,4 +1,6 @@
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 
 use tracedecay_domain::ObservationScopeV1;
 use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
@@ -245,16 +247,20 @@ impl<'a, D: SessionRegisteredDb + Sync> SessionStoreAccess<'a, D> {
         deep: bool,
         gc_config: &LcmGcConfig,
     ) -> Result<LcmStatus, LcmError> {
-        let snapshot = self.lcm_read_snapshot().await?;
-        query::status(
-            &snapshot,
-            self.lcm_storage_root()?,
-            provider,
-            session_id,
-            deep,
-            gc_config,
-        )
-        .await
+        let opened: Pin<
+            Box<dyn Future<Output = Result<DatabaseEngineReadSnapshot, LcmError>> + Send + '_>,
+        > = Box::pin(self.lcm_read_snapshot());
+        let snapshot = opened.await?;
+        let status: Pin<Box<dyn Future<Output = Result<LcmStatus, LcmError>> + Send + '_>> =
+            Box::pin(query::status(
+                &snapshot,
+                self.lcm_storage_root()?,
+                provider,
+                session_id,
+                deep,
+                gc_config,
+            ));
+        status.await
     }
 
     /// The session scope LCM writes this store's session rows under.

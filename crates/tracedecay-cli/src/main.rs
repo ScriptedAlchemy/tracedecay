@@ -302,8 +302,7 @@ fn try_print_cli_version(args: &[std::ffi::OsString]) -> Option<ExitCode> {
 fn tokio_blocking_thread_limit() -> usize {
     let available = std::thread::available_parallelism().map_or(1, usize::from);
     let effective = tracedecay_code_index::parallelism::installed_worker_status()
-        .map(|status| usize::from(status.effective_workers))
-        .unwrap_or(available);
+        .map_or(available, |status| usize::from(status.effective_workers));
     tokio_blocking_thread_limit_from(available, effective)
 }
 

@@ -698,9 +698,7 @@ fn sealed_generations_release_staging_rows_without_a_resident_lease() {
     // too small for a byte bound to distinguish compaction from framing.
     println!(
         "TRACEDECAY_STAGING_CONTAINER_BYTES after_release_and_reopen={}",
-        std::fs::metadata(support::graph_path(temp.path()))
-            .map(|meta| meta.len())
-            .unwrap_or(0)
+        std::fs::metadata(support::graph_path(temp.path())).map_or(0, |meta| meta.len())
     );
 }
 

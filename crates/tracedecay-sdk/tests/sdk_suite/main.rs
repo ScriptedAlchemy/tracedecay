@@ -20,9 +20,10 @@ mod remote_journey;
 mod semantic_replay;
 
 fn production_binary() -> std::path::PathBuf {
-    let path = std::env::var_os("TRACEDECAY_TEST_BIN")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("../../target/debug/tracedecay"));
+    let path = std::env::var_os("TRACEDECAY_TEST_BIN").map_or_else(
+        || std::path::PathBuf::from("../../target/debug/tracedecay"),
+        std::path::PathBuf::from,
+    );
     std::fs::canonicalize(&path)
         .unwrap_or_else(|error| panic!("missing production daemon {}: {error}", path.display()))
 }

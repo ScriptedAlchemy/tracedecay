@@ -4,7 +4,9 @@
 //! and resolves the project-memory owner. Settlement, retries, and journal
 //! recovery live in `tracedecay-automation-runtime`.
 
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 
 use crate::{DaemonInvocationService, RegisteredRetainedRequestContextError};
 use tracedecay_automation_runtime::automation::effect_runtime::contract_error;
@@ -73,34 +75,35 @@ pub async fn prepare(
     };
     // Runtime prepare retains journal and authority state; keep that frame
     // out of scheduler and dashboard callers.
-    Box::pin(AutomationEffectAuthority::prepare(
-        AdmittedAutomationEffectRequest {
-            context,
-            cancellation: cancellation.clone(),
-            observed_at,
-            configuration_digest,
-            request,
-            dashboard_root: dashboard_root.to_path_buf(),
-        },
-        || memory.project_memory_owner(),
-        |run_id, read_control| async move {
-            memory
-                .project_memory_application()
-                .map_err(|error| {
-                    contract_error(format!(
-                        "canonical memory automation receipt recovery failed: {error}"
-                    ))
-                })?
-                .project_memory_automation_run_receipts(run_id, &read_control)
-                .await
-                .map_err(|error| {
-                    contract_error(format!(
-                        "canonical memory automation receipt recovery failed: {error}"
-                    ))
-                })
-        },
-    ))
-    .await
+    let prepared: Pin<Box<dyn Future<Output = Result<AutomationEffectAdmission>> + Send + '_>> =
+        Box::pin(AutomationEffectAuthority::prepare(
+            AdmittedAutomationEffectRequest {
+                context,
+                cancellation: cancellation.clone(),
+                observed_at,
+                configuration_digest,
+                request,
+                dashboard_root: dashboard_root.to_path_buf(),
+            },
+            || memory.project_memory_owner(),
+            |run_id, read_control| async move {
+                memory
+                    .project_memory_application()
+                    .map_err(|error| {
+                        contract_error(format!(
+                            "canonical memory automation receipt recovery failed: {error}"
+                        ))
+                    })?
+                    .project_memory_automation_run_receipts(run_id, &read_control)
+                    .await
+                    .map_err(|error| {
+                        contract_error(format!(
+                            "canonical memory automation receipt recovery failed: {error}"
+                        ))
+                    })
+            },
+        ));
+    prepared.await
 }
 
 /// The stable request identity of one automation-scheduler run: a requested

@@ -827,16 +827,13 @@ where
             .latest_committed(context, observed_at)
             .await
             .filter(|publication| publication_matches_pin(publication, pin));
-        let candidates = latest_publication
-            .as_ref()
-            .map(|publication| {
-                context_scout_candidates_from_publication(
-                    publication,
-                    pin.configuration.control(),
-                    observed_at,
-                )
-            })
-            .unwrap_or_default();
+        let candidates = latest_publication.as_ref().map_or_default(|publication| {
+            context_scout_candidates_from_publication(
+                publication,
+                pin.configuration.control(),
+                observed_at,
+            )
+        });
         Some(ContextScoutCanonicalInputV1 {
             address,
             control: pin.configuration.control(),

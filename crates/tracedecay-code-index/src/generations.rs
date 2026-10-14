@@ -286,9 +286,8 @@ impl<R: LanguageRegistry> GenerationPlanner<R> {
         let (grammar_revisions, extractor_revisions) =
             self.language_revisions(&snapshot.snapshot)?;
         let registry_revision = self.registry.registry_revision();
-        let mut rebuild_triggers = parent
-            .map(|parent| self.rebuild_triggers(parent, &snapshot.snapshot))
-            .unwrap_or_default();
+        let mut rebuild_triggers =
+            parent.map_or_default(|parent| self.rebuild_triggers(parent, &snapshot.snapshot));
         rebuild_triggers.extend(invalidations.iter().cloned());
         rebuild_triggers.sort();
         rebuild_triggers.dedup();

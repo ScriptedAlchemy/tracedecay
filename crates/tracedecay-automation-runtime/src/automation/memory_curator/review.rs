@@ -1,12 +1,15 @@
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 
 use serde_json::{Value, json};
 use tracedecay_domain::{FactEventId, FactId, FactOwnerV1};
-use tracedecay_session_memory::memory::MemoryApplication;
+use tracedecay_session_memory::memory::{MemoryApplication, MemoryApplicationError};
 use tracedecay_store::{
-    ProjectMemoryFactListQueryV1, ProjectMemoryFactProjectionV1, ProjectMemoryFactStore,
-    ProjectMemoryGraphQueryV1, ProjectMemoryGraphStore, ProjectMemoryGraphTargetV1,
+    ProjectMemoryFactListQueryV1, ProjectMemoryFactPageV1, ProjectMemoryFactProjectionV1,
+    ProjectMemoryFactStore, ProjectMemoryGraphPageV1, ProjectMemoryGraphQueryV1,
+    ProjectMemoryGraphStore, ProjectMemoryGraphTargetV1,
 };
 
 use tracedecay_domain::errors::Result;
@@ -70,14 +73,21 @@ pub(super) async fn memory_curator_review<A: ProjectMemoryFactStore + ProjectMem
     run_control: &AutomationRunControl,
 ) -> Result<MemoryCuratorReviewPage> {
     let limit = fact_review_limit.clamp(1, CURATION_FACT_REVIEW_LIMIT);
-    let page = memory
-        .list_project_memory_facts(
+    let listed: Pin<
+        Box<
+            dyn Future<
+                    Output = std::result::Result<ProjectMemoryFactPageV1, MemoryApplicationError>,
+                > + Send
+                + '_,
+        >,
+    > = Box::pin(
+        memory.list_project_memory_facts(
             ProjectMemoryFactListQueryV1::new(owner.clone(), None, None, after_fact_id, limit)
                 .map_err(memory_contract_error)?,
             run_control.read_control(),
-        )
-        .await
-        .map_err(memory_application_error)?;
+        ),
+    );
+    let page = listed.await.map_err(memory_application_error)?;
     let mut allowed_facts = BTreeMap::new();
     let mut unavailable_count = 0usize;
     let facts = page
@@ -113,8 +123,15 @@ pub(super) async fn memory_curator_review<A: ProjectMemoryFactStore + ProjectMem
             resume_after_fact_id: next_after_fact_id,
         });
     }
-    let graph = memory
-        .project_memory_graph(
+    let graphed: Pin<
+        Box<
+            dyn Future<
+                    Output = std::result::Result<ProjectMemoryGraphPageV1, MemoryApplicationError>,
+                > + Send
+                + '_,
+        >,
+    > = Box::pin(
+        memory.project_memory_graph(
             ProjectMemoryGraphQueryV1::new(
                 owner.clone(),
                 allowed_facts.keys().cloned().collect(),
@@ -122,9 +139,9 @@ pub(super) async fn memory_curator_review<A: ProjectMemoryFactStore + ProjectMem
             )
             .map_err(memory_contract_error)?,
             run_control.read_control(),
-        )
-        .await
-        .map_err(memory_application_error)?;
+        ),
+    );
+    let graph = graphed.await.map_err(memory_application_error)?;
     let relations = graph
         .relations()
         .iter()

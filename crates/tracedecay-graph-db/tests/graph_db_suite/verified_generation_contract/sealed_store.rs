@@ -1777,7 +1777,7 @@ fn probe_mib(kib: u64) -> f64 {
 
 fn directory_bytes(path: &Path) -> u64 {
     let Ok(entries) = std::fs::read_dir(path) else {
-        return std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+        return std::fs::metadata(path).map_or(0, |meta| meta.len());
     };
     entries
         .map(Result::unwrap)
@@ -1786,7 +1786,7 @@ fn directory_bytes(path: &Path) -> u64 {
             if path.is_dir() {
                 directory_bytes(&path)
             } else {
-                std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0)
+                std::fs::metadata(&path).map_or(0, |meta| meta.len())
             }
         })
         .sum()
@@ -1968,9 +1968,8 @@ fn sealed_artifact_open_probe() {
     drop(commit);
     assert!(registered.close().unwrap());
 
-    let staging_bytes = std::fs::metadata(support::graph_path(temp.path()))
-        .map(|meta| meta.len())
-        .unwrap_or(0);
+    let staging_bytes =
+        std::fs::metadata(support::graph_path(temp.path())).map_or(0, |meta| meta.len());
     let sealed_root = sealed_store_root(temp.path());
     let artifact_dir = std::fs::read_dir(&sealed_root)
         .unwrap()
@@ -2159,15 +2158,13 @@ fn sealed_container_sections(root: &Path) -> (u64, Vec<u8>) {
 }
 
 fn row_spills(root: &Path) -> Vec<String> {
-    std::fs::read_dir(sealed_store_root(root))
-        .map(|entries| {
-            entries
-                .map(Result::unwrap)
-                .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
-                .filter(|name| name.starts_with(".rows-"))
-                .collect()
-        })
-        .unwrap_or_default()
+    std::fs::read_dir(sealed_store_root(root)).map_or_default(|entries| {
+        entries
+            .map(Result::unwrap)
+            .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+            .filter(|name| name.starts_with(".rows-"))
+            .collect()
+    })
 }
 
 /// Rows pushed through a spill in shuffled batches, repeats included, seal

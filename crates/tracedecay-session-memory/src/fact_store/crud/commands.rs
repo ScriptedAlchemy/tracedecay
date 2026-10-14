@@ -1,5 +1,8 @@
 //! Canonical project-memory add, update, and remove commands.
 
+use std::future::Future;
+use std::pin::Pin;
+
 use super::super::envelope::{
     ProjectMemoryOperationReceiptV1, project_memory_digest,
     project_memory_lookup_operation_receipt_tx, project_memory_receipt_u64,
@@ -645,11 +648,15 @@ pub(in crate::fact_store) async fn update_project_memory_fact_tx(
     update_project_memory_fact_with_cas_tx(transaction, request, false).await
 }
 
-pub(in crate::fact_store) async fn update_project_memory_fact_after_curation_review_tx(
-    transaction: &Transaction<'_>,
-    request: &ProjectMemoryFactUpdateCommandV1,
-) -> FactStoreResult<ProjectMemoryFactUpdateOutcomeV1> {
-    update_project_memory_fact_with_cas_tx(transaction, request, true).await
+pub(in crate::fact_store) fn update_project_memory_fact_after_curation_review_tx<'a>(
+    transaction: &'a Transaction<'_>,
+    request: &'a ProjectMemoryFactUpdateCommandV1,
+) -> Pin<Box<dyn Future<Output = FactStoreResult<ProjectMemoryFactUpdateOutcomeV1>> + Send + 'a>> {
+    Box::pin(update_project_memory_fact_with_cas_tx(
+        transaction,
+        request,
+        true,
+    ))
 }
 
 async fn update_project_memory_fact_with_cas_tx(
@@ -831,11 +838,15 @@ pub(in crate::fact_store) async fn remove_project_memory_fact_tx(
     remove_project_memory_fact_with_cas_tx(transaction, request, false).await
 }
 
-pub(in crate::fact_store) async fn remove_project_memory_fact_after_curation_review_tx(
-    transaction: &Transaction<'_>,
-    request: &ProjectMemoryFactRemoveCommandV1,
-) -> FactStoreResult<ProjectMemoryFactRemoveOutcomeV1> {
-    remove_project_memory_fact_with_cas_tx(transaction, request, true).await
+pub(in crate::fact_store) fn remove_project_memory_fact_after_curation_review_tx<'a>(
+    transaction: &'a Transaction<'_>,
+    request: &'a ProjectMemoryFactRemoveCommandV1,
+) -> Pin<Box<dyn Future<Output = FactStoreResult<ProjectMemoryFactRemoveOutcomeV1>> + Send + 'a>> {
+    Box::pin(remove_project_memory_fact_with_cas_tx(
+        transaction,
+        request,
+        true,
+    ))
 }
 
 async fn remove_project_memory_fact_with_cas_tx(

@@ -904,14 +904,13 @@ fn plan_session<'r, G: GitReflogSource + ?Sized>(
     // boundaries within a segment.
     let analytics_within = analytics_ts
         .get(&(row.provider.clone(), row.session_id.clone()))
-        .map(|times| {
+        .map_or_default(|times| {
             times
                 .iter()
                 .copied()
                 .filter(|&ts| ts >= win_start && ts <= win_end)
                 .collect()
-        })
-        .unwrap_or_default();
+        });
     let segments = window_branch_segments(
         win_start,
         win_end,

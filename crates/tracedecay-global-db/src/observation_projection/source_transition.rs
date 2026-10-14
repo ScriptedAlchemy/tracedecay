@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use tracedecay_domain::{
     CanonicalObservationIdV1, ClineTranscriptStream, DurableObservationV1, FactOwnerV1,
     ObservationIdentityMaterialV1, RetrievalAnchorRecord, RetrievalAnchorTarget,
@@ -14,14 +12,7 @@ use tracedecay_store::{
 
 use crate::observation::decode_observation_json;
 
-use super::apply::{
-    derive_projection_with_alias, verify_effect, verify_observation_provider_usage,
-    verify_provenance, verify_workflow_effects,
-};
-use super::state::{
-    read_observation, read_output_authorities, reaggregate_output_state_for_output,
-    resolve_output_projection, storage, verify_projection_rows,
-};
+use super::state::{read_observation, reaggregate_output_state_for_output, storage};
 
 #[derive(Clone, Copy)]
 pub(super) enum SourceTransitionTarget<'a> {
@@ -30,124 +21,14 @@ pub(super) enum SourceTransitionTarget<'a> {
 }
 
 /// Resolve immutable successor evidence; a disposition label alone is never authority.
-pub(crate) async fn verify_native_source_supersession(
-    conn: &impl QueryExecutor,
-    predecessor: &DurableObservationV1,
-) -> ProjectionStoreResult<()> {
-    let successor = read_native_source_successor(conn, predecessor)
-        .await?
-        .ok_or(ProjectionStoreError::ProvenanceCollision)?;
-    let effect = Box::pin(derive_projection_with_alias(conn, &successor)).await?;
-    if matches!(effect.skip_reason(), Some(reason) if reason != ProjectionSkipReason::NonConversationalRecord)
-    {
-        return Err(ProjectionStoreError::ProvenanceCollision);
-    }
-    if effect.skip_reason().is_some() {
-        Box::pin(verify_effect(conn, &successor, &effect)).await?;
-    } else {
-        verify_observation_provider_usage(conn, &successor).await?;
-        // Reopen audits use read-only connections without the live writer's
-        // temporary cache. Resolve retained ownership through the same bounded
-        // authority used by the canonical projection audit.
-        let outputs = effect
-            .message()
-            .into_iter()
-            .map(|projection| {
-                (
-                    projection.message().provider.clone(),
-                    projection.message().message_id.clone(),
-                )
-            })
-            .collect::<BTreeSet<_>>();
-        let authorities = read_output_authorities(conn, &outputs).await?;
-        for projection in effect.message().into_iter() {
-            verify_provenance(conn, projection).await?;
-            let message = projection.message();
-            let authority = authorities
-                .get(&(message.provider.clone(), message.message_id.clone()))
-                .ok_or(ProjectionStoreError::ProvenanceCollision)?;
-            let owner = resolve_output_projection(
-                conn,
-                authority,
-                Some((successor.observation_id().as_str(), &effect)),
-                projection,
-            )
-            .await?;
-            verify_provenance(conn, &owner).await?;
-            verify_projection_rows(conn, &owner).await?;
-        }
-        verify_workflow_effects(conn, effect.workflow_facts()).await?;
-    }
-    let (old_anchor, new_anchor) = read_transition_anchors(conn, predecessor, &successor).await?;
-    let owner = old_anchor
-        .owner_column_json()
-        .map_err(|error| storage("encode native source owner", error))?;
-    let mut disposition = conn
-        .query(
-            "SELECT state, superseded_by, reason_class FROM retrieval_anchor_dispositions
-         WHERE anchor_id = ?1 AND owner_json = ?2 ORDER BY sequence DESC LIMIT 1",
-            params![old_anchor.anchor_id().as_str(), owner.as_str()],
-        )
-        .await
-        .map_err(|error| storage("verify native source anchor supersession", error))?;
-    let current = disposition
-        .next()
-        .await
-        .map_err(|error| storage("verify native source anchor supersession", error))?
-        .ok_or(ProjectionStoreError::ProvenanceCollision)?;
-    if current
-        .get::<String>(0)
-        .map_err(|error| storage("verify native source anchor supersession", error))?
-        != "superseded"
-        || current
-            .get::<Option<String>>(1)
-            .map_err(|error| storage("verify native source anchor supersession", error))?
-            .as_deref()
-            != Some(new_anchor.anchor_id().as_str())
-        || current
-            .get::<String>(2)
-            .map_err(|error| storage("verify native source anchor supersession", error))?
-            != "correction"
-    {
-        return Err(ProjectionStoreError::ProvenanceCollision);
-    }
-    drop(disposition);
-    let mut aliases = conn.query(
-        "SELECT COUNT(*) FROM retrieval_anchor_aliases WHERE owner_json = ?1 AND anchor_id = ?2",
-        params![owner, new_anchor.anchor_id().as_str()],
-    ).await.map_err(|error| storage("verify native source current alias", error))?;
-    let count: i64 = aliases
-        .next()
-        .await
-        .map_err(|error| storage("verify native source current alias", error))?
-        .ok_or(ProjectionStoreError::ProvenanceCollision)?
-        .get(0)
-        .map_err(|error| storage("verify native source current alias", error))?;
-    if usize::try_from(count).ok() != Some(new_anchor.aliases().len()) {
-        return Err(ProjectionStoreError::ProvenanceCollision);
-    }
-    drop(aliases);
-    let mut rows = conn.query(
-            "SELECT 1 FROM observation_projection_provenance WHERE projector_version = ?1 AND observation_id = ?2
-             UNION ALL SELECT 1 FROM observation_workflow_facts WHERE projector_version = ?1 AND observation_id = ?2
-             UNION ALL SELECT 1 FROM observation_projection_aliases WHERE projector_version = ?1 AND observation_id = ?2
-             LIMIT 1",
-            params![SESSION_MESSAGE_PROJECTOR_VERSION, predecessor.observation_id().as_str()],
-        ).await.map_err(|error| storage("verify superseded native source effects", error))?;
-    if rows
-        .next()
-        .await
-        .map_err(|error| storage("verify superseded native source effects", error))?
-        .is_some()
-    {
-        return Err(ProjectionStoreError::ProvenanceCollision);
-    }
-    drop(rows);
-
-    Ok(())
+pub(crate) fn verify_native_source_supersession<'a>(
+    conn: &'a impl super::apply::SendProjectionDerive,
+    predecessor: &'a DurableObservationV1,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ProjectionStoreResult<()>> + Send + 'a>> {
+    conn.verify_native_source_supersession(predecessor)
 }
 
-async fn read_native_source_successor(
+pub(crate) async fn read_native_source_successor(
     conn: &impl QueryExecutor,
     predecessor: &DurableObservationV1,
 ) -> ProjectionStoreResult<Option<DurableObservationV1>> {
@@ -190,7 +71,7 @@ async fn read_native_source_successor(
     Ok(None)
 }
 
-pub(super) async fn read_native_source_predecessor(
+pub(crate) async fn read_native_source_predecessor(
     conn: &impl QueryExecutor,
     successor: &DurableObservationV1,
 ) -> ProjectionStoreResult<Option<DurableObservationV1>> {
@@ -211,7 +92,7 @@ pub(super) async fn read_native_source_predecessor(
 /// Runs after the successor effect succeeds, within its existing savepoint.
 /// Staging removes only staged effects; live authority changes at activation.
 pub(super) async fn settle_native_source_transition(
-    conn: &impl Executor,
+    conn: &(impl Executor + super::apply::SendProjectionDerive),
     successor: &DurableObservationV1,
     target: SourceTransitionTarget<'_>,
 ) -> ProjectionStoreResult<()> {
@@ -418,7 +299,7 @@ async fn observation_anchor(
     Ok(anchor)
 }
 
-async fn read_transition_anchors(
+pub(crate) async fn read_transition_anchors(
     conn: &impl QueryExecutor,
     predecessor: &DurableObservationV1,
     successor: &DurableObservationV1,
@@ -516,7 +397,7 @@ async fn promote_native_source_anchor(
 /// Activation has already replaced staged messages and provenance. Publish the
 /// predecessor disposition and current alias in that same activation transaction.
 pub(super) async fn activate_native_source_transitions(
-    conn: &impl Executor,
+    conn: &(impl Executor + super::apply::SendProjectionDerive),
     generation: &str,
 ) -> ProjectionStoreResult<()> {
     let mut after_sequence = 0_i64;

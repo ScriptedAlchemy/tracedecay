@@ -1500,8 +1500,7 @@ pub(crate) mod test_support {
                     .find(|(stored_scope, stored_path, _)| {
                         stored_scope == scope && stored_path == path
                     })
-                    .map(|(_, _, offset)| *offset)
-                    .unwrap_or_default();
+                    .map_or_default(|(_, _, offset)| *offset);
                 if actual != expected {
                     return Err(HostAdmissionOutcome::parse_offset_conflict());
                 }
@@ -1532,8 +1531,7 @@ pub(crate) mod test_support {
                         .find(|(stored_scope, stored_path, _)| {
                             stored_scope == scope && stored_path == path
                         })
-                        .map(|(_, _, offset)| *offset)
-                        .unwrap_or_default()
+                        .map_or_default(|(_, _, offset)| *offset)
                 };
                 if actual(first.0) != first.1 || actual(second.0) != second.1 {
                     return Err(HostAdmissionOutcome::parse_offset_conflict());
