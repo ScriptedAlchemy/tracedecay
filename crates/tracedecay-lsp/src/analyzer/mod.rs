@@ -6,6 +6,7 @@ pub mod broker;
 pub mod client;
 mod error;
 pub mod launch;
+mod process;
 pub mod semantic;
 pub mod settings;
 

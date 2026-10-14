@@ -21,7 +21,7 @@ use tracedecay_contracts::{
 use tracedecay_domain::{ActorId, WorkBlockedIntervalReceiptV1};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
-use super::recovery_schedule::{RecoveryWarningTrackerV1, run_recovery_loop};
+use super::recovery_schedule::{RecoveryScheduleV1, RecoveryWarningTrackerV1, run_recovery_loop};
 use super::work_blocked_interval_recovery_context;
 
 const RECOVERY_PAGE_LIMIT: u32 = 32;
@@ -154,7 +154,7 @@ async fn run_recovery(
     run_recovery_loop(
         signal,
         cancellation,
-        SAFETY_INTERVAL,
+        RecoveryScheduleV1::with_safety_interval(SAFETY_INTERVAL),
         "Work blocked-interval recovery",
         move |_| {
             let database = database.clone();

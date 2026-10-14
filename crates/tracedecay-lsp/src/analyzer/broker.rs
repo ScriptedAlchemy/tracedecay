@@ -319,7 +319,7 @@ impl DiagnosticBroker {
 
     /// Returns a retained semantic authority over the same stdio client slot
     /// used by diagnostic refreshes, or `None` when the executable is absent.
-    pub fn semantic_authority_if_available(
+    pub async fn semantic_authority_if_available(
         &mut self,
         language: &str,
         workspace_root: PathBuf,
@@ -338,7 +338,10 @@ impl DiagnosticBroker {
                 message: format!("no LSP adapter registered for language '{language}'"),
             })?;
         let command = self.settings.command_for(language, &adapter.command);
-        let Ok(launch) = self.resolve_launch(language, &command, &workspace_root) else {
+        let Ok(launch) = self
+            .resolve_launch(language, &command, &workspace_root)
+            .await
+        else {
             return Ok(None);
         };
         let key = LspSessionKey {
@@ -402,7 +405,10 @@ impl DiagnosticBroker {
 
     /// Reconciles enabled project language activity without requiring the
     /// external analyzer executable to be installed.
-    pub fn admitted_providers_for_files(&mut self, files: &[String]) -> Vec<AdmittedLspProvider> {
+    pub async fn admitted_providers_for_files(
+        &mut self,
+        files: &[String],
+    ) -> Vec<AdmittedLspProvider> {
         let languages =
             super::activity::active_languages_for_files(&self.project_root, &self.adapters, files);
         self.update_project_languages(languages);
@@ -422,24 +428,28 @@ impl DiagnosticBroker {
             })
             .collect();
         let project_root = self.project_root.clone();
-        admitted
-            .into_iter()
-            .map(|(language, command)| {
-                let analyzer_available = self
-                    .resolve_launch(&language, &command, &project_root)
-                    .is_ok();
-                AdmittedLspProvider {
-                    language,
-                    command,
-                    analyzer_available,
-                }
-            })
-            .collect()
+        let mut providers = Vec::with_capacity(admitted.len());
+        for (language, command) in admitted {
+            let analyzer_available = self
+                .resolve_launch(&language, &command, &project_root)
+                .await
+                .is_ok();
+            providers.push(AdmittedLspProvider {
+                language,
+                command,
+                analyzer_available,
+            });
+        }
+        providers
     }
 
     /// Returns only analyzer-backed providers that are executable now.
-    pub fn mounted_providers_for_files(&mut self, files: &[String]) -> Vec<MountedLspProvider> {
+    pub async fn mounted_providers_for_files(
+        &mut self,
+        files: &[String],
+    ) -> Vec<MountedLspProvider> {
         self.admitted_providers_for_files(files)
+            .await
             .iter()
             .filter_map(AdmittedLspProvider::mounted)
             .collect()
@@ -458,7 +468,7 @@ impl DiagnosticBroker {
     }
 
     #[tracing::instrument(name = "lsp_analyzer_prepare_refresh", level = "trace", skip_all)]
-    pub fn prepare_refresh(
+    pub async fn prepare_refresh(
         &mut self,
         language: &str,
         documents: Vec<LspDocument>,
@@ -530,6 +540,7 @@ impl DiagnosticBroker {
         for (workspace_root, documents) in documents_by_root {
             let launch = self
                 .resolve_launch(language, &command, &workspace_root)
+                .await
                 .map_err(|error| TraceDecayError::Config {
                     message: error.engine_error(),
                 })?;
@@ -594,7 +605,7 @@ impl DiagnosticBroker {
     /// per root, and a success clears the refusal this method recorded
     /// earlier, so an operator's `rustup component add` shows on the very
     /// next admission probe.
-    fn resolve_launch(
+    async fn resolve_launch(
         &mut self,
         language: &str,
         command: &str,
@@ -606,6 +617,7 @@ impl DiagnosticBroker {
         }
         self.launch_resolver
             .resolve(command, workspace_root)
+            .await
             .inspect(|launch| {
                 self.launches.insert(key, launch.clone());
                 self.clear_launch_refusal(language);
@@ -666,7 +678,7 @@ impl DiagnosticBroker {
         documents: Vec<LspDocument>,
         timeouts: LspRefreshTimeouts,
     ) -> Result<()> {
-        let Some(prepared) = self.prepare_refresh(language, documents)? else {
+        let Some(prepared) = self.prepare_refresh(language, documents).await? else {
             return Ok(());
         };
         let result = prepared.collect_diagnostics_with_timeouts(timeouts).await;

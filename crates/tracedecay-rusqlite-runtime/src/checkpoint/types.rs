@@ -118,7 +118,6 @@ pub(crate) trait CheckpointBlockerSource: Send + Sync {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CheckpointMode {
     Passive,
-    Restart,
     Truncate,
 }
 
@@ -155,15 +154,8 @@ pub enum CheckpointInterruption {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MaintenanceCheckpointMode {
-    Restart,
-    Truncate,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CheckpointKind {
     Passive,
-    Restart,
     Truncate,
 }
 
@@ -171,7 +163,6 @@ impl CheckpointKind {
     fn from_internal(mode: CheckpointMode) -> Self {
         match mode {
             CheckpointMode::Passive => Self::Passive,
-            CheckpointMode::Restart => Self::Restart,
             CheckpointMode::Truncate => Self::Truncate,
         }
     }
@@ -346,7 +337,6 @@ pub(crate) enum CheckpointDecision {
 pub(crate) enum CheckpointError<E> {
     InvalidConfig(CheckpointConfigError),
     Driver(E),
-    MaintenanceStillDraining(CheckpointBlockers),
     AuthorityDenied(RuntimeWriteAuthorityStage),
 }
 
@@ -355,11 +345,6 @@ impl<E: fmt::Display> fmt::Display for CheckpointError<E> {
         match self {
             Self::InvalidConfig(error) => write!(formatter, "invalid checkpoint policy: {error}"),
             Self::Driver(error) => write!(formatter, "SQLite checkpoint failed: {error}"),
-            Self::MaintenanceStillDraining(inventory) => write!(
-                formatter,
-                "exclusive checkpoint requested before snapshots drained ({} blockers)",
-                inventory.count()
-            ),
             Self::AuthorityDenied(stage) => {
                 write!(formatter, "runtime write authority denied at {stage:?}")
             }

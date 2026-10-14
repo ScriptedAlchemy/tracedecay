@@ -49,6 +49,7 @@ use super::{
     is_repeated_conflict_verdict, park_convergence, publication_authority_is_terminal,
     retained_noop_requires_follow_up_wake,
 };
+use tracedecay_runtime_core::native_runtime;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 /// What the worker does with a reconcile pass that found the durable
@@ -82,6 +83,43 @@ enum GraphPrepareStopV1 {
     StoreBusy(String),
     /// The active generation could not be decoded; a retry needs a new wake.
     DecodeFailed(String),
+}
+
+/// Why a reconcile pass's blocking step returned nothing. A panic is input
+/// that reproduces on every pass, which the panic guard bounds.
+#[derive(Debug, thiserror::Error)]
+enum ReconcileStepFailureV1 {
+    #[error("reconcile step panicked: {0}")]
+    Panicked(String),
+    #[error("{0}")]
+    Unavailable(String),
+}
+
+impl ReconcileStepFailureV1 {
+    fn is_panic(&self) -> bool {
+        matches!(self, Self::Panicked(_))
+    }
+}
+
+/// Runs a reconcile step on the native blocking pool, keeping a panic apart
+/// from a runtime failure.
+async fn run_reconcile_step<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, ReconcileStepFailureV1> {
+    let step = native_runtime::spawn_blocking(move || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+    });
+    match step.await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(payload)) => Err(ReconcileStepFailureV1::Panicked(
+            payload
+                .downcast_ref::<&str>()
+                .map(|message| (*message).to_owned())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_default(),
+        )),
+        Err(error) => Err(ReconcileStepFailureV1::Unavailable(error)),
+    }
 }
 
 impl CodeIndexSchedulerRegistryV1 {
@@ -377,7 +415,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let binding_scheduler = Arc::clone(scheduler);
         let binding_shutting_down = Arc::clone(shutting_down);
         let binding_passes = Arc::clone(passes);
-        let binding = tokio::task::spawn_blocking(move || {
+        let binding = native_runtime::spawn_blocking(move || {
             Self::lock_scheduler_for_graph_step(
                 &binding_scheduler,
                 &binding_shutting_down,
@@ -555,7 +593,7 @@ impl CodeIndexSchedulerRegistryV1 {
             let open_byte_pool = Arc::clone(&self.byte_pool);
             let open_resident_memory = Arc::clone(&self.resident_memory);
             let open_resident_owners = Arc::clone(&self.resident_owners);
-            let (opened, reservation) = tokio::task::spawn_blocking(move || {
+            let (opened, reservation) = native_runtime::spawn_blocking(move || {
                 #[cfg(test)]
                 Self::pause_cold_mount_open_for_test(&open_project_root);
                 let opened = CodeIndexWorktreeSchedulerV1::open_with_policy(
@@ -1200,7 +1238,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     // keeps yielding back to the loop between slices.
                     let failed_latest = latest.clone();
                     let build = tracing::Instrument::instrument(
-                        tokio::task::spawn_blocking(move || {
+                        native_runtime::spawn_blocking(move || {
                             latest.advance_text_serving(TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1)
                         }),
                         tracing::trace_span!("daemon.code_index.text_projection"),
@@ -1311,7 +1349,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     let text_scheduler = Arc::clone(&scheduler);
                     let shutting_down = Arc::clone(&worker_shutting_down);
                     let retained_text = tracing::Instrument::instrument(
-                        tokio::task::spawn_blocking(move || {
+                        native_runtime::spawn_blocking(move || {
                             Self::lock_scheduler_unless_shutting_down(
                                 &text_scheduler,
                                 &shutting_down,
@@ -1472,7 +1510,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 let bind_source_freshness = worker_source_freshness.clone();
                 let stashed_successor = sealed_successor.take().map(|(outcome, ..)| outcome);
                 let source_result = tracing::Instrument::instrument(
-                    tokio::task::spawn_blocking(move || {
+                    run_reconcile_step(move || {
                         if let Some(outcome) = stashed_successor {
                             return Ok(outcome);
                         }
@@ -1657,7 +1695,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 if published_pass {
                     let text_scheduler = Arc::clone(&worker_scheduler);
                     let shutting_down = Arc::clone(&worker_shutting_down);
-                    let published_text = tokio::task::spawn_blocking(move || {
+                    let published_text = native_runtime::spawn_blocking(move || {
                         Self::lock_scheduler_unless_shutting_down(&text_scheduler, &shutting_down)
                             .map(|mut scheduler| scheduler.servable_retained_text_generation())
                     })
@@ -1996,7 +2034,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     let replay_scheduler = Arc::clone(&worker_scheduler);
                     let shutting_down = Arc::clone(&worker_shutting_down);
                     let replay_passes = Arc::clone(&worker_reconcile_in_progress);
-                    let replay_binding = tokio::task::spawn_blocking(move || {
+                    let replay_binding = native_runtime::spawn_blocking(move || {
                         let scheduler = Self::lock_scheduler_for_graph_step(
                             &replay_scheduler,
                             &shutting_down,
@@ -2229,7 +2267,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             // The retained seat selects a cold or changed-page
                             // plan, then this authority admits that exact plan
                             // before its first page is materialized.
-                            let admitted_binding = tokio::task::spawn_blocking(move || {
+                            let admitted_binding = native_runtime::spawn_blocking(move || {
                                 let (_step, scheduler) = Self::lock_scheduler_for_graph_step(
                                     &binding_scheduler,
                                     &shutting_down,
@@ -2350,7 +2388,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         #[cfg(test)]
                         let after_decode_gate =
                             Self::enter_graph_decode_gate(&worker_project_root).await;
-                        let prepared = tracing::Instrument::instrument(tokio::task::spawn_blocking(move || {
+                        let prepared = tracing::Instrument::instrument(run_reconcile_step(move || {
                                 // A graph build the memory watermark stopped
                                 // parks exactly like a decode that does not fit.
                                 if let Some(detail) = graph_publish_refusal {
@@ -2770,7 +2808,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             let scheduler = Arc::clone(&worker_scheduler);
                             let shutting_down = Arc::clone(&worker_shutting_down);
                             let retained_text_only = !graph_activation_enabled;
-                            let sealed = tokio::task::spawn_blocking(move || {
+                            let sealed = native_runtime::spawn_blocking(move || {
                                 let mut scheduler = Self::lock_scheduler_unless_shutting_down(
                                     &scheduler,
                                     &shutting_down,
@@ -2923,7 +2961,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                 let wake = Arc::clone(&worker_wake);
                                 let source_freshness = worker_source_freshness.clone();
                                 let metadata = text.metadata().clone();
-                                let source_current = tokio::task::spawn_blocking(move || {
+                                let source_current = native_runtime::spawn_blocking(move || {
                                     let mut scheduler = Self::lock_scheduler_unless_shutting_down(
                                         &scheduler,
                                         &shutting_down,
@@ -3062,7 +3100,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     let shutting_down = Arc::clone(&worker_shutting_down);
                     let swap_passes = Arc::clone(&worker_reconcile_in_progress);
                     let serving_swap = tracing::Instrument::instrument(
-                        tokio::task::spawn_blocking(move || {
+                        native_runtime::spawn_blocking(move || {
                             let (_swap_pass, scheduler) = Self::lock_scheduler_for_graph_step(
                                 &scheduler,
                                 &shutting_down,
@@ -3766,7 +3804,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             super::CodeIndexWorkerPhaseV1::Working,
                         );
                         let preparing = Arc::clone(&generation);
-                        let completion = tokio::task::spawn_blocking(move || {
+                        let completion = native_runtime::spawn_blocking(move || {
                             preparing.prepare_test_attribution(&control)
                         })
                         .await;

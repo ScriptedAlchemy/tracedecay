@@ -188,15 +188,8 @@ async fn run_registered_store_retention(
         None => {}
     }
     match &report.observability {
-        Ok(receipt) if receipt.expired_detail > 0 || receipt.expired_rollup > 0 => {
-            log_daemon_event(
-                "retention_observability_analytics",
-                &[
-                    ("store", "mounted_sessions".to_owned()),
-                    ("expired_detail", receipt.expired_detail.to_string()),
-                    ("expired_rollup", receipt.expired_rollup.to_string()),
-                ],
-            );
+        Ok(receipt) if observability_retention_expired_rows(receipt) => {
+            log_observability_retention("mounted_sessions", receipt);
         }
         Err(error) => log_daemon_event(
             "retention_degraded",
@@ -269,15 +262,8 @@ async fn run_profile_observability_retention(
     };
     match database.prune_observability_events(now).await {
         Ok(receipt) => {
-            if receipt.expired_detail > 0 || receipt.expired_rollup > 0 {
-                log_daemon_event(
-                    "retention_observability_analytics",
-                    &[
-                        ("store", "global.db".to_owned()),
-                        ("expired_detail", receipt.expired_detail.to_string()),
-                        ("expired_rollup", receipt.expired_rollup.to_string()),
-                    ],
-                );
+            if observability_retention_expired_rows(&receipt) {
+                log_observability_retention("global.db", &receipt);
             }
             true
         }
@@ -292,6 +278,37 @@ async fn run_profile_observability_retention(
             false
         }
     }
+}
+
+fn observability_retention_expired_rows(
+    receipt: &tracedecay_global_db::ObservabilityRetentionReceiptV1,
+) -> bool {
+    receipt.expired_detail > 0
+        || receipt.expired_rollup > 0
+        || receipt.expired_rollups.expired_generations > 0
+        || receipt.expired_rollups.advanced_frontiers > 0
+}
+
+fn log_observability_retention(
+    store: &str,
+    receipt: &tracedecay_global_db::ObservabilityRetentionReceiptV1,
+) {
+    log_daemon_event(
+        "retention_observability_analytics",
+        &[
+            ("store", store.to_owned()),
+            ("expired_detail", receipt.expired_detail.to_string()),
+            ("expired_rollup", receipt.expired_rollup.to_string()),
+            (
+                "expired_rollup_generations",
+                receipt.expired_rollups.expired_generations.to_string(),
+            ),
+            (
+                "advanced_rollup_frontiers",
+                receipt.expired_rollups.advanced_frontiers.to_string(),
+            ),
+        ],
+    );
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

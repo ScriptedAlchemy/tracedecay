@@ -1,7 +1,5 @@
 use std::time::{Duration, Instant};
 
-use crate::maintenance::ExclusiveMaintenancePermit;
-
 use super::driver::{RusqliteCheckpointDriver, RusqliteCheckpointError};
 use super::types::{
     CheckpointBlockers, CheckpointConfig, CheckpointDecision, CheckpointError,
@@ -42,32 +40,6 @@ impl WriterCheckpointController {
         snapshot_blockers: CheckpointBlockers,
     ) -> Result<CheckpointResult, CheckpointError<RusqliteCheckpointError>> {
         self.evaluate_interruptible(snapshot_blockers, || None)
-    }
-
-    pub(crate) fn restart_scheduled(
-        &mut self,
-        permit: &ExclusiveMaintenancePermit,
-        snapshot_blockers: CheckpointBlockers,
-    ) -> Result<CheckpointResult, CheckpointError<RusqliteCheckpointError>> {
-        if !snapshot_blockers.is_clear() {
-            return Err(CheckpointError::MaintenanceStillDraining(snapshot_blockers));
-        }
-        let sample = self.driver.sample_wal().map_err(CheckpointError::Driver)?;
-        let decision = self.restart(sample.bytes, permit, snapshot_blockers)?;
-        Ok(CheckpointResult::Decision { sample, decision })
-    }
-
-    pub(crate) fn truncate_scheduled(
-        &mut self,
-        permit: &ExclusiveMaintenancePermit,
-        snapshot_blockers: CheckpointBlockers,
-    ) -> Result<CheckpointResult, CheckpointError<RusqliteCheckpointError>> {
-        if !snapshot_blockers.is_clear() {
-            return Err(CheckpointError::MaintenanceStillDraining(snapshot_blockers));
-        }
-        let sample = self.driver.sample_wal().map_err(CheckpointError::Driver)?;
-        let decision = self.truncate(sample.bytes, permit, snapshot_blockers)?;
-        Ok(CheckpointResult::Decision { sample, decision })
     }
 
     pub(crate) fn evaluate_interruptible<F>(
@@ -117,44 +89,13 @@ impl WriterCheckpointController {
         )
     }
 
-    /// RESTART and TRUNCATE are reachable only through the exclusive permit
-    /// issued after maintenance drains admission, readers, snapshots, and
-    /// writer work. PASSIVE remains available through [`Self::evaluate`].
-    pub(crate) fn restart(
-        &mut self,
-        wal_bytes: u64,
-        permit: &ExclusiveMaintenancePermit,
-        snapshot_blockers: CheckpointBlockers,
-    ) -> Result<CheckpointDecision, CheckpointError<RusqliteCheckpointError>> {
-        self.run_exclusive(
-            CheckpointMode::Restart,
-            wal_bytes,
-            permit,
-            snapshot_blockers,
-        )
-    }
-
-    pub(crate) fn truncate(
-        &mut self,
-        wal_bytes: u64,
-        permit: &ExclusiveMaintenancePermit,
-        snapshot_blockers: CheckpointBlockers,
-    ) -> Result<CheckpointDecision, CheckpointError<RusqliteCheckpointError>> {
-        self.run_exclusive(
-            CheckpointMode::Truncate,
-            wal_bytes,
-            permit,
-            snapshot_blockers,
-        )
-    }
-
     /// Returns the whole WAL to the database as the writer stops.
     ///
     /// Only the writer's own shutdown may call this: its admission is closed,
     /// its queues are empty, and the attachment released every reader before
-    /// joining it, so the writer holds the exclusivity a maintenance permit
-    /// would otherwise prove. A reader outside this attachment can still keep
-    /// the checkpoint pending; the WAL then stays for the next open.
+    /// joining it, so the writer holds the exclusivity TRUNCATE needs. A reader
+    /// outside this attachment can still keep the checkpoint pending; the WAL
+    /// then stays for the next open.
     pub(crate) fn truncate_at_shutdown(
         &mut self,
     ) -> Result<CheckpointResult, CheckpointError<RusqliteCheckpointError>> {
@@ -166,19 +107,6 @@ impl WriterCheckpointController {
             CheckpointBlockers::default(),
         )?;
         Ok(CheckpointResult::Decision { sample, decision })
-    }
-
-    fn run_exclusive(
-        &mut self,
-        mode: CheckpointMode,
-        wal_bytes: u64,
-        _permit: &ExclusiveMaintenancePermit,
-        snapshot_blockers: CheckpointBlockers,
-    ) -> Result<CheckpointDecision, CheckpointError<RusqliteCheckpointError>> {
-        if !snapshot_blockers.is_clear() {
-            return Err(CheckpointError::MaintenanceStillDraining(snapshot_blockers));
-        }
-        self.run_checkpoint(mode, self.pressure(wal_bytes), wal_bytes, snapshot_blockers)
     }
 
     fn run_checkpoint(

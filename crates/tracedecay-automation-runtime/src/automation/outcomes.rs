@@ -284,7 +284,8 @@ pub fn automation_outcomes_path(dashboard_root: &Path) -> PathBuf {
 #[tracing::instrument(name = "automation.outcomes.load", level = "trace", skip_all)]
 pub async fn load_outcomes_snapshot(dashboard_root: &Path) -> Result<AutomationOutcomesSnapshot> {
     let path = automation_outcomes_path(dashboard_root);
-    let bytes = match tokio::fs::read(&path).await {
+    let read_path = path.clone();
+    let bytes = match crate::automation::blocking_fs(move || std::fs::read(read_path)).await {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Ok(AutomationOutcomesSnapshot::default());
@@ -310,12 +311,15 @@ async fn save_outcomes_snapshot_unlocked(
 ) -> Result<()> {
     let path = automation_outcomes_path(dashboard_root);
     if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| {
-            config_error(format!(
-                "failed to create automation outcomes directory '{}': {e}",
-                parent.display()
-            ))
-        })?;
+        let directory = parent.to_path_buf();
+        crate::automation::blocking_fs(move || std::fs::create_dir_all(directory))
+            .await
+            .map_err(|e| {
+                config_error(format!(
+                    "failed to create automation outcomes directory '{}': {e}",
+                    parent.display()
+                ))
+            })?;
     }
     let bytes = serde_json::to_vec_pretty(snapshot).map_err(TraceDecayError::from)?;
     let nonce = AUTOMATION_OUTCOMES_TEMP_NONCE.fetch_add(1, Ordering::Relaxed);

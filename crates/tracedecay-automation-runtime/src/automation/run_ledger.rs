@@ -83,14 +83,16 @@ pub async fn write_run_artifact(
     let (artifact, bytes) = prepare_run_artifact(run_id, kind, payload, summary, created_at)?;
     let path = run_artifact_path(dashboard_root, run_id, kind)?;
     if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent)
+        let directory = parent.to_path_buf();
+        crate::automation::blocking_fs(move || std::fs::create_dir_all(directory))
             .await
             .map_err(|e| TraceDecayError::File {
                 message: format!("failed to create run artifact directory: {e}"),
                 path: parent.display().to_string(),
             })?;
     }
-    tokio::fs::write(&path, &bytes)
+    let write_path = path.clone();
+    crate::automation::blocking_fs(move || std::fs::write(write_path, bytes))
         .await
         .map_err(|e| TraceDecayError::File {
             message: format!("failed to write automation run artifact: {e}"),
@@ -137,7 +139,8 @@ pub async fn read_run_artifact_payload(
     let path = artifact_path_from_relative(dashboard_root, run_id, &artifact.path)?;
     tracedecay_runtime_core::storage::reject_symlink_components(&path, "automation artifact")
         .map_err(TraceDecayError::from)?;
-    let bytes = tokio::fs::read(&path)
+    let read_path = path.clone();
+    let bytes = crate::automation::blocking_fs(move || std::fs::read(read_path))
         .await
         .map_err(|e| TraceDecayError::File {
             message: format!("failed to read automation run artifact: {e}"),
@@ -168,13 +171,15 @@ pub async fn append_run_record(
     let path = run_ledger_path(dashboard_root);
     let line = serde_json::to_string(record).map_err(TraceDecayError::from)?;
     let write_path = path.clone();
-    tokio::task::spawn_blocking(move || append_jsonl_line_locked(&write_path, &line))
-        .await
-        .map_err(|e| config_error(format!("failed to join automation run ledger write: {e}")))?
-        .map_err(|e| TraceDecayError::File {
-            message: format!("failed to write automation run ledger: {e}"),
-            path: path.display().to_string(),
-        })?;
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        append_jsonl_line_locked(&write_path, &line)
+    })
+    .await
+    .map_err(|e| config_error(format!("failed to join automation run ledger write: {e}")))?
+    .map_err(|e| TraceDecayError::File {
+        message: format!("failed to write automation run ledger: {e}"),
+        path: path.display().to_string(),
+    })?;
     Ok(())
 }
 
@@ -594,7 +599,7 @@ pub async fn load_run_records(
     let root = dashboard_root.to_path_buf();
     let path = run_ledger_path(dashboard_root);
     let read_path = path.clone();
-    tokio::task::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         with_run_ledger_read_lock(&root, &read_path, Vec::new, || {
             read_run_records_tail(&read_path, limit)
         })
@@ -692,7 +697,7 @@ pub async fn load_run_records_page(
 ) -> Result<AutomationRunLedgerPageV1> {
     let root = dashboard_root.to_path_buf();
     let path = run_ledger_path(dashboard_root);
-    tokio::task::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         with_run_ledger_read_lock(&root, &path, AutomationRunLedgerPageV1::empty, || {
             read_run_records_tail_page(&path, limit)
         })
@@ -713,7 +718,7 @@ pub async fn load_run_records_for_task_key(
     let root = dashboard_root.to_path_buf();
     let path = run_ledger_path(dashboard_root);
     let task_key = requested_task_key.to_string();
-    tokio::task::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         with_run_ledger_read_lock(&root, &path, Vec::new, || {
             read_run_records_tail_with_filter(
                 &path,
@@ -754,7 +759,7 @@ pub async fn load_run_ledger_task_summary(
     let path = run_ledger_path(dashboard_root);
     let task_key = requested_task_key.to_owned();
     tracing::Instrument::instrument(
-        tokio::task::spawn_blocking(move || {
+        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             with_run_ledger_read_lock(
                 &root,
                 &path,

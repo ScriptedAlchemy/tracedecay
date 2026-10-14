@@ -1,22 +1,15 @@
 use std::collections::BTreeMap;
 use std::future::Future;
-#[cfg(test)]
-use std::future::poll_fn;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex, Weak};
-use std::task::{Context, Poll, Waker};
 
-use asupersync::runtime::{CheckedJoinHandle, JoinError};
-use futures_util::future::{AbortHandle, Aborted, abortable};
-use futures_util::lock::Mutex as AsyncMutex;
-use tracedecay_runtime_core::native_runtime;
+use tracedecay_runtime_core::native_runtime::{NativeTask, NativeTaskOutcome};
 use tracedecay_sessions::observation::ObservationCancellation;
 
 struct RetainedHookTask {
     key: String,
     generation: u64,
     cancellation: ObservationCancellation,
-    join: Arc<RetainedHookTaskJoin>,
+    join: Arc<NativeTask<()>>,
 }
 
 #[derive(Default)]
@@ -66,7 +59,7 @@ impl RetainedHookTasks {
             let task_cancellation = cancellation.clone();
             let weak_state = Arc::downgrade(&self.state);
             let task_key = key.clone();
-            let Ok(join) = RetainedHookTaskJoin::spawn(async move {
+            let Ok(join) = NativeTask::spawn(async move {
                 operation(task_cancellation).await;
                 finish_retained_hook_task(weak_state, &task_key, generation);
             }) else {
@@ -150,7 +143,7 @@ impl RetainedHookTasks {
                 .collect::<Vec<_>>()
         };
         for (generation, join) in joins {
-            let result = join.wait().await;
+            let result = join_result(join.wait().await);
             let mut state = self
                 .state
                 .lock()
@@ -181,78 +174,14 @@ impl RetainedHookTasks {
     }
 }
 
-// One retained join state per existing task. Concurrent drains share its
-// terminal result; cancelling a waiter never moves out or detaches the handle.
-pub(super) struct RetainedHookTaskJoin {
-    state: AsyncMutex<RetainedHookTaskJoinState>,
-    abort: AbortHandle,
-}
-
-type RetainedHookTaskHandle = CheckedJoinHandle<Result<(), Aborted>>;
-
-enum RetainedHookTaskJoinState {
-    Running(RetainedHookTaskHandle),
-    Finished(Result<(), String>),
-}
-
-impl RetainedHookTaskJoin {
-    /// Spawns `work` as a task owned by the native runtime, not by the
-    /// caller's region, so it outlives the request that started it. Native
-    /// cancellation is cooperative; `abort` drops `work` at its next poll.
-    pub(super) fn spawn<F>(work: F) -> Result<Self, String>
-    where
-        F: Future<Output = ()> + Send + 'static,
-    {
-        let runtime = native_runtime::handle().ok_or("native execution runtime unavailable")?;
-        let (work, abort) = abortable(work);
-        let task = runtime
-            .try_spawn_checked(work)
-            .map_err(|error| format!("native task was not admitted: {error}"))?;
-        Ok(Self {
-            state: AsyncMutex::new(RetainedHookTaskJoinState::Running(task)),
-            abort,
-        })
-    }
-
-    pub(super) async fn wait(&self) -> Result<(), String> {
-        let mut state = self.state.lock().await;
-        match &mut *state {
-            RetainedHookTaskJoinState::Finished(result) => result.clone(),
-            RetainedHookTaskJoinState::Running(handle) => {
-                let result = Self::outcome(handle.await);
-                *state = RetainedHookTaskJoinState::Finished(result.clone());
-                result
-            }
-        }
-    }
-
-    pub(super) fn abort(&self) {
-        self.abort.abort();
-    }
-
-    fn try_finished(&self) -> Option<Result<(), String>> {
-        let mut state = self.state.try_lock()?;
-        if let RetainedHookTaskJoinState::Running(handle) = &mut *state {
-            if !handle.is_finished() {
-                return None;
-            }
-            let mut cx = Context::from_waker(Waker::noop());
-            let Poll::Ready(result) = Pin::new(handle).poll(&mut cx) else {
-                return None;
-            };
-            *state = RetainedHookTaskJoinState::Finished(Self::outcome(result));
-        }
-        match &*state {
-            RetainedHookTaskJoinState::Finished(result) => Some(result.clone()),
-            RetainedHookTaskJoinState::Running(_) => None,
-        }
-    }
-
-    fn outcome(result: Result<Result<(), Aborted>, JoinError>) -> Result<(), String> {
-        match result {
-            Ok(_) | Err(JoinError::Cancelled(_)) => Ok(()),
-            Err(error) => Err(format!("retained hook task join failed: {error}")),
-        }
+/// A retained task that was aborted or dropped by its runtime stopped
+/// cleanly; only a panic fails its join.
+pub(super) fn join_result(outcome: NativeTaskOutcome<()>) -> Result<(), String> {
+    match outcome {
+        NativeTaskOutcome::Completed(()) | NativeTaskOutcome::Cancelled => Ok(()),
+        NativeTaskOutcome::Panicked(payload) => Err(format!(
+            "retained hook task join failed: task panicked: {payload}"
+        )),
     }
 }
 
@@ -267,7 +196,7 @@ impl RetainedHookTaskState {
     fn reap_finished(&mut self) {
         let mut index = 0;
         while index < self.retiring.len() {
-            if let Some(result) = self.retiring[index].join.try_finished() {
+            if let Some(result) = self.retiring[index].join.try_finished().map(join_result) {
                 self.finish_join(index, result);
             } else {
                 index += 1;
@@ -315,7 +244,10 @@ impl Drop for RetainedHookTasks {
 mod tests {
     use super::*;
     use asupersync::runtime::yield_now;
+    use std::future::poll_fn;
+    use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::Poll;
     use tokio::sync::Notify;
 
     async fn assert_pending<F: Future + Unpin>(future: &mut F, message: &str) {

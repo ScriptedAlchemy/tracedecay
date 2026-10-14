@@ -1,14 +1,6 @@
 use std::time::Duration;
 
-use tracedecay_store::{
-    BrainId, ProjectId, RuntimePublicationIdV1, SnapshotLeaseIdV1, StoreAuthorityEpochV1,
-    StoreIncarnationV1, StoreRuntimeBindingV1, StoreRuntimeRegistryPublicationV1, StoreShardIdV1,
-    UserProfileId,
-};
-
-use crate::maintenance::{
-    DrainBlockers, DrainedStateProof, ExclusiveMaintenancePermit, MaintenanceOwnerId,
-};
+use tracedecay_store::SnapshotLeaseIdV1;
 
 use super::*;
 
@@ -52,50 +44,6 @@ fn report(busy: bool, log_frames: u64, checkpointed_frames: u64) -> CheckpointRe
         busy,
         log_frames,
         checkpointed_frames,
-    }
-}
-
-use tracedecay_domain::test_fixtures::id;
-
-/// Test authority that admits one externally canonical publication and issues
-/// a permit only from an observed clear drain. It never derives an identity
-/// from a path or allocates a replacement fence.
-struct FakeCanonicalAuthority {
-    publication: StoreRuntimeRegistryPublicationV1,
-}
-
-impl FakeCanonicalAuthority {
-    fn new() -> Self {
-        let binding = StoreRuntimeBindingV1::new(
-            StoreShardIdV1::project(
-                id::<BrainId>("brain.checkpoint"),
-                id::<UserProfileId>("profile.checkpoint"),
-                id::<ProjectId>("project.checkpoint"),
-            ),
-            StoreIncarnationV1::new(1).unwrap(),
-            StoreAuthorityEpochV1::new(1).unwrap(),
-        );
-        Self {
-            publication: serde_json::from_value(serde_json::json!({
-                "publication_id": RuntimePublicationIdV1::new(
-                    "publication.checkpoint".to_owned()
-                ).unwrap(),
-                "binding": binding,
-                "published_at": 1,
-            }))
-            .unwrap(),
-        }
-    }
-
-    fn permit_after_drain(&self) -> ExclusiveMaintenancePermit {
-        let proof =
-            DrainedStateProof::observe(self.publication.clone(), DrainBlockers::default()).unwrap();
-        ExclusiveMaintenancePermit::issue_after_drain(
-            MaintenanceOwnerId::new(1).unwrap(),
-            self.publication.clone(),
-            proof,
-        )
-        .unwrap()
     }
 }
 
@@ -329,52 +277,6 @@ fn invalid_config_and_driver_configuration_fail_closed() {
     assert!(matches!(
         result,
         Err(CheckpointError::Driver(RusqliteCheckpointError::Sqlite(_)))
-    ));
-}
-
-#[test]
-fn exclusive_modes_borrow_one_canonical_linear_permit() {
-    let authority = FakeCanonicalAuthority::new();
-    let permit = authority.permit_after_drain();
-    let config = CheckpointConfig::default();
-    let mut fixture = CheckpointFixture::open(config);
-
-    assert!(matches!(
-        fixture
-            .controller
-            .restart(
-                config.soft_wal_bytes,
-                &permit,
-                CheckpointBlockers::default(),
-            )
-            .unwrap(),
-        CheckpointDecision::Complete {
-            mode: CheckpointMode::Restart,
-            ..
-        }
-    ));
-    assert!(matches!(
-        fixture
-            .controller
-            .truncate(0, &permit, CheckpointBlockers::default())
-            .unwrap(),
-        CheckpointDecision::Complete {
-            mode: CheckpointMode::Truncate,
-            ..
-        }
-    ));
-}
-
-#[test]
-fn exclusive_checkpoint_rejects_a_nonempty_drain_inventory() {
-    let authority = FakeCanonicalAuthority::new();
-    let permit = authority.permit_after_drain();
-    let blockers = inventory("lease.exclusive");
-    let mut fixture = CheckpointFixture::open(CheckpointConfig::default());
-
-    assert!(matches!(
-        fixture.controller.restart(0, &permit, blockers.clone()),
-        Err(CheckpointError::MaintenanceStillDraining(actual)) if actual == blockers
     ));
 }
 
