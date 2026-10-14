@@ -3745,27 +3745,35 @@ async fn project_registry_read_does_not_wait_for_a_blocked_project_open() {
         .expect("registry read shutdown timed out");
 }
 
-#[tokio::test(start_paused = true)]
-async fn foreground_project_open_wait_is_bounded_and_accepts_quick_publication() {
+// The publication wait runs under the request's executor, which need not be
+// Tokio: under `native_runtime::block_on` no Tokio runtime is entered.
+#[test]
+fn foreground_project_open_wait_is_bounded_and_accepts_quick_publication() {
     let project_path = std::path::PathBuf::from("/projects/uncontended");
-    let published = super::super::project_open_orchestration::wait_for_project_open_publication(
-        &project_path,
-        tokio::time::Instant::now() + std::time::Duration::from_secs(1),
-        async { Ok::<(), tracedecay_domain::errors::TraceDecayError>(()) },
+    let published = tracedecay_runtime_core::native_runtime::block_on(
+        super::super::project_open_orchestration::wait_for_project_open_publication(
+            &project_path,
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+            async { Ok::<(), tracedecay_domain::errors::TraceDecayError>(()) },
+        ),
     )
-    .await;
+    .expect("native runtime");
     assert!(
         published.is_ok(),
         "publication inside the deadline must succeed"
     );
 
-    let warming = super::super::project_open_orchestration::wait_for_project_open_publication(
-        &project_path,
-        tokio::time::Instant::now() + super::super::PROJECT_OPEN_REQUEST_DEADLINE,
-        std::future::pending::<tracedecay_domain::errors::Result<()>>(),
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
+    let warming = tracedecay_runtime_core::native_runtime::block_on(
+        super::super::project_open_orchestration::wait_for_project_open_publication(
+            &project_path,
+            deadline,
+            std::future::pending::<tracedecay_domain::errors::Result<()>>(),
+        ),
     )
-    .await
+    .expect("native runtime")
     .expect_err("an uncontended warm-up must not pin the foreground request");
+    assert!(std::time::Instant::now() >= deadline);
     assert!(
         super::super::error_is_project_warming(&warming),
         "{warming}"
