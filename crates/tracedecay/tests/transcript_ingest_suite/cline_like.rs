@@ -625,6 +625,38 @@ async fn cline_like_user_scope_includes_only_unregistered_tasks() {
     assert_eq!(session.project_path, "user");
 }
 
+/// The daemon's session refresh worker runs the user pass on a native thread
+/// with no Tokio runtime entered. A pass that writes sessions schedules their
+/// review, and that must not reach Tokio from the polling thread.
+#[test]
+fn user_pass_schedules_its_review_without_an_entered_tokio_runtime() {
+    tracedecay_runtime_core::native_runtime::block_on(async {
+        let tmp = TempDir::new().unwrap();
+        let (home, project) = setup(&tmp);
+        let projectless = tmp.path().join("general-chat");
+        std::fs::create_dir_all(&projectless).unwrap();
+        write_task(
+            &vscode_storage_root(&home, "saoudrizwan.claude-dev"),
+            &projectless,
+            "user-task",
+        );
+
+        let db = open_project_session_db(&project).await.unwrap();
+        let outcome = ingest_user_provider(
+            db.runtime(),
+            &home,
+            SessionProvider::Cline,
+            vec![project.clone()],
+        )
+        .await;
+        assert!(
+            outcome.stats.messages_upserted > 0,
+            "the pass must write sessions, or it schedules no review"
+        );
+    })
+    .expect("native runtime");
+}
+
 #[tokio::test]
 async fn cline_family_secrets_are_sanitized_before_observation_and_projection() {
     for (provider, extension_id, selected_provider) in [
