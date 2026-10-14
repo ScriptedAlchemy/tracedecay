@@ -564,21 +564,24 @@ async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generat
         )
         .await
         .expect("mount persistent generation A");
-    let ready_deadline = std::time::Instant::now() + Duration::from_secs(20);
-    loop {
-        if registry
-            .retained_text_owner_freshness_for_scope(&scope)
-            .await
-            .is_some_and(|(latest, current)| current && latest.interactive_graph_store().is_ok())
-        {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() <= ready_deadline,
-            "generation A graph did not become ready"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    // Head recovery installs the graph store before its worker pass records
+    // the seat, so a graph that already serves does not prove the seat yet.
+    // `Ready` also waits for that pass to finish.
+    let reached = registry
+        .wait_for_readiness(
+            fixture.path(),
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessTargetV1::Ready,
+            Duration::from_secs(20),
+        )
+        .await
+        .expect("generation A readiness read");
+    assert!(
+        matches!(
+            reached,
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Reached { .. }
+        ),
+        "generation A graph did not become ready: {reached:?}"
+    );
     // A recovered head seats no decoded generation, so only the seated graph
     // keeps generation A a retention root for its successor's refresh.
     let mounted_scope = registry
@@ -645,35 +648,58 @@ async fn persistent_callers_cursor_keeps_generation_a_without_repointing_generat
         "pub fn hub() {}\npub fn caller_a() { hub(); }\npub fn caller_b() { hub(); }\npub fn caller_c() { hub(); }\n",
     );
     git(fixture.path(), &["commit", "-qam", "publish generation B"]);
-    let (generation_b, hub_b) = loop {
-        if let Some((latest, true)) = registry
-            .retained_text_owner_freshness_for_scope(&scope)
+    // `Ready` accepts generation A's cached reading as is; only `Fresh`
+    // sweeps the source, which wakes the worker for the commit.
+    for target in [
+        tracedecay_contracts::code_index_freshness::CodeIndexReadinessTargetV1::Fresh,
+        tracedecay_contracts::code_index_freshness::CodeIndexReadinessTargetV1::Ready,
+    ] {
+        let reached = registry
+            .wait_for_readiness(fixture.path(), target, Duration::from_secs(20))
             .await
-            && latest.metadata().manifest().generation_id != generation_a
-            && let Ok(store) = latest.interactive_graph_store()
-            && let Ok(reader) = store.interactive_reader_with_cancellation(
-                &latest.metadata().manifest().generation_id,
-                Arc::new(tracedecay_graph_db::NeverCancelled),
-            )
-            && let Ok(hubs) = reader.resolve_simple_name(
-                "hub",
-                None,
-                2,
-                Arc::new(tracedecay_graph_db::NeverCancelled),
-            )
-            && hubs.len() == 1
-        {
-            break (
-                latest.metadata().manifest().generation_id.clone(),
-                hubs[0].occurrence.as_str().to_owned(),
-            );
-        }
+            .expect("generation B readiness read");
         assert!(
-            std::time::Instant::now() <= ready_deadline + Duration::from_secs(20),
-            "generation B graph did not become ready"
+            matches!(
+                reached,
+                tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Reached { .. }
+            ),
+            "generation B did not reach {target:?}: {reached:?}"
         );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    };
+    }
+    let (latest, current) = registry
+        .retained_text_owner_freshness_for_scope(&scope)
+        .await
+        .expect("generation B text owner");
+    assert!(current, "generation B serves the committed source");
+    let generation_b = latest.metadata().manifest().generation_id.clone();
+    assert_ne!(generation_b, generation_a);
+    let store_b = latest
+        .interactive_graph_store()
+        .expect("generation B graph store");
+    // The parked worker released B's engine; hold it through the re-warm
+    // the way registry graph reads do.
+    let retain_b = store_b
+        .await_rewarm_and_retain_for(
+            Duration::from_secs(20),
+            CodeGraphReadinessRequirement::Catalog,
+        )
+        .expect("generation B graph re-warms");
+    let hubs = store_b
+        .interactive_reader_with_cancellation(
+            &generation_b,
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("generation B graph reader")
+        .resolve_simple_name(
+            "hub",
+            None,
+            2,
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("generation B hub");
+    assert_eq!(hubs.len(), 1, "generation B resolves one hub");
+    let hub_b = hubs[0].occurrence.as_str().to_owned();
+    drop(retain_b);
 
     let continuation = registry
         .callers(
