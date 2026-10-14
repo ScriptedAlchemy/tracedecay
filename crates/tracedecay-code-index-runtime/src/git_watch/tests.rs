@@ -134,6 +134,25 @@ async fn shared_ref_event_marks_repository_reconciliation() {
 }
 
 #[tokio::test]
+async fn opening_git_metadata_leaves_the_watch_clean() {
+    let state = Arc::new(WatchState::new(
+        PathBuf::from("/repo/.git"),
+        PathBuf::from("/repo"),
+        PathBuf::from("/repo/.git"),
+        MaintenanceCoordinator::default(),
+    ));
+    let open = notify::Event {
+        kind: EventKind::Access(AccessKind::Open(notify::event::AccessMode::Any)),
+        paths: vec![PathBuf::from("/repo/.git/HEAD")],
+        attrs: EventAttributes::new(),
+    };
+    classify_and_mark(&state, &open);
+
+    assert!(state.dirty.lock().await.is_clean());
+    assert!(!state.reconciliation_pending.load(Ordering::Acquire));
+}
+
+#[tokio::test]
 async fn contended_event_requests_a_bounded_reconciliation() {
     let state = Arc::new(WatchState::new(
         PathBuf::from("/repo/.git"),

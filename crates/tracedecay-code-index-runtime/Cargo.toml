@@ -67,7 +67,7 @@ tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 tracedecay-application = { path = "../tracedecay-application" }
 
 [target.'cfg(unix)'.dependencies]
-notify = "6"
+notify = "8"
 
 [dev-dependencies]
 filetime = "0.2"

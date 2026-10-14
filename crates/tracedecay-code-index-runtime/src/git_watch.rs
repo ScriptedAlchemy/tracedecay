@@ -42,6 +42,7 @@ use std::time::{Duration, Instant as StdInstant};
 use futures_util::FutureExt;
 use futures_util::future::{BoxFuture, Shared};
 use notify::EventKind;
+use notify::event::AccessKind;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracedecay_runtime_core::cancellation::MonotonicDeadline;
@@ -599,7 +600,10 @@ async fn repository_task(inner: Arc<GitWatcherInner>, state: Arc<WatchState>) {
 /// state, it only records *what kind of path changed* so the debounce drain
 /// can resolve the actual git state once, after quiescence.
 fn classify_and_mark(state: &Arc<WatchState>, event: &notify::Event) {
-    if state.is_retired() {
+    // notify 7+ reports inotify opens on Linux. Opening a file changes no git
+    // state, and the drain's own reads of HEAD and refs would re-dirty the
+    // watch set after every reconciliation.
+    if state.is_retired() || matches!(event.kind, EventKind::Access(AccessKind::Open(_))) {
         return;
     }
     let event_roots = state.event_roots(&event.paths);
