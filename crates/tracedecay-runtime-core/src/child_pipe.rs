@@ -18,11 +18,6 @@ pub struct ChildPipeStop {
 pub struct ChildPipeWatch {
     flag: Arc<AtomicBool>,
     wake: std::io::PipeReader,
-    /// ponytail: after stop, one readable chunk is returned and the next read
-    /// is EOF. A descendant that writes continuously cannot hold the reader
-    /// past that chunk. Upgrade: drain the kernel buffer with a nonblocking
-    /// read before returning EOF.
-    yielded_after_stop: bool,
 }
 
 /// A pipe the watch can `poll` on Unix. Windows child pipes cannot be polled,
@@ -46,11 +41,7 @@ pub fn child_pipe_stop() -> io::Result<(ChildPipeStop, ChildPipeWatch)> {
             flag: Arc::clone(&flag),
             wake: writer,
         },
-        ChildPipeWatch {
-            flag,
-            wake,
-            yielded_after_stop: false,
-        },
+        ChildPipeWatch { flag, wake },
     ))
 }
 
@@ -69,8 +60,11 @@ impl Drop for ChildPipeStop {
 }
 
 impl ChildPipeWatch {
-    /// Reads one chunk, or `Ok(0)` at EOF or once the stop has been abandoned
-    /// and any already-readable chunk has been delivered.
+    /// Reads one chunk, or `Ok(0)` at EOF.
+    ///
+    /// After the stop is abandoned, bytes already sitting in the pipe are
+    /// still returned. `Ok(0)` starts once a read would have to wait, so a
+    /// descendant that is only holding the write end cannot block the caller.
     pub fn read(&mut self, pipe: &mut impl WatchedPipe, buf: &mut [u8]) -> io::Result<usize> {
         #[cfg(unix)]
         {
@@ -82,7 +76,6 @@ impl ChildPipeWatch {
             // this read blocks until the write end closes.
             let _ = self.flag.load(Ordering::Acquire);
             let _ = &self.wake;
-            let _ = self.yielded_after_stop;
             pipe.read(buf)
         }
     }
@@ -92,6 +85,10 @@ impl ChildPipeWatch {
         use std::os::fd::AsRawFd;
 
         loop {
+            let abandoned = self.flag.load(Ordering::Acquire);
+            // After stop, do not wait for a descendant to write or exit.
+            // Timeout 0 reports only what is already buffered.
+            let timeout = if abandoned { 0 } else { -1 };
             let mut fds = [
                 libc::pollfd {
                     fd: pipe.as_fd().as_raw_fd(),
@@ -106,7 +103,8 @@ impl ChildPipeWatch {
             ];
             // SAFETY: both descriptors are open and exclusively borrowed for
             // this call. `nfds` is the length of `fds`.
-            let polled = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
+            let polled =
+                unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
             if polled == -1 {
                 let error = io::Error::last_os_error();
                 if error.kind() == io::ErrorKind::Interrupted {
@@ -114,19 +112,20 @@ impl ChildPipeWatch {
                 }
                 return Err(error);
             }
+            if polled == 0 {
+                return Ok(0);
+            }
             let abandoned = self.flag.load(Ordering::Acquire);
             let data_ready = (fds[0].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR)) != 0;
             let wake_ready = (fds[1].revents & libc::POLLIN) != 0;
-            if data_ready && !(abandoned && self.yielded_after_stop) {
+            if data_ready {
                 match pipe.read(buf) {
                     Ok(0) => return Ok(0),
-                    Ok(read) => {
-                        if abandoned {
-                            self.yielded_after_stop = true;
-                        }
-                        return Ok(read);
-                    }
+                    Ok(read) => return Ok(read),
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) if abandoned && error.kind() == io::ErrorKind::WouldBlock => {
+                        return Ok(0);
+                    }
                     Err(error) => return Err(error),
                 }
             }
@@ -134,5 +133,38 @@ impl ChildPipeWatch {
                 return Ok(0);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn abandon_returns_bytes_already_buffered() {
+        let (mut reader, mut writer) = std::io::pipe().unwrap();
+        let (mut stop, mut watch) = child_pipe_stop().unwrap();
+        let payload = vec![0xab_u8; 2500];
+        writer.write_all(&payload).unwrap();
+        stop.abandon();
+
+        let mut got = Vec::new();
+        let mut buf = [0_u8; 1024];
+        loop {
+            let read = watch.read(&mut reader, &mut buf).unwrap();
+            if read == 0 {
+                break;
+            }
+            got.extend_from_slice(&buf[..read]);
+            assert!(
+                got.len() <= payload.len(),
+                "a stopped pipe must end once the buffered bytes are gone"
+            );
+        }
+        assert_eq!(got, payload);
+        let _held = writer;
     }
 }
