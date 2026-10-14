@@ -284,7 +284,13 @@ pub(crate) fn compute_graph_tool_for_owner<'a>(
                 | ApplicationSurfaceOperation::RemoteStatus
                 | ApplicationSurfaceOperation::Runtime
         ) {
-            let computed = compute_project_info(cg, operation, &args, scope_prefix, &options);
+            let computed = Box::pin(compute_project_info(
+                cg,
+                operation,
+                &args,
+                scope_prefix,
+                &options,
+            ));
             return match tokio::time::timeout(budget, computed).await {
                 Ok(result) => {
                     result.map(
