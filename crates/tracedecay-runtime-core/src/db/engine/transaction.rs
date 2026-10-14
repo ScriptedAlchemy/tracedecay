@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::sync::Arc;
 
+use asupersync::Budget;
 use asupersync::sync::{Mutex, OwnedMutexGuard};
 
 use tracedecay_rusqlite_runtime::exact_sql::ExactSqlTransaction as RuntimeTransaction;
@@ -41,7 +42,14 @@ impl Transaction {
             let gate = match OwnedMutexGuard::try_lock(Arc::clone(&runtime)) {
                 Ok(gate) => gate,
                 Err(_) => {
-                    let cx = crate::native_runtime::cx().ok_or(Error::RuntimeContextUnavailable)?;
+                    // Not the caller's `Cx`: cancelling the caller must not
+                    // cancel an operation it already handed over.
+                    let cx = crate::native_runtime::handle()
+                        .ok_or(Error::RuntimeContextUnavailable)?
+                        .try_request_cx_with_budget(Budget::INFINITE)
+                        .map_err(|error| {
+                            Error::Runtime(format!("failed to admit SQL settlement: {error}"))
+                        })?;
                     OwnedMutexGuard::lock(runtime, &cx).await.map_err(|error| {
                         Error::Runtime(format!("SQL transaction gate failed: {error}"))
                     })?

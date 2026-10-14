@@ -215,3 +215,48 @@ async fn cancelled_transaction_call_keeps_serialization_until_acknowledgement() 
         3
     );
 }
+
+#[asupersync::test]
+async fn cancelled_caller_waiting_on_the_transaction_gate_keeps_its_operation() {
+    let (_directory, connection, gate, mut accepted, release) = fixture().await;
+    let transaction = Arc::new(connection.transaction().await.unwrap());
+    gate.remaining.store(1, Ordering::Release);
+    let holder = Arc::clone(&transaction);
+    let mut first =
+        Box::pin(async move { holder.execute("INSERT INTO items VALUES (1, 1)", ()).await });
+    assert!(
+        poll_fn(|context| Poll::Ready(first.as_mut().poll(context)))
+            .await
+            .is_pending()
+    );
+    let cx = Cx::current().unwrap();
+    accepted.recv(&cx).await.unwrap();
+    let waiter = Arc::clone(&transaction);
+    let mut queued = cx
+        .spawn(
+            move |_cx| async move { waiter.execute("INSERT INTO items VALUES (2, 2)", ()).await },
+        )
+        .unwrap();
+    // The spawned caller reaches the gate and queues behind the first command.
+    asupersync::runtime::yield_now().await;
+    queued.abort();
+    asupersync::runtime::yield_now().await;
+    release.send(()).unwrap();
+    assert_eq!(first.await.unwrap(), 1);
+    let _ = queued.join(&cx).await;
+    let transaction = Arc::into_inner(transaction).expect("all transaction callers completed");
+    transaction.commit().await.unwrap();
+    let mut rows = connection
+        .query("SELECT id FROM items ORDER BY id", ())
+        .await
+        .unwrap();
+    let mut ids = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        ids.push(row.get::<i64>(0).unwrap());
+    }
+    assert_eq!(
+        ids,
+        vec![1, 2],
+        "an operation accepted before its caller was cancelled must still run"
+    );
+}
