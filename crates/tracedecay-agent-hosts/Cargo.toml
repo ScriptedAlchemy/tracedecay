@@ -44,7 +44,7 @@ toml = "1"
 toml_edit = "0.25"
 tracing = "0.1"
 ureq = { version = "3", features = ["json"] }
-yaml-edit = { version = "0.2.3", default-features = false }
+yaml-edit = { version = "0.3.2", default-features = false }
 
 tracedecay-contracts = { path = "../tracedecay-contracts" }
 tracedecay-automation = { path = "../tracedecay-automation" }
