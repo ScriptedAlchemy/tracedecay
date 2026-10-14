@@ -2187,7 +2187,7 @@ mod tests {
                 format!(
                     "tracedecay upgrade refused the request (release_attestation_rejected): \
                      no build-provenance attestation for sha256:{digest} proves a release workflow build: attestation 1: failed verification \
-                     (Verification error: artifact hash does not match any subject in \
+                     (artifact mismatch: artifact hash does not match any subject in \
                      attestation)"
                 )
             );
