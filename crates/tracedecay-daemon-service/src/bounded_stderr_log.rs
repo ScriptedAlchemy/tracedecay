@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use tracedecay_runtime_core::logging::log_daemon_event;
-use tracedecay_runtime_core::native_runtime;
+use tracedecay_runtime_core::native_runtime::{self, NativeTask};
 
 /// Size at which the daemon rotates its own stderr file. A generation can
 /// overshoot the bound by at most one check interval of writes before it is
@@ -110,17 +110,31 @@ impl BoundedStderrLog {
     /// until the returned task is aborted at shutdown. Each rotation is
     /// announced on the fresh file; a failed check is announced once and the
     /// task keeps measuring, so a transient filesystem fault does not silently
-    /// end the bound.
-    pub fn spawn_rotation(self) -> tokio::task::JoinHandle<()> {
-        log_daemon_event(
-            "daemon_stderr_log_bounded",
-            &[
-                ("path", self.path.display().to_string()),
-                ("rotate_bytes", self.rotate_bytes.to_string()),
-                ("retained_generations", "1".to_owned()),
-            ],
-        );
-        tokio::spawn(self.hold_bound(DAEMON_STDERR_LOG_CHECK_INTERVAL))
+    /// end the bound. `None` when the native runtime refused the task, which
+    /// is announced as an unbounded log.
+    pub fn spawn_rotation(self) -> Option<NativeTask<()>> {
+        let path = self.path.display().to_string();
+        let rotate_bytes = self.rotate_bytes.to_string();
+        match NativeTask::spawn(self.hold_bound(DAEMON_STDERR_LOG_CHECK_INTERVAL)) {
+            Ok(task) => {
+                log_daemon_event(
+                    "daemon_stderr_log_bounded",
+                    &[
+                        ("path", path),
+                        ("rotate_bytes", rotate_bytes),
+                        ("retained_generations", "1".to_owned()),
+                    ],
+                );
+                Some(task)
+            }
+            Err(error) => {
+                log_daemon_event(
+                    "daemon_stderr_log_unbounded",
+                    &[("path", path), ("error", error)],
+                );
+                None
+            }
+        }
     }
 
     /// Checks the bound now and then once per `interval`, timed on the native
@@ -325,6 +339,44 @@ mod tests {
             "peak {peak_on_disk} exceeds twice the bound plus one check interval per generation"
         );
         assert!(unbounded_bytes > 10 * peak_on_disk);
+    }
+
+    /// Spawned with no Tokio runtime entered: the rotation task runs on the
+    /// native runtime and checks the bound at once.
+    #[test]
+    fn the_rotation_task_starts_without_a_tokio_runtime() {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let root = tempfile::tempdir().expect("log root");
+        let path = root.path().join("daemon.err.log");
+        let rotated = root.path().join("daemon.err.log.1");
+        let mut stderr = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .expect("open stderr file");
+        stderr.write_all(&[b'a'; 80]).expect("write past bound");
+        let rotation = BoundedStderrLog::for_fd(stderr.as_raw_fd(), 64)
+            .expect("inspectable")
+            .expect("bounded")
+            .spawn_rotation()
+            .expect("the native runtime admits the rotation task");
+
+        native_runtime::block_on(native_runtime::timeout(Duration::from_secs(10), async {
+            while !rotated.exists() {
+                let _ = native_runtime::sleep_until(
+                    std::time::Instant::now() + Duration::from_millis(1),
+                )
+                .await;
+            }
+        }))
+        .expect("native runtime")
+        .expect("the first check rotates the oversized file");
+        rotation.abort();
+        assert_eq!(
+            native_runtime::block_on(rotation.wait()).expect("native runtime"),
+            native_runtime::NativeTaskOutcome::Cancelled
+        );
+        assert_eq!(std::fs::metadata(&rotated).expect("rotated").len(), 80);
     }
 
     /// Runs with no Tokio runtime entered: the loop times its checks on the
