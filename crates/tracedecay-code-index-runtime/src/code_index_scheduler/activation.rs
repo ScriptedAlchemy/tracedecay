@@ -20,6 +20,7 @@ use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline
 use tracedecay_runtime_core::git_discovery::{
     GitRepositoryIdentityOutcome, discover_repository_identity,
 };
+use tracedecay_runtime_core::native_runtime;
 
 use super::demand_admission::{
     CodeIndexDemandAdmissionV1, CodeIndexDemandUnavailableV1, CodeIndexDemandV1,
@@ -303,10 +304,6 @@ impl CodeIndexActivationV1 {
         }
         #[cfg(test)]
         self.activation_attempts.fetch_add(1, Ordering::SeqCst);
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            self.state.store(ACTIVATION_IDLE, Ordering::Release);
-            return false;
-        };
         let project_root = self.project_root.clone();
         let route_registered = Arc::clone(&self.route_registered);
         let cancellation = self.cancellation.clone();
@@ -315,7 +312,7 @@ impl CodeIndexActivationV1 {
         let mount = Arc::clone(&self.mount);
         let mount_failed = self.mount_failed.clone();
         let hint_sink = Arc::clone(&self.hint_sink);
-        runtime.spawn(tracing::Instrument::instrument(
+        let spawned = native_runtime::NativeTask::spawn(tracing::Instrument::instrument(
             async move {
                 let route_is_live =
                     || route_registered.load(Ordering::Acquire) && !cancellation.is_cancelled();
@@ -366,6 +363,18 @@ impl CodeIndexActivationV1 {
             },
             tracing::trace_span!("daemon.code_index.activation.mount"),
         ));
+        if let Err(error) = spawned {
+            self.state.store(ACTIVATION_IDLE, Ordering::Release);
+            self.mount_failed.send_replace(true);
+            tracing::warn!(
+                event = "code_index_activation",
+                project = %self.project_root.display(),
+                outcome = "degraded",
+                %error,
+                "demand-driven code-index activation did not start"
+            );
+            return false;
+        }
         true
     }
 
@@ -607,7 +616,7 @@ mod tests {
         }
         wait_until(|| mount_attempts.load(Ordering::SeqCst) == 1).await;
         assert_eq!(activation.activation_attempts(), 1);
-        gate.notify_waiters();
+        gate.notify_one();
         wait_until(|| activation.is_mounted()).await;
         assert_eq!(mount_attempts.load(Ordering::SeqCst), 1);
     }
@@ -675,7 +684,7 @@ mod tests {
             CodeIndexDemandAdmissionV1::Queued
         ));
         wait_until(|| mount_attempts.load(Ordering::SeqCst) == 1).await;
-        gate.notify_waiters();
+        gate.notify_one();
         wait_until(|| !batches.lock().expect("batches").is_empty()).await;
         let batch = batches.lock().expect("batches").remove(0);
         assert!(batch.overflow);
@@ -927,7 +936,7 @@ mod tests {
         wait_until(|| mount_attempts.load(Ordering::SeqCst) == 1).await;
         assert_eq!(activation.activation_attempts(), 1);
 
-        gate.notify_waiters();
+        gate.notify_one();
         wait_until(|| activation.is_mounted()).await;
         assert_eq!(registry.activation_count(), 1);
         drop(activation);
@@ -964,7 +973,7 @@ mod tests {
         assert!(activation.activate());
         wait_until(|| mount_attempts.load(Ordering::SeqCst) == 1).await;
         route_registered.store(false, Ordering::Release);
-        gate.notify_waiters();
+        gate.notify_one();
         wait_until(|| activation.is_idle()).await;
 
         assert!(!activation.is_mounted());

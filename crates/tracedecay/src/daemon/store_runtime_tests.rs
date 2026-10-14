@@ -271,14 +271,6 @@ async fn deferred_lcm_fixture_row_count(connection: &(impl QueryExecutor + ?Size
     .await
 }
 
-async fn lcm_migration_applied_at(connection: &(impl QueryExecutor + ?Sized)) -> i64 {
-    scalar_i64(
-        connection,
-        "SELECT applied_at FROM session_schema_migrations WHERE name = 'lcm'",
-    )
-    .await
-}
-
 fn accepting_memory_write_control() -> FactWriteControl {
     FactWriteControl::new(Arc::new(|| false), Arc::new(|| true))
 }
@@ -1150,9 +1142,6 @@ async fn daemon_admission_remains_ready_while_lcm_indexes_converge_in_background
                'cursor', 'deferred-index-message', 'deferred-index-session', 'assistant', 1,
                'deferred body', 'deferred-hash', 'inline', NULL
            );
-           UPDATE session_schema_migrations
-               SET applied_at = 123
-               WHERE name = 'lcm';
            DROP INDEX idx_lcm_raw_lossy_ingest;
            DROP INDEX idx_lcm_external_payloads_owner_bytes;
            CREATE INDEX idx_lcm_external_payloads_owner
@@ -1244,11 +1233,6 @@ async fn daemon_admission_remains_ready_while_lcm_indexes_converge_in_background
         deferred_lcm_fixture_row_count(&snapshot).await,
         1,
         "background convergence must preserve seeded session and LCM rows"
-    );
-    assert_eq!(
-        lcm_migration_applied_at(&snapshot).await,
-        123,
-        "background convergence must not rewrite the current LCM migration marker"
     );
 }
 

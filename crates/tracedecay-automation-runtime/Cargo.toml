@@ -23,7 +23,7 @@ test-helpers = [
 [dependencies]
 cap-fs-ext = "4.0.2"
 cap-std = "4.0.2"
-getrandom = "0.2"
+getrandom = "0.4"
 hex = "0.4"
 rustls = { version = "0.23", default-features = false, features = [
     "ring",

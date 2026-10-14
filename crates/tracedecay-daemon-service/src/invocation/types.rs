@@ -275,7 +275,9 @@ impl BoundedHookOrchestratorV1 {
         tracedecay_runtime_core::cancellation::CancellationToken,
         HookOrchestrationAdmissionV1,
     > {
-        let Ok(runtime_handle) = tokio::runtime::Handle::try_current() else {
+        let Some(runtime_handle) = tracedecay_runtime_core::native_runtime::tokio_handle(
+            "daemon-service.hook_orchestration.admit",
+        ) else {
             return Err(HookOrchestrationAdmissionV1::Unavailable);
         };
         let envelope = request.hook.envelope();
@@ -1386,10 +1388,8 @@ impl LspSessionAdmissionPort for AdmittedWorkspaceSessionAdmission {
     ) -> Result<AuthorizedLspSession, LspEndpointError> {
         let mut session_bytes = [0_u8; 16];
         let mut credential_bytes = [0_u8; 32];
-        getrandom::getrandom(&mut session_bytes)
-            .map_err(|_| LspEndpointError::AdmissionRejected)?;
-        getrandom::getrandom(&mut credential_bytes)
-            .map_err(|_| LspEndpointError::AdmissionRejected)?;
+        getrandom::fill(&mut session_bytes).map_err(|_| LspEndpointError::AdmissionRejected)?;
+        getrandom::fill(&mut credential_bytes).map_err(|_| LspEndpointError::AdmissionRejected)?;
         let session_id = LspSessionId::new(format!("lsp-{}", hex::encode(session_bytes)))?;
         let credential = LspSessionCredential::new(credential_bytes.to_vec())?;
         Ok(AuthorizedLspSession {

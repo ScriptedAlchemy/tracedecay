@@ -78,7 +78,10 @@ impl WorkBlockedIntervalObservationRecoveryOwnerV1 {
             ));
         }
         let context = work_blocked_interval_recovery_context(&actor, &grant)?;
-        let runtime = tokio::runtime::Handle::try_current().map_err(|_| {
+        let runtime = tracedecay_runtime_core::native_runtime::tokio_handle(
+            "daemon-service.work_blocked_interval_recovery.start",
+        )
+        .ok_or_else(|| {
             ApplicationContractError::Domain(
                 "Work blocked-interval recovery runtime unavailable".to_owned(),
             )

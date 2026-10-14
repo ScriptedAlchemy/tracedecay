@@ -478,7 +478,7 @@ fn restrict_file(_path: &Path) -> Result<()> {
 
 fn new_auth_token() -> Result<String> {
     let mut bytes = [0_u8; 32];
-    getrandom::getrandom(&mut bytes).map_err(|error| TraceDecayError::Config {
+    getrandom::fill(&mut bytes).map_err(|error| TraceDecayError::Config {
         message: format!("failed to generate daemon authentication token: {error}"),
     })?;
     Ok(hex::encode(bytes))

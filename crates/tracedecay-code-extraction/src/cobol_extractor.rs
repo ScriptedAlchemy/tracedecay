@@ -322,7 +322,7 @@ impl CobolExtractor {
         // (O(N)) instead of `node.child(i)` in a loop. `child(i)` is O(i),
         // turning the seed into O(N²) on PROCEDURE DIVISIONs with hundreds
         // of paragraphs.
-        let mut children: Vec<TsNode<'_>> = Vec::with_capacity(node.child_count());
+        let mut children: Vec<TsNode<'_>> = Vec::with_capacity(node.child_count() as usize);
         let mut cursor = node.walk();
         if cursor.goto_first_child() {
             loop {

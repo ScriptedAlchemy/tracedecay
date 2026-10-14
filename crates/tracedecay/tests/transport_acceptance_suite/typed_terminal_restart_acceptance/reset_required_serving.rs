@@ -85,7 +85,7 @@ fn stamp_profile_sessions_git_correlation_version(home: &Path, version: i64) {
     let stamped = rusqlite::Connection::open(&db_path)
         .expect("open the profile session store")
         .execute(
-            "UPDATE session_schema_migrations SET version = ?1 WHERE name = 'git_correlation'",
+            "UPDATE tracedecay_schema_version SET version = ?1 WHERE component = 'git_correlation'",
             [version],
         )
         .expect("stamp the released git correlation schema version");
@@ -203,8 +203,8 @@ fn stamp_session_temporal_version(db_path: &Path, version: i64) {
     let stamped = rusqlite::Connection::open(db_path)
         .expect("open the registered store")
         .execute(
-            "UPDATE session_temporal_schema_migrations SET version = ?1
-             WHERE name = 'session-temporal'",
+            "UPDATE tracedecay_schema_version SET version = ?1
+             WHERE component = 'session-temporal'",
             [version],
         )
         .expect("stamp the released session temporal schema version");
@@ -220,8 +220,8 @@ fn session_temporal_version(db_path: &Path) -> i64 {
     rusqlite::Connection::open(db_path)
         .expect("open the registered store")
         .query_row(
-            "SELECT version FROM session_temporal_schema_migrations
-             WHERE name = 'session-temporal'",
+            "SELECT version FROM tracedecay_schema_version
+             WHERE component = 'session-temporal'",
             [],
             |row| row.get(0),
         )

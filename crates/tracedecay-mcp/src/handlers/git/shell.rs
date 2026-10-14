@@ -48,9 +48,16 @@ fn resolve_pr_comparison_commit(
         exact_reference_commit(repo, &format!("refs/remotes/origin/{requested}"), requested)?;
     match (local, remote) {
         (Some(local), Some(remote)) if local != remote => {
-            let merge_base = repo.merge_base(local, remote).map_err(|error| {
-                format!("cannot compare local and remote tips for '{requested}': {error}")
-            })?;
+            let merge_base = repo
+                .merge_base(local, remote)
+                .map_err(|error| {
+                    format!("cannot compare local and remote tips for '{requested}': {error}")
+                })?
+                .ok_or_else(|| {
+                    format!(
+                        "cannot compare local and remote tips for '{requested}': no merge-base between commits {local} and {remote}"
+                    )
+                })?;
             if merge_base == local {
                 Ok(remote)
             } else if merge_base == remote {
@@ -142,6 +149,11 @@ pub(super) fn git_pr_comparison_controlled(
         let _span = tracing::trace_span!("mcp.git.shell.merge_base").entered();
         repo.merge_base(base_commit.id, head_commit.id)
             .map_err(|e| format!("cannot find merge base for '{base_ref}' and '{head_ref}': {e}"))?
+            .ok_or_else(|| {
+                format!(
+                    "cannot find merge base for '{base_ref}' and '{head_ref}': no merge-base between commits {base_oid} and {head_oid}"
+                )
+            })?
     };
     let merge_base = merge_base.to_string();
     check_git_pr_cancelled(cancelled)?;
@@ -223,11 +235,11 @@ fn git_diff_file_changes_controlled(
         .for_each_to_obtain_tree(&to_tree, |change| {
             use gix::object::tree::diff::Change;
             if cancelled() {
-                return Ok::<_, std::convert::Infallible>(std::ops::ControlFlow::Break(()));
+                return Ok(std::ops::ControlFlow::Break(()));
             }
             if changed.len() >= PR_CONTEXT_MAX_CHANGED_FILES {
                 reached_limit = true;
-                return Ok::<_, std::convert::Infallible>(std::ops::ControlFlow::Break(()));
+                return Ok(std::ops::ControlFlow::Break(()));
             }
             match &change {
                 Change::Addition {
@@ -287,7 +299,7 @@ fn git_diff_file_changes_controlled(
                     }
                 }
             }
-            Ok::<_, std::convert::Infallible>(std::ops::ControlFlow::Continue(()))
+            Ok(std::ops::ControlFlow::Continue(()))
         })
         .map_err(|e| format!("tree diff failed: {e}"))?;
     check_git_pr_cancelled(cancelled)?;

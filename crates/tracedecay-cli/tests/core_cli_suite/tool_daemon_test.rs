@@ -3769,7 +3769,7 @@ async fn daemon_reopens_retained_receipts_without_reset() {
         .unwrap();
         let version: i64 = db
             .query_row(
-                "SELECT version FROM session_temporal_schema_migrations WHERE name = 'session-temporal'",
+                "SELECT version FROM tracedecay_schema_version WHERE component = 'session-temporal'",
                 [],
                 |row| row.get(0),
             )

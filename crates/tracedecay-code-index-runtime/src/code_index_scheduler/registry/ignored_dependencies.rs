@@ -7,12 +7,12 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
-use std::time::Duration;
 
 use tracedecay_code_index::graph_projection::CodeGraphProjectionStore;
 use tracedecay_code_index::production::{CodeIndexExecutionControlV1, CodeIndexProductionErrorV1};
 use tracedecay_domain::canonical_sha256;
 
+use super::super::control_poll;
 use super::{
     CodeIndexSchedulerRegistryV1, CodeIndexSeatParkV1, CodeIndexSeatWaitV1, PendingWakeV1,
     ServingGenerationSlot,
@@ -950,14 +950,6 @@ async fn acquire_daemon_admission(
     }
 }
 
-/// The request control is a synchronous predicate with no wake, so every
-/// wait in an admission re-checks it on this period. Each tick is a direct
-/// Asupersync sleep rather than `native_runtime::sleep_until`, which spawns a
-/// native timer task per call.
-fn control_poll() -> asupersync::time::Sleep {
-    asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5))
-}
-
 fn refuse_if_interrupted(
     control: &(dyn CodeIndexExecutionControlV1 + Send + Sync),
     shutting_down: &AtomicBool,
@@ -1006,6 +998,8 @@ mod flight_recovery_tests {
 #[cfg(test)]
 mod interruption_poll_tests {
     use super::*;
+    use std::time::Duration;
+
     use tracedecay_runtime_core::native_runtime;
 
     /// The gate wait reaches the control only through its poll, so this

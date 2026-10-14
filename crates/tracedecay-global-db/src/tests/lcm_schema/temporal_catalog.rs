@@ -692,7 +692,7 @@ async fn temporal_schema_refuses_markerless_malformed_fts_without_mutation() {
         "unexpected reason: {reason}"
     );
     assert!(
-        !table_exists(&db_path, "session_temporal_schema_migrations").await,
+        !table_exists(&db_path, "tracedecay_schema_version").await,
         "typed refusal must not install the temporal marker"
     );
     assert!(
