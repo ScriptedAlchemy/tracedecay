@@ -262,7 +262,7 @@ impl WorkAttemptProcessRegistryV1 {
         Some(notify)
     }
 
-    fn spawn_for_worktree<F, Fut>(
+    pub(super) fn spawn_for_worktree<F, Fut>(
         self: &Arc<Self>,
         identity: &WorkAttemptIdentityV1,
         worktree_id: &WorktreeId,
