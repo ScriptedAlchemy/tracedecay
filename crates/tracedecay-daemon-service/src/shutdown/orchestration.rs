@@ -329,12 +329,15 @@ where
             attempt
         }
         DaemonShutdownClaim::Run { attempt, failures } => {
+            // The owner phases still reach Tokio timers and blocking tasks
+            // (maintenance, project servers), so the runner stays on Tokio.
+            let runner_runtime = native_runtime::tokio_handle("daemon-service.shutdown.runner");
             let coordinator_lifecycle = lifecycle.clone();
             let runner_lifecycle = lifecycle.clone();
             let coordinator_attempt = Arc::clone(&attempt);
             let mut coordinator_failures = failures.clone();
-            let coordinator = async move {
-                let mut runner = tokio::spawn(async move {
+            let coordinator = runner_runtime.map(|runtime| async move {
+                let mut runner = runtime.spawn(async move {
                     let prepare_started = Instant::now();
                     let plan = prepare.await;
                     log_shutdown_phase(
@@ -392,11 +395,16 @@ where
                 {
                     tracing::error!(%error, "timed-out daemon shutdown runner failed while joining");
                 }
-            };
-            if !lifecycle.spawn_shutdown_coordinator(&attempt, coordinator) {
+            });
+            let spawned = coordinator
+                .ok_or_else(|| "daemon shutdown runner found no Tokio runtime".to_owned())
+                .and_then(|coordinator| {
+                    lifecycle.spawn_shutdown_coordinator(&attempt, coordinator)
+                });
+            if let Err(error) = spawned {
                 let receipt = Arc::new(DaemonShutdownReceipt::coordinator_failed(
                     shutdown_deadline,
-                    "daemon shutdown coordinator ownership was lost".to_owned(),
+                    error,
                 ));
                 let mut failures = failures;
                 failures.record(&receipt);
@@ -1042,6 +1050,32 @@ mod tests {
             ShutdownStatus::Failed("config error: client failed during shutdown".to_owned())
         );
         assert!(receipt.project_servers.is_clean());
+    }
+
+    /// The coordinator itself runs natively; the runner it owns still needs
+    /// Tokio, so a caller without one gets a typed receipt, not a panic.
+    #[test]
+    fn a_shutdown_without_a_tokio_runtime_fails_with_a_typed_receipt() {
+        const SITE: &str = "daemon-service.shutdown.runner";
+        let lifecycle = DaemonLifecycle::default();
+        let missing = native_runtime::tokio_runtime_missing_count(SITE);
+        let receipt = native_runtime::block_on(async {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            coordinate_daemon_shutdown(&lifecycle, Instant::now() + Duration::from_secs(5), async {
+                DaemonShutdownPlan::new(Vec::new(), |_| async { ShutdownTaskReceipt::default() })
+            })
+            .await
+        })
+        .expect("native runtime");
+
+        assert_eq!(
+            receipt.in_flight,
+            ShutdownStatus::Failed("daemon shutdown runner found no Tokio runtime".to_owned())
+        );
+        assert_eq!(
+            native_runtime::tokio_runtime_missing_count(SITE) - missing,
+            1
+        );
     }
 
     #[tokio::test]

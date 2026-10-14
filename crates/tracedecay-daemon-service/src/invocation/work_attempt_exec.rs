@@ -272,6 +272,14 @@ impl WorkAttemptProcessRegistryV1 {
         F: FnOnce(Arc<Notify>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
+        // The attempt calls synchronous Work storage ports (`mark_running`,
+        // the settle paths) whose writer wait needs Tokio's `block_in_place`;
+        // on a native worker each wait would park it.
+        let Some(runtime) =
+            native_runtime::tokio_handle("daemon-service.work_attempt.spawn_for_worktree")
+        else {
+            return false;
+        };
         let mut state = self
             .state
             .lock()
@@ -292,7 +300,7 @@ impl WorkAttemptProcessRegistryV1 {
         let task_key = key.clone();
         let (start, started) = tokio::sync::oneshot::channel();
         let future = task(Arc::clone(&cancellation));
-        let handle = tokio::spawn(async move {
+        let handle = runtime.spawn(async move {
             let admitted = tokio::select! {
                 result = started => result.is_ok(),
                 () = task_lifecycle.cancelled() => false,

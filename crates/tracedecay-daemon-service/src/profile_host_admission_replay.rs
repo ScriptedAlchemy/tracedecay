@@ -21,7 +21,7 @@ use tracedecay_host_admission::{
     REPLAY_BACKOFF_SHIFT_CAP, ReplayPassDecision, SharedHostAdmissionBroker, classify_replay_pass,
     replay_backoff,
 };
-use tracedecay_runtime_core::native_runtime;
+use tracedecay_runtime_core::native_runtime::{self, NativeTask};
 use tracedecay_sessions::admission::HostAdmissionOutcome;
 
 const IDLE_EVICTION_AFTER: Duration = Duration::from_secs(30);
@@ -112,7 +112,15 @@ pub struct ProfileHostAdmissionReplayRegistry {
 
 struct ReplayWorkerEntry {
     worker: Arc<ProfileHostAdmissionReplayWorker>,
-    task: AbortOnDropHandle<()>,
+    task: NativeTask<()>,
+}
+
+/// A dropped entry aborts its worker, so a shutdown owner timed out while
+/// joining the registry leaves no replay task running.
+impl Drop for ReplayWorkerEntry {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 struct ProfileHostAdmissionBootstrapEntry {
@@ -226,8 +234,14 @@ impl ProfileHostAdmissionReplayRegistry {
             Arc::clone(&self.cancellation),
             self.bootstrap_retry_budget,
         ));
+        // The production operation opens its broker on Tokio's blocking pool
+        // (`open_host_admission_broker` in the daemon's branch admin).
+        let Some(runtime) = native_runtime::tokio_handle("daemon-service.host_admission.bootstrap")
+        else {
+            return;
+        };
         let task_worker = Arc::clone(&worker);
-        let task = AbortOnDropHandle::new(tokio::spawn(tracing::Instrument::instrument(
+        let task = AbortOnDropHandle::new(runtime.spawn(tracing::Instrument::instrument(
             async move {
                 task_worker.run(operation).await;
             },
@@ -310,7 +324,7 @@ impl ProfileHostAdmissionReplayRegistry {
         let worker_path = broker_path.to_path_buf();
         let workers_weak = Arc::downgrade(&self.workers);
         let idle_eviction_after = self.idle_eviction_after;
-        let task = AbortOnDropHandle::new(tokio::spawn(tracing::Instrument::instrument(
+        let task = NativeTask::spawn(tracing::Instrument::instrument(
             async move {
                 worker.run(idle_eviction_after).await;
                 let Some(workers) = workers_weak.upgrade() else {
@@ -325,7 +339,14 @@ impl ProfileHostAdmissionReplayRegistry {
                 }
             },
             tracing::trace_span!("daemon.authority.host_admission.replay.run"),
-        )));
+        ));
+        let task = match task {
+            Ok(task) => task,
+            Err(error) => {
+                tracing::error!(%error, "profile host-admission replay worker was not started");
+                return;
+            }
+        };
         workers.insert(
             broker_path.to_path_buf(),
             ReplayWorkerEntry {
@@ -357,7 +378,7 @@ impl ProfileHostAdmissionReplayRegistry {
         };
         self.cancellation.cancel();
         for entry in replay_entries {
-            let _ = entry.task.await;
+            entry.task.wait().await;
         }
         for entry in bootstrap_entries {
             let _ = entry.task.await;
@@ -1262,7 +1283,10 @@ mod tests {
             let passes = Arc::clone(&passes_for_override);
             Box::pin(async move {
                 passes.fetch_add(1, Ordering::AcqRel);
-                tokio::time::sleep(Duration::from_millis(40)).await;
+                // The worker runs on the native runtime, where Tokio timers
+                // have no driver.
+                let _ =
+                    native_runtime::sleep_until(Instant::now() + Duration::from_millis(40)).await;
                 HostAdmissionOutcome::accepted_for_replay()
             })
         });
@@ -1493,17 +1517,16 @@ mod tests {
             None,
         ));
         let (alive, task_dropped) = std::sync::mpsc::channel::<()>();
-        let task = tokio::spawn(async move {
+        let task = NativeTask::spawn(async move {
             let _alive = alive;
             std::future::pending::<()>().await;
-        });
-        registry.workers.lock().await.insert(
-            db_path,
-            ReplayWorkerEntry {
-                worker,
-                task: AbortOnDropHandle::new(task),
-            },
-        );
+        })
+        .expect("native replay task");
+        registry
+            .workers
+            .lock()
+            .await
+            .insert(db_path, ReplayWorkerEntry { worker, task });
 
         let join_registry = Arc::clone(&registry);
         let receipt = crate::shutdown::join_shutdown_owners(
@@ -1555,14 +1578,15 @@ mod tests {
             Some(pending_count_override),
         ));
         let task_worker = Arc::clone(&worker);
-        let task = tokio::spawn(async move {
+        let task = NativeTask::spawn(async move {
             task_worker.run(Duration::from_secs(30)).await;
-        });
+        })
+        .expect("native replay task");
         registry.workers.lock().await.insert(
             db_path.clone(),
             ReplayWorkerEntry {
                 worker: Arc::clone(&worker),
-                task: AbortOnDropHandle::new(task),
+                task,
             },
         );
         probe_started.notified().await;
@@ -1625,14 +1649,15 @@ mod tests {
             Some(pending_count_override),
         ));
         let cancellation = Arc::clone(&registry.cancellation);
-        let task = tokio::spawn(async move {
+        let task = NativeTask::spawn(async move {
             cancellation.wait().await;
-        });
+        })
+        .expect("native replay task");
         registry.workers.lock().await.insert(
             db_path.clone(),
             ReplayWorkerEntry {
                 worker: Arc::clone(&worker),
-                task: AbortOnDropHandle::new(task),
+                task,
             },
         );
 
@@ -1755,6 +1780,48 @@ mod tests {
         (db_path, broker)
     }
 
+    /// A replay worker ensured by a caller with no Tokio runtime runs its
+    /// passes on the native runtime, and shutdown joins it there.
+    #[test]
+    fn a_worker_ensured_off_tokio_replays_and_joins() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let profile_root = temp.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        let (db_path, broker) = open_test_broker(&profile_root);
+        let registry = ProfileHostAdmissionReplayRegistry::default();
+        let replayed = Arc::new(Notify::new());
+        let pass_override: ReplayPassOverride = {
+            let replayed = Arc::clone(&replayed);
+            Arc::new(move || {
+                let replayed = Arc::clone(&replayed);
+                Box::pin(async move {
+                    replayed.notify_one();
+                    HostAdmissionOutcome::accepted_for_replay()
+                })
+            })
+        };
+        let writer_waits = tracedecay_rusqlite_runtime::exact_sql::native_thread_writer_waits();
+
+        native_runtime::block_on(async {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            registry
+                .ensure_with_pass_override(&db_path, &profile_root, &broker, pass_override)
+                .await;
+            native_runtime::timeout(Duration::from_secs(10), replayed.notified())
+                .await
+                .expect("the native worker runs a replay pass");
+            native_runtime::timeout(Duration::from_secs(10), registry.shutdown())
+                .await
+                .expect("shutdown cancels and joins the native worker");
+            assert_eq!(registry.worker_count().await, 0);
+        })
+        .expect("native runtime");
+        assert_eq!(
+            tracedecay_rusqlite_runtime::exact_sql::native_thread_writer_waits(),
+            writer_waits
+        );
+    }
+
     #[test]
     fn workers_back_off_and_evict_with_no_tokio_runtime_entered() {
         assert!(tokio::runtime::Handle::try_current().is_err());
@@ -1864,9 +1931,10 @@ mod tests {
             Some(pending_count_override),
         ));
         let task_worker = Arc::clone(&worker);
-        let task = AbortOnDropHandle::new(tokio_runtime.spawn(async move {
+        let task = NativeTask::spawn(async move {
             task_worker.run(Duration::from_secs(30)).await;
-        }));
+        })
+        .expect("native replay task");
         registry
             .workers
             .try_lock()

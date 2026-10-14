@@ -83,6 +83,9 @@ use tracedecay_domain::test_fixtures::digest;
 /// Runs `future` with no Tokio runtime anywhere on the stack, so any Tokio
 /// reactor, timer or blocking-pool call on the attempt path panics.
 fn without_tokio<F: std::future::Future>(future: F) -> F::Output {
+    let _probe = crate::invocation::NATIVE_WRITER_WAITS_PROBE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     native_runtime::block_on(async {
         assert!(tokio::runtime::Handle::try_current().is_err());
         future.await

@@ -203,7 +203,7 @@ pub(crate) struct WorkflowFanOutRecoveryOwnerV1 {
 
 struct WorkflowFanOutRecoveryInnerV1 {
     cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
-    task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    task: std::sync::Mutex<Option<tracedecay_runtime_core::native_runtime::NativeTask<()>>>,
     registered: Arc<std::sync::Mutex<RegisteredWorkRuntime>>,
 }
 
@@ -222,11 +222,15 @@ impl WorkflowFanOutRecoveryOwnerV1 {
         let holder_root = project_root
             .canonicalize()
             .map_err(|_| workflow_runtime_unavailable())?;
+        let page_tokio = tracedecay_runtime_core::native_runtime::tokio_handle(
+            "daemon-service.workflow_fan_out_recovery.page",
+        )
+        .ok_or_else(workflow_runtime_unavailable)?;
         let cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
         let worker_cancellation = cancellation.clone();
         let registered = Arc::new(std::sync::Mutex::new(registered));
         let worker_registered = Arc::clone(&registered);
-        let task = tokio::spawn(async move {
+        let task = tracedecay_runtime_core::native_runtime::NativeTask::spawn(async move {
             let mut cursor = None;
             let mut resume_pending = true;
             loop {
@@ -301,7 +305,7 @@ impl WorkflowFanOutRecoveryOwnerV1 {
                 let page_project_root = project_root.clone();
                 let page_producer = observability_producer.clone();
                 let page_cursor = cursor.clone();
-                let page = spawn_reconcile_page(tokio::runtime::Handle::current(), move || {
+                let page = spawn_reconcile_page(page_tokio.clone(), move || {
                     reconcile_active_workflow_fan_out_page(
                         &page_registered,
                         page_attempt_processes,
@@ -348,7 +352,11 @@ impl WorkflowFanOutRecoveryOwnerV1 {
                     () = recovery_backoff(delay) => {}
                 }
             }
-        });
+        })
+        .map_err(|error| {
+            tracing::error!(%error, "workflow fan-out recovery could not start");
+            workflow_runtime_unavailable()
+        })?;
         Ok(Self {
             inner: Arc::new(WorkflowFanOutRecoveryInnerV1 {
                 cancellation,
@@ -382,10 +390,12 @@ impl WorkflowFanOutRecoveryOwnerV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
-        if let Some(task) = task
-            && let Err(error) = task.await
-        {
-            tracing::warn!(%error, "workflow fan-out recovery shutdown failed");
+        if let Some(task) = task {
+            let outcome = task.wait().await;
+            if outcome != tracedecay_runtime_core::native_runtime::NativeTaskOutcome::Completed(())
+            {
+                tracing::warn!(?outcome, "workflow fan-out recovery shutdown failed");
+            }
         }
     }
 }
@@ -404,9 +414,8 @@ impl Drop for WorkflowFanOutRecoveryInnerV1 {
 }
 
 /// Runs one reconcile page on the native blocking pool. Dispatching a child
-/// spawns its attempt supervisor, and a committed change publishes task
-/// activity, with `tokio::spawn`, so the page runs with the worker's Tokio
-/// runtime entered.
+/// spawns its attempt supervisor on Tokio, so the page runs with the mount's
+/// Tokio runtime entered.
 fn spawn_reconcile_page<T: Send + 'static>(
     tokio: tokio::runtime::Handle,
     page: impl FnOnce() -> T + Send + 'static,
