@@ -10,9 +10,9 @@
 //! executor never blocks on the native runtime.
 
 use std::future::poll_fn;
-use std::pin::pin;
+use std::pin::{Pin, pin};
 use std::sync::OnceLock;
-use std::task::Poll;
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use asupersync::runtime::{JoinError, RuntimeHandle};
@@ -101,6 +101,55 @@ where
         })
         .ok_or("native blocking pool unavailable")?;
     Ok((cx, receiver))
+}
+
+/// Drives `settlement` on the caller's executor. A caller that stops waiting
+/// hands the unfinished settlement to the runtime, so accepted work still
+/// outlives a cancelled request. Spawning a native task for every call instead
+/// costs a runtime admission and two cross-runtime wakes per SQL statement.
+pub fn settle<F>(settlement: F) -> Settlement<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    Settlement(Some(Box::pin(settlement)))
+}
+
+/// The future [`settle`] returns.
+pub struct Settlement<T: Send + 'static>(Option<Pin<Box<dyn Future<Output = T> + Send>>>);
+
+impl<T: Send + 'static> Future for Settlement<T> {
+    type Output = T;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<T> {
+        // Held outside `self` while polled: a panic unwinds it on the caller
+        // instead of leaving it for `Drop` to hand to the runtime.
+        let pending = &mut self.get_mut().0;
+        let mut settlement = pending.take().expect("settlement polled after completion");
+        let poll = settlement.as_mut().poll(context);
+        if poll.is_pending() {
+            *pending = Some(settlement);
+        }
+        poll
+    }
+}
+
+impl<T: Send + 'static> Drop for Settlement<T> {
+    fn drop(&mut self) {
+        let Some(settlement) = self.0.take() else {
+            return;
+        };
+        let detached = handle()
+            .ok_or_else(|| "native execution runtime unavailable".to_owned())
+            .and_then(|runtime| {
+                runtime
+                    .try_spawn(settlement)
+                    .map_err(|error| error.to_string())
+            });
+        if let Err(error) = detached {
+            tracing::error!(%error, "abandoned native settlement was dropped unfinished");
+        }
+    }
 }
 
 /// Completes at `deadline` on a native timer task, so a foreign executor never
@@ -511,6 +560,65 @@ mod tests {
             settled.recv_timeout(Duration::from_secs(10)),
             Ok(()),
             "work must run although its result future was dropped unpolled"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn settlement_runs_on_the_waiting_caller() {
+        let caller = std::thread::current().id();
+        assert_eq!(settle(async { std::thread::current().id() }).await, caller);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dropped_settlement_finishes_on_the_runtime() {
+        let (release, held) = async_channel::bounded::<()>(1);
+        let (finished, settled) = std::sync::mpsc::channel::<()>();
+        let mut settlement = settle(async move {
+            let _ = held.recv().await;
+            let _ = finished.send(());
+        });
+        let polled =
+            std::future::poll_fn(|context| Poll::Ready(Pin::new(&mut settlement).poll(context)))
+                .await;
+        assert!(polled.is_pending());
+        drop(settlement);
+        release.send(()).await.expect("settlement still waiting");
+        assert_eq!(
+            settled.recv_timeout(Duration::from_secs(10)),
+            Ok(()),
+            "a settlement its caller dropped must still finish"
+        );
+    }
+
+    #[test]
+    fn panicking_settlement_unwinds_on_the_caller_and_is_never_polled_again() {
+        struct PanicsWhenPolled {
+            polls: usize,
+            dropped: std::sync::mpsc::Sender<usize>,
+        }
+        impl Future for PanicsWhenPolled {
+            type Output = ();
+            fn poll(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<()> {
+                self.polls += 1;
+                panic!("settlement panicked");
+            }
+        }
+        impl Drop for PanicsWhenPolled {
+            fn drop(&mut self) {
+                let _ = self.dropped.send(self.polls);
+            }
+        }
+        let (dropped, polls) = std::sync::mpsc::channel();
+        let unwound = std::panic::catch_unwind(move || {
+            let mut settlement = settle(PanicsWhenPolled { polls: 0, dropped });
+            let _ =
+                Pin::new(&mut settlement).poll(&mut Context::from_waker(std::task::Waker::noop()));
+        });
+        assert!(unwound.is_err(), "the panic must reach the caller");
+        assert_eq!(
+            polls.recv_timeout(Duration::from_secs(10)),
+            Ok(1),
+            "a panicked settlement must not be handed to the runtime and polled again"
         );
     }
 
