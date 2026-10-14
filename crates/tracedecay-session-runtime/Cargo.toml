@@ -100,3 +100,8 @@ required-features = ["test-helpers"]
 [[test]]
 name = "session_retention_read_cost"
 required-features = ["test-helpers"]
+
+# The 8x store growth probe runs 189s pinned to four CPUs alone and exceeds
+# the native five-minute medium limit beside other CI test actions.
+[package.metadata.bazel.test_sizes]
+session_ingest_index_read_cost = "large"
