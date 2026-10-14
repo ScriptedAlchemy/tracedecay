@@ -216,29 +216,18 @@ async fn dropping_lsp_client_closes_transport_without_spawning_detach() {
 #[cfg(unix)]
 enum LspOpenInterrupt {
     Cancel,
-    /// Jumps the frozen clock to the deadline instead of spending it in wall
-    /// time. Real time resumes before the client notifies cancellation and
-    /// closes its stream, so that I/O never races an auto-advanced timer.
+    /// Lets the open's own deadline run out.
     ExpireDeadline,
 }
 
 #[cfg(unix)]
 impl LspOpenInterrupt {
-    async fn fire(
-        self,
-        cancellation: &tracedecay_contracts::CancellationSignal,
-        expiry: tokio::time::Instant,
-    ) {
+    fn fire(self, cancellation: &tracedecay_contracts::CancellationSignal) {
         match self {
             Self::Cancel => {
                 cancellation.cancel(tracedecay_contracts::clock::now_micros());
             }
-            Self::ExpireDeadline => {
-                tokio::time::pause();
-                tokio::time::advance(expiry.saturating_duration_since(tokio::time::Instant::now()))
-                    .await;
-                tokio::time::resume();
-            }
+            Self::ExpireDeadline => {}
         }
     }
 }
@@ -295,7 +284,7 @@ async fn interrupt_unanswered_lsp_open(
             "carries_deadline": open["deadline"]["expires_at"] == expected_deadline,
             "cancellation": open["cancellation"]["state"]["state"],
         });
-        interrupt.fire(&daemon_cancellation, expiry).await;
+        interrupt.fire(&daemon_cancellation);
         (
             Some(control),
             lines.next_line().await.expect("read after interruption"),

@@ -5,10 +5,11 @@
 //! [`ResolvedDaemonConnection`] it resolves.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use asupersync::io::AsyncWriteExt;
+use asupersync::time::{sleep, timeout, wall_now};
 use serde_json::json;
-use tokio::time::{Duration, Instant, timeout};
 use tracedecay_daemon_control::{default_socket_path, with_unavailable_daemon_advice};
 use tracedecay_daemon_identity::{
     DAEMON_AUTHORITY_UNAVAILABLE, ResolvedDaemonConnection, client_connection,
@@ -80,6 +81,7 @@ pub(crate) async fn ensure_daemon_connection_live(
     connection.ensure_authority_current(request_label)?;
 
     timeout(
+        wall_now(),
         DAEMON_TOOL_HEALTH_CONNECT_TIMEOUT,
         DaemonClientStream::connect(connection.endpoint()),
     )
@@ -237,7 +239,7 @@ pub(crate) async fn connect_with_restart_grace(
 /// both its authority epoch and authentication token, and a daemon's first
 /// start writes its record only moments before it binds.
 #[tracing::instrument(name = "daemon.core.connect_restart_grace", level = "trace", skip_all)]
-async fn connect_with_restart_grace_resolving(
+pub(super) async fn connect_with_restart_grace_resolving(
     mut resolve: impl FnMut() -> Result<ResolvedDaemonConnection>,
     grace: Duration,
     poll_interval: Duration,
@@ -247,7 +249,7 @@ async fn connect_with_restart_grace_resolving(
         let connection = match resolve() {
             Ok(connection) => connection,
             Err(error) if authority_absent(&error) && Instant::now() < deadline => {
-                tokio::time::sleep(poll_interval).await;
+                sleep(wall_now(), poll_interval).await;
                 continue;
             }
             Err(error) => return Err(error),
@@ -271,7 +273,7 @@ async fn connect_with_restart_grace_resolving(
                         }
                     });
                 }
-                tokio::time::sleep(poll_interval).await;
+                sleep(wall_now(), poll_interval).await;
             }
             Err(error) => return Err(error),
         }
@@ -559,7 +561,7 @@ async fn call_tool_with_project_open_retry(
         let Some(wait) = project_open_retry_wait(&result, deadline) else {
             return result;
         };
-        tokio::time::sleep(wait).await;
+        sleep(wall_now(), wait).await;
     }
 }
 
@@ -594,7 +596,7 @@ pub async fn call_default_tool(
         return result
             .map_err(|error| with_unavailable_daemon_advice(profile, &socket_path, error));
     };
-    tokio::time::sleep(wait).await;
+    sleep(wall_now(), wait).await;
     call_tool_with_project_open_retry(
         &socket_path,
         handshake,
@@ -779,6 +781,8 @@ pub fn is_truncation_envelope(value: &serde_json::Value) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use serde_json::json;
     use tracedecay_contracts::{
         ApplicationProblem, ApplicationProblemEnvelope, RequestId, ResultContractRef,
@@ -840,11 +844,8 @@ mod tests {
             "the one-shot client rides out a mid-response retirement like a warming open"
         );
         assert!(
-            super::project_open_retry_wait(
-                &Err(revoked),
-                tokio::time::Instant::now() + std::time::Duration::from_secs(5)
-            )
-            .is_some(),
+            super::project_open_retry_wait(&Err(revoked), Instant::now() + Duration::from_secs(5))
+                .is_some(),
             "a revoked response is re-sent, not returned"
         );
     }
@@ -876,7 +877,7 @@ mod tests {
 
     #[test]
     fn projectless_mounting_refusal_is_re_sent_after_its_delay() {
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(5);
         let mounting = projectless_problem_result(ApplicationProblem::runtime_mounting());
         assert_eq!(mounting.get("problem"), None);
         assert_eq!(

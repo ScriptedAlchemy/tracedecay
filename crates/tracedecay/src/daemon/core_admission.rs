@@ -5,10 +5,11 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tracedecay_runtime_core::path_safety::{canonical_existing_identity, same_canonical_path};
 
 use serde::{Deserialize, Serialize};
-use tokio::time::{Duration, Instant, timeout, timeout_at};
+use tokio::time::timeout;
 
 use super::{
     AuthenticatedFirstRequest, BrokerStream, BrokerStreamTransport, DaemonAuthPreface,
@@ -67,7 +68,8 @@ impl DaemonClientDeadline {
     where
         F: std::future::Future<Output = Result<T>>,
     {
-        match timeout_at(self.deadline, fut).await {
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        match asupersync::time::timeout(asupersync::time::wall_now(), remaining, fut).await {
             Ok(result) => result,
             Err(_) => Err(tracedecay_daemon_protocol::daemon_response_stalled_during(
                 stage,

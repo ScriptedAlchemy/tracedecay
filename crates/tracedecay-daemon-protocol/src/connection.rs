@@ -5,10 +5,9 @@
 //! preamble, and bounded response reads.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use asupersync::io::AsyncWriteExt;
-use tokio::time::Instant;
 
 use crate::handshake::DaemonHandshake;
 use crate::transport::{
@@ -199,7 +198,7 @@ where
         tokio::select! {
             biased;
             result = line_reader.read_mcp_line() => return response_line(result, request_label),
-            () = tokio::time::sleep(liveness_poll_interval) => {}
+            () = asupersync::time::sleep(asupersync::time::wall_now(), liveness_poll_interval) => {}
         }
         let probe = ensure_live();
         tokio::pin!(probe);
@@ -339,7 +338,7 @@ pub async fn connect_with_restart_grace(
                         }
                     });
                 }
-                tokio::time::sleep(poll_interval).await;
+                asupersync::time::sleep(asupersync::time::wall_now(), poll_interval).await;
             }
             Err(error) => return Err(error),
         }

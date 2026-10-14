@@ -5,11 +5,12 @@ use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 use asupersync::io::AsyncWriteExt;
+use asupersync::time::wall_now;
 use serde::{Deserialize, Serialize};
-use tokio::time::{Duration, Instant};
 
 use super::binary_version;
 #[cfg(unix)]
@@ -304,7 +305,7 @@ async fn drain_daemon_request_after_disconnect(
     daemon_request: impl Future<Output = Result<Vec<String>>>,
     drain_bound: Duration,
 ) -> Result<Vec<String>> {
-    tokio::time::timeout(drain_bound, daemon_request)
+    asupersync::time::timeout(wall_now(), drain_bound, daemon_request)
         .await
         .unwrap_or_else(|_| {
             Err(TraceDecayError::Config {
@@ -799,7 +800,7 @@ async fn send_daemon_request_with_project_open_retry(
         else {
             break;
         };
-        tokio::time::sleep(remaining.min(PROJECT_OPEN_RETRY_INTERVAL)).await;
+        asupersync::time::sleep(wall_now(), remaining.min(PROJECT_OPEN_RETRY_INTERVAL)).await;
         if cancellation.borrow().is_some() {
             break;
         }

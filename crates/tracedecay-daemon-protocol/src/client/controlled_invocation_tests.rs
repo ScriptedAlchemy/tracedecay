@@ -312,7 +312,17 @@ async fn delayed_invocation_does_not_block_short_calls_and_pool_stays_bounded() 
     );
 }
 
-#[tokio::test(start_paused = true)]
+/// A liveness probe that reports every poll to the test.
+struct ReportingProbe(tokio::sync::mpsc::UnboundedSender<()>);
+
+impl crate::connection::DaemonLivenessProbe for ReportingProbe {
+    fn ensure_live(&self, _request_label: &str) -> tracedecay_domain::errors::Result<()> {
+        let _ = self.0.send(());
+        Ok(())
+    }
+}
+
+#[tokio::test]
 async fn delayed_response_opens_no_periodic_probe_connections() {
     const REQUEST_ID: &str = "request.no-probe-connections";
     let (listener, endpoint) =
@@ -321,10 +331,13 @@ async fn delayed_response_opens_no_periodic_probe_connections() {
             .expect("bind delayed response listener");
     let accepts = Arc::new(AtomicUsize::new(0));
     let server_accepts = Arc::clone(&accepts);
+    let (polled, polls) = tokio::sync::mpsc::unbounded_channel();
     let server = tokio::spawn(async move {
+        let mut polls = Some(polls);
         loop {
             let stream = listener.accept().await.expect("accept delayed invocation");
             server_accepts.fetch_add(1, Ordering::SeqCst);
+            let polls = polls.take();
             tokio::spawn(async move {
                 let (reader, mut writer) = tokio::io::split(stream);
                 let mut lines = authenticated_lines(reader).await;
@@ -336,20 +349,32 @@ async fn delayed_response_opens_no_periodic_probe_connections() {
                 };
                 let request: DaemonInvocationRequest =
                     serde_json::from_str(&line).expect("typed invocation");
-                tokio::time::sleep(Duration::from_secs(12)).await;
+                // Answer only once the waiting client has polled liveness twice.
+                let mut polls = polls.expect("only the invocation connection is answered");
+                for _ in 0..2 {
+                    polls.recv().await.expect("liveness poll");
+                }
                 write_unavailable_response(&mut writer, &request.request_id).await;
             });
         }
     });
-    let client = invocation_client(endpoint, "client.no-probe-connections");
+    let probe: Arc<dyn crate::connection::DaemonLivenessProbe> = Arc::new(ReportingProbe(polled));
+    let mut client = invocation_client_for(
+        DaemonConnection::new(endpoint, TEST_AUTH_TOKEN.to_owned()).with_liveness(probe),
+        "client.no-probe-connections",
+    );
+    client.liveness_poll_interval = Duration::from_millis(10);
 
-    client
-        .invoke(invocation_request(
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        client.invoke(invocation_request(
             REQUEST_ID,
             deadline_after(Duration::from_secs(20)),
-        ))
-        .await
-        .expect("delayed invocation response");
+        )),
+    )
+    .await
+    .expect("the waiting client polls liveness on its interval")
+    .expect("delayed invocation response");
 
     assert_eq!(
         accepts.load(Ordering::SeqCst),
@@ -1001,12 +1026,8 @@ async fn controlled_client(
 
 /// Phase signals from a fixture daemon that never settles a remote effect.
 ///
-/// The choreography runs over real loopback connections, so the tests keep
-/// real time until `control_observed` fires and only then pause and advance
-/// the clock past the authoritative-settlement grace. Pausing earlier lets
-/// the paused clock auto-advance past the admission deadline while the
-/// runtime waits for loopback readiness, which drops the invocation
-/// connection before its handshake is written (observed on macOS).
+/// Its client waits [`SHORT_RESPONSE_GRACE`] for the settlement that never
+/// comes, so each test spends the grace in real time.
 struct UnsettledDaemon {
     client: DaemonInvocationClient,
     /// The daemon read the typed invocation request.
@@ -1022,17 +1043,16 @@ struct UnsettledDaemon {
     server: tokio::task::JoinHandle<()>,
 }
 
-/// Pauses the clock and advances it past the authoritative-settlement grace.
-///
-/// Only call this once every real loopback exchange the test depends on has
-/// completed and the remaining work is timer-bound; the paused clock
-/// auto-advances to the next timer whenever the runtime would otherwise wait
-/// for I/O. Tests that perform more real I/O afterwards must
-/// `tokio::time::resume()` first.
-async fn virtualize_response_grace() {
-    tokio::time::pause();
-    tokio::time::advance(crate::connection::DAEMON_TOOL_RESPONSE_GRACE + Duration::from_secs(1))
-        .await;
+const SHORT_RESPONSE_GRACE: Duration = Duration::from_millis(100);
+
+/// Bounds a test's wait on an unsettled effect: far above
+/// [`SHORT_RESPONSE_GRACE`] and far below the production grace, so a client
+/// that ignores its configured grace fails instead of passing slowly.
+const SETTLEMENT_WAIT: Duration = Duration::from_secs(5);
+
+fn with_short_response_grace(mut client: DaemonInvocationClient) -> DaemonInvocationClient {
+    client.response_grace = SHORT_RESPONSE_GRACE;
+    client
 }
 
 async fn reset_then_reconnect_client(
@@ -1142,10 +1162,10 @@ async fn reset_then_reconnect_client(
         moved_store_adoption: crate::handshake::MovedStoreAdoption::Never,
     };
     (
-        DaemonInvocationClient::for_connection_for_test(
+        with_short_response_grace(DaemonInvocationClient::for_connection_for_test(
             DaemonConnection::new(endpoint, TEST_AUTH_TOKEN.to_owned()),
             handshake,
-        ),
+        )),
         admitted,
         control_observed,
         server,
@@ -1243,10 +1263,10 @@ async fn unsettled_client(request_id: &'static str, control: UnsettledControl) -
         moved_store_adoption: crate::handshake::MovedStoreAdoption::Never,
     };
     UnsettledDaemon {
-        client: DaemonInvocationClient::for_connection_for_test(
+        client: with_short_response_grace(DaemonInvocationClient::for_connection_for_test(
             DaemonConnection::new(endpoint, TEST_AUTH_TOKEN.to_owned()),
             handshake,
-        ),
+        )),
         admitted,
         control_observed,
         release,
@@ -1283,9 +1303,9 @@ async fn settle_without_daemon_response(
     admitted.await.expect("request admission");
     assert!(cancellation.cancel(now_micros()));
     control_observed.await.expect("cancellation control phase");
-    virtualize_response_grace().await;
-    let response = call
+    let response = tokio::time::timeout(SETTLEMENT_WAIT, call)
         .await
+        .expect("the client settles once its response grace ends")
         .expect("authoritative invocation task")
         .expect("indeterminate settlement is typed");
     let _ = release.send(());
@@ -1429,29 +1449,26 @@ async fn indeterminate_effect_discards_connection_before_next_invocation() {
     let cancellation =
         CancellationSignal::active("cancel.remote-effect-reset-state").expect("cancellation");
     let cancel_after_admission = cancellation.clone();
-    // Cancel once the daemon has admitted the request, then virtualize the
-    // response grace only after the daemon has read the cancellation: the
-    // choreography itself runs over real loopback connections.
-    let clock = tokio::spawn(async move {
+    let cancel = tokio::spawn(async move {
         admitted.await.expect("request admission");
         assert!(cancel_after_admission.cancel(now_micros()));
         control_observed.await.expect("cancellation delivery");
-        virtualize_response_grace().await;
     });
     let deadline = deadline_after(Duration::from_secs(10));
-    let first = client
-        .invoke_controlled(
+    let first = tokio::time::timeout(
+        SETTLEMENT_WAIT,
+        client.invoke_controlled(
             invocation_request(FIRST_ID, deadline.clone()),
             deadline,
             cancellation,
             InvocationCancellationPolicy::AuthoritativeEffect,
-        )
-        .await
-        .expect("indeterminate effect is typed");
+        ),
+    )
+    .await
+    .expect("the client settles once its response grace ends")
+    .expect("indeterminate effect is typed");
     assert_authoritative_settlement(first);
-    clock.await.expect("clock task");
-    // The reconnect below is real loopback I/O again, so hand real time back.
-    tokio::time::resume();
+    cancel.await.expect("cancellation task");
 
     let second = client
         .invoke(invocation_request(

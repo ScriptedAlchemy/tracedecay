@@ -376,6 +376,10 @@ pub struct DaemonInvocationClient {
     handshake: crate::handshake::DaemonHandshake,
     pool: Arc<DaemonInvocationConnectionPool>,
     activity: Arc<DaemonInvocationClientActivity>,
+    liveness_poll_interval: Duration,
+    /// How long an interrupted authoritative effect waits for the daemon's
+    /// settlement before it reports the effect indeterminate.
+    response_grace: Duration,
 }
 
 #[derive(Default)]
@@ -594,6 +598,8 @@ impl DaemonInvocationClient {
             handshake,
             pool: DaemonInvocationConnectionPool::shared(),
             activity: Arc::new(DaemonInvocationClientActivity::default()),
+            liveness_poll_interval: crate::connection::DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
+            response_grace: crate::connection::DAEMON_TOOL_RESPONSE_GRACE,
         }
     }
 
@@ -602,12 +608,7 @@ impl DaemonInvocationClient {
         connection: crate::connection::DaemonConnection,
         handshake: crate::handshake::DaemonHandshake,
     ) -> Self {
-        Self {
-            connection,
-            handshake,
-            pool: DaemonInvocationConnectionPool::shared(),
-            activity: Arc::new(DaemonInvocationClientActivity::default()),
-        }
+        Self::new(connection, handshake)
     }
 
     async fn checkout_connection(
@@ -712,7 +713,7 @@ impl DaemonInvocationClient {
                 &mut connection.reader,
                 &self.connection,
                 request_label,
-                crate::connection::DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
+                self.liveness_poll_interval,
             ),
             tracing::trace_span!("daemon.invocation.client.response.wait"),
         )
