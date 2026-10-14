@@ -560,9 +560,6 @@ async fn ingest_user_global_sources_for_provider_with_roots_bounded_inner<
             false,
         ));
     }
-    let Some(session_review) = registered.session_review() else {
-        return IngestPassOutcome::failed(TranscriptCatchUpFailure::session_review_unwired());
-    };
     let selected: Vec<SessionProvider> = USER_CATCH_UP_PROVIDERS
         .iter()
         .copied()
@@ -712,12 +709,6 @@ async fn ingest_user_global_sources_for_provider_with_roots_bounded_inner<
             usize::try_from(provider_runs.deferred_units).unwrap_or(usize::MAX),
         );
     }
-    if provider_runs.stats.messages_upserted > 0 {
-        session_review
-            .schedule(provider.map_or("all", SessionProvider::id), None)
-            .await;
-    }
-
     if matches!(coverage, IngestPassCoverage::Backpressured { .. })
         && !provider_runs
             .failures

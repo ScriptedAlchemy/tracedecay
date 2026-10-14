@@ -1090,32 +1090,31 @@ where
                             request.query,
                             policy,
                         );
-                    let runtime = tokio::runtime::Handle::current();
                     let settlement_control = Arc::clone(&control);
-                    let execution = tokio::task::spawn_blocking(move || {
+                    let execution = native_runtime::spawn_blocking(move || {
                         let _execution_permit = execution_permit;
-                        runtime.block_on(async move {
-                        let work = async move {
-                        let Some(revision) = execution_source_revision else {
-                            return execution_schedulers
-                                .execute_controlled_query(
-                                    &execution_scope,
-                                    execution_request,
-                                    execution_control.clone(),
-                                )
-                                .await;
-                        };
-                        let tree = execution_source_tree.ok_or(
+                        native_runtime::block_on(async move {
+                            let work = async move {
+                                let Some(revision) = execution_source_revision else {
+                                    return execution_schedulers
+                                        .execute_controlled_query(
+                                            &execution_scope,
+                                            execution_request,
+                                            execution_control.clone(),
+                                        )
+                                        .await;
+                                };
+                                let tree = execution_source_tree.ok_or(
                             code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1::GenerationUnavailable,
                         )?;
-                        let reference = execution_source_reference.ok_or(
+                                let reference = execution_source_reference.ok_or(
                             code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1::ExactCursorInvalid,
                         )?;
-                        let control = code_index_scheduler::branch_generations::BranchGenerationReadControlV1 {
+                                let control = code_index_scheduler::branch_generations::BranchGenerationReadControlV1 {
                             deadline: execution_control.deadline.clone(),
                             cancellation: execution_control.cancellation.clone(),
                         };
-                        let generations = execution_schedulers
+                                let generations = execution_schedulers
                             .generations_for_revisions(
                                 &execution_scope,
                                 &reference,
@@ -1130,58 +1129,58 @@ where
                             .map_err(
                                 code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1::ExactGenerationUnavailable,
                             )?;
-                        let exact_source = tracedecay_domain::CodeSourceCursorBindingV1 {
-                            reference,
-                            commit: revision,
-                            tree,
-                            generation: generations
-                                .base
-                                .generation()
-                                .manifest()
-                                .generation_id
-                                .clone(),
-                        };
-                        code_index_task_support::verify_exact_source_cursor(
-                            &execution_schedulers,
-                            &execution_scope,
-                            execution_cursor.as_ref(),
-                            &exact_source,
-                        )
-                        .await?;
-                        execution_schedulers
-                            .execute_query_search_on_generation(
-                                &execution_scope,
-                                execution_request,
-                                generations.base,
-                                execution_control.clone(),
-                            )
-                            .await
-                        };
-                        // The permit follows request settlement, not this
-                        // work's natural completion. `work` is polled first, so
-                        // an unsettled request behaves exactly as before; a
-                        // settled one is dropped where it stands, including
-                        // mid-`mounted.lock()` or mid-decode, the awaits that
-                        // no checkpoint covers, and `_execution_permit` is
-                        // released with the task. `settle_owned_blocking_task`
-                        // below normally names the precise terminal reason
-                        // first; this only keeps the typed state when it did
-                        // not.
-                        tokio::pin!(work);
-                        tokio::select! {
-                            biased;
-                            output = &mut work => output,
-                            _ = settlement_control.settled() => Err(
-                                code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1::Retrieval(
-                                    tracedecay_query::retrieval::RetrievalPortError::Cancelled,
+                                let exact_source = tracedecay_domain::CodeSourceCursorBindingV1 {
+                                    reference,
+                                    commit: revision,
+                                    tree,
+                                    generation: generations
+                                        .base
+                                        .generation()
+                                        .manifest()
+                                        .generation_id
+                                        .clone(),
+                                };
+                                code_index_task_support::verify_exact_source_cursor(
+                                    &execution_schedulers,
+                                    &execution_scope,
+                                    execution_cursor.as_ref(),
+                                    &exact_source,
+                                )
+                                .await?;
+                                execution_schedulers
+                                    .execute_query_search_on_generation(
+                                        &execution_scope,
+                                        execution_request,
+                                        generations.base,
+                                        execution_control.clone(),
+                                    )
+                                    .await
+                            };
+                            // The permit follows request settlement, not this
+                            // work's natural completion. `work` is polled first, so
+                            // an unsettled request behaves exactly as before; a
+                            // settled one is dropped where it stands, including
+                            // mid-`mounted.lock()` or mid-decode, the awaits that
+                            // no checkpoint covers, and `_execution_permit` is
+                            // released with the task. `settle_owned_blocking_task`
+                            // below normally names the precise terminal reason
+                            // first; this only keeps the typed state when it did
+                            // not.
+                            tokio::pin!(work);
+                            tokio::select! {
+                                biased;
+                                output = &mut work => output,
+                                _ = settlement_control.settled() => Err(
+                                    code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1::Retrieval(
+                                        tracedecay_query::retrieval::RetrievalPortError::Cancelled,
+                                    ),
                                 ),
-                            ),
-                        }
-                    })
+                            }
+                        })
                     });
                     match tracing::Instrument::instrument(
                         code_index_task_support::settle_owned_blocking_task(
-                            async { execution.await.map_err(|error| error.to_string()) },
+                            async { execution.await.and_then(|executed| executed) },
                             std::time::Duration::from_millis(10),
                             || search_terminated(&control, &admission_provider, None),
                         ),

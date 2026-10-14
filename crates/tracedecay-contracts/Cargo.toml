@@ -9,7 +9,7 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [dependencies]
 schemars.workspace = true
-getrandom = "0.2"
+getrandom = "0.4"
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.11"

@@ -185,11 +185,8 @@ pub(in super::super) fn capture_unborn_source(
         .head()
         .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?
         .log_iter();
-    let relative = platform.store.namespace.as_ref().map_or_else(
-        || platform.name.to_path().to_owned(),
-        |namespace| namespace.to_path().join(platform.name.to_path()),
-    );
-    let reflog_path = platform.store.git_dir().join("logs").join(relative);
+    let reflog_path =
+        head_reflog_path(&platform).map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     let source_generation = match std::fs::metadata(&reflog_path) {
         Ok(metadata) if metadata.len() == 0 => present_source_generation(&reflog_path, &metadata)?,
         Ok(_) => return Err(BoundedBackfillInterruption::UnsupportedSourceFraming),
@@ -237,11 +234,8 @@ pub(in super::super) fn initialize_reflog_cursor(
         .head()
         .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?
         .log_iter();
-    let relative = platform.store.namespace.as_ref().map_or_else(
-        || platform.name.to_path().to_owned(),
-        |namespace| namespace.to_path().join(platform.name.to_path()),
-    );
-    let unresolved_reflog_path = platform.store.git_dir().join("logs").join(relative);
+    let unresolved_reflog_path =
+        head_reflog_path(&platform).map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     let (reflog_path, source_generation, source_length) =
         match std::fs::metadata(&unresolved_reflog_path) {
             Ok(metadata) => {
@@ -561,6 +555,17 @@ pub(in super::super) fn scan_graph_chunk(
         examined_bytes: bytes_read,
         budget_exhausted,
     })
+}
+
+fn head_reflog_path(
+    platform: &gix::refs::file::log::iter::Platform<'_, '_>,
+) -> gix::Result<PathBuf> {
+    let name = platform.name.to_path()?;
+    let relative = match platform.store.namespace.as_ref() {
+        Some(namespace) => namespace.to_path()?.join(name),
+        None => name.to_owned(),
+    };
+    Ok(platform.store.git_dir().join("logs").join(relative))
 }
 
 fn cross_entry(

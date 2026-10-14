@@ -28,7 +28,7 @@ struct Analyzer<'tree, 'source> {
     /// its parent. Three of the four passes over a body walk exactly this
     /// sequence, and a tree-sitter cursor step is the single most expensive
     /// thing extraction does, so the walk is paid for once.
-    nodes: Vec<(TreeSitterNode<'tree>, Option<&'static str>)>,
+    nodes: Vec<(TreeSitterNode<'tree>, Option<&'tree str>)>,
     callables: Vec<CallableSyntax<'tree>>,
     bindings: Vec<Binding>,
     python_bindings: HashMap<(ByteSpan, String), String>,

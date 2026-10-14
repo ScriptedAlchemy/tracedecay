@@ -1181,8 +1181,8 @@ async fn retired_codex_source_cursor_store_refuses_sessions_with_scoped_reset() 
     rusqlite::Connection::open(&db_path)
         .unwrap()
         .execute(
-            "DELETE FROM global_schema_migrations \
-             WHERE migration = 'observations-unified-identity-v1'",
+            "DELETE FROM tracedecay_schema_version \
+             WHERE component = 'observations-unified-identity-v1'",
             [],
         )
         .unwrap();

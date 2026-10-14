@@ -27,7 +27,7 @@ test-helpers = [
 [dependencies]
 asupersync.workspace = true
 futures-util = "0.3.33"
-gix = { version = "=0.87.1", default-features = false, features = [
+gix = { version = "=0.89.0", default-features = false, features = [
     "revision",
     "blob-diff",
     "parallel",
@@ -67,7 +67,7 @@ tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
 tracedecay-application = { path = "../tracedecay-application" }
 
 [target.'cfg(unix)'.dependencies]
-notify = "6"
+notify = "8"
 
 [dev-dependencies]
 filetime = "0.2"

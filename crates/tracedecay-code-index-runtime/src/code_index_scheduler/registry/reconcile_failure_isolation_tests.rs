@@ -875,7 +875,7 @@ async fn a_permanent_refusal_is_never_self_retried() {
 async fn a_reproducing_reconcile_failure_parks_typed_and_converges_after_the_fix() {
     const PROJECT: &str = "project.reconcile-reproducing-failure";
     const REASON: &str = "code-index repository status failed: code-index classification: \
-        IO error while writing blob or reading file metadata or changing filetype";
+        Permission denied (os error 13)";
     let set_model_mode = |project: &Path, mode: u32| {
         fs::set_permissions(
             project.join("src/model.rs"),

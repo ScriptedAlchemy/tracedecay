@@ -15,9 +15,9 @@ test-helpers = []
 
 [dependencies]
 asupersync.workspace = true
-base64 = "0.22"
+base64 = "0.23"
 futures-util = "0.3.33"
-gix = { version = "=0.87.1", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
+gix = { version = "=0.89.0", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
 hex = "0.4"
 rayon = "1"
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup", "cache"] }
@@ -38,10 +38,10 @@ tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime" }
 tracedecay-store = { path = "../tracedecay-store" }
 url = "2"
-getrandom = "0.2"
+getrandom = "0.4"
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["async_tokio"] }
+criterion = { version = "0.8", features = ["async_tokio"] }
 # `runtime::vibe` and `runtime::workflow_ingest` tests backdate file mtimes.
 filetime = "0.2"
 tempfile = "3"

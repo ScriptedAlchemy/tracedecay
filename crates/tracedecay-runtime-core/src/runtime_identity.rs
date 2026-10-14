@@ -21,7 +21,7 @@ pub fn process_run_id() -> &'static str {
     static RUN_ID: OnceLock<String> = OnceLock::new();
     RUN_ID.get_or_init(|| {
         let mut buf = [0u8; 16];
-        match getrandom::getrandom(&mut buf) {
+        match getrandom::fill(&mut buf) {
             Ok(()) => hex::encode(buf),
             Err(_) => format!("mcp-{}", crate::tracedecay::current_timestamp()),
         }

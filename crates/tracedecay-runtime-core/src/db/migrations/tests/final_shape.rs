@@ -58,9 +58,12 @@ fn store_snapshot(path: &Path) -> StoreSnapshot {
     let connection =
         rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .expect("open final-shape snapshot read-only");
-    let user_version = connection
-        .query_row("PRAGMA user_version", (), |row| row.get(0))
-        .expect("read final-shape snapshot version");
+    let user_version = tracedecay_rusqlite_runtime::schema_version::read_version_sync(
+        &connection,
+        tracedecay_rusqlite_runtime::schema_version::GRAPH_COMPONENT,
+    )
+    .expect("read final-shape snapshot version")
+    .unwrap_or(0);
     let schema_bytes = connection
         .query_row(
             "SELECT CAST(COALESCE(group_concat(entry, char(0)), '') AS BLOB)

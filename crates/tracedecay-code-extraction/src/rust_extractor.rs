@@ -1410,9 +1410,7 @@ impl RustExtractor {
     /// original source positions, so node ids, spans, and text of the items
     /// found there are exactly those of the enclosing file.
     fn parse_macro_item_body(state: &mut ExtractionState<'_>, body: TsNode<'_>) -> MacroItemBody {
-        let last = u32::try_from(body.child_count())
-            .ok()
-            .and_then(|count| count.checked_sub(1));
+        let last = body.child_count().checked_sub(1);
         let (Some(open), Some(close)) = (body.child(0), last.and_then(|index| body.child(index)))
         else {
             return MacroItemBody::Unparsed;

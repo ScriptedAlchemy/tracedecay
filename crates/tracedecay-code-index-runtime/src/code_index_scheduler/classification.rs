@@ -180,7 +180,7 @@ impl WorktreeChangeClassificationV1 {
         self.non_utf8_paths
             .iter()
             .filter(|path| {
-                gix::path::try_from_byte_slice(path)
+                gix::path::from_byte_slice(path)
                     .is_ok_and(|relative| project_root.join(relative).is_file())
             })
             .cloned()

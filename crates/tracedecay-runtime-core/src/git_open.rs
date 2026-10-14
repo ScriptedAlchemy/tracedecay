@@ -24,17 +24,12 @@ use std::path::Path;
 ///
 /// `path` may be a worktree root or a Git directory, exactly as `gix::open`
 /// accepts either.
-// The error is gix's own and it carries it by value; boxing here would only
-// make every caller's `map_err` differ from the type gix hands back. Upstream
-// allows the same lint on the call this wraps.
-#[allow(clippy::result_large_err)]
-pub fn open(path: &Path) -> Result<gix::Repository, gix::open::Error> {
+pub fn open(path: &Path) -> gix::Result<gix::Repository> {
     gix::open_opts(path, options())
 }
 
 /// Walk upward from `path` to the repository that contains it.
-#[allow(clippy::result_large_err)]
-pub fn discover(path: &Path) -> Result<gix::Repository, gix::discover::Error> {
+pub fn discover(path: &Path) -> gix::Result<gix::Repository> {
     gix::discover_opts(path, gix::discover::upwards::Options::default(), options())
 }
 

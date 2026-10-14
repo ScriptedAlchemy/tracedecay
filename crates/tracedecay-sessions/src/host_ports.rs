@@ -1,61 +1,11 @@
 //! Ports for the few host-side capabilities the session runtime reaches for
 //! but must not own.
 //!
-//! Three things the transcript runtime needs live above this crate: the agent
-//! host installation layout (`tracedecay-agent-hosts`) and the hook process
-//! spawner (root `src/hooks/`). Depending on either from here would point the
-//! session layer back at the composition root.
-//!
-//! The session review scheduler is an explicit [`session_review::SessionReviewPort`] value that a user
-//! ingest pass receives through its `SessionIngestAuthority`, so an unwired
-//! pass is a typed refusal rather than a silent skip.
+//! The transcript runtime needs the agent host installation layout
+//! (`tracedecay-agent-hosts`), which lives above this crate. Depending on it
+//! from here would point the session layer back at the composition root.
 
-use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
-
-/// Schedules the post-ingest user session review.
-///
-/// The review hint is delivered through the root-owned daemon client. This
-/// crate must not know the daemon transport or scheduling policy.
-pub mod session_review {
-    use std::sync::Arc;
-
-    use super::{Future, Pin};
-
-    pub type ReviewFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
-
-    type Scheduler = dyn for<'a> Fn(&'a str, Option<&'a str>) -> ReviewFuture<'a> + Send + Sync;
-
-    /// The root-owned review scheduler as an explicit handle.
-    ///
-    /// Constructing one requires the scheduler, and a user ingest pass must be
-    /// handed one by its authority; there is no process-global slot that can
-    /// be left empty and read back as "do nothing".
-    #[derive(Clone)]
-    pub struct SessionReviewPort {
-        scheduler: Arc<Scheduler>,
-    }
-
-    impl SessionReviewPort {
-        #[must_use]
-        pub fn new(
-            scheduler: impl for<'a> Fn(&'a str, Option<&'a str>) -> ReviewFuture<'a>
-            + Send
-            + Sync
-            + 'static,
-        ) -> Self {
-            Self {
-                scheduler: Arc::new(scheduler),
-            }
-        }
-
-        /// Requests a review pass for the sessions the ingest pass just wrote.
-        pub async fn schedule(self, provider: &str, session_id: Option<&str>) {
-            (self.scheduler)(provider, session_id).await;
-        }
-    }
-}
 
 /// VS Code user-data root for `home`.
 ///

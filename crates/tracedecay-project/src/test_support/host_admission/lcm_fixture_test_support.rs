@@ -138,7 +138,7 @@ impl HostAdmissionTestRuntimeV1 {
             .await?;
         transaction
             .execute(
-                "UPDATE session_schema_migrations SET version = ?1 WHERE name = 'lcm'",
+                "UPDATE tracedecay_schema_version SET version = ?1 WHERE component = 'lcm'",
                 [version],
             )
             .await
@@ -166,7 +166,7 @@ impl HostAdmissionTestRuntimeV1 {
             .await?;
         let mut rows = snapshot
             .query(
-                "SELECT version FROM session_schema_migrations WHERE name = 'lcm'",
+                "SELECT version FROM tracedecay_schema_version WHERE component = 'lcm'",
                 (),
             )
             .await
@@ -188,76 +188,6 @@ impl HostAdmissionTestRuntimeV1 {
             .map(Some)
             .map_err(|error| TraceDecayError::Database {
                 operation: "decode lcm schema migration fixture version".to_owned(),
-                message: error.to_string(),
-            })
-    }
-
-    #[doc(hidden)]
-    pub async fn set_lcm_schema_migration_applied_at_for_test(
-        &self,
-        scope: HostAdmissionScope,
-        applied_at: i64,
-    ) -> Result<()> {
-        let transaction = self
-            .session_database_for_test(scope)?
-            .begin_write_transaction()
-            .await?;
-        transaction
-            .execute(
-                "UPDATE session_schema_migrations
-                 SET applied_at = ?1
-                 WHERE name = 'lcm'",
-                [applied_at],
-            )
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                operation: "set lcm schema migration fixture applied_at".to_owned(),
-                message: error.to_string(),
-            })?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                operation: "set lcm schema migration fixture applied_at".to_owned(),
-                message: error.to_string(),
-            })
-    }
-
-    #[doc(hidden)]
-    pub async fn lcm_schema_migration_applied_at_for_test(
-        &self,
-        scope: HostAdmissionScope,
-    ) -> Result<Option<i64>> {
-        let snapshot = self
-            .session_database_for_test(scope)?
-            .read_snapshot()
-            .await?;
-        let mut rows = snapshot
-            .query(
-                "SELECT applied_at
-                 FROM session_schema_migrations
-                 WHERE name = 'lcm'",
-                (),
-            )
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                operation: "query lcm schema migration fixture applied_at".to_owned(),
-                message: error.to_string(),
-            })?;
-        let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| TraceDecayError::Database {
-                operation: "read lcm schema migration fixture applied_at".to_owned(),
-                message: error.to_string(),
-            })?
-        else {
-            return Ok(None);
-        };
-        row.get::<i64>(0)
-            .map(Some)
-            .map_err(|error| TraceDecayError::Database {
-                operation: "decode lcm schema migration fixture applied_at".to_owned(),
                 message: error.to_string(),
             })
     }

@@ -3,6 +3,7 @@ use crate::retrieval_content::projected_content_hash;
 #[cfg(test)]
 use tracedecay_runtime_core::db::engine::{Connection, TransactionBehavior};
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_runtime_core::db::schema_version::{self as store_schema, LCM_COMPONENT};
 use tracedecay_store::CANONICAL_BODIES_TABLE_SQL;
 
 use super::{LcmError, LcmRawMessage, raw};
@@ -73,8 +74,6 @@ pub const RAW_MESSAGE_UNPUBLISHED_SQL: &str = "NOT EXISTS (
     WHERE published_provenance.output_provider = raw.provider
       AND published_provenance.output_message_id = raw.message_id
 )";
-
-const MIGRATION_NAME: &str = "lcm";
 
 const RETIRE_LEGACY_GREP_INDEX_SQL: &str =
     "DROP INDEX IF EXISTS idx_lcm_raw_direct_user_candidate;";
@@ -287,6 +286,9 @@ pub async fn ensure_lcm_schema_in_transaction(
 ) -> Result<(), LcmError> {
     match require_admissible_lcm_schema(conn).await? {
         LcmSchemaAdmission::Current => {
+            store_schema::retire_named_ledgers(conn)
+                .await
+                .map_err(schema_stamp_error)?;
             conn.execute_batch(RETIRE_LEGACY_GREP_INDEX_SQL).await?;
             conn.execute_batch(CANONICAL_BODIES_TABLE_SQL).await?;
             ensure_raw_identity_schema(conn).await?;
@@ -298,12 +300,7 @@ pub async fn ensure_lcm_schema_in_transaction(
     }
 
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS session_schema_migrations (
-            name TEXT PRIMARY KEY,
-            version INTEGER NOT NULL,
-            applied_at INTEGER NOT NULL DEFAULT (unixepoch())
-        );
-        CREATE TABLE IF NOT EXISTS session_canonical_bodies (
+        "CREATE TABLE IF NOT EXISTS session_canonical_bodies (
             content_hash TEXT PRIMARY KEY,
             encoding TEXT NOT NULL CHECK(encoding IN ('identity', 'deflate')),
             body BLOB NOT NULL,
@@ -425,12 +422,14 @@ pub async fn ensure_lcm_schema_in_transaction(
         conn.execute_batch(sql).await?;
     }
 
-    conn.execute(
-        "INSERT INTO session_schema_migrations(name, version) VALUES (?1, ?2)",
-        params![MIGRATION_NAME, LCM_SCHEMA_VERSION],
-    )
-    .await?;
+    store_schema::record_version(conn, LCM_COMPONENT, LCM_SCHEMA_VERSION)
+        .await
+        .map_err(schema_stamp_error)?;
     Ok(())
+}
+
+fn schema_stamp_error(error: store_schema::SchemaVersionError) -> LcmError {
+    LcmError::Db(error.to_string())
 }
 
 async fn ensure_raw_identity_schema(conn: &(impl Executor + ?Sized)) -> Result<(), LcmError> {
@@ -472,19 +471,9 @@ pub async fn schema_version(conn: &(impl QueryExecutor + ?Sized)) -> Result<i64,
 async fn stored_schema_version(
     conn: &(impl QueryExecutor + ?Sized),
 ) -> Result<Option<i64>, LcmError> {
-    if !schema_object_exists(conn, "session_schema_migrations").await? {
-        return Ok(None);
-    }
-    let mut rows = conn
-        .query(
-            "SELECT version FROM session_schema_migrations WHERE name = ?1",
-            params![MIGRATION_NAME],
-        )
-        .await?;
-    match rows.next().await? {
-        Some(row) => Ok(Some(row.get(0)?)),
-        None => Ok(None),
-    }
+    store_schema::read_version(conn, LCM_COMPONENT)
+        .await
+        .map_err(schema_stamp_error)
 }
 
 async fn lcm_schema_objects_exist(conn: &(impl QueryExecutor + ?Sized)) -> Result<bool, LcmError> {
@@ -855,13 +844,19 @@ mod tests {
         assert_eq!(
             util::fetch_i64(
                 &*conn,
-                "SELECT version FROM session_schema_migrations WHERE name = 'lcm'",
+                "SELECT version FROM tracedecay_schema_version WHERE component = 'lcm'",
                 (),
                 "migration marker version",
             )
             .await
             .map_err(|err| err.to_string())?,
             LCM_SCHEMA_VERSION
+        );
+        assert!(
+            !schema_object_exists(&*conn, "session_schema_migrations")
+                .await
+                .map_err(|error| error.to_string())?,
+            "a current install retires the legacy LCM ledger"
         );
         assert_eq!(
             util::fetch_i64(
@@ -1126,6 +1121,60 @@ mod tests {
             checked += 1;
         }
         assert_eq!(checked, bodies.len() + 1);
+        Ok(())
+    }
+
+    #[asupersync::test]
+    async fn current_legacy_stamp_moves_onto_the_store_ledger() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let conn = TestConnection::open(&temp.path().join("sessions.db"));
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                provider TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                project_key TEXT NOT NULL,
+                project_path TEXT NOT NULL,
+                PRIMARY KEY(provider, session_id)
+            );",
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        ensure_lcm_schema(&conn)
+            .await
+            .map_err(|error| error.to_string())?;
+        conn.execute_batch(
+            "DROP TABLE tracedecay_schema_version;
+            CREATE TABLE session_schema_migrations (
+                name TEXT PRIMARY KEY,
+                version INTEGER NOT NULL,
+                applied_at INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            INSERT INTO session_schema_migrations(name, version, applied_at)
+            VALUES ('lcm', 15, 123);",
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+
+        ensure_lcm_schema(&conn)
+            .await
+            .map_err(|error| error.to_string())?;
+        assert!(
+            !schema_object_exists(&*conn, "session_schema_migrations")
+                .await
+                .map_err(|error| error.to_string())?,
+            "adopting the current LCM stamp drops the legacy ledger"
+        );
+        assert_eq!(
+            util::fetch_i64(
+                &*conn,
+                "SELECT version FROM tracedecay_schema_version WHERE component = 'lcm'",
+                (),
+                "adopted LCM version",
+            )
+            .await
+            .map_err(|error| error.to_string())?,
+            LCM_SCHEMA_VERSION
+        );
         Ok(())
     }
 

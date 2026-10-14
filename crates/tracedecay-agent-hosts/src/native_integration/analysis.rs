@@ -17,6 +17,7 @@ use tracedecay_domain::{
 use tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::git_repository::{GitNativeCandidateTreeV1, GitNativePreflight};
+use tracedecay_runtime_core::native_runtime;
 
 const ANALYZER_REVISION: &str = "native-semantic-analysis-v1";
 
@@ -25,20 +26,13 @@ const ANALYZER_REVISION: &str = "native-semantic-analysis-v1";
 pub struct DaemonNativeIntegrationAnalysisV1 {
     schedulers: CodeIndexSchedulerRegistryV1,
     scope: ResolvedScope,
-    runtime: tokio::runtime::Handle,
 }
 
 impl DaemonNativeIntegrationAnalysisV1 {
-    pub fn new(
-        schedulers: CodeIndexSchedulerRegistryV1,
-        scope: ResolvedScope,
-        runtime: tokio::runtime::Handle,
-    ) -> Self {
-        Self {
-            schedulers,
-            scope,
-            runtime,
-        }
+    /// `analyze` and `revalidate` block their caller on the scheduler, so
+    /// they run on blocking-pool threads, never on a native worker.
+    pub fn new(schedulers: CodeIndexSchedulerRegistryV1, scope: ResolvedScope) -> Self {
+        Self { schedulers, scope }
     }
 }
 
@@ -121,9 +115,8 @@ impl NativeIntegrationAnalysisPort for DaemonNativeIntegrationAnalysisV1 {
             candidate_tree: TreeId::new(candidate_tree.as_str().to_owned())
                 .map_err(native_domain)?,
         };
-        let bindings = self
-            .runtime
-            .block_on(self.schedulers.with_native_candidate_generation_producer(
+        let bindings =
+            native_runtime::block_on(self.schedulers.with_native_candidate_generation_producer(
                 &self.scope,
                 BranchGenerationReadControlV1 {
                     deadline: Some(deadline.clone()),
@@ -133,6 +126,7 @@ impl NativeIntegrationAnalysisPort for DaemonNativeIntegrationAnalysisV1 {
                     scheduler.publish_native_candidate_generations(&sources, candidate, control)
                 },
             ))
+            .map_err(native_domain)?
             .map_err(scheduler_error)?;
         let findings = analyze_native_integration_generations(
             bindings.merge_base.generation(),
@@ -184,26 +178,28 @@ impl NativeIntegrationAnalysisPort for DaemonNativeIntegrationAnalysisV1 {
         if report.analyzer_revision != ANALYZER_REVISION {
             return Ok(NativeIntegrationAnalysisRevalidationV1::Stale);
         }
-        let result =
-            self.runtime
-                .block_on(self.schedulers.with_native_candidate_generation_producer(
-                    &self.scope,
-                    BranchGenerationReadControlV1 {
-                        deadline: Some(deadline.clone()),
-                        cancellation: Some(cancellation.clone()),
-                    },
-                    |scheduler, _| {
-                        let merge_base = scheduler
-                            .load_native_candidate_generation(&identity(&report.merge_base))?;
-                        let source = scheduler
-                            .load_native_candidate_generation(&identity(&report.source))?;
-                        let destination = scheduler
-                            .load_native_candidate_generation(&identity(&report.destination))?;
-                        let candidate = scheduler
-                            .load_native_candidate_generation(&identity(&report.candidate))?;
-                        Ok((merge_base, source, destination, candidate))
-                    },
-                ));
+        let Ok(result) =
+            native_runtime::block_on(self.schedulers.with_native_candidate_generation_producer(
+                &self.scope,
+                BranchGenerationReadControlV1 {
+                    deadline: Some(deadline.clone()),
+                    cancellation: Some(cancellation.clone()),
+                },
+                |scheduler, _| {
+                    let merge_base = scheduler
+                        .load_native_candidate_generation(&identity(&report.merge_base))?;
+                    let source =
+                        scheduler.load_native_candidate_generation(&identity(&report.source))?;
+                    let destination = scheduler
+                        .load_native_candidate_generation(&identity(&report.destination))?;
+                    let candidate =
+                        scheduler.load_native_candidate_generation(&identity(&report.candidate))?;
+                    Ok((merge_base, source, destination, candidate))
+                },
+            ))
+        else {
+            return Ok(NativeIntegrationAnalysisRevalidationV1::Unavailable);
+        };
         let (merge_base, source, destination, candidate) = match result {
             Ok((Some(merge_base), Some(source), Some(destination), Some(candidate))) => {
                 (merge_base, source, destination, candidate)

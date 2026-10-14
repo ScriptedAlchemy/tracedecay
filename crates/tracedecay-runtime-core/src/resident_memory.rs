@@ -228,7 +228,7 @@ pub fn detected_process_resident_memory_limit_v1() -> NonZeroU64 {
 #[must_use]
 pub fn physical_memory_bytes_v1() -> Option<u64> {
     let system = System::new_with_specifics(
-        RefreshKind::new().with_memory(MemoryRefreshKind::new().with_ram()),
+        RefreshKind::nothing().with_memory(MemoryRefreshKind::nothing().with_ram()),
     );
     Some(system.total_memory()).filter(|bytes| *bytes != 0)
 }

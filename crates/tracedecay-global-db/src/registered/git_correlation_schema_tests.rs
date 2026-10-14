@@ -28,7 +28,7 @@ async fn an_older_git_correlation_schema_is_refused_without_mutation() {
     rusqlite::Connection::open(&database_path)
         .unwrap()
         .execute(
-            "UPDATE session_schema_migrations SET version = ?1 WHERE name = 'git_correlation'",
+            "UPDATE tracedecay_schema_version SET version = ?1 WHERE component = 'git_correlation'",
             [previous],
         )
         .unwrap();

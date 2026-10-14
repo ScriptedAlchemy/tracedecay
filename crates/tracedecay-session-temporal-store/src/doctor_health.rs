@@ -11,7 +11,8 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::handle::{SessionTemporalAccess, SessionTemporalRegisteredDb};
-use tracedecay_runtime_core::db::engine::Error as EngineError;
+use tracedecay_runtime_core::db::engine::{Error as EngineError, QueryExecutor};
+use tracedecay_runtime_core::db::schema_version::{self, SESSION_TEMPORAL_COMPONENT};
 
 use crate::schema_constants::{SESSION_TEMPORAL_SCHEMA_VERSION, TEMPORAL_TABLE_COLUMNS};
 
@@ -845,7 +846,7 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
 
 #[tracing::instrument(name = "session_temporal.doctor.diagnose", level = "trace", skip_all)]
 async fn diagnose_snapshot(
-    conn: &impl crate::handle::SessionTemporalQuery,
+    conn: &(impl crate::handle::SessionTemporalQuery + QueryExecutor),
 ) -> SessionTemporalHealthReport {
     let inventory = match snapshot_schema_inventory(conn).await {
         Ok(inventory) => inventory,
@@ -1106,16 +1107,18 @@ fn normalize_sql(sql: &str) -> String {
     skip_all
 )]
 async fn snapshot_schema_version(
-    conn: &impl crate::handle::SessionTemporalQuery,
+    conn: &(impl QueryExecutor + Sync),
 ) -> tracedecay_runtime_core::db::engine::Result<Option<i64>> {
-    let mut rows = conn
-        .query(
-            "SELECT version FROM session_temporal_schema_migrations
-             WHERE name = 'session-temporal'",
-            (),
-        )
-        .await?;
-    rows.next().await?.map(|row| row.get(0)).transpose()
+    match schema_version::read_version(conn, SESSION_TEMPORAL_COMPONENT).await {
+        Ok(version) => Ok(version),
+        Err(error) if error.is_busy() => Err(EngineError::Busy),
+        Err(error) => Err(EngineError::Sqlite {
+            operation: "read schema version",
+            code: None,
+            extended_code: None,
+            message: error.to_string(),
+        }),
+    }
 }
 
 #[tracing::instrument(
