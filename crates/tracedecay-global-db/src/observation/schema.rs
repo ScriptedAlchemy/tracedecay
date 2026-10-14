@@ -1,6 +1,6 @@
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor};
 #[cfg(test)]
 use tracedecay_runtime_core::db::engine::params;
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor};
 use tracedecay_runtime_core::db::schema_version;
 
 use super::super::{global_db_operation_error, global_db_operation_message};
@@ -89,7 +89,9 @@ async fn migration_recorded(
     schema_version::read_version(conn, migration)
         .await
         .map(|version| version.is_some())
-        .map_err(|error| global_db_operation_message(OBSERVATION_SCHEMA_OPERATION, error.to_string()))
+        .map_err(|error| {
+            global_db_operation_message(OBSERVATION_SCHEMA_OPERATION, error.to_string())
+        })
 }
 
 async fn record_marker(
@@ -98,7 +100,9 @@ async fn record_marker(
 ) -> tracedecay_domain::errors::Result<()> {
     schema_version::record_version(conn, migration, 1)
         .await
-        .map_err(|error| global_db_operation_message(OBSERVATION_SCHEMA_OPERATION, error.to_string()))
+        .map_err(|error| {
+            global_db_operation_message(OBSERVATION_SCHEMA_OPERATION, error.to_string())
+        })
 }
 
 async fn observation_rows_exist(
@@ -115,8 +119,7 @@ async fn observation_rows_exist(
 }
 
 /// Canonical observation-authority DDL.
-const OBSERVATION_AUTHORITY_SCHEMA_SQL: &str =
-    "CREATE TABLE IF NOT EXISTS sanitization_receipts (
+const OBSERVATION_AUTHORITY_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS sanitization_receipts (
             receipt_id TEXT PRIMARY KEY,
             sanitizer_version TEXT NOT NULL,
             payload_digest TEXT NOT NULL,
@@ -246,9 +249,11 @@ const OBSERVATION_AUTHORITY_SCHEMA_SQL: &str =
 pub async fn ensure_observation_schema(
     conn: &(impl Executor + Sync),
 ) -> tracedecay_domain::errors::Result<Option<crate::registered::RefusedAuthorityV1>> {
-    schema_version::retire_named_ledgers(conn).await.map_err(|error| {
-        global_db_operation_message(OBSERVATION_SCHEMA_OPERATION, error.to_string())
-    })?;
+    schema_version::retire_named_ledgers(conn)
+        .await
+        .map_err(|error| {
+            global_db_operation_message(OBSERVATION_SCHEMA_OPERATION, error.to_string())
+        })?;
     let table_preexisted = observation_table_exists(conn).await?;
     tracedecay_runtime_core::db::retrieval_anchor_schema::install_retrieval_anchor_schema(
         conn,

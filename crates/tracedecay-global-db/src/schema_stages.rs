@@ -859,10 +859,7 @@ async fn install_registered_schema_stage_sequence(
     tracedecay_runtime_core::db::schema_version::retire_named_ledgers(transaction)
         .await
         .map_err(|error| {
-            global_db_operation_message(
-                "adopt store schema version",
-                error.to_string(),
-            )
+            global_db_operation_message("adopt store schema version", error.to_string())
         })?;
     let is_fresh = configuration_fresh.is_some();
     configuration::ensure_configuration_schema(transaction, configuration_fresh)
