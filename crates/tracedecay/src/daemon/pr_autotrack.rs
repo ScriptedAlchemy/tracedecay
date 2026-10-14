@@ -59,7 +59,7 @@ fn scheduler_unavailable(detail: &str) -> String {
 
 async fn git_authority_available(repo_root: &Path) -> bool {
     let repo = repo_root.to_path_buf();
-    tokio::task::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         tracedecay_runtime_core::worktree::git_worktree_root(&repo).is_some()
     })
     .await
@@ -229,7 +229,7 @@ async fn activate_manual_branch_with_administration(
     let command_control = administration.command_control.clone();
     let repo = repo_root.to_path_buf();
     let branch_name = branch.to_string();
-    let head_sha = match tokio::task::spawn_blocking(move || {
+    let head_sha = match tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         resolve_branch_head(&repo, &branch_name, &command_control)
     })
     .await
@@ -295,7 +295,7 @@ async fn activate_manual_branch_with_administration(
     let label_for_prep = label.clone();
     let expected_head = head_sha.clone();
     let command_control = administration.command_control.clone();
-    match tokio::task::spawn_blocking(move || {
+    match tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         prepare_manual_branch_worktree(
             &repo,
             &wt,
@@ -498,7 +498,7 @@ pub(crate) async fn cleanup_manual_branch_retirement(
     let tracking_ref = artifacts.tracking_ref;
     let label = artifacts.label;
     let source_oid = source.source_oid.clone();
-    let (cleaned, lifecycle) = tokio::task::spawn_blocking(move || {
+    let (cleaned, lifecycle) = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         let cleaned = cleanup_owned_worktree(
             &repo_root,
             &expected_worktree,
@@ -789,7 +789,7 @@ async fn track_pr(
     let expected_head = pr.head_sha.clone();
     let command_control = administration.command_control.clone();
     let pr_number = pr.number;
-    match tokio::task::spawn_blocking(move || {
+    match tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         prepare_pr_worktree(
             &repo,
             &wt,
@@ -1018,7 +1018,7 @@ async fn sweep_orphan_pr_worktrees(
     administration: PrStoreAdministration<'_>,
 ) {
     let worktrees_dir = data_root.join("pr-worktrees");
-    let entries = match tokio::task::spawn_blocking({
+    let entries = match tracedecay_runtime_core::native_runtime::spawn_blocking({
         let worktrees_dir = worktrees_dir.clone();
         move || {
             std::fs::read_dir(&worktrees_dir).map(|entries| {

@@ -78,10 +78,11 @@ pub(super) async fn refresh_membership(
         .map_err(|_| RemoteNodeOperatorErrorV1::InvalidRequest)?;
     let discover = request.clone();
     // The SDK client is blocking; it is built, used, and dropped off the runtime.
-    let discovered =
-        tokio::task::spawn_blocking(move || discover_authority(&discover, &credential))
-            .await
-            .unwrap_or(Err(RemoteNodeOperatorErrorV1::Unavailable));
+    let discovered = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        discover_authority(&discover, &credential)
+    })
+    .await
+    .unwrap_or(Err(RemoteNodeOperatorErrorV1::Unavailable));
     match discovered {
         Ok(discovery) => {
             runtime.join_remote_node(&discovery).await?;

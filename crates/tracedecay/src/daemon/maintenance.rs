@@ -1119,10 +1119,10 @@ async fn run_resident_memory_sampler_loop(
         // multi-gigabyte heap takes real time; keep it off the runtime. A
         // shutdown stops awaiting that blocking pass but cannot unsafely
         // interrupt allocator maintenance already running on its worker.
-        let mut sampled = tokio::task::spawn_blocking(move || sample());
+        let sampled = tracedecay_runtime_core::native_runtime::spawn_blocking(move || sample());
         tokio::select! {
             () = cancellation.cancelled() => return,
-            result = &mut sampled => {
+            result = sampled => {
                 if result.is_err() {
                     return;
                 }

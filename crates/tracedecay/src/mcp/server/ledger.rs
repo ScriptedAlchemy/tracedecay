@@ -226,16 +226,17 @@ impl McpServer {
             let Some(monitor_dir) = monitor_dir else {
                 return;
             };
-            let monitor_write = tokio::task::spawn_blocking(move || {
-                tracedecay_session_memory::monitor_ring::write_entry_to(
-                    &monitor_dir,
-                    &monitor_project_root,
-                    "tracedecay",
-                    &tool_name,
-                    net_saved_tokens,
-                    raw_file_tokens,
-                );
-            });
+            let monitor_write =
+                tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+                    tracedecay_session_memory::monitor_ring::write_entry_to(
+                        &monitor_dir,
+                        &monitor_project_root,
+                        "tracedecay",
+                        &tool_name,
+                        net_saved_tokens,
+                        raw_file_tokens,
+                    );
+                });
             if let Err(error) = monitor_write.await {
                 tracing::warn!(error = %error, "live monitor entry write failed");
             }
@@ -357,7 +358,7 @@ impl McpServer {
                     return;
                 }
             };
-            let saved = tokio::task::spawn_blocking(move || {
+            let saved = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
                 persist_worldwide_delta(&profile_root, delta, upload_enabled)
                     .inspect_err(|error| tracing::warn!(%error, "could not save upload config"))
                     .is_ok()
@@ -538,7 +539,7 @@ impl McpServer {
             // The derivation walks the filesystem (gix discovery) and may
             // spawn git, so it runs on the blocking pool, off the
             // notification hot path.
-            let derived = tokio::task::spawn_blocking(move || {
+            let derived = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
                 derive_hook_span_git_context(&cwd, project_root, &active_project_root)
             })
             .await;
