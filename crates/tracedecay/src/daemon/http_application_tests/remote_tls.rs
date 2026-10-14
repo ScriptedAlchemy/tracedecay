@@ -366,20 +366,24 @@ async fn remote_tls_connect(
 /// Waits until the real TLS reader has consumed exactly `expected` body
 /// bytes, refusing any reading past it.
 async fn wait_for_ingress_body_bytes(service: &DaemonHttpApplicationService, expected: usize) {
-    loop {
-        let observed = service
-            .remote_tls_ingress_snapshot()
-            .expect("TLS ingress observer")
-            .body_bytes_observed;
-        assert!(
-            observed <= expected,
-            "TLS ingress consumed body bytes out of order"
-        );
-        if observed == expected {
-            return;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let observed = service
+                .remote_tls_ingress_snapshot()
+                .expect("TLS ingress observer")
+                .body_bytes_observed;
+            assert!(
+                observed <= expected,
+                "TLS ingress consumed body bytes out of order"
+            );
+            if observed == expected {
+                return;
+            }
+            tokio::task::yield_now().await;
         }
-        tokio::task::yield_now().await;
-    }
+    })
+    .await
+    .expect("the listener must keep reading the request body");
 }
 
 async fn remote_tls_h2_only_handshake_is_rejected(
