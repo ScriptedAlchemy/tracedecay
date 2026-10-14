@@ -188,11 +188,10 @@ struct IndependentDoctorChecks {
     daemon_service: DoctorCheck<DoctorCounters>,
     reset_stores: DoctorCheck<(DoctorCounters, bool)>,
     project_files: DoctorCheck<DoctorCounters>,
-    daemon_status: tokio::task::JoinHandle<
-        Option<tracedecay_domain::errors::Result<Option<serde_json::Value>>>,
-    >,
+    daemon_status:
+        DoctorCheck<Option<tracedecay_domain::errors::Result<Option<serde_json::Value>>>>,
     watcher: DoctorCheck<DoctorCounters>,
-    upload: tokio::task::JoinHandle<tracedecay_domain::errors::Result<UploadSetting>>,
+    upload: DoctorCheck<tracedecay_domain::errors::Result<UploadSetting>>,
     hosts: DoctorCheck<DoctorCounters>,
     network: DoctorNetworkChecks,
 }
@@ -233,7 +232,7 @@ fn launch_independent_doctor_checks(
                 check_persisted_state_resets(dc, &profile_root_for_files, &project_for_files);
             })
         }),
-        daemon_status: tokio::spawn(async move {
+        daemon_status: spawn_doctor_task(async move {
             if daemon_listening {
                 Some(daemon_project_status(&profile_for_status, &project_for_status).await)
             } else {
@@ -243,7 +242,7 @@ fn launch_independent_doctor_checks(
         watcher: spawn_doctor_check(move || {
             collect_quiet(|dc| check_watcher(dc, &profile_for_watcher))
         }),
-        upload: tokio::spawn(async move {
+        upload: spawn_doctor_task(async move {
             if daemon_listening {
                 configured_upload_enabled(&profile_for_upload)
                     .await
@@ -276,6 +275,24 @@ where
     Box::pin(tracedecay_runtime_core::native_runtime::spawn_blocking(
         check,
     ))
+}
+
+/// A daemon round trip running on the native runtime beside the blocking
+/// checks. The result travels over a channel because a `NativeTask` output
+/// must be `Clone`, and the doctor's error type is not.
+fn spawn_doctor_task<T: Send + 'static>(
+    work: impl Future<Output = T> + Send + 'static,
+) -> DoctorCheck<T> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let started = tracedecay_runtime_core::native_runtime::NativeTask::spawn(async move {
+        let _ = sender.send(work.await);
+    });
+    Box::pin(async move {
+        let _task = started?;
+        receiver
+            .await
+            .map_err(|_| "doctor task ended without a result".to_owned())
+    })
 }
 
 async fn join_doctor_check<T, E: std::fmt::Display>(

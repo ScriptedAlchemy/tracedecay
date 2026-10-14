@@ -381,6 +381,17 @@ pub fn tokio_runtime_missing_count(site: &str) -> u64 {
         .unwrap_or(0)
 }
 
+/// How many times [`tokio_handle`] found no Tokio runtime in this process,
+/// over every site.
+#[must_use]
+pub fn tokio_runtime_missing_total() -> u64 {
+    TOKIO_RUNTIME_MISSING
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .values()
+        .sum()
+}
+
 fn started_process_runtime() -> Result<&'static Runtime, String> {
     PROCESS_RUNTIME
         .get_or_init(|| {
@@ -415,8 +426,10 @@ mod tests {
     fn a_missing_tokio_runtime_is_counted_per_site_and_a_present_one_is_not() {
         const SITE: &str = "native_runtime.tests.tokio_handle";
         let before = tokio_runtime_missing_count(SITE);
+        let before_total = tokio_runtime_missing_total();
         assert!(tokio_handle(SITE).is_none());
         assert_eq!(tokio_runtime_missing_count(SITE), before + 1);
+        assert_eq!(tokio_runtime_missing_total(), before_total + 1);
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
@@ -424,6 +437,7 @@ mod tests {
         let _entered = runtime.enter();
         assert!(tokio_handle(SITE).is_some());
         assert_eq!(tokio_runtime_missing_count(SITE), before + 1);
+        assert_eq!(tokio_runtime_missing_total(), before_total + 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]
