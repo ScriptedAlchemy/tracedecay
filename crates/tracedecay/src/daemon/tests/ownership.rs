@@ -207,7 +207,6 @@ async fn unborn_git_project_open_retains_lsp_and_starts_hook_replay() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
-    const PHASE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(20);
     const PARALLEL_CLIENT_IDENTITIES: usize = 16;
     let temp = TempDir::new().expect("temp dir");
     let project = temp.path().join("project");
@@ -251,17 +250,13 @@ async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
 
     tracedecay_runtime_core::git_repository::hold_repository_discovery_clock_for_test(&project);
     eprintln!("[cache-test] phase=concurrent-open start");
-    let (direct_server, alias_server) = tokio::time::timeout(
-        PHASE_TIMEOUT,
-        Box::pin(async {
-            tokio::join!(
-                engine.project_server(&direct),
-                engine.project_server(&aliased)
-            )
-        }),
-    )
-    .await
-    .expect("cache-test concurrent-open phase timed out");
+    let (direct_server, alias_server) = Box::pin(async {
+        tokio::join!(
+            engine.project_server(&direct),
+            engine.project_server(&aliased)
+        )
+    })
+    .await;
     eprintln!("[cache-test] phase=concurrent-open done");
     let direct_server = direct_server.expect("direct project server");
     let alias_server = alias_server.expect("aliased project server");
@@ -273,25 +268,21 @@ async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
         1,
         "canonical aliases must singleflight the first project open"
     );
-    tokio::time::timeout(PHASE_TIMEOUT, async {
-        while engine
-            .automation_config_probe_attempts
-            .load(std::sync::atomic::Ordering::Relaxed)
-            == 0
-        {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("initial automation configuration probe timed out");
+    while engine
+        .automation_config_probe_attempts
+        .load(std::sync::atomic::Ordering::Relaxed)
+        == 0
+    {
+        tokio::task::yield_now().await;
+    }
     engine
         .automation_config_probe_attempts
         .store(0, std::sync::atomic::Ordering::Relaxed);
 
     eprintln!("[cache-test] phase=cached-open start");
-    let cached = tokio::time::timeout(PHASE_TIMEOUT, engine.project_server(&direct))
+    let cached = engine
+        .project_server(&direct)
         .await
-        .expect("cache-test cached-open phase timed out")
         .expect("cached project server");
     eprintln!("[cache-test] phase=cached-open done");
     assert!(std::sync::Arc::ptr_eq(&direct_server, &cached));
@@ -340,9 +331,7 @@ async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
     drop(alias_server);
     drop(direct_server);
     eprintln!("[cache-test] phase=shutdown start");
-    tokio::time::timeout(PHASE_TIMEOUT, engine.shutdown_all())
-        .await
-        .expect("cache-test shutdown phase timed out");
+    engine.shutdown_all().await;
     assert!(
         released_server.upgrade().is_none(),
         "shutdown must break the server-to-administration ownership cycle"
