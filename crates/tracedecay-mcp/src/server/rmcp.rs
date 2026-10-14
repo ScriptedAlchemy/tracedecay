@@ -557,7 +557,9 @@ pub fn attach_stateless_request_context(request: &mut JsonRpcRequest) -> bool {
         return false;
     };
     let mut context = RequestMetaObject::new();
-    context.set_protocol_version(ProtocolVersion::LATEST);
+    // `LATEST` (2026-07-28) has no initialize handshake, and stamping it would add
+    // resultType/ttlMs/cacheScope that strict 2025-11-25 clients reject.
+    context.set_protocol_version(ProtocolVersion::LATEST_WITH_INITIALIZE);
     context.set_client_capabilities(ClientCapabilities::default());
     let mut attached = false;
     for (key, value) in context.0.0 {
@@ -597,7 +599,7 @@ where
         .with_server_info(Implementation::new("tracedecay", self.build_version))
     }
 
-    /// Answers one request under `rmcp` 3.4's server request policy
+    /// Answers one request under `rmcp` 3.5's server request policy
     /// (`handler/server.rs`), narrowed to the methods this server implements.
     pub(crate) async fn handle_request(
         &self,

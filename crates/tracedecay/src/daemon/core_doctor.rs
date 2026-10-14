@@ -3,7 +3,8 @@
 
 use serde_json::json;
 use std::path::{Path, PathBuf};
-use tokio::time::{Duration, timeout};
+use std::time::Duration;
+use tracedecay_runtime_core::native_runtime::timeout;
 
 use super::{DaemonHandshake, projectless_tool_call, write_daemon_response};
 use tracedecay_contracts::project_open::{ProjectOpenStatusStateV1, ProjectOpenStatusV1};

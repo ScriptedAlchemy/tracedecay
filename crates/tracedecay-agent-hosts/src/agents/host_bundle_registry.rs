@@ -984,9 +984,8 @@ mod tests {
     /// component-set journal.
     #[test]
     fn opencode_core_assets_do_not_depend_on_the_running_executable_path() {
-        let running = std::env::current_exe()
-            .map(|path| path.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let running =
+            std::env::current_exe().map_or_default(|path| path.to_string_lossy().into_owned());
         let installed =
             super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
         let assets = component_assets(
@@ -1049,9 +1048,8 @@ mod tests {
     /// `component-set-journal.hermes.v1.json` behind.
     #[test]
     fn hermes_core_assets_do_not_depend_on_the_running_executable_path() {
-        let running = std::env::current_exe()
-            .map(|path| path.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let running =
+            std::env::current_exe().map_or_default(|path| path.to_string_lossy().into_owned());
         let installed =
             super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
         let assets = component_assets(

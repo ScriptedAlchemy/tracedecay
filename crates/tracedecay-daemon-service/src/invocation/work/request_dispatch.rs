@@ -1,6 +1,8 @@
 //! Work application invocation dispatch.
 
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use tracedecay_contracts::{CancellationContext, Deadline, WorkAttemptListOperationV1};
@@ -493,8 +495,25 @@ pub(super) async fn dispatch_work_application(
             operation_key,
             use_case.clone(),
             input_digest,
-            evidence_retrieval::retrieve(&registered, &context, capability, use_case, request)
-                .await,
+            {
+                let retrieved: Pin<
+                    Box<
+                        dyn Future<
+                                Output = Result<
+                                    tracedecay_contracts::WorkEvidenceRetrievalV1,
+                                    tracedecay_contracts::ApplicationProblem,
+                                >,
+                            > + Send,
+                    >,
+                > = Box::pin(evidence_retrieval::retrieve(
+                    &registered,
+                    &context,
+                    capability,
+                    use_case,
+                    request,
+                ));
+                retrieved.await
+            },
             observed_at,
             deadline,
             WorkApplicationOutcomeV1::RetrieveEvidence,
@@ -537,13 +556,23 @@ pub(super) async fn dispatch_work_application(
                 tracedecay_application::observability::RegisteredObservabilityPortV1::new(
                     &registered.database,
                 );
+            let metrics: Pin<
+                Box<
+                    dyn Future<
+                            Output = Result<
+                                tracedecay_contracts::ExecutionTopologyMetricsV1,
+                                tracedecay_contracts::ApplicationProblem,
+                            >,
+                        > + Send,
+                >,
+            > = Box::pin(tracedecay_contracts::execution_topology_rollup_metrics(
+                &observations,
+                &observations,
+                &context,
+                &request,
+            ));
             let metrics = tracing::Instrument::instrument(
-                tracedecay_contracts::execution_topology_rollup_metrics(
-                    &observations,
-                    &observations,
-                    &context,
-                    &request,
-                ),
+                metrics,
                 tracing::trace_span!("daemon.service.work.topology_metrics"),
             )
             .await;
@@ -644,7 +673,16 @@ pub(super) async fn dispatch_work_application(
             }
         }
         WorkApplicationInvocationV1::AdjudicateLeak(command) => {
-            let adjudicated = adjudicate_leak(
+            let adjudicated: Pin<
+                Box<
+                    dyn Future<
+                            Output = Result<
+                                tracedecay_contracts::WorkLeakAdjudicationOutcomeV1,
+                                tracedecay_contracts::ApplicationProblem,
+                            >,
+                        > + Send,
+                >,
+            > = Box::pin(adjudicate_leak(
                 &registered,
                 &services,
                 attempt_processes.as_ref(),
@@ -652,8 +690,8 @@ pub(super) async fn dispatch_work_application(
                 command,
                 observed_at,
                 &deadline,
-            )
-            .await;
+            ));
+            let adjudicated = adjudicated.await;
             if let Ok(outcome) = &adjudicated {
                 let _ = tracedecay_application::observability::record_work_leak_observation(
                     observability_producer.as_deref(),
@@ -737,20 +775,21 @@ pub(super) async fn dispatch_work_application(
             }
         }
         WorkApplicationInvocationV1::Experience(request) => {
-            intelligence::experience(
-                &registered,
-                request_id,
-                &context,
-                canonical_request_id,
-                operation_key,
-                use_case,
-                input_digest,
-                observed_at,
-                deadline,
-                capability,
-                request,
-            )
-            .await
+            let experienced: Pin<Box<dyn Future<Output = DaemonInvocationResponse> + Send>> =
+                Box::pin(intelligence::experience(
+                    &registered,
+                    request_id,
+                    &context,
+                    canonical_request_id,
+                    operation_key,
+                    use_case,
+                    input_digest,
+                    observed_at,
+                    deadline,
+                    capability,
+                    request,
+                ));
+            experienced.await
         }
         WorkApplicationInvocationV1::CompareProposal(request) => intelligence::compare_proposal(
             &registered,
@@ -845,8 +884,7 @@ pub(super) async fn dispatch_work_application(
                 let transition = services.run_control().pause_with_receipt(&context, command);
                 let open_receipts = transition
                     .as_ref()
-                    .map(|transition| transition.blocked_intervals.clone())
-                    .unwrap_or_default();
+                    .map_or_default(|transition| transition.blocked_intervals.clone());
                 let response = complete_work_effect(
                     &registered,
                     request_id,
@@ -877,8 +915,7 @@ pub(super) async fn dispatch_work_application(
                     .resume_with_receipt(&context, command);
                 let settled_receipts = transition
                     .as_ref()
-                    .map(|transition| transition.blocked_intervals.clone())
-                    .unwrap_or_default();
+                    .map_or_default(|transition| transition.blocked_intervals.clone());
                 let response = complete_work_effect(
                     &registered,
                     request_id,
@@ -1014,7 +1051,21 @@ pub(super) async fn dispatch_work_application(
                         deadline: deadline.clone(),
                         cancellation: job_cancellation,
                     };
-                    job::advance_job(&host, &context, capability, &use_case, request).await
+                    {
+                        let advanced: Pin<
+                            Box<
+                                dyn Future<
+                                        Output = Result<
+                                            tracedecay_contracts::AdvanceWorkJobResultV1,
+                                            tracedecay_contracts::ApplicationProblem,
+                                        >,
+                                    > + Send,
+                            >,
+                        > = Box::pin(job::advance_job(
+                            &host, &context, capability, &use_case, request,
+                        ));
+                        advanced.await
+                    }
                 }
                 Err(problem) => Err(problem),
             };

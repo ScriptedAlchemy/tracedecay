@@ -115,12 +115,12 @@ pub(crate) mod mimalloc_v3 {
         // exists, so every tree-sitter block is allocated and freed by
         // mimalloc; the functions are thread-safe and never unwind.
         unsafe {
-            tree_sitter::set_allocator(
-                Some(mi_malloc),
-                Some(mi_calloc),
-                Some(mi_realloc),
-                Some(mi_free),
-            );
+            tree_sitter::set_allocator(Some(tree_sitter::Allocator {
+                malloc: mi_malloc,
+                calloc: mi_calloc,
+                realloc: mi_realloc,
+                free: mi_free,
+            }));
         }
         let methods = sqlite3_mem_methods {
             xMalloc: Some(sqlite_malloc),

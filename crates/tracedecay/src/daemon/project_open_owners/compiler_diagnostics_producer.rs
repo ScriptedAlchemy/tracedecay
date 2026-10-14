@@ -130,7 +130,11 @@ pub(super) fn spawn_typescript_diagnostics_producer(
 /// that silently skips projects.
 async fn discover_projects(project_root: &Path) -> Option<Vec<TypeScriptProject>> {
     let root = project_root.to_path_buf();
-    match tokio::task::spawn_blocking(move || typescript_projects(&root)).await {
+    match tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        typescript_projects(&root)
+    })
+    .await
+    {
         Ok(projects) => Some(projects),
         Err(error) => {
             log_daemon_event(
@@ -138,7 +142,7 @@ async fn discover_projects(project_root: &Path) -> Option<Vec<TypeScriptProject>
                 &[
                     ("project", project_root.display().to_string()),
                     ("outcome", "discovery_failed".to_owned()),
-                    ("detail", error.to_string()),
+                    ("detail", error),
                 ],
             );
             None

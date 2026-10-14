@@ -2018,9 +2018,7 @@ fn push_manifest_rows(
     }
     let projection = &identity.projection.projection;
     let entities = &manifest.entities;
-    let workers = rayon::current_thread_index()
-        .map(|_| rayon::current_num_threads())
-        .unwrap_or(1);
+    let workers = rayon::current_thread_index().map_or(1, |_| rayon::current_num_threads());
     let row_window = workers.max(1).saturating_mul(512);
     {
         let _span = tracing::trace_span!("code_index.seal.encode.entities").entered();
@@ -2138,9 +2136,7 @@ fn push_spilled_rows(
     check: &dyn Fn() -> Result<(), GraphDbError>,
 ) -> Result<(usize, usize), GraphDbError> {
     let projection = &identity.projection.projection;
-    let workers = rayon::current_thread_index()
-        .map(|_| rayon::current_num_threads())
-        .unwrap_or(1);
+    let workers = rayon::current_thread_index().map_or(1, |_| rayon::current_num_threads());
     let row_window = workers.max(1).saturating_mul(512);
     let (entity_count, relation_count) = spilled.row_counts();
     {
@@ -3531,7 +3527,7 @@ mod cost_probe {
 
     fn directory_bytes(path: &std::path::Path) -> u64 {
         let Ok(entries) = std::fs::read_dir(path) else {
-            return std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+            return std::fs::metadata(path).map_or(0, |meta| meta.len());
         };
         entries
             .filter_map(Result::ok)
@@ -3540,7 +3536,7 @@ mod cost_probe {
                 if path.is_dir() {
                     directory_bytes(&path)
                 } else {
-                    std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0)
+                    std::fs::metadata(&path).map_or(0, |meta| meta.len())
                 }
             })
             .sum()
@@ -3567,9 +3563,8 @@ mod cost_probe {
         let entities = env_usize("TRACEDECAY_VERIFY_PROBE_ROWS", 50_000);
         let relations = entities.saturating_mul(8) / 7;
         let payload = env_usize("TRACEDECAY_VERIFY_PROBE_PAYLOAD", 700);
-        let bytes_payload = std::env::var("TRACEDECAY_VERIFY_PROBE_FORM")
-            .map(|form| form != "compact")
-            .unwrap_or(true);
+        let bytes_payload =
+            std::env::var("TRACEDECAY_VERIFY_PROBE_FORM").map_or(true, |form| form != "compact");
         let check: &dyn Fn() -> Result<(), crate::GraphDbError> = &|| Ok(());
 
         let temp = tempfile::tempdir().unwrap();

@@ -134,7 +134,7 @@ jobs:
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24
+          node-version: 26
 
       - uses: ./.github/actions/setup-pnpm
 
@@ -617,8 +617,6 @@ jobs:
       # One graph walk per push. The release resolver repeats it on the tag it
       # builds, since a release is dispatched without waiting on this run.
       - name: Check the production feature graph
-        env:
-          RUSTUP_TOOLCHAIN: stable
         run: python3 scripts/check-production-feature-profile.py
 
   # The configuration users actually receive: the release build of
@@ -662,7 +660,7 @@ jobs:
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24"
+          node-version: "26"
 
       - uses: ./.github/actions/setup-pnpm
 

@@ -599,8 +599,7 @@ fn visit_require_object_pattern(
                     let local_name = child
                         .child_by_field_name("value")
                         .or_else(|| child.named_child(1))
-                        .map(|value| binding_name(state, value))
-                        .unwrap_or_else(|| imported_name.clone());
+                        .map_or_else(|| imported_name.clone(), |value| binding_name(state, value));
                     push_evidence(
                         state,
                         module_specifier,

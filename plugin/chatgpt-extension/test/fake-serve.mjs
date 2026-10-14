@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Stands in for `tracedecay serve` where a test needs exact daemon tool results.
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { McpServer } from "@modelcontextprotocol/server";
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 
 const server = new McpServer({ name: "fake-tracedecay-serve", version: "0.0.0" });
 

@@ -186,7 +186,7 @@ async fn registered_projects(
         }
     }
     let profile_root = profile.data_dir().to_path_buf();
-    tokio::task::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         roots
             .into_iter()
             .filter_map(|project_root| {

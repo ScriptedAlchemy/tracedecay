@@ -1,3 +1,5 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use tracedecay_contracts::{ApplicationProblem, RequestContext};
@@ -330,34 +332,26 @@ fn census_readiness(
             &registered.work_topology_policy,
         )
         .ok()?;
-    let mut global_remaining = capacities
-        .values()
-        .next()
-        .map(|capacity| {
-            u64::from(
-                registered
-                    .work_topology_policy
-                    .concurrency
-                    .maximum_global_active
-                    .get(),
-            )
-            .saturating_sub(capacity.global_active())
-        })
-        .unwrap_or_default();
-    let mut repository_remaining = capacities
-        .values()
-        .next()
-        .map(|capacity| {
-            u64::from(
-                registered
-                    .work_topology_policy
-                    .concurrency
-                    .maximum_active_per_repository
-                    .get(),
-            )
-            .saturating_sub(capacity.repository_active())
-        })
-        .unwrap_or_default();
+    let mut global_remaining = capacities.values().next().map_or_default(|capacity| {
+        u64::from(
+            registered
+                .work_topology_policy
+                .concurrency
+                .maximum_global_active
+                .get(),
+        )
+        .saturating_sub(capacity.global_active())
+    });
+    let mut repository_remaining = capacities.values().next().map_or_default(|capacity| {
+        u64::from(
+            registered
+                .work_topology_policy
+                .concurrency
+                .maximum_active_per_repository
+                .get(),
+        )
+        .saturating_sub(capacity.repository_active())
+    });
     if capacities.values().any(|capacity| {
         capacity.concurrency() != &registered.work_topology_policy.concurrency
             || capacities.values().next().is_some_and(|first| {
@@ -446,7 +440,7 @@ pub(crate) struct WorkflowFanOutCensusObservationRecoveryOwnerV1 {
 
 struct WorkflowFanOutCensusObservationRecoveryInnerV1 {
     cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
-    task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    task: std::sync::Mutex<Option<tracedecay_runtime_core::native_runtime::NativeTask<()>>>,
 }
 
 impl WorkflowFanOutCensusObservationRecoveryOwnerV1 {
@@ -464,7 +458,7 @@ impl WorkflowFanOutCensusObservationRecoveryOwnerV1 {
         let cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
         let worker_cancellation = cancellation.clone();
         let task_cancellation = worker_cancellation.clone();
-        let task = tokio::spawn(async move {
+        let task = tracedecay_runtime_core::native_runtime::NativeTask::spawn(async move {
             run_recovery_loop(
                 signal,
                 worker_cancellation,
@@ -476,13 +470,24 @@ impl WorkflowFanOutCensusObservationRecoveryOwnerV1 {
                     let producer = Arc::clone(&producer);
                     let cancellation = task_cancellation.clone();
                     async move {
-                        recover_pending_census_once(database, project_id, producer, cancellation)
-                            .await
+                        let recovered: Pin<Box<dyn Future<Output = Result<(), String>> + Send>> =
+                            Box::pin(recover_pending_census_once(
+                                database,
+                                project_id,
+                                producer,
+                                cancellation,
+                            ));
+                        recovered.await
                     }
                 },
             )
             .await;
-        });
+        })
+        .map_err(|error| {
+            tracedecay_contracts::ApplicationContractError::Domain(format!(
+                "workflow census recovery could not start: {error}"
+            ))
+        })?;
         Ok(Self {
             inner: Arc::new(WorkflowFanOutCensusObservationRecoveryInnerV1 {
                 cancellation,
@@ -507,10 +512,12 @@ impl WorkflowFanOutCensusObservationRecoveryOwnerV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
-        if let Some(task) = task
-            && let Err(error) = task.await
-        {
-            tracing::warn!(%error, "workflow census recovery shutdown failed");
+        if let Some(task) = task {
+            let outcome = task.wait().await;
+            if outcome != tracedecay_runtime_core::native_runtime::NativeTaskOutcome::Completed(())
+            {
+                tracing::warn!(?outcome, "workflow census recovery shutdown failed");
+            }
         }
     }
 }

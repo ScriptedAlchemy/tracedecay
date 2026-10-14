@@ -78,7 +78,7 @@ pub(super) async fn revoke_remote_node(
         Err(_) => return RemoteNodeRevocationErrorV1::Unavailable.into_response(),
     };
     let node_id = request.node_id.clone();
-    let revoked = tokio::task::spawn_blocking(move || {
+    let revoked = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         let revoked_at = tracedecay_contracts::clock::now_micros();
         // Grants first: an enrollment that consumes a grant concurrently is
         // then already committed when the node's enrollments are revoked.

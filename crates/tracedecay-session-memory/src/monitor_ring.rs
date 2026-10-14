@@ -77,8 +77,7 @@ pub fn write_entry_to(
     let mmap_path = dir.join(MMAP_FILENAME);
     let project = project_root
         .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
+        .map_or_default(|n| n.to_string_lossy().to_string());
     let _ = write_entry_inner(&mmap_path, prefix, &project, tool_name, delta, before);
 }
 

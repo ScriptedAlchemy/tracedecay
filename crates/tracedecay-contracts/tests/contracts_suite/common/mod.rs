@@ -818,8 +818,7 @@ impl WorkAttemptStoragePort for WorkProductAttemptStore {
             .filter(|attempt| {
                 attempt
                     .as_ref()
-                    .map(|attempt| !attempt.is_terminal())
-                    .unwrap_or(true)
+                    .map_or(true, |attempt| !attempt.is_terminal())
             })
             .collect()
     }

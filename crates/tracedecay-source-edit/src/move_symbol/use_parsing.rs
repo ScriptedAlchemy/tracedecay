@@ -169,9 +169,7 @@ fn parse_use_bindings(stmt_text: &str) -> Option<(bool, Vec<UseLeaf>)> {
             .map(|binding| UseLeaf { binding })
             .collect()
     } else {
-        leaf_binding(body)
-            .map(|binding| vec![UseLeaf { binding }])
-            .unwrap_or_default()
+        leaf_binding(body).map_or_default(|binding| vec![UseLeaf { binding }])
     };
     if leaves.is_empty() && !glob {
         return None;

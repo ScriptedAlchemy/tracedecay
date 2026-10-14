@@ -157,9 +157,9 @@ fn run_with_timeout(mut command: Command, timeout: Duration) -> Output {
             .unwrap_or_else(|error| panic!("failed to poll tracedecay: {error}"))
         {
             let join = |handle: Option<JoinHandle<Vec<u8>>>| {
-                handle
-                    .map(|handle| handle.join().expect("child pipe drain thread panicked"))
-                    .unwrap_or_default()
+                handle.map_or_default(|handle| {
+                    handle.join().expect("child pipe drain thread panicked")
+                })
             };
             return Output {
                 status,

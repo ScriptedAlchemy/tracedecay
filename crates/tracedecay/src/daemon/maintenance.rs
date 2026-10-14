@@ -28,6 +28,7 @@ use super::branch_admin::StoreAdministration;
 use tracedecay_daemon_service::shutdown::DAEMON_TASK_ABORT_DEADLINE;
 use tracedecay_domain::process_heap::request_idle_thread_collection_v1;
 use tracedecay_runtime_core::logging::log_daemon_event;
+use tracedecay_runtime_core::native_runtime::{self, TimeoutError};
 const MAINTENANCE_STORE_PAGE_LIMIT: usize = 8;
 const REGISTERED_PROJECT_PAGE_LIMIT: usize = 64;
 
@@ -74,41 +75,41 @@ async fn registered_project_stores(
 /// the blocking closure keeps that client past the terminal store close, which
 /// then leaves the store's WAL untruncated. The task therefore gets the abort
 /// deadline to finish cooperatively and is aborted only past it.
-async fn join_cancelled_maintenance_task(task: Option<JoinHandle<()>>, owner: &'static str) {
+async fn join_cancelled_maintenance_task(
+    task: Option<JoinHandle<()>>,
+    owner: &'static str,
+    abort_deadline: Duration,
+) {
     let Some(mut task) = task else {
         return;
     };
-    if tokio::time::timeout(DAEMON_TASK_ABORT_DEADLINE, &mut task)
-        .await
-        .is_ok()
-    {
-        return;
-    }
+    let reason = match native_runtime::timeout(abort_deadline, &mut task).await {
+        Ok(_) => return,
+        Err(TimeoutError::Elapsed) => "cooperative_join_exceeded_abort_deadline".to_string(),
+        Err(error @ TimeoutError::TimerUnavailable(_)) => error.to_string(),
+    };
     log_daemon_event(
         "daemon_shutdown",
         &[
             ("outcome", "maintenance_task_aborted".to_string()),
             ("owner", owner.to_string()),
-            (
-                "reason",
-                "cooperative_join_exceeded_abort_deadline".to_string(),
-            ),
+            ("reason", reason),
         ],
     );
     task.abort();
-    match tokio::time::timeout(DAEMON_TASK_ABORT_DEADLINE, task).await {
-        Ok(Ok(()) | Err(_)) => {}
-        Err(_) => {
-            log_daemon_event(
-                "daemon_shutdown",
-                &[
-                    ("outcome", "maintenance_task_abandoned".to_string()),
-                    ("owner", owner.to_string()),
-                    ("reason", "join_exceeded_abort_deadline".to_string()),
-                ],
-            );
-        }
-    }
+    let reason = match native_runtime::timeout(abort_deadline, task).await {
+        Ok(Ok(()) | Err(_)) => return,
+        Err(TimeoutError::Elapsed) => "join_exceeded_abort_deadline".to_string(),
+        Err(error @ TimeoutError::TimerUnavailable(_)) => error.to_string(),
+    };
+    log_daemon_event(
+        "daemon_shutdown",
+        &[
+            ("outcome", "maintenance_task_abandoned".to_string()),
+            ("owner", owner.to_string()),
+            ("reason", reason),
+        ],
+    );
 }
 
 #[tracing::instrument(
@@ -571,10 +572,16 @@ impl MaintenanceCoordinator {
         // Cancel stops the next pass and the sampler at once; an in-flight
         // tick notices between stores. Retention and RSS sampling are
         // abandonable, so the abort deadline bounds each join.
-        join_cancelled_maintenance_task(self.task.lock().await.take(), "retention_tick").await;
+        join_cancelled_maintenance_task(
+            self.task.lock().await.take(),
+            "retention_tick",
+            DAEMON_TASK_ABORT_DEADLINE,
+        )
+        .await;
         join_cancelled_maintenance_task(
             self.resident_memory_sampler.lock().await.take(),
             "resident_memory_sampler",
+            DAEMON_TASK_ABORT_DEADLINE,
         )
         .await;
     }
@@ -1151,7 +1158,13 @@ async fn run_resident_memory_sampler_loop(
     loop {
         tokio::select! {
             () = cancellation.cancelled() => return,
-            () = tokio::time::sleep(interval) => {}
+            slept = native_runtime::sleep_until(Instant::now() + interval) => {
+                if let Err(error) = slept {
+                    // Without a timer every park would return at once and spin.
+                    tracing::error!(event = "resident_memory_sampler_timer_unavailable", %error);
+                    return;
+                }
+            }
         }
         if cancellation.is_cancelled() {
             return;
@@ -1161,10 +1174,10 @@ async fn run_resident_memory_sampler_loop(
         // multi-gigabyte heap takes real time; keep it off the runtime. A
         // shutdown stops awaiting that blocking pass but cannot unsafely
         // interrupt allocator maintenance already running on its worker.
-        let mut sampled = tokio::task::spawn_blocking(move || sample());
+        let sampled = native_runtime::spawn_blocking(move || sample());
         tokio::select! {
             () = cancellation.cancelled() => return,
-            result = &mut sampled => {
+            result = sampled => {
                 if result.is_err() {
                     return;
                 }
@@ -1590,8 +1603,9 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn blocked_resident_memory_reclaimer_never_stalls_runtime_or_sampler_cancellation() {
+        const INTERVAL: Duration = Duration::from_millis(200);
         let cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
         let started = Arc::new(Notify::new());
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1613,47 +1627,37 @@ mod tests {
             }
         });
         let task_cancellation = cancellation.clone();
-        let sampler = tokio::spawn(async move {
-            run_resident_memory_sampler_loop(
-                &task_cancellation,
-                Duration::from_secs(30),
-                fake_reclaimer,
-            )
-            .await;
+        let spawned = std::time::Instant::now();
+        let mut sampler = tokio::spawn(async move {
+            run_resident_memory_sampler_loop(&task_cancellation, INTERVAL, fake_reclaimer).await;
         });
-        tokio::task::yield_now().await;
 
-        tokio::time::advance(Duration::from_secs(29)).await;
-        tokio::task::yield_now().await;
-        let calls_before_deadline = calls.load(Ordering::SeqCst);
-        tokio::time::advance(Duration::from_secs(1)).await;
-        let started_on_deadline =
-            tokio::time::timeout(Duration::from_secs(1), started.notified()).await;
+        let started_after_interval =
+            tokio::time::timeout(Duration::from_secs(10), started.notified()).await;
+        let first_sample_after = spawned.elapsed();
         let heartbeat = tokio::spawn(async { 7_u8 });
         let heartbeat_result = heartbeat.await;
 
         cancellation.cancel();
-        tokio::task::yield_now().await;
-        let cancelled_while_blocked = sampler.is_finished();
+        let cancelled_while_blocked =
+            tokio::time::timeout(Duration::from_secs(10), &mut sampler).await;
 
         let (released, ready) = &*release;
         *released
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
         ready.notify_all();
-        let sampler_result = sampler.await;
 
-        assert_eq!(calls_before_deadline, 0);
+        assert!(started_after_interval.is_ok(), "the sampler must run");
         assert!(
-            started_on_deadline.is_ok(),
-            "the sampler must preserve its thirty-second cadence"
+            first_sample_after >= INTERVAL,
+            "the sampler must wait its interval first, sampled after {first_sample_after:?}"
         );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(heartbeat_result.expect("runtime heartbeat"), 7);
-        assert!(
-            cancelled_while_blocked,
-            "cancellation must not wait for a blocked pressure reclaimer"
-        );
-        sampler_result.expect("sampler joins after cancellation");
+        cancelled_while_blocked
+            .expect("cancellation must not wait for a blocked pressure reclaimer")
+            .expect("sampler joins after cancellation");
     }
 
     /// A registered project nothing has mounted since the daemon started is
@@ -1742,24 +1746,31 @@ mod tests {
         assert_eq!(generation_files(), 1);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn shutdown_aborts_a_stuck_tick_at_the_abort_deadline() {
-        let coordinator = MaintenanceCoordinator::default();
+        let tick_state = Arc::new(());
+        let held_state = Arc::clone(&tick_state);
         let started = Arc::new(Notify::new());
         let task_started = Arc::clone(&started);
         let handle = tokio::spawn(async move {
             task_started.notify_one();
             std::future::pending::<()>().await;
+            drop(held_state);
         });
-        *coordinator.task.lock().await = Some(handle);
         started.notified().await;
 
-        tokio::time::timeout(
-            super::DAEMON_TASK_ABORT_DEADLINE + Duration::from_millis(500),
-            coordinator.shutdown(),
+        super::join_cancelled_maintenance_task(
+            Some(handle),
+            "stuck_tick",
+            Duration::from_millis(50),
         )
-        .await
-        .expect("maintenance shutdown must abort a tick stuck past the abort deadline");
+        .await;
+
+        assert_eq!(
+            Arc::strong_count(&tick_state),
+            1,
+            "a tick stuck past the abort deadline must be aborted and joined"
+        );
     }
 
     /// A tick cancelled while it awaits blocking store work must not leave

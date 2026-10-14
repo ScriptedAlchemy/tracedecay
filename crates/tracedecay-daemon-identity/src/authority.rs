@@ -99,13 +99,12 @@ impl DaemonAuthority {
             let record = read_record_if_present(&authority_root.join(RECORD_FILE))
                 .ok()
                 .flatten()
-                .map(|record| {
+                .map_or_default(|record| {
                     format!(
                         " (pid {}, epoch {}, endpoint '{}')",
                         record.pid, record.epoch, record.endpoint
                     )
-                })
-                .unwrap_or_default();
+                });
             return Err(TraceDecayError::Config {
                 message: format!(
                     "daemon authority for profile '{}' is already held{record}: {error}",
@@ -478,7 +477,7 @@ fn restrict_file(_path: &Path) -> Result<()> {
 
 fn new_auth_token() -> Result<String> {
     let mut bytes = [0_u8; 32];
-    getrandom::getrandom(&mut bytes).map_err(|error| TraceDecayError::Config {
+    getrandom::fill(&mut bytes).map_err(|error| TraceDecayError::Config {
         message: format!("failed to generate daemon authentication token: {error}"),
     })?;
     Ok(hex::encode(bytes))

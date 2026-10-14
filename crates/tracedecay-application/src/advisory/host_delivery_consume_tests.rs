@@ -382,7 +382,6 @@ impl CanonicalDiagnosticSnapshotAuthority for UnavailableDiagnostics {
 
 fn lsp_session_factory() -> Arc<DaemonLspSessionFactory> {
     Arc::new(DaemonLspSessionFactory::new(
-        crate::lsp_runtime::native_lsp_runtime(),
         Arc::new(NoopFeedbackCycle),
         Arc::new(UnavailableSemanticProvider),
         Arc::new(UnavailableDiagnostics),

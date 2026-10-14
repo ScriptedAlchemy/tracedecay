@@ -7,7 +7,9 @@
 //! unreadable registry still fails.
 
 use serde_json::Value;
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 
 use tracedecay_contracts::{
     ProjectRegistryContextCommand, ProjectRegistryContextFuture, ProjectRegistryContextOutcome,
@@ -44,11 +46,14 @@ impl DaemonProjectRegistryReadService {
             return Ok(None);
         };
         let git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(active_project_root);
-        Ok(self
-            .registry
-            .project_registry_context_by_identity(active_project_root, git_common_dir.as_deref())
-            .await?
-            .map(|context| context.project.project_id))
+        let resolved: Pin<
+            Box<dyn Future<Output = Result<Option<ProjectRegistryContext>>> + Send + '_>,
+        > =
+            Box::pin(self.registry.project_registry_context_by_identity(
+                active_project_root,
+                git_common_dir.as_deref(),
+            ));
+        Ok(resolved.await?.map(|context| context.project.project_id))
     }
 
     async fn listing(
@@ -57,13 +62,18 @@ impl DaemonProjectRegistryReadService {
         mut projects: Vec<CodeProjectRecord>,
         limit: usize,
     ) -> Result<ProjectRegistryListingView> {
-        let active_id = self.active_project_id(active_project_root).await?;
+        let active: Pin<Box<dyn Future<Output = Result<Option<String>>> + Send + '_>> =
+            Box::pin(self.active_project_id(active_project_root));
+        let active_id = active.await?;
         let truncated = projects.len() > limit;
         projects.truncate(limit);
-        let contexts = self
-            .registry
-            .project_registry_contexts_for_projects(&projects)
-            .await?;
+        let contexts_future: Pin<
+            Box<dyn Future<Output = Result<Vec<ProjectRegistryContext>>> + Send + '_>,
+        > = Box::pin(
+            self.registry
+                .project_registry_contexts_for_projects(&projects),
+        );
+        let contexts = contexts_future.await?;
         let view = build_project_registry_view(
             &contexts,
             active_id.as_deref(),
@@ -95,13 +105,23 @@ impl DaemonProjectRegistryReadService {
         // One extra row detects truncation without a second count query.
         let page = limit.saturating_add(1);
         let projects = match &scope {
-            ProjectRegistryListingScope::All => self.registry.list_code_projects(page).await?,
+            ProjectRegistryListingScope::All => {
+                let listed: Pin<
+                    Box<dyn Future<Output = Result<Vec<CodeProjectRecord>>> + Send + '_>,
+                > = Box::pin(self.registry.list_code_projects(page));
+                listed.await?
+            }
             ProjectRegistryListingScope::Matching { query } => {
-                self.registry.try_search_code_projects(query, page).await?
+                let searched: Pin<
+                    Box<dyn Future<Output = Result<Vec<CodeProjectRecord>>> + Send + '_>,
+                > = Box::pin(self.registry.try_search_code_projects(query, page));
+                searched.await?
             }
         };
-        self.listing(active_project_root.as_deref(), projects, limit)
-            .await
+        let listed_view: Pin<
+            Box<dyn Future<Output = Result<ProjectRegistryListingView>> + Send + '_>,
+        > = Box::pin(self.listing(active_project_root.as_deref(), projects, limit));
+        listed_view.await
     }
 
     async fn resolve_context(

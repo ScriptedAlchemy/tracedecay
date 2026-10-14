@@ -104,32 +104,26 @@ fn print_cost_csv(summary: &CostSummaryPayload, by_model: bool) {
         for model in &usage.by_model {
             let cost = model
                 .cost_usd
-                .map(|cost| format!("{cost:.4}"))
-                .unwrap_or_else(|| "unavailable".to_owned());
+                .map_or_else(|| "unavailable".to_owned(), |cost| format!("{cost:.4}"));
             let tokens = model
                 .total_tokens
-                .map(|tokens| tokens.to_string())
-                .unwrap_or_else(|| "unavailable".to_owned());
+                .map_or_else(|| "unavailable".to_owned(), |tokens| tokens.to_string());
             println!("{},{},{cost},{tokens}", model.provider, model.model);
         }
     } else {
         println!("total_cost_usd,input_tokens,output_tokens,tokens_saved,efficiency");
         let total_cost = usage
             .total_cost_usd
-            .map(|cost| format!("{cost:.4}"))
-            .unwrap_or_else(|| "unavailable".to_owned());
+            .map_or_else(|| "unavailable".to_owned(), |cost| format!("{cost:.4}"));
         let input = usage
             .total_input_tokens
-            .map(|tokens| tokens.to_string())
-            .unwrap_or_else(|| "unavailable".to_owned());
+            .map_or_else(|| "unavailable".to_owned(), |tokens| tokens.to_string());
         let output = usage
             .total_output_tokens
-            .map(|tokens| tokens.to_string())
-            .unwrap_or_else(|| "unavailable".to_owned());
+            .map_or_else(|| "unavailable".to_owned(), |tokens| tokens.to_string());
         let efficiency = summary
             .efficiency_ratio
-            .map(|ratio| format!("{ratio:.4}"))
-            .unwrap_or_else(|| "unavailable".to_owned());
+            .map_or_else(|| "unavailable".to_owned(), |ratio| format!("{ratio:.4}"));
         println!(
             "{total_cost},{input},{output},{},{efficiency}",
             summary.tokens_saved
@@ -148,16 +142,17 @@ fn print_model_table(summary: &CostSummaryPayload) {
             .total_cost_usd
             .zip(model.cost_usd)
             .filter(|(total, _)| *total > 0.0)
-            .map(|(total, cost)| format!("{:.0}%", cost / total * 100.0))
-            .unwrap_or_else(|| "n/a".to_owned());
-        let token_count = model
-            .total_tokens
-            .map(tracedecay_runtime_core::text::format_token_count)
-            .unwrap_or_else(|| "unknown".to_owned());
+            .map_or_else(
+                || "n/a".to_owned(),
+                |(total, cost)| format!("{:.0}%", cost / total * 100.0),
+            );
+        let token_count = model.total_tokens.map_or_else(
+            || "unknown".to_owned(),
+            tracedecay_runtime_core::text::format_token_count,
+        );
         let cost = model
             .cost_usd
-            .map(|cost| format!("${cost:.2}"))
-            .unwrap_or_else(|| "unavailable".to_owned());
+            .map_or_else(|| "unavailable".to_owned(), |cost| format!("${cost:.2}"));
         println!(
             "  {:<12} {:<24} {:>10} {:>10} {:>6}",
             model.provider, model.model, cost, token_count, share
@@ -216,18 +211,16 @@ fn print_cost_row(
         let denominator = input.checked_add(cache_read)?;
         (denominator > 0).then_some((cache_read as f64 / denominator as f64) * 100.0)
     });
-    let input = input
-        .map(tracedecay_runtime_core::text::format_token_count)
-        .unwrap_or_else(|| "unknown".to_owned());
-    let output = output
-        .map(tracedecay_runtime_core::text::format_token_count)
-        .unwrap_or_else(|| "unknown".to_owned());
-    let cost = cost
-        .map(|cost| format!("${cost:.2}"))
-        .unwrap_or_else(|| "unavailable".to_owned());
-    let cache = cache_pct
-        .map(|percent| format!("{percent:.0}%"))
-        .unwrap_or_else(|| "unknown".to_owned());
+    let input = input.map_or_else(
+        || "unknown".to_owned(),
+        tracedecay_runtime_core::text::format_token_count,
+    );
+    let output = output.map_or_else(
+        || "unknown".to_owned(),
+        tracedecay_runtime_core::text::format_token_count,
+    );
+    let cost = cost.map_or_else(|| "unavailable".to_owned(), |cost| format!("${cost:.2}"));
+    let cache = cache_pct.map_or_else(|| "unknown".to_owned(), |percent| format!("{percent:.0}%"));
     println!(
         "  {:<10} {:>10} {:>10} {:>10} {:>10}",
         label, cost, input, output, cache

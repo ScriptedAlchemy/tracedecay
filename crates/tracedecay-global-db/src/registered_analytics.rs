@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::future::Future;
+use std::pin::Pin;
 
 use tracedecay_runtime_core::db::engine::{Value, opt_text};
 
@@ -254,20 +256,38 @@ impl RegisteredGlobalDb {
         project_id: &str,
         idempotency_key: &str,
     ) -> Result<Option<AnalyticsEventRecord>, String> {
-        let snapshot = self
-            .read_snapshot()
+        let opened: Pin<
+            Box<
+                dyn Future<
+                        Output = tracedecay_domain::errors::Result<
+                            tracedecay_runtime_core::db::DatabaseEngineReadSnapshot,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > = Box::pin(self.read_snapshot());
+        let snapshot = opened
             .await
             .map_err(|error| format!("failed to begin observability event snapshot: {error}"))?;
-        let mut rows = snapshot
-            .query(
-                "SELECT id, provider, project_id, session_id, timestamp, event_kind,
+        let queried: Pin<
+            Box<
+                dyn Future<
+                        Output = tracedecay_runtime_core::db::engine::Result<
+                            tracedecay_runtime_core::db::engine::Rows,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > = Box::pin(snapshot.query(
+            "SELECT id, provider, project_id, session_id, timestamp, event_kind,
                         hook_name, tool_name, tool_category, skill_name, hint_category,
                         hint_id, outcome, metadata_json
                  FROM analytics_events
                  WHERE provider = 'tracedecay-observability' AND project_id = ?1 AND hint_id = ?2
                  LIMIT 1",
-                tracedecay_runtime_core::db::engine::params![project_id, idempotency_key],
-            )
+            tracedecay_runtime_core::db::engine::params![project_id, idempotency_key],
+        ));
+        let mut rows = queried
             .await
             .map_err(|error| format!("failed to read observability event: {error}"))?;
         rows.next()

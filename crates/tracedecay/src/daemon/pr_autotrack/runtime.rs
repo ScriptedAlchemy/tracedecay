@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use tokio::time::Instant;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::native_runtime;
 
 use crate::daemon::branch_admin::StoreAdministration;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
@@ -94,7 +94,13 @@ async fn run(
         .await;
         tokio::select! {
             () = cancellation.cancelled() => return,
-            () = tokio::time::sleep(BASE_TICK) => {}
+            slept = native_runtime::sleep_until(Instant::now() + BASE_TICK) => {
+                if let Err(error) = slept {
+                    // Without a timer every park would return at once and spin.
+                    tracing::error!(event = "pr_autotrack_timer_unavailable", %error);
+                    return;
+                }
+            }
         }
     }
 }
@@ -201,7 +207,7 @@ async fn poll_project(
     let command_control = PrCommandControl::with_cancellation(cancellation.clone());
     let repo_for_discovery = repo_root.clone();
     let discovery_control = command_control.clone();
-    let discovery = match tokio::task::spawn_blocking(move || {
+    let discovery = match tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         discover_open_prs_with_control(&repo_for_discovery, &discovery_control)
     })
     .await

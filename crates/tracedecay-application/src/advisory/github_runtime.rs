@@ -691,9 +691,7 @@ impl GitHubReviewRefreshStateV1 {
             } else {
                 previous.and_then(|state| state.last_complete.clone())
             };
-        let mut attempt_receipts = previous
-            .map(|state| state.attempt_receipts.clone())
-            .unwrap_or_default();
+        let mut attempt_receipts = previous.map_or_default(|state| state.attempt_receipts.clone());
         if let Some(receipt) = receipt {
             attempt_receipts.push(receipt);
             if attempt_receipts.len() > MAX_GITHUB_REFRESH_ATTEMPT_RECEIPTS_V1 {

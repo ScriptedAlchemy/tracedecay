@@ -1,6 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{Arc, atomic::Ordering};
+
+use tracedecay_runtime_core::native_runtime::{NativeTask, NativeTaskOutcome};
 
 use super::{ProjectRuntime, ProjectRuntimeRegistryV1};
 use crate::invocation::UnavailableFeedbackCycleRuntimeV1;
@@ -42,7 +46,9 @@ impl ProjectRuntimeRegistryV1 {
             }
             fences.quiesced.extend(roots.iter().cloned());
         }
-        if !self.drain_roots(roots).await {
+        let drained: Pin<Box<dyn Future<Output = bool> + Send + '_>> =
+            Box::pin(self.drain_roots(roots));
+        if !drained.await {
             self.release_quiesced_roots(roots);
             return None;
         }
@@ -175,7 +181,7 @@ impl ProjectRuntimeRegistryV1 {
         if !self.shutdown_started.swap(true, Ordering::AcqRel) {
             let registry = self.clone();
             self.shutdown_complete.send_replace(ShutdownState::Pending);
-            let task = tokio::spawn(async move {
+            let task = NativeTask::spawn(async move {
                 let drain_registry = registry.clone();
                 let drained = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -203,7 +209,14 @@ impl ProjectRuntimeRegistryV1 {
                 };
                 registry.shutdown_complete.send_replace(state);
             });
-            *shutdown_task = Some(task);
+            match task {
+                Ok(task) => *shutdown_task = Some(task),
+                Err(error) => {
+                    tracing::error!(%error, "project runtime shutdown drain was not started");
+                    self.shutdown_started.store(false, Ordering::Release);
+                    self.shutdown_complete.send_replace(ShutdownState::Failed);
+                }
+            }
         }
         drop(shutdown_task);
         loop {
@@ -240,14 +253,14 @@ impl ProjectRuntimeRegistryV1 {
             let Some(task) = retained.as_mut() else {
                 return;
             };
-            let result = task.await;
+            let result = task.wait().await;
             retained.take();
             result
         };
-        if let Err(error) = result {
+        if !matches!(result, NativeTaskOutcome::Completed(())) {
             self.shutdown_started.store(false, Ordering::Release);
             self.shutdown_complete.send_replace(ShutdownState::Failed);
-            tracing::error!(%error, "project runtime shutdown drain task failed");
+            tracing::error!(outcome = ?result, "project runtime shutdown drain task failed");
         }
     }
 
@@ -367,7 +380,13 @@ async fn shut_down_observability(runtimes: &mut BTreeMap<PathBuf, ProjectRuntime
         let Some(observability) = runtime.observability.take() else {
             continue;
         };
-        if let Err(error) = observability.shutdown().await {
+        let shutdown: Pin<
+            Box<
+                dyn Future<Output = Result<(), tracedecay_contracts::ApplicationContractError>>
+                    + Send,
+            >,
+        > = Box::pin(observability.shutdown());
+        if let Err(error) = shutdown.await {
             tracing::warn!(
                 project = %project_root.display(),
                 %error,

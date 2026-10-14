@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tracedecay_application::source_authorization::ProjectSourceAccessSnapshot;
 use tracedecay_application::stack_coordinator::{
@@ -40,8 +40,7 @@ use tracedecay_global_db::{
     GitHubStackSignalAppendOutcomeV1, GitHubStackSignalRecordV1,
     MAX_GITHUB_STACK_DELIVERY_BATCH_V1, RegisteredGlobalDb, RegisteredGlobalDbLeaseV1,
 };
-use tracedecay_runtime_core::cancellation::CancellationToken;
-use tracedecay_runtime_core::native_runtime;
+use tracedecay_runtime_core::native_runtime::{self, NativeTask};
 
 use super::registry::DaemonProjectNativeIntegrationService;
 use super::store::SharedDaemonNativeIntegrationStore;
@@ -760,9 +759,57 @@ pub struct DaemonGitHubStackRuntimeV1 {
     scope: ResolvedScope,
     coordinator: Arc<DaemonGitHubStackCoordinatorV1>,
     ports: StackRuntimePortsV1,
-    cancellation: CancellationToken,
-    tick_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    tick_task: NativeTask<()>,
 }
+
+/// Drains due deliveries every [`STACK_DELIVERY_TICK`] after the previous
+/// drain finishes, so a slow drain never runs back to back. Ends only when
+/// its task is aborted or no native timer starts.
+async fn drain_loop(coordinator: Arc<DaemonGitHubStackCoordinatorV1>, ports: StackRuntimePortsV1) {
+    loop {
+        let drain_coordinator = Arc::clone(&coordinator);
+        let drain_ports = ports.clone();
+        let drained = native_runtime::spawn_blocking(move || {
+            let now = StackRuntimePortsV1::now()?;
+            drain_coordinator.drain_due(&drain_ports, &drain_ports, &drain_ports, now)
+        })
+        .await;
+        match drained {
+            Ok(Ok(_)) => {}
+            Ok(Err(StackCoordinatorErrorV1::Unavailable)) => {
+                tracing::debug!(
+                    "GitHub stack drain deferred because its durable store is unavailable"
+                );
+            }
+            Ok(Err(error)) => tracing::warn!(?error, "GitHub stack delivery drain failed"),
+            Err(error) => tracing::warn!(%error, "GitHub stack delivery drain task failed"),
+        }
+        if let Err(error) = native_runtime::sleep_until(Instant::now() + STACK_DELIVERY_TICK).await
+        {
+            tracing::warn!(%error, "GitHub stack delivery drain stopped without a timer");
+            return;
+        }
+    }
+}
+
+// A `BTreeMap` of these runtimes proves the native service before `Send`
+// bottoms out (rust-lang/rust#159228). Each field is checked on its own.
+unsafe impl Send for DaemonGitHubStackRuntimeV1 {}
+unsafe impl Sync for DaemonGitHubStackRuntimeV1 {}
+
+const _: fn(&DaemonGitHubStackRuntimeV1) = |value| {
+    fn assert_send_sync<T: Send + Sync>(_: &T) {}
+    let DaemonGitHubStackRuntimeV1 {
+        scope,
+        coordinator,
+        ports,
+        tick_task,
+    } = value;
+    assert_send_sync(scope);
+    assert_send_sync(coordinator);
+    assert_send_sync(ports);
+    assert_send_sync(tick_task);
+};
 
 impl DaemonGitHubStackRuntimeV1 {
     #[allow(clippy::too_many_arguments)]
@@ -805,48 +852,14 @@ impl DaemonGitHubStackRuntimeV1 {
             authorizations: Arc::new(Mutex::new(BTreeMap::new())),
             preflight_outcomes: Arc::new(Mutex::new(BTreeMap::new())),
         };
-        let cancellation = CancellationToken::new();
-        let runtime = Arc::new(Self {
+        let tick_task = NativeTask::spawn(drain_loop(Arc::clone(&coordinator), ports.clone()))
+            .map_err(|_| StackCoordinatorErrorV1::Unavailable)?;
+        Ok(Arc::new(Self {
             scope,
             coordinator,
-            ports: ports.clone(),
-            cancellation: cancellation.clone(),
-            tick_task: Mutex::new(None),
-        });
-        let coordinator = Arc::clone(&runtime.coordinator);
-        let tick_ports = ports;
-        let task = tokio::runtime::Handle::try_current()
-            .map_err(|_| StackCoordinatorErrorV1::Unavailable)?
-            .spawn(async move {
-                let mut interval = tokio::time::interval(STACK_DELIVERY_TICK);
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                loop {
-                    tokio::select! {
-                        () = cancellation.cancelled() => break,
-                        _ = interval.tick() => {
-                            let coordinator = Arc::clone(&coordinator);
-                            let ports = tick_ports.clone();
-                            let drained = tokio::task::spawn_blocking(move || {
-                                let now = StackRuntimePortsV1::now()?;
-                                coordinator.drain_due(&ports, &ports, &ports, now)
-                            }).await;
-                            match drained {
-                                Ok(Ok(_)) => {},
-                                Ok(Err(StackCoordinatorErrorV1::Unavailable)) => {
-                                    tracing::debug!("GitHub stack drain deferred because its durable store is unavailable");
-                                }
-                                Ok(Err(error)) => tracing::warn!(?error, "GitHub stack delivery drain failed"),
-                                Err(error) => tracing::warn!(%error, "GitHub stack delivery drain task failed"),
-                            }
-                        }
-                    }
-                }
-            });
-        *runtime
-            .tick_task
-            .lock()
-            .map_err(|_| StackCoordinatorErrorV1::Unavailable)? = Some(task);
-        Ok(runtime)
+            ports,
+            tick_task,
+        }))
     }
 
     pub fn enqueue_from_preflight(
@@ -1147,12 +1160,7 @@ impl GitHubStackSignalExpandPort for DaemonGitHubStackRuntimeV1 {
 
 impl Drop for DaemonGitHubStackRuntimeV1 {
     fn drop(&mut self) {
-        self.cancellation.cancel();
-        if let Ok(mut task) = self.tick_task.lock()
-            && let Some(task) = task.take()
-        {
-            task.abort();
-        }
+        self.tick_task.abort();
     }
 }
 

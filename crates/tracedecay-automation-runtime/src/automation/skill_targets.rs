@@ -506,8 +506,7 @@ fn target_marker_slug(target: SkillInstallTarget) -> &'static str {
 fn unique_overlay_sibling(overlay_root: &Path, suffix: &str) -> PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
+        .map_or_default(|duration| duration.as_nanos());
     overlay_root.with_file_name(format!(
         ".{NATIVE_NAMESPACE_DIR}.{suffix}-{}-{nonce}",
         std::process::id()

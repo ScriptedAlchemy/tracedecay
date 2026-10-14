@@ -917,11 +917,14 @@ impl DaemonEngine {
             let transition = self.maintenance_transition_gate(old_key).await;
             let _transition = transition.lock().await;
             let automation_retirement = self.retire_automation_scheduler_locked(old_key).await;
-            let retired = timeout(DAEMON_TASK_ABORT_DEADLINE, async {
-                if let Some(retirement) = automation_retirement {
-                    retirement.wait().await;
-                }
-            })
+            let retired = tracedecay_runtime_core::native_runtime::timeout(
+                DAEMON_TASK_ABORT_DEADLINE,
+                async {
+                    if let Some(retirement) = automation_retirement {
+                        retirement.wait().await;
+                    }
+                },
+            )
             .await
             .is_ok();
             if !retired {

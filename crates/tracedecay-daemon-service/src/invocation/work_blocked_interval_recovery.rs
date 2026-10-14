@@ -11,7 +11,6 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::task::JoinHandle;
 use tracedecay_application::observability::{
     BoundedObservabilityProducerV1, work_blocked_interval_observation_envelope,
 };
@@ -20,6 +19,7 @@ use tracedecay_contracts::{
 };
 use tracedecay_domain::{ActorId, WorkBlockedIntervalReceiptV1};
 use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::native_runtime::{NativeTask, NativeTaskOutcome};
 
 use super::recovery_schedule::{RecoveryScheduleV1, RecoveryWarningTrackerV1, run_recovery_loop};
 use super::work_blocked_interval_recovery_context;
@@ -61,7 +61,7 @@ pub(crate) struct WorkBlockedIntervalObservationRecoveryOwnerV1 {
 
 struct WorkBlockedIntervalObservationRecoveryInnerV1 {
     cancellation: CancellationToken,
-    task: Mutex<Option<JoinHandle<()>>>,
+    task: Mutex<Option<NativeTask<()>>>,
 }
 
 impl WorkBlockedIntervalObservationRecoveryOwnerV1 {
@@ -78,20 +78,20 @@ impl WorkBlockedIntervalObservationRecoveryOwnerV1 {
             ));
         }
         let context = work_blocked_interval_recovery_context(&actor, &grant)?;
-        let runtime = tokio::runtime::Handle::try_current().map_err(|_| {
-            ApplicationContractError::Domain(
-                "Work blocked-interval recovery runtime unavailable".to_owned(),
-            )
-        })?;
         let cancellation = CancellationToken::new();
         let worker_cancellation = cancellation.clone();
-        let task = runtime.spawn(run_recovery(
+        let task = NativeTask::spawn(run_recovery(
             database,
             context,
             producer,
             signal,
             worker_cancellation,
-        ));
+        ))
+        .map_err(|error| {
+            ApplicationContractError::Domain(format!(
+                "Work blocked-interval recovery could not start: {error}"
+            ))
+        })?;
         Ok(Self {
             inner: Arc::new(WorkBlockedIntervalObservationRecoveryInnerV1 {
                 cancellation,
@@ -121,10 +121,11 @@ impl WorkBlockedIntervalObservationRecoveryOwnerV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
-        if let Some(task) = task
-            && let Err(error) = task.await
-        {
-            tracing::warn!(%error, "Work blocked-interval recovery shutdown failed");
+        if let Some(task) = task {
+            let outcome = task.wait().await;
+            if outcome != NativeTaskOutcome::Completed(()) {
+                tracing::warn!(?outcome, "Work blocked-interval recovery shutdown failed");
+            }
         }
     }
 }
@@ -297,4 +298,133 @@ fn mark_receipt_durable(
     work.run_control()
         .mark_settled_blocked_interval_durable(context, receipt)
         .map_err(RecoveryFailureV1::Application)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tracedecay_application::observability::{
+        BoundedObservabilityProducerV1, ObservabilityProducerIdentityV1,
+    };
+    use tracedecay_contracts::{
+        CapabilityGrantId, CapabilityGrantSnapshot, DisclosureClass, ResolvedScope,
+    };
+    use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, UtcMicros};
+    use tracedecay_runtime_core::native_runtime;
+    use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+
+    use super::WorkBlockedIntervalObservationRecoveryOwnerV1;
+    use crate::invocation::types::WorkDurableWriteSignalV1;
+    use crate::invocation::work::workflow_census::WorkflowFanOutCensusObservationRecoveryOwnerV1;
+
+    const HANG_GUARD: Duration = Duration::from_secs(30);
+
+    fn work_grant(scope: &ResolvedScope, actor: &ActorId) -> CapabilityGrantSnapshot {
+        CapabilityGrantSnapshot::new(
+            CapabilityGrantId::new("grant.work.native-recovery").expect("grant id"),
+            1,
+            ManifestDigest::new(format!("sha256:{}", "d".repeat(64))).expect("grant digest"),
+            actor.clone(),
+            UtcMicros(1),
+            UtcMicros(i64::MAX),
+            scope.clone(),
+            tracedecay_contracts::WORK_APPLICATION_OPERATION_IDS_V1
+                .iter()
+                .map(|(_, capability, _)| CapabilityId::new(*capability).expect("capability"))
+                .collect(),
+            tracedecay_contracts::WORK_APPLICATION_OPERATION_IDS_V1
+                .iter()
+                .map(|(_, _, use_case)| UseCaseId::new(*use_case).expect("use case"))
+                .collect(),
+            DisclosureClass::Sensitive,
+        )
+        .expect("Work grant")
+    }
+
+    /// Both Work observation recovery loops run on the native runtime: with no
+    /// Tokio runtime anywhere they mount, and shutdown joins them.
+    #[test]
+    fn work_observation_recovery_owners_run_without_a_tokio_runtime() {
+        let site = "daemon-service.work_blocked_interval_recovery.start";
+        let profile = tempfile::tempdir().expect("profile root");
+        let project = tempfile::tempdir().expect("project root");
+        let tokio_misses = native_runtime::tokio_runtime_missing_count(site);
+        let _probe = crate::invocation::NATIVE_WRITER_WAITS_PROBE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let writer_waits = tracedecay_rusqlite_runtime::exact_sql::native_thread_writer_waits();
+        native_runtime::block_on(async {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            let project_id = ProjectId::new("project.work.native-recovery").expect("project id");
+            let host = tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1::project(
+                profile.path(),
+                project.path(),
+                project_id.clone(),
+            )
+            .await
+            .expect("registered project runtime");
+            let database = host
+                .registered_database_arc(tracedecay_sessions::admission::HostAdmissionScope::Project)
+                .expect("registered project database");
+            let producer = Arc::new(
+                BoundedObservabilityProducerV1::start(
+                    database.clone(),
+                    ObservabilityProducerIdentityV1 {
+                        authorized_scope_ref: project_id.as_str().to_owned(),
+                        process_boot_id: "boot:native-recovery".to_owned(),
+                        producer_revision: "native-recovery-producer.v1".to_owned(),
+                        configuration_revision: "native-recovery-config.v1".to_owned(),
+                        policy_revision: "native-recovery-policy.v1".to_owned(),
+                    },
+                    8,
+                )
+                .expect("observability producer"),
+            );
+            let actor = ActorId::new("actor.work.native-recovery").expect("actor id");
+            let scope = ResolvedScope::new(
+                project_id.clone(),
+                tracedecay_domain::RepositoryId::new("repository.work.native-recovery")
+                    .expect("repository id"),
+                tracedecay_domain::WorktreeId::new("worktree.work.native-recovery")
+                    .expect("worktree id"),
+                None,
+            )
+            .expect("resolved scope");
+            let signal = WorkDurableWriteSignalV1::default();
+            let blocked = WorkBlockedIntervalObservationRecoveryOwnerV1::mount(
+                database.clone(),
+                actor.clone(),
+                work_grant(&scope, &actor),
+                Arc::clone(&producer),
+                signal.subscribe(),
+            )
+            .unwrap_or_else(|error| panic!("blocked-interval recovery must mount: {error}"));
+            let census = WorkflowFanOutCensusObservationRecoveryOwnerV1::mount(
+                database,
+                project_id,
+                producer,
+                signal.subscribe(),
+            )
+            .unwrap_or_else(|error| panic!("census recovery must mount: {error}"));
+            native_runtime::timeout(HANG_GUARD, async {
+                blocked.shutdown().await;
+                census.shutdown().await;
+            })
+            .await
+            .expect("shutdown must join both recovery loops");
+        })
+        .expect("native runtime");
+        assert_eq!(
+            native_runtime::tokio_runtime_missing_count(site),
+            tokio_misses,
+            "mounting must not look for a Tokio runtime"
+        );
+        assert_eq!(
+            tracedecay_rusqlite_runtime::exact_sql::native_thread_writer_waits(),
+            writer_waits,
+            "recovery scans must not park a native thread on a synchronous writer wait"
+        );
+    }
 }

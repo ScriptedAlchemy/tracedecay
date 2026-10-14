@@ -162,14 +162,14 @@ class SdkPublishWorkflowPolicyTests(unittest.TestCase):
         old = self.workflow_fragment(
             r"      - uses: dtolnay/rust-toolchain@[0-9a-f]{40} # stable\n"
             r"        with:\n"
-            r"          toolchain: stable",
+            r"          toolchain: \$\{\{ steps\.rust-toolchain\.outputs\.toolchain \}\}",
             missing="build-typescript rust-toolchain pin missing from release.yml",
         )
         self.assert_rejected_after(
             old,
             "      - uses: dtolnay/rust-toolchain@stable\n"
             "        with:\n"
-            "          toolchain: stable",
+            "          toolchain: ${{ steps.rust-toolchain.outputs.toolchain }}",
             "'build-typescript' uses unpinned action 'dtolnay/rust-toolchain@stable'",
         )
 
@@ -216,18 +216,18 @@ class SdkPublishWorkflowPolicyTests(unittest.TestCase):
         self.assert_rejected_after(
             "          ref: ${{ needs.validate-release.outputs.source_sha }}\n"
             "          persist-credentials: false\n\n"
-            "      - uses: dtolnay/rust-toolchain@",
+            "      # rust-toolchain.toml is the only compiler.",
             "          persist-credentials: false\n\n"
-            "      - uses: dtolnay/rust-toolchain@",
+            "      # rust-toolchain.toml is the only compiler.",
             "'build-typescript' must first and only check out the validated source "
             "SHA without persisted credentials",
         )
 
     def test_rejects_local_helper_outside_reviewed_actions(self) -> None:
         self.assert_rejected_after(
-            "        run: npm install -g npm@12.0.2\n\n"
+            "        run: npm install -g npm@12.2.0\n\n"
             "      - uses: ./.github/actions/setup-pnpm\n",
-            "        run: npm install -g npm@12.0.2\n\n"
+            "        run: npm install -g npm@12.2.0\n\n"
             "      - uses: ./sdks/typescript\n",
             "'build-typescript' helper './sdks/typescript' must be a directory "
             "under ./.github/actions",
@@ -291,7 +291,7 @@ class SdkPublishWorkflowPolicyTests(unittest.TestCase):
         )
         self.assert_rejected_after(
             marker,
-            "    steps:\n      - run: npm install -g npm@12.0.2\n"
+            "    steps:\n      - run: npm install -g npm@12.2.0\n"
             "      - uses: actions/download-artifact@",
             "'publish-typescript' must not install executable packages with publish authority",
         )

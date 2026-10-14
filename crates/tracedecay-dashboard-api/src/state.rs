@@ -328,6 +328,8 @@ impl DashboardState {
     pub fn reconcile_automation_scheduler(&self) {
         if let Some(reconcile) = &self.automation_scheduler_reconciler {
             let reconcile = Arc::clone(reconcile);
+            // Stays on Tokio: the daemon's reconcile starts the scheduler
+            // loop with `tokio::spawn` (`start_automation_scheduler`).
             tokio::spawn(async move {
                 let _ = reconcile().await;
             });
@@ -477,16 +479,21 @@ pub(super) async fn build_state_inner(
         ),
         _ => None,
     };
-    let savings_db_path = registered_savings_db
-        .as_ref()
-        .map(|db| db.db_path().display().to_string())
-        .unwrap_or_else(|| cg.profile.global_db_path().display().to_string());
+    let savings_db_path = registered_savings_db.as_ref().map_or_else(
+        || cg.profile.global_db_path().display().to_string(),
+        |db| db.db_path().display().to_string(),
+    );
     let delivery_settlements = Arc::new(
         events_delivery::DashboardDeliverySettlementRegistryV1::new(delivery_settlement_authority),
     );
     events_delivery::DashboardDeliverySettlementRegistryV1::mount_deadline_reaper(
         &delivery_settlements,
-    );
+    )
+    .map_err(|error| {
+        config_error(format!(
+            "dashboard delivery deadline reaper did not start: {error}"
+        ))
+    })?;
     let state = DashboardState {
         build_version,
         host_io: cg.host_io,

@@ -108,7 +108,7 @@ impl RExtractor {
         let name = match lhs.kind() {
             "namespace_operator" => {
                 // pkg::fn. Use the rightmost identifier
-                lhs.child((lhs.child_count() - 1) as u32)
+                lhs.child(lhs.child_count() - 1)
                     .map_or_else(|| state.node_text(lhs), |n| state.node_text(n))
             }
             // identifier and any other shape: fall back to raw text.

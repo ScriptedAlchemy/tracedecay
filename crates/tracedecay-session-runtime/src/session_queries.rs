@@ -8,8 +8,9 @@ use tracedecay_contracts::retained_surfaces::{
     WorkflowQueryModeV1, WorkflowRunV1, WorkflowStatusV1, WorkflowsRequestV1, WorkflowsResultV1,
 };
 use tracedecay_sessions::runtime::git_correlation::{
-    CommitEvidence, CommitRelation, CommitRelationFilter, GitCorrelationError, GitRefFilter,
-    SessionGitCorrelationHit, SessionsForQuery, SpanOverlapKind, git_scope_filter_from_args,
+    CommitEvidence, CommitRelation, CommitRelationFilter, CorrelationIndexPresence,
+    GitCorrelationError, GitRefFilter, SessionGitCorrelationHit, SessionsForQuery, SpanOverlapKind,
+    git_scope_filter_from_args,
 };
 use tracedecay_sessions::{
     WorkflowAgent, WorkflowGitScope, WorkflowIndexReadPort, WorkflowIndexState, WorkflowRun,
@@ -64,8 +65,12 @@ pub async fn sessions_for(
         limit,
     };
     let correlation = GlobalDbGitCorrelationStore::new(database);
-    let (results, index_presence) = match tracing::Instrument::instrument(
+    let queried = tracedecay_runtime_core::erase_send!(
         correlation.sessions_for_with_relation_and_presence(&query, relation),
+        Result<(Vec<SessionGitCorrelationHit>, CorrelationIndexPresence), GitCorrelationError>
+    );
+    let (results, index_presence) = match tracing::Instrument::instrument(
+        queried,
         tracing::trace_span!("daemon.retained.session.sessions_for.query"),
     )
     .await
@@ -83,9 +88,13 @@ pub async fn sessions_for(
         && matches!(query.git_ref, GitRefFilter::Commit(_))
         && relation == CommitRelationFilter::Produced
     {
-        match tracing::Instrument::instrument(
+        let observed = tracedecay_runtime_core::erase_send!(
             correlation
                 .sessions_for_with_relation_and_presence(&query, CommitRelationFilter::Observed),
+            Result<(Vec<SessionGitCorrelationHit>, CorrelationIndexPresence), GitCorrelationError>
+        );
+        match tracing::Instrument::instrument(
+            observed,
             tracing::trace_span!("daemon.retained.session.sessions_for.observed_fallback"),
         )
         .await

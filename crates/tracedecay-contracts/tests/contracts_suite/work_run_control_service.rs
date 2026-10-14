@@ -202,7 +202,7 @@ impl WorkRunControlStoragePort for TestStore {
             .lock()
             .unwrap()
             .get(&key)
-            .map(|admission| {
+            .map_or_default(|admission| {
                 admission
                     .live_attempts
                     .iter()
@@ -212,8 +212,7 @@ impl WorkRunControlStoragePort for TestStore {
                         step_id: workflow_bound.then(|| id::<WorkflowStepId>("step.run-control")),
                     })
                     .collect()
-            })
-            .unwrap_or_default();
+            });
         if std::mem::take(&mut *self.settle_frontier_during_binding_read.lock().unwrap())
             && let Some(admission) = self.admissions.lock().unwrap().get_mut(&key)
         {

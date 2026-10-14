@@ -1,4 +1,6 @@
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{Arc, PoisonError, RwLock};
 
 use tracedecay_contracts::session_sync::{
@@ -459,11 +461,6 @@ impl DaemonSessionSyncService {
             .cloned()
     }
 
-    #[tracing::instrument(
-        name = "daemon.session_sync.lifecycle.execute_request",
-        level = "trace",
-        skip_all
-    )]
     pub(super) async fn execute_request(
         &self,
         request: SessionSyncRequestV1,
@@ -478,8 +475,10 @@ impl DaemonSessionSyncService {
                 reason_code: "session_sync_project_retired",
             };
         };
-        self.execute_request_admitted(request, Arc::clone(&context), project_sessions)
-            .await
+        let admitted: Pin<Box<dyn Future<Output = SessionSyncOutcomeV1> + Send + '_>> = Box::pin(
+            self.execute_request_admitted(request, Arc::clone(&context), project_sessions),
+        );
+        admitted.await
     }
 
     pub async fn retire_project(
@@ -534,9 +533,7 @@ impl DaemonSessionSyncService {
             return Err(format!(
                 "session sync project '{}' could not recover after rebind: {error}{}",
                 project_id.as_str(),
-                drain
-                    .map(|drain| format!("; rollback failed: {drain}"))
-                    .unwrap_or_default(),
+                drain.map_or_default(|drain| format!("; rollback failed: {drain}")),
             ));
         }
         Ok(true)

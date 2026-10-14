@@ -1,5 +1,7 @@
 //! Retained application adapter for the canonical Memory Curator.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::DaemonInvocationService;
@@ -31,6 +33,18 @@ pub async fn execute_retained_memory_curator(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     request: &FactStoreCurateRequestV1,
 ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
+    // The curator calls its Codex backend synchronously for the whole model
+    // run (`CodexAppServerBackend::run_task`), which would park a native
+    // worker; the run stays on a Tokio worker until that call moves off the
+    // async path.
+    let curator_runtime = tracedecay_runtime_core::native_runtime::tokio_handle(
+        "daemon-service.retained_curator.run",
+    )
+    .ok_or_else(|| {
+        RetainedSurfaceExecutionErrorV1::unavailable(
+            "the memory curator runtime is unavailable".to_owned(),
+        )
+    })?;
     let pinned = cg
         .configuration_runtime()
         .client()
@@ -78,7 +92,16 @@ pub async fn execute_retained_memory_curator(
                 "the automation project context could not be composed: {error}"
             ))
         })?;
-    let admission = crate::automation_effect::prepare(
+    let prepared: Pin<
+        Box<
+            dyn Future<
+                    Output = tracedecay_domain::errors::Result<
+                        tracedecay_automation_runtime::automation::effect_runtime::AutomationEffectAdmission,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > = Box::pin(crate::automation_effect::prepare(
         invocation_service,
         cg,
         automation_context.project_root(),
@@ -89,9 +112,8 @@ pub async fn execute_retained_memory_curator(
         context.observed_at,
         configuration_digest,
         automation_request,
-    )
-    .await
-    .map_err(|error| {
+    ));
+    let admission = prepared.await.map_err(|error| {
         RetainedSurfaceExecutionErrorV1::unavailable(format!(
             "the automation effect authority could not be prepared: {error}"
         ))
@@ -140,7 +162,7 @@ pub async fn execute_retained_memory_curator(
         fact_review_limit: request.fact_review_limit as usize,
         min_confidence,
     };
-    drop(tokio::spawn(async move {
+    drop(curator_runtime.spawn(async move {
         let retained_run = run_memory_curator_with_backend_for_retained_settlement(
             &automation_context,
             &config,

@@ -242,8 +242,7 @@ impl WorkAttemptStoragePort for WorkSqliteStorage {
                                             ExactSqlValue::Integer(i64::from(next.is_terminal())),
                                             ExactSqlValue::Text(payload),
                                             evidence_payload
-                                                .map(ExactSqlValue::Text)
-                                                .unwrap_or(ExactSqlValue::Null),
+                                                .map_or(ExactSqlValue::Null, ExactSqlValue::Text),
                                             ExactSqlValue::Text(
                                                 expected_fence.lease_id().as_str().to_owned(),
                                             ),

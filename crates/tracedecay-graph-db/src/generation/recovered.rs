@@ -314,8 +314,7 @@ fn digest_rows_parallel(
         .chain(relations.chunks(chunk_rows).map(ProofChunk::Relations))
         .collect();
     let workers = std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(1)
+        .map_or(1, std::num::NonZeroUsize::get)
         .min(PROOF_MAX_WORKERS)
         .min(chunks.len())
         .max(1);

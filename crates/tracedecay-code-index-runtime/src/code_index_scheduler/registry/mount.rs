@@ -49,7 +49,9 @@ use super::{
     is_repeated_conflict_verdict, park_convergence, publication_authority_is_terminal,
     retained_noop_requires_follow_up_wake,
 };
-use tracedecay_runtime_core::native_runtime;
+use tracedecay_runtime_core::native_runtime::{self, NativeTask, NativeTaskOutcome};
+
+use crate::code_index_task_support::{join_native, spawn_detached};
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 /// What the worker does with a reconcile pass that found the durable
@@ -132,12 +134,25 @@ impl CodeIndexSchedulerRegistryV1 {
         let Some(delay) = capacity_retry.record_capacity_failure() else {
             return false;
         };
-        let retry_wake = Arc::clone(wake);
-        tokio::spawn(async move {
-            tokio::time::sleep(delay).await;
-            retry_wake.notify_one();
-        });
+        Self::wake_after(delay, wake);
         true
+    }
+
+    /// Wake the worker once `delay` has passed. A delay no native timer can
+    /// time is logged and dropped: the worktree waits for its next real wake.
+    fn wake_after(delay: std::time::Duration, wake: &Arc<tokio::sync::Notify>) {
+        let wake = Arc::clone(wake);
+        let deadline = Instant::now() + delay;
+        spawn_detached("code_index_delayed_wake", async move {
+            match native_runtime::sleep_until(deadline).await {
+                Ok(()) => wake.notify_one(),
+                Err(error) => tracing::warn!(
+                    event = "code_index_delayed_wake_unavailable",
+                    %error,
+                    "a delayed code-index wake has no native timer"
+                ),
+            }
+        });
     }
 
     /// Block this worker until the holder of the store lock that refused the
@@ -547,13 +562,14 @@ impl CodeIndexSchedulerRegistryV1 {
             if retiring
                 .get(&project_root)
                 .is_some_and(|worktree| worktree.task.is_finished())
-                && let Some(mut worktree) = retiring.remove(&project_root)
+                && let Some(worktree) = retiring.remove(&project_root)
             {
-                (&mut worktree.task).await.map_err(|error| {
-                    CodeIndexSchedulerErrorV1::Identity(format!(
-                        "retired code-index scheduler worker failed: {error}"
-                    ))
-                })?;
+                let outcome = worktree.task.wait().await;
+                if !matches!(outcome, NativeTaskOutcome::Completed(())) {
+                    return Err(CodeIndexSchedulerErrorV1::Identity(format!(
+                        "retired code-index scheduler worker failed: {outcome:?}"
+                    )));
+                }
             }
             if retiring.contains_key(&project_root) {
                 return Err(CodeIndexSchedulerErrorV1::Identity(
@@ -995,7 +1011,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 // A quarantined or backing-off unit must not consume the
                 // pending arrival: the wake stays outstanding so a later
                 // eligible pass still measures its full queue wait.
-                if panic_guard.suppresses_pass(tokio::time::Instant::now(), pass_control_epoch) {
+                if panic_guard.suppresses_pass(Instant::now(), pass_control_epoch) {
                     tracing::debug!(
                         event = "code_index_reconcile_panic_suppressed",
                         path = "background_worker",
@@ -1194,7 +1210,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         let projection_wake = Arc::clone(&worker_wake);
                         let projection_serving_changed = worker_serving_generation_changed.clone();
                         let projection_store_root = worker_scope_store_root.clone();
-                        retained_text_projection = Some(tokio::spawn(async move {
+                        retained_text_projection = Some(NativeTask::spawn(async move {
                             let _projection_pass = projection_pass;
                             #[cfg(any(test, feature = "test-helpers"))]
                             Self::wait_for_retained_text_projection_gate(&gated_root).await;
@@ -1385,7 +1401,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             continue;
                         }
                         Ok(Ok(Some(RetainedTextGenerationRestoreV1::Refused(metadata)))) => {
-                            Some(metadata)
+                            Some(*metadata)
                         }
                         Ok(Ok(Some(RetainedTextGenerationRestoreV1::Failed(error)))) => {
                             tracing::error!(
@@ -1779,7 +1795,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         let projection_serving_changed = worker_serving_generation_changed.clone();
                         #[cfg(test)]
                         let project_root = worker_project_root.clone();
-                        published_text_projection = Some(tokio::spawn(async move {
+                        published_text_projection = Some(NativeTask::spawn(async move {
                             let _projection_pass = projection_pass;
                             let outcome = Self::drive_text_projection(
                                 text.clone(),
@@ -2723,12 +2739,8 @@ impl CodeIndexSchedulerRegistryV1 {
                                     .activation_conflict_context()
                                     .map(|context| (seat_generation_id, context.clone()));
                                 next_seat_attempt_at = Some(Instant::now() + seat_retry_backoff);
-                                let retry_wake = Arc::clone(&worker_wake);
                                 let retry_delay = seat_retry_backoff;
-                                tokio::spawn(async move {
-                                    tokio::time::sleep(retry_delay).await;
-                                    retry_wake.notify_one();
-                                });
+                                Self::wake_after(retry_delay, &worker_wake);
                                 tracing::warn!(
                                     event = "code_index_graph_activation_retry_scheduled",
                                     retry_delay_micros = retry_delay.as_micros() as u64,
@@ -2780,7 +2792,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 // Join the publication's projection, then process its outcome
                 // at the existing source-proof and serving-swap boundary. Graph
                 // work above overlapped it; nothing seats before text is done.
-                if let Some(mut projection) = published_text_projection.take() {
+                if let Some(projection) = published_text_projection.take() {
                     // An arrival during the projection seals its successor now
                     // instead of waiting for this projection and its seat. The
                     // seal claims the arrival, and the next pass answers it
@@ -2858,7 +2870,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             }
                         }
                         tokio::select! {
-                            outcome = &mut projection => break outcome,
+                            outcome = join_native(&projection) => break outcome,
                             () = worker_wake.notified() => {
                                 preserve_worker_wake = true;
                             }
@@ -3541,7 +3553,7 @@ impl CodeIndexSchedulerRegistryV1 {
                             // unit on every wake.
                             capacity_retry.record_progress();
                             let decision = panic_guard.record_panic(
-                                tokio::time::Instant::now(),
+                                Instant::now(),
                                 worker_control_epoch.load(Ordering::Acquire),
                             );
                             match decision {
@@ -3553,11 +3565,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                         error = %error,
                                         "code-index background reconcile panicked; retrying the same input with backoff"
                                     );
-                                    let retry_wake = Arc::clone(&worker_wake);
-                                    tokio::spawn(async move {
-                                        tokio::time::sleep(delay).await;
-                                        retry_wake.notify_one();
-                                    });
+                                    Self::wake_after(delay, &worker_wake);
                                 }
                                 ReconcilePanicDecisionV1::Quarantine => tracing::warn!(
                                     event = "code_index_reconcile_quarantined",
@@ -3587,12 +3595,12 @@ impl CodeIndexSchedulerRegistryV1 {
                 // serving. `reconcile_in_progress` stays truthful until here so
                 // admission does not misread in-flight text work as
                 // unavailability.
-                if let Some(projection) = retained_text_projection.as_mut() {
+                if let Some(projection) = retained_text_projection.as_ref() {
                     let projection_result = if retained_head_recovered_without_complete_replay {
                         let mut preserve_worker_wake = false;
                         let result = loop {
                             tokio::select! {
-                                outcome = &mut *projection => break Some(outcome),
+                                outcome = join_native(projection) => break Some(outcome),
                                 () = async {
                                     match worker_complete_generation_requested_changed
                                         .wait_for(|requested| *requested)
@@ -3609,7 +3617,7 @@ impl CodeIndexSchedulerRegistryV1 {
                                 }
                                 () = worker_wake.notified() => {
                                     if worker_shutting_down.load(Ordering::Acquire) {
-                                        break Some((&mut *projection).await);
+                                        break Some(join_native(projection).await);
                                     }
                                     // The pending arrival remains authoritative while this pass
                                     // owns the projection. Preserve one permit after the join;
@@ -3623,7 +3631,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         }
                         result
                     } else {
-                        Some(projection.await)
+                        Some(join_native(projection).await)
                     };
                     let Some(projection_result) = projection_result else {
                         drop(reconcile_pass.take());
@@ -3842,10 +3850,15 @@ impl CodeIndexSchedulerRegistryV1 {
                 let _ = result;
             }
         });
-        let task = tokio::spawn(tracing::Instrument::instrument(
+        let task = NativeTask::spawn(tracing::Instrument::instrument(
             worker_loop,
             tracing::trace_span!("daemon.code_index.scheduler_worker"),
-        ));
+        ))
+        .map_err(|error| {
+            CodeIndexSchedulerErrorV1::Identity(format!(
+                "code-index scheduler worker did not start: {error}"
+            ))
+        })?;
         self.register_worker_shutdown_signal(&shutting_down, &wake, &serving_generation_changed);
         let residency_registration = Arc::clone(&residency).register(
             &self.resident_owners,
@@ -3871,7 +3884,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let headroom_text = Arc::downgrade(&text_generation);
         let headroom_park = Arc::downgrade(&convergence_park);
         let headroom_residency = Arc::downgrade(&residency);
-        tokio::spawn(async move {
+        spawn_detached("code_index_headroom_watcher", async move {
             let Some(cx) = tracedecay_runtime_core::native_runtime::cx() else {
                 tracing::error!(
                     "native runtime unavailable; memory headroom no longer wakes this worktree"

@@ -1,9 +1,8 @@
 //! Exact branch-generation publication through the retained code-index owner.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use tokio::time::Instant;
 use tracedecay_contracts::code_index_freshness::{
     CodeGraphServingReadinessV1, CodeIndexWorktreeFreshnessV1,
 };
@@ -574,7 +573,20 @@ impl BranchPublicationContextV1 {
                         ));
                     }
                 }
-                () = tokio::time::sleep_until(idle_deadline.min(hard_deadline)) => {}
+                fired = tracedecay_runtime_core::native_runtime::sleep_until(
+                    idle_deadline.min(hard_deadline),
+                ) => {
+                    if let Err(error) = fired {
+                        return Err(TraceDecayError::project_route(
+                            CODE_INDEX_SCHEDULER_UNAVAILABLE,
+                            true,
+                            format!(
+                                "branch generation wait for '{}' has no deadline timer: {error}",
+                                canonical_worktree_root.display()
+                            ),
+                        ));
+                    }
+                }
             }
         }
     }

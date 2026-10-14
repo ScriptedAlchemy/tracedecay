@@ -492,11 +492,7 @@ impl QBasicExtractor {
             None => return,
         };
 
-        let from_node_id = state
-            .node_stack
-            .last()
-            .map(|(_, id)| id.clone())
-            .unwrap_or_default();
+        let from_node_id = state.node_stack.last().map_or_default(|(_, id)| id.clone());
 
         state.unresolved_refs.push(UnresolvedRef {
             from_node_id,

@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 
 use std::sync::atomic::AtomicBool;
@@ -146,20 +148,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         identity: LocalProfileIdentityAuthorityV1,
         long_lived_session_maintenance: bool,
     ) -> Result<Self> {
-        let operation_runtime =
-            tracedecay_runtime_core::native_runtime::handle().ok_or_else(|| {
-                TraceDecayError::Config {
-                    message: "session runtime registry requires a native execution runtime"
-                        .to_owned(),
-                }
-            })?;
-        let operation_task_owner = Arc::new(
-            RuntimeOperationTaskOwnerV1::new(operation_runtime.clone()).map_err(|error| {
-                TraceDecayError::Config {
-                    message: error.to_string(),
-                }
-            })?,
-        );
         let remote_credential_authority = Arc::new(crate::DaemonRemoteCredentialAuthorityV1::new(
             identity.brain_id().clone(),
             identity.profile_id().clone(),
@@ -184,15 +172,33 @@ impl DaemonSessionRuntimeRegistryV1 {
                 identity.profile_root().to_path_buf(),
             ),
         ));
-        let registry_resolver: Arc<dyn StoreRuntimeResolver> = resolver.clone();
-        let registry = StoreRuntimeRegistry::new(
-            operation_runtime,
-            registry_resolver,
-            Arc::new(LifecycleShardRuntimePublisher),
-        )
-        .map_err(|error| {
-            session_registry_error("create store runtime registry", format!("{error:?}"))
-        })?;
+        let (operation_task_owner, registry) =
+            {
+                // The handle's Send proof is the asupersync self-cycle. Consume it
+                // before the first await so the constructor future does not capture it.
+                let operation_runtime = tracedecay_runtime_core::native_runtime::handle()
+                    .ok_or_else(|| TraceDecayError::Config {
+                        message: "session runtime registry requires a native execution runtime"
+                            .to_owned(),
+                    })?;
+                let operation_task_owner = Arc::new(
+                    RuntimeOperationTaskOwnerV1::new(operation_runtime.clone()).map_err(
+                        |error| TraceDecayError::Config {
+                            message: error.to_string(),
+                        },
+                    )?,
+                );
+                let registry_resolver: Arc<dyn StoreRuntimeResolver> = resolver.clone();
+                let registry = StoreRuntimeRegistry::new(
+                    operation_runtime,
+                    registry_resolver,
+                    Arc::new(LifecycleShardRuntimePublisher),
+                )
+                .map_err(|error| {
+                    session_registry_error("create store runtime registry", format!("{error:?}"))
+                })?;
+                (operation_task_owner, registry)
+            };
         let graph_manifest_provider =
             Arc::new(super::code_graph_manifest::DaemonCodeGraphManifestProviderV1::default());
         let graph_registry = GraphDbRegistry::new_with_manifest_provider(
@@ -208,8 +214,8 @@ impl DaemonSessionRuntimeRegistryV1 {
         })?;
         let profile_shard =
             StoreShardIdV1::profile(identity.brain_id().clone(), identity.profile_id().clone());
-        let profile_runtime = tracing::Instrument::instrument(
-            open_runtime(
+        let opened: Pin<Box<dyn Future<Output = Result<StoreRuntimeClientLease>> + Send + '_>> =
+            Box::pin(open_runtime(
                 &registry,
                 resolver.as_ref(),
                 StoreRuntimeOpenSpec::new(
@@ -220,7 +226,9 @@ impl DaemonSessionRuntimeRegistryV1 {
                     true,
                     "mount profile authority store",
                 ),
-            ),
+            ));
+        let profile_runtime = tracing::Instrument::instrument(
+            opened,
             tracing::trace_span!("daemon.store.profile_authority.bootstrap_open"),
         )
         .await?;
@@ -267,9 +275,17 @@ impl DaemonSessionRuntimeRegistryV1 {
             #[cfg(any(test, feature = "test-helpers"))]
             session_graph_publication_gate: std::sync::Mutex::new(None),
         };
-        registry.mount_registered_remote_nodes().await?;
+        let mounted_nodes: Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> =
+            Box::pin(registry.mount_registered_remote_nodes());
+        tracing::Instrument::instrument(
+            mounted_nodes,
+            tracing::trace_span!("daemon.session_registry.mount_remote_nodes"),
+        )
+        .await?;
         if registry.long_lived_session_maintenance {
-            registry.inspect_project_session_stores().await;
+            let inspected: Pin<Box<dyn Future<Output = ()> + Send + '_>> =
+                Box::pin(registry.inspect_project_session_stores());
+            inspected.await;
         }
         Ok(registry)
     }
@@ -317,9 +333,9 @@ impl DaemonSessionRuntimeRegistryV1 {
         manifests.sort();
         let digest = registered_schema_admission_digest();
         for manifest in manifests {
-            if let Err(error) =
-                Box::pin(self.inspect_project_session_store(&manifest, &digest)).await
-            {
+            let inspected: Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> =
+                Box::pin(self.inspect_project_session_store(&manifest, &digest));
+            if let Err(error) = inspected.await {
                 tracing::warn!(
                     event = "project_session_store_inspection_failed",
                     path = %manifest.display(),
@@ -404,11 +420,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         }
     }
 
-    #[tracing::instrument(
-        name = "daemon.session_registry.mount_remote_nodes",
-        level = "trace",
-        skip_all
-    )]
     async fn mount_registered_remote_nodes(&self) -> Result<()> {
         let nodes_root = self.identity.profile_root().join("remote").join("nodes");
         if !nodes_root.exists() {
@@ -443,8 +454,9 @@ impl DaemonSessionRuntimeRegistryV1 {
                     error.to_string(),
                 )
             })?;
-            self.remote_node_storage(node_id, Arc::clone(&keyring))
-                .await?;
+            let mounted: Pin<Box<dyn Future<Output = Result<RemoteSqliteStorageV1>> + Send + '_>> =
+                Box::pin(self.remote_node_storage(node_id, Arc::clone(&keyring)));
+            mounted.await?;
         }
         Ok(())
     }
@@ -626,7 +638,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         );
         // Boxed store-open composition: keeps this mount machine (and the
         // measured wrapper embedding it by value) pointer-sized per await.
-        let runtime = tracing::Instrument::instrument(
+        let opened: Pin<Box<dyn Future<Output = Result<StoreRuntimeClientLease>> + Send + '_>> =
             Box::pin(open_runtime(
                 &self.registry,
                 self.resolver.as_ref(),
@@ -638,12 +650,15 @@ impl DaemonSessionRuntimeRegistryV1 {
                     true,
                     "mount profile authority store",
                 ),
-            )),
+            ));
+        let runtime = tracing::Instrument::instrument(
+            opened,
             tracing::trace_span!("daemon.store.profile_authority.mount_open"),
         )
         .await?;
-        let database =
-            Box::pin(self.attach_registered(runtime, "attach profile authority store")).await?;
+        let attached: Pin<Box<dyn Future<Output = Result<RegisteredGlobalDbOwnerV1>> + Send + '_>> =
+            Box::pin(self.attach_registered(runtime, "attach profile authority store"));
+        let database = attached.await?;
         let lease = database.issue_lease().map_err(|error| {
             session_registry_error(
                 "issue profile authority database client",
@@ -660,7 +675,9 @@ impl DaemonSessionRuntimeRegistryV1 {
     /// The profile session store. A store held in its typed reset-required
     /// state answers that refusal instead of a client.
     pub async fn profile_sessions(&self) -> Result<RegisteredGlobalDbLeaseV1> {
-        refuse_reset_required(Box::pin(self.mount_profile_session_store()).await?)
+        let mounted: Pin<Box<dyn Future<Output = Result<RegisteredGlobalDbLeaseV1>> + Send + '_>> =
+            Box::pin(self.mount_profile_session_store());
+        refuse_reset_required(mounted.await?)
     }
 
     async fn mount_profile_session_store(&self) -> Result<RegisteredGlobalDbLeaseV1> {
@@ -700,8 +717,10 @@ impl DaemonSessionRuntimeRegistryV1 {
             self.identity.brain_id().clone(),
             self.identity.profile_id().clone(),
         );
-        let pin = Box::pin(self.profile_authority_pin("mount profile session store")).await?;
-        let runtime = tracing::Instrument::instrument(
+        let pin: Pin<Box<dyn Future<Output = Result<super::ProfileAuthorityPin>> + Send + '_>> =
+            Box::pin(self.profile_authority_pin("mount profile session store"));
+        let pin = pin.await?;
+        let opened: Pin<Box<dyn Future<Output = Result<StoreRuntimeClientLease>> + Send + '_>> =
             Box::pin(open_runtime(
                 &self.registry,
                 self.resolver.as_ref(),
@@ -713,12 +732,15 @@ impl DaemonSessionRuntimeRegistryV1 {
                     true,
                     "mount profile session store",
                 ),
-            )),
+            ));
+        let runtime = tracing::Instrument::instrument(
+            opened,
             tracing::trace_span!("daemon.store.profile_sessions.open"),
         )
         .await?;
-        let database =
-            Box::pin(self.attach_registered(runtime, "mount profile session store")).await?;
+        let attached: Pin<Box<dyn Future<Output = Result<RegisteredGlobalDbOwnerV1>> + Send + '_>> =
+            Box::pin(self.attach_registered(runtime, "mount profile session store"));
+        let database = attached.await?;
         let (database, lease) = self.publish_session_owner(
             database,
             shard_id,
@@ -896,8 +918,8 @@ impl DaemonSessionRuntimeRegistryV1 {
         let pin = self
             .profile_authority_pin("mount profile memory store")
             .await?;
-        let runtime = tracing::Instrument::instrument(
-            open_runtime(
+        let opened: Pin<Box<dyn Future<Output = Result<StoreRuntimeClientLease>> + Send + '_>> =
+            Box::pin(open_runtime(
                 &self.registry,
                 self.resolver.as_ref(),
                 StoreRuntimeOpenSpec::new(
@@ -908,11 +930,17 @@ impl DaemonSessionRuntimeRegistryV1 {
                     true,
                     "mount profile memory store",
                 ),
-            ),
+            ));
+        let runtime = tracing::Instrument::instrument(
+            opened,
             tracing::trace_span!("daemon.store.profile_memory.open"),
         )
         .await?;
-        let (owner, database) = self.publish_memory_owner(shard_id, runtime).await?;
+        let published = tracedecay_runtime_core::erase_send!(
+            self.publish_memory_owner(shard_id, runtime),
+            Result<(MemoryStoreOwnerV1, Arc<Database>)>
+        );
+        let (owner, database) = published.await?;
         *self
             .profile_memory
             .lock()
@@ -1032,10 +1060,11 @@ impl DaemonSessionRuntimeRegistryV1 {
                     self.identity.profile_id().clone(),
                     node_id.clone(),
                 );
-                let pin = self
-                    .profile_authority_pin("mount Remote Brain node store")
-                    .await?;
-                let (runtime, existed) = tracing::Instrument::instrument(
+                let pin: Pin<
+                    Box<dyn Future<Output = Result<super::ProfileAuthorityPin>> + Send + '_>,
+                > = Box::pin(self.profile_authority_pin("mount Remote Brain node store"));
+                let pin = pin.await?;
+                let opened = tracedecay_runtime_core::erase_send!(
                     open_runtime_with_presence(
                         &self.registry,
                         self.resolver.as_ref(),
@@ -1046,12 +1075,21 @@ impl DaemonSessionRuntimeRegistryV1 {
                         true,
                         "mount Remote Brain node store",
                     ),
+                    Result<(StoreRuntimeClientLease, bool)>
+                );
+                let (runtime, existed) = tracing::Instrument::instrument(
+                    opened,
                     tracing::trace_span!("daemon.store.remote_node.open"),
                 )
                 .await?;
+                let published: Pin<
+                    Box<dyn Future<Output = Result<super::DatabaseOwnerV1>> + Send + '_>,
+                > = Box::pin(Database::publish_runtime(
+                    runtime,
+                    DatabaseAccessMode::ReadWrite,
+                ));
                 let owner = RemoteNodeStoreOwnerV1 {
-                    database: Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite)
-                        .await?,
+                    database: published.await?,
                 };
                 let database = owner.database.issue_lease().map_err(|error| {
                     session_registry_error(

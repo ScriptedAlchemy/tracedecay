@@ -589,7 +589,7 @@ async fn join_dashboard(dashboard: RunningDashboard, exceeded_deadline: bool) ->
 /// the cancellation has actually joined.
 pub(crate) async fn shutdown_dashboard_for_until(
     project_root: &Path,
-    deadline: tokio::time::Instant,
+    deadline: std::time::Instant,
 ) -> Result<()> {
     {
         let mut manager = get_manager().lock().await;
@@ -618,7 +618,12 @@ pub(crate) async fn shutdown_dashboard_for_until(
         tokio::select! {
             biased;
             _ = completed.acquire() => {}
-            () = tokio::time::sleep_until(deadline) => {
+            fired = tracedecay_runtime_core::native_runtime::sleep_until(deadline) => {
+                // Without a timer the wait could not end at the deadline, so
+                // the stop takes the deadline path now.
+                if let Err(error) = fired {
+                    tracing::warn!(%error, "dashboard stop deadline timer unavailable");
+                }
                 let mut manager = get_manager().lock().await;
                 if let Some(dashboard) = manager.get_mut(project_root) {
                     dashboard.task.abort();
@@ -632,7 +637,7 @@ pub(crate) async fn shutdown_dashboard_for_until(
 pub(crate) async fn shutdown_dashboard_for(project_root: &Path) -> Result<()> {
     shutdown_dashboard_for_until(
         project_root,
-        tokio::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE,
+        std::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE,
     )
     .await
 }
@@ -642,7 +647,7 @@ pub(crate) async fn shutdown_dashboard_for(project_root: &Path) -> Result<()> {
 /// requests (the `tracedecay_dashboard` `stop` action) use
 /// [`shutdown_dashboard_for`] instead so one project's stop never takes down
 /// another project's dashboard.
-pub(crate) async fn shutdown_dashboard_until(deadline: tokio::time::Instant) -> Result<()> {
+pub(crate) async fn shutdown_dashboard_until(deadline: std::time::Instant) -> Result<()> {
     let (project_roots, _abort_unjoined) = {
         let manager = get_manager().lock().await;
         (
@@ -671,7 +676,7 @@ pub(crate) async fn shutdown_dashboard_until(deadline: tokio::time::Instant) -> 
 
 pub(crate) async fn shutdown_dashboard() -> Result<()> {
     shutdown_dashboard_until(
-        tokio::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE,
+        std::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE,
     )
     .await
 }
@@ -715,7 +720,7 @@ fn opening_project_sessions(
     project_root: PathBuf,
 ) -> watch::Receiver<DashboardSessionResolutionV1> {
     let (publication, receiver) = watch::channel(DashboardSessionResolutionV1::Opening);
-    tokio::spawn(async move {
+    let spawned = tracedecay_runtime_core::native_runtime::NativeTask::spawn(async move {
         tokio::select! {
             resolution = project_sessions_once_published(resolver, &project_runtimes, project_root) => {
                 publication.send_replace(resolution);
@@ -723,7 +728,13 @@ fn opening_project_sessions(
             () = publication.closed() => {}
         }
     });
-    receiver
+    match spawned {
+        Ok(_detached) => receiver,
+        Err(error) => {
+            tracing::error!(%error, "dashboard session resolution could not start");
+            watch::channel(DashboardSessionResolutionV1::Unavailable).1
+        }
+    }
 }
 
 async fn project_sessions_once_published(

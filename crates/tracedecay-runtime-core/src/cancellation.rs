@@ -50,6 +50,24 @@ struct CancellationScope {
     changed: Arc<Notify>,
 }
 
+// `parent` is `Arc<Self>`. Auto-trait proof does not cache that cycle and
+// overflows (rust-lang/rust#159228). The parent field below stops at this
+// impl; the context is checked on its own.
+unsafe impl Send for CancellationScope {}
+unsafe impl Sync for CancellationScope {}
+
+const _: fn(&CancellationScope) = |value| {
+    fn assert_send_sync<T: Send + Sync>(_: &T) {}
+    let CancellationScope {
+        context,
+        parent,
+        changed,
+    } = value;
+    assert_send_sync(context);
+    assert_send_sync(parent);
+    assert_send_sync(changed);
+};
+
 impl Default for CancellationToken {
     fn default() -> Self {
         Self {

@@ -112,9 +112,7 @@ impl WgslExtractor {
         );
 
         let body = find_direct_child_by_kind(node, "compound_statement");
-        let metrics = body
-            .map(|b| count_complexity(b, &C_COMPLEXITY, state.source))
-            .unwrap_or_default();
+        let metrics = body.map_or_default(|b| count_complexity(b, &C_COMPLEXITY, state.source));
 
         let graph_node = Node {
             id: id.clone(),

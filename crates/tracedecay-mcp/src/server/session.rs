@@ -3,7 +3,7 @@
 //! Every request runs inside the connection future, never on a task of its
 //! own: a scope the daemon installs around the connection (admission parking)
 //! covers every handler, and no executor is named here. The protocol policy
-//! mirrors `rmcp` 3.4's server (`service/server.rs`, `handler/server.rs`), with
+//! mirrors `rmcp` 3.5's server (`service/server.rs`, `handler/server.rs`), with
 //! `rmcp` kept only for its wire model types.
 
 use std::any::Any;
@@ -33,10 +33,11 @@ const MALFORMED_INITIALIZE_MESSAGE: &str = "initialize params are missing or mal
 /// Where a connection stands in the MCP lifecycle.
 #[derive(Clone)]
 pub(crate) enum SessionState {
-    /// Only pings and refused handshakes have arrived.
+    /// Only pings, refused openers, and `server/discover` probes have arrived.
     Opening,
-    /// The first request carried SEP-2575 per-request client context instead
-    /// of an `initialize`; every later request must carry it too.
+    /// The first request past any discover probe carried SEP-2575 per-request
+    /// client context instead of an `initialize`; every later request must
+    /// carry it too.
     Inline,
     /// `initialize` agreed on this protocol version.
     Initialized(ProtocolVersion),
@@ -191,11 +192,30 @@ impl<C: McpConnectionContext> Session<'_, C> {
         let request = match request {
             ClientRequest::InitializeRequest(initialize) => initialize.params,
             request => {
+                // Each refusal here leaves the session open, and a discover
+                // probe chooses no lifecycle, so a client that probes first
+                // can still fall back to `initialize`.
                 let missing = meta.missing_required_keys(&ProtocolVersion::V_2026_07_28);
-                if !missing.is_empty() {
+                let Some(requested) = meta.protocol_version().filter(|_| missing.is_empty()) else {
                     let refusal = missing_request_context_error(&missing);
-                    self.answer(id, Err(refusal.clone())).await?;
-                    return Err(opening_failed(&refusal));
+                    return Ok(self.answer(id, Err(refusal)).await?);
+                };
+                if matches!(request, ClientRequest::DiscoverRequest(_)) {
+                    let context = McpRequestContext {
+                        id: id.clone(),
+                        cancellation: CancellationToken::new(),
+                        meta,
+                        session: SessionState::Opening,
+                    };
+                    let discovered = self.adapter.handle_request(request, context).await;
+                    return Ok(self.answer(id, discovered).await?);
+                }
+                if !ProtocolVersion::KNOWN_VERSIONS.contains(&requested) {
+                    let refusal = ErrorData::unsupported_protocol_version(
+                        requested,
+                        ProtocolVersion::KNOWN_VERSIONS,
+                    );
+                    return Ok(self.answer(id, Err(refusal)).await?);
                 }
                 self.state = SessionState::Inline;
                 self.start_request_with_meta(id, request, meta);

@@ -469,9 +469,7 @@ fn environment() -> Environment {
                 })
             })
             .unwrap_or_else(|| "unavailable".to_owned()),
-        logical_cpus: std::thread::available_parallelism()
-            .map(usize::from)
-            .unwrap_or(0),
+        logical_cpus: std::thread::available_parallelism().map_or(0, usize::from),
         rustc: command_output("rustc", &["--version"]),
         cargo: command_output("cargo", &["--version"]),
     }
@@ -484,8 +482,7 @@ fn command_output(program: &str, arguments: &[&str]) -> String {
         .ok()
         .filter(|output| output.status.success())
         .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|output| output.trim().to_owned())
-        .unwrap_or_default()
+        .map_or_default(|output| output.trim().to_owned())
 }
 
 fn sha256(bytes: &[u8]) -> String {

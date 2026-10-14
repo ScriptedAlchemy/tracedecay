@@ -1,3 +1,5 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 mod target;
@@ -34,6 +36,7 @@ use tracedecay_contracts::retained_receipts::{
     effective_memory_deadline, evidence_outcome, memory_expiry_partial, prepare_retained_effect,
 };
 use tracedecay_runtime_core::db::Database;
+use tracedecay_runtime_core::erase_send;
 use tracedecay_session_memory::fact_store::DatabaseFactStore;
 use tracedecay_session_memory::memory_mapping::{self, FactPageOperation};
 use tracedecay_session_memory::memory_mutation::{
@@ -55,46 +58,80 @@ macro_rules! execute_scoped_memory {
     ) => {{
         match &$port.authority {
             DirectRetainedMemoryAuthorityV1::Project { authority } => {
-                let (target, _) = bounded_memory_operation($context, async {
-                    open_project_retained_memory_target(
-                        authority,
-                        &authority.project_root,
-                        &$context.request_context.scope().project_id,
-                        $memory_scope,
-                        $selector,
-                        $access,
-                    )
-                    .await
-                })
-                .await?;
-                $executor(
+                let opened: Pin<
+                    Box<
+                        dyn Future<
+                                Output = Result<
+                                    target::RetainedMemoryTargetV1<'static>,
+                                    RetainedSurfaceExecutionErrorV1,
+                                >,
+                            > + Send
+                            + '_,
+                    >,
+                > = Box::pin(open_project_retained_memory_target(
+                    authority,
+                    &authority.project_root,
+                    &$context.request_context.scope().project_id,
+                    $memory_scope,
+                    $selector,
+                    $access,
+                ));
+                let (target, _) = bounded_memory_operation($context, opened).await?;
+                let executed: Pin<
+                    Box<
+                        dyn Future<
+                                Output = Result<
+                                    ApplicationOutcome<RetainedSurfaceResultV1>,
+                                    RetainedSurfaceExecutionErrorV1,
+                                >,
+                            > + Send
+                            + '_,
+                    >,
+                > = Box::pin($executor(
                     $context,
                     target.database(),
                     target.owner().clone(),
                     $request,
                     &$port.configuration_digest,
-                )
-                .await
+                ));
+                executed.await
             }
             DirectRetainedMemoryAuthorityV1::Profile { registry } => {
                 memory_mapping::ensure_profile_request_scope($memory_scope, $selector)?;
-                let (database, _) = bounded_memory_operation($context, async {
+                let opened: Pin<
+                    Box<
+                        dyn Future<Output = tracedecay_domain::errors::Result<Arc<Database>>>
+                            + Send
+                            + '_,
+                    >,
+                > = Box::pin(registry.profile_memory());
+                let (database, _) = bounded_memory_operation($context, async move {
                     tracing::Instrument::instrument(
-                        registry.profile_memory(),
+                        opened,
                         tracing::trace_span!("daemon.retained.memory.open_profile"),
                     )
                     .await
                     .map_err(map_execution_error)
                 })
                 .await?;
-                $executor(
+                let executed: Pin<
+                    Box<
+                        dyn Future<
+                                Output = Result<
+                                    ApplicationOutcome<RetainedSurfaceResultV1>,
+                                    RetainedSurfaceExecutionErrorV1,
+                                >,
+                            > + Send
+                            + '_,
+                    >,
+                > = Box::pin($executor(
                     $context,
                     &database,
                     FactOwnerV1::Profile,
                     $request,
                     &$port.configuration_digest,
-                )
-                .await
+                ));
+                executed.await
             }
         }
     }};
@@ -285,52 +322,74 @@ impl<'a> DirectRetainedMemoryPortV1<'a> {
 }
 
 impl DirectRetainedMemoryPortV1<'_> {
-    pub async fn execute_request(
-        &self,
-        context: RetainedSurfaceExecutionContextV1<'_>,
-        request: RetainedMemoryRequestV1<'_>,
-    ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
-        match request {
-            RetainedMemoryRequestV1::FactStoreAdd(request) => {
-                self.execute_add(&context, request).await
-            }
-            RetainedMemoryRequestV1::FactStoreSearch(request) => {
-                self.execute_read(&context, Read::Search(request)).await
-            }
-            RetainedMemoryRequestV1::FactStoreProbe(request) => {
-                self.execute_read(&context, Read::Probe(request)).await
-            }
-            RetainedMemoryRequestV1::FactStoreRelated(request) => {
-                self.execute_read(&context, Read::Related(request)).await
-            }
-            RetainedMemoryRequestV1::FactStoreReason(request) => {
-                self.execute_read(&context, Read::Reason(request)).await
-            }
-            RetainedMemoryRequestV1::FactStoreContradict(request) => {
-                self.execute_read(&context, Read::Contradict(request)).await
-            }
-            RetainedMemoryRequestV1::FactStoreGet(request) => {
-                self.execute_read(&context, Read::Get(request)).await
-            }
-            RetainedMemoryRequestV1::FactStoreUpdate(request) => {
-                self.execute_update(&context, request).await
-            }
-            RetainedMemoryRequestV1::FactStoreRemove(request) => {
-                self.execute_remove(&context, request).await
-            }
-            RetainedMemoryRequestV1::FactStoreSupersede(request) => {
-                self.execute_supersede(&context, request).await
-            }
-            RetainedMemoryRequestV1::FactStoreList(request) => {
-                self.execute_read(&context, Read::List(request)).await
-            }
-            RetainedMemoryRequestV1::FactFeedback(request) => {
-                self.execute_feedback(&context, request).await
-            }
-            RetainedMemoryRequestV1::MemoryStatus(request) => {
-                self.execute_status(&context, request).await
-            }
-        }
+    pub fn execute_request<'a>(
+        &'a self,
+        context: RetainedSurfaceExecutionContextV1<'a>,
+        request: RetainedMemoryRequestV1<'a>,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        ApplicationOutcome<RetainedSurfaceResultV1>,
+                        RetainedSurfaceExecutionErrorV1,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let executed: Pin<
+                Box<
+                    dyn Future<
+                            Output = Result<
+                                ApplicationOutcome<RetainedSurfaceResultV1>,
+                                RetainedSurfaceExecutionErrorV1,
+                            >,
+                        > + Send,
+                >,
+            > = match request {
+                RetainedMemoryRequestV1::FactStoreAdd(request) => {
+                    Box::pin(self.execute_add(&context, request))
+                }
+                RetainedMemoryRequestV1::FactStoreSearch(request) => {
+                    Box::pin(self.execute_read(&context, Read::Search(request)))
+                }
+                RetainedMemoryRequestV1::FactStoreProbe(request) => {
+                    Box::pin(self.execute_read(&context, Read::Probe(request)))
+                }
+                RetainedMemoryRequestV1::FactStoreRelated(request) => {
+                    Box::pin(self.execute_read(&context, Read::Related(request)))
+                }
+                RetainedMemoryRequestV1::FactStoreReason(request) => {
+                    Box::pin(self.execute_read(&context, Read::Reason(request)))
+                }
+                RetainedMemoryRequestV1::FactStoreContradict(request) => {
+                    Box::pin(self.execute_read(&context, Read::Contradict(request)))
+                }
+                RetainedMemoryRequestV1::FactStoreGet(request) => {
+                    Box::pin(self.execute_read(&context, Read::Get(request)))
+                }
+                RetainedMemoryRequestV1::FactStoreUpdate(request) => {
+                    Box::pin(self.execute_update(&context, request))
+                }
+                RetainedMemoryRequestV1::FactStoreRemove(request) => {
+                    Box::pin(self.execute_remove(&context, request))
+                }
+                RetainedMemoryRequestV1::FactStoreSupersede(request) => {
+                    Box::pin(self.execute_supersede(&context, request))
+                }
+                RetainedMemoryRequestV1::FactStoreList(request) => {
+                    Box::pin(self.execute_read(&context, Read::List(request)))
+                }
+                RetainedMemoryRequestV1::FactFeedback(request) => {
+                    Box::pin(self.execute_feedback(&context, request))
+                }
+                RetainedMemoryRequestV1::MemoryStatus(request) => {
+                    Box::pin(self.execute_status(&context, request))
+                }
+            };
+            executed.await
+        })
     }
 }
 
@@ -340,7 +399,7 @@ impl RetainedMemoryExecutionPortV1 for DirectRetainedMemoryPortV1<'_> {
         context: RetainedSurfaceExecutionContextV1<'a>,
         request: RetainedMemoryRequestV1<'a>,
     ) -> RetainedSurfaceExecutionFutureV1<'a> {
-        Box::pin(async move { self.execute_request(context, request).await })
+        self.execute_request(context, request)
     }
 }
 
@@ -368,9 +427,18 @@ async fn execute_add_on_db(
         &operation_id,
     )?;
     let write_control = fact_write_control(context);
+    let committed = erase_send!(
+        memory.add_preflighted_project_memory_fact(preflight, &write_control),
+        Result<
+            ProjectMemoryFactAddRequestOutcome,
+            tracedecay_session_memory::memory::MemoryMutationError<
+                ProjectMemoryFactAddRequestOutcome,
+            >,
+        >
+    );
     let (outcome, settled_after_expiry) = bounded_memory_operation(context, async {
         Ok(tracing::Instrument::instrument(
-            memory.add_preflighted_project_memory_fact(preflight, &write_control),
+            committed,
             tracing::trace_span!("daemon.retained.memory.add.commit"),
         )
         .await)
@@ -435,9 +503,18 @@ async fn execute_update_on_db(
         context.request_context.actor().clone(),
     )?;
     let write_control = fact_write_control(context);
+    let committed = erase_send!(
+        memory.update_project_memory_fact(command, &write_control),
+        Result<
+            tracedecay_store::ProjectMemoryFactUpdateOutcomeV1,
+            tracedecay_session_memory::memory::MemoryMutationError<
+                tracedecay_store::ProjectMemoryFactUpdateOutcomeV1,
+            >,
+        >
+    );
     let (outcome, settled_after_expiry) = bounded_memory_operation(context, async {
         Ok(tracing::Instrument::instrument(
-            memory.update_project_memory_fact(command, &write_control),
+            committed,
             tracing::trace_span!("daemon.retained.memory.update.commit"),
         )
         .await)
@@ -487,9 +564,18 @@ async fn execute_remove_on_db(
         context.request_context.actor().clone(),
     )?;
     let write_control = fact_write_control(context);
+    let committed = erase_send!(
+        memory.remove_project_memory_fact(command, &write_control),
+        Result<
+            tracedecay_store::ProjectMemoryFactRemoveOutcomeV1,
+            tracedecay_session_memory::memory::MemoryMutationError<
+                tracedecay_store::ProjectMemoryFactRemoveOutcomeV1,
+            >,
+        >
+    );
     let (outcome, settled_after_expiry) = bounded_memory_operation(context, async {
         Ok(tracing::Instrument::instrument(
-            memory.remove_project_memory_fact(command, &write_control),
+            committed,
             tracing::trace_span!("daemon.retained.memory.remove.commit"),
         )
         .await)
@@ -555,9 +641,18 @@ async fn execute_supersede_on_db(
         context.request_context.actor().clone(),
     )?;
     let write_control = fact_write_control(context);
+    let committed = erase_send!(
+        memory.supersede_project_memory_fact(command, &write_control),
+        Result<
+            tracedecay_store::ProjectMemoryFactSupersedeOutcomeV1,
+            tracedecay_session_memory::memory::MemoryMutationError<
+                tracedecay_store::ProjectMemoryFactSupersedeOutcomeV1,
+            >,
+        >
+    );
     let (outcome, settled_after_expiry) = bounded_memory_operation(context, async {
         Ok(tracing::Instrument::instrument(
-            memory.supersede_project_memory_fact(command, &write_control),
+            committed,
             tracing::trace_span!("daemon.retained.memory.supersede.commit"),
         )
         .await)
@@ -615,9 +710,18 @@ async fn execute_feedback_on_db(
         context.request_context.actor().clone(),
     )?;
     let write_control = fact_write_control(context);
+    let committed = erase_send!(
+        memory.record_project_memory_fact_feedback(command, &write_control),
+        Result<
+            tracedecay_store::ProjectMemoryFactFeedbackOutcomeV1,
+            tracedecay_session_memory::memory::MemoryMutationError<
+                tracedecay_store::ProjectMemoryFactFeedbackOutcomeV1,
+            >,
+        >
+    );
     let (outcome, settled_after_expiry) = bounded_memory_operation(context, async {
         Ok(tracing::Instrument::instrument(
-            memory.record_project_memory_fact_feedback(command, &write_control),
+            committed,
             tracing::trace_span!("daemon.retained.memory.feedback.commit"),
         )
         .await)
@@ -685,9 +789,16 @@ async fn search_on_db(
         MemoryOperationContext::from_request_id(&owner, "search", request_id, actor)
             .map_err(memory_mapping::map_memory_error)?;
     let read_control = fact_read_control(context);
+    let searched = erase_send!(
+        memory.search_project_memory_facts(query, &read_control),
+        Result<
+            tracedecay_store::ProjectMemoryFactSearchPageV1,
+            tracedecay_session_memory::memory::MemoryApplicationError,
+        >
+    );
     let (page, _) = bounded_memory_operation(context, async {
         tracing::Instrument::instrument(
-            memory.search_project_memory_facts(query, &read_control),
+            searched,
             tracing::trace_span!("daemon.retained.memory.search.query"),
         )
         .await
@@ -895,31 +1006,42 @@ async fn semantic_search_on_db(
     let memory = memory_application(database, owner.clone())?;
     let query = memory_mapping::search_query(owner, kind, query_text, options, after, &binding)?;
     let read_control = fact_read_control(context);
+    let (span, queried) = match request {
+        SemanticRead::Probe(_) => (
+            tracing::trace_span!("daemon.retained.memory.probe"),
+            erase_send!(
+                memory.probe_project_memory_facts(query, &read_control),
+                Result<
+                    tracedecay_store::ProjectMemoryFactSearchPageV1,
+                    tracedecay_session_memory::memory::MemoryApplicationError,
+                >
+            ),
+        ),
+        SemanticRead::Related(_) => (
+            tracing::trace_span!("daemon.retained.memory.related"),
+            erase_send!(
+                memory.related_project_memory_facts(query, &read_control),
+                Result<
+                    tracedecay_store::ProjectMemoryFactSearchPageV1,
+                    tracedecay_session_memory::memory::MemoryApplicationError,
+                >
+            ),
+        ),
+        SemanticRead::Reason(_) => (
+            tracing::trace_span!("daemon.retained.memory.reason"),
+            erase_send!(
+                memory.reason_project_memory_facts(query, &read_control),
+                Result<
+                    tracedecay_store::ProjectMemoryFactSearchPageV1,
+                    tracedecay_session_memory::memory::MemoryApplicationError,
+                >
+            ),
+        ),
+    };
     let (page, _) = bounded_memory_operation(context, async {
-        let page = match request {
-            SemanticRead::Probe(_) => {
-                tracing::Instrument::instrument(
-                    memory.probe_project_memory_facts(query, &read_control),
-                    tracing::trace_span!("daemon.retained.memory.probe"),
-                )
-                .await
-            }
-            SemanticRead::Related(_) => {
-                tracing::Instrument::instrument(
-                    memory.related_project_memory_facts(query, &read_control),
-                    tracing::trace_span!("daemon.retained.memory.related"),
-                )
-                .await
-            }
-            SemanticRead::Reason(_) => {
-                tracing::Instrument::instrument(
-                    memory.reason_project_memory_facts(query, &read_control),
-                    tracing::trace_span!("daemon.retained.memory.reason"),
-                )
-                .await
-            }
-        };
-        page.map_err(memory_mapping::map_memory_error)
+        tracing::Instrument::instrument(queried, span)
+            .await
+            .map_err(memory_mapping::map_memory_error)
     })
     .await?;
     let mapped = memory_mapping::search_page(&page, &binding)?;
@@ -942,9 +1064,16 @@ async fn contradict_on_db(
     )
     .map_err(memory_mapping::map_store_error)?;
     let read_control = fact_read_control(context);
+    let contradictions = erase_send!(
+        memory.find_project_memory_contradictions(query, &read_control),
+        Result<
+            tracedecay_store::ProjectMemoryFactContradictionPageV1,
+            tracedecay_session_memory::memory::MemoryApplicationError,
+        >
+    );
     let (page, _) = bounded_memory_operation(context, async {
         tracing::Instrument::instrument(
-            memory.find_project_memory_contradictions(query, &read_control),
+            contradictions,
             tracing::trace_span!("daemon.retained.memory.contradict.query"),
         )
         .await
@@ -970,9 +1099,16 @@ async fn get_on_db(
     let target = ProjectMemoryFactIdV1::new(owner, request.fact_id.clone())
         .map_err(memory_mapping::map_store_error)?;
     let read_control = fact_read_control(context);
+    let loaded = erase_send!(
+        memory.get_project_memory_fact(target.clone(), &read_control),
+        Result<
+            Option<tracedecay_store::ProjectMemoryFactProjectionV1>,
+            tracedecay_session_memory::memory::MemoryApplicationError,
+        >
+    );
     let (projection, _) = bounded_memory_operation(context, async {
         tracing::Instrument::instrument(
-            memory.get_project_memory_fact(target.clone(), &read_control),
+            loaded,
             tracing::trace_span!("daemon.retained.memory.get.fact"),
         )
         .await
@@ -986,9 +1122,16 @@ async fn get_on_db(
         memory_mapping::MAX_RETAINED_FEEDBACK_HISTORY_LIMIT,
     )
     .map_err(memory_mapping::map_store_error)?;
+    let history_page = erase_send!(
+        memory.get_project_memory_feedback_history(history_query, &read_control),
+        Result<
+            tracedecay_store::ProjectMemoryFactFeedbackHistoryV1,
+            tracedecay_session_memory::memory::MemoryApplicationError,
+        >
+    );
     let (history, _) = bounded_memory_operation(context, async {
         tracing::Instrument::instrument(
-            memory.get_project_memory_feedback_history(history_query, &read_control),
+            history_page,
             tracing::trace_span!("daemon.retained.memory.get.history"),
         )
         .await
@@ -1023,9 +1166,16 @@ async fn list_on_db(
     )
     .map_err(memory_mapping::map_store_error)?;
     let read_control = fact_read_control(context);
+    let listed = erase_send!(
+        memory.list_project_memory_facts(query, &read_control),
+        Result<
+            tracedecay_store::ProjectMemoryFactPageV1,
+            tracedecay_session_memory::memory::MemoryApplicationError,
+        >
+    );
     let (page, _) = bounded_memory_operation(context, async {
         tracing::Instrument::instrument(
-            memory.list_project_memory_facts(query, &read_control),
+            listed,
             tracing::trace_span!("daemon.retained.memory.list.query"),
         )
         .await
@@ -1046,9 +1196,20 @@ async fn execute_status_on_db(
 ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
     let memory = memory_application(database, owner)?;
     let read_control = fact_read_control(context);
+    let status_query: Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        tracedecay_store::ProjectMemoryMemoryStatusV1,
+                        tracedecay_session_memory::memory::MemoryApplicationError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > = Box::pin(memory.project_memory_status(&read_control));
     let (status, _) = bounded_memory_operation(context, async {
         tracing::Instrument::instrument(
-            memory.project_memory_status(&read_control),
+            status_query,
             tracing::trace_span!("daemon.retained.memory.status.query"),
         )
         .await

@@ -24,7 +24,7 @@ use crate::observation::decode_observation_json;
 
 use super::apply::{derive_projection_with_alias, verify_provenance};
 
-pub(super) fn storage(
+pub(crate) fn storage(
     operation: &'static str,
     source: impl std::error::Error + Send + Sync + 'static,
 ) -> ProjectionStoreError {
@@ -799,8 +799,8 @@ pub(super) async fn has_other_projector_output_owner(
         .is_some())
 }
 
-async fn message_projection(
-    conn: &impl QueryExecutor,
+pub(super) async fn message_projection(
+    conn: &impl super::apply::SendProjectionDerive,
     observation: &DurableObservationV1,
     provider: &str,
     message_id: &str,
@@ -915,7 +915,7 @@ pub(super) fn same_projection_lineage(
 }
 
 pub(super) async fn verify_output_state(
-    conn: &impl QueryExecutor,
+    conn: &impl super::apply::SendProjectionDerive,
     state: &ProjectionOutputState,
     projection: &SessionMessageProjection,
 ) -> ProjectionStoreResult<()> {
@@ -1243,7 +1243,7 @@ pub(in super::super) async fn read_output_authorities(
     skip_all
 )]
 pub(in super::super) async fn resolve_output_projection(
-    conn: &impl QueryExecutor,
+    conn: &impl super::apply::SendProjectionDerive,
     authority: &ProjectionOutputAuthority,
     derived: Option<(&str, &ObservationProjection)>,
     projection: &SessionMessageProjection,

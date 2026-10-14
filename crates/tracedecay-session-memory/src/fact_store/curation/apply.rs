@@ -1,6 +1,8 @@
 //! Canonical tag curation and fact merge commands.
 
 use std::collections::{BTreeSet, HashMap};
+use std::future::Future;
+use std::pin::Pin;
 
 use serde_json::Value;
 use tracedecay_domain::{
@@ -76,27 +78,34 @@ pub(super) fn curation_receipt_from_value(
         .map_err(|error| storage_error(PROJECT_MEMORY_WRITE_OPERATION, error))
 }
 
-async fn replay_curation(
-    transaction: &Transaction<'_>,
-    request: &ProjectMemoryFactCurationBatchV1,
-    envelope: &ProjectMemoryOperationReceiptV1,
-    input_digest: &str,
-) -> FactStoreResult<ProjectMemoryFactCurationReceiptV1> {
-    let receipt = curation_receipt_from_value(&envelope.receipt)?;
-    if receipt.owner() != request.owner()
-        || receipt.operation_id() != request.operation_id()
-        || receipt.input_digest() != input_digest
-        || receipt.automation_run_id() != request.automation_run_id()
-        || envelope.fact_id.as_ref() != receipt.replay_fact_id()
-        || envelope.event_id.as_ref() != receipt.replay_event_id()
-    {
-        return Err(storage_message(
-            PROJECT_MEMORY_WRITE_OPERATION,
-            "curation operation receipt material does not match the request",
-        ));
-    }
-    verify_curation_replay_events_tx(transaction, request, &receipt).await?;
-    Ok(receipt.into_replayed())
+fn replay_curation<'a>(
+    transaction: &'a Transaction<'_>,
+    request: &'a ProjectMemoryFactCurationBatchV1,
+    envelope: &'a ProjectMemoryOperationReceiptV1,
+    input_digest: &'a str,
+) -> Pin<Box<dyn Future<Output = FactStoreResult<ProjectMemoryFactCurationReceiptV1>> + Send + 'a>>
+{
+    let receipt = curation_receipt_from_value(&envelope.receipt);
+    Box::pin(async move {
+        let receipt = receipt?;
+        if receipt.owner() != request.owner()
+            || receipt.operation_id() != request.operation_id()
+            || receipt.input_digest() != input_digest
+            || receipt.automation_run_id() != request.automation_run_id()
+            || envelope.fact_id.as_ref() != receipt.replay_fact_id()
+            || envelope.event_id.as_ref() != receipt.replay_event_id()
+        {
+            return Err(storage_message(
+                PROJECT_MEMORY_WRITE_OPERATION,
+                "curation operation receipt material does not match the request",
+            ));
+        }
+        let verified: Pin<Box<dyn Future<Output = FactStoreResult<()>> + Send + '_>> = Box::pin(
+            verify_curation_replay_events_tx(transaction, request, &receipt),
+        );
+        verified.await?;
+        Ok(receipt.into_replayed())
+    })
 }
 
 async fn verify_curation_replay_events_tx(
@@ -922,11 +931,15 @@ pub(in crate::fact_store) async fn merge_project_memory_facts_tx(
     merge_project_memory_facts_with_cas_tx(transaction, request, false).await
 }
 
-async fn merge_project_memory_facts_after_curation_review_tx(
-    transaction: &Transaction<'_>,
-    request: &ProjectMemoryFactMergeCommandV1,
-) -> FactStoreResult<ProjectMemoryFactMergeOutcomeV1> {
-    merge_project_memory_facts_with_cas_tx(transaction, request, true).await
+fn merge_project_memory_facts_after_curation_review_tx<'a>(
+    transaction: &'a Transaction<'_>,
+    request: &'a ProjectMemoryFactMergeCommandV1,
+) -> Pin<Box<dyn Future<Output = FactStoreResult<ProjectMemoryFactMergeOutcomeV1>> + Send + 'a>> {
+    Box::pin(merge_project_memory_facts_with_cas_tx(
+        transaction,
+        request,
+        true,
+    ))
 }
 
 async fn merge_project_memory_facts_with_cas_tx(

@@ -1017,8 +1017,7 @@ pub async fn inbox(
             let label = Path::new(&project.display_root)
                 .file_name()
                 .and_then(|name| name.to_str())
-                .map(str::to_owned)
-                .unwrap_or_else(|| project.display_root.clone());
+                .map_or_else(|| project.display_root.clone(), str::to_owned);
             let project_root = PathBuf::from(&project.canonical_root);
             let freshness = match state.code_index_freshness_reader.as_ref() {
                 Some(reader) => reader(project_root.clone()).await,

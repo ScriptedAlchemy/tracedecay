@@ -495,13 +495,26 @@ impl CargoFixture {
     }
 
     fn build_script_runs(&self) -> u32 {
+        // Dated nightly cargo nests build-script units at
+        // `build/<package>/<hash>/out` instead of `build/<package>-<hash>/out`.
         let build_directory = self.target.join("debug/build");
-        let counters = std::fs::read_dir(build_directory)
-            .expect("fixture build output directory")
-            .flatten()
-            .map(|entry| entry.path().join("out/build-script-runs"))
-            .filter(|path| path.is_file())
-            .collect::<Vec<_>>();
+        let mut counters = Vec::new();
+        let mut pending = vec![build_directory];
+        while let Some(directory) = pending.pop() {
+            for entry in std::fs::read_dir(&directory)
+                .expect("fixture build output directory")
+                .flatten()
+            {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if path.file_name().and_then(|name| name.to_str())
+                    == Some("build-script-runs")
+                {
+                    counters.push(path);
+                }
+            }
+        }
         assert_eq!(
             counters.len(),
             1,

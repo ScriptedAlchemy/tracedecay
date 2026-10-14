@@ -34,11 +34,11 @@ impl Drop for ReadRefreshRunningGuard {
     }
 }
 
-struct BranchReopenCompletion(Arc<AtomicU64>);
+struct BranchReopenCompletion(Arc<tokio::sync::watch::Sender<u64>>);
 
 impl Drop for BranchReopenCompletion {
     fn drop(&mut self) {
-        self.0.fetch_add(1, Ordering::Release);
+        self.0.send_modify(|completed| *completed += 1);
     }
 }
 
@@ -116,7 +116,7 @@ impl McpServer {
     pub(super) async fn shutdown_startup_catch_up_sync(&self) {
         if let Some(task) = self.startup_catch_up.take_sync_task() {
             task.abort();
-            let _ = task.await;
+            let _ = task.wait().await;
         }
         self.startup_catch_up.mark_cancelled();
     }
@@ -226,7 +226,7 @@ impl McpServer {
         });
     }
 
-    /// Polls until at least one branch reopen has completed past `after`, or
+    /// Waits until at least one branch reopen has completed past `after`, or
     /// until `timeout` elapses. Returns `true` if one landed. Reopens do not
     /// block requests, so tests observe completion here.
     #[cfg(test)]
@@ -235,20 +235,21 @@ impl McpServer {
         after: u64,
         timeout: std::time::Duration,
     ) -> bool {
-        let deadline = tokio::time::Instant::now() + timeout;
-        while self.branch_reopen_completions.load(Ordering::Acquire) <= after {
-            if tokio::time::Instant::now() >= deadline {
-                return false;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        true
+        let mut completions = self.branch_reopen_completions.subscribe();
+        matches!(
+            tracedecay_runtime_core::native_runtime::timeout(
+                timeout,
+                completions.wait_for(|completed| *completed > after),
+            )
+            .await,
+            Ok(Ok(_))
+        )
     }
 
     /// Number of branch reopens that have completed so far.
     #[cfg(test)]
     pub(crate) fn branch_reopens_completed(&self) -> u64 {
-        self.branch_reopen_completions.load(Ordering::Acquire)
+        *self.branch_reopen_completions.borrow()
     }
 
     /// Catch-up helper for tests and explicit callers. Bypasses the 30 s
@@ -307,12 +308,18 @@ impl McpServer {
 
     /// Polls until startup reconciliation admission settles or `timeout` elapses.
     pub async fn wait_for_startup_catch_up(&self, timeout: std::time::Duration) -> bool {
-        let deadline = tokio::time::Instant::now() + timeout;
+        let deadline = std::time::Instant::now() + timeout;
         while !self.startup_catch_up_done() {
-            if tokio::time::Instant::now() >= deadline {
+            let now = std::time::Instant::now();
+            if now >= deadline
+                || tracedecay_runtime_core::native_runtime::sleep_until(
+                    now + std::time::Duration::from_millis(25),
+                )
+                .await
+                .is_err()
+            {
                 return false;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
         true
     }
@@ -509,7 +516,7 @@ impl McpServer {
         let server = self.dispatch_authority.server();
         let spawned = self.spawn_background_task(tracing::Instrument::instrument(
             async move {
-                let latest = match tokio::task::spawn_blocking(
+                let latest = match tracedecay_runtime_core::native_runtime::spawn_blocking(
                     tracedecay_dashboard_api::cloud::fetch_latest_version,
                 )
                 .await

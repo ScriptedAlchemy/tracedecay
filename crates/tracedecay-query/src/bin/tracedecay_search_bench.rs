@@ -796,8 +796,7 @@ impl Scratch {
     fn create() -> Result<Self, String> {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_nanos())
-            .unwrap_or_default();
+            .map_or_default(|elapsed| elapsed.as_nanos());
         let path = std::env::temp_dir().join(format!(
             "tracedecay-search-bench-{}-{unique:x}",
             std::process::id()

@@ -377,3 +377,26 @@ async fn lifecycle_less_boundary_settles_and_resumes_on_its_sessions_lifecycle()
     assert!(runtime.shutdown().await);
     assert!(runs.try_recv().is_err());
 }
+
+#[test]
+fn admission_without_a_tokio_runtime_is_unavailable_logged_and_counted() {
+    use tracedecay_runtime_core::native_runtime;
+    const SITE: &str = "daemon-service.hook_orchestration.admit";
+    let runtime = BoundedHookOrchestratorV1::new(1, |_, _| async {
+        HookOrchestrationWorkOutcomeV1::RetryableFailure
+    })
+    .unwrap();
+    native_runtime::block_on(async {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let before = native_runtime::tokio_runtime_missing_count(SITE);
+        assert_eq!(
+            runtime.admit(native_request(191)),
+            HookOrchestrationAdmissionV1::Unavailable
+        );
+        assert_eq!(
+            native_runtime::tokio_runtime_missing_count(SITE) - before,
+            1
+        );
+    })
+    .expect("native runtime");
+}

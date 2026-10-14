@@ -672,8 +672,7 @@ impl PhpExtractor {
     fn visit_use_group(state: &mut ExtractionState, group: TsNode<'_>, use_node: TsNode<'_>) {
         // The group has a prefix and individual clauses.
         let prefix = find_direct_child_by_kind(group, "namespace_name")
-            .map(|n| state.node_text(n).to_string())
-            .unwrap_or_default();
+            .map_or_default(|n| state.node_text(n).to_string());
 
         let mut cursor = group.walk();
         if cursor.goto_first_child() {

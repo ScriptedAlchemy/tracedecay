@@ -1570,6 +1570,16 @@ fn options(dry_run: bool) -> BackfillOptions {
     }
 }
 
+/// A page soft-stops once its deadline is within reach and returns
+/// `interruption: None` before its traversal budget is spent. A deadline no
+/// test run reaches keeps each page's shape independent of host load.
+fn page_control() -> BoundedGitControl {
+    BoundedGitControl::new(
+        ObservationCancellation::default(),
+        Duration::from_secs(24 * 60 * 60),
+    )
+}
+
 #[tokio::test]
 async fn persisted_partial_reopens_and_converges_exactly_once() {
     let repository = repository_fixture();
@@ -1594,13 +1604,9 @@ async fn persisted_partial_reopens_and_converges_exactly_once() {
     drop(store);
 
     let reopened = TestStore::open(&database);
-    let completed = run_bounded_history_index_page(
-        &reopened,
-        &options(false),
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    let completed = run_bounded_history_index_page(&reopened, &options(false), &page_control())
+        .await
+        .unwrap();
     assert_eq!(completed.interruption, None);
     assert_eq!(completed.frontier.change_sequence, 1);
     assert_eq!(
@@ -1610,13 +1616,9 @@ async fn persisted_partial_reopens_and_converges_exactly_once() {
     assert!(completed.stats.spans_written > 0);
     assert!(completed.stats.commits_attributed > 0);
 
-    let repeated = run_bounded_history_index_page(
-        &reopened,
-        &options(false),
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    let repeated = run_bounded_history_index_page(&reopened, &options(false), &page_control())
+        .await
+        .unwrap();
     assert_eq!(repeated.stats.sessions_scanned, 0);
 }
 
@@ -1732,36 +1734,24 @@ async fn unborn_history_converges_and_later_activity_indexes_first_commit() {
         .execute_batch("UPDATE sessions SET ended_at = 1")
         .await
         .unwrap();
-    let dry = run_bounded_history_index_page(
-        &store,
-        &options(true),
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    let dry = run_bounded_history_index_page(&store, &options(true), &page_control())
+        .await
+        .unwrap();
     assert_eq!(dry.interruption, None);
     assert!(!dry.committed);
     assert_eq!(dry.stats.commits_attributed, 0);
     store.fail_next_write();
-    let failed = run_bounded_history_index_page(
-        &store,
-        &options(false),
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    let failed = run_bounded_history_index_page(&store, &options(false), &page_control())
+        .await
+        .unwrap();
     assert_eq!(
         failed.interruption,
         Some(BoundedBackfillInterruption::SourceUnavailable)
     );
     assert_eq!(failed.frontier.change_sequence, 0);
-    let completed = run_bounded_history_index_page(
-        &store,
-        &options(false),
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    let completed = run_bounded_history_index_page(&store, &options(false), &page_control())
+        .await
+        .unwrap();
     assert_eq!(completed.interruption, None);
     assert_eq!(completed.remaining_sessions, 0);
     assert_eq!(completed.frontier.change_sequence, 2);
@@ -1783,13 +1773,9 @@ async fn unborn_history_converges_and_later_activity_indexes_first_commit() {
         .await
         .unwrap();
     let sequence = touch(&store, "session-1").await;
-    let completed = run_bounded_history_index_page(
-        &store,
-        &options(false),
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    let completed = run_bounded_history_index_page(&store, &options(false), &page_control())
+        .await
+        .unwrap();
     assert_eq!(completed.interruption, None);
     assert_eq!(completed.frontier.change_sequence, sequence);
     assert_eq!(completed.stats.commits_attributed, 1);
@@ -1815,13 +1801,9 @@ async fn staged_graph_replacement_publishes_nothing_and_retry_converges() {
     let mut unbounded_commits = options(false);
     unbounded_commits.max_commits_per_repo = usize::MAX;
 
-    let staged = run_bounded_history_index_page(
-        &store,
-        &unbounded_commits,
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    let staged = run_bounded_history_index_page(&store, &unbounded_commits, &page_control())
+        .await
+        .unwrap();
     assert_eq!(
         staged.interruption,
         Some(BoundedBackfillInterruption::HistoryTraversalBudgetReached)
@@ -1841,13 +1823,9 @@ async fn staged_graph_replacement_publishes_nothing_and_retry_converges() {
     )
     .unwrap();
     initialize_repository(repository.path());
-    let reset = run_bounded_history_index_page(
-        &store,
-        &unbounded_commits,
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    let reset = run_bounded_history_index_page(&store, &unbounded_commits, &page_control())
+        .await
+        .unwrap();
     assert_eq!(reset.frontier.change_sequence, 0);
     for table in [
         "git_history_index_progress",
@@ -1869,13 +1847,9 @@ async fn staged_graph_replacement_publishes_nothing_and_retry_converges() {
         )
         .await
         .unwrap();
-    let completed = run_bounded_history_index_page(
-        &store,
-        &unbounded_commits,
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    let completed = run_bounded_history_index_page(&store, &unbounded_commits, &page_control())
+        .await
+        .unwrap();
     assert_eq!(completed.interruption, None);
     assert_eq!(completed.frontier.change_sequence, 3);
     assert!(completed.stats.spans_written > 0);
@@ -1886,8 +1860,7 @@ async fn publish_verification_restart_rejects_same_path_repository_replacement()
     let repository = repository_fixture();
     let directory = tempfile::tempdir().unwrap();
     let store = prepare_store(&directory.path().join("sessions.db"), repository.path()).await;
-    let control =
-        BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10));
+    let control = page_control();
     let row = SessionActivityRow {
         provider: "codex".to_string(),
         session_id: "session-1".to_string(),
@@ -1970,13 +1943,9 @@ async fn publish_verification_restart_rejects_same_path_repository_replacement()
     )
     .unwrap();
     initialize_repository(repository.path());
-    let restarted = run_bounded_history_index_page(
-        &store,
-        &options(false),
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    let restarted = run_bounded_history_index_page(&store, &options(false), &page_control())
+        .await
+        .unwrap();
 
     assert_eq!(restarted.interruption, None);
     assert_eq!(restarted.frontier.change_sequence, 0);
@@ -2010,13 +1979,9 @@ async fn out_of_window_deep_history_is_bounded_and_resumes_from_durable_graph_st
     let mut unbounded_commits = options(false);
     unbounded_commits.max_commits_per_repo = usize::MAX;
 
-    let partial = run_bounded_history_index_page(
-        &store,
-        &unbounded_commits,
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    let partial = run_bounded_history_index_page(&store, &unbounded_commits, &page_control())
+        .await
+        .unwrap();
     assert_eq!(
         partial.interruption,
         Some(BoundedBackfillInterruption::HistoryTraversalBudgetReached)
@@ -2026,13 +1991,9 @@ async fn out_of_window_deep_history_is_bounded_and_resumes_from_durable_graph_st
         scalar(&store, "SELECT COUNT(*) FROM git_history_index_seen").await,
         i64::try_from(MAX_GRAPH_PAGE_EXAMINED_NODES).unwrap()
     );
-    let completed = run_bounded_history_index_page(
-        &store,
-        &unbounded_commits,
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    let completed = run_bounded_history_index_page(&store, &unbounded_commits, &page_control())
+        .await
+        .unwrap();
     assert_eq!(completed.interruption, None);
     assert_eq!(completed.frontier.change_sequence, 2);
     assert_eq!(
@@ -2075,13 +2036,9 @@ async fn resume_uses_sealed_canonical_worktree_after_alias_repoint() {
     );
     std::fs::remove_file(&alias).unwrap();
     symlink(&replacement, &alias).unwrap();
-    let completed = run_bounded_history_index_page(
-        &store,
-        &options(false),
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    let completed = run_bounded_history_index_page(&store, &options(false), &page_control())
+        .await
+        .unwrap();
 
     assert_eq!(completed.interruption, None);
     assert!(completed.stats.spans_written > 0);
@@ -2159,13 +2116,9 @@ async fn non_utf8_canonical_worktree_resumes_exactly_then_fails_typed_publish() 
     );
     std::fs::remove_file(&alias).unwrap();
     symlink(&replacement, &alias).unwrap();
-    let unsupported = run_bounded_history_index_page(
-        &store,
-        &options(false),
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    let unsupported = run_bounded_history_index_page(&store, &options(false), &page_control())
+        .await
+        .unwrap();
 
     assert_eq!(unsupported.stats.skipped_git_error, 1);
     assert_eq!(unsupported.unresolved_failures, 1);
@@ -2228,26 +2181,18 @@ async fn changed_session_discards_sealed_candidate_before_publishing_new_revisio
         .await
         .unwrap();
     let newer_sequence = touch(&store, "session-1").await;
-    let resumed = run_bounded_history_index_page(
-        &store,
-        &options(false),
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    let resumed = run_bounded_history_index_page(&store, &options(false), &page_control())
+        .await
+        .unwrap();
     assert_eq!(resumed.frontier.change_sequence, 0);
     assert_eq!(
         scalar(&store, "SELECT COUNT(*) FROM git_history_index_progress").await,
         0
     );
 
-    let newer = run_bounded_history_index_page(
-        &store,
-        &options(false),
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    let newer = run_bounded_history_index_page(&store, &options(false), &page_control())
+        .await
+        .unwrap();
     assert_eq!(newer.frontier.change_sequence, newer_sequence);
 }
 
@@ -2288,13 +2233,9 @@ async fn malformed_source_is_durable_while_later_sessions_advance_and_recovery_c
     let mut page_options = options(false);
     page_options.limit_sessions = 2;
 
-    let outcome = run_bounded_history_index_page(
-        &store,
-        &page_options,
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    let outcome = run_bounded_history_index_page(&store, &page_options, &page_control())
+        .await
+        .unwrap();
     assert_eq!(outcome.interruption, None);
     assert_eq!(outcome.frontier.change_sequence, valid_sequence);
     assert_eq!(outcome.stats.skipped_git_error, 1);
@@ -2302,13 +2243,9 @@ async fn malformed_source_is_durable_while_later_sessions_advance_and_recovery_c
     assert_eq!(outcome.remaining_sessions, 0);
     assert!(outcome.stats.spans_written > 0);
 
-    let empty_pass = run_bounded_history_index_page(
-        &store,
-        &page_options,
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    let empty_pass = run_bounded_history_index_page(&store, &page_options, &page_control())
+        .await
+        .unwrap();
     assert_eq!(empty_pass.stats.sessions_scanned, 0);
     assert_eq!(empty_pass.remaining_sessions, 0);
     assert_eq!(empty_pass.unresolved_failures, 1);
@@ -2323,13 +2260,9 @@ async fn malformed_source_is_durable_while_later_sessions_advance_and_recovery_c
         .await
         .unwrap();
     let recovered_sequence = touch(&store, "session-1").await;
-    let recovered = run_bounded_history_index_page(
-        &store,
-        &page_options,
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    let recovered = run_bounded_history_index_page(&store, &page_options, &page_control())
+        .await
+        .unwrap();
     assert_eq!(recovered.frontier.change_sequence, recovered_sequence);
     assert_eq!(recovered.unresolved_failures, 0);
     assert_eq!(
@@ -2344,13 +2277,9 @@ async fn dry_run_leaves_progress_evidence_and_frontier_untouched() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("sessions.db");
     let store = prepare_store(&database, repository.path()).await;
-    let outcome = run_bounded_history_index_page(
-        &store,
-        &options(true),
-        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    let outcome = run_bounded_history_index_page(&store, &options(true), &page_control())
+        .await
+        .unwrap();
 
     assert!(!outcome.committed);
     assert!(outcome.stats.spans_written > 0);

@@ -270,11 +270,7 @@ fn visit_let_statement(state: &mut ExtractionState, basic_line: &BasicLine<'_>) 
 
 /// Extract GOSUB/GOTO references from top-level lines (those not part of subroutines).
 pub(crate) fn extract_top_level_calls(state: &mut ExtractionState, lines: &[BasicLine<'_>]) {
-    let file_node_id = state
-        .node_stack
-        .last()
-        .map(|(_, id)| id.clone())
-        .unwrap_or_default();
+    let file_node_id = state.node_stack.last().map_or_default(|(_, id)| id.clone());
     for_each_top_level_line(lines, |line| {
         walk_for_calls(state, line.node, &file_node_id);
     });

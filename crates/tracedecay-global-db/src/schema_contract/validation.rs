@@ -1,7 +1,11 @@
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::LazyLock;
 
 use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
+use tracedecay_runtime_core::db::{DatabaseEngineReadConnection, DatabaseEngineReadSnapshot};
+use tracedecay_runtime_core::ports::registered_schema::RegisteredSchemaInstallationV1;
 
 use super::super::{global_db_operation_error, global_db_operation_message};
 use super::definitions::{
@@ -613,17 +617,58 @@ pub async fn validate_remote_deletion_schema_contract(
 ///
 /// Transcript, LCM, git-correlation, and workflow-index tables are independently owned by their
 /// schema modules; this validator intentionally neither claims nor validates those domains.
-pub async fn validate_authority_schema_contract(
-    conn: &impl QueryExecutor,
-) -> tracedecay_domain::errors::Result<()> {
-    validate_tables_and_indexes(conn, TABLES).await?;
-    for invariant in super::invariants::INVARIANTS {
-        for trigger in invariant.triggers {
-            validate_trigger(conn, trigger).await?;
+///
+/// Each concrete connection implements this instead of one generic async function: nesting
+/// `validate_tables_and_indexes` under the trigger walk overflows the next solver's `Send`
+/// proof (rust-lang/rust#159228). The returned future only awaits already-erased children.
+pub(crate) trait AuthoritySchemaContract: Sync {
+    fn validate_authority_schema<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = tracedecay_domain::errors::Result<()>> + Send + 'a>>;
+}
+
+macro_rules! impl_authority_schema_contract {
+    ($ty:ty) => {
+        impl AuthoritySchemaContract for $ty {
+            fn validate_authority_schema<'a>(
+                &'a self,
+            ) -> Pin<Box<dyn Future<Output = tracedecay_domain::errors::Result<()>> + Send + 'a>>
+            {
+                Box::pin(async move {
+                    let tables: Pin<
+                        Box<dyn Future<Output = tracedecay_domain::errors::Result<()>> + Send + '_>,
+                    > = Box::pin(validate_tables_and_indexes(self, TABLES));
+                    tables.await?;
+                    for invariant in super::invariants::INVARIANTS {
+                        for trigger in invariant.triggers {
+                            let checked: Pin<
+                                Box<
+                                    dyn Future<Output = tracedecay_domain::errors::Result<()>>
+                                        + Send
+                                        + '_,
+                                >,
+                            > = Box::pin(validate_trigger(self, trigger));
+                            checked.await?;
+                        }
+                    }
+                    let autoincrement: Pin<
+                        Box<dyn Future<Output = tracedecay_domain::errors::Result<()>> + Send + '_>,
+                    > = Box::pin(validate_observation_autoincrement(self));
+                    autoincrement.await
+                })
+            }
         }
-    }
-    validate_observation_autoincrement(conn).await?;
-    Ok(())
+    };
+}
+
+impl_authority_schema_contract!(DatabaseEngineReadConnection);
+impl_authority_schema_contract!(DatabaseEngineReadSnapshot);
+impl_authority_schema_contract!(RegisteredSchemaInstallationV1);
+
+pub(crate) fn validate_authority_schema_contract<'a>(
+    conn: &'a impl AuthoritySchemaContract,
+) -> Pin<Box<dyn Future<Output = tracedecay_domain::errors::Result<()>> + Send + 'a>> {
+    conn.validate_authority_schema()
 }
 
 #[cfg(test)]

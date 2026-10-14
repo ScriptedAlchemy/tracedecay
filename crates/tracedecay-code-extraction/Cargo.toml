@@ -88,11 +88,12 @@ tracedecay-domain = { path = "../tracedecay-domain" }
 # unmerged upstream, #1104): the published scanner spins forever at end of
 # input when a token starts in the sequence-number area with no six-column
 # line before EOF, and no parse deadline can interrupt a scanner call.
+# The next commit only raises its `tree-sitter` requirement to 0.27.
 arborium-kotlin = { version = "2.18", optional = true }
-tracedecay-large-treesitters = { package = "tokensave-large-treesitters", git = "https://github.com/ScriptedAlchemy/tokensave-large-treesitters", rev = "102d0103b6fd093c1e5989cceede1ed9f08fe6a9", optional = true }
+tracedecay-large-treesitters = { package = "tokensave-large-treesitters", git = "https://github.com/ScriptedAlchemy/tokensave-large-treesitters", rev = "c79cf9b77a4ec49d1d30af2d1a8279a37ca1aea4", optional = true }
 tracedecay-medium-treesitters = { package = "tokensave-medium-treesitters", version = "0.2.0", optional = true }
 tracing = "0.1"
-tree-sitter = "0.26"
+tree-sitter = "0.27"
 tree-sitter-hlsl = { version = "0.2.0", optional = true }
 tree-sitter-json = { version = "0.24", optional = true }
 tree-sitter-md = { version = "=0.5.3", default-features = false, optional = true }
@@ -107,7 +108,7 @@ serde_json = "1"
 sha2 = "0.11"
 
 [build-dependencies]
-cc = "1"
+cc = "1.8"
 
 # Names every shipped extractor to prove signature identity across the whole
 # language set, so it only builds once the full tier registers them.

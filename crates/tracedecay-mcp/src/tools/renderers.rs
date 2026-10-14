@@ -95,8 +95,7 @@ pub fn skill_view_md(value: &Value) -> String {
                 let bytes = file
                     .get("bytes")
                     .and_then(Value::as_array)
-                    .map(Vec::len)
-                    .unwrap_or_default();
+                    .map_or_default(Vec::len);
                 md.bullet(&format!("**{path}** - {bytes} bytes"));
             }
         }
@@ -215,16 +214,13 @@ fn value_i64(value: &Value, pointer: &str) -> Option<i64> {
 }
 
 fn string_array(value: Option<&Value>) -> String {
-    value
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
-        .unwrap_or_default()
+    value.and_then(Value::as_array).map_or_default(|items| {
+        items
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(", ")
+    })
 }
 
 fn append_skill_item(md: &mut Md, skill: &Value) {

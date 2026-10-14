@@ -226,16 +226,17 @@ impl McpServer {
             let Some(monitor_dir) = monitor_dir else {
                 return;
             };
-            let monitor_write = tokio::task::spawn_blocking(move || {
-                tracedecay_session_memory::monitor_ring::write_entry_to(
-                    &monitor_dir,
-                    &monitor_project_root,
-                    "tracedecay",
-                    &tool_name,
-                    net_saved_tokens,
-                    raw_file_tokens,
-                );
-            });
+            let monitor_write =
+                tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+                    tracedecay_session_memory::monitor_ring::write_entry_to(
+                        &monitor_dir,
+                        &monitor_project_root,
+                        "tracedecay",
+                        &tool_name,
+                        net_saved_tokens,
+                        raw_file_tokens,
+                    );
+                });
             if let Err(error) = monitor_write.await {
                 tracing::warn!(error = %error, "live monitor entry write failed");
             }
@@ -279,7 +280,10 @@ impl McpServer {
                 notified.await;
             }
         };
-        if tokio::time::timeout(timeout, wait).await.is_ok() {
+        if tracedecay_runtime_core::native_runtime::timeout(timeout, wait)
+            .await
+            .is_ok()
+        {
             return true;
         }
         let started = self.ledger_writes_started.load(Ordering::SeqCst);
@@ -357,7 +361,7 @@ impl McpServer {
                     return;
                 }
             };
-            let saved = tokio::task::spawn_blocking(move || {
+            let saved = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
                 persist_worldwide_delta(&profile_root, delta, upload_enabled)
                     .inspect_err(|error| tracing::warn!(%error, "could not save upload config"))
                     .is_ok()
@@ -538,7 +542,7 @@ impl McpServer {
             // The derivation walks the filesystem (gix discovery) and may
             // spawn git, so it runs on the blocking pool, off the
             // notification hot path.
-            let derived = tokio::task::spawn_blocking(move || {
+            let derived = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
                 derive_hook_span_git_context(&cwd, project_root, &active_project_root)
             })
             .await;
@@ -585,11 +589,16 @@ impl McpServer {
         self.ledger_writes_started.fetch_add(1, Ordering::SeqCst);
         let finished = self.ledger_writes_finished.clone();
         let notify = self.ledger_write_notify.clone();
-        tokio::spawn(async move {
+        let spawned = tracedecay_runtime_core::native_runtime::NativeTask::spawn(async move {
             future.await;
             finished.fetch_add(1, Ordering::SeqCst);
             notify.notify_waiters();
         });
+        if let Err(error) = spawned {
+            tracing::error!(%error, "savings-ledger write could not start");
+            self.ledger_writes_finished.fetch_add(1, Ordering::SeqCst);
+            self.ledger_write_notify.notify_waiters();
+        }
     }
 }
 
@@ -717,5 +726,39 @@ mod tests {
             "shutdown-observed settlement must advance durable token accounting"
         );
         server.shutdown_background_tasks().await;
+    }
+
+    /// The observed ledger write runs where no Tokio runtime exists and still
+    /// advances durable accounting.
+    #[test]
+    fn worldwide_flush_settles_without_a_tokio_runtime() {
+        let hazards = crate::test_support::native_runtime_hazards();
+        tracedecay_runtime_core::native_runtime::block_on(async {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            let (cg, _project, authority) =
+                super::super::writer_test_support::init_indexed_repo().await;
+            let context = super::super::writer_test_support::registered_context(cg, &authority);
+            let server = super::super::McpServer::new_with_context(context).await;
+            let tokens_saved = server.tokens_saved.as_ref().expect("fixture token counter");
+            let last_flushed = server
+                .last_flushed_tokens
+                .as_ref()
+                .expect("fixture flushed counter");
+            let baseline = last_flushed.load(Ordering::Acquire);
+            tokens_saved.store(baseline + 7, Ordering::Release);
+            server.last_flush_at.store(0, Ordering::Release);
+
+            server.maybe_flush_worldwide();
+
+            assert!(
+                server
+                    .ledger_writes_settled_within(Duration::from_secs(30))
+                    .await
+            );
+            assert_eq!(last_flushed.load(Ordering::Acquire), baseline + 7);
+            server.shutdown_background_tasks().await;
+        })
+        .expect("native runtime");
+        assert_eq!(crate::test_support::native_runtime_hazards(), hazards);
     }
 }

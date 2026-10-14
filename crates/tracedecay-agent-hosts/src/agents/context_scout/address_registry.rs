@@ -827,16 +827,13 @@ where
             .latest_committed(context, observed_at)
             .await
             .filter(|publication| publication_matches_pin(publication, pin));
-        let candidates = latest_publication
-            .as_ref()
-            .map(|publication| {
-                context_scout_candidates_from_publication(
-                    publication,
-                    pin.configuration.control(),
-                    observed_at,
-                )
-            })
-            .unwrap_or_default();
+        let candidates = latest_publication.as_ref().map_or_default(|publication| {
+            context_scout_candidates_from_publication(
+                publication,
+                pin.configuration.control(),
+                observed_at,
+            )
+        });
         Some(ContextScoutCanonicalInputV1 {
             address,
             control: pin.configuration.control(),
@@ -1051,7 +1048,7 @@ async fn load_address_ledger(
 
 fn random_address(envelope: &HookEventEnvelopeV2) -> Option<ContextScoutAddressV1> {
     let mut random = [0_u8; 96];
-    getrandom::getrandom(&mut random).ok()?;
+    getrandom::fill(&mut random).ok()?;
     let part = |index: usize| {
         let mut value = [0_u8; 16];
         value.copy_from_slice(&random[index * 16..(index + 1) * 16]);

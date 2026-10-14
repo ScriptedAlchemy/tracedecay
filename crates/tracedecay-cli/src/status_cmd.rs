@@ -2,11 +2,10 @@ use std::fmt::Write as _;
 use std::future::Future;
 use std::io::IsTerminal;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::Value;
-use tokio::time::{Instant, timeout_at};
 use tracedecay_application::advisory::github_runtime::{
     GitHubPullRequestDiscoveryKindV1, GitHubSourceStatusV1,
 };
@@ -18,6 +17,7 @@ use tracedecay_contracts::retrieval::StatusCodeIndexFreshnessV1;
 use tracedecay_contracts::storage::{
     SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStateV1,
 };
+use tracedecay_runtime_core::native_runtime::{TimeoutError, timeout_at};
 
 use crate::commands::{reject_problem_envelope, reject_truncation_envelope};
 use crate::{commands, resolve_cli_project_root};
@@ -69,13 +69,18 @@ async fn await_daemon_tool_result<T>(
     tool_name: &str,
     response: impl Future<Output = tracedecay_domain::errors::Result<T>>,
 ) -> tracedecay_domain::errors::Result<T> {
-    timeout_at(response_deadline, response).await.map_err(|_| {
-        tracedecay_domain::errors::TraceDecayError::Config {
-            message: format!(
-                "timed out waiting for daemon tool {tool_name} before status deadline"
-            ),
-        }
-    })?
+    timeout_at(response_deadline, response)
+        .await
+        .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+            message: match error {
+                TimeoutError::Elapsed => {
+                    format!("timed out waiting for daemon tool {tool_name} before status deadline")
+                }
+                TimeoutError::TimerUnavailable(_) => {
+                    format!("could not bound daemon tool {tool_name}: {error}")
+                }
+            },
+        })?
 }
 
 fn should_print_status_logo(short: bool, stdout_is_terminal: bool) -> bool {
@@ -186,7 +191,7 @@ async fn daemon_tool_json_within(
         tool_name,
         commands::daemon_tool_json_until(
             profile,
-            request_deadline.into_std(),
+            request_deadline,
             Some(project_path),
             tool_name,
             arguments,
@@ -277,13 +282,16 @@ pub(crate) async fn handle_status_command(
         ),
     )
     .await
-    .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
-        message: format!(
-            "status did not complete within {}s; the daemon may still be \
-             starting or opening this project, retry, or raise \
-             {STATUS_DEADLINE_ENV}",
-            budget.as_secs()
-        ),
+    .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+        message: match error {
+            TimeoutError::Elapsed => format!(
+                "status did not complete within {}s; the daemon may still be \
+                 starting or opening this project, retry, or raise \
+                 {STATUS_DEADLINE_ENV}",
+                budget.as_secs()
+            ),
+            TimeoutError::TimerUnavailable(_) => format!("could not bound status: {error}"),
+        },
     })?
 }
 
@@ -507,7 +515,7 @@ mod tests {
     };
     use serde_json::json;
     use std::time::Duration;
-    use tokio::time::Instant;
+    use std::time::Instant;
     use tracedecay_contracts::project_open::{
         ProjectOpenStatusReasonV1, ProjectOpenStatusStateV1, ProjectOpenStatusV1,
     };
@@ -582,13 +590,13 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn typed_server_failure_beats_cli_response_timeout() {
         let started_at = Instant::now();
-        let server_deadline = started_at + Duration::from_secs(30);
-        let response_deadline = started_at + Duration::from_secs(45);
+        let server_deadline = started_at + Duration::from_millis(50);
+        let response_deadline = started_at + Duration::from_secs(30);
         let result = await_daemon_tool_result(response_deadline, "tracedecay_status", async move {
-            tokio::time::sleep_until(server_deadline).await;
+            tokio::time::sleep_until(server_deadline.into()).await;
             Err::<(), _>(tracedecay_domain::errors::TraceDecayError::project_route(
                 "status_deadline_exceeded",
                 true,

@@ -180,9 +180,10 @@ impl CppExtractor {
         node: TsNode<'_>,
         name: Option<&str>,
     ) {
-        let name = name
-            .map(str::to_string)
-            .unwrap_or_else(|| Self::extract_destructor_name(state, node));
+        let name = name.map_or_else(
+            || Self::extract_destructor_name(state, node),
+            str::to_string,
+        );
         let signature = Some(Self::extract_function_signature(state, node));
         let docstring = Self::extract_docstring(state, node);
         let start_line = node.start_position().row as u32;

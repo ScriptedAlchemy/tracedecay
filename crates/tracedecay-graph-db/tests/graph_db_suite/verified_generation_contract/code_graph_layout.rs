@@ -386,14 +386,12 @@ fn sweep_keeps_the_shared_head_while_the_deleted_generation_still_serves() {
 
 /// Number of sealed generation artifacts currently on disk under the store.
 fn sealed_generation_count(root: &std::path::Path) -> usize {
-    std::fs::read_dir(support::graph_path(root).with_extension("sealed"))
-        .map(|entries| {
-            entries
-                .map(Result::unwrap)
-                .filter(|entry| entry.path().join("sealed.json").is_file())
-                .count()
-        })
-        .unwrap_or(0)
+    std::fs::read_dir(support::graph_path(root).with_extension("sealed")).map_or(0, |entries| {
+        entries
+            .map(Result::unwrap)
+            .filter(|entry| entry.path().join("sealed.json").is_file())
+            .count()
+    })
 }
 
 fn publish_generation(

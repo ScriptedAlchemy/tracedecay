@@ -1,25 +1,5 @@
 use super::*;
 use tracedecay_application::lsp_runtime::ProductionSemanticAuthorities;
-use tracedecay_lsp::{LspRuntimeSpawner, LspRuntimeTask};
-
-/// Runs the factory's feedback-cycle, diagnostic, and context work on Tokio:
-/// that work reaches the code index, whose reads still use the Tokio blocking
-/// pool and timers.
-struct TokioLspRuntime(tokio::runtime::Handle);
-
-struct TokioLspTask(tokio::task::AbortHandle);
-
-impl LspRuntimeTask for TokioLspTask {
-    fn abort(&self) {
-        self.0.abort();
-    }
-}
-
-impl LspRuntimeSpawner for TokioLspRuntime {
-    fn spawn(&self, future: LspRuntimeFuture<()>) -> Box<dyn LspRuntimeTask> {
-        Box::new(TokioLspTask(self.0.spawn(future).abort_handle()))
-    }
-}
 
 #[derive(Clone)]
 pub struct DaemonLspOwnerRegistrar {
@@ -141,7 +121,6 @@ impl DaemonLspOwnerRegistrar {
             .await;
         let factory = Arc::new(
             lsp_session_factory(
-                Arc::new(TokioLspRuntime(tokio::runtime::Handle::current())),
                 feedback_runtime,
                 registered_database.clone(),
                 code_index.clone() as Arc<dyn LspCodeIndexProjectionIdentityPort>,

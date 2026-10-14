@@ -215,7 +215,7 @@ async fn brokered_init(
     // eventually demand it does not survive a daemon restart. Request the
     // reconciliation explicitly so the receipt below reports something that
     // actually happened.
-    let reconcile = admin_sync(profile, handshake.clone(), init_deadline.into()).await;
+    let reconcile = admin_sync(profile, handshake.clone(), init_deadline).await;
     let reconcile = match reconcile {
         Err(error) => {
             if !code_index_reconciliation_is_optional(project_path, &error).await {
@@ -349,7 +349,7 @@ fn require_first_generation_ready(
 async fn admin_sync(
     profile: &ProfileRoot,
     handshake: tracedecay_daemon_protocol::DaemonHandshake,
-    deadline: tokio::time::Instant,
+    deadline: Instant,
 ) -> tracedecay_domain::errors::Result<AdminSyncResultV1> {
     match crate::tool_command::owner_operation_result(
         profile,

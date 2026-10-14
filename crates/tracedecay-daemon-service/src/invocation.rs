@@ -196,6 +196,11 @@ mod work_attempt_exec;
 mod work_blocked_interval_recovery;
 mod work_routing;
 
+/// Held by tests that read the process-wide native writer-wait counter, and
+/// by the off-Tokio attempt tests whose synchronous Work storage writes raise it.
+#[cfg(test)]
+pub(crate) static NATIVE_WRITER_WAITS_PROBE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub use clock::now_millis;
 use configuration::*;
 pub use configuration::{ProfileConfigurationAuthorityV1, execute_profile_configuration};

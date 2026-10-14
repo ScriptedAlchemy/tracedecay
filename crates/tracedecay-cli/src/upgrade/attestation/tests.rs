@@ -71,9 +71,7 @@ fn verify_served(
 ) -> (Result<String, AttestationRefusal>, Vec<String>) {
     let server = FakeGitHub::bind();
     let base = server.base.clone();
-    let responses = body
-        .map(|body| vec![(attestations_path(hex_digest), body)])
-        .unwrap_or_default();
+    let responses = body.map_or_default(|body| vec![(attestations_path(hex_digest), body)]);
     let requests = server.serve(responses);
     let provenance = ReleaseProvenance::for_release(&base, None, tag, is_beta);
     let outcome = verify_release_attestation(&provenance, digest(hex_digest));
@@ -128,7 +126,7 @@ fn a_tampered_archive_is_refused_even_when_served_the_released_bundle() {
         Err(AttestationRefusal::Rejected {
             digest: tampered,
             rejections: vec![BundleRejection::Unverified {
-                detail: "Verification error: artifact hash does not match any subject in \
+                detail: "artifact mismatch: artifact hash does not match any subject in \
                          attestation"
                     .to_owned(),
             }],
@@ -152,7 +150,7 @@ fn a_bundle_for_a_different_subject_is_refused() {
         Err(AttestationRefusal::Rejected {
             digest: BETA_ARCHIVE.to_owned(),
             rejections: vec![BundleRejection::Unverified {
-                detail: "Verification error: artifact hash does not match any subject in \
+                detail: "artifact mismatch: artifact hash does not match any subject in \
                          attestation"
                     .to_owned(),
             }],
@@ -239,8 +237,8 @@ fn a_bundle_with_a_broken_signature_is_refused() {
         Err(AttestationRefusal::Rejected {
             digest: BETA_ARCHIVE.to_owned(),
             rejections: vec![BundleRejection::Unverified {
-                detail: "Verification error: DSSE signature verification failed: Verification \
-                         error: ECDSA P-256 SHA-256 signature invalid"
+                detail: "invalid signature: DSSE signature verification failed: Verification \
+                         error: ECDSA_P256_SHA256 signature invalid"
                     .to_owned(),
             }],
         })

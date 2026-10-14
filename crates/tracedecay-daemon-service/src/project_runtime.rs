@@ -210,6 +210,83 @@ pub struct ProjectRuntime {
     recovery_cancel_probe: Option<RecoveryCancelProbe>,
 }
 
+// A `BTreeMap` of these runtimes walks every component before `Send` bottoms
+// out (rust-lang/rust#159228). Each field is proved on its own.
+unsafe impl Send for ProjectRuntime {}
+unsafe impl Sync for ProjectRuntime {}
+
+const _: fn(&ProjectRuntime) = |value| {
+    fn assert_send_sync<T: Send + Sync>(_: &T) {}
+    let ProjectRuntime {
+        publication,
+        publication_attempt,
+        callable_code,
+        feedback,
+        advisory_cycle,
+        advisory,
+        delivery_read,
+        feedback_cycle,
+        feedback_cycle_input,
+        primitive,
+        configuration,
+        work,
+        retained,
+        lsp_owner,
+        source_edit,
+        graph_tool,
+        #[cfg(any(test, feature = "test-helpers"))]
+        test_marker,
+        observability,
+        reservations,
+        registration_builds,
+        #[cfg(test)]
+        test_first,
+        #[cfg(test)]
+        test_second,
+        #[cfg(test)]
+        test_omitted,
+        #[cfg(test)]
+        recording_first,
+        #[cfg(test)]
+        recording_second,
+        #[cfg(test)]
+        recovery_cancel_probe,
+    } = value;
+    assert_send_sync(publication);
+    assert_send_sync(publication_attempt);
+    assert_send_sync(callable_code);
+    assert_send_sync(feedback);
+    assert_send_sync(advisory_cycle);
+    assert_send_sync(advisory);
+    assert_send_sync(delivery_read);
+    assert_send_sync(feedback_cycle);
+    assert_send_sync(feedback_cycle_input);
+    assert_send_sync(primitive);
+    assert_send_sync(configuration);
+    assert_send_sync(work);
+    assert_send_sync(retained);
+    assert_send_sync(lsp_owner);
+    assert_send_sync(source_edit);
+    assert_send_sync(graph_tool);
+    #[cfg(any(test, feature = "test-helpers"))]
+    assert_send_sync(test_marker);
+    assert_send_sync(observability);
+    assert_send_sync(reservations);
+    assert_send_sync(registration_builds);
+    #[cfg(test)]
+    assert_send_sync(test_first);
+    #[cfg(test)]
+    assert_send_sync(test_second);
+    #[cfg(test)]
+    assert_send_sync(test_omitted);
+    #[cfg(test)]
+    assert_send_sync(recording_first);
+    #[cfg(test)]
+    assert_send_sync(recording_second);
+    #[cfg(test)]
+    assert_send_sync(recovery_cancel_probe);
+};
+
 impl ProjectRuntime {
     /// Stop this project's retained background recovery owners from starting
     /// another cycle, without awaiting anything.
@@ -654,7 +731,7 @@ pub struct ProjectRuntimeRegistryV1 {
     /// The blocking drain is retained independently of whichever async
     /// shutdown caller first requested it. A retry can therefore join the
     /// same work after that caller is cancelled.
-    shutdown_task: Arc<AsyncMutex<Option<tokio::task::JoinHandle<()>>>>,
+    shutdown_task: Arc<AsyncMutex<Option<tracedecay_runtime_core::native_runtime::NativeTask<()>>>>,
     closed: Arc<AtomicBool>,
     shutdown_started: Arc<AtomicBool>,
     shutdown_complete: watch::Sender<ShutdownState>,

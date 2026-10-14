@@ -16,7 +16,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
 tokio = { version = "1", features = ["rt", "sync"] }
-tree-sitter = "0.26"
+tree-sitter = "0.27"
 tracing = "0.1"
 tracedecay-contracts = { path = "../tracedecay-contracts" }
 # The admitted graph handle wraps the interactive reader. Move-symbol import

@@ -9,14 +9,16 @@
 //! channel receivers, which wake through ordinary `Waker`s, so a foreign
 //! executor never blocks on the native runtime.
 
-use std::future::poll_fn;
-use std::pin::{Pin, pin};
-use std::sync::OnceLock;
+use std::collections::BTreeMap;
+use std::pin::Pin;
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use asupersync::runtime::{JoinError, RuntimeHandle};
 pub use asupersync::runtime::{Runtime, RuntimeBuilder};
+
+pub use crate::exact_sql::native_thread_writer_waits;
 use asupersync::types::PanicPayload;
 use asupersync::{Budget, Cx};
 use futures_util::future::{AbortHandle, Aborted, BoxFuture, FutureExt, Shared, abortable};
@@ -72,19 +74,23 @@ pub fn block_on<F: Future>(future: F) -> Result<F::Output, String> {
 /// is never polled still runs. Work spawned through a request `Cx` can instead
 /// be cancelled with that region before it starts, which would strand anything
 /// the caller had already queued for it.
-pub fn spawn_blocking<T, F>(work: F) -> impl Future<Output = Result<T, String>> + Send + 'static
+///
+/// Boxed so callers prove the context and channel wait `Send` once, here,
+/// instead of inside every future that awaits blocking work
+/// (rust-lang/rust#159228).
+pub fn spawn_blocking<T, F>(work: F) -> BoxFuture<'static, Result<T, String>>
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
     let queued = queue_blocking(work);
-    async move {
+    Box::pin(async move {
         let (cx, mut receiver) = queued?;
         receiver
             .recv(&cx)
             .await
             .map_err(|error| format!("native blocking work ended without a result: {error}"))
-    }
+    })
 }
 
 fn queue_blocking<T, F>(work: F) -> Result<(Cx, asupersync::channel::oneshot::Receiver<T>), String>
@@ -155,20 +161,25 @@ impl<T: Send + 'static> Drop for Settlement<T> {
 /// Completes at `deadline` on a native timer task, so a foreign executor never
 /// polls an Asupersync timer: its wait wakes through the join's `Waker`.
 /// Dropping the returned future cancels the timer.
-pub async fn sleep_until(deadline: Instant) -> Result<(), String> {
-    let cx = cx().ok_or("native execution context unavailable")?;
-    let mut timer = cx
-        .spawn(move |cx| async move {
-            // Measured before the timer clock is read, so the wake never lands
-            // before `deadline`.
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            asupersync::time::sleep(cx.now(), remaining).await;
-        })
-        .map_err(|error| format!("native timer was not admitted: {error}"))?;
-    timer
-        .join(&cx)
-        .await
-        .map_err(|error| format!("native timer ended without firing: {error}"))
+///
+/// Boxed so every timed caller proves this future `Send` once, here, instead
+/// of nesting the timer task inside its own proof (rust-lang/rust#159228).
+pub fn sleep_until(deadline: Instant) -> BoxFuture<'static, Result<(), String>> {
+    Box::pin(async move {
+        let cx = cx().ok_or("native execution context unavailable")?;
+        let mut timer = cx
+            .spawn(move |cx| async move {
+                // Measured before the timer clock is read, so the wake never
+                // lands before `deadline`.
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                asupersync::time::sleep(cx.now(), remaining).await;
+            })
+            .map_err(|error| format!("native timer was not admitted: {error}"))?;
+        timer
+            .join(&cx)
+            .await
+            .map_err(|error| format!("native timer ended without firing: {error}"))
+    })
 }
 
 /// Why [`timeout_at`] stopped waiting for its future.
@@ -185,37 +196,53 @@ pub enum TimeoutError {
 /// Awaits `future` until `deadline`, timed by [`sleep_until`]. The future is
 /// polled first, so one that is already ready wins even past its deadline and
 /// never starts a timer.
-pub async fn timeout_at<F: Future>(
-    deadline: Instant,
-    future: F,
-) -> Result<F::Output, TimeoutError> {
-    race_timer(future, sleep_until(deadline)).await
+pub fn timeout_at<F: Future>(deadline: Instant, future: F) -> Timeout<F> {
+    race_timer(future, Some(sleep_until(deadline)))
 }
 
 /// [`timeout_at`] `duration` from now. A duration past the clock's range waits
 /// without a deadline.
-pub async fn timeout<F: Future>(duration: Duration, future: F) -> Result<F::Output, TimeoutError> {
-    match Instant::now().checked_add(duration) {
-        Some(deadline) => timeout_at(deadline, future).await,
-        None => Ok(future.await),
+pub fn timeout<F: Future>(duration: Duration, future: F) -> Timeout<F> {
+    race_timer(
+        future,
+        Instant::now().checked_add(duration).map(sleep_until),
+    )
+}
+
+fn race_timer<F: Future>(
+    future: F,
+    timer: Option<BoxFuture<'static, Result<(), String>>>,
+) -> Timeout<F> {
+    Timeout {
+        future: Box::pin(future),
+        timer,
     }
 }
 
-async fn race_timer<F: Future>(
-    future: F,
-    timer: impl Future<Output = Result<(), String>>,
-) -> Result<F::Output, TimeoutError> {
-    let mut future = pin!(future);
-    let mut timer = pin!(timer);
-    poll_fn(|task| {
-        if let Poll::Ready(output) = future.as_mut().poll(task) {
+/// The future [`timeout_at`] and [`timeout`] return.
+///
+/// A named future over boxed fields, not an `async fn`, so a timed caller's
+/// `Send` proof crosses two pointers instead of three nested coroutines
+/// (rust-lang/rust#159228).
+pub struct Timeout<F> {
+    future: Pin<Box<F>>,
+    timer: Option<BoxFuture<'static, Result<(), String>>>,
+}
+
+impl<F: Future> Future for Timeout<F> {
+    type Output = Result<F::Output, TimeoutError>;
+
+    fn poll(mut self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<Self::Output> {
+        if let Poll::Ready(output) = self.future.as_mut().poll(task) {
             return Poll::Ready(Ok(output));
         }
+        let Some(timer) = self.timer.as_mut() else {
+            return Poll::Pending;
+        };
         timer.as_mut().poll(task).map(|fired| {
             Err(fired.map_or_else(TimeoutError::TimerUnavailable, |()| TimeoutError::Elapsed))
         })
-    })
-    .await
+    }
 }
 
 /// How a [`NativeTask`] ended.
@@ -248,6 +275,9 @@ impl<T: Clone + Send + Sync + 'static> NativeTask<T> {
         F: Future<Output = T> + Send + 'static,
     {
         let runtime = handle().ok_or("native execution runtime unavailable")?;
+        // Boxed so the runtime's own spawn wrappers do not nest `work` in
+        // their `Send` proof (rust-lang/rust#159228).
+        let work: BoxFuture<'static, T> = Box::pin(work);
         let (work, abort) = abortable(work);
         let join = runtime
             .try_spawn_checked(work)
@@ -319,6 +349,38 @@ pub fn install(builder: RuntimeBuilder) -> Result<&'static Runtime, InstallError
         .map_err(|message| InstallError::StartFailed(message.clone()))
 }
 
+static TOKIO_RUNTIME_MISSING: Mutex<BTreeMap<&'static str, u64>> = Mutex::new(BTreeMap::new());
+
+/// The Tokio runtime entered on this thread, for a `site` whose work still
+/// needs one. A miss is logged and counted against `site`: the caller skips
+/// that work, which would otherwise stop silently once the caller runs on the
+/// native runtime.
+#[must_use]
+pub fn tokio_handle(site: &'static str) -> Option<tokio::runtime::Handle> {
+    let handle = tokio::runtime::Handle::try_current().ok();
+    if handle.is_none() {
+        *TOKIO_RUNTIME_MISSING
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(site)
+            .or_default() += 1;
+        tracing::error!(site, "Tokio runtime missing; path skipped");
+    }
+    handle
+}
+
+/// How many times [`tokio_handle`] found no Tokio runtime for `site` in this
+/// process.
+#[must_use]
+pub fn tokio_runtime_missing_count(site: &str) -> u64 {
+    TOKIO_RUNTIME_MISSING
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(site)
+        .copied()
+        .unwrap_or(0)
+}
+
 fn started_process_runtime() -> Result<&'static Runtime, String> {
     PROCESS_RUNTIME
         .get_or_init(|| {
@@ -348,6 +410,21 @@ mod tests {
     use super::*;
 
     const HANG_GUARD: Duration = Duration::from_secs(10);
+
+    #[test]
+    fn a_missing_tokio_runtime_is_counted_per_site_and_a_present_one_is_not() {
+        const SITE: &str = "native_runtime.tests.tokio_handle";
+        let before = tokio_runtime_missing_count(SITE);
+        assert!(tokio_handle(SITE).is_none());
+        assert_eq!(tokio_runtime_missing_count(SITE), before + 1);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("tokio runtime");
+        let _entered = runtime.enter();
+        assert!(tokio_handle(SITE).is_some());
+        assert_eq!(tokio_runtime_missing_count(SITE), before + 1);
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn timeout_returns_a_value_that_lands_before_the_deadline() {
@@ -407,11 +484,11 @@ mod tests {
     fn an_unavailable_timer_fails_closed_after_a_ready_value() {
         let unavailable = || async { Err::<(), _>("runtime stopped".to_owned()) };
         assert_eq!(
-            race_timer(async { 7 }, unavailable()).now_or_never(),
+            race_timer(async { 7 }, Some(Box::pin(unavailable()))).now_or_never(),
             Some(Ok(7))
         );
         assert_eq!(
-            race_timer(std::future::pending::<()>(), unavailable()).now_or_never(),
+            race_timer(std::future::pending::<()>(), Some(Box::pin(unavailable()))).now_or_never(),
             Some(Err(TimeoutError::TimerUnavailable(
                 "runtime stopped".to_owned()
             )))

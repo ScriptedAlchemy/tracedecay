@@ -43,11 +43,10 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::{Value, json};
-use tokio::time::Instant;
 
 use tracedecay::daemon::invocation_client_for_current_client;
 use tracedecay::mcp::tools::{registered_project_not_found, registered_project_selector_id};
@@ -329,8 +328,7 @@ fn run_inner(
         let canonical = canonical_tool_name(&raw_name);
         let Some(def) = defs.iter().find(|definition| definition.name == canonical) else {
             let suggestion = nearest_tool_name(&canonical, defs)
-                .map(|name| format!(" Did you mean '{name}'?"))
-                .unwrap_or_default();
+                .map_or_default(|name| format!(" Did you mean '{name}'?"));
             return Err(TraceDecayError::project_route(
                 "unknown_tool",
                 false,
@@ -528,7 +526,7 @@ fn dispatch_cli_application_surface_inner(
             if deadline.saturating_duration_since(Instant::now()) <= delay {
                 break result;
             }
-            tokio::time::sleep(delay).await;
+            sleep_before_retry(delay).await?;
         };
         print_cli_application_surface(profile, project.as_deref(), result, output)
     })
@@ -542,8 +540,9 @@ fn cli_request_controls(
     let remaining = deadline.saturating_duration_since(Instant::now());
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| i64::try_from(duration.as_micros()).unwrap_or(i64::MAX))
-        .unwrap_or(i64::MAX);
+        .map_or(i64::MAX, |duration| {
+            i64::try_from(duration.as_micros()).unwrap_or(i64::MAX)
+        });
     let request_deadline = Deadline::new(UtcMicros(
         now.saturating_add(i64::try_from(remaining.as_micros()).unwrap_or(i64::MAX)),
     ))
@@ -557,6 +556,14 @@ fn cli_request_controls(
             },
         )?;
     Ok((request_deadline, cancellation))
+}
+
+/// Waits `delay` before a retry. Without a timer the retry fails rather than
+/// resend at once.
+async fn sleep_before_retry(delay: Duration) -> Result<()> {
+    tracedecay_runtime_core::native_runtime::sleep_until(Instant::now() + delay)
+        .await
+        .map_err(|message| TraceDecayError::Config { message })
 }
 
 fn cli_request_id() -> Result<tracedecay_contracts::RequestId> {
@@ -635,7 +642,7 @@ async fn dispatch_cli_retained(
         if deadline.saturating_duration_since(Instant::now()) <= delay {
             break execution;
         }
-        tokio::time::sleep(delay).await;
+        sleep_before_retry(delay).await?;
     };
     let response_handle_root = cli_response_handle_root(profile, dispatch.project_path.as_deref())?;
     let result = tracedecay::mcp::tools::render_retained_execution(
@@ -693,7 +700,7 @@ async fn dispatch_cli_source_edit(
         if deadline.saturating_duration_since(Instant::now()) <= delay {
             break outcome;
         }
-        tokio::time::sleep(delay).await;
+        sleep_before_retry(delay).await?;
     };
     let response_handle_root = cli_response_handle_root(profile, project.as_deref())?;
     let result = tracedecay_mcp::handlers::edit::render_source_edit_outcome(
@@ -815,7 +822,7 @@ async fn invoke_cli_graph_tool(
         if deadline.saturating_duration_since(Instant::now()) <= delay {
             return Ok(outcome);
         }
-        tokio::time::sleep(delay).await;
+        sleep_before_retry(delay).await?;
     }
 }
 
@@ -1126,14 +1133,13 @@ fn tool_result_process_outcome(result_value: &Value, tool_name: &str) -> Result<
         let untested = result_value
             .pointer("/structuredContent/test_gate/untested")
             .and_then(Value::as_array)
-            .map(|items| {
+            .map_or_default(|items| {
                 items
                     .iter()
                     .filter_map(Value::as_str)
                     .collect::<Vec<_>>()
                     .join(", ")
-            })
-            .unwrap_or_default();
+            });
         std::io::stdout().flush()?;
         return Err(TraceDecayError::tool_refused(
             tool_name,

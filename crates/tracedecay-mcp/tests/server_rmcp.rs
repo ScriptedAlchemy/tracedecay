@@ -6,7 +6,7 @@ use rmcp::model::{
     ClientCapabilities, ErrorCode, PaginatedRequestParams, ProtocolVersion, RequestMetaObject,
 };
 use rmcp::transport::IntoTransport;
-use rmcp::{RoleClient, ServiceExt};
+use rmcp::{ClientLifecycleMode, ClientServiceExt, RoleClient, ServiceExt};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracedecay_daemon_protocol::{BrokerListener, DaemonEndpoint, default_loopback_endpoint};
@@ -234,6 +234,56 @@ async fn rmcp_client_handshake_typed_list_and_cancellation_share_the_dispatch_co
     serving.await.expect("join RMCP server");
 }
 
+/// A default `rmcp` 3.5 client sends `initialize` naming 2026-07-28, a revision
+/// without a handshake, so the session settles on the newest one that has it.
+/// An auto-lifecycle client probes `server/discover` and stays per-request.
+#[tokio::test]
+async fn rmcp_3_5_clients_open_a_session_on_either_lifecycle() {
+    let context = new_context();
+    for (lifecycle, negotiated) in [
+        (
+            ClientLifecycleMode::Initialize,
+            ProtocolVersion::LATEST_WITH_INITIALIZE,
+        ),
+        (
+            ClientLifecycleMode::Auto {
+                preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+                legacy_version: None,
+            },
+            ProtocolVersion::V_2026_07_28,
+        ),
+    ] {
+        let adapter = RmcpConnectionAdapter::new(Arc::clone(&context), false, None, None)
+            .expect("RMCP adapter");
+        let (transport, client_io) = broker_pair().await;
+        let serving = tokio::spawn(async move {
+            adapter
+                .serve(transport, std::future::pending())
+                .await
+                .expect("serve MCP session");
+        });
+        let mut client = ()
+            .serve_with_lifecycle(
+                IntoTransport::<RoleClient, _, _>::into_transport(client_io),
+                lifecycle.clone(),
+            )
+            .await
+            .expect("open RMCP client session");
+        assert_eq!(
+            client.peer_info().expect("server info").protocol_version,
+            negotiated,
+            "{lifecycle:?}"
+        );
+        let tools = client
+            .list_tools(None::<PaginatedRequestParams>)
+            .await
+            .expect("typed tools/list");
+        assert!(tools.tools.is_empty(), "{lifecycle:?}");
+        client.close().await.expect("close RMCP client");
+        serving.await.expect("join RMCP server");
+    }
+}
+
 tokio::task_local! {
     static CONNECTION_SCOPE: &'static str;
 }
@@ -380,13 +430,13 @@ async fn initialize_naming_a_per_request_revision_negotiates_the_newest_handshak
 
     assert_eq!(
         initialized["result"]["protocolVersion"],
-        json!(ProtocolVersion::LATEST.as_str()),
+        json!(ProtocolVersion::LATEST_WITH_INITIALIZE.as_str()),
         "{initialized}"
     );
 }
 
 #[tokio::test]
-async fn an_inline_opener_without_full_request_context_is_refused_and_closed() {
+async fn refused_inline_openers_leave_the_session_open_for_initialize() {
     let context = new_context();
     let mut session = open_session(&context).await;
     let mut partial = request_context(ProtocolVersion::V_2026_07_28);
@@ -398,7 +448,6 @@ async fn an_inline_opener_without_full_request_context_is_refused_and_closed() {
     let refused = session
         .exchange(&request_frame(1, "tools/list", json!({}), Some(partial)))
         .await;
-
     assert_eq!(refused["error"]["code"], json!(-32602), "{refused}");
     assert!(
         refused["error"]["message"]
@@ -406,10 +455,68 @@ async fn an_inline_opener_without_full_request_context_is_refused_and_closed() {
             .is_some_and(|message| message.starts_with("request _meta is missing")),
         "{refused}"
     );
+
+    let unsupported = session
+        .exchange(&request_frame(
+            2,
+            "tools/list",
+            json!({}),
+            Some(request_context(
+                serde_json::from_value(json!("1999-01-01")).expect("version"),
+            )),
+        ))
+        .await;
     assert_eq!(
-        session.recv().await,
-        None,
-        "the refused opener ends the session"
+        unsupported["error"]["code"],
+        json!(ErrorCode::UNSUPPORTED_PROTOCOL_VERSION.0),
+        "{unsupported}"
+    );
+
+    let initialized = session.exchange(&initialize_frame(3, "2025-06-18")).await;
+    assert_eq!(
+        initialized["result"]["protocolVersion"],
+        json!("2025-06-18"),
+        "{initialized}"
+    );
+}
+
+/// An `rmcp` 3.5 auto-lifecycle client probes `server/discover` before it
+/// falls back to `initialize`; the probe must not commit the session to the
+/// per-request lifecycle.
+#[tokio::test]
+async fn a_discover_probe_leaves_the_session_open_for_initialize() {
+    let context = new_context();
+    let mut session = open_session(&context).await;
+
+    let discovered = session
+        .exchange(&request_frame(
+            1,
+            "server/discover",
+            json!({}),
+            Some(request_context(ProtocolVersion::V_2026_07_28)),
+        ))
+        .await;
+    assert!(
+        discovered["result"]["supportedVersions"]
+            .as_array()
+            .is_some_and(|versions| versions.contains(&json!("2025-06-18"))),
+        "{discovered}"
+    );
+
+    let initialized = session.exchange(&initialize_frame(2, "2025-06-18")).await;
+    assert_eq!(
+        initialized["result"]["protocolVersion"],
+        json!("2025-06-18"),
+        "{initialized}"
+    );
+
+    let listed = session
+        .exchange(&request_frame(3, "tools/list", json!({}), None))
+        .await;
+    assert_eq!(
+        listed["result"],
+        json!({"tools": []}),
+        "the initialized session keeps the legacy lifecycle: {listed}"
     );
 }
 

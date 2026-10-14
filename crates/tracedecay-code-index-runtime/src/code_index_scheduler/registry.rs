@@ -874,8 +874,94 @@ pub struct MountedCodeIndexWorktreeV1 {
     /// Live handle to the publication's encoded-byte counter; observed only by
     /// test memory accounting today.
     _active_generation_encoded_bytes: Arc<AtomicU64>,
-    pub task: tokio::task::JoinHandle<()>,
+    pub task: native_runtime::NativeTask<()>,
 }
+
+// The scheduler registry stores these worktrees in a `BTreeMap`. One `Send`
+// proof of that map walks every slot past the recursion limit
+// (rust-lang/rust#159228); each field is checked on its own.
+unsafe impl Send for MountedCodeIndexWorktreeV1 {}
+unsafe impl Sync for MountedCodeIndexWorktreeV1 {}
+
+const _: fn(&MountedCodeIndexWorktreeV1) = |value| {
+    fn assert_send_sync<T: Send + Sync>(_: &T) {}
+    let MountedCodeIndexWorktreeV1 {
+        project_id,
+        repository_id,
+        worktree_id,
+        query_authority,
+        scheduler,
+        path_policy,
+        build_publication_lock,
+        historical_generation_owner,
+        serving_generation,
+        complete_generation_requested,
+        complete_generation_requested_changed,
+        memory_retry,
+        source_freshness,
+        last_reconciled_at_micros,
+        text_generation,
+        convergence_park,
+        generation_recovery,
+        serving_source_witness,
+        build_progress,
+        serving_generation_epoch,
+        serving_generation_changed,
+        serving_generation_installation,
+        graph_activation,
+        residency,
+        _residency_registration,
+        graph_cursor_retention,
+        ignored_dependency_admissions,
+        hints,
+        wake,
+        epoch,
+        pending_wake,
+        index_observability,
+        shutting_down,
+        reconcile_in_progress,
+        worker_phase,
+        _active_generation_encoded_bytes,
+        task,
+    } = value;
+    assert_send_sync(project_id);
+    assert_send_sync(repository_id);
+    assert_send_sync(worktree_id);
+    assert_send_sync(query_authority);
+    assert_send_sync(scheduler);
+    assert_send_sync(path_policy);
+    assert_send_sync(build_publication_lock);
+    assert_send_sync(historical_generation_owner);
+    assert_send_sync(serving_generation);
+    assert_send_sync(complete_generation_requested);
+    assert_send_sync(complete_generation_requested_changed);
+    assert_send_sync(memory_retry);
+    assert_send_sync(source_freshness);
+    assert_send_sync(last_reconciled_at_micros);
+    assert_send_sync(text_generation);
+    assert_send_sync(convergence_park);
+    assert_send_sync(generation_recovery);
+    assert_send_sync(serving_source_witness);
+    assert_send_sync(build_progress);
+    assert_send_sync(serving_generation_epoch);
+    assert_send_sync(serving_generation_changed);
+    assert_send_sync(serving_generation_installation);
+    assert_send_sync(graph_activation);
+    assert_send_sync(residency);
+    assert_send_sync(_residency_registration);
+    assert_send_sync(graph_cursor_retention);
+    assert_send_sync(ignored_dependency_admissions);
+    assert_send_sync(hints);
+    assert_send_sync(wake);
+    assert_send_sync(epoch);
+    assert_send_sync(pending_wake);
+    assert_send_sync(index_observability);
+    assert_send_sync(shutting_down);
+    assert_send_sync(reconcile_in_progress);
+    assert_send_sync(worker_phase);
+    assert_send_sync(_active_generation_encoded_bytes);
+    assert_send_sync(task);
+};
 
 /// Unique mounted worktree for one admitted repo+worktree scope.
 ///
@@ -1940,6 +2026,54 @@ pub struct CodeIndexSchedulerRegistryV1 {
     worker_shutdown_signals: Arc<Mutex<Vec<WorkerShutdownSignalV1>>>,
 }
 
+// Git watch and mount admission prove this registry `Send` through the mounted
+// worktree map. That walk exceeds the recursion limit (rust-lang/rust#159228);
+// each field is checked on its own.
+unsafe impl Send for CodeIndexSchedulerRegistryV1 {}
+unsafe impl Sync for CodeIndexSchedulerRegistryV1 {}
+
+const _: fn(&CodeIndexSchedulerRegistryV1) = |value| {
+    fn assert_send_sync<T: Send + Sync>(_: &T) {}
+    let CodeIndexSchedulerRegistryV1 {
+        max_worktrees,
+        progress_daemon_incarnation,
+        next_progress_producer_incarnation,
+        resident_memory,
+        resident_owners,
+        byte_pool,
+        mounted,
+        retiring,
+        cold_mount_reservations,
+        background_reconcile_admission,
+        serving_generation_installation_tokens,
+        generation_publications,
+        serving_seats,
+        root_mounted,
+        cadence_telemetry,
+        activations,
+        test_attribution_authorities,
+        worker_shutdown_signals,
+    } = value;
+    assert_send_sync(max_worktrees);
+    assert_send_sync(progress_daemon_incarnation);
+    assert_send_sync(next_progress_producer_incarnation);
+    assert_send_sync(resident_memory);
+    assert_send_sync(resident_owners);
+    assert_send_sync(byte_pool);
+    assert_send_sync(mounted);
+    assert_send_sync(retiring);
+    assert_send_sync(cold_mount_reservations);
+    assert_send_sync(background_reconcile_admission);
+    assert_send_sync(serving_generation_installation_tokens);
+    assert_send_sync(generation_publications);
+    assert_send_sync(serving_seats);
+    assert_send_sync(root_mounted);
+    assert_send_sync(cadence_telemetry);
+    assert_send_sync(activations);
+    assert_send_sync(test_attribution_authorities);
+    assert_send_sync(worker_shutdown_signals);
+};
+
 /// One worker's early-shutdown handles, registered when it is mounted.
 struct WorkerShutdownSignalV1 {
     shutting_down: Weak<AtomicBool>,
@@ -2713,10 +2847,12 @@ impl CodeIndexSchedulerRegistryV1 {
     /// pointer. A publication's owner is not installed until it reopens, so
     /// that caller passes `None`.
     async fn join_retained_text_projection_on_worker_exit(
-        projection: &mut Option<tokio::task::JoinHandle<PublishedTextProjectionOutcomeV1>>,
+        projection: &mut Option<
+            Result<native_runtime::NativeTask<PublishedTextProjectionOutcomeV1>, String>,
+        >,
     ) {
         if let Some(projection) = projection.take() {
-            let _ = projection.await;
+            let _ = crate::code_index_task_support::join_native(&projection).await;
         }
     }
 
@@ -3549,7 +3685,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     ],
                 );
                 let _ = tracing::Instrument::instrument(
-                    &mut worktree.task,
+                    worktree.task.wait(),
                     tracing::trace_span!("daemon.code_index.shutdown.worker_join"),
                 )
                 .await;
@@ -3570,7 +3706,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 // long and hide it inside the owner's join budget, so the
                 // release runs on the blocking pool. Shutdown still joins it
                 // below: ownership must be gone when this returns.
-                owner_releases.extend(crate::code_index_task_support::start_blocking(move || {
+                owner_releases.push(native_runtime::spawn_blocking(move || {
                     let _span =
                         tracing::trace_span!("daemon.code_index.shutdown.owner_release").entered();
                     drop(worktree);
@@ -3586,7 +3722,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let release_count = owner_releases.len();
         for release in owner_releases {
             let _ = tracing::Instrument::instrument(
-                release.wait(),
+                release,
                 tracing::trace_span!("daemon.code_index.shutdown.owner_release_join"),
             )
             .await;
@@ -3671,7 +3807,7 @@ impl CodeIndexSchedulerRegistryV1 {
             let Some(worktree) = retiring.get_mut(root) else {
                 continue;
             };
-            match native_runtime::timeout_at(deadline, &mut worktree.task).await {
+            match native_runtime::timeout_at(deadline, worktree.task.wait()).await {
                 Ok(_) => {
                     joined.insert(root.clone());
                 }

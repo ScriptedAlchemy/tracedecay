@@ -48,6 +48,8 @@ mod sql;
 pub mod store;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::future::Future;
+use std::pin::Pin;
 
 use tracedecay_contracts::retrieval::{
     SessionRetrievalBudgetAccountingV1, SessionRetrievalBudgetObservationV1,
@@ -944,52 +946,65 @@ impl<'db, D: SessionTemporalRegisteredDb + Sync>
         control.checkpoint().map_err(map_control_error)?;
         let read = self.open_read_snapshot().await?;
         let temporal_read = TemporalSqlRead::registered(&read);
-        let (participants, watermarks, cursor_key, prepared, readiness) =
-            match request.snapshot_request().retrieval_scope() {
-                TemporalRetrievalScope::Session(_) => {
-                    let (participants, watermarks, cursor_key) =
-                        freeze_participants(&temporal_read, request).await?;
-                    (participants, watermarks, cursor_key, None, None)
-                }
-                TemporalRetrievalScope::AllSessionsInAuthorizedRoot => {
-                    let relation_authority = self.db.session_relation_store().ok();
-                    let candidate_read = match &relation_authority {
-                        Some((relation_scope, relation_store)) => {
-                            SessionTemporalReadPort::new_registered_with_relations(
-                                &read,
-                                relation_scope,
-                                relation_store.clone(),
-                            )
-                        }
-                        None => SessionTemporalReadPort::new_registered(&read),
-                    };
-                    let plan = tracedecay_temporal_query::plan_temporal_candidates(
-                        request.query(),
-                        request.direct_anchor(),
-                        request.snapshot_request().semantic_filter().goals,
-                    );
-                    let prepared = candidate_read
-                        .prepare_root_candidate_cohort(request.snapshot_request(), &plan)
-                        .await
-                        .map_err(map_control_error)?;
-                    let readiness = root_readiness(&temporal_read, request).await?;
-                    if prepared.candidates().is_empty() {
-                        return Err(SessionTemporalExecutionError::Empty {
-                            freshness: readiness,
-                        });
+        let (participants, watermarks, cursor_key, prepared, readiness) = match request
+            .snapshot_request()
+            .retrieval_scope()
+        {
+            TemporalRetrievalScope::Session(_) => {
+                let (participants, watermarks, cursor_key) =
+                    freeze_participants(&temporal_read, request).await?;
+                (participants, watermarks, cursor_key, None, None)
+            }
+            TemporalRetrievalScope::AllSessionsInAuthorizedRoot => {
+                let relation_authority = self.db.session_relation_store().ok();
+                let candidate_read = match &relation_authority {
+                    Some((relation_scope, relation_store)) => {
+                        SessionTemporalReadPort::new_registered_with_relations(
+                            &read,
+                            relation_scope,
+                            relation_store.clone(),
+                        )
                     }
-                    let (participants, watermarks, cursor_key) =
-                        freeze_prepared_candidate_participants(&temporal_read, request, &prepared)
-                            .await?;
-                    (
-                        participants,
-                        watermarks,
-                        cursor_key,
-                        Some(prepared),
-                        Some(readiness),
-                    )
+                    None => SessionTemporalReadPort::new_registered(&read),
+                };
+                let plan = tracedecay_temporal_query::plan_temporal_candidates(
+                    request.query(),
+                    request.direct_anchor(),
+                    request.snapshot_request().semantic_filter().goals,
+                );
+                let prepared_cohort: Pin<
+                        Box<
+                            dyn Future<
+                                    Output = Result<
+                                        tracedecay_temporal_query::snapshot::TemporalPreparedCandidateCohort,
+                                        tracedecay_temporal_query::execution::TemporalPortError,
+                                    >,
+                                > + Send
+                                + '_,
+                        >,
+                    > = Box::pin(candidate_read.prepare_root_candidate_cohort(
+                        request.snapshot_request(),
+                        &plan,
+                    ));
+                let prepared = prepared_cohort.await.map_err(map_control_error)?;
+                let readiness = root_readiness(&temporal_read, request).await?;
+                if prepared.candidates().is_empty() {
+                    return Err(SessionTemporalExecutionError::Empty {
+                        freshness: readiness,
+                    });
                 }
-            };
+                let (participants, watermarks, cursor_key) =
+                    freeze_prepared_candidate_participants(&temporal_read, request, &prepared)
+                        .await?;
+                (
+                    participants,
+                    watermarks,
+                    cursor_key,
+                    Some(prepared),
+                    Some(readiness),
+                )
+            }
+        };
         control.checkpoint().map_err(map_control_error)?;
         let mut snapshot = TemporalExecutionSnapshot::new_authorized(
             request.snapshot_request().clone(),

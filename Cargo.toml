@@ -67,7 +67,10 @@ edition = "2024"
 version = "1.0.0-beta.87"
 
 [workspace.dependencies]
-asupersync = { version = "=0.5.0", default-features = false, features = ["proc-macros", "native-runtime"] }
+# nightly-outcome-try is an asupersync default (Outcome's Try impls). It
+# compiles only on the pinned nightly. native-runtime stays explicit because
+# it is not part of that default set.
+asupersync = { version = "=0.5.0", default-features = false, features = ["proc-macros", "native-runtime", "nightly-outcome-try"] }
 # grafeo 0.5.43 from our fork (ScriptedAlchemy/grafeo, main). The
 # published crates carry a tiered-storage
 # arena whose `HotVersionRef` addresses a single 1 MiB chunk, which caps an
@@ -90,7 +93,7 @@ rusqlite = { version = "0.40.1", default-features = false, features = ["backup",
 # Pinned once: the MCP git handlers and the root's edit/lifecycle readers must
 # resolve the same object database and status implementation, so a feature
 # added for one is never missing for the other.
-gix = { version = "=0.87.1", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
+gix = { version = "=0.89.0", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
 schemars = "1.2.1"
 
 [profile.bench]
@@ -231,6 +234,16 @@ tree-sitter-rust = { git = "https://github.com/vanessa-rodrigues/tree-sitter-rus
 # Kotlin uses arborium-kotlin across all tiers; the medium bundle must not
 # link tree-sitter-kotlin-sg's duplicate parse table.
 tokensave-medium-treesitters = { path = "patches/tokensave-medium-treesitters" }
+# tree-sitter-perl 1.1.2 lists `tree-sitter` ^0.26 as a normal dependency;
+# upstream master moves it to dev-dependencies with grammar sources identical
+# to 1.1.2. Unpublished, so pin that commit until a release ships it.
+tree-sitter-perl = { git = "https://github.com/ganezdragon/tree-sitter-perl", rev = "5b97493ce70686e22ec8b9ea261437147e342b49" }
+# tree-sitter-sequel 0.3.11 builds with `cc = "~1.2.1"`, which holds every
+# cc 1.x in the graph at 1.2. The fork is the 0.3.11 tag plus upstream
+# DerekStride/tree-sitter-sql#368 (cc = "1.2.1") and the generated parser
+# copied byte for byte from the published crate. Drop it once a release
+# ships #368 (DerekStride/tree-sitter-sql#384).
+tree-sitter-sequel = { git = "https://github.com/ScriptedAlchemy/tree-sitter-sql", rev = "52fb886f900022d459df9f87cecb3d5033ce7268" }
 
 # Dev opt-level 0 for workspace glue crates (every tracedecay-* crate that is
 # not a profile.perf kernel below). A `cargo build -p tracedecay-cli --timings`

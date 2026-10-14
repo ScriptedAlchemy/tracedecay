@@ -13,6 +13,24 @@ pub mod git;
 #[cfg(any(test, feature = "test-transport"))]
 pub mod host_admission;
 
+/// Tokio-dependent paths this process skipped, plus synchronous writer waits
+/// that parked a native worker. An off-Tokio test asserts this does not move.
+#[cfg(test)]
+pub(crate) fn native_runtime_hazards() -> u64 {
+    [
+        "daemon-service.operation_events.sse_disconnect",
+        "daemon-service.hook_orchestration.admit",
+        "daemon-service.work_blocked_interval_recovery.start",
+        "daemon-service.observability.mount_drain",
+        "daemon-service.observability.settle_drain",
+        "daemon-service.observability.producer_drop",
+    ]
+    .into_iter()
+    .map(tracedecay_runtime_core::native_runtime::tokio_runtime_missing_count)
+    .sum::<u64>()
+        + tracedecay_rusqlite_runtime::exact_sql::native_thread_writer_waits()
+}
+
 /// Park after core publication when `TRACEDECAY_TEST_HOLD_AFTER_CORE_PUBLISH`
 /// names a file. The core graph-tool owner is already registered and the
 /// route is ready, so a session action can land before the full server

@@ -1,5 +1,7 @@
 use std::fmt;
 
+use tracedecay_runtime_core::erase_send;
+
 use sha2::{Digest, Sha256};
 use tracedecay_contracts::RequestContext;
 use tracedecay_domain::canonical_text::encode_tagged_lowercase_hex;
@@ -337,13 +339,13 @@ where
         .with_coverage_request(SessionTemporalCoverageRequestV1::new(
             target.temporal_mode(),
         ));
-        let receipt = match await_with_request_controls(
-            context,
-            binding,
+        let joined = erase_send!(
             self.store.begin_or_join_session_refresh(request),
-        )
-        .await
-        {
+            tracedecay_store::SessionStoreResult<
+                tracedecay_store::SessionRefreshBeginOrJoinReceiptV1,
+            >
+        );
+        let receipt = match await_with_request_controls(context, binding, joined).await {
             Ok(Ok(receipt)) => receipt,
             Ok(Err(SessionStoreError::IdempotencyConflict { .. })) => {
                 return SessionRefreshOutcome::Busy;
@@ -420,17 +422,15 @@ where
         if let Err(outcome) = self.authorize_handle(context, binding, handle) {
             return *outcome;
         }
-        let progress = match await_with_request_controls(
-            context,
-            binding,
+        let query = erase_send!(
             self.store
                 .session_refresh_progress(SessionRefreshProgressRequestV1::new(
                     handle.operation_id.clone(),
                     handle.target.session_id.clone(),
                 )),
-        )
-        .await
-        {
+            tracedecay_store::SessionStoreResult<Option<SessionRefreshProgressV1>>
+        );
+        let progress = match await_with_request_controls(context, binding, query).await {
             Ok(Ok(progress)) => progress,
             Ok(Err(error)) => {
                 return SessionRefreshOutcome::Unavailable(SessionRefreshUnavailable::store(
@@ -479,17 +479,15 @@ where
             if let Some(outcome) = request_interruption(context, binding) {
                 return outcome;
             }
-            let progress = match await_with_request_controls(
-                context,
-                binding,
+            let query = erase_send!(
                 self.store
                     .session_refresh_progress(SessionRefreshProgressRequestV1::new(
                         handle.operation_id.clone(),
                         handle.target.session_id.clone(),
                     )),
-            )
-            .await
-            {
+                tracedecay_store::SessionStoreResult<Option<SessionRefreshProgressV1>>
+            );
+            let progress = match await_with_request_controls(context, binding, query).await {
                 Ok(Ok(progress)) => progress,
                 Ok(Err(error)) => {
                     return SessionRefreshOutcome::Unavailable(SessionRefreshUnavailable::store(
@@ -508,13 +506,11 @@ where
             }
             attempted_progress = Some(progress.clone());
             let request = cancellation_request(handle, progress.as_ref());
-            match await_with_request_controls(
-                context,
-                binding,
+            let cancelled = erase_send!(
                 self.store.cancel_session_refresh(request),
-            )
-            .await
-            {
+                tracedecay_store::SessionStoreResult<SessionRefreshReceiptV1>
+            );
+            match await_with_request_controls(context, binding, cancelled).await {
                 Ok(Ok(receipt)) => {
                     return if (self.scheduler)().is_err() {
                         SessionRefreshOutcome::CancelledReconciliationRequired(receipt)
@@ -560,17 +556,15 @@ where
         binding: &SessionRequestBinding,
         handle: &SessionRefreshHandle,
     ) -> Result<Option<SessionRefreshReceiptV1>, Box<SessionRefreshOutcome>> {
-        match await_with_request_controls(
-            context,
-            binding,
+        let query = erase_send!(
             self.store
                 .session_refresh_receipt(SessionRefreshReceiptRequestV1::new(
                     handle.operation_id.clone(),
                     handle.target.session_id.clone(),
                 )),
-        )
-        .await
-        {
+            tracedecay_store::SessionStoreResult<Option<SessionRefreshReceiptV1>>
+        );
+        match await_with_request_controls(context, binding, query).await {
             Ok(Ok(receipt)) => Ok(receipt.map(|receipt| {
                 let source_coverage = receipt.source_coverage().and_then(|coverage| {
                     source_coverage_for_target(Some(coverage), &handle.target, receipt.frontier())
@@ -669,10 +663,10 @@ fn request_interruption(
     }
 }
 
-async fn await_with_request_controls<T>(
+async fn await_with_request_controls<T: Send>(
     context: &RequestContext,
     binding: &SessionRequestBinding,
-    future: impl std::future::Future<Output = T>,
+    future: impl std::future::Future<Output = T> + Send,
 ) -> Result<T, Box<SessionRefreshOutcome>> {
     if let Some(outcome) = request_interruption(context, binding) {
         return Err(Box::new(outcome));

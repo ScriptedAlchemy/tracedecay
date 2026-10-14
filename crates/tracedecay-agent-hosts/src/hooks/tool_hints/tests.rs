@@ -91,8 +91,10 @@ fn every_category_has_compact_skill_backed_rendering() {
         let skill = visible
             .split_once("Skill: tracedecay:")
             .and_then(|(_, rest)| rest.split_once('.'))
-            .map(|(skill, _)| skill)
-            .unwrap_or_else(|| panic!("{category:?} hint names no skill:\n{visible}"));
+            .map_or_else(
+                || panic!("{category:?} hint names no skill:\n{visible}"),
+                |(skill, _)| skill,
+            );
         let skill_path = format!("skills/{skill}/SKILL.md");
         let (_, skill_body) = shipped
             .iter()

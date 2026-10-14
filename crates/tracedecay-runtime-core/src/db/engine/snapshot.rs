@@ -35,19 +35,12 @@ impl ReadSnapshot {
         let runtime = Arc::clone(&self.runtime);
         let budget = self.budget;
         let statement = statement(sql, params)?;
-        let cx = crate::native_runtime::cx().ok_or(super::Error::RuntimeContextUnavailable)?;
-        let rows = cx
-            .spawn_blocking(move |_cx| {
-                runtime
-                    .query_with_budget(statement, budget)
-                    .map_err(super::Error::from)
-            })
-            .map_err(|error| {
-                super::Error::Runtime(format!("failed to admit SQL snapshot query: {error}"))
-            })?
-            .join(&cx)
-            .await
-            .map_err(join_error)??;
+        let rows = super::connection::run_blocking("SQL snapshot query", join_error, move || {
+            runtime
+                .query_with_budget(statement, budget)
+                .map_err(super::Error::from)
+        })
+        .await??;
         Ok(Rows::from_exact(rows))
     }
 }

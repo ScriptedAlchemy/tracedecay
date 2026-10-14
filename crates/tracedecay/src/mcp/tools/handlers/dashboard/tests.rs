@@ -37,7 +37,7 @@ async fn shutdown_deadline_aborts_joins_and_clears_dashboard_task() {
     );
     drop(manager);
 
-    let error = shutdown_dashboard_until(tokio::time::Instant::now())
+    let error = shutdown_dashboard_until(std::time::Instant::now())
         .await
         .expect_err("expired dashboard shutdown must report its abort");
 
@@ -82,7 +82,7 @@ async fn shutdown_observes_a_completion_signalled_before_the_stop_began() {
 
     shutdown_dashboard_for_until(
         &project_root,
-        tokio::time::Instant::now() + std::time::Duration::from_millis(50),
+        std::time::Instant::now() + std::time::Duration::from_millis(50),
     )
     .await
     .expect("a stop that begins after the completion signal must not miss it");
@@ -138,8 +138,44 @@ async fn timed_out_shutdown_owner_aborts_the_dashboard_task() {
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
         "a timed-out owner must not leave the dashboard task it was joining running"
     );
-    let _ =
-        shutdown_dashboard_until(tokio::time::Instant::now() + std::time::Duration::from_secs(5))
-            .await;
+    let _ = shutdown_dashboard_until(std::time::Instant::now() + std::time::Duration::from_secs(5))
+        .await;
     assert!(get_manager().lock().await.is_empty());
+}
+
+/// The session resolution for a dashboard of a still-opening project runs
+/// where no Tokio runtime exists and publishes its terminal answer.
+#[test]
+fn opening_project_sessions_resolve_without_a_tokio_runtime() {
+    let hazards = crate::test_support::native_runtime_hazards();
+    let unavailable = tracedecay_runtime_core::native_runtime::block_on(async {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let resolver = crate::mcp::server::install_retained_project_server_resolver(|_| {
+            Box::pin(async { Ok(None) })
+        });
+        let mut sessions = super::opening_project_sessions(
+            resolver,
+            tracedecay_daemon_service::ProjectRuntimeRegistryV1::default(),
+            std::path::PathBuf::from("/dashboard-test/never-published"),
+        );
+        let resolution = sessions
+            .wait_for(|resolution| {
+                !matches!(
+                    resolution,
+                    tracedecay_dashboard_api::DashboardSessionResolutionV1::Opening
+                )
+            })
+            .await
+            .expect("resolution is published");
+        matches!(
+            *resolution,
+            tracedecay_dashboard_api::DashboardSessionResolutionV1::Unavailable
+        )
+    })
+    .expect("native runtime");
+    assert!(
+        unavailable,
+        "an unpublished project resolves as unavailable"
+    );
+    assert_eq!(crate::test_support::native_runtime_hazards(), hazards);
 }

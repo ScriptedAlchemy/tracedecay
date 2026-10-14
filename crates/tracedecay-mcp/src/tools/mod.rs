@@ -151,8 +151,7 @@ pub fn render_tool_cli_help(def: &ToolDefinition) -> String {
         .input_schema
         .get("required")
         .and_then(Value::as_array)
-        .map(|arr| arr.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
+        .map_or_default(|arr| arr.iter().filter_map(Value::as_str).collect());
 
     let Some(props) = props else {
         let _ = writeln!(out, "(no parameters)");
@@ -343,8 +342,7 @@ fn variant_label(variant: &Value) -> Option<String> {
     let required: Vec<&str> = variant
         .get("required")
         .and_then(Value::as_array)
-        .map(|arr| arr.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
+        .map_or_default(|arr| arr.iter().filter_map(Value::as_str).collect());
     (!required.is_empty()).then(|| format!("{{{}}}", required.join(", ")))
 }
 
@@ -375,13 +373,12 @@ fn param_shape_note(schema: &Value, ty: &str) -> Option<String> {
         let required: Vec<String> = schema
             .get("required")
             .and_then(Value::as_array)
-            .map(|arr| {
+            .map_or_default(|arr| {
                 arr.iter()
                     .filter_map(Value::as_str)
                     .map(str::to_owned)
                     .collect()
-            })
-            .unwrap_or_default();
+            });
         if !required.is_empty() {
             return Some(format!(
                 "object with required keys: {}",
@@ -466,8 +463,7 @@ fn example_from_object_schema(root: &Value, schema: &Value, depth: usize) -> Val
     let required: Vec<&str> = schema
         .get("required")
         .and_then(Value::as_array)
-        .map(|arr| arr.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
+        .map_or_default(|arr| arr.iter().filter_map(Value::as_str).collect());
     example_object_value(root, props, &required, depth + 1)
 }
 

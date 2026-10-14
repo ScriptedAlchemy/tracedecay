@@ -42,6 +42,7 @@ use std::time::{Duration, Instant};
 use futures_util::FutureExt;
 use futures_util::future::{BoxFuture, Shared};
 use notify::EventKind;
+use notify::event::AccessKind;
 use tracedecay_runtime_core::cancellation::MonotonicDeadline;
 use tracedecay_runtime_core::git_discovery::{
     GitDiscoveryUnknown, GitRepositoryIdentityOutcome, discover_repository_identity,
@@ -666,7 +667,9 @@ async fn repository_task(inner: Arc<GitWatcherInner>, state: Arc<WatchState>) {
         state.health.set_status(ProjectWatchStatus::Active);
         state.health.beat();
 
-        match debounce_loop(&inner, &state, &cancellation).await {
+        let debounced: BoxFuture<'_, DebounceExit> =
+            Box::pin(debounce_loop(&inner, &state, &cancellation));
+        match debounced.await {
             DebounceExit::Cancelled | DebounceExit::TimerUnavailable => return,
             DebounceExit::Reconfigure => {
                 // A canceled debounce future may already have consumed the
@@ -684,7 +687,10 @@ async fn repository_task(inner: Arc<GitWatcherInner>, state: Arc<WatchState>) {
 /// state, it only records *what kind of path changed* so the debounce drain
 /// can resolve the actual git state once, after quiescence.
 fn classify_and_mark(state: &Arc<WatchState>, event: &notify::Event) {
-    if state.is_retired() {
+    // notify 7+ reports inotify opens on Linux. Opening a file changes no git
+    // state, and the drain's own reads of HEAD and refs would re-dirty the
+    // watch set after every reconciliation.
+    if state.is_retired() || matches!(event.kind, EventKind::Access(AccessKind::Open(_))) {
         return;
     }
     let event_roots = state.event_roots(&event.paths);
@@ -830,13 +836,12 @@ async fn debounce_loop(
             let quiet_deadline = last.map(|l| l + quiet);
             let hard_deadline = first.map(|f| f + max_delay);
 
-            let operation_state = match observe_operation_state(
+            let observed: BoxFuture<'_, OperationObservation> = Box::pin(observe_operation_state(
                 Arc::clone(state),
                 cancellation.clone(),
                 affected_roots,
-            )
-            .await
-            {
+            ));
+            let operation_state = match observed.await {
                 OperationObservation::State(state) => state,
                 OperationObservation::Cancelled => return DebounceExit::Cancelled,
             };
@@ -1034,8 +1039,23 @@ async fn observe_operation_state(
 /// scheduler owns exact source revision resolution, gix status,
 /// changed-candidate evidence, generation assembly, and its short CAS
 /// publication; this watcher owns none of those authorities.
+///
+/// Boxed so the watch task's `Send` proof does not nest the whole freshness
+/// request (rust-lang/rust#159228).
+fn request_freshness_for_repository<'a>(
+    inner: &'a GitWatcherInner,
+    state: &'a Arc<WatchState>,
+    affected_roots: Option<BTreeSet<PathBuf>>,
+) -> BoxFuture<'a, ()> {
+    Box::pin(request_freshness_for_repository_inner(
+        inner,
+        state,
+        affected_roots,
+    ))
+}
+
 #[tracing::instrument(name = "daemon.git.watch.freshness", level = "trace", skip_all)]
-async fn request_freshness_for_repository(
+async fn request_freshness_for_repository_inner(
     inner: &GitWatcherInner,
     state: &Arc<WatchState>,
     affected_roots: Option<BTreeSet<PathBuf>>,

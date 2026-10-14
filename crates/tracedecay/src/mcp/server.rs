@@ -288,7 +288,7 @@ pub struct McpServer {
     branch_reopen: Arc<tokio::sync::Mutex<()>>,
     /// Count of settled branch reopens (success, failure, cancellation, or
     /// shutdown-time rejection) without exposing the retained task handle.
-    branch_reopen_completions: Arc<AtomicU64>,
+    branch_reopen_completions: Arc<tokio::sync::watch::Sender<u64>>,
     /// Retains non-request maintenance futures so shutdown can fence task
     /// admission, cancel every live future, and join it before stores close.
     background_tasks: McpBackgroundTaskOwner,
@@ -658,13 +658,18 @@ impl McpServer {
             && let Some(project_session_db) = context.project_session_db.as_ref()
         {
             let database_path = project_session_db.db_path().to_path_buf();
-            let admission_runtime = tokio::task::spawn_blocking(move || {
-                tracedecay_host_admission::HostAdmissionRuntime::open_for_database(&database_path)
-            })
-            .await
-            .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("test server host-admission task failed: {error}"),
-            })?;
+            let admission_runtime =
+                tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+                    tracedecay_host_admission::HostAdmissionRuntime::open_for_database(
+                        &database_path,
+                    )
+                })
+                .await
+                .map_err(|error| {
+                    tracedecay_domain::errors::TraceDecayError::Config {
+                        message: format!("test server host-admission task failed: {error}"),
+                    }
+                })?;
             let (admission_runtime, _) = admission_runtime?;
             context.host_admission_broker = Some(Arc::new(
                 tracedecay_host_admission::HostAdmissionBroker::new(admission_runtime),
@@ -888,7 +893,7 @@ impl McpServer {
             let project_root = cg.project_root().to_path_buf();
             let scope_prefix = scope_prefix.clone();
             tracing::Instrument::instrument(
-                tokio::task::spawn_blocking(move || {
+                tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
                     tracedecay_runtime_core::worktree::detect_scoped_worktree_index_mismatch(
                         &project_root,
                         scope_prefix.as_deref(),
@@ -995,7 +1000,7 @@ impl McpServer {
         let server = Arc::new_cyclic(|dispatch_server| Self {
             cg: Arc::new(tokio::sync::RwLock::new(cg)),
             branch_reopen: Arc::new(tokio::sync::Mutex::new(())),
-            branch_reopen_completions: Arc::new(AtomicU64::new(0)),
+            branch_reopen_completions: Arc::new(tokio::sync::watch::Sender::new(0)),
             background_tasks: McpBackgroundTaskOwner::default(),
             tool_activity_publish_running: Arc::new(AtomicBool::new(false)),
             stats: ServerStats::new(),
@@ -1088,12 +1093,15 @@ impl McpServer {
             dispatch_authority: RetainedDispatchAuthority::new(dispatch_server.clone()),
         });
 
-        tokio::task::spawn_blocking(move || {
-            let _ = cleanup_expired_response_handles(
-                &response_handle_root,
-                tracedecay_runtime_core::tracedecay::current_timestamp(),
-            );
-        });
+        // Detached: the sweep is best-effort and the server never waits on it.
+        drop(tracedecay_runtime_core::native_runtime::spawn_blocking(
+            move || {
+                let _ = cleanup_expired_response_handles(
+                    &response_handle_root,
+                    tracedecay_runtime_core::tracedecay::current_timestamp(),
+                );
+            },
+        ));
         if own_project_host_admission_replay
             && let Some(broker) = server.host_admission_broker.clone()
         {
@@ -1133,10 +1141,15 @@ impl McpServer {
             && server.startup_catch_up.try_claim_dispatch()
         {
             let s = Arc::clone(&server);
-            let task = tokio::spawn(async move {
+            match tracedecay_runtime_core::native_runtime::NativeTask::spawn(async move {
                 s.run_startup_catch_up_sync().await;
-            });
-            server.startup_catch_up.install_sync_task(task);
+            }) {
+                Ok(task) => server.startup_catch_up.install_sync_task(task),
+                Err(error) => {
+                    tracing::error!(%error, "startup catch-up could not start");
+                    server.startup_catch_up.settle();
+                }
+            }
         }
 
         server
@@ -1354,8 +1367,7 @@ impl McpServer {
         let file_token_entries = self
             .file_token_map
             .lock()
-            .map(|tokens| tokens.len())
-            .unwrap_or_default();
+            .map_or_default(|tokens| tokens.len());
         let ratio = |n: u64| {
             if total_requests == 0 {
                 0.0
