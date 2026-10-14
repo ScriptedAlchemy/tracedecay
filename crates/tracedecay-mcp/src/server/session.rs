@@ -6,12 +6,14 @@
 //! mirrors `rmcp` 3.4's server (`service/server.rs`, `handler/server.rs`), with
 //! `rmcp` kept only for its wire model types.
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 
-use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
+use futures_util::{FutureExt, StreamExt};
 use rmcp::model::{
     ClientJsonRpcMessage, ClientNotification, ClientRequest, EmptyResult, ErrorData, GetMeta,
     JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, ProtocolVersion, RequestId,
@@ -250,7 +252,17 @@ impl<C: McpConnectionContext> Session<'_, C> {
         let adapter = self.adapter;
         let responses = self.responses.clone();
         self.in_flight.push(Box::pin(async move {
-            let result = adapter.handle_request(request, context).await;
+            // An unwind here would end the connection future and every other
+            // request on the session, so a panicking handler fails alone.
+            let result = AssertUnwindSafe(adapter.handle_request(request, context))
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|payload| {
+                    Err(ErrorData::internal_error(
+                        format!("request handler panicked: {}", panic_message(&*payload)),
+                        None,
+                    ))
+                });
             if let Err(error) = responses.send(response_message(id.clone(), result)).await {
                 tracing::debug!(%error, "MCP response was not delivered");
             }
@@ -273,9 +285,17 @@ impl<C: McpConnectionContext> Session<'_, C> {
             ClientNotification::CustomNotification(custom) => {
                 let adapter = self.adapter;
                 self.in_flight.push(Box::pin(async move {
-                    adapter
-                        .dispatch_notification(custom.method, custom.params)
-                        .await;
+                    let dispatched = AssertUnwindSafe(
+                        adapter.dispatch_notification(custom.method, custom.params),
+                    )
+                    .catch_unwind()
+                    .await;
+                    if let Err(payload) = dispatched {
+                        tracing::warn!(
+                            panic = panic_message(&*payload),
+                            "MCP notification handler panicked"
+                        );
+                    }
                     None
                 }));
             }
@@ -306,6 +326,14 @@ fn response_message(
         Ok(result) => ServerJsonRpcMessage::response(result, id),
         Err(error) => ServerJsonRpcMessage::error(error, Some(id)),
     }
+}
+
+fn panic_message(payload: &(dyn Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&'static str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-string panic payload")
 }
 
 pub(crate) fn missing_request_context_error(missing: &[&str]) -> ErrorData {

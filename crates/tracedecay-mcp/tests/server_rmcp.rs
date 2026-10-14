@@ -111,6 +111,7 @@ impl McpConnectionContext for TestContext {
                         .try_with(|scope| *scope)
                         .unwrap_or("outside the connection scope"),
                 ),
+                ("tools/call", Some("panic")) => panic!("tool handler exploded"),
                 ("tools/call", Some("wait_for_cancel")) => {
                     self.dispatch_started.notify_one();
                     cancellation.cancelled().await;
@@ -581,5 +582,73 @@ async fn shutdown_cancels_in_flight_requests_and_answers_them_before_the_session
         session.recv().await,
         None,
         "the session closed after draining"
+    );
+}
+
+#[tokio::test]
+async fn a_panicking_request_is_answered_and_its_session_keeps_serving() {
+    let context = new_context();
+    let mut session = TestSession::initialized(&context, "2025-06-18").await;
+    let started = context.dispatch_started.notified();
+    session
+        .send(&request_frame(
+            1,
+            "tools/call",
+            json!({"name": "wait_for_cancel", "arguments": {}}),
+            None,
+        ))
+        .await;
+    started.await;
+
+    let panicked = session
+        .exchange(&request_frame(
+            2,
+            "tools/call",
+            json!({"name": "panic", "arguments": {}}),
+            None,
+        ))
+        .await;
+    assert_eq!(
+        panicked["error"]["code"],
+        json!(ErrorCode::INTERNAL_ERROR.0),
+        "{panicked}"
+    );
+    assert!(
+        panicked["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("tool handler exploded")),
+        "{panicked}"
+    );
+
+    let following = session
+        .exchange(&request_frame(
+            3,
+            "tools/call",
+            json!({"name": "connection_scope", "arguments": {}}),
+            None,
+        ))
+        .await;
+    assert_eq!(
+        following["result"]["content"][0]["text"],
+        json!("connection-scope"),
+        "{following}"
+    );
+
+    session
+        .send(&json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": {"requestId": 1},
+        }))
+        .await;
+    let in_flight = session
+        .recv()
+        .await
+        .expect("the in-flight request is answered");
+    assert_eq!(in_flight["id"], json!(1), "{in_flight}");
+    assert_eq!(
+        in_flight["error"]["data"]["reason_code"],
+        json!("request_cancelled"),
+        "{in_flight}"
     );
 }
