@@ -1000,38 +1000,36 @@ async fn cancel_stops_the_automation_loop_while_the_scheduler_map_is_held() {
         .ensure_automation_scheduler(key.clone(), project, handshake)
         .await;
 
-    let schedulers = engine
+    let mut schedulers = engine
         .store_administration
         .automation_schedulers()
         .lock()
         .await;
-    assert!(
-        schedulers
-            .get(&key)
-            .and_then(|handle| handle.task.as_ref())
-            .is_some(),
-        "started automation loop"
-    );
+    let automation_loop = schedulers
+        .get_mut(&key)
+        .and_then(|handle| handle.task.take())
+        .expect("started automation loop");
     engine.cancel_automation_schedulers();
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
     drop(schedulers);
-    // An ended loop removes its own registration.
-    let mut waited = tokio::time::Duration::ZERO;
-    let stopped_before_join = loop {
-        let stopped = engine
+    // The loop's tick is 60 s: only the cancel can end it inside this bound.
+    let stopped_before_join = tracedecay_runtime_core::native_runtime::timeout(
+        std::time::Duration::from_secs(20),
+        automation_loop.wait(),
+    )
+    .await
+    .is_ok();
+    if !stopped_before_join
+        && let Some(handle) = engine
             .store_administration
             .automation_schedulers()
             .lock()
             .await
-            .get(&key)
-            .and_then(|handle| handle.task.as_ref())
-            .is_none_or(NativeTask::is_finished);
-        if stopped || waited >= tokio::time::Duration::from_secs(2) {
-            break stopped;
-        }
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        waited += tokio::time::Duration::from_millis(10);
-    };
+            .get_mut(&key)
+    {
+        // Hand the live loop back so shutdown can abort it.
+        handle.task = Some(automation_loop);
+    }
     engine.shutdown_all().await;
 
     assert!(
