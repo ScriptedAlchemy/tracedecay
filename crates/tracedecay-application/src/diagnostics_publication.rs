@@ -32,6 +32,7 @@ use tracedecay_domain::{
 };
 #[cfg(test)]
 use tracedecay_lsp::DiagnosticSource;
+use tracedecay_runtime_core::native_runtime;
 
 use crate::diagnostics_store::DiagnosticsStore;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -764,7 +765,11 @@ async fn load_project_file(project_root: &Path, relative: &str) -> Option<(Conte
     {
         return None;
     }
-    let bytes = tokio::fs::read(project_root.join(path)).await.ok()?;
+    let file = project_root.join(path);
+    let bytes = native_runtime::spawn_blocking(move || std::fs::read(file))
+        .await
+        .ok()?
+        .ok()?;
     let digest = tracedecay_code_index::intake::content_digest(&bytes);
     let text = String::from_utf8(bytes).ok()?;
     Some((digest, text))

@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::time::Duration;
-use tokio::time::Instant;
+use std::time::{Duration, Instant};
 use tracedecay_runtime_core::config::ProfileRoot;
 
 use tracedecay_project::project::TraceDecay;
@@ -216,7 +215,7 @@ async fn brokered_init(
     // eventually demand it does not survive a daemon restart. Request the
     // reconciliation explicitly so the receipt below reports something that
     // actually happened.
-    let reconcile = admin_sync(profile, handshake.clone(), init_deadline).await;
+    let reconcile = admin_sync(profile, handshake.clone(), init_deadline.into()).await;
     let reconcile = match reconcile {
         Err(error) => {
             if !code_index_reconciliation_is_optional(project_path, &error).await {

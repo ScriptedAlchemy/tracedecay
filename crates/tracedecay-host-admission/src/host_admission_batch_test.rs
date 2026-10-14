@@ -22,6 +22,7 @@ use tracedecay_sessions::admission::{HostAdmission, HostAdmissionScope};
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationPersistOutcome, ObservationWrite,
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor,
+    runtime::DEFAULT_MAX_READERS_PER_HOT_SHARD,
 };
 
 use super::*;
@@ -244,6 +245,72 @@ async fn mounted_capture_batch_reduces_writer_transactions() {
         committed, 2,
         "one observation batch plus one external-source batch must commit"
     );
+}
+
+/// Every general reader held is a capacity answer about this pool, not a
+/// failed authority write: a retry backoff keyed on the reason must see
+/// backpressure, and the same capture must commit once readers return.
+#[asupersync::test]
+async fn saturated_reader_pool_reports_backpressure_not_authority_write_failure() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let (facade, database) = profile_facade(&runtime);
+    let mut held = Vec::new();
+    for _ in 0..DEFAULT_MAX_READERS_PER_HOT_SHARD {
+        held.push(
+            database
+                .read_snapshot()
+                .await
+                .expect("hold a general reader"),
+        );
+    }
+    let occupancy = database
+        .read_connection()
+        .reader_pool_occupancy()
+        .expect("registered reader pool");
+    assert_eq!(occupancy.available_general, 0, "{occupancy:?}");
+    assert_eq!(
+        occupancy.leased_general, DEFAULT_MAX_READERS_PER_HOT_SHARD,
+        "{occupancy:?}"
+    );
+
+    let backpressured = |outcome: &HostAdmissionOutcome| {
+        assert_eq!(
+            (outcome.status, outcome.retryable, outcome.reason_code),
+            (
+                HostAdmissionStatus::Backpressured,
+                true,
+                Some("reader_pool_saturated")
+            ),
+            "cause: {:?}",
+            outcome.cause
+        );
+    };
+    let session_id = SessionId::new("session.host-admission-capture.saturated").unwrap();
+    let source = ObservationSourceIdentityV1::for_provider(
+        ProviderId::new(BATCH_PROVIDER).unwrap(),
+        session_id.clone(),
+    )
+    .unwrap();
+    backpressured(
+        &facade
+            .get_source_cursor(&source, &ObservationScopeV1::Profile)
+            .await
+            .expect_err("a cursor read needs a reader"),
+    );
+    backpressured(
+        &facade
+            .capture(sequential_capture_requests(&session_id, 1).remove(0))
+            .await,
+    );
+
+    drop(held);
+    let recovered = facade
+        .capture(sequential_capture_requests(&session_id, 1).remove(0))
+        .await;
+    assert_eq!(recovered.status, HostAdmissionStatus::AcceptedForReplay);
 }
 
 fn run_git(project: &std::path::Path, args: &[&str]) {

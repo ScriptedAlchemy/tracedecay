@@ -146,6 +146,57 @@ async fn bounded_producer_persists_through_registered_authority_and_cancels_clos
     );
 }
 
+#[test]
+fn bounded_producer_starts_and_delivers_without_a_tokio_runtime() {
+    use tracedecay_runtime_core::native_runtime::block_on;
+
+    assert!(tokio::runtime::Handle::try_current().is_err());
+    let (_project, runtime) = block_on(runtime()).expect("native runtime");
+    let db = runtime.project_database_arc().expect("project database");
+    let scope = "project.observability.v2".to_owned();
+    let producer = BoundedObservabilityProducerV1::start(
+        db.clone(),
+        ObservabilityProducerIdentityV1 {
+            authorized_scope_ref: scope.clone(),
+            process_boot_id: "boot:no-tokio".into(),
+            producer_revision: "producer.v1".into(),
+            configuration_revision: "configuration.v1".into(),
+            policy_revision: "policy.v1".into(),
+        },
+        4,
+    )
+    .expect("the producer worker starts outside a Tokio runtime");
+    assert_eq!(
+        producer
+            .try_emit(envelope(&scope, "boot:no-tokio", 1, 1_000_000))
+            .expect("enqueue"),
+        ObservabilityEmissionOutcomeV1::Enqueued
+    );
+    let summary = block_on(producer.shutdown())
+        .expect("native runtime")
+        .expect("clean shutdown");
+    assert_eq!(
+        summary.persisted, 2,
+        "the event and its zero terminal carrier"
+    );
+    let page = block_on(
+        RegisteredObservabilityPortV1::new(&db).query(ObservabilityQueryV1 {
+            authorized_scope_ref: scope,
+            event_kinds: vec!["retrieval.query.completed.v1".into()],
+            horizon: ObservabilityHorizonV1 {
+                since_micros: 0,
+                until_micros: i64::MAX,
+            },
+            after_watermark: None,
+            limit: 4,
+        }),
+    )
+    .expect("native runtime")
+    .expect("delivered observations");
+    assert_eq!(page.events.len(), 1);
+    assert_eq!(page.events[0].process_boot_id, "boot:no-tokio");
+}
+
 #[tokio::test]
 async fn bounded_producer_stamps_its_mounted_identity_and_preserves_delayed_evidence() {
     let (_project, runtime) = runtime().await;
@@ -697,23 +748,27 @@ async fn drops_carried_by_a_later_normal_event_remain_explicit_and_counted() {
             .expect("first emission"),
         ObservabilityEmissionOutcomeV1::Enqueued
     );
-    tokio::task::yield_now().await;
-    assert_eq!(
-        producer
-            .try_emit(envelope(&scope, "boot:carried-drops", 2, 2))
-            .expect("queued emission"),
-        ObservabilityEmissionOutcomeV1::Enqueued
-    );
-    let mut dropped = u64::from(
-        producer
-            .try_emit(envelope(&scope, "boot:carried-drops", 3, 3))
-            .expect("capacity observation")
-            == ObservabilityEmissionOutcomeV1::DroppedAtCapacity,
-    );
+    // The native worker takes at most one batch before it parks on the held
+    // writer, so the single slot overflows within a batch of offers.
+    let mut dropped = 0_u64;
+    let mut next_id = 2_u64;
+    while dropped == 0 && next_id <= 64 {
+        dropped = u64::from(
+            producer
+                .try_emit(envelope(
+                    &scope,
+                    "boot:carried-drops",
+                    next_id,
+                    i64::try_from(next_id).expect("small event id"),
+                ))
+                .expect("capacity observation")
+                == ObservabilityEmissionOutcomeV1::DroppedAtCapacity,
+        );
+        next_id += 1;
+    }
     assert!(dropped > 0, "the held writer must make the data queue full");
     blocker.commit().await.expect("release registered writer");
 
-    let mut next_id = 4_u64;
     // The reopened slot is a wall-clock condition, not an iteration count:
     // the worker only frees the queued observation once its previously
     // blocked write actually lands. Retry under a real deadline and park

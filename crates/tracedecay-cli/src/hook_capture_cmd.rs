@@ -406,7 +406,6 @@ fn prepare_native_capture(
                 payload,
                 material,
                 now,
-                tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
             );
             let delivery = (outcome == NativeHookCaptureOutcomeV1::Captured)
                 .then_some((layout.data_root, material));

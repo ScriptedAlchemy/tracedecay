@@ -291,6 +291,7 @@ const COMPACTION_INGEST_CONVERGING_REASONS: &[&str] = &[
     "external_source_runtime_unavailable",
     "external_source_commit_failed",
     "batch_worker_stopped",
+    "reader_pool_saturated",
 ];
 
 /// Lands the project's Codex rollouts in the owning store through the
@@ -308,8 +309,14 @@ async fn admit_codex_rollouts_for_compaction(
 ) -> Result<u64> {
     let mut last_retryable = None;
     for attempt in 0..COMPACTION_INGEST_ATTEMPTS {
-        if attempt > 0 {
-            tokio::time::sleep(COMPACTION_INGEST_RETRY_DELAY).await;
+        if attempt > 0
+            && tracedecay_runtime_core::native_runtime::sleep_until(
+                std::time::Instant::now() + COMPACTION_INGEST_RETRY_DELAY,
+            )
+            .await
+            .is_err()
+        {
+            break;
         }
         match admit_codex_rollouts_once(cg, session_authorities.clone()).await {
             Ok(messages_upserted) => return Ok(messages_upserted),

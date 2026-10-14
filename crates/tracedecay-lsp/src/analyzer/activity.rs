@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 
 use super::adapters::LspAdapterDefinition;
 use super::client::LspDocument;
-use super::error::AnalyzerResult;
+use super::error::{AnalyzerResult, AnalyzerRuntimeError};
 
 #[cfg(test)]
 thread_local! {
@@ -83,7 +83,7 @@ pub async fn documents_for_adapter(
     let Ok(project_root) = canonicalize_project_root(project_root) else {
         return Ok(Vec::new());
     };
-    let mut documents = Vec::new();
+    let mut candidates = Vec::new();
     for file in files {
         if !matches_adapter_extension(adapter, &file) {
             continue;
@@ -94,17 +94,27 @@ pub async fn documents_for_adapter(
         let Some(path) = scoped_project_file_from_canonical_root(&project_root, &file) else {
             continue;
         };
-        let Ok(text) = tokio::fs::read_to_string(&path).await else {
-            continue;
-        };
-        documents.push(LspDocument {
-            language: adapter.language.clone(),
-            language_id: language_id_for_file(adapter, &file),
-            relative_path: file,
-            text,
-        });
+        let language_id = language_id_for_file(adapter, &file);
+        candidates.push((path, file, language_id));
     }
-    Ok(documents)
+    let language = adapter.language.clone();
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        candidates
+            .into_iter()
+            .filter_map(|(path, relative_path, language_id)| {
+                Some(LspDocument {
+                    language: language.clone(),
+                    language_id,
+                    relative_path,
+                    text: std::fs::read_to_string(path).ok()?,
+                })
+            })
+            .collect()
+    })
+    .await
+    .map_err(|error| {
+        AnalyzerRuntimeError::new(format!("failed to read analyzer documents: {error}"))
+    })
 }
 
 fn language_id_for_file(adapter: &LspAdapterDefinition, file: &str) -> String {
@@ -197,28 +207,38 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
-    #[tokio::test]
-    async fn documents_for_adapter_requires_a_matching_root_marker()
+    fn block<T>(future: impl Future<Output = T>) -> T {
+        tracedecay_runtime_core::native_runtime::block_on(future).expect("native runtime")
+    }
+
+    #[test]
+    fn documents_for_adapter_requires_a_matching_root_marker()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let project_root = temp.path();
         let source_path = project_root.join("src/lib.fake");
         let source_parent = source_path.parent().ok_or("source path has no parent")?;
-        tokio::fs::create_dir_all(source_parent).await?;
-        tokio::fs::write(&source_path, "fake source").await?;
+        std::fs::create_dir_all(source_parent)?;
+        std::fs::write(&source_path, "fake source")?;
         let adapter = fake_adapter("fake-root");
 
-        let documents =
-            documents_for_adapter(project_root, &adapter, vec!["src/lib.fake".to_string()]).await?;
+        let documents = block(documents_for_adapter(
+            project_root,
+            &adapter,
+            vec!["src/lib.fake".to_string()],
+        ))?;
 
         assert!(
             documents.is_empty(),
             "adapter without a root marker should not open project documents"
         );
 
-        tokio::fs::write(project_root.join("fake-root"), "").await?;
-        let documents =
-            documents_for_adapter(project_root, &adapter, vec!["src/lib.fake".to_string()]).await?;
+        std::fs::write(project_root.join("fake-root"), "")?;
+        let documents = block(documents_for_adapter(
+            project_root,
+            &adapter,
+            vec!["src/lib.fake".to_string()],
+        ))?;
         assert_eq!(
             documents
                 .iter()

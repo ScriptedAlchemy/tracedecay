@@ -54,7 +54,7 @@ pub(super) async fn compute_field_sites(
     // Graph phase is done. The source walk reads every candidate file, so it
     // belongs on a blocking worker like the sibling analysis scans.
     let project_root = graph.project_root()?.to_path_buf();
-    let (writes, reads, touched) = tracing::Instrument::instrument(tokio::task::spawn_blocking(move || {
+    let (writes, reads, touched) = tracing::Instrument::instrument(tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             let mut files = symbols_by_file.keys().cloned().collect::<Vec<_>>();
             files.sort();
             let mut writes: Vec<FieldSiteV1> = Vec::new();

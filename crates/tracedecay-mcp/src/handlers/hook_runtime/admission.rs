@@ -564,7 +564,7 @@ async fn admit_hook_v2_envelope_with_lifecycle_inner(
     let receipt = staged.receipt;
     let commit = staged.commit;
     if !matches!(
-        tokio::task::spawn_blocking(move || commit.wait()).await,
+        tracedecay_runtime_core::native_runtime::spawn_blocking(move || commit.wait()).await,
         Ok(Ok(()))
     ) {
         return HookV2AdmissionOutcomeV1::Backpressured;
@@ -793,9 +793,9 @@ async fn admit_hook_v2_envelope_with_lifecycle_inner(
         if cursor_stack_wakeup_allowed(first_admission, envelope.producer) {
             let project_id = envelope.project_id;
             let worktree_id = envelope.worktree_id;
-            tokio::time::timeout(
+            tracedecay_runtime_core::native_runtime::timeout(
                 std::time::Duration::from_millis(50),
-                tokio::task::spawn_blocking(move || {
+                tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
                     tracedecay_agent_hosts::native_integration::github_stack_hook_available(
                         project_id,
                         worktree_id,

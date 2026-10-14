@@ -132,6 +132,7 @@ alloc-jemalloc = ["dep:tikv-jemallocator", "tikv-jemallocator/background_threads
 alloc-mimalloc = ["dep:mimalloc"]
 
 [dependencies]
+asupersync.workspace = true
 crossterm = { version = "0.29", default-features = false, features = ["bracketed-paste", "events", "windows"] }
 clap = { version = "4.6", features = ["derive"] }
 flate2 = "1"

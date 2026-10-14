@@ -422,9 +422,10 @@ pub struct RemoteStatusSurfaceRequestV1 {}
 pub struct RuntimeSurfaceRequestV1 {
     /// Run the exhaustive observation-authority audit and include
     /// authority_audit_ok (true = audit ran and passed, false = audit ran and
-    /// failed, null = audit did not run), authority_audit_reason (typed:
-    /// authority_invariant_failed, authority_store_unavailable,
-    /// authority_store_missing, authority_audit_not_run), and
+    /// failed, null = audit did not run or finish), authority_audit_reason
+    /// (typed: authority_invariant_failed, authority_store_unavailable,
+    /// authority_store_missing, authority_audit_not_run,
+    /// authority_audit_budget_exceeded), and
     /// authority_audit_error (observed detail) in database telemetry. Also
     /// includes session-temporal health. Default false.
     #[serde(default)]

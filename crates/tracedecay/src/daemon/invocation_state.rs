@@ -1254,7 +1254,7 @@ mod shutdown_tests {
             .expect("admit lease worker");
         observed.await.expect("lease worker was polled");
         let receipt = tracedecay_daemon_service::shutdown::join_shutdown_owners(
-            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
             vec![
                 tracedecay_daemon_service::shutdown::ShutdownOwner::with_deadline_status(
                     "invocation",

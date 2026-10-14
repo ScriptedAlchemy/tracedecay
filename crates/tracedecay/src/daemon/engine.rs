@@ -840,6 +840,12 @@ impl DaemonEngine {
                         &[("reason", "identity_unavailable".to_string())],
                     );
                 }
+                git_watch::GitWatcherAdmission::RuntimeUnavailable => {
+                    log_daemon_event(
+                        "git_watch_admission_rejected",
+                        &[("reason", "runtime_unavailable".to_string())],
+                    );
+                }
             }
             server
         })

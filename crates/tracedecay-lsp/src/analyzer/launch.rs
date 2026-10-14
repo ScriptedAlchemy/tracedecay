@@ -11,14 +11,16 @@
 //! spawned environment always carries [`RUSTUP_AUTO_INSTALL_ENV`]`=0` so a
 //! child `cargo` the analyzer runs cannot install either.
 //!
-//! Every rustup probe is bounded by [`RUSTUP_PROBE_DEADLINE`] and runs in a
-//! blocking section handed off the async worker, because the broker calls
-//! into here while its callers hold the broker lock on the Tokio executor.
+//! Every rustup probe is bounded by [`RUSTUP_PROBE_DEADLINE`] and runs on the
+//! native blocking pool, because the broker calls into here while its callers
+//! hold the broker lock on an async worker.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+use tracedecay_runtime_core::native_runtime;
 
 /// rustup honours this variable since 1.28.1; `0` refuses every implicit
 /// toolchain install, from proxies and from `rustup which` alike. Older rustup
@@ -169,8 +171,8 @@ impl AnalyzerLaunchResolver {
     ///
     /// The `which` probe runs from `workspace_root` because that is where
     /// rustup reads the active toolchain override a spawn would see. Both
-    /// probes run bounded and off the async worker.
-    pub fn resolve(
+    /// probes run bounded on the native blocking pool.
+    pub async fn resolve(
         &mut self,
         command: &str,
         workspace_root: &Path,
@@ -183,40 +185,63 @@ impl AnalyzerLaunchResolver {
         let Some(rustup) = rustup_proxy_owner(&located) else {
             return Ok(AnalyzerLaunch::direct(located));
         };
-        run_blocking_probe_section(|| {
-            self.require_no_install_rustup(&rustup, command)?;
-            resolve_through_rustup(&rustup, command, workspace_root)
-        })
-    }
-
-    /// Refuses a rustup that ignores [`RUSTUP_AUTO_INSTALL_ENV`] before any
-    /// toolchain-resolving probe runs through it.
-    fn require_no_install_rustup(
-        &mut self,
-        rustup: &Path,
-        command: &str,
-    ) -> Result<(), AnalyzerLaunchError> {
-        let version = if let Some(version) = self.rustup_versions.get(rustup) {
-            *version
-        } else {
-            let version = rustup_version(rustup, command)?;
-            self.rustup_versions.insert(rustup.to_path_buf(), version);
-            version
+        let known = self.rustup_versions.get(&rustup).copied();
+        let probe = {
+            let rustup = rustup.clone();
+            let command = command.to_owned();
+            let workspace_root = workspace_root.to_path_buf();
+            move || probe_rustup_launch(&rustup, known, &command, &workspace_root)
         };
-        if version < MIN_RUSTUP_VERSION_FOR_NO_INSTALL {
-            return Err(AnalyzerLaunchError::RustupTooOldForNoInstall { found: version });
+        let (version, launch) = native_runtime::spawn_blocking(probe)
+            .await
+            .map_err(|reason| AnalyzerLaunchError::ProbeFailed {
+                command: command.to_owned(),
+                reason,
+            })?;
+        if let Some(version) = version {
+            self.rustup_versions.insert(rustup, version);
         }
-        Ok(())
+        launch
     }
+}
+
+/// Runs the rustup probes for one resolution: `rustup --version` unless
+/// `known`, then `rustup which` only when that rustup honours
+/// [`RUSTUP_AUTO_INSTALL_ENV`]. Returns the version to remember (also when the
+/// launch is refused) with the launch.
+fn probe_rustup_launch(
+    rustup: &Path,
+    known: Option<RustupVersion>,
+    command: &str,
+    workspace_root: &Path,
+) -> (
+    Option<RustupVersion>,
+    Result<AnalyzerLaunch, AnalyzerLaunchError>,
+) {
+    let version = match known {
+        Some(version) => version,
+        None => match rustup_version(rustup, command) {
+            Ok(version) => version,
+            Err(error) => return (None, Err(error)),
+        },
+    };
+    let launch = if version < MIN_RUSTUP_VERSION_FOR_NO_INSTALL {
+        Err(AnalyzerLaunchError::RustupTooOldForNoInstall { found: version })
+    } else {
+        resolve_through_rustup(rustup, command, workspace_root)
+    };
+    (Some(version), launch)
 }
 
 /// Resolves `command` for `workspace_root` with a fresh resolver. Callers that
 /// resolve repeatedly hold an [`AnalyzerLaunchResolver`] instead.
-pub fn resolve_analyzer_launch(
+pub async fn resolve_analyzer_launch(
     command: &str,
     workspace_root: &Path,
 ) -> Result<AnalyzerLaunch, AnalyzerLaunchError> {
-    AnalyzerLaunchResolver::new().resolve(command, workspace_root)
+    AnalyzerLaunchResolver::new()
+        .resolve(command, workspace_root)
+        .await
 }
 
 /// `rustup --version`, run from the system temporary directory so no project
@@ -352,23 +377,6 @@ fn run_bounded(mut probe: Command, command: &str) -> Result<ProbeOutput, Analyze
         stdout,
         stderr,
     })
-}
-
-/// Runs the synchronous rustup probes without stalling the async worker that
-/// called into the broker.
-///
-/// The broker is deliberately synchronous and its callers hold its lock on
-/// Tokio workers. `block_in_place` hands the worker's run queue to another
-/// thread for the section; it panics outside a multi-thread runtime, so the
-/// flavor is checked first and everything else (current-thread runtimes, plain
-/// threads) runs the section inline.
-fn run_blocking_probe_section<T>(work: impl FnOnce() -> T) -> T {
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(work)
-        }
-        _ => work(),
-    }
 }
 
 fn no_install_env() -> Vec<(String, String)> {
@@ -550,6 +558,17 @@ pub(crate) mod fake_rustup {
 mod tests {
     use super::*;
 
+    fn block<T>(future: impl Future<Output = T>) -> T {
+        native_runtime::block_on(future).expect("native runtime")
+    }
+
+    fn resolve_blocking(
+        command: &str,
+        workspace_root: &Path,
+    ) -> Result<AnalyzerLaunch, AnalyzerLaunchError> {
+        block(resolve_analyzer_launch(command, workspace_root))
+    }
+
     #[test]
     fn direct_command_carries_the_no_install_environment() {
         let launch = AnalyzerLaunch::direct("typescript-language-server");
@@ -563,7 +582,7 @@ mod tests {
     #[test]
     fn missing_command_is_typed_unavailable() {
         assert_eq!(
-            resolve_analyzer_launch("__tracedecay_missing_lsp_for_test__", Path::new(".")),
+            resolve_blocking("__tracedecay_missing_lsp_for_test__", Path::new(".")),
             Err(AnalyzerLaunchError::CommandUnavailable {
                 command: "__tracedecay_missing_lsp_for_test__".to_owned(),
             })
@@ -583,7 +602,7 @@ mod tests {
         let relative = program.strip_prefix(&current).unwrap();
         let workspace = tempfile::tempdir().unwrap();
 
-        let launch = resolve_analyzer_launch(relative.to_str().unwrap(), workspace.path()).unwrap();
+        let launch = resolve_blocking(relative.to_str().unwrap(), workspace.path()).unwrap();
         assert!(launch.program.is_absolute());
         let output = Command::new(launch.program)
             .envs(launch.env)
@@ -603,7 +622,7 @@ mod tests {
     fn npm_style_launcher_is_resolved_and_spawned_from_path() {
         const CHILD: &str = "TRACEDECAY_TEST_NPM_LAUNCH_CHILD";
         if std::env::var_os(CHILD).is_some() {
-            let launch = resolve_analyzer_launch("language-server", Path::new(".")).unwrap();
+            let launch = resolve_blocking("language-server", Path::new(".")).unwrap();
             assert_eq!(launch.program.extension().unwrap(), "CMD");
             let output = Command::new(launch.program)
                 .envs(launch.env)
@@ -772,7 +791,7 @@ mod tests {
             let project = tempfile::tempdir().unwrap();
             let command = dir.path().join("rust-analyzer");
 
-            let error = resolve_analyzer_launch(command.to_str().unwrap(), project.path())
+            let error = resolve_blocking(command.to_str().unwrap(), project.path())
                 .expect_err("missing component must not resolve a launch");
 
             assert_eq!(
@@ -801,7 +820,7 @@ mod tests {
             let project = tempfile::tempdir().unwrap();
             let command = dir.path().join("rust-analyzer");
 
-            let error = resolve_analyzer_launch(command.to_str().unwrap(), project.path())
+            let error = resolve_blocking(command.to_str().unwrap(), project.path())
                 .expect_err("missing toolchain must not resolve a launch");
 
             assert_eq!(
@@ -825,7 +844,7 @@ mod tests {
             let project = tempfile::tempdir().unwrap();
             let command = dir.path().join("rust-analyzer");
 
-            let launch = resolve_analyzer_launch(command.to_str().unwrap(), project.path())
+            let launch = resolve_blocking(command.to_str().unwrap(), project.path())
                 .expect("installed component resolves");
 
             assert_eq!(launch.program, real_binary);
@@ -851,8 +870,7 @@ mod tests {
             let command = dir.path().join("rust-analyzer");
             let mut resolver = AnalyzerLaunchResolver::new();
 
-            let error = resolver
-                .resolve(command.to_str().unwrap(), project.path())
+            let error = block(resolver.resolve(command.to_str().unwrap(), project.path()))
                 .expect_err("old rustup must be refused");
 
             assert_eq!(
@@ -877,7 +895,7 @@ mod tests {
                 "the version probe must not run inside the project: {log}"
             );
 
-            let _ = resolver.resolve(command.to_str().unwrap(), project.path());
+            let _ = block(resolver.resolve(command.to_str().unwrap(), project.path()));
             assert_eq!(
                 fake_rustup::version_probes(dir.path()),
                 1,
@@ -896,19 +914,13 @@ mod tests {
             let root_b = tempfile::tempdir().unwrap();
             let mut resolver = AnalyzerLaunchResolver::new();
 
-            resolver
-                .resolve(command.to_str().unwrap(), root_a.path())
-                .unwrap();
-            resolver
-                .resolve(command.to_str().unwrap(), root_b.path())
-                .unwrap();
+            block(resolver.resolve(command.to_str().unwrap(), root_a.path())).unwrap();
+            block(resolver.resolve(command.to_str().unwrap(), root_b.path())).unwrap();
 
             assert_eq!(fake_rustup::version_probes(dir.path()), 1);
             assert_eq!(fake_rustup::which_probes(dir.path()), 2);
             resolver.clear();
-            resolver
-                .resolve(command.to_str().unwrap(), root_a.path())
-                .unwrap();
+            block(resolver.resolve(command.to_str().unwrap(), root_a.path())).unwrap();
             assert_eq!(fake_rustup::version_probes(dir.path()), 2);
         }
 
@@ -919,7 +931,7 @@ mod tests {
             let command = dir.path().join("rust-analyzer");
             let started = Instant::now();
 
-            let error = resolve_analyzer_launch(command.to_str().unwrap(), project.path())
+            let error = resolve_blocking(command.to_str().unwrap(), project.path())
                 .expect_err("a hanging probe must be refused");
 
             assert_eq!(
@@ -942,7 +954,7 @@ mod tests {
             let real = dir.path().join("gopls");
             write_executable_script(&real, "#!/bin/sh\nexit 0\n").unwrap();
 
-            let launch = resolve_analyzer_launch(real.to_str().unwrap(), dir.path())
+            let launch = resolve_blocking(real.to_str().unwrap(), dir.path())
                 .expect("a non-proxy command launches directly");
 
             assert_eq!(launch.program, real);
@@ -957,7 +969,7 @@ mod tests {
             std::os::unix::fs::symlink(dir.path().join("rust-analyzer"), &distro_link).unwrap();
             let project = tempfile::tempdir().unwrap();
 
-            let error = resolve_analyzer_launch(distro_link.to_str().unwrap(), project.path())
+            let error = resolve_blocking(distro_link.to_str().unwrap(), project.path())
                 .expect_err("the link resolves to the proxy, which must be probed");
 
             assert_eq!(
@@ -987,7 +999,7 @@ mod tests {
             );
             let project = tempfile::tempdir().unwrap();
 
-            let launch = resolve_analyzer_launch(copied.to_str().unwrap(), project.path())
+            let launch = resolve_blocking(copied.to_str().unwrap(), project.path())
                 .expect("the copied proxy resolves through rustup");
 
             assert_eq!(launch.program, real_binary);

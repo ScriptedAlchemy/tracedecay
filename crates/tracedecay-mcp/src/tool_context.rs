@@ -971,8 +971,6 @@ pub(crate) mod tests {
         StoreLayout {
             identity: tracedecay_runtime_core::storage::ProjectIdentity {
                 project_id: Some(project_id.to_owned()),
-                display_root: root.to_path_buf(),
-                primary_alias: root.to_path_buf(),
             },
             store_kind: tracedecay_runtime_core::storage::StoreKind::CodeProject,
             storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,

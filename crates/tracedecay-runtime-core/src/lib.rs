@@ -97,6 +97,7 @@ pub mod background_cpu;
 pub mod branch;
 pub mod branch_meta;
 pub mod cancellation;
+pub mod child_pipe;
 pub mod config;
 pub mod db;
 pub mod git;
@@ -125,7 +126,7 @@ pub mod text;
 pub mod timeutil;
 pub mod tracedecay;
 pub mod weak_registry;
-pub use asupersync::Cx;
+pub use asupersync::{Cx, signal};
 pub use operation_task_owner::RuntimeOperationTaskOwnerV1;
 #[cfg(windows)]
 pub use tracedecay_private_fs::windows as windows_security;

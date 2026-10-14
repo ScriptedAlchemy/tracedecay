@@ -65,7 +65,7 @@ pub(super) async fn indexed_files(
 ) -> Result<Vec<IndexedFileSummary>> {
     let counts = indexed_file_counts(graph)?;
     let project_root = project_root.to_path_buf();
-    tokio::task::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         let mut files = counts
             .into_iter()
             .map(|file| {

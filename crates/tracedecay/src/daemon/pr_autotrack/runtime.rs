@@ -33,9 +33,9 @@ impl PrAutotrackTask {
         self.cancellation.clone()
     }
 
-    pub(crate) async fn shutdown(self) {
+    pub(crate) async fn shutdown(mut self) {
         self.cancellation.cancel();
-        if let Err(error) = self.task.await {
+        if let Err(error) = (&mut self.task).await {
             log_daemon_event(
                 "pr_autotrack",
                 &[
@@ -45,6 +45,12 @@ impl PrAutotrackTask {
                 ],
             );
         }
+    }
+}
+
+impl Drop for PrAutotrackTask {
+    fn drop(&mut self) {
+        self.task.abort();
     }
 }
 

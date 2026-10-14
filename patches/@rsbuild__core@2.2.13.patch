@@ -1,0 +1,12 @@
+diff --git a/dist/m.js b/dist/m.js
+--- a/dist/m.js
++++ b/dist/m.js
+@@ -6058,7 +6058,7 @@
+     let { options } = htmlPluginData.plugin;
+     return recursiveChunkEntryNames(chunk).some((chunkName)=>isChunksFiltered(chunkName, options?.chunks, options?.excludeChunks));
+ }
+-let getManifestPlugin = cachedImport_cachedImport(()=>import("./manifest-plugin.js").then(rspackRequire.bind(rspackRequire, "../../../../../setup-pnpm/node_modules/.bin/store/v11/links/@/rspack-manifest-plugin/5.2.2/cbeeb1bf16831c5d12121244c2e0e825d7a61324a587214ca9e44e464c6b1496/node_modules/rspack-manifest-plugin/dist/index.js"))), isCSSPath = (filePath)=>filePath.endsWith('.css');
++let getManifestPlugin = cachedImport_cachedImport(()=>import("./manifest-plugin.js")), isCSSPath = (filePath)=>filePath.endsWith('.css');
+ function normalizeManifestObjectConfig(manifest) {
+     let defaultOptions = {
+         prefix: !0,

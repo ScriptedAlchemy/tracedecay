@@ -3,11 +3,11 @@ use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use tokio::io::AsyncWriteExt;
 
 use crate::automation::artifacts::sha256_bytes;
 use crate::automation::{AutomationCommittedReceipt, AutomationRunError, AutomationRunResult};
 use tracedecay_domain::errors::Result;
+use tracedecay_runtime_core::native_runtime;
 
 use super::{
     AgentTaskResponse, AutomationJob, JOB_OUTPUT_DIR, JobDelivery, TraceDecayError,
@@ -263,36 +263,36 @@ pub(super) async fn deliver_job_output(
         JobDelivery::File { path } => {
             let target = file_target(dashboard_root, job, run_id, path.as_deref())?;
             if let Some(parent) = target.parent() {
-                tokio::fs::create_dir_all(parent).await.map_err(|error| {
-                    TraceDecayError::Config {
+                let directory = parent.to_path_buf();
+                crate::automation::blocking_fs(move || std::fs::create_dir_all(directory))
+                    .await
+                    .map_err(|error| TraceDecayError::Config {
                         message: format!("failed to create job output directory: {error}"),
-                    }
-                })?;
+                    })?;
             }
             let target_digest = sha256_bytes(target.display().to_string().as_bytes());
-            let mut file = tokio::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(&target)
-                .await
-                .map_err(|error| {
-                    AutomationRunError::Runtime(TraceDecayError::Config {
-                        message: format!("failed to open job output: {error}"),
-                    })
-                })?;
-            {
-                use tracing::Instrument as _;
-                {
-                    file.write_all(response.output_text.as_bytes())
-                        .instrument(tracing::trace_span!("automation.job_delivery.write_file"))
-                        .await
-                }
-            }
-            .map_err(|_| {
-                indeterminate_error(run_id, &task_key, "file", &target_digest, content_digest)
+            let mut file = crate::automation::blocking_fs(move || {
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(true)
+                    .open(target)
+            })
+            .await
+            .map_err(|error| {
+                AutomationRunError::Runtime(TraceDecayError::Config {
+                    message: format!("failed to open job output: {error}"),
+                })
             })?;
-            file.flush().await.map_err(|_| {
+            let output = response.output_text.clone();
+            crate::automation::blocking_fs(move || {
+                use std::io::Write as _;
+                let _span = tracing::trace_span!("automation.job_delivery.write_file").entered();
+                file.write_all(output.as_bytes())?;
+                file.flush()
+            })
+            .await
+            .map_err(|_| {
                 indeterminate_error(run_id, &task_key, "file", &target_digest, content_digest)
             })?;
             Ok(JobDeliveryOutcome::File { target_digest })
@@ -308,16 +308,21 @@ pub(super) async fn deliver_job_output(
             });
             let target_digest = sha256_bytes(url.as_bytes());
             let post_url = url.clone();
-            let attempted = tokio::task::spawn_blocking(move || {
+            let attempted = native_runtime::spawn_blocking(move || {
                 job_webhook::post_json_url(
                     &post_url,
                     &payload,
                     Duration::from_secs(WEBHOOK_TIMEOUT_SECS),
                 )
-            });
-            let status =
-                await_webhook_attempt(attempted, run_id, &task_key, &target_digest, content_digest)
-                    .await?;
+            })
+            .await;
+            let status = settle_webhook_attempt(
+                attempted,
+                run_id,
+                &task_key,
+                &target_digest,
+                content_digest,
+            )?;
             Ok(JobDeliveryOutcome::Webhook {
                 target_digest,
                 status,
@@ -326,14 +331,16 @@ pub(super) async fn deliver_job_output(
     }
 }
 
-async fn await_webhook_attempt(
-    attempted: tokio::task::JoinHandle<std::result::Result<u16, job_webhook::WebhookPostError>>,
+/// `attempted` is `Err` when the blocking worker ended without a result, so
+/// whether the POST went out is unknown.
+fn settle_webhook_attempt(
+    attempted: std::result::Result<std::result::Result<u16, job_webhook::WebhookPostError>, String>,
     run_id: &str,
     task_key: &str,
     target_digest: &str,
     content_digest: &str,
 ) -> AutomationRunResult<u16> {
-    match attempted.await {
+    match attempted {
         Err(_) => Err(indeterminate_error(
             run_id,
             task_key,
@@ -688,20 +695,22 @@ mod tests {
         assert!(!debug.contains("private delivery body"));
     }
 
-    #[tokio::test]
-    async fn webhook_worker_panic_after_attempt_remains_a_bound_partial_effect() {
-        let attempted = tokio::task::spawn_blocking(|| {
-            // The worker "attempted" its write; the panic lands afterwards.
-            panic!("injected panic after write")
-        });
-        let error = await_webhook_attempt(
+    #[test]
+    fn webhook_worker_panic_after_attempt_remains_a_bound_partial_effect() {
+        let attempted = native_runtime::block_on(native_runtime::spawn_blocking(
+            || -> std::result::Result<u16, job_webhook::WebhookPostError> {
+                // The worker "attempted" its write; the panic lands afterwards.
+                panic!("injected panic after write")
+            },
+        ))
+        .expect("native runtime available");
+        let error = settle_webhook_attempt(
             attempted,
             "run-webhook-panic",
             "user_job:notify",
             &sha256_bytes(b"https://secret.invalid/hook?token=private"),
             &sha256_bytes(b"private body"),
         )
-        .await
         .expect_err("unknown worker phase must fail closed as indeterminate");
         let AutomationRunError::PartialEffect {
             committed_receipt,

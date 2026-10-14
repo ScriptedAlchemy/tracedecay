@@ -69,10 +69,33 @@ async fn registered_project_stores(
     }
 }
 
-async fn join_abandoned_maintenance_task(task: Option<JoinHandle<()>>, owner: &'static str) {
-    let Some(task) = task else {
+/// Joins a cancelled maintenance task. A tick notices cancellation only
+/// between store units, and the unit it is in may be awaiting blocking store
+/// work that holds a database client. Aborting drops only the awaiting future:
+/// the blocking closure keeps that client past the terminal store close, which
+/// then leaves the store's WAL untruncated. The task therefore gets the abort
+/// deadline to finish cooperatively and is aborted only past it.
+async fn join_cancelled_maintenance_task(task: Option<JoinHandle<()>>, owner: &'static str) {
+    let Some(mut task) = task else {
         return;
     };
+    if tokio::time::timeout(DAEMON_TASK_ABORT_DEADLINE, &mut task)
+        .await
+        .is_ok()
+    {
+        return;
+    }
+    log_daemon_event(
+        "daemon_shutdown",
+        &[
+            ("outcome", "maintenance_task_aborted".to_string()),
+            ("owner", owner.to_string()),
+            (
+                "reason",
+                "cooperative_join_exceeded_abort_deadline".to_string(),
+            ),
+        ],
+    );
     task.abort();
     let reason = match native_runtime::timeout(DAEMON_TASK_ABORT_DEADLINE, task).await {
         Ok(Ok(()) | Err(_)) => return,
@@ -166,15 +189,8 @@ async fn run_registered_store_retention(
         None => {}
     }
     match &report.observability {
-        Ok(receipt) if receipt.expired_detail > 0 || receipt.expired_rollup > 0 => {
-            log_daemon_event(
-                "retention_observability_analytics",
-                &[
-                    ("store", "mounted_sessions".to_owned()),
-                    ("expired_detail", receipt.expired_detail.to_string()),
-                    ("expired_rollup", receipt.expired_rollup.to_string()),
-                ],
-            );
+        Ok(receipt) if observability_retention_expired_rows(receipt) => {
+            log_observability_retention("mounted_sessions", receipt);
         }
         Err(error) => log_daemon_event(
             "retention_degraded",
@@ -247,15 +263,8 @@ async fn run_profile_observability_retention(
     };
     match database.prune_observability_events(now).await {
         Ok(receipt) => {
-            if receipt.expired_detail > 0 || receipt.expired_rollup > 0 {
-                log_daemon_event(
-                    "retention_observability_analytics",
-                    &[
-                        ("store", "global.db".to_owned()),
-                        ("expired_detail", receipt.expired_detail.to_string()),
-                        ("expired_rollup", receipt.expired_rollup.to_string()),
-                    ],
-                );
+            if observability_retention_expired_rows(&receipt) {
+                log_observability_retention("global.db", &receipt);
             }
             true
         }
@@ -270,6 +279,37 @@ async fn run_profile_observability_retention(
             false
         }
     }
+}
+
+fn observability_retention_expired_rows(
+    receipt: &tracedecay_global_db::ObservabilityRetentionReceiptV1,
+) -> bool {
+    receipt.expired_detail > 0
+        || receipt.expired_rollup > 0
+        || receipt.expired_rollups.expired_generations > 0
+        || receipt.expired_rollups.advanced_frontiers > 0
+}
+
+fn log_observability_retention(
+    store: &str,
+    receipt: &tracedecay_global_db::ObservabilityRetentionReceiptV1,
+) {
+    log_daemon_event(
+        "retention_observability_analytics",
+        &[
+            ("store", store.to_owned()),
+            ("expired_detail", receipt.expired_detail.to_string()),
+            ("expired_rollup", receipt.expired_rollup.to_string()),
+            (
+                "expired_rollup_generations",
+                receipt.expired_rollups.expired_generations.to_string(),
+            ),
+            (
+                "advanced_rollup_frontiers",
+                receipt.expired_rollups.advanced_frontiers.to_string(),
+            ),
+        ],
+    );
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -529,13 +569,11 @@ impl MaintenanceCoordinator {
 
     pub(super) async fn shutdown(&self) {
         self.cancel();
-        // Cancel stops the next pass; an in-flight tick only notices between
-        // stores. Abort the tasks so shutdown does not wait for retention or
-        // RSS sampling to finish, those are abandonable maintenance, not
-        // durability. The abort deadline is the join backstop if a tick is
-        // stuck in blocking work.
-        join_abandoned_maintenance_task(self.task.lock().await.take(), "retention_tick").await;
-        join_abandoned_maintenance_task(
+        // Cancel stops the next pass and the sampler at once; an in-flight
+        // tick notices between stores. Retention and RSS sampling are
+        // abandonable, so the abort deadline bounds each join.
+        join_cancelled_maintenance_task(self.task.lock().await.take(), "retention_tick").await;
+        join_cancelled_maintenance_task(
             self.resident_memory_sampler.lock().await.take(),
             "resident_memory_sampler",
         )
@@ -767,7 +805,11 @@ impl MaintenanceCoordinator {
         maintenance_observations.retain_project_maintenance_state(&active_maintenance_projects);
         let telemetry_sampling = if continuation.is_none() {
             maintenance_observations
-                .advance_registered(&active_telemetry_paths, &sampled_telemetry_paths)
+                .advance_registered(
+                    &active_telemetry_paths,
+                    &sampled_telemetry_paths,
+                    &self.cancellation,
+                )
                 .await
         } else {
             StoreTelemetrySamplingOutcome::default()
@@ -1698,8 +1740,8 @@ mod tests {
         assert_eq!(generation_files(), 1);
     }
 
-    #[tokio::test]
-    async fn shutdown_aborts_an_in_flight_tick_instead_of_waiting_for_it() {
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_aborts_a_stuck_tick_at_the_abort_deadline() {
         let coordinator = MaintenanceCoordinator::default();
         let started = Arc::new(Notify::new());
         let task_started = Arc::clone(&started);
@@ -1710,8 +1752,42 @@ mod tests {
         *coordinator.task.lock().await = Some(handle);
         started.notified().await;
 
-        tokio::time::timeout(Duration::from_millis(500), coordinator.shutdown())
-            .await
-            .expect("maintenance shutdown must abort an in-flight tick");
+        tokio::time::timeout(
+            super::DAEMON_TASK_ABORT_DEADLINE + Duration::from_millis(500),
+            coordinator.shutdown(),
+        )
+        .await
+        .expect("maintenance shutdown must abort a tick stuck past the abort deadline");
+    }
+
+    /// A tick cancelled while it awaits blocking store work must not leave
+    /// that work holding its database client past the maintenance join: the
+    /// terminal store close then finds the client lease and skips the WAL
+    /// truncate.
+    #[tokio::test]
+    async fn shutdown_waits_for_the_blocking_store_work_of_a_cancelled_tick() {
+        let coordinator = MaintenanceCoordinator::default();
+        let store_client = Arc::new(());
+        let blocking_client = Arc::clone(&store_client);
+        let started = Arc::new(Notify::new());
+        let task_started = Arc::clone(&started);
+        let handle = tokio::spawn(async move {
+            let _ = tokio::task::spawn_blocking(move || {
+                task_started.notify_one();
+                std::thread::sleep(Duration::from_millis(300));
+                drop(blocking_client);
+            })
+            .await;
+        });
+        *coordinator.task.lock().await = Some(handle);
+        started.notified().await;
+
+        coordinator.shutdown().await;
+
+        assert_eq!(
+            Arc::strong_count(&store_client),
+            1,
+            "the maintenance join returned while the tick's blocking store work held its client"
+        );
     }
 }

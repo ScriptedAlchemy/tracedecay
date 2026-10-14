@@ -12,6 +12,7 @@ use tracedecay_contracts::{
     RetainedSurfaceExecutionContextV1, RetainedSurfaceExecutionErrorV1, now_micros,
 };
 use tracedecay_domain::errors::TraceDecayError;
+use tracedecay_runtime_core::native_runtime::{self, TimeoutError};
 
 pub mod lcm;
 pub mod profile;
@@ -72,12 +73,23 @@ where
         .ok_or(RetainedSurfaceExecutionErrorV1::TimedOut(
             tracedecay_contracts::CancellationStage::BeforeRead,
         ))?;
-    match tokio::time::timeout(remaining, future).await {
+    match native_runtime::timeout(remaining, future).await {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(error)) => Err(map_execution_error(error)),
-        Err(_) => Err(RetainedSurfaceExecutionErrorV1::TimedOut(
+        Err(error) => Err(read_timeout_error(error)),
+    }
+}
+
+/// A read that outlived its request deadline. A read whose deadline cannot be
+/// timed is refused as unavailable rather than run unbounded.
+pub(crate) fn read_timeout_error(error: TimeoutError) -> RetainedSurfaceExecutionErrorV1 {
+    match error {
+        TimeoutError::Elapsed => RetainedSurfaceExecutionErrorV1::TimedOut(
             tracedecay_contracts::CancellationStage::DuringRead,
-        )),
+        ),
+        TimeoutError::TimerUnavailable(_) => RetainedSurfaceExecutionErrorV1::Unavailable {
+            detail: error.to_string(),
+        },
     }
 }
 
