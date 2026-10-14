@@ -2,9 +2,9 @@ use super::*;
 use tracedecay_application::lsp_runtime::ProductionSemanticAuthorities;
 use tracedecay_lsp::{LspRuntimeSpawner, LspRuntimeTask};
 
-/// Runs the factory's feedback-cycle, diagnostic, and context work on Tokio:
-/// that work reaches the code index, whose reads still use the Tokio blocking
-/// pool and timers.
+/// Runs the factory's feedback-cycle and diagnostic work on Tokio: both run the
+/// advisory cycle, whose provider deadline is a Tokio timer (`await_provider`)
+/// and whose GitHub reads use the Tokio blocking pool.
 struct TokioLspRuntime(tokio::runtime::Handle);
 
 struct TokioLspTask(tokio::task::AbortHandle);
