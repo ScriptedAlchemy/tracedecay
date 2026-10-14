@@ -8,7 +8,9 @@
 //! channel receivers, which wake through ordinary `Waker`s, so a foreign
 //! executor never blocks on the native runtime.
 
+use std::pin::Pin;
 use std::sync::OnceLock;
+use std::task::{Context, Poll, ready};
 use std::time::Instant;
 
 use asupersync::runtime::{Runtime, RuntimeBuilder, RuntimeHandle};
@@ -96,6 +98,56 @@ where
     Ok((cx, receiver))
 }
 
+/// Drives `settlement` on the caller's executor. A caller that stops waiting
+/// hands the unfinished settlement to the runtime, so accepted work still
+/// outlives a cancelled request. Spawning a native task for every call instead
+/// costs a runtime admission and two cross-runtime wakes per SQL statement.
+pub fn settle<F>(settlement: F) -> Settlement<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    Settlement(Some(Box::pin(settlement)))
+}
+
+/// The future [`settle`] returns.
+pub struct Settlement<T: Send + 'static>(Option<Pin<Box<dyn Future<Output = T> + Send>>>);
+
+impl<T: Send + 'static> Future for Settlement<T> {
+    type Output = T;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<T> {
+        let pending = &mut self.get_mut().0;
+        let output = ready!(
+            pending
+                .as_mut()
+                .expect("settlement polled after completion")
+                .as_mut()
+                .poll(context)
+        );
+        *pending = None;
+        Poll::Ready(output)
+    }
+}
+
+impl<T: Send + 'static> Drop for Settlement<T> {
+    fn drop(&mut self) {
+        let Some(settlement) = self.0.take() else {
+            return;
+        };
+        let detached = handle()
+            .ok_or_else(|| "native execution runtime unavailable".to_owned())
+            .and_then(|runtime| {
+                runtime
+                    .try_spawn(settlement)
+                    .map_err(|error| error.to_string())
+            });
+        if let Err(error) = detached {
+            tracing::error!(%error, "abandoned native settlement was dropped unfinished");
+        }
+    }
+}
+
 /// Completes at `deadline` on a native timer task, so a foreign executor never
 /// polls an Asupersync timer: its wait wakes through the join's `Waker`.
 /// Dropping the returned future cancels the timer.
@@ -168,6 +220,33 @@ mod tests {
             settled.recv_timeout(Duration::from_secs(10)),
             Ok(()),
             "work must run although its result future was dropped unpolled"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn settlement_runs_on_the_waiting_caller() {
+        let caller = std::thread::current().id();
+        assert_eq!(settle(async { std::thread::current().id() }).await, caller);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dropped_settlement_finishes_on_the_runtime() {
+        let (release, held) = async_channel::bounded::<()>(1);
+        let (finished, settled) = std::sync::mpsc::channel::<()>();
+        let mut settlement = settle(async move {
+            let _ = held.recv().await;
+            let _ = finished.send(());
+        });
+        let polled =
+            std::future::poll_fn(|context| Poll::Ready(Pin::new(&mut settlement).poll(context)))
+                .await;
+        assert!(polled.is_pending());
+        drop(settlement);
+        release.send(()).await.expect("settlement still waiting");
+        assert_eq!(
+            settled.recv_timeout(Duration::from_secs(10)),
+            Ok(()),
+            "a settlement its caller dropped must still finish"
         );
     }
 
