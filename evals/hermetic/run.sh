@@ -167,6 +167,8 @@ seed_auth() {
     log "         'claude -p' will report 'Not logged in' and scenarios will fail."
   fi
   if [[ -f "${real_codex}/auth.json" ]]; then
+    python3 "${SCRIPT_DIR}/../codex_auth_fresh.py" "${real_codex}/auth.json" \
+      || die "refusing to copy a Codex login that would refresh inside the eval"
     cp -f "${real_codex}/auth.json" "${env_dir}/home/.codex/auth.json"
     chmod 600 "${env_dir}/home/.codex/auth.json"
   else

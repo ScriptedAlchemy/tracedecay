@@ -225,6 +225,7 @@ mkdir -p "$CODEX_EVAL_CONFIG" "$CLAUDE_EVAL_CONFIG"
 copy_auth_readonly() {
   local src="$1" dest="$2"
   [[ -f "$src" ]] || return 0
+  python3 "$repo_root/evals/codex_auth_fresh.py" "$src" || exit 2
   cp "$src" "$dest"
   chmod 400 "$dest"
 }
