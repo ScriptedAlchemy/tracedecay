@@ -202,7 +202,7 @@ mimalloc = { version = "0.1.52", optional = true, features = ["no_thp"] }
 [target.'cfg(windows)'.dependencies]
 # Keep the flate2 backend selected by the workspace: sealed segment digests
 # must not change when Windows archive support is enabled.
-zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 # sigstore-verify links aws-lc; on x86_64 MSVC it needs NASM unless its
 # prebuilt assembly objects are allowed, and release runners carry no NASM.
 aws-lc-rs = { version = "1.18", features = ["prebuilt-nasm"] }
