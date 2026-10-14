@@ -5814,7 +5814,7 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 
 [[package]]
 name = "tracedecay"
-version = "1.0.0-beta.86"
+version = "1.0.0-beta.87"
 dependencies = [
  "asupersync",
  "axum",
@@ -6087,7 +6087,7 @@ dependencies = [
 
 [[package]]
 name = "tracedecay-cli"
-version = "1.0.0-beta.86"
+version = "1.0.0-beta.87"
 dependencies = [
  "aws-lc-rs",
  "axum",
@@ -6095,7 +6095,6 @@ dependencies = [
  "crossterm",
  "dirs",
  "flate2",
- "futures-util",
  "hex",
  "libc",
  "mimalloc",
@@ -6488,6 +6487,7 @@ name = "tracedecay-framing"
 version = "0.1.0"
 dependencies = [
  "asupersync",
+ "async-channel",
  "tokio",
  "tracing",
 ]
@@ -6828,7 +6828,7 @@ dependencies = [
 
 [[package]]
 name = "tracedecay-project"
-version = "1.0.0-beta.86"
+version = "1.0.0-beta.87"
 dependencies = [
  "asupersync",
  "rusqlite",
