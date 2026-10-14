@@ -23,6 +23,9 @@ struct WarmLedger {
     /// Bumped by every settled warm, so a waiter that read the owners'
     /// state under an earlier epoch never sleeps through the settle.
     epoch: u64,
+    /// A released engine's background re-warm is running. Kept under this
+    /// lock so ending one re-warm and admitting the next cannot interleave.
+    engine_rewarming: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -68,6 +71,34 @@ impl WarmClock {
         ledger.epoch = ledger.epoch.wrapping_add(1);
         drop(ledger);
         self.settled.notify_all();
+    }
+
+    /// Admits a released engine's re-warm and starts its clock; `false` when
+    /// one is already running.
+    pub(super) fn begin_engine_rewarm(&self) -> bool {
+        let mut ledger = self.ledger();
+        if ledger.engine_rewarming {
+            return false;
+        }
+        ledger.engine_rewarming = true;
+        ledger.engine.started.get_or_insert_with(Instant::now);
+        true
+    }
+
+    /// Ends the running re-warm and wakes every waiter. A waiter that found
+    /// it running must wake even when the engine warm settled earlier and a
+    /// release has since closed the engine again.
+    pub(super) fn end_engine_rewarm(&self) {
+        let mut ledger = self.ledger();
+        ledger.engine_rewarming = false;
+        ledger.engine.started = None;
+        ledger.epoch = ledger.epoch.wrapping_add(1);
+        drop(ledger);
+        self.settled.notify_all();
+    }
+
+    pub(super) fn engine_rewarming(&self) -> bool {
+        self.ledger().engine_rewarming
     }
 
     /// Whether `owner` has completed a warm before, so a cold owner now is

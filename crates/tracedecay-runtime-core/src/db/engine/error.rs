@@ -15,6 +15,7 @@ pub enum Error {
         target: &'static str,
         value: i64,
     },
+    RuntimeContextUnavailable,
     Runtime(String),
     Sqlite {
         operation: &'static str,
@@ -55,6 +56,9 @@ impl fmt::Display for Error {
                 formatter,
                 "column {column} integer {value} is out of range for {target}"
             ),
+            Self::RuntimeContextUnavailable => {
+                formatter.write_str("SQLite operation requires an Asupersync runtime context")
+            }
             Self::Runtime(message) => write!(formatter, "SQLite runtime failed: {message}"),
             Self::Sqlite {
                 operation, message, ..

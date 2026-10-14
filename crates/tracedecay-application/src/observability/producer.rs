@@ -695,48 +695,14 @@ async fn run_worker(
     let rollup_tick = sleep_until(Instant::now());
     tokio::pin!(rollup_tick);
     let mut rollup_source_persisted = false;
-    loop {
+    let command = loop {
         tokio::select! {
             biased;
-            command = control.recv() => {
-                let Some(ProducerControl::Shutdown { cancelled, reply }) = command else {
-                    settle_worker(
-                        &db,
-                        &identity,
-                        &mut data,
-                        &state,
-                        &mut progress,
-                        false,
-                        false,
-                    )
-                    .await;
-                    break;
-                };
-                let (dropped_count, writer_settled) = settle_worker(
-                    &db,
-                    &identity,
-                    &mut data,
-                    &state,
-                    &mut progress,
-                    cancelled,
-                    !cancelled,
-                )
-                .await;
-                state.lifecycle.store(PRODUCER_STOPPED, Ordering::Release);
-                let result = progress.first_error.map_or_else(
-                    || Ok(ObservabilityProducerSummaryV1 {
-                        persisted: progress.persisted,
-                        dropped: dropped_count,
-                        cancelled,
-                    }),
-                    Err,
-                );
-                let _ = reply.send((result, writer_settled));
-                break;
-            }
+            command = control.recv() => break command,
             observation = data.recv() => {
                 let Some(observation) = observation else {
-                    break;
+                    state.lifecycle.store(PRODUCER_STOPPED, Ordering::Release);
+                    return;
                 };
                 let mut observations = Vec::with_capacity(OBSERVABILITY_WRITE_BATCH);
                 observations.push(observation);
@@ -781,18 +747,62 @@ async fn run_worker(
             () = &mut rollup_tick => {
                 // Advance one dirty day at a bounded idle cadence. Control and
                 // ordinary observations remain prioritized above maintenance.
-                let outcome = run_one_rollup_maintenance(
+                // Control also preempts a pass in flight: each of its steps
+                // may wait a full persistence deadline, and shutdown owns its
+                // budget. A dropped step is a timed-out write that the
+                // terminal carrier or the writer fence settles.
+                let maintenance = run_one_rollup_maintenance(
                     &db,
                     &identity,
                     state.deadlines.persistence,
                     &mut progress.rollup_frontier_initialized,
-                )
-                .await;
-                rollup_tick
-                    .as_mut()
-                    .reset(Instant::now() + rollup_rebuild_delay(outcome));
+                );
+                tokio::select! {
+                    biased;
+                    command = control.recv() => break command,
+                    outcome = maintenance => {
+                        rollup_tick
+                            .as_mut()
+                            .reset(Instant::now() + rollup_rebuild_delay(outcome));
+                    }
+                }
             }
         }
+    };
+    if let Some(ProducerControl::Shutdown { cancelled, reply }) = command {
+        let (dropped_count, writer_settled) = settle_worker(
+            &db,
+            &identity,
+            &mut data,
+            &state,
+            &mut progress,
+            cancelled,
+            !cancelled,
+        )
+        .await;
+        state.lifecycle.store(PRODUCER_STOPPED, Ordering::Release);
+        let result = progress.first_error.map_or_else(
+            || {
+                Ok(ObservabilityProducerSummaryV1 {
+                    persisted: progress.persisted,
+                    dropped: dropped_count,
+                    cancelled,
+                })
+            },
+            Err,
+        );
+        let _ = reply.send((result, writer_settled));
+    } else {
+        settle_worker(
+            &db,
+            &identity,
+            &mut data,
+            &state,
+            &mut progress,
+            false,
+            false,
+        )
+        .await;
     }
     state.lifecycle.store(PRODUCER_STOPPED, Ordering::Release);
 }
@@ -1092,16 +1102,22 @@ async fn settle_worker(
             .final_coverage_persisted
             .store(clean_shutdown_observed && writer_settled, Ordering::Release);
         // The mandatory terminal precedes optional maintenance so its day
-        // can be rebuilt before shutdown. A deferred maintenance operation
-        // may still own a timed-out database command and requires the fence.
-        let maintenance = run_one_rollup_maintenance(
-            db,
-            identity,
-            state.deadlines.persistence,
-            &mut progress.rollup_frontier_initialized,
-        )
-        .await;
-        writer_settled &= maintenance != RollupAdvanceOutcome::Deferred;
+        // can be rebuilt before shutdown. After a persistence failure the
+        // writer has already missed a deadline, and maintenance would spend
+        // the shutdown budget that the reply and the writer fence need; the
+        // durable dirty day waits for the next producer. A deferred
+        // maintenance operation may still own a timed-out database command
+        // and requires the fence.
+        if progress.first_error.is_none() {
+            let maintenance = run_one_rollup_maintenance(
+                db,
+                identity,
+                state.deadlines.persistence,
+                &mut progress.rollup_frontier_initialized,
+            )
+            .await;
+            writer_settled &= maintenance != RollupAdvanceOutcome::Deferred;
+        }
     }
     (state.total_dropped.load(Ordering::Acquire), writer_settled)
 }

@@ -14,7 +14,10 @@ mod search_evidence;
 mod search_freshness;
 mod verified;
 
-pub use clones::{compute_redundancy, compute_similar};
+pub use clones::{
+    clone_normalization_class, compute_redundancy, compute_similar, similar_coverage,
+    similar_match_class,
+};
 pub use context::compute_context;
 pub(crate) use context_markdown::render_context;
 pub use exact_symbol::compute_find_exact_symbol;

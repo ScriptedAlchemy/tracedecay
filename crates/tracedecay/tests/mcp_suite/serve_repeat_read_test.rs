@@ -281,13 +281,16 @@ async fn serve_pointer_and_query_hint_name_an_identical_repeat_once() {
     );
     assert!(!text(&identical).contains(QUERY_HINT), "{identical}");
 
-    let near = json!({ "file": "src/lib.rs", "format": "json" });
-    let near_repeat = client.request(call(102, "tracedecay_source_outline", &near));
-    assert!(!is_pointer(&near_repeat), "{near_repeat}");
+    let after_pointer = client.request(call(102, "tracedecay_source_outline", &outline));
+    assert!(!is_pointer(&after_pointer), "{after_pointer}");
     assert_eq!(
-        text(&near_repeat).matches(QUERY_HINT).count(),
+        text(&after_pointer).matches(QUERY_HINT).count(),
         1,
-        "a near-identical repeat still gets its hint: {near_repeat}"
+        "the full answer after a pointer is hinted once: {after_pointer}"
+    );
+    assert!(
+        text(&after_pointer).contains("tracedecay_source_outline call 2 calls earlier"),
+        "the hint names the earlier full answer, not the pointer: {after_pointer}"
     );
 }
 

@@ -68,8 +68,8 @@ use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
+use asupersync::channel::watch;
 use sha2::{Digest, Sha256};
-use tokio::sync::watch;
 use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_private_fs::{ChangeClockReading, ChangeStamp, RewriteWitness};
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
@@ -156,10 +156,19 @@ pub struct CodexDiscoveryState {
     idle: Option<CodexIdleProbe>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct CodexDiscoveryHub {
     inner: std::sync::Arc<Mutex<CodexDiscoveryHubState>>,
-    scan_released: watch::Sender<u64>,
+    scan_released: std::sync::Arc<watch::Sender<u64>>,
+}
+
+impl Default for CodexDiscoveryHub {
+    fn default() -> Self {
+        Self {
+            inner: std::sync::Arc::default(),
+            scan_released: std::sync::Arc::new(watch::channel(0).0),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -211,19 +220,24 @@ struct SettledFileWitness {
 }
 
 impl SettledFileWitness {
-    /// `None` while the file's change time is inside the timestamp quantum,
-    /// or where no stat field witnesses a rewrite, or once the file is gone:
-    /// the pass then reads it as before.
+    /// `None` once the file is gone, or for the reasons [`Self::of`] gives.
     fn settled(path: &Path) -> TranscriptIngestResult<Option<Self>> {
-        let Some(metadata) = stat_if_present(path, "stat transcript for convergence")? else {
-            return Ok(None);
-        };
-        let changed = change_stamp(path, &metadata);
+        match stat_if_present(path, "stat transcript for convergence")? {
+            Some(metadata) => Self::of(path, &metadata),
+            None => Ok(None),
+        }
+    }
+
+    /// `None` while the file's change time is inside the timestamp quantum,
+    /// or where no stat field witnesses a rewrite: the pass then reads it as
+    /// before.
+    fn of(path: &Path, metadata: &std::fs::Metadata) -> TranscriptIngestResult<Option<Self>> {
+        let changed = change_stamp(path, metadata);
         if !metadata.is_file() || !changed.is_settled() {
             return Ok(None);
         }
         Ok(Some(Self {
-            identity: codex_corpus_identity(path, &metadata, changed)?,
+            identity: codex_corpus_identity(path, metadata, changed)?,
             len: metadata.len(),
         }))
     }
@@ -239,8 +253,8 @@ pub(crate) struct PendingTranscript {
 }
 
 impl PendingTranscript {
-    /// `None` when the consumer already finished this exact file, so the
-    /// pass skips it without opening it.
+    /// `None` when the consumer already finished this exact file, or the file
+    /// is gone, so the pass skips it without opening it.
     pub(crate) async fn observe(
         discovery: Option<(&CodexDiscoveryHub, &str)>,
         path: &Path,
@@ -266,7 +280,15 @@ impl PendingTranscript {
         let Some((hub, consumer)) = discovery else {
             return Ok(Some(Self { convergence: None }));
         };
-        let witness = SettledFileWitness::settled(path)?;
+        // A delivered pass is replayed until a catch-up acknowledges it, and a
+        // read failure withholds the acknowledgement. A file moved away since
+        // delivery (Codex archives a session by moving its rollout) has
+        // nothing left to read; failing on it would replay the same path
+        // forever. A later walk delivers the file again if it returns.
+        let Some(metadata) = stat_if_present(path, "stat transcript for convergence")? else {
+            return Ok(None);
+        };
+        let witness = SettledFileWitness::of(path, &metadata)?;
         if let Some(witness) = witness
             && hub.file_converged(consumer, path, witness)
         {
@@ -675,20 +697,21 @@ impl CodexDiscoveryHub {
         let hub = self.clone();
         let consumer = consumer.to_owned();
         let source = source.clone();
-        let (delivery, prefetch) = tokio::task::spawn_blocking(move || {
-            let delivery = hub.discover_blocking(&consumer, &source, bounds, frontier)?;
-            let prefetch = match &delivery {
-                CodexDiscoveryDelivery::Ready(pass) if pass._shared_page_pin.is_some() => {
-                    hub.paths_needing_source_read(&consumer, &pass.report.paths)?
-                }
-                _ => Vec::new(),
-            };
-            Ok::<_, TranscriptIngestError>((delivery, prefetch))
-        })
-        .await
-        .map_err(|_| TranscriptIngestError::InvalidCodexDiscoveryFrontier {
-            detail: "Codex discovery blocking task failed",
-        })??;
+        let (delivery, prefetch) =
+            tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+                let delivery = hub.discover_blocking(&consumer, &source, bounds, frontier)?;
+                let prefetch = match &delivery {
+                    CodexDiscoveryDelivery::Ready(pass) if pass._shared_page_pin.is_some() => {
+                        hub.paths_needing_source_read(&consumer, &pass.report.paths)?
+                    }
+                    _ => Vec::new(),
+                };
+                Ok::<_, TranscriptIngestError>((delivery, prefetch))
+            })
+            .await
+            .map_err(|_| TranscriptIngestError::InvalidCodexDiscoveryFrontier {
+                detail: "Codex discovery blocking task failed",
+            })??;
         if let CodexDiscoveryDelivery::Ready(pass) = &delivery
             && let Some(pin) = &pass._shared_page_pin
         {
@@ -922,7 +945,8 @@ impl CodexDiscoveryHub {
                 }
             })?;
             if std::mem::take(&mut inner.scan_waited) {
-                self.scan_released
+                let _ = self
+                    .scan_released
                     .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
             }
             let Some(source_key) = replay_source else {

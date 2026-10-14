@@ -44,9 +44,10 @@ use super::{
     ColdMountAdmissionV1, ColdMountReservationV1, GraphActivationGateV1, GraphSeatGateV1,
     MountedCodeIndexWorktreeV1, PendingWakeV1, PublishedTextProjectionOutcomeV1,
     ServingGenerationSlot, ServingSwapOutcomeV1, TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1,
-    clear_convergence_park, clear_graph_resident_memory_park, convergence_park_retries_on_wake,
-    graph_head_belongs_to_another_generation, is_repeated_conflict_verdict, park_convergence,
-    publication_authority_is_terminal, retained_noop_requires_follow_up_wake,
+    clear_convergence_park, clear_graph_resident_memory_park, clear_reconcile_refusal_park,
+    convergence_park_retries_on_wake, graph_head_belongs_to_another_generation,
+    is_repeated_conflict_verdict, park_convergence, publication_authority_is_terminal,
+    retained_noop_requires_follow_up_wake,
 };
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
@@ -839,7 +840,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     .park_headroom
                     .released_by_others(&mut worker_owner_headroom)
                     > worker_owner_headroom_seen
-                    || worker_admission_headroom.has_changed().unwrap_or(false);
+                    || worker_admission_headroom.has_changed();
                 if headroom_moved
                     && worktree_waits_for_memory(
                         &worker_text_generation,
@@ -912,7 +913,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         .park_headroom
                         .released_by_others(&mut worker_owner_headroom),
                 );
-                worker_admission_headroom.mark_unchanged();
+                worker_admission_headroom.mark_seen();
                 super::CodeIndexWorkerPhaseV1::enter(
                     &worker_phase_signal,
                     super::CodeIndexWorkerPhaseV1::Working,
@@ -1610,6 +1611,9 @@ impl CodeIndexSchedulerRegistryV1 {
                     matches!(&source_result, Ok(Ok(CodeIndexReconcileOutcomeV1::Noop(_)))),
                 );
                 if let Ok(Ok(outcome)) = &source_result {
+                    // The source no longer reproduces a refusal parked over
+                    // earlier input; retire it before this pass seats.
+                    clear_reconcile_refusal_park(&worker_convergence_park);
                     Self::record_source_reconcile_observation(
                         worker_index_observability.get(),
                         &worker_pending_wake,
@@ -2626,7 +2630,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         super::CodeIndexWorkerPhaseV1::Working,
                     );
                     match activation {
-                        Ok(()) => {
+                        Ok(_background_catalog_warm) => {
                             next_seat_attempt_at = None;
                             seat_retry_backoff = ACTIVATION_RETRY_BACKOFF_FLOOR;
                             last_seat_conflict = None;
@@ -3830,10 +3834,16 @@ impl CodeIndexSchedulerRegistryV1 {
         let headroom_park = Arc::downgrade(&convergence_park);
         let headroom_residency = Arc::downgrade(&residency);
         tokio::spawn(async move {
+            let Some(cx) = tracedecay_runtime_core::native_runtime::cx() else {
+                tracing::error!(
+                    "native runtime unavailable; memory headroom no longer wakes this worktree"
+                );
+                return;
+            };
             loop {
                 let (changed, owner_released) = tokio::select! {
-                    changed = owner_headroom.changed() => (changed, true),
-                    changed = admission_headroom.changed() => (changed, false),
+                    changed = owner_headroom.changed(&cx) => (changed, true),
+                    changed = admission_headroom.changed(&cx) => (changed, false),
                 };
                 let (
                     Ok(()),

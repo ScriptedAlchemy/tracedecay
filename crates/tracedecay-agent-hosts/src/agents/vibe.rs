@@ -30,6 +30,7 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::host_bundle::{HostBundleRegistrationStateV1, HostComponentV1};
 use super::prompt_rules::{PROMPT_RULE_MARKER, PromptRulesOptions};
+use super::serve_args::ServeArgs;
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, TextFileMutation,
     update_text_file_transactionally,
@@ -58,7 +59,7 @@ fn project_vibe_home(project: &Path) -> PathBuf {
 /// Whether one Vibe home (user-level or project-level) carries a live
 /// tracedecay registration in either of its two documents.
 fn vibe_home_has_tracedecay(vibe_home: &Path) -> bool {
-    mcp_registration_state(&vibe_home.join("config.toml"), None)
+    mcp_registration_state(&vibe_home.join("config.toml"), None, None)
         == HostBundleRegistrationStateV1::Current
         || prompt_registration_state(&vibe_home.join("prompts/cli.md"))
             == HostBundleRegistrationStateV1::Current
@@ -83,6 +84,7 @@ impl AgentIntegration for VibeIntegration {
             dc,
             &vibe_config_path(&ctx.home),
             &vibe_prompt_path(&ctx.home),
+            &ctx.catalog_profiles.serve_args(self.id()),
         );
         let project_home = project_vibe_home(&ctx.project_path);
         if project_home.exists() {
@@ -90,6 +92,7 @@ impl AgentIntegration for VibeIntegration {
                 dc,
                 &project_home.join("config.toml"),
                 &project_home.join("prompts/cli.md"),
+                &ctx.catalog_profiles.serve_args(self.id()),
             );
         }
         super::doctor_check_managed_skill_prompt_indexes(
@@ -113,6 +116,7 @@ impl AgentIntegration for VibeIntegration {
             &vibe_config_path(&ctx.home),
             &vibe_prompt_path(&ctx.home),
             None,
+            &ctx.catalog_profiles.serve_args(self.id()),
         )
     }
 
@@ -127,6 +131,7 @@ impl AgentIntegration for VibeIntegration {
             &vibe_config_path(&ctx.home),
             &vibe_prompt_path(&ctx.home),
             Some(&install.tracedecay_bin),
+            &install.serve_args,
         )
     }
 
@@ -278,9 +283,12 @@ fn component_registration_state(
     config: &Path,
     prompt: &Path,
     expected_binary: Option<&str>,
+    serve_args: &ServeArgs,
 ) -> HostBundleRegistrationStateV1 {
     match component {
-        HostComponentV1::ContextMcp => mcp_registration_state(config, expected_binary),
+        HostComponentV1::ContextMcp => {
+            mcp_registration_state(config, expected_binary, Some(serve_args))
+        }
         HostComponentV1::Core => prompt_registration_state(prompt),
         HostComponentV1::Agent | HostComponentV1::OperatorMcp => {
             HostBundleRegistrationStateV1::Missing
@@ -307,9 +315,11 @@ fn tracedecay_server(document: &DocumentMut) -> Option<&Table> {
         })
 }
 
+/// `serve_args` `None` accepts any catalog profile, for presence checks.
 fn mcp_registration_state(
     config: &Path,
     expected_binary: Option<&str>,
+    serve_args: Option<&ServeArgs>,
 ) -> HostBundleRegistrationStateV1 {
     let Ok(existing) = std::fs::read_to_string(config) else {
         return HostBundleRegistrationStateV1::Missing;
@@ -330,8 +340,14 @@ fn mcp_registration_state(
     let args_match = server
         .get("args")
         .and_then(Item::as_array)
-        .is_some_and(|args| {
-            args.len() == 1 && args.get(0).and_then(|arg| arg.as_str()) == Some("serve")
+        .and_then(|args| {
+            args.iter()
+                .map(|arg| arg.as_str())
+                .collect::<Option<Vec<_>>>()
+        })
+        .is_some_and(|args| match serve_args {
+            Some(serve_args) => serve_args.matches(&args, &[]),
+            None => args.first() == Some(&"serve"),
         });
     if command_matches && transport_matches && args_match {
         HostBundleRegistrationStateV1::Current
@@ -356,8 +372,13 @@ fn prompt_registration_state(prompt: &Path) -> HostBundleRegistrationStateV1 {
     }
 }
 
-fn doctor_check_registration(dc: &mut DoctorCounters, config: &Path, prompt: &Path) {
-    match mcp_registration_state(config, None) {
+fn doctor_check_registration(
+    dc: &mut DoctorCounters,
+    config: &Path,
+    prompt: &Path,
+    serve_args: &ServeArgs,
+) {
+    match mcp_registration_state(config, None, Some(serve_args)) {
         HostBundleRegistrationStateV1::Unverifiable => {
             dc.info("Vibe MCP registration is unverifiable")
         }
@@ -379,7 +400,7 @@ fn doctor_check_registration(dc: &mut DoctorCounters, config: &Path, prompt: &Pa
     super::doctor_check_prompt_contains_tracedecay(dc, prompt, "Vibe prompt", "vibe");
 }
 
-fn install_mcp(config: &Path, binary: &str) -> Result<()> {
+fn install_mcp(config: &Path, binary: &str, serve_args: &ServeArgs) -> Result<()> {
     update_text_file_transactionally(config, |existing| {
         let mut document = parse_document(config, existing)?;
         let servers = document
@@ -405,7 +426,9 @@ fn install_mcp(config: &Path, binary: &str) -> Result<()> {
         server["transport"] = value("stdio");
         server["command"] = value(binary);
         let mut args = Array::new();
-        args.push("serve");
+        for arg in serve_args.to_vec(&[]) {
+            args.push(arg);
+        }
         server["args"] = value(args);
         servers.push(server);
         Ok(((), TextFileMutation::Write(document.to_string())))
@@ -464,7 +487,7 @@ fn activate_components(
     ctx: &InstallContext,
 ) -> Result<()> {
     if components.contains(&HostComponentV1::ContextMcp) {
-        install_mcp(config, &ctx.tracedecay_bin)?;
+        install_mcp(config, &ctx.tracedecay_bin, &ctx.serve_args)?;
     }
     if components.contains(&HostComponentV1::Core) {
         install_prompt(prompt, ctx.profile.data_dir())?;
@@ -497,6 +520,7 @@ mod tests {
             tracedecay_bin: binary.to_string(),
             project_root: None,
             dashboard: false,
+            serve_args: Default::default(),
         }
     }
 
@@ -519,7 +543,11 @@ mod tests {
         assert!(installed.contains("name = \"one\"\ncommand = \"one-bin\""));
         assert!(installed.contains("name = \"two\"\ncommand = \"two-bin\""));
         assert_eq!(
-            mcp_registration_state(&config, Some("/tmp/tracedecay")),
+            mcp_registration_state(
+                &config,
+                Some("/tmp/tracedecay"),
+                Some(&ServeArgs::default())
+            ),
             HostBundleRegistrationStateV1::Current
         );
 
@@ -565,7 +593,11 @@ mod tests {
         .unwrap();
         activate_components(&[HostComponentV1::ContextMcp], &config, &prompt, &install).unwrap();
         assert_eq!(
-            mcp_registration_state(&config, Some("/tmp/tracedecay")),
+            mcp_registration_state(
+                &config,
+                Some("/tmp/tracedecay"),
+                Some(&ServeArgs::default())
+            ),
             HostBundleRegistrationStateV1::Current
         );
         assert!(!prompt.exists());
@@ -604,7 +636,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            mcp_registration_state(&config, Some("/tmp/tracedecay")),
+            mcp_registration_state(
+                &config,
+                Some("/tmp/tracedecay"),
+                Some(&ServeArgs::default())
+            ),
             HostBundleRegistrationStateV1::Repairable
         );
     }

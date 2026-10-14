@@ -102,19 +102,38 @@ pub(super) fn persistence_one_row(
 pub(super) fn decode_spool_state(
     row: crate::exact_sql::ExactSqlRow,
 ) -> Result<RemoteReplaySpoolStateV1, RemoteCapturePersistenceErrorV1> {
-    let state = parse_replay_state(row_text(&row, 0)?)?;
-    let receipt = match row.values.get(1) {
-        Some(ExactSqlValue::Null) => None,
-        Some(ExactSqlValue::Text(value)) => Some(
-            serde_json::from_str(value).map_err(|_| RemoteCapturePersistenceErrorV1::Corruption)?,
-        ),
-        _ => return Err(RemoteCapturePersistenceErrorV1::Corruption),
-    };
     Ok(RemoteReplaySpoolStateV1 {
-        state,
-        receipt,
+        state: parse_replay_state(row_text(&row, 0)?)?,
+        receipt: optional_json(&row, 1)?,
         last_attempt: row_u64(&row, 2)?,
+        finding: optional_json(&row, 3)?,
     })
+}
+
+/// Decodes `event_id, sequence, state, receipt_json, finding`.
+pub(super) fn decode_backlog_entry(
+    row: &crate::exact_sql::ExactSqlRow,
+) -> Result<RemoteReplayBacklogEntryV1, RemoteCapturePersistenceErrorV1> {
+    Ok(RemoteReplayBacklogEntryV1 {
+        event_id: row_text(row, 0)?.to_owned(),
+        sequence: row_u64(row, 1)?,
+        state: parse_replay_state(row_text(row, 2)?)?,
+        receipt: optional_json(row, 3)?,
+        finding: optional_json(row, 4)?,
+    })
+}
+
+fn optional_json<T: serde::de::DeserializeOwned>(
+    row: &crate::exact_sql::ExactSqlRow,
+    index: usize,
+) -> Result<Option<T>, RemoteCapturePersistenceErrorV1> {
+    match row.values.get(index) {
+        Some(ExactSqlValue::Null) => Ok(None),
+        Some(ExactSqlValue::Text(value)) => serde_json::from_str(value)
+            .map(Some)
+            .map_err(|_| RemoteCapturePersistenceErrorV1::Corruption),
+        _ => Err(RemoteCapturePersistenceErrorV1::Corruption),
+    }
 }
 
 pub(super) const fn replay_state_name(state: RemoteReplayStateV1) -> &'static str {

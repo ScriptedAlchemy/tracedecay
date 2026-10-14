@@ -17,7 +17,12 @@ import {
 import type { WorkResult } from './workApi.ts';
 import type { WorkChannel } from './workChannel.ts';
 import { workGraphReading, type WorkGraphReading } from './workGraphModel.ts';
-import type { WorkAccountingCard, WorkAccountingDimension } from './workAccountingModel.ts';
+import {
+  accountingCardCoverage,
+  unavailableCard,
+  type WorkAccountingCard,
+  type WorkAccountingDimension,
+} from './workAccountingModel.ts';
 import { workTopologyAccounting } from './workTopologyAccounting.ts';
 
 /**
@@ -680,5 +685,64 @@ describe('GitHub stack capability', () => {
     const stated = absence(card.reading);
     expect(stated.detail).toContain('no trustworthy capability observation');
     expect(stated.detail).toContain('no eligible evidence');
+  });
+});
+
+describe('the coverage partition', () => {
+  const UNCOVERED: readonly WorkAccountingDimension[] = [
+    'duplicate_work',
+    'conflict_confusion',
+    'ready_to_integrated_latency',
+    'stale_stack_age',
+    'operational_leaks',
+    'delivery_fanout',
+  ];
+  const STATED: readonly WorkAccountingDimension[] = [
+    'concurrency_and_fanout',
+    'integration_outcomes',
+    'github_stack_capability',
+    'blocked_time',
+    'reruns',
+    'duplicate_effects',
+  ];
+  const dimensions = (cards: readonly WorkAccountingCard[]) => cards.map((card) => card.dimension);
+
+  it('sets apart exactly the dimensions this ledger decodes nothing for, in mandate order', () => {
+    const reading = workTopologyAccounting(
+      listed([attempt({ taskId: 'alpha', runId: 'run-1', attemptId: 'a-1' })]),
+      graphOf({ ...BASE_GRAPH, requestedConcurrency: 4, actualConcurrency: 2 }),
+      undefined,
+      metricsOf(),
+    );
+
+    expect(dimensions(reading.uncovered)).toEqual(UNCOVERED);
+    expect(dimensions(reading.stated)).toEqual(STATED);
+  });
+
+  it('keeps a card whose read refused or conflicts among the stated cards', () => {
+    const reading = workTopologyAccounting(
+      { outcome: 'refused', state: 'unavailable', detail: 'attempt list refused' },
+      graphWithRuntimeGeneration('generation-other'),
+      undefined,
+      { outcome: 'refused', state: 'unavailable', detail: 'metrics refused' },
+    );
+
+    expect(dimensions(reading.stated)).toEqual(STATED);
+    expect(dimensions(reading.uncovered)).toEqual(UNCOVERED);
+    expect(absence(cardOf(reading, 'reruns').reading).state).toBe('unavailable');
+    expect(absence(cardOf(reading, 'integration_outcomes').reading).state).toBe('unavailable');
+  });
+
+  it('never sets apart a card that carries a contradiction', () => {
+    const blank = unavailableCard('stale_stack_age', 'stale-stack age', [
+      { key: 'stack_age', label: 'Stack age distribution', measure: 'the stale-stack age distribution' },
+    ]);
+    expect(accountingCardCoverage(blank)).toBe('uncovered');
+    expect(
+      accountingCardCoverage({
+        ...blank,
+        contradictions: [{ key: 'age', state: 'conflicting', detail: 'two ages disagree' }],
+      }),
+    ).toBe('stated');
   });
 });

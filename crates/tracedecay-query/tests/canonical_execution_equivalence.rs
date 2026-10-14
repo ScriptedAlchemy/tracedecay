@@ -160,6 +160,7 @@ fn exact_evidence() -> ExactLaneEvidence {
         }],
         admission_proof: exact_proof(),
         source_role: RetrievalSourceRoleV1::default(),
+        specificity_micros: 1_000_000,
     }
 }
 

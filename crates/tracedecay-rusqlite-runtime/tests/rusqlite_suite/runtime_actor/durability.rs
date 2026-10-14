@@ -1,3 +1,4 @@
+use tracedecay_rusqlite_runtime::native_runtime;
 use tracedecay_store::{AdmissionConfigV1, OperationPriorityV1, RuntimeSubmitOutcomeV1};
 
 use super::support::{
@@ -23,7 +24,11 @@ fn restart_is_durable_and_replay_or_conflict_returns_the_original_receipt() {
         ExecutorControl::default(),
     );
     let original_receipt = match runtime()
-        .block_on(first_writer.submit(original.clone(), TestProbe::fixed(&original)))
+        .block_on(first_writer.submit(
+            &native_runtime::cx().unwrap(),
+            original.clone(),
+            TestProbe::fixed(&original),
+        ))
         .unwrap()
     {
         RuntimeSubmitOutcomeV1::Committed { receipt } => receipt,
@@ -47,7 +52,11 @@ fn restart_is_durable_and_replay_or_conflict_returns_the_original_receipt() {
     );
     assert_eq!(
         runtime()
-            .block_on(restarted.submit(retry.clone(), TestProbe::fixed(&retry)))
+            .block_on(restarted.submit(
+                &native_runtime::cx().unwrap(),
+                retry.clone(),
+                TestProbe::fixed(&retry)
+            ))
             .unwrap(),
         RuntimeSubmitOutcomeV1::ExactReplay {
             receipt: original_receipt.clone()
@@ -62,7 +71,11 @@ fn restart_is_durable_and_replay_or_conflict_returns_the_original_receipt() {
     );
     assert_eq!(
         runtime()
-            .block_on(restarted.submit(conflict.clone(), TestProbe::fixed(&conflict)))
+            .block_on(restarted.submit(
+                &native_runtime::cx().unwrap(),
+                conflict.clone(),
+                TestProbe::fixed(&conflict)
+            ))
             .unwrap(),
         RuntimeSubmitOutcomeV1::IdempotencyConflict {
             existing_receipt: original_receipt

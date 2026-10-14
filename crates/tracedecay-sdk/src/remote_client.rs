@@ -13,10 +13,14 @@ use serde::{Serialize, de::DeserializeOwned};
 use tracedecay_api::remote::REMOTE_ENROLLMENT_CREDENTIAL_HEADER;
 use tracedecay_contracts::remote::capture::RemoteCaptureReceiptV1;
 use tracedecay_contracts::remote::capture_protocol::RemoteCaptureRequestV1;
+use tracedecay_contracts::remote::discovery::{
+    RemoteAuthorityDiscoveryV1, remote_authority_result_contract_v1,
+};
 use tracedecay_contracts::remote::protocol::{
-    EnrollmentRequestV1, REMOTE_PROTOCOL_VERSION_V1, RemoteProtocolBodyV1, RemoteProtocolRequestV1,
-    RemoteProtocolResponseV1, remote_capture_result_contract_v1,
-    remote_enrollment_result_contract_v1, remote_replay_result_contract_v1,
+    CurrentAuthorityRequestV1, EnrollmentRequestV1, REMOTE_PROTOCOL_VERSION_V1,
+    RemoteProtocolBodyV1, RemoteProtocolRequestV1, RemoteProtocolResponseV1,
+    remote_capture_result_contract_v1, remote_enrollment_result_contract_v1,
+    remote_replay_result_contract_v1,
 };
 use tracedecay_contracts::remote::query::{
     RemoteQueryRequestV1, RemoteQueryResultV1, remote_exact_observation_query_result_contract_v1,
@@ -24,7 +28,11 @@ use tracedecay_contracts::remote::query::{
 use tracedecay_contracts::remote::recovery::{
     PromotionCasReceiptV1, PromotionConfirmationV1, remote_promotion_result_contract_v1,
 };
-use tracedecay_contracts::remote::replay::{RemoteReplayOutcomeV1, RemoteReplayRequestV1};
+use tracedecay_contracts::remote::replay::{
+    RemoteReplayCommitReceiptV1, RemoteReplayOperationReceiptV1, RemoteReplayOutcomeV1,
+    RemoteReplayPendingReceiptV1, RemoteReplayPendingRequestV1, RemoteReplayRequestV1,
+    remote_replay_pending_result_contract_v1,
+};
 use tracedecay_contracts::remote::transfer::{
     RemoteFrameTransferReceiptV1, RemoteFrameTransferRequestV1,
     remote_frame_transfer_result_contract_v1,
@@ -36,6 +44,8 @@ use tracedecay_contracts::{
 use tracedecay_domain::{
     CurrentRemoteAuthorityStateV1, EnrollmentCredentialRecordV1, validate_remote_secret_length,
 };
+
+use crate::client::{ClientError, ProblemError, problem_error};
 
 pub struct EnrolledRemoteClient {
     http: HttpClient,
@@ -58,6 +68,10 @@ pub enum RemoteClientError {
     Configuration(String),
     Transport(String),
     Protocol(String),
+    /// A canonical application problem the daemon's transport boundary
+    /// returned before any protocol response existed, such as the concealed
+    /// `not_found_or_not_authorized` refusal of an unauthenticated request.
+    Problem(Box<ProblemError>),
 }
 
 impl fmt::Display for RemoteClientError {
@@ -77,6 +91,9 @@ impl fmt::Display for RemoteClientError {
                     formatter,
                     "Remote Brain protocol response was invalid: {message}"
                 )
+            }
+            Self::Problem(problem) => {
+                write!(formatter, "Remote Brain request was refused: {problem}")
             }
         }
     }
@@ -247,6 +264,22 @@ impl EnrolledRemoteClient {
         )
     }
 
+    /// Replays every frame the authority holds for the caller's enrollment,
+    /// lowest sequence first, stopping at the first refusal. Sending it again
+    /// reports the same frames and commits nothing twice.
+    pub fn replay_pending(
+        &self,
+        request: &RemoteProtocolRequestV1<RemoteReplayPendingRequestV1>,
+    ) -> Result<RemoteProtocolResponseV1<RemoteReplayPendingReceiptV1>, RemoteClientError> {
+        self.execute_authenticated(
+            "replay/pending",
+            request,
+            remote_replay_pending_result_contract_v1().map_err(protocol_error)?,
+            RemoteSuccessKind::Result,
+            replay_pending_result_valid,
+        )
+    }
+
     pub fn transfer_frame(
         &self,
         request: &RemoteProtocolRequestV1<RemoteFrameTransferRequestV1>,
@@ -270,6 +303,23 @@ impl EnrolledRemoteClient {
             remote_exact_observation_query_result_contract_v1(),
             RemoteSuccessKind::Evidence,
             |result: &RemoteQueryResultV1| result.validate().is_ok(),
+        )
+    }
+
+    /// Reads the current authority for the caller's own enrolled scope: the
+    /// writer, the capture policy, and the authority's committed enrollment.
+    pub fn discover_authority(
+        &self,
+        request: &RemoteProtocolRequestV1<CurrentAuthorityRequestV1>,
+    ) -> Result<RemoteProtocolResponseV1<RemoteAuthorityDiscoveryV1>, RemoteClientError> {
+        self.execute_authenticated(
+            "authority",
+            request,
+            remote_authority_result_contract_v1().map_err(protocol_error)?,
+            RemoteSuccessKind::Result,
+            |discovery: &RemoteAuthorityDiscoveryV1| {
+                discovery.enrollment.enrollment.scope == request.body.scope
+            },
         )
     }
 
@@ -397,6 +447,7 @@ fn protocol_error(error: impl fmt::Display) -> RemoteClientError {
 enum RemoteSuccessKind {
     Evidence,
     Effect,
+    Result,
 }
 
 fn decode_typed_response<T: Clone + DeserializeOwned>(
@@ -410,6 +461,11 @@ fn decode_typed_response<T: Clone + DeserializeOwned>(
     let value = response
         .json::<serde_json::Value>()
         .map_err(protocol_error)?;
+    if !status.is_success()
+        && value.get("kind").and_then(serde_json::Value::as_str) == Some("problem")
+    {
+        return Err(transport_boundary_problem(status, &value));
+    }
     let payload = canonical_response_payload(value)?;
     let serde_json::Value::Object(mut fields) = payload else {
         return Err(RemoteClientError::Protocol(
@@ -449,6 +505,23 @@ fn decode_typed_response<T: Clone + DeserializeOwned>(
     RemoteProtocolResponseV1::new(request_id, authority, result).map_err(protocol_error)
 }
 
+/// The daemon's transport boundary answers before any protocol response
+/// exists with the plain HTTP problem envelope; it is accepted only as a
+/// canonical application problem whose kind matches the HTTP status.
+fn transport_boundary_problem(
+    status: reqwest::StatusCode,
+    value: &serde_json::Value,
+) -> RemoteClientError {
+    match problem_error(
+        value,
+        status.as_u16(),
+        "remote problem response carried no value",
+    ) {
+        ClientError::Problem(problem) => RemoteClientError::Problem(problem),
+        error => RemoteClientError::Protocol(error.to_string()),
+    }
+}
+
 fn canonical_success_valid<T: Clone>(
     envelope: &ApplicationEnvelope<T>,
     expected_kind: RemoteSuccessKind,
@@ -483,6 +556,9 @@ fn canonical_success_valid<T: Clone>(
                 )
                 .is_ok()
         }
+        (ApplicationOutcome::Result(payload), RemoteSuccessKind::Result) => {
+            validate_payload(payload)
+        }
         _ => false,
     }
 }
@@ -500,9 +576,46 @@ fn replay_result_valid(result: &RemoteReplayOutcomeV1, request: &RemoteReplayReq
         {
             operation_receipt
         }
+        RemoteReplayOutcomeV1::AlreadyAcknowledged { receipt } => {
+            return receipt.event_id == request.event_id;
+        }
+        RemoteReplayOutcomeV1::AlreadyRefused { .. } => return true,
         _ => return false,
     };
     operation_receipt.event_id == request.event_id && operation_receipt.validate().is_ok()
+}
+
+/// Sequences strictly increase through the stop, and every replay receipt
+/// belongs to the frame it is reported for.
+fn replay_pending_result_valid(receipt: &RemoteReplayPendingReceiptV1) -> bool {
+    let replayed_valid =
+        |replayed: Option<&RemoteReplayOperationReceiptV1>,
+         event_id: &str,
+         transaction: Option<&RemoteReplayCommitReceiptV1>| {
+            replayed.is_none_or(|replayed| {
+                replayed.event_id == event_id
+                    && replayed.transaction.as_ref() == transaction
+                    && replayed.validate().is_ok()
+            })
+        };
+    let acknowledged = receipt.acknowledged.iter().all(|frame| {
+        replayed_valid(
+            frame.replayed.as_ref(),
+            &frame.receipt.event_id,
+            Some(&frame.receipt),
+        )
+    });
+    let stopped = receipt
+        .stopped_at
+        .as_ref()
+        .is_none_or(|stop| replayed_valid(stop.replayed.as_ref(), &stop.event_id, None));
+    let sequences = receipt
+        .acknowledged
+        .iter()
+        .map(|frame| frame.sequence)
+        .chain(receipt.stopped_at.as_ref().map(|stop| stop.sequence))
+        .collect::<Vec<_>>();
+    acknowledged && stopped && sequences.windows(2).all(|pair| pair[0] < pair[1])
 }
 
 fn canonical_response_payload(

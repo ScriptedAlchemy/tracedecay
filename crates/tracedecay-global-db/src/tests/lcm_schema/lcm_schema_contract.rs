@@ -1,7 +1,7 @@
 use super::*;
 use tracedecay_domain::errors::TraceDecayError;
 
-#[tokio::test]
+#[asupersync::test]
 async fn legacy_profile_requires_reset_without_carrying_session_content_forward() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -23,7 +23,7 @@ async fn legacy_profile_requires_reset_without_carrying_session_content_forward(
     assert_eq!(row_count(&db_path, "session_messages").await, 1);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn stale_or_future_lcm_marker_requires_reset_without_rewriting_marker() {
     for found_version in [
         tracedecay_lcm::LCM_SCHEMA_VERSION - 1,
@@ -59,7 +59,7 @@ async fn stale_or_future_lcm_marker_requires_reset_without_rewriting_marker() {
     }
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn current_lcm_schema_reopens_without_republishing_its_marker() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -83,7 +83,7 @@ async fn current_lcm_schema_reopens_without_republishing_its_marker() {
 /// stage skips it. A short-lived attach must still converge the indexes in
 /// place, and retire the superseded plain payload owner index, without
 /// touching the version marker or the rows those indexes cover.
-#[tokio::test]
+#[asupersync::test]
 async fn short_lived_attach_convergence_rebuilds_queryable_lcm_status_indexes() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");

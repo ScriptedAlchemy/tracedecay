@@ -63,7 +63,7 @@ pub async fn try_ingest_user_codex_sessions_with_db_and_admission(
             });
         };
         let session_id_owned = session_id.to_owned();
-        let lookup = tokio::task::spawn_blocking(move || {
+        let lookup = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             source.find_session_transcript_paths_bounded(&session_id_owned)
         })
         .await

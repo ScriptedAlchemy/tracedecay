@@ -398,9 +398,15 @@ mod profile_owner;
 mod profile_retained;
 mod projectless;
 mod remote_deletion;
+mod remote_drain;
+mod remote_join;
+mod remote_revocation;
 #[cfg(test)]
 use projectless::projectless_tools_call_response;
 use projectless::{projectless_first_request, projectless_tool_call, serve_projectless_client};
+pub use remote_drain::{RemoteNodeDrainReceiptV1, live_remote_drain};
+pub use remote_join::{RemoteNodeJoinRequestV1, live_remote_join};
+pub use remote_revocation::{RemoteNodeRevocationV1, live_remote_node_revocation};
 mod project_composition;
 mod project_delivery_mount;
 pub(crate) use project_composition::daemon_transcript_source_profile;
@@ -450,13 +456,12 @@ use project_routing::portable_database_owner_reconciler;
 #[cfg(unix)]
 use project_routing::{CatalogRefreshClientKey, maintenance_transition_gate};
 use project_routing::{
-    bind_authenticated_profile_identity, bounded_repository_probe,
-    cached_or_bind_ready_project_server, ensure_checkout_topology_before_admission,
-    prefer_recorded_open_failure, project_open_cancellation_checkpoint,
-    project_open_cancellation_error, project_open_capacity_gate, project_open_gate,
-    project_open_task_capacity_error, project_open_tasks, project_route_for_handshake,
-    project_server_capacity_error, project_server_retirement_blocked_error, project_warming_error,
-    resolved_project_server_key,
+    bind_authenticated_profile_identity, cached_or_bind_ready_project_server,
+    ensure_checkout_topology_before_admission, prefer_recorded_open_failure,
+    project_open_cancellation_checkpoint, project_open_cancellation_error,
+    project_open_capacity_gate, project_open_gate, project_open_task_capacity_error,
+    project_open_tasks, project_route_for_handshake, project_server_capacity_error,
+    project_server_retirement_blocked_error, project_warming_error, resolved_project_server_key,
 };
 #[cfg(test)]
 use project_server_lifecycle::replay_user_profile_host_admission_for_identity;

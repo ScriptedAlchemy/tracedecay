@@ -25,7 +25,7 @@ use tracedecay_runtime_core::db::{
     Database, DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
 };
 
-#[tokio::test]
+#[asupersync::test]
 async fn unregistered_installer_refuses_to_initialize_a_registered_shard() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let path = directory.path().join("registered.db");

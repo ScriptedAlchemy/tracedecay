@@ -31,6 +31,7 @@ use serde_json::json;
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
+use crate::agents::serve_args::ServeArgs;
 use crate::agents::{host_cli, load_json_file, record_host_config_observation_bytes};
 
 /// Name of Gemini CLI's lifecycle binary.
@@ -47,9 +48,6 @@ pub(super) const EXTENSION_NAME: &str = "tracedecay";
 
 /// Key the MCP server lands under inside the extension manifest.
 pub(super) const MCP_SERVER_NAME: &str = "tracedecay";
-
-/// Arguments the tracedecay MCP server is launched with.
-pub(super) const MCP_SERVER_ARGS: &[&str] = &["serve"];
 
 /// Manifest file name Gemini CLI requires at the root of an extension.
 pub(super) const EXTENSION_MANIFEST_FILE: &str = "gemini-extension.json";
@@ -144,6 +142,7 @@ pub(super) fn settings_path(home: &Path) -> PathBuf {
 /// are the same bytes every other reader reasons about.
 pub(crate) fn rendered_extension_files(
     tracedecay_bin: &str,
+    serve_args: &ServeArgs,
 ) -> Result<Vec<(&'static str, String)>> {
     Ok(vec![
         (
@@ -152,6 +151,7 @@ pub(crate) fn rendered_extension_files(
                 EXTENSION_MANIFEST_FILE,
                 EXTENSION_MANIFEST_TEMPLATE,
                 tracedecay_bin,
+                serve_args,
             )?,
         ),
         (EXTENSION_CONTEXT_FILE, context_file_text()),
@@ -162,9 +162,14 @@ pub(crate) fn rendered_extension_files(
 /// - `gemini-extension.json`: stamp `version` from the crate version and
 ///   replace the `__TRACEDECAY_BIN__` placeholder with the resolved binary.
 /// - everything else is shipped verbatim.
-fn render_extension_file(relative: &str, contents: &str, tracedecay_bin: &str) -> Result<String> {
+fn render_extension_file(
+    relative: &str,
+    contents: &str,
+    tracedecay_bin: &str,
+    serve_args: &ServeArgs,
+) -> Result<String> {
     match relative {
-        EXTENSION_MANIFEST_FILE => render_manifest(contents, tracedecay_bin),
+        EXTENSION_MANIFEST_FILE => render_manifest(contents, tracedecay_bin, serve_args),
         _ => Ok(contents.to_string()),
     }
 }
@@ -172,8 +177,9 @@ fn render_extension_file(relative: &str, contents: &str, tracedecay_bin: &str) -
 /// Stamp the version and substitute the binary path in a single parse /
 /// serialize round-trip. Assigning a `serde_json::Value` escapes any
 /// JSON-special character in the path, which a raw string replace would not.
-fn render_manifest(raw: &str, tracedecay_bin: &str) -> Result<String> {
-    let rendered = crate::agents::plugin_bundle::stamp_manifest_version_with(raw, |manifest| {
+fn render_manifest(raw: &str, tracedecay_bin: &str, serve_args: &ServeArgs) -> Result<String> {
+    let raw = serve_args.render_quoted(raw);
+    let rendered = crate::agents::plugin_bundle::stamp_manifest_version_with(&raw, |manifest| {
         if let Some(server) = manifest
             .pointer_mut("/mcpServers/tracedecay")
             .and_then(serde_json::Value::as_object_mut)
@@ -255,11 +261,12 @@ pub(super) fn read_installed_extension(home: &Path) -> InstalledExtensionV1 {
 pub(super) fn manifest_declares_current_server(
     manifest: &serde_json::Value,
     tracedecay_bin: Option<&str>,
+    serve_args: &ServeArgs,
 ) -> bool {
     manifest.get("name").and_then(serde_json::Value::as_str) == Some(EXTENSION_NAME)
         && manifest.get("version").and_then(serde_json::Value::as_str)
             == Some(crate::PRODUCT_VERSION)
-        && manifest_server_is_current(manifest, tracedecay_bin)
+        && manifest_server_is_current(manifest, tracedecay_bin, serve_args)
 }
 
 /// The MCP-server half of [`manifest_declares_current_server`], without the
@@ -267,6 +274,7 @@ pub(super) fn manifest_declares_current_server(
 pub(super) fn manifest_server_is_current(
     manifest: &serde_json::Value,
     tracedecay_bin: Option<&str>,
+    serve_args: &ServeArgs,
 ) -> bool {
     let Some(server) = manifest
         .pointer(&format!("/mcpServers/{MCP_SERVER_NAME}"))
@@ -280,23 +288,20 @@ pub(super) fn manifest_server_is_current(
         .is_some_and(|command| {
             !command.is_empty() && tracedecay_bin.is_none_or(|expected| command == expected)
         });
-    let args_ok = server
-        .get("args")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|args| {
-            MCP_SERVER_ARGS
-                .iter()
-                .all(|expected| args.iter().any(|arg| arg.as_str() == Some(*expected)))
-        });
+    let args_ok = serve_args.matches_json(server.get("args"), &[]);
     let trust_ok = server.get("trust").and_then(serde_json::Value::as_bool) == Some(true);
     command_ok && args_ok && trust_ok
 }
 
 /// True when the host's installed extension is present and current.
-pub(super) fn installed_extension_is_current(home: &Path, tracedecay_bin: Option<&str>) -> bool {
+pub(super) fn installed_extension_is_current(
+    home: &Path,
+    tracedecay_bin: Option<&str>,
+    serve_args: &ServeArgs,
+) -> bool {
     match read_installed_extension(home) {
         InstalledExtensionV1::Present(manifest) => {
-            manifest_declares_current_server(&manifest, tracedecay_bin)
+            manifest_declares_current_server(&manifest, tracedecay_bin, serve_args)
         }
         InstalledExtensionV1::Missing | InstalledExtensionV1::Unreadable => false,
     }

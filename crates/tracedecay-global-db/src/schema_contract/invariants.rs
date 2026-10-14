@@ -3,7 +3,7 @@ use tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION;
 use super::super::global_db_operation_error;
 use super::normalize_trigger_sql;
 use tracedecay_runtime_core::db::{
-    Database, DatabaseWriteTransaction,
+    Database, DatabaseEngineReadSnapshot, DatabaseWriteTransaction,
     engine::{Executor, QueryExecutor, params},
 };
 
@@ -146,14 +146,13 @@ pub(crate) trait AuthorityInvariantTransactionProvider {
         operation: &'static str,
     ) -> tracedecay_domain::errors::Result<DatabaseWriteTransaction<'_>>;
 
-    /// `Some` when this provider can scan one table's foreign keys without
-    /// holding the canonical writer. `None` keeps the check inside the
-    /// write step, which tests use and which blocks every other writer for
-    /// the whole scan.
-    async fn read_foreign_key_violation(
+    /// `Some` when this provider can run a whole-table audit read without
+    /// holding the canonical writer. `None` keeps the read inside a write
+    /// step, which tests use and which blocks every other writer for the
+    /// whole scan.
+    async fn convergence_snapshot(
         &self,
-        _table: &str,
-    ) -> tracedecay_domain::errors::Result<Option<bool>> {
+    ) -> tracedecay_domain::errors::Result<Option<DatabaseEngineReadSnapshot>> {
         Ok(None)
     }
 }
@@ -166,20 +165,18 @@ impl AuthorityInvariantTransactionProvider for Database {
         self.begin_bulk_write_transaction(operation).await
     }
 
-    async fn read_foreign_key_violation(
+    async fn convergence_snapshot(
         &self,
-        table: &str,
-    ) -> tracedecay_domain::errors::Result<Option<bool>> {
-        // A table-wide `pragma_foreign_key_check` is a read. Running it inside
-        // the write step reserves the canonical writer until the scan returns,
-        // so historical ingest and refresh cannot commit for the whole table.
-        let snapshot = self
-            .read_connection()
-            .background()
-            .read_snapshot()
+    ) -> tracedecay_domain::errors::Result<Option<DatabaseEngineReadSnapshot>> {
+        // A whole-table audit is one statement whose cost grows with the
+        // store. Under the request statement deadline it is interrupted at
+        // the same table on every open of a large store, so the exhaustive
+        // pass never completes and the store stays degraded.
+        self.read_connection()
+            .convergence_snapshot()
             .await
-            .map_err(audit_read_error)?;
-        Ok(Some(foreign_key_table_violates(&snapshot, table).await?))
+            .map(Some)
+            .map_err(audit_read_error)
     }
 }
 
@@ -459,7 +456,7 @@ async fn converge_authority_invariants(
         async |conn| {
             repair_projection_frontier(conn, checkpoint.projection_checkpoint).await?;
             if exhaustive {
-                validate_invariant_rows(conn).await
+                validate_invariant_rows(&ConvergenceReads(conn)).await
             } else {
                 validate_mutable_invariant_rows(conn).await
             }
@@ -537,8 +534,8 @@ async fn converge_authority_invariants(
             let Some(table) = table else {
                 break;
             };
-            let violation = match provider.read_foreign_key_violation(&table).await? {
-                Some(violation) => violation,
+            let violation = match provider.convergence_snapshot().await? {
+                Some(snapshot) => foreign_key_table_violates(&snapshot, &table).await?,
                 None => {
                     authority_invariant_step(
                         provider,
@@ -591,6 +588,25 @@ async fn converge_authority_invariants(
         },
     )
     .await
+}
+
+/// Reads for the exhaustive row audits. They stay inside the frontier
+/// repair's write step so a refusal rolls that repair back, and each is one
+/// whole-table statement that on a large store outlives the request
+/// statement deadline.
+struct ConvergenceReads<'a, 'b>(&'a DatabaseWriteTransaction<'b>);
+
+impl QueryExecutor for ConvergenceReads<'_, '_> {
+    async fn query<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> tracedecay_runtime_core::db::engine::Result<tracedecay_runtime_core::db::engine::Rows>
+    where
+        P: tracedecay_runtime_core::db::engine::IntoParams,
+    {
+        self.0.convergence_query(sql, params).await
+    }
 }
 
 pub(super) async fn validate_invariant_rows(
@@ -790,14 +806,13 @@ pub async fn validate_authority_rows_exhaustive(
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use asupersync::sync::Notify;
     use tempfile::TempDir;
-    use tokio::sync::{Notify, Semaphore};
 
     use super::{
         AUDIT_PAGE_ROWS, AuthorityInvariantTransactionProvider, FOREIGN_KEY_AUDIT_PROGRESS,
         INCOMPLETE_EXHAUSTIVE_PASS, OBSERVATION_AUDIT_PAGE_ROWS, ensure_authority_invariants,
         foreign_key_violation_exists_read_only, foreign_key_violation_exists_resumable,
-        global_db_operation_error,
     };
     use crate::global_db_operation_message;
     use crate::schema_contract::invariants::test_fixture::{
@@ -834,7 +849,7 @@ mod tests {
         pause_at: usize,
         calls: AtomicUsize,
         paused: Notify,
-        release: Semaphore,
+        release: Notify,
     }
 
     impl PausingTransactionProvider<'_> {
@@ -845,7 +860,7 @@ mod tests {
         }
 
         fn release(&self) {
-            self.release.add_permits(1);
+            self.release.notify_one();
         }
     }
 
@@ -857,11 +872,7 @@ mod tests {
             let call = self.calls.fetch_add(1, Ordering::AcqRel) + 1;
             if call == self.pause_at {
                 self.paused.notify_waiters();
-                self.release
-                    .acquire()
-                    .await
-                    .map_err(|error| global_db_operation_error(operation, error))?
-                    .forget();
+                self.release.notified().await;
             }
             self.database.begin_bulk_write_transaction(operation).await
         }
@@ -887,7 +898,7 @@ mod tests {
         (observation_rows, source_cursor_rows)
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn completed_audit_pages_survive_later_convergence_failure() {
         let (_directory, fixture) = open_registered().await;
         let transaction = fixture
@@ -945,7 +956,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn ordinary_write_completes_between_convergence_steps() {
         let (_directory, fixture) = open_registered().await;
         let transaction = fixture
@@ -968,31 +979,37 @@ mod tests {
             pause_at: 4,
             calls: AtomicUsize::new(0),
             paused: Notify::new(),
-            release: Semaphore::new(0),
+            release: Notify::new(),
         };
         let convergence = ensure_authority_invariants(&provider, true, false);
-        tokio::pin!(convergence);
-        tokio::select! {
-            result = &mut convergence => {
+        let mut convergence = std::pin::pin!(convergence);
+        let mut paused = std::pin::pin!(provider.wait_until_paused());
+        std::future::poll_fn(|context| {
+            if let std::task::Poll::Ready(result) = convergence.as_mut().poll(context) {
                 panic!("convergence completed before the controlled inter-step pause: {result:?}");
             }
-            () = provider.wait_until_paused() => {}
-        }
+            paused.as_mut().poll(context)
+        })
+        .await;
 
-        tokio::time::timeout(std::time::Duration::from_secs(3), async {
-            fixture
-                .database()
-                .writer_connection()
-                .expect("ordinary registered writer")
-                .execute(
-                    "INSERT INTO savings_ledger(
+        asupersync::time::timeout(
+            asupersync::time::wall_now(),
+            std::time::Duration::from_secs(3),
+            async {
+                fixture
+                    .database()
+                    .writer_connection()
+                    .expect("ordinary registered writer")
+                    .execute(
+                        "INSERT INTO savings_ledger(
                         ts, project_path, tool_name, before_tokens, after_tokens
                      ) VALUES (1, '/writer-availability', 'test', 2, 1)",
-                    (),
-                )
-                .await
-                .expect("ordinary write while convergence is between steps");
-        })
+                        (),
+                    )
+                    .await
+                    .expect("ordinary write while convergence is between steps");
+            },
+        )
         .await
         .expect("ordinary write must not wait for the full convergence pass");
 
@@ -1002,7 +1019,7 @@ mod tests {
             .expect("convergence resumes after ordinary admission");
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn stepped_convergence_preserves_single_transaction_checkpoint_result() {
         let (_directory, fixture) = open_registered().await;
         let transaction = fixture
@@ -1084,7 +1101,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn corruption_refuses_trust_after_durable_audit_progress() {
         let (_directory, fixture) = open_registered().await;
         let transaction = fixture
@@ -1141,7 +1158,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn foreign_key_audit_finds_violations_by_child_table() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("sessions.db");
@@ -1167,7 +1184,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn foreign_key_audit_resumes_after_last_durable_table() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("sessions.db");

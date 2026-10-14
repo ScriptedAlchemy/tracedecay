@@ -18,6 +18,7 @@ use tracedecay_domain::{
     DiagnosticEvidenceClassV1, DiagnosticProducerKindV1, DiagnosticProvenanceV1,
     DiagnosticRecordStateV1, DiagnosticSeverityV1, GenerationDiagnosticV1, SourceSpan, UtcMicros,
 };
+use tracedecay_rusqlite_runtime::native_runtime;
 use tracedecay_rusqlite_runtime::{
     ExistingWriterLocator, PersistentWriter, StorageOperationExecutor,
     reader::{ReaderPool, ReaderQueryExecutor},
@@ -124,6 +125,7 @@ fn start_writer(
     executor: impl StorageOperationExecutor + Send + 'static,
 ) -> PersistentWriter {
     PersistentWriter::start(
+        &tracedecay_rusqlite_runtime::native_runtime::handle().expect("native runtime"),
         writer_locator(database, binding),
         AdmissionConfigV1::default(),
         executor,
@@ -133,7 +135,7 @@ fn start_writer(
 
 fn commit(writer: &PersistentWriter, request: RuntimeSubmitRequestV1) -> StoreCommitReceiptV1 {
     let probe = Probe::for_submit(&request);
-    match run(writer.submit(request, probe)).unwrap() {
+    match run(writer.submit(&native_runtime::cx().unwrap(), request, probe)).unwrap() {
         RuntimeSubmitOutcomeV1::Committed { receipt } => receipt,
         outcome => panic!("expected commit, got {outcome:?}"),
     }
@@ -429,7 +431,12 @@ fn competing_submissions_preserve_contiguous_receipts_after_reopen_and_conflict(
     let original = &receipts[0];
     let replay = publication(&binding, original.operation_id.as_str(), 2);
     assert_eq!(
-        run(restarted.submit(replay.clone(), Probe::for_submit(&replay))).unwrap(),
+        run(restarted.submit(
+            &native_runtime::cx().unwrap(),
+            replay.clone(),
+            Probe::for_submit(&replay)
+        ))
+        .unwrap(),
         RuntimeSubmitOutcomeV1::ExactReplay {
             receipt: original.clone()
         }
@@ -444,7 +451,12 @@ fn competing_submissions_preserve_contiguous_receipts_after_reopen_and_conflict(
     )
     .unwrap();
     assert_eq!(
-        run(restarted.submit(conflict.clone(), Probe::for_submit(&conflict))).unwrap(),
+        run(restarted.submit(
+            &native_runtime::cx().unwrap(),
+            conflict.clone(),
+            Probe::for_submit(&conflict)
+        ))
+        .unwrap(),
         RuntimeSubmitOutcomeV1::IdempotencyConflict {
             existing_receipt: original.clone()
         }
@@ -491,7 +503,12 @@ fn conflicting_concurrent_submissions_execute_only_the_winning_publication() {
                 let barrier = &barrier;
                 scope.spawn(move || {
                     barrier.wait();
-                    run(writer.submit(request.clone(), Probe::for_submit(&request))).unwrap()
+                    run(writer.submit(
+                        &native_runtime::cx().unwrap(),
+                        request.clone(),
+                        Probe::for_submit(&request),
+                    ))
+                    .unwrap()
                 })
             })
             .collect();
@@ -559,7 +576,14 @@ fn failed_repository_mutation_rolls_back_and_the_same_request_can_retry() {
     let binding = binding(0);
     let writer = start_writer(&database, &binding, FailOnceAfterMutation(true));
     let request = publication(&binding, "generation.retry", 4);
-    assert!(run(writer.submit(request.clone(), Probe::for_submit(&request))).is_err());
+    assert!(
+        run(writer.submit(
+            &native_runtime::cx().unwrap(),
+            request.clone(),
+            Probe::for_submit(&request)
+        ))
+        .is_err()
+    );
     for table in [
         "generation_diagnostics",
         "diagnostic_generation_publications",
@@ -590,7 +614,14 @@ fn competing_sqlite_writer_lock_returns_an_error_and_resubmit_commits_once() {
     let connection = database.connect();
     connection.execute_batch("BEGIN IMMEDIATE").unwrap();
     let request = publication(&binding, "generation.lock-retry", 4);
-    assert!(run(writer.submit(request.clone(), Probe::for_submit(&request))).is_err());
+    assert!(
+        run(writer.submit(
+            &native_runtime::cx().unwrap(),
+            request.clone(),
+            Probe::for_submit(&request)
+        ))
+        .is_err()
+    );
     assert_eq!(writer.telemetry_snapshot().busy_events, 1);
     assert_eq!(
         persisted_rows(&connection, "td_runtime_writer_idempotency_v2"),
@@ -600,7 +631,12 @@ fn competing_sqlite_writer_lock_returns_an_error_and_resubmit_commits_once() {
     let receipt = commit(&writer, request.clone());
     assert_eq!(receipt.commit_sequence.0, 1);
     assert_eq!(
-        run(writer.submit(request.clone(), Probe::for_submit(&request))).unwrap(),
+        run(writer.submit(
+            &native_runtime::cx().unwrap(),
+            request.clone(),
+            Probe::for_submit(&request)
+        ))
+        .unwrap(),
         RuntimeSubmitOutcomeV1::ExactReplay { receipt }
     );
     writer.shutdown_and_join().unwrap();
@@ -631,6 +667,7 @@ fn crash_writer_process() {
     let path = std::env::var_os("TRACEDECAY_CRASH_DATABASE").expect("crash subprocess database");
     let binding = binding(0);
     let writer = PersistentWriter::start(
+        &tracedecay_rusqlite_runtime::native_runtime::handle().expect("native runtime"),
         ExistingWriterLocator::new(binding.clone(), verified_locator(&binding), path.into())
             .unwrap(),
         AdmissionConfigV1::default(),
@@ -681,7 +718,7 @@ fn process_crash_preserves_committed_receipts_and_discards_uncommitted_mutations
     );
     let previous = publication(&binding, "generation.before-crash", 4);
     assert!(
-        matches!(run(restarted.submit(previous.clone(), Probe::for_submit(&previous))).unwrap(), RuntimeSubmitOutcomeV1::ExactReplay { receipt } if receipt.commit_sequence.0 == 1)
+        matches!(run(restarted.submit(&native_runtime::cx().unwrap(), previous.clone(), Probe::for_submit(&previous))).unwrap(), RuntimeSubmitOutcomeV1::ExactReplay { receipt } if receipt.commit_sequence.0 == 1)
     );
     assert_eq!(
         commit(&restarted, publication(&binding, "generation.crashing", 4))
@@ -780,7 +817,11 @@ fn workload(
                             );
                             let probe = Probe::for_submit(&request);
                             let started = Instant::now();
-                            let result = runtime.block_on(writer.submit(request, probe));
+                            let result = runtime.block_on(writer.submit(
+                                &native_runtime::cx().unwrap(),
+                                request,
+                                probe,
+                            ));
                             latencies.push(started.elapsed());
                             if !matches!(result, Ok(RuntimeSubmitOutcomeV1::Committed { .. })) {
                                 failed += 1;
@@ -953,6 +994,7 @@ fn at_least_attachment_reads_use_the_writers_committed_watermark() {
     writer.shutdown_and_join().unwrap();
     let attachment = RepositoryPhysicalAttachmentFactory
         .attach(
+            &tracedecay_rusqlite_runtime::native_runtime::handle().expect("native runtime"),
             binding.clone(),
             verified_locator(&binding),
             database.path.canonicalize().unwrap(),
@@ -1006,6 +1048,64 @@ fn at_least_attachment_reads_use_the_writers_committed_watermark() {
 }
 
 #[test]
+fn at_least_reads_under_a_newer_authority_epoch_inherit_the_committed_frontier() {
+    let database = TestDatabase::new("read-newer-epoch.db");
+    seed(&database);
+    let previous = binding(0);
+    let mut reopened = previous.clone();
+    reopened.authority_epoch =
+        StoreAuthorityEpochV1::new(previous.authority_epoch.get() + 1).unwrap();
+    let writer = start_writer(
+        &database,
+        &previous,
+        ConcreteRepositoryWriteExecutor::default(),
+    );
+    let receipt = commit(&writer, publication(&previous, "generation.restarted", 1));
+    writer.shutdown_and_join().unwrap();
+    let attachment = RepositoryPhysicalAttachmentFactory
+        .attach(
+            &tracedecay_rusqlite_runtime::native_runtime::handle().expect("native runtime"),
+            reopened.clone(),
+            verified_locator(&reopened),
+            database.path.canonicalize().unwrap(),
+            AdmissionConfigV1::default(),
+        )
+        .unwrap();
+    let request = RuntimeReadRequestV1::new(
+        reopened.clone(),
+        ConsistencyModeV1::AtLeast {
+            commit_sequence: receipt.commit_sequence,
+        },
+        RuntimeReadOperationV1::TemporalHealth,
+        OperationPriorityV1::Health,
+        1,
+        read_request(&reopened, "health").control().clone(),
+    )
+    .unwrap();
+
+    let outcome = attachment
+        .dispatch_read(request.clone(), &Probe::for_read(&request))
+        .unwrap();
+
+    let RuntimeReadCoverageV1::Complete { coverage } = outcome.coverage() else {
+        panic!(
+            "a reopened authority with no commit yet must serve the inherited frontier, got {:?}",
+            outcome.coverage()
+        );
+    };
+    let observed = coverage.observed(&reopened.shard_id).unwrap();
+    assert_eq!(observed.commit_sequence, receipt.commit_sequence);
+    assert_eq!(observed.authority_epoch, reopened.authority_epoch);
+    assert!(matches!(
+        outcome.value(),
+        Some(RuntimeReadResultV1::TemporalHealth { healthy: true })
+    ));
+    assert_eq!(outcome.validate_for(&request), Ok(()));
+    attachment.drain().unwrap();
+    attachment.close_and_join().unwrap();
+}
+
+#[test]
 fn at_least_reads_under_a_superseded_authority_epoch_are_typed_unavailable() {
     let database = TestDatabase::new("read-superseded-epoch.db");
     seed(&database);
@@ -1022,6 +1122,7 @@ fn at_least_reads_under_a_superseded_authority_epoch_are_typed_unavailable() {
     writer.shutdown_and_join().unwrap();
     let attachment = RepositoryPhysicalAttachmentFactory
         .attach(
+            &tracedecay_rusqlite_runtime::native_runtime::handle().expect("native runtime"),
             superseded.clone(),
             verified_locator(&superseded),
             database.path.canonicalize().unwrap(),

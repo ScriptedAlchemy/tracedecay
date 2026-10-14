@@ -4,15 +4,17 @@
 //! published, it changes through the fenced promotion journal, never by
 //! republishing. A node accepts a writer only for a repository scope it was
 //! provisioned for, and only together with the replay policy that admits that
-//! writer's frames, so a later promotion never journals against a missing
-//! policy.
+//! writer's frames and the query policy that admits reads of them, so a later
+//! promotion never journals against a missing policy and a replayed
+//! observation is never unreadable for want of one.
 
 use thiserror::Error;
+use tracedecay_contracts::remote::query::RemoteQueryPolicyRecordV1;
 use tracedecay_contracts::remote::replay::RemoteReplayPolicyEvidenceV1;
 
 use crate::exact_sql::{ExactSqlRow, ExactSqlTransaction, text_at};
 
-use super::policy::replay_scope_digest;
+use super::policy::{query_scope_digest, replay_scope_digest};
 use super::*;
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq, serde::Serialize)]
@@ -47,10 +49,18 @@ impl RemoteSqliteStorageV1 {
         &self,
         writer: &RemoteWriterAuthorityV1,
         policy: &RemoteReplayPolicyEvidenceV1,
+        query_policy: &RemoteQueryPolicyRecordV1,
         published_at: UtcMicros,
     ) -> Result<RemoteWriterPublicationStateV1, RemoteWriterPublicationErrorV1> {
         let transaction = self.handle().begin_immediate().map_err(unavailable)?;
-        let state = admit_publication(&transaction, &self.binding, writer, policy, published_at)?;
+        let state = admit_publication(
+            &transaction,
+            &self.binding,
+            writer,
+            policy,
+            query_policy,
+            published_at,
+        )?;
         transaction.rollback().map_err(unavailable)?;
         Ok(state)
     }
@@ -59,13 +69,23 @@ impl RemoteSqliteStorageV1 {
         &self,
         writer: &RemoteWriterAuthorityV1,
         policy: &RemoteReplayPolicyEvidenceV1,
+        query_policy: &RemoteQueryPolicyRecordV1,
         published_at: UtcMicros,
     ) -> Result<(), RemoteWriterPublicationErrorV1> {
         let transaction = self.handle().begin_immediate().map_err(unavailable)?;
-        if admit_publication(&transaction, &self.binding, writer, policy, published_at)?
-            == RemoteWriterPublicationStateV1::Published
+        if admit_publication(
+            &transaction,
+            &self.binding,
+            writer,
+            policy,
+            query_policy,
+            published_at,
+        )? == RemoteWriterPublicationStateV1::Published
         {
-            transaction.rollback().map_err(unavailable)?;
+            // A writer published before publication carried a query policy
+            // gains it on an exact republish.
+            insert_query_policy(&transaction, query_policy)?;
+            transaction.commit().map_err(unavailable)?;
             return Ok(());
         }
         let state = CurrentRemoteAuthorityStateV1::Available(writer.authority.clone());
@@ -84,6 +104,7 @@ impl RemoteSqliteStorageV1 {
                         text(&encode(policy)?),
                     ],
                 )?;
+                insert_query_policy(&transaction, query_policy)?;
                 execute(
                     &transaction,
                     "INSERT INTO remote_authorities (
@@ -109,6 +130,7 @@ fn admit_publication(
     binding: &StoreRuntimeBindingV1,
     writer: &RemoteWriterAuthorityV1,
     policy: &RemoteReplayPolicyEvidenceV1,
+    query_policy: &RemoteQueryPolicyRecordV1,
     published_at: UtcMicros,
 ) -> Result<RemoteWriterPublicationStateV1, RemoteWriterPublicationErrorV1> {
     if writer.validate().is_err()
@@ -117,6 +139,9 @@ fn admit_publication(
         || policy.validate().is_err()
         || policy.repository_scope != writer.scope
         || policy.revalidated_at > published_at
+        || query_policy.validate().is_err()
+        || query_policy.repository_scope != writer.scope
+        || query_policy.revalidated_at > published_at
     {
         return Err(RemoteWriterPublicationErrorV1::InvalidWriter);
     }
@@ -130,6 +155,16 @@ fn admit_publication(
     )?;
     if let Some(row) = optional_row(stored_policy)?
         && decode::<RemoteReplayPolicyEvidenceV1>(&row, 0)? != *policy
+    {
+        return Err(RemoteWriterPublicationErrorV1::Conflict);
+    }
+    let stored_query_policy = select(
+        transaction,
+        "SELECT record_json FROM remote_query_policies WHERE scope_digest = ?1",
+        vec![text(query_policy_scope_digest(query_policy)?.as_str())],
+    )?;
+    if let Some(row) = optional_row(stored_query_policy)?
+        && decode::<RemoteQueryPolicyRecordV1>(&row, 0)? != *query_policy
     {
         return Err(RemoteWriterPublicationErrorV1::Conflict);
     }
@@ -194,6 +229,23 @@ fn execute(
     Ok(())
 }
 
+fn insert_query_policy(
+    transaction: &ExactSqlTransaction,
+    query_policy: &RemoteQueryPolicyRecordV1,
+) -> Result<(), RemoteWriterPublicationErrorV1> {
+    execute(
+        transaction,
+        "INSERT INTO remote_query_policies (scope_digest, policy_revision, record_json)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(scope_digest) DO NOTHING",
+        vec![
+            text(query_policy_scope_digest(query_policy)?.as_str()),
+            integer(query_policy.policy_revision)?,
+            text(&encode(query_policy)?),
+        ],
+    )
+}
+
 fn optional_row(rows: ExactSqlRows) -> Result<Option<ExactSqlRow>, RemoteWriterPublicationErrorV1> {
     let mut rows = rows.rows.into_iter();
     match (rows.next(), rows.next()) {
@@ -225,6 +277,13 @@ fn policy_scope_digest(
     policy: &RemoteReplayPolicyEvidenceV1,
 ) -> Result<ManifestDigest, RemoteWriterPublicationErrorV1> {
     replay_scope_digest(&policy.repository_scope)
+        .map_err(|_| RemoteWriterPublicationErrorV1::InvalidWriter)
+}
+
+fn query_policy_scope_digest(
+    policy: &RemoteQueryPolicyRecordV1,
+) -> Result<ManifestDigest, RemoteWriterPublicationErrorV1> {
+    query_scope_digest(&policy.repository_scope)
         .map_err(|_| RemoteWriterPublicationErrorV1::InvalidWriter)
 }
 

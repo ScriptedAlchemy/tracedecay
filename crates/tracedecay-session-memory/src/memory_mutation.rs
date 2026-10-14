@@ -4,6 +4,7 @@ use std::fmt::Debug;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::Poll;
 use std::time::Duration;
 
 use tracedecay_contracts::{
@@ -127,24 +128,35 @@ where
         .ok_or(RetainedSurfaceExecutionErrorV1::TimedOut(
             tracedecay_contracts::CancellationStage::BeforeEffect,
         ))?;
-    tokio::pin!(future);
-    tokio::select! {
-        biased;
-        outcome = &mut future => classify_memory_settlement(context, outcome),
-        () = context.cancellation_signal.cancelled() => {
-            if context.cancellation_signal.commit_started() {
-                classify_memory_settlement(context, future.await)
-            } else {
-                Err(RetainedSurfaceExecutionErrorV1::Cancelled(tracedecay_contracts::CancellationStage::BeforeEffect))
-            }
+    let mut future = std::pin::pin!(future);
+    let mut cancelled = std::pin::pin!(context.cancellation_signal.cancelled());
+    let mut deadline = std::pin::pin!(asupersync::time::sleep(
+        asupersync::time::wall_now(),
+        remaining
+    ));
+    let settlement = std::future::poll_fn(|task| {
+        if let Poll::Ready(outcome) = future.as_mut().poll(task) {
+            return Poll::Ready(Ok(outcome));
         }
-        () = tokio::time::sleep(remaining) => {
-            if context.cancellation_signal.commit_started() {
-                classify_memory_settlement(context, future.await)
-            } else {
-                Err(RetainedSurfaceExecutionErrorV1::TimedOut(tracedecay_contracts::CancellationStage::BeforeEffect))
-            }
+        if cancelled.as_mut().poll(task).is_ready() {
+            return Poll::Ready(Err(RetainedSurfaceExecutionErrorV1::Cancelled(
+                tracedecay_contracts::CancellationStage::BeforeEffect,
+            )));
         }
+        if deadline.as_mut().poll(task).is_ready() {
+            return Poll::Ready(Err(RetainedSurfaceExecutionErrorV1::TimedOut(
+                tracedecay_contracts::CancellationStage::BeforeEffect,
+            )));
+        }
+        Poll::Pending
+    })
+    .await;
+    match settlement {
+        Ok(outcome) => classify_memory_settlement(context, outcome),
+        Err(_) if context.cancellation_signal.commit_started() => {
+            classify_memory_settlement(context, future.await)
+        }
+        Err(interruption) => Err(interruption),
     }
 }
 

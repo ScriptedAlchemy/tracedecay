@@ -46,7 +46,7 @@ impl SqliteReadConn {
         F: FnOnce(&rusqlite::Connection) -> T + Send + 'static,
     {
         let inner = Arc::clone(&self.inner);
-        tokio::task::spawn_blocking(move || {
+        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             let guard = inner.lock().unwrap_or_else(PoisonError::into_inner);
             body(&guard)
         })

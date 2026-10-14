@@ -8,8 +8,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use asupersync::{Budget, channel::mpsc as actor_mpsc, runtime::RuntimeHandle};
 use rusqlite::{Connection, TransactionBehavior, params_from_iter};
-use tokio::sync::mpsc as tokio_mpsc;
 use tracedecay_store::{
     OperationPriorityV1, StoreRuntimeBindingV1, UnavailableReasonV1, VerifiedStoreLocatorV1,
 };
@@ -65,8 +65,8 @@ type ExactSqlHealthSnapshotFactory =
     dyn Fn(Duration) -> Result<ExactSqlReadSnapshot, ExactSqlError> + Send + Sync;
 type ReaderPoolOccupancyRead = dyn Fn() -> Option<ReaderPoolSnapshot> + Send + Sync;
 type ReaderMemoryRelease = dyn Fn() -> Result<MemoryReleaseOutcome, ExactSqlError> + Send + Sync;
-type ExactSqlSnapshotQuery =
-    dyn FnMut(ExactSqlStatement) -> Result<ExactSqlRows, ExactSqlError> + Send;
+type ExactSqlSnapshotQuery = dyn FnMut(ExactSqlStatement, ExactSqlStatementBudget) -> Result<ExactSqlRows, ExactSqlError>
+    + Send;
 type StoreSizeTelemetryRead = dyn Fn(
         Duration,
         &mut dyn FnMut() -> Option<UnavailableReasonV1>,
@@ -84,7 +84,7 @@ type TableSizeTelemetryRead = dyn Fn(
 pub struct ExactSqlHandle {
     binding: StoreRuntimeBindingV1,
     locator: VerifiedStoreLocatorV1,
-    writer: Option<tokio_mpsc::Sender<WriterCommand>>,
+    writer: Option<actor_mpsc::Sender<WriterCommand>>,
     query: Arc<ExactSqlQuery>,
     snapshot: Arc<ExactSqlSnapshotFactory>,
     health_snapshot: Arc<ExactSqlHealthSnapshotFactory>,
@@ -162,7 +162,7 @@ impl ExactSqlHandle {
     fn from_readers<E: ReaderQueryExecutor>(
         binding: StoreRuntimeBindingV1,
         locator: VerifiedStoreLocatorV1,
-        writer: Option<tokio_mpsc::Sender<WriterCommand>>,
+        writer: Option<actor_mpsc::Sender<WriterCommand>>,
         readers: &ReaderPool<E>,
     ) -> Self {
         let query_readers = readers.downgrade();
@@ -470,9 +470,17 @@ impl ExactSqlHandle {
     /// awaits the same serialized command protocol as ordinary writes.
     pub async fn release_connection_memory_async(
         &self,
+        runtime: &RuntimeHandle,
     ) -> Result<MemoryReleaseOutcome, ExactSqlError> {
         let release_readers = Arc::clone(&self.release_reader_memory);
-        let readers = tokio::task::spawn_blocking(move || release_readers())
+        let cx = runtime
+            .try_request_cx_with_budget(Budget::INFINITE)
+            .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
+        let mut task = cx
+            .spawn_blocking(move |_| release_readers())
+            .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
+        let readers = task
+            .join(&cx)
             .await
             .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))??;
         let writer = if self.writer.is_some() {
@@ -709,7 +717,9 @@ pub struct ExactSqlReadSnapshot {
 impl ExactSqlReadSnapshot {
     pub(crate) fn new<F>(query: F) -> Self
     where
-        F: FnMut(ExactSqlStatement) -> Result<ExactSqlRows, ExactSqlError> + Send + 'static,
+        F: FnMut(ExactSqlStatement, ExactSqlStatementBudget) -> Result<ExactSqlRows, ExactSqlError>
+            + Send
+            + 'static,
     {
         Self {
             query: std::sync::Mutex::new(Box::new(query)),
@@ -717,10 +727,18 @@ impl ExactSqlReadSnapshot {
     }
 
     pub fn query(&self, statement: ExactSqlStatement) -> Result<ExactSqlRows, ExactSqlError> {
+        self.query_with_budget(statement, ExactSqlStatementBudget::Request)
+    }
+
+    pub fn query_with_budget(
+        &self,
+        statement: ExactSqlStatement,
+        budget: ExactSqlStatementBudget,
+    ) -> Result<ExactSqlRows, ExactSqlError> {
         statement.validate()?;
         self.query
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)(statement)
+            .unwrap_or_else(std::sync::PoisonError::into_inner)(statement, budget)
     }
 }
 
@@ -861,6 +879,26 @@ impl ExactSqlTransaction {
             .await?
         {
             SqlResult::BatchExecuted(result) => Ok(result),
+            _ => Err(ExactSqlError::TransactionClosed),
+        }
+    }
+
+    /// Runs one query under the same authority-revalidated policy as
+    /// [`Self::execute_authority_revalidated_batch_async`]: no ordinary
+    /// statement deadline, accepted only by an authority-bound long-lease
+    /// transaction.
+    pub async fn query_authority_revalidated_async(
+        &self,
+        statement: ExactSqlStatement,
+    ) -> Result<ExactSqlRows, ExactSqlError> {
+        match self
+            .dispatch_with_policy_async(
+                SqlRequest::Query(statement),
+                ExecutionPolicy::AuthorityRevalidated,
+            )
+            .await?
+        {
+            SqlResult::Queried(result) => Ok(result),
             _ => Err(ExactSqlError::TransactionClosed),
         }
     }
@@ -1179,6 +1217,7 @@ fn execute_batch(connection: &Connection, sql: &str) -> Result<ExactSqlBatchResu
 pub(crate) fn execute_query(
     connection: &Connection,
     request: ExactSqlStatement,
+    budget: ExactSqlStatementBudget,
 ) -> Result<ExactSqlRows, ExactSqlError> {
     request.validate()?;
     with_exact_sql_guard(
@@ -1187,7 +1226,7 @@ pub(crate) fn execute_query(
         false,
         None,
         None,
-        true,
+        budget == ExactSqlStatementBudget::Request,
         None,
         crate::connection::authorize_reader,
         false,
@@ -1329,10 +1368,12 @@ fn sqlite_error(operation: &'static str, error: rusqlite::Error) -> ExactSqlErro
     }
 }
 
-fn map_writer_send_error(error: tokio_mpsc::error::TrySendError<WriterCommand>) -> ExactSqlError {
+fn map_writer_send_error(error: actor_mpsc::SendError<WriterCommand>) -> ExactSqlError {
     match error {
-        tokio_mpsc::error::TrySendError::Full(_) => ExactSqlError::Busy,
-        tokio_mpsc::error::TrySendError::Closed(_) => ExactSqlError::WriterUnavailable,
+        actor_mpsc::SendError::Full(_) => ExactSqlError::Busy,
+        actor_mpsc::SendError::Disconnected(_) | actor_mpsc::SendError::Cancelled(_) => {
+            ExactSqlError::WriterUnavailable
+        }
     }
 }
 

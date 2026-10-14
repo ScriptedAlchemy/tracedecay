@@ -149,7 +149,7 @@ impl StdioTransport {
 impl McpTransport for StdioTransport {
     #[tracing::instrument(name = "mcp.server.read", level = "trace", skip_all)]
     async fn read_line(&mut self) -> std::io::Result<Option<String>> {
-        self.reader.read_mcp_line().await
+        self.reader.read_mcp_line_tokio().await
     }
 
     async fn write_line(&mut self, line: &str) -> std::io::Result<()> {
@@ -172,7 +172,7 @@ where
     R: tokio::io::AsyncBufRead + Unpin + Send,
 {
     async fn read_line(&mut self) -> std::io::Result<Option<String>> {
-        (**self).read_mcp_line().await
+        (**self).read_mcp_line_tokio().await
     }
 }
 

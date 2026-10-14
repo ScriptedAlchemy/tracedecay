@@ -23,6 +23,7 @@ use tracedecay_domain::CodeGenerationId;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::logging::log_daemon_event;
+use tracedecay_runtime_core::native_runtime;
 
 mod graph_replay;
 mod scope_reconciliation;
@@ -35,10 +36,11 @@ pub use scope_reconciliation::{run_code_index_scope_reconciliation, scheduler_ow
 ///
 /// `MoreWork` reports bounded progress with a remaining backlog, another
 /// collectable superseded generation, superseded bytes a transient holder
-/// (serving seat, in-flight text replacement) is about to release, or
-/// unconsumed graph-replay release evidence, so the maintenance owner keeps
-/// the short cadence until the store converges instead of parking multi-GiB
-/// debris behind the full maintenance interval.
+/// (serving seat, in-flight text replacement) is about to release,
+/// unconsumed graph-replay release evidence, or a consumed release whose
+/// freed segments the pass's earlier census missed, so the maintenance owner
+/// keeps the short cadence until the store converges instead of parking
+/// multi-GiB debris behind the full maintenance interval.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CodeGenerationRetentionOutcomeV1 {
     Complete,
@@ -155,7 +157,7 @@ async fn plan_collection(
     let plan_sources = protected_sources.clone();
     let plan_cancellation = cancellation.clone();
     let plan_pool_root = graph_replay_pool_root.to_path_buf();
-    let plan = tokio::task::spawn_blocking(move || {
+    let plan = native_runtime::spawn_blocking(move || {
         prepare_next_code_generation_retention_cancellable(
             &plan_root,
             &plan_sources,
@@ -216,7 +218,7 @@ async fn execute_collection(
     let execution_root = store_root.to_path_buf();
     let execution_pool_root = graph_replay_pool_root.to_path_buf();
     let execution_cancellation = cancellation.clone();
-    let report = tokio::task::spawn_blocking(move || {
+    let report = native_runtime::spawn_blocking(move || {
         execute_code_generation_retention_cancellable(
             &execution_root,
             plan,

@@ -680,7 +680,7 @@ mod tests {
         assert_eq!(normalize_default(Some("(')')")).as_deref(), Some("')'"));
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn table_contract_metadata_is_read_in_a_constant_query_count() {
         let directory = tempfile::tempdir().unwrap();
         let (database, _owner) = open_registered_test_database_fixture(

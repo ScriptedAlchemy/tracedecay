@@ -9,8 +9,9 @@ use serde::Serialize;
 use tracedecay_host_integration::host_bundle_storage_failure;
 
 use super::control::{
-    HOST_BUNDLE_CONTROL_DIR, MAX_CONTROL_FILE_BYTES, component_slug, parse_receipt, receipt_file,
-    receipt_identity_from_file_name, validate_receipt,
+    HOST_BUNDLE_CONTROL_DIR, MAX_CONTROL_FILE_BYTES, canonical_component, component_slug,
+    expected_ownership_marker, parse_receipt, receipt_file, receipt_identity_from_file_name,
+    validate_receipt,
 };
 use super::planner::{ObservedArtifactKindV1, ObservedHostArtifactV1, observe_artifact_at};
 use super::{
@@ -50,6 +51,10 @@ pub trait HostBundleRegistrationInspectorV1 {
     fn interactive_activation_guidance(&self, _host: HostKindV1) -> Option<String> {
         None
     }
+
+    /// The launch args this machine renders the host's embedded bundle with,
+    /// so the receipt digest check compares against the same bytes install wrote.
+    fn serve_args(&self, host: HostKindV1) -> crate::agents::serve_args::ServeArgs;
 }
 
 /// Read-only classification of one installed component (or one of its
@@ -277,24 +282,28 @@ pub fn inspect_installed_host_bundle_components_at(
             continue;
         }
 
-        let catalog_current = crate::agents::host_bundle_registry::verified_embedded_host_bundle(
-            receipt.host,
-            receipt.component,
-            0,
-            generator_commit,
-        )
-        .ok()
-        .is_some_and(|bundle| {
-            bundle.manifest.canonical_digest() == Ok(receipt.manifest_digest)
-                && receipt.artifacts.len() == bundle.manifest.artifacts.len()
-                && receipt.artifacts.iter().all(|artifact| {
-                    bundle.manifest.artifacts.iter().any(|expected| {
-                        artifact.relative_path == expected.relative_path
-                            && artifact.artifact_digest == expected.artifact_digest
-                            && artifact.ownership_marker == expected.ownership_marker
+        // A legacy receipt is never current: its route waits on the canonical
+        // component's next transaction to migrate it.
+        let catalog_current = receipt.component == canonical_component(receipt.component)
+            && crate::agents::host_bundle_registry::verified_embedded_host_bundle(
+                receipt.host,
+                receipt.component,
+                0,
+                generator_commit,
+                &registrations.serve_args(receipt.host),
+            )
+            .ok()
+            .is_some_and(|bundle| {
+                bundle.manifest.canonical_digest() == Ok(receipt.manifest_digest)
+                    && receipt.artifacts.len() == bundle.manifest.artifacts.len()
+                    && receipt.artifacts.iter().all(|artifact| {
+                        bundle.manifest.artifacts.iter().any(|expected| {
+                            artifact.relative_path == expected.relative_path
+                                && artifact.artifact_digest == expected.artifact_digest
+                                && artifact.ownership_marker == expected.ownership_marker
+                        })
                     })
-                })
-        });
+            });
         let registration = registrations.inspect_registration(receipt.host, receipt.component);
         let activation_guidance = registrations.interactive_activation_guidance(receipt.host);
         let mut artifacts = Vec::with_capacity(receipt.artifacts.len());
@@ -307,7 +316,7 @@ pub fn inspect_installed_host_bundle_components_at(
             let sole_owner = ownership_claims
                 .get(&artifact.relative_path)
                 .is_some_and(|markers| {
-                    markers.len() == 1 && markers.contains(&artifact.ownership_marker)
+                    markers.len() == 1 && markers.contains(&canonical_marker(&receipt))
                 });
             let observed = observe_artifact_at(
                 artifact_root,
@@ -492,10 +501,16 @@ fn receipt_ownership_claims(receipt_paths: &[PathBuf]) -> BTreeMap<String, BTree
             claims
                 .entry(artifact.relative_path.clone())
                 .or_default()
-                .insert(artifact.ownership_marker.clone());
+                .insert(canonical_marker(&receipt));
         }
     }
     claims
+}
+
+/// The marker a receipt's claims count under: a legacy identity and its
+/// canonical identity are one owner, not two.
+fn canonical_marker(receipt: &HostBundleInstallReceiptV1) -> String {
+    expected_ownership_marker(receipt.host, canonical_component(receipt.component))
 }
 
 /// Doctor-side mirror of the planner's (`plan_artifact_action`) marker-vs-digest boundary
@@ -589,7 +604,7 @@ pub(super) fn repair_action(
     if host == HostKindV1::ChatGpt && state != HostBundleComponentDoctorStateV1::Current {
         return "run `tracedecay install --agent chatgpt` to refresh the staged bundle, then register it inside ChatGPT through its interactive plugin or connector surfaces; ChatGPT keeps no local registry Doctor can verify".to_string();
     }
-    let component = component_slug(component);
+    let component = component_slug(canonical_component(component));
     let host_descriptor = host.descriptor();
     let host = host_descriptor.cli_id();
     match state {

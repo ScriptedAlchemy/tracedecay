@@ -5,6 +5,7 @@ pub mod capture;
 pub mod capture_protocol;
 pub mod composition;
 pub mod credential_admission;
+pub mod discovery;
 pub mod protocol;
 pub mod protocol_owner;
 pub mod query;

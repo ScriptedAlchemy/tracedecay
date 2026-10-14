@@ -16,11 +16,19 @@ use super::auth::{
     OpaqueRemoteCredential, RemoteEnrollmentAdmissionEvidenceV1, RemoteEnrollmentCommitReceiptV1,
 };
 use super::capture_protocol::RemoteCaptureRequestV1;
-use super::protocol::{EnrollmentRequestV1, RemoteProtocolBodyV1, RemoteProtocolRequestV1};
-use super::query::RemoteQueryRequestV1;
-use super::recovery::PromotionConfirmationV1;
-use super::replay::RemoteReplayRequestV1;
-use super::transfer::RemoteFrameTransferRequestV1;
+use super::discovery::remote_authority_result_contract_v1;
+use super::protocol::{
+    CurrentAuthorityRequestV1, EnrollmentRequestV1, RemoteProtocolBodyV1, RemoteProtocolRequestV1,
+    remote_capture_result_contract_v1, remote_enrollment_result_contract_v1,
+    remote_replay_result_contract_v1,
+};
+use super::query::{RemoteQueryRequestV1, remote_exact_observation_query_result_contract_v1};
+use super::recovery::{PromotionConfirmationV1, remote_promotion_result_contract_v1};
+use super::replay::{
+    RemoteReplayPendingRequestV1, RemoteReplayRequestV1, remote_replay_pending_result_contract_v1,
+};
+use super::transfer::{RemoteFrameTransferRequestV1, remote_frame_transfer_result_contract_v1};
+use crate::{ApplicationContractError, ResultContractRef};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RemoteCredentialClassV1 {
@@ -38,6 +46,7 @@ pub enum RemoteCredentialUseV1 {
     Replay,
     Query,
     Promote,
+    DiscoverAuthority,
 }
 
 impl RemoteCredentialUseV1 {
@@ -48,18 +57,25 @@ impl RemoteCredentialUseV1 {
             | Self::TransferFrame
             | Self::Replay
             | Self::Query
-            | Self::Promote => RemoteCredentialClassV1::Enrollment,
+            | Self::Promote
+            | Self::DiscoverAuthority => RemoteCredentialClassV1::Enrollment,
         }
     }
 
-    pub const fn required_capability(self) -> Option<RemoteCapabilityV1> {
+    /// A promoted node becomes the authority, so promotion also requires the
+    /// capability to serve as one.
+    pub const fn required_capabilities(self) -> &'static [RemoteCapabilityV1] {
         match self {
-            Self::InitialEnrollment => None,
-            Self::CaptureOffline => Some(RemoteCapabilityV1::CaptureOffline),
-            Self::TransferFrame => Some(RemoteCapabilityV1::TransferFrame),
-            Self::Replay => Some(RemoteCapabilityV1::Replay),
-            Self::Query => Some(RemoteCapabilityV1::Query),
-            Self::Promote => Some(RemoteCapabilityV1::Promote),
+            Self::InitialEnrollment => &[],
+            Self::CaptureOffline => &[RemoteCapabilityV1::CaptureOffline],
+            Self::TransferFrame => &[RemoteCapabilityV1::TransferFrame],
+            Self::Replay => &[RemoteCapabilityV1::Replay],
+            Self::Query => &[RemoteCapabilityV1::Query],
+            Self::Promote => &[
+                RemoteCapabilityV1::Promote,
+                RemoteCapabilityV1::ServeAuthority,
+            ],
+            Self::DiscoverAuthority => &[RemoteCapabilityV1::DiscoverAuthority],
         }
     }
 }
@@ -373,6 +389,10 @@ pub trait RemoteSessionBoundProtocolBodyV1: RemoteProtocolBodyV1 {
     const CREDENTIAL_USE: RemoteCredentialUseV1;
     const REAUTHORIZE_BEFORE_EXECUTION: bool = false;
 
+    /// Result contract of the route's responses, including a refusal the
+    /// transport answers before any operation port runs.
+    fn result_contract() -> Result<ResultContractRef, ApplicationContractError>;
+
     fn execution_expires_at(&self) -> Option<UtcMicros> {
         None
     }
@@ -388,6 +408,10 @@ pub trait RemoteSessionBoundProtocolBodyV1: RemoteProtocolBodyV1 {
 impl RemoteSessionBoundProtocolBodyV1 for EnrollmentRequestV1 {
     const CREDENTIAL_USE: RemoteCredentialUseV1 = RemoteCredentialUseV1::InitialEnrollment;
 
+    fn result_contract() -> Result<ResultContractRef, ApplicationContractError> {
+        Ok(remote_enrollment_result_contract_v1())
+    }
+
     fn bind_authenticated_session(
         session: &RemoteAuthenticatedSessionV1,
         request: &RemoteProtocolRequestV1<Self>,
@@ -398,6 +422,10 @@ impl RemoteSessionBoundProtocolBodyV1 for EnrollmentRequestV1 {
 
 impl RemoteSessionBoundProtocolBodyV1 for RemoteCaptureRequestV1 {
     const CREDENTIAL_USE: RemoteCredentialUseV1 = RemoteCredentialUseV1::CaptureOffline;
+
+    fn result_contract() -> Result<ResultContractRef, ApplicationContractError> {
+        Ok(remote_capture_result_contract_v1())
+    }
 
     fn bind_authenticated_session(
         session: &RemoteAuthenticatedSessionV1,
@@ -411,6 +439,25 @@ impl RemoteSessionBoundProtocolBodyV1 for RemoteCaptureRequestV1 {
 impl RemoteSessionBoundProtocolBodyV1 for RemoteReplayRequestV1 {
     const CREDENTIAL_USE: RemoteCredentialUseV1 = RemoteCredentialUseV1::Replay;
 
+    fn result_contract() -> Result<ResultContractRef, ApplicationContractError> {
+        Ok(remote_replay_result_contract_v1())
+    }
+
+    fn bind_authenticated_session(
+        session: &RemoteAuthenticatedSessionV1,
+        request: &RemoteProtocolRequestV1<Self>,
+    ) -> Result<(), RemoteCredentialAdmissionErrorV1> {
+        bind_protocol_body(session, request, Self::CREDENTIAL_USE)
+    }
+}
+
+impl RemoteSessionBoundProtocolBodyV1 for RemoteReplayPendingRequestV1 {
+    const CREDENTIAL_USE: RemoteCredentialUseV1 = RemoteCredentialUseV1::Replay;
+
+    fn result_contract() -> Result<ResultContractRef, ApplicationContractError> {
+        remote_replay_pending_result_contract_v1()
+    }
+
     fn bind_authenticated_session(
         session: &RemoteAuthenticatedSessionV1,
         request: &RemoteProtocolRequestV1<Self>,
@@ -422,6 +469,10 @@ impl RemoteSessionBoundProtocolBodyV1 for RemoteReplayRequestV1 {
 impl RemoteSessionBoundProtocolBodyV1 for RemoteFrameTransferRequestV1 {
     const CREDENTIAL_USE: RemoteCredentialUseV1 = RemoteCredentialUseV1::TransferFrame;
     const REAUTHORIZE_BEFORE_EXECUTION: bool = true;
+
+    fn result_contract() -> Result<ResultContractRef, ApplicationContractError> {
+        remote_frame_transfer_result_contract_v1()
+    }
 
     fn execution_expires_at(&self) -> Option<UtcMicros> {
         Some(UtcMicros(self.expires_at_micros))
@@ -438,6 +489,10 @@ impl RemoteSessionBoundProtocolBodyV1 for RemoteFrameTransferRequestV1 {
 impl RemoteSessionBoundProtocolBodyV1 for RemoteQueryRequestV1 {
     const CREDENTIAL_USE: RemoteCredentialUseV1 = RemoteCredentialUseV1::Query;
 
+    fn result_contract() -> Result<ResultContractRef, ApplicationContractError> {
+        Ok(remote_exact_observation_query_result_contract_v1())
+    }
+
     fn bind_authenticated_session(
         session: &RemoteAuthenticatedSessionV1,
         request: &RemoteProtocolRequestV1<Self>,
@@ -451,9 +506,29 @@ impl RemoteSessionBoundProtocolBodyV1 for RemoteQueryRequestV1 {
     }
 }
 
+impl RemoteSessionBoundProtocolBodyV1 for CurrentAuthorityRequestV1 {
+    const CREDENTIAL_USE: RemoteCredentialUseV1 = RemoteCredentialUseV1::DiscoverAuthority;
+
+    fn result_contract() -> Result<ResultContractRef, ApplicationContractError> {
+        remote_authority_result_contract_v1()
+    }
+
+    fn bind_authenticated_session(
+        session: &RemoteAuthenticatedSessionV1,
+        request: &RemoteProtocolRequestV1<Self>,
+    ) -> Result<(), RemoteCredentialAdmissionErrorV1> {
+        bind_protocol_body(session, request, Self::CREDENTIAL_USE)?;
+        session.bind_scope(&request.body.scope)
+    }
+}
+
 impl RemoteSessionBoundProtocolBodyV1 for PromotionConfirmationV1 {
     const CREDENTIAL_USE: RemoteCredentialUseV1 = RemoteCredentialUseV1::Promote;
     const REAUTHORIZE_BEFORE_EXECUTION: bool = true;
+
+    fn result_contract() -> Result<ResultContractRef, ApplicationContractError> {
+        remote_promotion_result_contract_v1()
+    }
 
     fn execution_expires_at(&self) -> Option<UtcMicros> {
         Some(UtcMicros(self.expires_at_micros))
@@ -532,9 +607,10 @@ where
             return Err(RemoteCredentialAdmissionErrorV1::Rejected);
         }
         validate_state(&record, observed_at)?;
-        if use_case
-            .required_capability()
-            .is_some_and(|capability| !record.capabilities().contains(&capability))
+        if !use_case
+            .required_capabilities()
+            .iter()
+            .all(|capability| record.capabilities().contains(capability))
         {
             return Err(RemoteCredentialAdmissionErrorV1::InsufficientCapability);
         }
@@ -671,7 +747,10 @@ mod tests {
         }
     }
 
-    fn enrollment(secret: &[u8]) -> EnrollmentCredentialRecordV1 {
+    fn enrollment(
+        secret: &[u8],
+        capabilities: BTreeSet<RemoteCapabilityV1>,
+    ) -> EnrollmentCredentialRecordV1 {
         EnrollmentCredentialRecordV1 {
             enrollment_id: id::<EntityId>("enrollment.remote"),
             brain_id: id::<BrainId>("brain.remote"),
@@ -681,17 +760,27 @@ mod tests {
             issued_at: UtcMicros(10),
             expires_at: UtcMicros(100),
             revoked_at: None,
-            capabilities: BTreeSet::from([
-                RemoteCapabilityV1::Replay,
-                RemoteCapabilityV1::Query,
-                RemoteCapabilityV1::TransferFrame,
-            ]),
+            capabilities,
             scope: scope(),
         }
     }
 
     fn fake_record(secret: &[u8]) -> RemoteCredentialAuthorityRecordV1 {
-        let enrollment = enrollment(secret);
+        fake_record_with(
+            secret,
+            BTreeSet::from([
+                RemoteCapabilityV1::Replay,
+                RemoteCapabilityV1::Query,
+                RemoteCapabilityV1::TransferFrame,
+            ]),
+        )
+    }
+
+    fn fake_record_with(
+        secret: &[u8],
+        capabilities: BTreeSet<RemoteCapabilityV1>,
+    ) -> RemoteCredentialAuthorityRecordV1 {
+        let enrollment = enrollment(secret, capabilities);
         let grant = EnrollmentGrantV1 {
             grant_id: id("grant.remote"),
             brain_id: enrollment.brain_id.clone(),
@@ -927,6 +1016,33 @@ mod tests {
         assert_eq!(
             service.reauthorize_publication(&session, UtcMicros(21)),
             Err(RemoteCredentialAdmissionErrorV1::Revoked)
+        );
+    }
+
+    #[test]
+    fn promotion_requires_the_capability_to_serve_as_the_promoted_authority() {
+        let secret = [7_u8; 32];
+        let presented = OpaqueRemoteCredential::new(secret).unwrap();
+        let admit = |capabilities: &[RemoteCapabilityV1]| {
+            let record = fake_record_with(&secret, capabilities.iter().copied().collect());
+            RemoteCredentialAdmissionServiceV1::new(FakeStore {
+                records: Mutex::new(BTreeMap::from([(record.fingerprint().clone(), record)])),
+            })
+            .admit_before_body(&presented, RemoteCredentialUseV1::Promote, UtcMicros(20))
+            .map(|session| session.use_case)
+        };
+
+        assert_eq!(
+            admit(&[RemoteCapabilityV1::Promote]),
+            Err(RemoteCredentialAdmissionErrorV1::InsufficientCapability),
+            "a node that cannot serve authority must not be promoted to it"
+        );
+        assert_eq!(
+            admit(&[
+                RemoteCapabilityV1::Promote,
+                RemoteCapabilityV1::ServeAuthority
+            ]),
+            Ok(RemoteCredentialUseV1::Promote)
         );
     }
 }

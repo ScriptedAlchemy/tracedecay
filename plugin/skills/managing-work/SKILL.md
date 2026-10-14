@@ -5,6 +5,14 @@ description: Create or control TraceDecay Work tasks, attempts, graph mutations,
 
 # Managing Work
 
+For bounded parallel implementation with a reviewed synthesis, start with
+`tracedecay_work_advance_job`. One request names the tasks, each task's
+placement, and the synthesis; each call runs the next existing operations and
+returns their receipts, a wait, a typed refusal, or the completed attempts.
+Call it again with the same request until it settles. The operations below
+stay available for steps the guided job leaves to you, such as pause, resume,
+retry, and adjudication.
+
 Work is the daemon-owned task/attempt surface. `tracedecay_work_create` mints a
 task; proposal review and acceptance (`tracedecay_work_review_proposal`,
 `tracedecay_work_accept_proposal`) precede execution admission

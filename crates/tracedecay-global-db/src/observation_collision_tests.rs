@@ -722,7 +722,7 @@ async fn provenance_rows(runtime: &HostAdmissionTestRuntimeV1) -> Vec<Provenance
 /// cursor converges past the colliding record and the refusal lands in the
 /// `source_cursor_advances` ledger with the typed
 /// `observation_identity_collision` reason.
-#[tokio::test]
+#[asupersync::test]
 async fn identity_collision_records_durable_typed_coverage() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -817,7 +817,7 @@ async fn identity_collision_records_durable_typed_coverage() {
 /// alternate identity then owns the ordinary exact-CAS write; if it persists,
 /// the primary candidate was never a terminal refusal and therefore must not
 /// leave refusal or coverage state behind.
-#[tokio::test]
+#[asupersync::test]
 async fn retryable_primary_collision_leaves_frontier_for_positional_fallback() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -937,7 +937,7 @@ async fn retryable_primary_collision_leaves_frontier_for_positional_fallback() {
     assert_eq!(table_count(&runtime, "observations").await, 2);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn exhausted_positional_fallback_settles_terminal_collision_coverage() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -1051,7 +1051,7 @@ async fn exhausted_positional_fallback_settles_terminal_collision_coverage() {
 /// the same typed error without accessing the retained observation row and
 /// without any point-read runtime dispatches: the bounded preflight snapshot
 /// supplies the refusal, retained identity, and source-cursor authorities.
-#[tokio::test]
+#[asupersync::test]
 async fn re_admitted_identity_collision_uses_marker_without_retained_row_access() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -1179,7 +1179,7 @@ async fn re_admitted_identity_collision_uses_marker_without_retained_row_access(
 /// cursor-transition authority accepts that shape when the FileBytes range
 /// restarts at zero, so collision refusal must commit the same terminal
 /// coverage and keep later re-admission on the zero-record-work fast path.
-#[tokio::test]
+#[asupersync::test]
 async fn replacement_domain_collision_records_terminal_coverage_without_rework() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -1281,7 +1281,7 @@ async fn replacement_domain_collision_records_terminal_coverage_without_rework()
 /// checkpoint advances, the queue drains, replay is an exact duplicate,
 /// while the real pre-existing output stays durable and no partial
 /// replacement output rows leak.
-#[tokio::test]
+#[asupersync::test]
 async fn drain_provenance_collision_with_existing_output_converges_to_durable_skip() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -1444,7 +1444,7 @@ async fn drain_provenance_collision_with_existing_output_converges_to_durable_sk
 /// message row is corrupt authority, not an existing-output
 /// collision. It must stay a hard `ProvenanceCollision`: the checkpoint and
 /// queue remain in place and the ghost provenance row is not deleted.
-#[tokio::test]
+#[asupersync::test]
 async fn drain_keeps_ghost_provenance_binding_a_hard_error() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -1670,7 +1670,7 @@ async fn run_catch_up_pass(
 /// the cursor is a retryable cursor race, not proof that the candidate itself
 /// is permanently invalid. With no matching refusal terminal, the loser must
 /// leave every coverage ledger untouched and retry from the winning cursor.
-#[tokio::test]
+#[asupersync::test]
 async fn covered_collision_without_a_terminal_is_a_retryable_cursor_conflict() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -1732,7 +1732,7 @@ async fn covered_collision_without_a_terminal_is_a_retryable_cursor_conflict() {
 /// A colliding candidate whose expected cursor does not match the durable one
 /// has not established a terminal content refusal. It must surface the typed
 /// retryable cursor conflict and never record coverage.
-#[tokio::test]
+#[asupersync::test]
 async fn stale_expected_cursor_collision_is_a_retryable_cursor_conflict() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -1805,8 +1805,8 @@ async fn stale_expected_cursor_collision_is_a_retryable_cursor_conflict() {
 /// enters the canonical writer lane. If the winner advances that cursor while
 /// the collision loser is waiting for the refusal transaction, the loser has
 /// lost a CAS; it has not established a permanent content refusal.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn refusal_cursor_cas_loser_is_retryable_and_writes_no_terminal() {
+#[asupersync::test(flavor = "multi_thread", workers = 2)]
+async fn refusal_cursor_cas_loser_is_retryable_and_writes_no_terminal(cx: &asupersync::Cx) {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
         .await
@@ -1848,12 +1848,18 @@ async fn refusal_cursor_cas_loser_is_retryable_and_writes_no_terminal() {
         .expect("registered profile database");
     let winner = database.begin_write_transaction().await.unwrap();
     let losing_store = store.clone();
-    let mut losing_write =
-        tokio::spawn(async move { losing_store.persist_observation(rewritten_write).await });
+    let mut losing_write = cx
+        .spawn(move |_| async move { losing_store.persist_observation(rewritten_write).await })
+        .expect("spawn losing write");
+    let mut losing_write = std::pin::pin!(losing_write.join(cx));
     assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(100), &mut losing_write)
-            .await
-            .is_err(),
+        asupersync::time::timeout(
+            asupersync::time::wall_now(),
+            std::time::Duration::from_millis(100),
+            &mut losing_write
+        )
+        .await
+        .is_err(),
         "the loser must wait behind the held writer lane"
     );
 
@@ -1910,7 +1916,7 @@ async fn refusal_cursor_cas_loser_is_retryable_and_writes_no_terminal() {
 /// FileBytes replacement generations must restart at zero. The canonical
 /// observation-write contract rejects a mid-file replacement before it can
 /// reach persistence, so no refusal, coverage, or cursor mutation can occur.
-#[tokio::test]
+#[asupersync::test]
 async fn file_bytes_generation_jump_is_rejected_before_persistence() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -1982,7 +1988,7 @@ async fn file_bytes_generation_jump_is_rejected_before_persistence() {
 
 /// The refusal CAS compares typed cursor authority. JSON whitespace is not
 /// part of that authority and must not prevent atomic coverage.
-#[tokio::test]
+#[asupersync::test]
 async fn refusal_cas_accepts_equivalent_cursor_json_spelling() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -2157,7 +2163,7 @@ fn codex_revision_observation(
 /// canonical payload revision replay must still converge as
 /// `CoveredDuplicate`. The terminal is bound to the exact refused candidate
 /// digest, so it can never blanket-reject every differing digest.
-#[tokio::test]
+#[asupersync::test]
 async fn canonical_payload_revision_replay_survives_an_earlier_refusal() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -2255,7 +2261,7 @@ async fn canonical_payload_revision_replay_survives_an_earlier_refusal() {
 /// marker with unconverged coverage. That orphan must be self-repairing: the
 /// next frontier pass answers from the marker AND repairs coverage, so the
 /// record is reopened at most once and never again.
-#[tokio::test]
+#[asupersync::test]
 async fn orphaned_refusal_marker_repairs_coverage_on_the_next_frontier_pass() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -2666,7 +2672,7 @@ async fn run_vibe_trigger(
 /// A rewritten EOF record collides once; the global-db transaction records the
 /// refusal and cursor together. Retention, another file generation, the next
 /// trigger, and a full store restart must never rematerialize that record.
-#[tokio::test]
+#[asupersync::test]
 async fn vibe_jsonl_eof_refusal_survives_retention_generation_and_restart_without_rework() {
     use crate::observation::retention::{ObservationRetentionConfig, RetentionMode};
 
@@ -2852,7 +2858,7 @@ async fn vibe_jsonl_eof_refusal_survives_retention_generation_and_restart_withou
 /// must leave NO visible refusal marker (no orphan), no cursor movement, and
 /// the injected row untouched; clearing the conflict lets the next frontier
 /// pass record marker + coverage together.
-#[tokio::test]
+#[asupersync::test]
 async fn failed_coverage_advance_leaves_no_visible_refusal_marker() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -3019,7 +3025,7 @@ async fn failed_coverage_advance_leaves_no_visible_refusal_marker() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn covered_frontier_keeps_the_first_reason_when_a_second_owner_advances() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -3085,7 +3091,7 @@ async fn covered_frontier_keeps_the_first_reason_when_a_second_owner_advances() 
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn runtime_cursor_replay_preserves_structured_ledger_disagreement() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -3160,7 +3166,7 @@ async fn runtime_cursor_replay_preserves_structured_ledger_disagreement() {
     ));
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn covered_cursor_without_a_ledger_row_is_already_owned() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -3196,8 +3202,8 @@ async fn covered_cursor_without_a_ledger_row_is_already_owned() {
     );
 }
 
-#[tokio::test]
-async fn concurrent_cursor_owners_with_different_reasons_share_one_frontier() {
+#[asupersync::test]
+async fn concurrent_cursor_owners_with_different_reasons_share_one_frontier(cx: &asupersync::Cx) {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
         .await
@@ -3243,19 +3249,32 @@ async fn concurrent_cursor_owners_with_different_reasons_share_one_frontier() {
     let gate = database.begin_write_transaction().await.unwrap();
     let left_store = store.clone();
     let right_store = store.clone();
-    let mut left_task = tokio::spawn(async move { left_store.advance_source_cursor(blank).await });
-    let mut right_task =
-        tokio::spawn(async move { right_store.advance_source_cursor(out_of_scope).await });
+    let mut left_task = cx
+        .spawn(move |_| async move { left_store.advance_source_cursor(blank).await })
+        .expect("spawn blank-frame owner");
+    let mut right_task = cx
+        .spawn(move |_| async move { right_store.advance_source_cursor(out_of_scope).await })
+        .expect("spawn out-of-scope owner");
+    let mut left_task = std::pin::pin!(left_task.join(cx));
+    let mut right_task = std::pin::pin!(right_task.join(cx));
     assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(200), &mut left_task)
-            .await
-            .is_err(),
+        asupersync::time::timeout(
+            asupersync::time::wall_now(),
+            std::time::Duration::from_millis(200),
+            &mut left_task
+        )
+        .await
+        .is_err(),
         "the blank-frame owner must wait behind the held writer"
     );
     assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(200), &mut right_task)
-            .await
-            .is_err(),
+        asupersync::time::timeout(
+            asupersync::time::wall_now(),
+            std::time::Duration::from_millis(200),
+            &mut right_task
+        )
+        .await
+        .is_err(),
         "the out-of-scope owner must wait behind the held writer"
     );
     gate.rollback().await.unwrap();
@@ -3342,7 +3361,7 @@ async fn rewind_source_cursor(
 /// `next_cursor`, so the coverage is applied and the replay is a duplicate.
 /// A conflict whose ledger already records this coverage restores the cursor.
 /// A missing ledger row stays a collision.
-#[tokio::test]
+#[asupersync::test]
 async fn already_positioned_cursor_replay_with_new_command_bytes_is_a_duplicate() {
     const FILE_IDENTITY: u64 = 41;
 
@@ -3440,7 +3459,7 @@ async fn already_positioned_cursor_replay_with_new_command_bytes_is_a_duplicate(
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn runtime_cursor_replay_preserves_storage_failure() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
@@ -3515,7 +3534,7 @@ async fn runtime_cursor_replay_preserves_storage_failure() {
 /// existing-output collision. It must stay a hard `ProvenanceCollision` with
 /// the queue item retained and the checkpoint unmoved; only a row binding a
 /// DIFFERENT output converges to the durable skip.
-#[tokio::test]
+#[asupersync::test]
 async fn drain_keeps_corrupt_provenance_with_matching_output_a_hard_error() {
     // Learn the derived output binding from a clean drain of the identical
     // fixture in a scratch store (the derivation is deterministic).
@@ -3749,7 +3768,7 @@ async fn drain_keeps_corrupt_provenance_with_matching_output_a_hard_error() {
 /// durable skip. Divergent durable workflow-fact state is corrupt authority,
 /// not an output collision, it must stay a hard `ProvenanceCollision` error
 /// with the queue item retained and the checkpoint unmoved.
-#[tokio::test]
+#[asupersync::test]
 async fn drain_keeps_divergent_workflow_fact_state_a_hard_error() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())

@@ -48,6 +48,13 @@ impl HostBundleRegistrationInspectorV1 for CurrentRegistration {
     ) -> HostBundleRegistrationStateV1 {
         HostBundleRegistrationStateV1::Current
     }
+
+    fn serve_args(
+        &self,
+        _host: HostKindV1,
+    ) -> tracedecay_agent_hosts::agents::serve_args::ServeArgs {
+        tracedecay_agent_hosts::agents::serve_args::ServeArgs::default()
+    }
 }
 
 impl HostComponentSetRegistrationV1 for CurrentRegistration {}
@@ -62,6 +69,13 @@ impl HostBundleRegistrationInspectorV1 for MissingRegistration {
     ) -> HostBundleRegistrationStateV1 {
         HostBundleRegistrationStateV1::Missing
     }
+
+    fn serve_args(
+        &self,
+        _host: HostKindV1,
+    ) -> tracedecay_agent_hosts::agents::serve_args::ServeArgs {
+        tracedecay_agent_hosts::agents::serve_args::ServeArgs::default()
+    }
 }
 
 #[test]
@@ -74,6 +88,7 @@ fn receipt_backed_doctor_checks_deployed_digests_registration_and_repair() {
         HostComponentV1::Core,
         0,
         GENERATOR_COMMIT,
+        &tracedecay_agent_hosts::agents::serve_args::ServeArgs::default(),
     )
     .unwrap();
     for content in &bundle.contents {
@@ -179,6 +194,7 @@ fn receipt_backed_doctor_checks_deployed_digests_registration_and_repair() {
             profile: tracedecay_runtime_core::config::ProfileRoot::under_home(artifact_root.path()),
             home: artifact_root.path().to_path_buf(),
             project_path: artifact_root.path().to_path_buf(),
+            catalog_profiles: Default::default(),
         },
         lifecycle_root.path(),
         GENERATOR_COMMIT,
@@ -222,6 +238,7 @@ fn cursor_native_extension_receipt_matches_embedded_assets() {
         HostComponentV1::Agent,
         0,
         GENERATOR_COMMIT,
+        &tracedecay_agent_hosts::agents::serve_args::ServeArgs::default(),
     )
     .unwrap();
     for content in &bundle.contents {

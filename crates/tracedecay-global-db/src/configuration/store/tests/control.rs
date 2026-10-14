@@ -95,7 +95,7 @@ fn audit_target_commitments_are_keyed_and_event_scoped() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn partial_rollback_is_typed_unavailable_until_selective_restore_exists() {
     let (_directory, runtime, root) = global_setup().await;
     let db = runtime
@@ -119,7 +119,7 @@ async fn partial_rollback_is_typed_unavailable_until_selective_restore_exists() 
     assert_eq!(result, Err(ConfigurationError::Unavailable));
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn global_control_adapter_enforces_direct_cas_and_exact_replay() {
     let (_directory, runtime, root) = global_setup().await;
     let db = runtime
@@ -188,7 +188,7 @@ async fn global_control_adapter_enforces_direct_cas_and_exact_replay() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn owned_global_control_adapter_preserves_cas_while_daemon_scope_is_active() {
     let (_directory, runtime, root) = global_setup().await;
     let store = runtime
@@ -235,7 +235,7 @@ async fn owned_global_control_adapter_preserves_cas_while_daemon_scope_is_active
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn owned_global_control_adapter_rejects_writes_after_daemon_scope_ends() {
     let (_directory, runtime, root) = global_setup().await;
     let store = runtime
@@ -261,7 +261,7 @@ async fn owned_global_control_adapter_rejects_writes_after_daemon_scope_ends() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn direct_audit_target_never_persists_sensitive_setting_values() {
     let (_directory, runtime, root) = global_setup().await;
     let db = runtime
@@ -316,7 +316,7 @@ async fn direct_audit_target_never_persists_sensitive_setting_values() {
     assert!(rows.next().await.unwrap().is_none());
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn protected_operation_survives_adapter_rebuild_populates_projections_and_rolls_back() {
     let (_directory, runtime, root) = global_setup().await;
     let db = runtime
@@ -518,7 +518,7 @@ async fn protected_operation_survives_adapter_rebuild_populates_projections_and_
     assert_eq!(store.current().await.unwrap().snapshot, root.snapshot);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn configuration_audit_cursor_pages_only_the_request_that_minted_it() {
     let (_directory, runtime, root) = global_setup().await;
     let db = runtime

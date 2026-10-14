@@ -360,7 +360,7 @@ pub(crate) async fn capture_opencode_observations(
                 break;
             }
             let owned_source = scan_source.clone();
-            let scan = tokio::task::spawn_blocking(move || {
+            let scan = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
                 scan_materialized_page(
                     &owned_source,
                     scan_kind,

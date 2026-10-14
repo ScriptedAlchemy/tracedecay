@@ -11,6 +11,11 @@ use crate::ToolDefinition;
 
 type DiscoveryResult<T> = Result<T, crate::McpCatalogError>;
 
+/// The MCP tool name of one Workflow operation.
+pub fn workflow_tool_name(operation: WorkflowOperation) -> String {
+    format!("tracedecay_workflow_{}", operation.operation_key())
+}
+
 /// Build every discoverable Workflow tool from the mounted executable bindings.
 ///
 /// Discovery fails loudly if the registry is incomplete rather than silently
@@ -25,7 +30,7 @@ pub(super) fn workflow_definitions() -> DiscoveryResult<Vec<ToolDefinition>> {
             let key = operation.operation_key();
             FamilyOperation {
                 operation_id: operation.operation_id_str().to_owned(),
-                name: format!("tracedecay_workflow_{key}"),
+                name: workflow_tool_name(operation),
                 title: format!("Workflow {key}"),
                 description: format!("Invoke the Workflow {key} operation."),
             }

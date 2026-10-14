@@ -93,7 +93,7 @@ impl ParkHeadroomV1 {
     /// lower value; its epoch moving wakes the reader to count again.
     pub(super) fn released_by_others(
         &self,
-        headroom: &mut tokio::sync::watch::Receiver<u64>,
+        headroom: &mut asupersync::channel::watch::Receiver<u64>,
     ) -> u64 {
         let epoch = *headroom.borrow_and_update();
         epoch.saturating_sub(self.0.load(Ordering::Acquire))
@@ -272,16 +272,10 @@ impl WorktreeResidencyV1 {
             text.code_graph_serving_readiness() == CodeGraphServingReadinessV1::Ready
         }) {
             self.arm_park_release_after_first_catalog_warm(owners);
-            // The first warm may have settled between the check and the arm.
-            // Re-check before returning so that permit is not the only retry.
-            if !self.serving_text().is_some_and(|text| {
-                text.code_graph_serving_readiness() == CodeGraphServingReadinessV1::Ready
-            }) {
-                if !decode_released.is_empty() {
-                    self.park_headroom.note(owners);
-                }
-                return;
+            if !decode_released.is_empty() {
+                self.park_headroom.note(owners);
             }
+            return;
         }
         let mut graph_released = false;
         let mut graph_busy = false;
@@ -401,6 +395,8 @@ impl WorktreeResidencyV1 {
     /// The first catalog warm finishes on a blocking task and does not wake
     /// the parked worker. Arm one waiter that retries this release when that
     /// warm settles; generation/owner checks stay in [`Self::release_decode_when_parked`].
+    /// The settle hook and the waiter share one retry that runs once: a
+    /// second run would evict a graph that a read reseated in between.
     fn arm_park_release_after_first_catalog_warm(self: &Arc<Self>, owners: &Arc<ResidentOwnersV1>) {
         let Some(text) = self.serving_text() else {
             return;
@@ -410,7 +406,11 @@ impl WorktreeResidencyV1 {
         }
         let residency = Arc::downgrade(self);
         let owners = Arc::downgrade(owners);
+        let retried = AtomicBool::new(false);
         let retry: ParkedGraphReleaseCallback = Arc::new(move || {
+            if retried.swap(true, Ordering::AcqRel) {
+                return;
+            }
             if let (Some(residency), Some(owners)) = (residency.upgrade(), owners.upgrade()) {
                 residency.release_decode_when_parked(&owners);
             }

@@ -197,7 +197,7 @@ async fn fill_codex_session_meta(
     let memory = reserve_shared_jsonl_page()?;
     let background_cpu = shared_jsonl_background_cpu()?;
     let parse_path = claim.key.path.clone();
-    let (parsed, mut memory) = tokio::task::spawn_blocking(move || {
+    let (parsed, mut memory) = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         let parsed = background_cpu.with_permit(|| session_meta_with_provenance(&parse_path));
         (parsed, memory)
     })
@@ -463,7 +463,7 @@ async fn shared_session_meta_with_provenance(
     cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<Arc<CodexMetaWithProvenance>> {
     let identity_path = path.to_path_buf();
-    let key = tokio::task::spawn_blocking(move || {
+    let key = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         let canonical = std::fs::canonicalize(&identity_path).map_err(|source| {
             TranscriptIngestError::ScanIo {
                 operation: "resolve Codex session metadata identity",
@@ -498,9 +498,15 @@ async fn shared_session_meta_with_provenance(
     };
     // The fill is detached from this request: cancelling the requester leaves
     // the owner to settle for every other waiter on the same key.
-    let fill = tokio::spawn(fill_codex_session_meta(claim, path.to_path_buf()));
+    let error_path = path.to_path_buf();
+    let mut fill = tracedecay_runtime_core::native_runtime::cx()
+        .and_then(|cx| {
+            cx.spawn(move |_cx| fill_codex_session_meta(claim, error_path))
+                .ok()
+        })
+        .ok_or(TranscriptIngestError::BlockingScanTaskFailed { provider: PROVIDER })?;
     tokio::select! {
-        settled = fill => {
+        settled = std::future::poll_fn(|context| fill.poll_join(context)) => {
             settled.map_err(|_| TranscriptIngestError::BlockingScanTaskFailed { provider: PROVIDER })?
         }
         () = cancellation.cancelled() => Err(TranscriptIngestError::Cancelled { provider: PROVIDER }),

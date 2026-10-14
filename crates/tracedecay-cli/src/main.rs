@@ -1260,11 +1260,10 @@ async fn dispatch_runtime_command(
         Commands::Workflow { invocation } => workflow_command::run(profile, invocation).await?,
         Commands::Remote { action } => {
             let profile = profile.clone();
-            let command = action.into();
             tracing::Instrument::instrument(
                 async {
                     tokio::task::spawn_blocking(move || {
-                        crate::remote_command::run(&profile, command)
+                        crate::remote_command::run(&profile, action)
                     })
                     .await
                     .map_err(|error| {
@@ -1381,6 +1380,7 @@ async fn dispatch_runtime_command(
             path,
             timings,
             full_tool_list,
+            catalog_profile,
         } => {
             if matches!(std::env::var("DISABLE_TRACEDECAY").as_deref(), Ok("true")) {
                 // Allow users to opt out per-project by setting
@@ -1393,7 +1393,7 @@ async fn dispatch_runtime_command(
             // do (they would drop the sweep mid-parse on exit).
             tracedecay_store_runtime::mark_process_long_lived_for_session_maintenance();
             tracing::Instrument::instrument(
-                serve_cmd::run_serve(profile, path, timings, full_tool_list),
+                serve_cmd::run_serve(profile, path, timings, full_tool_list, catalog_profile),
                 tracing::trace_span!("cli.serve.run"),
             )
             .await?;
@@ -1564,49 +1564,58 @@ async fn dispatch_agent_command(
 ) -> tracedecay_domain::errors::Result<agent_cmd::HostLifecycleCompletion> {
     use agent_cmd::HostBundleCliOperation as Operation;
 
-    let (operation, agent, local, no_dashboard, automation, git_hook) = match command {
-        Commands::FeedbackRollback { mut action } => {
-            if host_bundle.component.is_some() || host_bundle.dry_run {
-                return Err(tracedecay_domain::errors::TraceDecayError::Config {
-                    message: "feedback-rollback does not accept host-component selectors"
-                        .to_string(),
-                });
-            }
-            match &mut action {
-                crate::cli::FeedbackRollbackAction::Apply { yes, .. }
-                | crate::cli::FeedbackRollbackAction::Restore { yes, .. } => {
-                    *yes |= host_bundle.yes;
+    let (operation, agent, local, no_dashboard, automation, git_hook, catalog_profile) =
+        match command {
+            Commands::FeedbackRollback { mut action } => {
+                if host_bundle.component.is_some() || host_bundle.dry_run {
+                    return Err(tracedecay_domain::errors::TraceDecayError::Config {
+                        message: "feedback-rollback does not accept host-component selectors"
+                            .to_string(),
+                    });
                 }
-                crate::cli::FeedbackRollbackAction::DryRun { .. } => {}
+                match &mut action {
+                    crate::cli::FeedbackRollbackAction::Apply { yes, .. }
+                    | crate::cli::FeedbackRollbackAction::Restore { yes, .. } => {
+                        *yes |= host_bundle.yes;
+                    }
+                    crate::cli::FeedbackRollbackAction::DryRun { .. } => {}
+                }
+                agent_cmd::handle_feedback_rollback_command(profile, action).await?;
+                return Ok(agent_cmd::HostLifecycleCompletion::Complete);
             }
-            agent_cmd::handle_feedback_rollback_command(profile, action).await?;
-            return Ok(agent_cmd::HostLifecycleCompletion::Complete);
-        }
-        Commands::Install {
-            agent,
-            local,
-            no_dashboard,
-            automation,
-            git_hook,
-        } => (
-            Operation::Install,
-            agent,
-            local,
-            no_dashboard,
-            automation,
-            git_hook,
-        ),
-        Commands::Reinstall { local, agent } => {
-            (Operation::Repair, agent, local, false, false, false)
-        }
-        Commands::UpdatePlugin { local, agent } => {
-            (Operation::Update, agent, local, false, false, false)
-        }
-        Commands::Uninstall { agent, local } => {
-            (Operation::Uninstall, agent, local, false, false, false)
-        }
-        _ => unreachable!("non-agent command passed to agent dispatcher"),
-    };
+            Commands::Install {
+                agent,
+                local,
+                no_dashboard,
+                automation,
+                git_hook,
+                catalog_profile,
+            } => (
+                Operation::Install,
+                agent,
+                local,
+                no_dashboard,
+                automation,
+                git_hook,
+                catalog_profile,
+            ),
+            Commands::Reinstall { local, agent } => {
+                (Operation::Repair, agent, local, false, false, false, None)
+            }
+            Commands::UpdatePlugin { local, agent } => {
+                (Operation::Update, agent, local, false, false, false, None)
+            }
+            Commands::Uninstall { agent, local } => (
+                Operation::Uninstall,
+                agent,
+                local,
+                false,
+                false,
+                false,
+                None,
+            ),
+            _ => unreachable!("non-agent command passed to agent dispatcher"),
+        };
     let completion = if local {
         if host_bundle.component.is_some() || host_bundle.dry_run {
             return Err(tracedecay_domain::errors::TraceDecayError::Config {
@@ -1625,6 +1634,7 @@ async fn dispatch_agent_command(
             operation,
             host_bundle,
             no_dashboard,
+            catalog_profile,
             automation.then_some(agent_cmd::CodexAutomationInstall),
         )
         .await?

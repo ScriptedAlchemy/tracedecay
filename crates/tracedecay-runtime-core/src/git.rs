@@ -16,11 +16,14 @@ pub mod churn;
 pub mod co_change;
 
 use std::ffi::{OsStr, OsString};
+use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::cancellation::CancellationToken;
@@ -280,38 +283,33 @@ pub fn bounded_git_output(
 /// and termination. [`bounded_git_output`] is the read-only Git wrapper that
 /// applies `TraceDecay`'s ambient-environment sanitization.
 pub fn bounded_command_output(
-    command: Command,
+    mut command: Command,
     stdin: Option<&[u8]>,
     bounds: &GitCommandBounds,
 ) -> Result<Output, GitCommandError> {
-    if bounds
-        .cancel
-        .as_ref()
-        .is_some_and(CancellationToken::is_cancelled)
-    {
+    if is_cancelled(bounds) {
         return Err(GitCommandError::Cancelled);
     }
     if Instant::now() >= bounds.deadline {
         return Err(GitCommandError::DeadlineExceeded);
     }
 
-    let input = stdin.map(<[u8]>::to_vec);
-    let bounds = bounds.clone();
-    std::thread::scope(|scope| {
-        scope
-            .spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_io()
-                    .enable_time()
-                    .build()
-                    .map_err(GitCommandError::Wait)?;
-                runtime.block_on(run_bounded_command(command, input, bounds))
-            })
-            .join()
-            .map_err(|_| {
-                GitCommandError::Wait(std::io::Error::other("bounded command supervisor panicked"))
-            })?
-    })
+    let mut child = command
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(GitCommandError::Unavailable)?;
+    let output = supervise_child(&mut child, stdin, bounds);
+    if output.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    output
 }
 
 /// Runs in-process Git work under the bounds that govern Git subprocesses.
@@ -321,35 +319,37 @@ pub fn bounded_command_output(
 /// discarded because an interrupted walk returns whatever it had so far.
 pub(crate) fn run_interruptible<T>(
     bounds: &GitCommandBounds,
-    interrupt: &std::sync::atomic::AtomicBool,
+    interrupt: &AtomicBool,
     work: impl FnOnce() -> T,
 ) -> Result<T, GitCommandError> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .build()
-        .map_err(GitCommandError::Wait)?;
-    let cancellation = bounds.cancel.clone();
-    let deadline = tokio::time::Instant::from_std(bounds.deadline);
-    let (finished, settled) = tokio::sync::oneshot::channel::<()>();
+    let (finished, settled) = mpsc::channel::<()>();
     std::thread::scope(|scope| {
         let watchdog = scope.spawn(move || {
-            let fired = runtime.block_on(async {
-                tokio::select! {
-                    biased;
-                    () = wait_for_cancellation(cancellation) => Some(GitCommandError::Cancelled),
-                    () = tokio::time::sleep_until(deadline) => {
-                        Some(GitCommandError::DeadlineExceeded)
-                    }
-                    _ = settled => None,
+            loop {
+                let wait = bounds
+                    .deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(CHILD_WAIT_POLL_INTERVAL);
+                let work_settled =
+                    !matches!(settled.recv_timeout(wait), Err(RecvTimeoutError::Timeout));
+                let fired = if is_cancelled(bounds) {
+                    Some(GitCommandError::Cancelled)
+                } else if Instant::now() >= bounds.deadline {
+                    Some(GitCommandError::DeadlineExceeded)
+                } else {
+                    None
+                };
+                if fired.is_some() {
+                    interrupt.store(true, Ordering::Release);
+                    return fired;
                 }
-            });
-            if fired.is_some() {
-                interrupt.store(true, std::sync::atomic::Ordering::Release);
+                if work_settled {
+                    return None;
+                }
             }
-            fired
         });
         let output = work();
-        let _ = finished.send(());
+        drop(finished);
         match watchdog.join() {
             Ok(None) => Ok(output),
             Ok(Some(error)) => Err(error),
@@ -360,148 +360,174 @@ pub(crate) fn run_interruptible<T>(
     })
 }
 
+fn is_cancelled(bounds: &GitCommandBounds) -> bool {
+    bounds
+        .cancel
+        .as_ref()
+        .is_some_and(CancellationToken::is_cancelled)
+}
+
 struct BoundedRead {
     bytes: Vec<u8>,
     exceeded: bool,
 }
 
-async fn read_bounded_output(
-    mut reader: impl tokio::io::AsyncRead + Unpin,
-    stream: &'static str,
-    limit: usize,
-    limit_sender: tokio::sync::mpsc::UnboundedSender<(&'static str, usize)>,
-) -> std::io::Result<BoundedRead> {
-    use tokio::io::AsyncReadExt;
+enum PipeEvent {
+    Exceeded {
+        stream: &'static str,
+        bound: usize,
+    },
+    Read {
+        stream: &'static str,
+        result: std::io::Result<BoundedRead>,
+    },
+    Written(std::io::Result<()>),
+}
 
-    let mut bytes = Vec::with_capacity(limit.min(64 * 1024));
-    let mut buffer = [0u8; 8 * 1024];
-    let mut over_limit = false;
-    loop {
-        let count = reader.read(&mut buffer).await?;
-        if count == 0 {
-            break;
+/// What the pipe threads have reported so far. The threads are detached: a
+/// descendant that inherited a pipe can keep one blocked past the caller's
+/// deadline, and its final send then fails silently.
+struct PipeEvents {
+    receiver: Receiver<PipeEvent>,
+    exceeded: Option<(&'static str, usize)>,
+    stdout: Option<std::io::Result<BoundedRead>>,
+    stderr: Option<std::io::Result<BoundedRead>>,
+    written: Option<std::io::Result<()>>,
+}
+
+impl PipeEvents {
+    /// Waits at most one poll interval for the next event under the bounds.
+    fn pump(&mut self, bounds: &GitCommandBounds) -> Result<(), GitCommandError> {
+        if is_cancelled(bounds) {
+            return Err(GitCommandError::Cancelled);
         }
-        let remaining = limit.saturating_sub(bytes.len());
-        bytes.extend_from_slice(&buffer[..count.min(remaining)]);
-        if count > remaining && !over_limit {
-            over_limit = true;
-            let _ = limit_sender.send((stream, limit));
+        let wait = bounds.deadline.saturating_duration_since(Instant::now());
+        if wait.is_zero() {
+            return Err(GitCommandError::DeadlineExceeded);
+        }
+        let wait = wait.min(CHILD_WAIT_POLL_INTERVAL);
+        match self.receiver.recv_timeout(wait) {
+            Ok(PipeEvent::Exceeded { stream, bound }) => {
+                self.exceeded.get_or_insert((stream, bound));
+            }
+            Ok(PipeEvent::Read { stream, result }) => {
+                if stream == "stdout" {
+                    self.stdout = Some(result);
+                } else {
+                    self.stderr = Some(result);
+                }
+            }
+            Ok(PipeEvent::Written(result)) => self.written = Some(result),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                let reader_panicked = || Err(std::io::Error::other("git output reader panicked"));
+                self.stdout.get_or_insert_with(reader_panicked);
+                self.stderr.get_or_insert_with(reader_panicked);
+                self.written
+                    .get_or_insert_with(|| Err(std::io::Error::other("git stdin writer panicked")));
+                std::thread::sleep(wait);
+            }
+        }
+        Ok(())
+    }
+
+    fn wait_for<T>(
+        &mut self,
+        bounds: &GitCommandBounds,
+        take: impl Fn(&mut Self) -> Option<T>,
+    ) -> Result<T, GitCommandError> {
+        loop {
+            if let Some(value) = take(self) {
+                return Ok(value);
+            }
+            self.pump(bounds)?;
         }
     }
-    Ok(BoundedRead {
-        bytes,
-        exceeded: over_limit,
-    })
 }
 
-async fn join_reader(
-    reader: tokio::task::JoinHandle<std::io::Result<BoundedRead>>,
-    stream: &'static str,
-) -> Result<BoundedRead, GitCommandError> {
-    reader
-        .await
-        .map_err(|_| GitCommandError::ReadOutput {
-            stream,
-            source: std::io::Error::other("git output reader panicked"),
-        })?
-        .map_err(|source| GitCommandError::ReadOutput { stream, source })
-}
-
-async fn run_bounded_command(
-    command: Command,
-    input: Option<Vec<u8>>,
-    bounds: GitCommandBounds,
+fn supervise_child(
+    child: &mut Child,
+    input: Option<&[u8]>,
+    bounds: &GitCommandBounds,
 ) -> Result<Output, GitCommandError> {
-    use tokio::io::AsyncWriteExt;
-
-    let has_input = input.is_some();
-    let mut command = tokio::process::Command::from(command);
-    let mut child = command
-        .stdin(if has_input {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(GitCommandError::Unavailable)?;
-    let stdout = child.stdout.take().ok_or_else(|| {
-        GitCommandError::Unavailable(std::io::Error::other("missing stdout pipe"))
-    })?;
-    let stderr = child.stderr.take().ok_or_else(|| {
-        GitCommandError::Unavailable(std::io::Error::other("missing stderr pipe"))
-    })?;
-    let (limit_sender, mut limit_receiver) = tokio::sync::mpsc::unbounded_channel();
-    let _limit_sender_guard = limit_sender.clone();
-    let stdout_reader = tokio::spawn(read_bounded_output(
+    let missing = |pipe| GitCommandError::Unavailable(std::io::Error::other(pipe));
+    let abandoned = AbandonOnReturn(Arc::new(AtomicBool::new(false)));
+    let (sender, receiver) = mpsc::channel();
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| missing("missing stdout pipe"))?;
+    spawn_reader(
         stdout,
         "stdout",
         bounds.max_stdout_bytes,
-        limit_sender.clone(),
-    ));
-    let stderr_reader = tokio::spawn(read_bounded_output(
+        sender.clone(),
+        Arc::clone(&abandoned.0),
+    )?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| missing("missing stderr pipe"))?;
+    spawn_reader(
         stderr,
         "stderr",
         bounds.max_stderr_bytes,
-        limit_sender,
-    ));
-    let input_writer = match input {
-        Some(input) => {
-            let mut stdin = child.stdin.take().ok_or_else(|| {
-                GitCommandError::Unavailable(std::io::Error::other("missing stdin pipe"))
-            })?;
-            Some(tokio::spawn(async move {
-                stdin.write_all(&input).await?;
-                stdin.shutdown().await
-            }))
-        }
-        None => None,
-    };
-
-    let cancellation = bounds.cancel.clone();
-    let deadline = tokio::time::Instant::from_std(bounds.deadline);
-    let process_outcome = tokio::select! {
-        status = child.wait() => status.map_err(GitCommandError::Wait),
-        () = wait_for_cancellation(cancellation.clone()) => Err(GitCommandError::Cancelled),
-        () = tokio::time::sleep_until(deadline) => Err(GitCommandError::DeadlineExceeded),
-        exceeded = limit_receiver.recv() => {
-            let (stream, bound) = exceeded.unwrap_or((
-                "output",
-                bounds.max_stdout_bytes.max(bounds.max_stderr_bytes),
-            ));
-            Err(GitCommandError::OutputLimitExceeded { stream, bound })
-        }
-    };
-
-    if process_outcome.is_err() {
-        terminate_child(&mut child).await;
+        sender.clone(),
+        Arc::clone(&abandoned.0),
+    )?;
+    if let Some(input) = input {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| missing("missing stdin pipe"))?;
+        let input = input.to_vec();
+        let abandoned = Arc::clone(&abandoned.0);
+        std::thread::Builder::new()
+            .name("tracedecay-git-stdin".into())
+            .spawn(move || {
+                let written = write_input(&mut stdin, &input, &abandoned);
+                drop(stdin);
+                let _ = sender.send(PipeEvent::Written(written));
+            })
+            .map_err(GitCommandError::Wait)?;
+    } else {
+        drop(sender);
     }
-    let status = process_outcome?;
-    // Draining stays under the same deadline and cancellation as the process:
-    // a descendant that inherited the child's stdout keeps the pipe open after
-    // the child itself has exited, and waiting for that EOF unbounded would
-    // outlive the caller's deadline. The reader tasks are dropped with this
-    // runtime, which closes our pipe ends.
-    let drained = async {
-        if let Some(writer) = input_writer {
-            let written = writer.await.map_err(|error| {
-                GitCommandError::WriteInput(std::io::Error::other(error.to_string()))
-            })?;
-            if status.success() {
-                written.map_err(GitCommandError::WriteInput)?;
-            }
+    let mut events = PipeEvents {
+        receiver,
+        exceeded: None,
+        stdout: None,
+        stderr: None,
+        written: None,
+    };
+
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(GitCommandError::Wait)? {
+            break status;
         }
-        let stdout = join_reader(stdout_reader, "stdout").await?;
-        let stderr = join_reader(stderr_reader, "stderr").await?;
-        Ok::<_, GitCommandError>((stdout, stderr))
+        events.pump(bounds)?;
+        if let Some((stream, bound)) = events.exceeded {
+            return Err(GitCommandError::OutputLimitExceeded { stream, bound });
+        }
     };
-    let (stdout, stderr) = tokio::select! {
-        drained = drained => drained?,
-        () = wait_for_cancellation(cancellation) => return Err(GitCommandError::Cancelled),
-        () = tokio::time::sleep_until(deadline) => return Err(GitCommandError::DeadlineExceeded),
-    };
+    if input.is_some() {
+        let written = events.wait_for(bounds, |events| events.written.take())?;
+        if status.success() {
+            written.map_err(GitCommandError::WriteInput)?;
+        }
+    }
+    let stdout = events
+        .wait_for(bounds, |events| events.stdout.take())?
+        .map_err(|source| GitCommandError::ReadOutput {
+            stream: "stdout",
+            source,
+        })?;
+    let stderr = events
+        .wait_for(bounds, |events| events.stderr.take())?
+        .map_err(|source| GitCommandError::ReadOutput {
+            stream: "stderr",
+            source,
+        })?;
     if stdout.exceeded {
         return Err(GitCommandError::OutputLimitExceeded {
             stream: "stdout",
@@ -521,16 +547,155 @@ async fn run_bounded_command(
     })
 }
 
-async fn wait_for_cancellation(cancel: Option<CancellationToken>) {
-    match cancel {
-        Some(cancel) => cancel.cancelled().await,
-        None => std::future::pending().await,
+/// Raised on every return from [`supervise_child`]. A descendant can inherit a
+/// pipe and hold it open after the child exits; the pipe threads then stop and
+/// close our ends, so the descendant sees EOF or a broken pipe.
+struct AbandonOnReturn(Arc<AtomicBool>);
+
+impl Drop for AbandonOnReturn {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
     }
 }
 
-async fn terminate_child(child: &mut tokio::process::Child) {
-    let _ = child.start_kill();
-    let _ = child.wait().await;
+#[cfg(unix)]
+trait PipeEnd: std::os::fd::AsFd + Send + 'static {}
+#[cfg(unix)]
+impl<T: std::os::fd::AsFd + Send + 'static> PipeEnd for T {}
+#[cfg(not(unix))]
+trait PipeEnd: Send + 'static {}
+#[cfg(not(unix))]
+impl<T: Send + 'static> PipeEnd for T {}
+
+#[cfg(unix)]
+fn set_nonblocking(pipe: &impl PipeEnd) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let fd = pipe.as_fd().as_raw_fd();
+    // SAFETY: `fd` is our open pipe end, borrowed for the call.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: as above; only our end's status flags change.
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Waits until `pipe` is ready, failing once the supervisor abandons it.
+#[cfg(unix)]
+fn await_pipe(pipe: &impl PipeEnd, writable: bool, abandoned: &AtomicBool) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let mut poll_fd = libc::pollfd {
+        fd: pipe.as_fd().as_raw_fd(),
+        events: if writable {
+            libc::POLLOUT
+        } else {
+            libc::POLLIN
+        },
+        revents: 0,
+    };
+    let timeout =
+        libc::c_int::try_from(CHILD_WAIT_POLL_INTERVAL.as_millis()).unwrap_or(libc::c_int::MAX);
+    while !abandoned.load(Ordering::Acquire) {
+        // SAFETY: `poll_fd` is one valid pollfd, exclusively borrowed for the call.
+        match unsafe { libc::poll(&raw mut poll_fd, 1, timeout) } {
+            0 => {}
+            -1 => {
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
+            }
+            _ => return Ok(()),
+        }
+    }
+    Err(std::io::Error::other("git supervisor abandoned the pipe"))
+}
+
+/// Windows child pipes cannot be polled; the blocking call that follows waits.
+#[cfg(not(unix))]
+fn await_pipe(_: &impl PipeEnd, _: bool, _: &AtomicBool) -> std::io::Result<()> {
+    Ok(())
+}
+
+fn retryable(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+    )
+}
+
+fn write_input(
+    stdin: &mut (impl Write + PipeEnd),
+    mut input: &[u8],
+    abandoned: &AtomicBool,
+) -> std::io::Result<()> {
+    #[cfg(unix)]
+    set_nonblocking(stdin)?;
+    while !input.is_empty() {
+        await_pipe(stdin, true, abandoned)?;
+        match stdin.write(input) {
+            Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+            Ok(written) => input = &input[written..],
+            Err(error) if retryable(&error) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn spawn_reader(
+    mut pipe: impl Read + PipeEnd,
+    stream: &'static str,
+    limit: usize,
+    sender: Sender<PipeEvent>,
+    abandoned: Arc<AtomicBool>,
+) -> Result<(), GitCommandError> {
+    std::thread::Builder::new()
+        .name(format!("tracedecay-git-{stream}"))
+        .spawn(move || {
+            let result = read_bounded_output(&mut pipe, stream, limit, &sender, &abandoned);
+            let _ = sender.send(PipeEvent::Read { stream, result });
+        })
+        .map(drop)
+        .map_err(GitCommandError::Wait)
+}
+
+/// Keeps draining past `limit` so an over-limit child never blocks on a full
+/// pipe before the supervisor kills it.
+fn read_bounded_output(
+    pipe: &mut (impl Read + PipeEnd),
+    stream: &'static str,
+    limit: usize,
+    sender: &Sender<PipeEvent>,
+    abandoned: &AtomicBool,
+) -> std::io::Result<BoundedRead> {
+    #[cfg(unix)]
+    set_nonblocking(pipe)?;
+    let mut bytes = Vec::with_capacity(limit.min(64 * 1024));
+    let mut buffer = [0u8; 8 * 1024];
+    let mut exceeded = false;
+    loop {
+        await_pipe(pipe, false, abandoned)?;
+        let count = match pipe.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => count,
+            Err(error) if retryable(&error) => continue,
+            Err(error) => return Err(error),
+        };
+        let remaining = limit.saturating_sub(bytes.len());
+        bytes.extend_from_slice(&buffer[..count.min(remaining)]);
+        if count > remaining && !exceeded {
+            exceeded = true;
+            let _ = sender.send(PipeEvent::Exceeded {
+                stream,
+                bound: limit,
+            });
+        }
+    }
+    Ok(BoundedRead { bytes, exceeded })
 }
 
 /// Runs `git <args>` in `repo_root` and returns the trimmed stdout as a
@@ -847,5 +1012,49 @@ mod tests {
             bounded_git_output(root.path(), &["--version"], &bounds),
             Err(GitCommandError::Cancelled)
         ));
+    }
+
+    fn spin_until_interrupted(interrupt: &AtomicBool) {
+        let spinning = Instant::now();
+        while !interrupt.load(Ordering::Acquire) {
+            assert!(
+                spinning.elapsed() < Duration::from_secs(5),
+                "the watchdog never raised the interrupt"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn in_process_work_is_interrupted_by_live_cancellation() {
+        let cancel = CancellationToken::new();
+        let trigger = cancel.clone();
+        let bounds = GitCommandBounds {
+            cancel: Some(cancel),
+            ..GitCommandBounds::default()
+        };
+        let interrupt = AtomicBool::new(false);
+        let notifier = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            trigger.cancel();
+        });
+
+        let result = run_interruptible(&bounds, &interrupt, || spin_until_interrupted(&interrupt));
+        notifier.join().expect("cancellation notifier");
+
+        assert!(matches!(result, Err(GitCommandError::Cancelled)));
+    }
+
+    #[test]
+    fn in_process_work_is_interrupted_at_its_deadline() {
+        let bounds = GitCommandBounds {
+            deadline: Instant::now() + Duration::from_millis(30),
+            ..GitCommandBounds::default()
+        };
+        let interrupt = AtomicBool::new(false);
+
+        let result = run_interruptible(&bounds, &interrupt, || spin_until_interrupted(&interrupt));
+
+        assert!(matches!(result, Err(GitCommandError::DeadlineExceeded)));
     }
 }

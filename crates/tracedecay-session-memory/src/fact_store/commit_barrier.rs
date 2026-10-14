@@ -42,7 +42,10 @@ const RELEASE_POLL: Duration = Duration::from_millis(10);
 /// one-shot barrier. Arrival is published as `arrived`; the park ends when
 /// `release` appears, or when the bounded wait expires so a failed test cannot
 /// strand a live daemon.
-pub(super) async fn wait_after_durable_fact_commit(committed_content: Option<&str>) {
+pub(super) async fn wait_after_durable_fact_commit(
+    cx: &asupersync::Cx,
+    committed_content: Option<&str>,
+) {
     let Some(root) = std::env::var_os(BARRIER_DIR_ENV) else {
         return;
     };
@@ -78,6 +81,6 @@ pub(super) async fn wait_after_durable_fact_commit(committed_content: Option<&st
         if matches!(release.try_exists(), Ok(true)) {
             return;
         }
-        tokio::time::sleep(RELEASE_POLL).await;
+        asupersync::time::sleep(cx.now(), RELEASE_POLL).await;
     }
 }

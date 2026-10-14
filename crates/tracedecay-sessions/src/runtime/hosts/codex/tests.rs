@@ -1453,7 +1453,7 @@ mod recent_first_discovery_tests {
         else {
             panic!("the first scan delivers");
         };
-        assert!(!released.has_changed().unwrap());
+        assert!(!released.has_changed());
         hub.acknowledge("profile");
 
         // A consumer joining now replays the source's index, which another
@@ -1479,7 +1479,7 @@ mod recent_first_discovery_tests {
         hub.discover("profile", &source, bounds, first.next_frontier)
             .await
             .unwrap();
-        assert!(released.has_changed().unwrap());
+        assert!(released.has_changed());
     }
 
     #[tokio::test]
@@ -2829,5 +2829,81 @@ mod recent_first_discovery_tests {
             "catch-up never admitted the newest rollout"
         );
         assert!(frontier.is_complete());
+    }
+
+    /// Codex moves a rollout out of `sessions/` when it archives the session.
+    /// A pass delivered before the move still names the old path, and the hub
+    /// replays that pass until a catch-up acknowledges it. Reading the absent
+    /// file as a retryable failure withheld the acknowledgement, so every later
+    /// pass replayed the same path and failed on it again, forever.
+    #[tokio::test]
+    async fn codex_catch_up_skips_a_vanished_rollout_and_admits_it_when_it_returns() {
+        install_test_shared_jsonl_preparation_authority();
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let project = home.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let rollout = write_project_rollout(&home, &project, "vanishing");
+        let body = std::fs::read(&rollout).unwrap();
+
+        let hub = CodexDiscoveryHub::default();
+        hub.register("project", Some(&home));
+        let delivered = match hub
+            .discover(
+                "project",
+                &CodexSource::with_home(&home),
+                TranscriptDiscoveryBounds::default_walk(),
+                CodexDiscoveryFrontier::initial(),
+            )
+            .await
+            .unwrap()
+        {
+            CodexDiscoveryDelivery::Ready(pass) => pass,
+            CodexDiscoveryDelivery::Waiting => panic!("an idle hub must deliver a pass"),
+        };
+        assert!(delivered.report.paths.contains(&rollout));
+        std::fs::remove_file(&rollout).unwrap();
+
+        let project_id = ProjectId::new("project-vanished-rollout").unwrap();
+        let scope = tracedecay_domain::ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        };
+        let admission = MemoryHostAdmission::default();
+        let cancellation = ObservationCancellation::default();
+        let run = || {
+            crate::runtime::with_transcript_source_profile(
+                tracedecay_runtime_core::config::ProfileRoot::under_home(home.clone()),
+                crate::runtime::ingest::project_provider::ProjectProviderRun {
+                    project_root: &project,
+                    project_id: &project_id,
+                    facade: &admission,
+                    scope: &scope,
+                    candidate: crate::runtime::SessionProvider::Codex,
+                    max_new_bytes: u64::MAX,
+                    cancellation: &cancellation,
+                    codex_discovery: Some((&hub, "project")),
+                }
+                .run_codex(),
+            )
+        };
+
+        for pass in 0..2 {
+            let outcome = run().await;
+            assert!(
+                outcome.failures.is_empty(),
+                "pass {pass} failed on the vanished rollout: {:?}",
+                outcome.failures
+            );
+        }
+        assert!(admission.observations().is_empty());
+
+        std::fs::write(&rollout, &body).unwrap();
+        spin_until_jsonl_change_settled(&rollout);
+        let returned = run().await;
+        assert!(returned.failures.is_empty(), "{:?}", returned.failures);
+        assert!(
+            !admission.observations().is_empty(),
+            "the returned rollout must be admitted"
+        );
     }
 }

@@ -1520,7 +1520,7 @@ mod tests {
     /// older LCM, git correlation, or workflow schema is refused for its
     /// sessions, while the profile authority, which holds no session rows,
     /// keeps serving its registry and leaves those markers exactly as found.
-    #[tokio::test]
+    #[asupersync::test]
     async fn released_session_feature_markers_refuse_session_stores_but_not_the_profile_authority()
     {
         const PREVIOUS_LCM: i64 = LCM_SCHEMA_VERSION - 1;
@@ -1621,7 +1621,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn existing_store_reinstalls_the_project_leading_session_lookup_index() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("sessions.db");
@@ -1684,7 +1684,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn existing_store_drops_the_retired_runtime_effects_tables() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("sessions.db");
@@ -1715,7 +1715,7 @@ mod tests {
         assert_eq!(remaining, Vec::<String>::new());
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn existing_registry_without_remote_deletion_catalog_requires_typed_reset() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("sessions.db");
@@ -1751,7 +1751,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn existing_registry_with_mismatched_remote_deletion_catalog_requires_typed_reset() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("sessions.db");
@@ -1793,7 +1793,7 @@ mod tests {
     /// 8-column table released binaries through 0.0.74 created or any other
     /// drift, is refused with the project-registry reset state and left
     /// exactly as admission found it instead of being altered in place.
-    #[tokio::test]
+    #[asupersync::test]
     async fn registry_with_non_final_code_project_shape_requires_typed_reset() {
         for (drift, columns_after_refusal) in [
             (
@@ -1843,7 +1843,7 @@ mod tests {
     /// Released registries (through v1.0.0-beta.63) record a per-scope
     /// `db_relpath`. That shape is refused with the project-registry reset
     /// state, and its rows are left exactly as admission found them.
-    #[tokio::test]
+    #[asupersync::test]
     async fn registry_with_released_graph_scope_relpath_requires_typed_reset() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("sessions.db");
@@ -1932,7 +1932,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn restored_triggers_still_refuse_corrupt_rows_without_repairing_them() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("sessions.db");
@@ -2008,7 +2008,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn restored_triggers_arm_a_persistent_audit_that_refuses_fk_violations() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("sessions.db");
@@ -2065,7 +2065,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn damaged_triggers_on_a_clean_store_are_restored_and_admitted() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("sessions.db");

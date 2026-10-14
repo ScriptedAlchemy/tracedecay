@@ -430,6 +430,28 @@ impl CatalogSnapshotV1 {
         authorized_capabilities: &BTreeSet<CapabilityId>,
         available_scope: &BTreeSet<ScopeDimension>,
     ) -> Vec<(&'a SurfaceBindingV1, &'a CapabilityManifestV1)> {
+        let mut visible =
+            self.profile_bindings(profile_id, surface, protocol_revision, negotiated_features);
+        visible.retain(|(_, capability)| {
+            authorized_capabilities.contains(capability.capability_id())
+                && capability
+                    .scope()
+                    .dimensions()
+                    .iter()
+                    .all(|dimension| available_scope.contains(dimension))
+        });
+        visible
+    }
+
+    /// Lists the callable bindings a profile exposes on one surface, before
+    /// any caller's authority or scope narrows them, in operation order.
+    pub fn profile_bindings<'a>(
+        &'a self,
+        profile_id: &ProfileId,
+        surface: BindingSurface,
+        protocol_revision: u32,
+        negotiated_features: &BTreeSet<FeatureId>,
+    ) -> Vec<(&'a SurfaceBindingV1, &'a CapabilityManifestV1)> {
         let surface_enabled = self
             .profiles
             .get(profile_id)
@@ -437,15 +459,6 @@ impl CatalogSnapshotV1 {
         let mut visible = Vec::new();
         if surface_enabled {
             for capability in self.visible_capabilities(profile_id, negotiated_features) {
-                if !authorized_capabilities.contains(capability.capability_id())
-                    || !capability
-                        .scope()
-                        .dimensions()
-                        .iter()
-                        .all(|dimension| available_scope.contains(dimension))
-                {
-                    continue;
-                }
                 for binding_id in capability.binding_ids() {
                     let Some(binding) = self.bindings.get(binding_id) else {
                         continue;

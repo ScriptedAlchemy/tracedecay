@@ -819,7 +819,7 @@ mod tests {
             .expect("unobserved raw anchor count value")
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn malformed_canonical_observation_never_falls_back_to_an_unobserved_anchor() {
         let directory = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -855,7 +855,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn malformed_canonical_message_identity_is_not_hidden_by_candidate_filtering() {
         let directory = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -892,7 +892,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn ownership_mismatched_canonical_binding_never_falls_back_to_an_unobserved_anchor() {
         let directory = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -925,7 +925,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn non_exact_canonical_binding_never_falls_back_to_an_unobserved_anchor() {
         let directory = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -960,7 +960,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn missing_canonical_anchor_binding_never_falls_back_to_an_unobserved_anchor() {
         let directory = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -991,7 +991,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn unavailable_session_owner_never_inserts_an_unobserved_anchor() {
         let directory = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -1020,7 +1020,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn malformed_raw_timestamp_never_inserts_a_zero_time_unobserved_anchor() {
         let directory = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -1043,7 +1043,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn malformed_summary_horizon_never_fabricates_a_zero_knowledge_time() {
         let directory = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -1113,7 +1113,7 @@ mod tests {
     /// A summary built only from other summaries inherits the typed anchor of
     /// its first typed child summary rather than falling back to an untyped
     /// session anchor.
-    #[tokio::test]
+    #[asupersync::test]
     async fn summary_of_summaries_inherits_its_childs_typed_anchor() {
         let directory = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -1189,7 +1189,7 @@ mod tests {
     /// `K` raw sources published before any refresh resolve through one scan
     /// of the session's `N` observation effects, and the same bindings come
     /// back once the refresh has materialized some or all of the occurrences.
-    #[tokio::test]
+    #[asupersync::test]
     async fn many_raw_sources_resolve_their_anchors_in_one_bounded_pass() {
         const SOURCES: i64 = 6;
         const UNRELATED_OBSERVATIONS: i64 = 4;
@@ -1319,7 +1319,7 @@ mod tests {
     /// A mixed publication refuses on the first source (in source order) that
     /// fails its own check, with that source's typed refusal, and leaves
     /// nothing published: no summary node and no unobserved raw anchor.
-    #[tokio::test]
+    #[asupersync::test]
     async fn mixed_source_publication_refuses_on_the_first_failing_source() {
         let directory = tempdir().expect("temporary directory");
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())

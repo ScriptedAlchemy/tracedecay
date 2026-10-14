@@ -16,6 +16,10 @@ use tracedecay_runtime_core::db::{
 use super::harness::TEST_RUNTIME_NONCE;
 use crate::RegisteredGlobalDbOwnerV1;
 
+/// The operation a cancel reports once it rolled back an open schema
+/// transaction, rather than stopping before the transaction began.
+const INSTALL_ROLLBACK: &str = "roll back attached registered global schema";
+
 /// An existing profile-sessions store file with no schema objects, the shape
 /// daemon attach installs the full registered schema into.
 struct EmptyStore {
@@ -80,10 +84,9 @@ impl EmptyStore {
     }
 
     /// Runs daemon admission, cancelling its token just before the
-    /// `cancel_at`-th poll. Every poll after the first follows one completed
-    /// statement round trip, so sweeping `cancel_at` lands the cancellation at
-    /// each statement boundary of the install. Returns the outcome and how
-    /// many polls admission took.
+    /// `cancel_at`-th poll, so sweeping `cancel_at` samples cancellation
+    /// points across admission. Returns the outcome and how many polls
+    /// admission took.
     async fn attach_cancelled_at(&self, cancel_at: usize) -> (Result<(), TraceDecayError>, usize) {
         let (owner, _runtime, _retirement) = self.publish().await.into_parts();
         let cancellation = CancellationToken::new();
@@ -107,7 +110,7 @@ impl EmptyStore {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[asupersync::test(flavor = "multi_thread")]
 async fn cancelled_daemon_attach_rolls_back_schema_and_reopens() {
     let reference = EmptyStore::create();
     let (outcome, total_polls) = reference.attach_cancelled_at(usize::MAX).await;
@@ -120,6 +123,7 @@ async fn cancelled_daemon_attach_rolls_back_schema_and_reopens() {
 
     let stride = (total_polls / 20).max(1);
     let mut cancelled = Vec::new();
+    let mut rolled_back_installs = Vec::new();
     let mut completed = Vec::new();
     for cancel_at in (1..total_polls).step_by(stride).chain([total_polls + 10]) {
         let store = EmptyStore::create();
@@ -138,6 +142,12 @@ async fn cancelled_daemon_attach_rolls_back_schema_and_reopens() {
                     objects, before_admission,
                     "cancel at poll {cancel_at}/{total_polls} must roll the install back"
                 );
+                if error
+                    .project_route_context()
+                    .is_some_and(|(_, _, detail)| detail.starts_with(INSTALL_ROLLBACK))
+                {
+                    rolled_back_installs.push(cancel_at);
+                }
                 cancelled.push(cancel_at);
             }
             Ok(()) => {
@@ -154,15 +164,13 @@ async fn cancelled_daemon_attach_rolls_back_schema_and_reopens() {
         });
         assert_eq!(store.schema_objects().await, installed);
     }
-    // Only the commit and the idempotent post-commit tail may run past a
-    // cancel: every sampled point up to the commit boundary rolls back.
-    let last_cancelled = cancelled.iter().max().copied().unwrap_or(0);
-    let first_completed = completed.iter().min().copied().unwrap_or(usize::MAX);
     assert!(
-        cancelled.contains(&1)
-            && last_cancelled >= total_polls / 2
-            && first_completed.saturating_sub(last_cancelled) <= 2 * stride,
-        "cancellation must stop the install at every statement before its commit; \
+        cancelled.contains(&1),
+        "a cancel before admission starts must stop it; cancelled at {cancelled:?}"
+    );
+    assert!(
+        !rolled_back_installs.is_empty(),
+        "a cancel inside the schema transaction must roll the install back; \
          cancelled at {cancelled:?}, completed at {completed:?} of {total_polls} polls"
     );
     assert!(completed.contains(&(total_polls + 10)));

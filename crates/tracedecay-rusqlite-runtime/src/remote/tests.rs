@@ -25,11 +25,14 @@ use tracedecay_contracts::remote::{
         RemoteCredentialUseV1,
     },
     protocol::RemoteProtocolRequestV1,
-    query::RemoteExactObservationQueryErrorV1,
+    query::{
+        RemoteExactObservationQueryErrorV1, RemoteQueryAuthorizationDecisionV1,
+        RemoteQueryAuthorizationPortV1, RemoteQueryPolicyRecordV1,
+    },
     replay::{
-        RemoteReplayApplicationErrorV1, RemoteReplayFrameLookupPortV1,
-        RemoteReplayPolicyDecisionV1, RemoteReplayPolicyEvidencePortV1,
-        RemoteReplayPolicyEvidenceV1, RemoteReplaySpoolPortV1,
+        RemoteReplayApplicationErrorV1, RemoteReplayBacklogEntryV1, RemoteReplayCommitReceiptV1,
+        RemoteReplayFindingV1, RemoteReplayFrameLookupPortV1, RemoteReplayPolicyDecisionV1,
+        RemoteReplayPolicyEvidencePortV1, RemoteReplayPolicyEvidenceV1, RemoteReplaySpoolPortV1,
     },
     transfer::{
         RemoteFrameTransferDispositionV1, RemoteFrameTransferErrorV1, RemoteFrameTransferPortV1,
@@ -40,9 +43,9 @@ use tracedecay_contracts::{
     PolicyDecisionRef, RequestId, ResolvedScope,
 };
 use tracedecay_domain::{
-    ActorId, BrainId, BrainNodeId, ComponentVersion, DurableObservationV1,
-    EnrollmentCredentialRecordV1, EnrollmentGrantV1, EntityId, LocatorDigest, ObservationId,
-    ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
+    ActorId, BrainId, BrainNodeId, ComponentVersion, CredentialRevocationReceiptV1,
+    DurableObservationV1, EnrollmentCredentialRecordV1, EnrollmentGrantV1, EntityId, LocatorDigest,
+    ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
     ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
     PayloadReferenceV1, ProviderId, RemoteCapabilityV1, RemoteCredentialFingerprintV1,
     RemoteRepositoryScopeV1, RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1,
@@ -51,9 +54,10 @@ use tracedecay_domain::{
 };
 use tracedecay_store::{
     AdmissionConfigV1, RepositoryWritePayloadV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1,
-    StorageRuntimeErrorV1, StoreIncarnationV1, VerifiedStoreLocatorV1,
+    StorageRuntimeErrorV1, StoreAuthorityEpochV1, StoreIncarnationV1, VerifiedStoreLocatorV1,
 };
 
+mod membership;
 mod transfer;
 
 use crate::{
@@ -136,13 +140,23 @@ fn fixture_with_binding(binding: StoreRuntimeBindingV1) -> Fixture {
         )
         .unwrap();
     drop(connection);
-    let path = path.canonicalize().unwrap();
+    attach_fixture(directory, binding)
+}
+
+/// Attaches a runtime with `binding` to the store kept in `directory`.
+fn attach_fixture(directory: TempDir, binding: StoreRuntimeBindingV1) -> Fixture {
+    let path = directory
+        .path()
+        .join("remote.sqlite3")
+        .canonicalize()
+        .unwrap();
     let locator = VerifiedStoreLocatorV1::new(
         binding.shard_id.clone(),
-        StoreIncarnationV1::new(3).unwrap(),
+        binding.incarnation,
         LocatorDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
     );
     let writer = PersistentWriter::start(
+        &crate::native_runtime::handle().expect("native runtime"),
         ExistingWriterLocator::new(binding.clone(), locator.clone(), path.clone()).unwrap(),
         AdmissionConfigV1::default(),
         NoWrites,
@@ -164,6 +178,25 @@ fn fixture_with_binding(binding: StoreRuntimeBindingV1) -> Fixture {
         _readers: readers,
         handle,
     }
+}
+
+/// The same store after its daemon restarts: a later process attaches it
+/// under a new incarnation and authority epoch.
+fn restarted(fixture: Fixture) -> Fixture {
+    let Fixture {
+        _directory: directory,
+        _writer: writer,
+        _readers: readers,
+        handle,
+    } = fixture;
+    let mut binding = handle.binding().clone();
+    drop(handle);
+    drop(readers);
+    drop(writer);
+    binding.incarnation = StoreIncarnationV1::new(binding.incarnation.get() + 1).unwrap();
+    binding.authority_epoch =
+        StoreAuthorityEpochV1::new(binding.authority_epoch.get() + 1).unwrap();
+    attach_fixture(directory, binding)
 }
 
 fn spool_frame_count(fixture: &Fixture) -> u64 {
@@ -303,17 +336,23 @@ fn enrollment_grant(secret: &[u8]) -> EnrollmentGrantV1 {
         capabilities: std::collections::BTreeSet::from([
             RemoteCapabilityV1::Replay,
             RemoteCapabilityV1::Promote,
+            RemoteCapabilityV1::ServeAuthority,
         ]),
         scope: writer().scope,
     }
 }
 
 /// Provisions the writer's scope on this node, then publishes the writer
-/// with the replay policy that admits its frames.
+/// with the replay and query policies that admit its frames and their reads.
 fn publish_writer(storage: &RemoteSqliteStorageV1, writer: &RemoteWriterAuthorityV1) {
     provision_scope(storage, &writer.scope);
     storage
-        .publish_authority(writer, &replay_policy(&writer.scope), UtcMicros(10))
+        .publish_authority(
+            writer,
+            &replay_policy(&writer.scope),
+            &query_policy(&writer.scope),
+            UtcMicros(10),
+        )
         .unwrap();
 }
 
@@ -337,6 +376,39 @@ fn replay_policy(scope: &RemoteRepositoryScopeV1) -> RemoteReplayPolicyEvidenceV
     .unwrap();
     policy.repository_scope = scope.clone();
     policy
+}
+
+fn query_policy(scope: &RemoteRepositoryScopeV1) -> RemoteQueryPolicyRecordV1 {
+    let resolved = ResolvedScope::new(
+        scope.project_id.clone(),
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
+        scope.reference.clone(),
+    )
+    .unwrap();
+    let digest = ManifestDigest::new(format!("sha256:{}", "e".repeat(64))).unwrap();
+    RemoteQueryPolicyRecordV1 {
+        repository_scope: scope.clone(),
+        authority: AuthorityReceipt {
+            grant_id: CapabilityGrantId::new("grant.remote.query").unwrap(),
+            grant_revision: 1,
+            grant_digest: digest.clone(),
+            authorized_scope_digest: resolved.scope_digest.clone(),
+            disclosure: DisclosureClass::Evidence,
+            policy: PolicyDecisionRef::new(
+                "policy.remote.query",
+                1,
+                digest,
+                ComponentVersion::new("policy.remote.query.v1").unwrap(),
+            )
+            .unwrap(),
+            revalidated_at: UtcMicros(10),
+        },
+        scope: resolved,
+        policy_revision: 1,
+        decision: RemoteQueryAuthorizationDecisionV1::Allow,
+        revalidated_at: UtcMicros(10),
+    }
 }
 
 fn enrollment_admission(grant: &EnrollmentGrantV1) -> RemoteEnrollmentAdmissionEvidenceV1 {
@@ -711,6 +783,137 @@ fn durable_revocation_wins_publication_reauthorization() {
 }
 
 #[test]
+fn node_revocation_keeps_replay_receipts_and_repeats_its_receipts() {
+    let fixture = fixture();
+    let storage = storage(&fixture);
+    let (enrollment, receipt) = enrollment_record(&[9_u8; 32]);
+    insert_enrollment(&fixture, &enrollment, &receipt);
+    let captured = storage.capture_pending(&admitted()).unwrap();
+    let attempt = storage
+        .begin_replay_attempt(&captured.event_id, UtcMicros(20))
+        .unwrap();
+    storage
+        .transition(RemoteReplayTransitionV1 {
+            event_id: captured.event_id.clone(),
+            from: RemoteReplayStateV1::Pending,
+            to: RemoteReplayStateV1::Admitted,
+            replay_attempt: attempt,
+            observed_at: UtcMicros(21),
+            finding: None,
+            receipt: Some(RemoteReplayCommitReceiptV1 {
+                event_id: captured.event_id.clone(),
+                writer_fence: writer().authority.fence,
+                commit_sequence: 1,
+                committed_at: UtcMicros(21),
+                budget: OperationBudgetUsage {
+                    units_consumed: 1,
+                    bytes_consumed: 1,
+                    elapsed_micros: 0,
+                },
+            }),
+        })
+        .unwrap();
+    let replayed = storage.state(&captured.event_id).unwrap();
+    assert!(replayed.receipt.is_some());
+    let brain_id = BrainId::new("brain.remote").unwrap();
+    assert!(
+        storage
+            .status_at(&brain_id, UtcMicros(30))
+            .unwrap()
+            .has_active_enrollment
+    );
+
+    let revoked = storage
+        .revoke_node_enrollments(&enrollment.node_id, UtcMicros(30))
+        .unwrap();
+    assert_eq!(
+        revoked,
+        vec![CredentialRevocationReceiptV1 {
+            enrollment_id: enrollment.enrollment_id.clone(),
+            node_id: enrollment.node_id.clone(),
+            prior_revision: 1,
+            current_revision: 2,
+            revoked_at: UtcMicros(30),
+        }]
+    );
+    assert_eq!(
+        storage
+            .enrollment_by_id(&enrollment.enrollment_id)
+            .unwrap()
+            .revoked_at,
+        Some(UtcMicros(30))
+    );
+    assert_eq!(
+        storage
+            .revoke_node_enrollments(&enrollment.node_id, UtcMicros(40))
+            .unwrap(),
+        revoked,
+        "a repeat keeps the first revocation"
+    );
+    assert_eq!(storage.state(&captured.event_id).unwrap(), replayed);
+    assert!(
+        !storage
+            .status_at(&brain_id, UtcMicros(40))
+            .unwrap()
+            .has_active_enrollment,
+        "a revoked enrollment no longer counts as configured"
+    );
+}
+
+#[test]
+fn node_revocation_spends_only_that_nodes_unredeemed_grants() {
+    let fixture = fixture();
+    let storage = storage(&fixture);
+    let grant = enrollment_grant(&[7_u8; 32]);
+    let admission = enrollment_admission(&grant);
+    storage.store_enrollment_grant(&grant, &admission).unwrap();
+    let mut other = enrollment_grant(&[8_u8; 32]);
+    other.grant_id = EntityId::new("grant.remote.other-node").unwrap();
+    other.node_id = BrainNodeId::new("node.remote.other").unwrap();
+    storage
+        .store_enrollment_grant(&other, &enrollment_admission(&other))
+        .unwrap();
+
+    assert_eq!(
+        storage
+            .revoke_node_grants(&grant.node_id, UtcMicros(30))
+            .unwrap(),
+        vec![grant.grant_id.clone()]
+    );
+    assert_eq!(
+        storage.credential_by_fingerprint(
+            RemoteCredentialClassV1::EnrollmentGrant,
+            &grant.fingerprint
+        ),
+        Err(RemoteCredentialLookupErrorV1::NotFound)
+    );
+    assert_eq!(
+        storage.load_grant(&grant.grant_id),
+        Err(RemoteEnrollmentAuthorityErrorV1::GrantConsumed)
+    );
+    assert!(
+        matches!(
+            storage.store_enrollment_grant(&grant, &admission),
+            Err(RemoteSqliteStorageErrorV1::Corruption)
+        ),
+        "a spent grant cannot be provisioned again"
+    );
+    assert!(
+        storage
+            .credential_by_fingerprint(RemoteCredentialClassV1::EnrollmentGrant, &other.fingerprint)
+            .is_ok(),
+        "another node's grant stays usable"
+    );
+    assert_eq!(
+        storage
+            .revoke_node_grants(&grant.node_id, UtcMicros(40))
+            .unwrap(),
+        Vec::<EntityId>::new(),
+        "a repeat finds nothing left to spend"
+    );
+}
+
+#[test]
 fn capture_is_encrypted_and_idempotent() {
     let fixture = fixture();
     let storage = storage(&fixture);
@@ -792,10 +995,6 @@ fn writer_authority_readers_report_an_unpublished_writer_as_typed_absence() {
         placement_revision: fence.placement_revision.get(),
         authority_epoch: fence.authority_epoch.0,
     };
-    let frame = tracedecay_contracts::remote::replay::RemoteReplayFrameV1 {
-        event_id: "remote.event.unpublished".to_owned(),
-        capture: admitted(),
-    };
     let read_all =
         |storage: &RemoteSqliteStorageV1| {
             (
@@ -804,7 +1003,7 @@ fn writer_authority_readers_report_an_unpublished_writer_as_typed_absence() {
             )
             .map(|_| ()),
             tracedecay_contracts::remote::replay::RemoteReplayCurrentWriterPortV1::current_writer(
-                storage, &frame,
+                storage, fence,
             )
             .map(|current| current.writer),
             storage
@@ -842,11 +1041,78 @@ fn writer_authority_readers_report_an_unpublished_writer_as_typed_absence() {
 }
 
 #[test]
+fn a_restarted_runtime_keeps_serving_the_published_writer() {
+    let fixture = fixture();
+    let writer = writer();
+    publish_writer(&storage(&fixture), &writer);
+    let capture = admitted();
+    storage(&fixture).capture_pending(&capture).unwrap();
+
+    let fixture = restarted(fixture);
+    let storage = storage(&fixture);
+    assert_eq!(
+        <RemoteSqliteStorageV1 as RemoteCapturePortV1>::current_writer_authority(&storage, &writer),
+        Ok(CurrentRemoteAuthorityStateV1::Available(
+            writer.authority.clone()
+        ))
+    );
+    assert_eq!(
+        storage
+            .query_authority_snapshot(&writer.scope, UtcMicros(11))
+            .map(|snapshot| snapshot.writer),
+        Ok(writer.clone())
+    );
+    let status = storage
+        .status_at(&writer.authority.fence.brain_id, UtcMicros(11))
+        .unwrap();
+    assert_eq!(
+        (status.authority, status.pending_spool_items),
+        (
+            CurrentRemoteAuthorityStateV1::Available(writer.authority),
+            1
+        ),
+        "the restarted daemon reads the writer and spool its predecessor wrote"
+    );
+
+    let mut foreign = remote_test_binding();
+    foreign.shard_id.scope = serde_json::from_value(json!({
+        "kind": "remote_node",
+        "node_id": "node.foreign"
+    }))
+    .unwrap();
+    fixture
+        .handle
+        .execute(
+            ExactSqlStatement::new(
+                "UPDATE remote_authorities SET runtime_binding_json = ?1".to_owned(),
+                vec![text(serde_json::to_string(&foreign).unwrap())],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    drop(storage);
+    let fixture = restarted(fixture);
+    assert!(
+        matches!(
+            RemoteSqliteStorageV1::from_retained_exact_sql(
+                retained(&fixture),
+                Arc::new(TestKeyring(Arc::new(
+                    RemoteSpoolKeyV1::from_secret_bytes(7, vec![7; 32]).unwrap(),
+                ))),
+            ),
+            Err(RemoteSqliteStorageErrorV1::BindingMismatch)
+        ),
+        "a row bound to another shard is refused, never adopted"
+    );
+}
+
+#[test]
 fn writer_publication_seeds_one_provisioned_writer_and_refuses_rivals() {
     let fixture = fixture();
     let storage = storage(&fixture);
     let writer = writer();
     let policy = replay_policy(&writer.scope);
+    let reads = query_policy(&writer.scope);
     let fence = &writer.authority.fence;
     let expected = tracedecay_contracts::remote::recovery::RecoveryAuthorityExpectationV1 {
         brain_id: fence.brain_id.as_str().to_owned(),
@@ -858,7 +1124,7 @@ fn writer_publication_seeds_one_provisioned_writer_and_refuses_rivals() {
     };
 
     assert_eq!(
-        storage.publish_authority(&writer, &policy, UtcMicros(10)),
+        storage.publish_authority(&writer, &policy, &reads, UtcMicros(10)),
         Err(RemoteWriterPublicationErrorV1::ScopeNotProvisioned)
     );
     provision_scope(&storage, &writer.scope);
@@ -867,13 +1133,17 @@ fn writer_publication_seeds_one_provisioned_writer_and_refuses_rivals() {
     let mut foreign_policy = policy.clone();
     foreign_policy.repository_scope.snapshot_id =
         tracedecay_domain::RepositoryStateSnapshotId::new("snapshot.foreign").unwrap();
+    let mut foreign_reads = reads.clone();
+    foreign_reads.repository_scope = foreign_policy.repository_scope.clone();
     assert_eq!(
         (
-            storage.publish_authority(&foreign_brain, &policy, UtcMicros(10)),
-            storage.publish_authority(&writer, &foreign_policy, UtcMicros(10)),
-            storage.publish_authority(&writer, &policy, UtcMicros(9)),
+            storage.publish_authority(&foreign_brain, &policy, &reads, UtcMicros(10)),
+            storage.publish_authority(&writer, &foreign_policy, &reads, UtcMicros(10)),
+            storage.publish_authority(&writer, &policy, &foreign_reads, UtcMicros(10)),
+            storage.publish_authority(&writer, &policy, &reads, UtcMicros(9)),
         ),
         (
+            Err(RemoteWriterPublicationErrorV1::InvalidWriter),
             Err(RemoteWriterPublicationErrorV1::InvalidWriter),
             Err(RemoteWriterPublicationErrorV1::InvalidWriter),
             Err(RemoteWriterPublicationErrorV1::InvalidWriter),
@@ -884,28 +1154,74 @@ fn writer_publication_seeds_one_provisioned_writer_and_refuses_rivals() {
         Err(RemoteSqliteStorageErrorV1::WriterAuthorityUnpublished)
     ));
     assert_eq!(
-        storage.writer_publication_state(&writer, &policy, UtcMicros(10)),
+        storage.writer_publication_state(&writer, &policy, &reads, UtcMicros(10)),
         Ok(RemoteWriterPublicationStateV1::Unpublished)
+    );
+    let observation_id = admitted().observation.observation_id().clone();
+    let authorize = || {
+        storage.authorize(
+            &reads.scope,
+            &writer.scope,
+            &observation_id,
+            fence,
+            UtcMicros(12),
+        )
+    };
+    assert_eq!(
+        authorize().unwrap_err(),
+        RemoteExactObservationQueryErrorV1::PolicyUnavailable,
+        "an unpublished writer's reads have no policy"
     );
 
     storage
-        .publish_authority(&writer, &policy, UtcMicros(10))
+        .publish_authority(&writer, &policy, &reads, UtcMicros(10))
         .unwrap();
     storage
-        .publish_authority(&writer, &policy, UtcMicros(12))
+        .publish_authority(&writer, &policy, &reads, UtcMicros(12))
         .unwrap();
+    assert_eq!(
+        authorize().map(|evidence| (evidence.decision, evidence.authority)),
+        Ok((
+            RemoteQueryAuthorizationDecisionV1::Allow,
+            reads.authority.clone()
+        )),
+        "publication installs the query policy that admits reads of the writer's frames"
+    );
+    fixture
+        .handle
+        .execute(
+            ExactSqlStatement::new("DELETE FROM remote_query_policies".to_owned(), vec![]).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        authorize().unwrap_err(),
+        RemoteExactObservationQueryErrorV1::PolicyUnavailable,
+        "a writer published before publication carried a query policy"
+    );
+    storage
+        .publish_authority(&writer, &policy, &reads, UtcMicros(12))
+        .unwrap();
+    assert_eq!(
+        authorize().map(|evidence| evidence.decision),
+        Ok(RemoteQueryAuthorizationDecisionV1::Allow),
+        "an exact republish installs the missing query policy"
+    );
     let mut rival = writer.clone();
     rival.authority.fence.authority_node_id = BrainNodeId::new("node.rival").unwrap();
     let mut rival_policy = policy.clone();
     rival_policy.decision = RemoteReplayPolicyDecisionV1::Quarantine;
+    let mut rival_reads = reads.clone();
+    rival_reads.decision = RemoteQueryAuthorizationDecisionV1::Deny;
     assert_eq!(
         (
-            storage.writer_publication_state(&writer, &policy, UtcMicros(12)),
-            storage.publish_authority(&rival, &policy, UtcMicros(12)),
-            storage.publish_authority(&writer, &rival_policy, UtcMicros(12)),
+            storage.writer_publication_state(&writer, &policy, &reads, UtcMicros(12)),
+            storage.publish_authority(&rival, &policy, &reads, UtcMicros(12)),
+            storage.publish_authority(&writer, &rival_policy, &reads, UtcMicros(12)),
+            storage.publish_authority(&writer, &policy, &rival_reads, UtcMicros(12)),
         ),
         (
             Ok(RemoteWriterPublicationStateV1::Published),
+            Err(RemoteWriterPublicationErrorV1::Conflict),
             Err(RemoteWriterPublicationErrorV1::Conflict),
             Err(RemoteWriterPublicationErrorV1::Conflict),
         )
@@ -923,14 +1239,12 @@ fn capture_and_promotion_gate_share_one_write_transaction() {
     let storage = storage(&fixture);
     let capture = admitted();
     publish_writer(&storage, &capture.writer);
-    let fence = &capture.writer.authority.fence;
-    let authority_key = canonical_sha256(&(
-        "tracedecay.remote-recovery-authority.v1",
-        &fence.brain_id,
-        &fence.shard_id,
-        &fence.generation_id,
-    ))
-    .unwrap();
+    let authority_key = capture
+        .writer
+        .authority
+        .fence
+        .recovery_authority_key()
+        .unwrap();
     fixture
         .handle
         .execute(
@@ -1132,6 +1446,181 @@ fn capture_enforces_the_registered_spool_event_bound() {
 }
 
 #[test]
+fn abandoning_an_attempt_a_terminal_transition_already_released_succeeds() {
+    let fixture = fixture();
+    let storage = storage(&fixture);
+    let receipt = storage.capture_pending(&admitted()).unwrap();
+    let attempt = storage
+        .begin_replay_attempt(&receipt.event_id, UtcMicros(20))
+        .unwrap();
+    storage
+        .transition(RemoteReplayTransitionV1 {
+            event_id: receipt.event_id.clone(),
+            from: RemoteReplayStateV1::Pending,
+            to: RemoteReplayStateV1::Rejected,
+            replay_attempt: attempt,
+            observed_at: UtcMicros(21),
+            finding: Some(RemoteReplayFindingV1::EnrollmentRevoked),
+            receipt: None,
+        })
+        .unwrap();
+
+    assert_eq!(
+        storage.abandon_replay_attempt(&receipt.event_id, attempt),
+        Ok(())
+    );
+    assert_eq!(
+        storage.abandon_replay_attempt(&receipt.event_id, attempt + 1),
+        Err(RemoteCapturePersistenceErrorV1::Corruption),
+        "an attempt that never started is not this caller's to release"
+    );
+    assert_eq!(
+        storage.state(&receipt.event_id).unwrap(),
+        RemoteReplaySpoolStateV1 {
+            state: RemoteReplayStateV1::Rejected,
+            receipt: None,
+            last_attempt: attempt,
+            finding: Some(RemoteReplayFindingV1::EnrollmentRevoked),
+        },
+        "the spool reports the finding that settled the frame"
+    );
+}
+
+#[test]
+fn replay_backlog_lists_one_enrollments_frames_in_sequence_order() {
+    let fixture = fixture();
+    let storage = storage(&fixture);
+    let receipt = RemoteReplayCommitReceiptV1 {
+        event_id: "remote.event.backlog-1".to_owned(),
+        writer_fence: writer().authority.fence,
+        commit_sequence: 4,
+        committed_at: UtcMicros(20),
+        budget: OperationBudgetUsage {
+            units_consumed: 1,
+            bytes_consumed: 1,
+            elapsed_micros: 0,
+        },
+    };
+    let receipt_json = serde_json::to_string(&receipt).unwrap();
+    let finding_json = serde_json::to_string(&RemoteReplayFindingV1::StoreRefused).unwrap();
+    let insert = |event: &str,
+                  enrollment: &str,
+                  sequence: i64,
+                  state: &str,
+                  receipt: Option<&str>,
+                  finding: Option<&str>| {
+        fixture
+            .handle
+            .execute(
+                ExactSqlStatement::new(
+                    "INSERT INTO remote_spool_frames (
+                        event_id, enrollment_id, sequence, frame_digest, key_revision,
+                        nonce, ciphertext, state, receipt_json, finding, captured_at
+                     ) VALUES (?1, ?2, ?3, 'sha256:frame', 7, ?4, ?5, ?6, ?7, ?8, 10)"
+                        .to_owned(),
+                    vec![
+                        text(event),
+                        text(enrollment),
+                        ExactSqlValue::Integer(sequence),
+                        ExactSqlValue::Blob(vec![0; 12]),
+                        ExactSqlValue::Blob(vec![0]),
+                        text(state),
+                        optional_text(receipt),
+                        optional_text(finding),
+                    ],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    };
+    insert(
+        "remote.event.backlog-3",
+        "enrollment.backlog",
+        3,
+        "pending",
+        None,
+        None,
+    );
+    insert(
+        "remote.event.backlog-1",
+        "enrollment.backlog",
+        1,
+        "acknowledged",
+        Some(receipt_json.as_str()),
+        None,
+    );
+    insert(
+        "remote.event.foreign-1",
+        "enrollment.foreign",
+        1,
+        "pending",
+        None,
+        None,
+    );
+    insert(
+        "remote.event.backlog-2",
+        "enrollment.backlog",
+        2,
+        "rejected",
+        None,
+        Some(finding_json.as_str()),
+    );
+    let entry = |event_id: &str, sequence, state, receipt, finding| RemoteReplayBacklogEntryV1 {
+        event_id: event_id.to_owned(),
+        sequence,
+        state,
+        receipt,
+        finding,
+    };
+
+    assert_eq!(
+        storage.replay_backlog(&EntityId::new("enrollment.backlog").unwrap()),
+        Ok(vec![
+            entry(
+                "remote.event.backlog-1",
+                1,
+                RemoteReplayStateV1::Acknowledged,
+                Some(receipt),
+                None,
+            ),
+            entry(
+                "remote.event.backlog-2",
+                2,
+                RemoteReplayStateV1::Rejected,
+                None,
+                Some(RemoteReplayFindingV1::StoreRefused),
+            ),
+            entry(
+                "remote.event.backlog-3",
+                3,
+                RemoteReplayStateV1::Pending,
+                None,
+                None,
+            ),
+        ]),
+        "only this enrollment's frames, lowest sequence first, with their receipt and finding"
+    );
+    assert_eq!(
+        storage.replay_backlog(&EntityId::new("enrollment.absent").unwrap()),
+        Ok(Vec::new())
+    );
+
+    insert(
+        "remote.event.corrupt-1",
+        "enrollment.corrupt",
+        1,
+        "rejected",
+        None,
+        Some("not a finding"),
+    );
+    assert_eq!(
+        storage.replay_backlog(&EntityId::new("enrollment.corrupt").unwrap()),
+        Err(RemoteCapturePersistenceErrorV1::Corruption),
+        "an undecodable finding is corruption, not an absent finding"
+    );
+}
+
+#[test]
 fn startup_releases_only_interrupted_attempt_markers_for_idempotent_retry() {
     let fixture = fixture();
     let storage = storage(&fixture);
@@ -1159,6 +1648,7 @@ fn startup_releases_only_interrupted_attempt_markers_for_idempotent_retry() {
             state: RemoteReplayStateV1::Pending,
             receipt: None,
             last_attempt: 1,
+            finding: None,
         }
     );
     assert_eq!(

@@ -307,6 +307,12 @@ pub async fn compute_health(
 
     let (dimensions, weights) = if request.details.unwrap_or(false) {
         let r4 = |x: f64| (x * 10000.0).round() / 10000.0;
+        let interpretation = |dimension: HealthDimension, measured: &str| {
+            snap.no_evidence(dimension).map_or_else(
+                || measured.to_owned(),
+                |reason| format!("no evidence: {}", reason.label()),
+            )
+        };
         (
             Some(HealthDimensionsV1 {
                 acyclicity: HealthAcyclicityV1 {
@@ -324,7 +330,10 @@ pub async fn compute_health(
                 equality: HealthEqualityV1 {
                     score: r4(snap.equality),
                     gini: r4(snap.gini),
-                    interpretation: gini_label(snap.gini).to_owned(),
+                    interpretation: interpretation(
+                        HealthDimension::Equality,
+                        gini_label(snap.gini),
+                    ),
                     incomplete_complexity_symbols: snap.incomplete_complexity_symbols as u64,
                     source: "1 - gini(per_file_complexity); symbols whose complexity walk hit its budget are excluded and counted".to_owned(),
                 },
@@ -336,7 +345,10 @@ pub async fn compute_health(
                 },
                 modularity: HealthModularityV1 {
                     score: r4(snap.modularity),
-                    interpretation: modularity_label(snap.modularity).to_owned(),
+                    interpretation: interpretation(
+                        HealthDimension::Modularity,
+                        modularity_label(snap.modularity),
+                    ),
                     components_after_hub_removal: snap.modularity_components as u64,
                     source: "1 - 1/components_after_hub_removal".to_owned(),
                 },
@@ -348,29 +360,18 @@ pub async fn compute_health(
                 },
             }),
             Some(HealthWeightsV1 {
-                note: "quality_signal is a breakdown of panel, worst dimension first. Do not maximize it.".to_owned(),
+                note: "quality_signal is a breakdown of panel, worst dimension first. Do not maximize it. Dimensions under \"no evidence\" enter quality_signal at their vacuous formula value, so quality_signal does not summarize such a scope.".to_owned(),
             }),
         )
     } else {
         (None, None)
     };
 
-    let panel = tracedecay_graph_query::health::health_panel(
-        &tracedecay_graph_query::health::HealthDimensions {
-            acyclicity: snap.acyclicity,
-            depth: snap.depth,
-            equality: snap.equality,
-            redundancy: snap.redundancy,
-            modularity: snap.modularity,
-            coverage_discipline: snap.coverage_discipline,
-        },
-    )
-    .join(", ");
     Ok(graph_tool_completion(
         GraphToolResultV1::Health(HealthResultV1 {
             quality_signal: snap.quality_signal,
             files_analyzed: snap.files_analyzed as u64,
-            panel,
+            panel: health_panel(&snap),
             dimensions,
             weights,
             freshness: None,

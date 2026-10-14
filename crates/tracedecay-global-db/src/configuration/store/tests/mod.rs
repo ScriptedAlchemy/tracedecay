@@ -49,7 +49,7 @@ fn incomplete_snapshot_requires_reset_instead_of_default_repair() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn linked_worktree_default_converges_into_existing_snapshot() {
     let (_directory, runtime, root) = Box::pin(global_setup()).await;
     let key = SettingKey::new(SYNC_WATCH_LINKED_WORKTREES_SETTING_KEY).unwrap();
@@ -98,7 +98,7 @@ async fn linked_worktree_default_converges_into_existing_snapshot() {
 /// `index.exclude.v1` default. A store that never overrode the setting must
 /// follow the current default, otherwise the pattern would drop tracked
 /// `bin/` sources the first time the setting is honored.
-#[tokio::test]
+#[asupersync::test]
 async fn a_changed_default_converges_when_the_setting_was_never_overridden() {
     let (_directory, runtime, root) = Box::pin(global_setup()).await;
     let key = SettingKey::new(INDEX_EXCLUDE_SETTING_KEY).unwrap();
@@ -170,7 +170,7 @@ async fn a_changed_default_converges_when_the_setting_was_never_overridden() {
 /// A v0.1.0-beta.37 profile still carries `semantic.runtime.v1`. Opening it
 /// on the current registry must drop that retired key instead of stalling the
 /// project behind a reset verdict.
-#[tokio::test]
+#[asupersync::test]
 async fn retired_semantic_runtime_key_converges_out_of_a_beta37_snapshot() {
     assert_retired_key_converges_out("semantic.runtime.v1", ConfigurationValueV1::Boolean(true))
         .await;
@@ -178,7 +178,7 @@ async fn retired_semantic_runtime_key_converges_out_of_a_beta37_snapshot() {
 
 /// Every release through v0.1.0-beta.50 persisted the
 /// `sync.orphan_db_gc_days.v1` default (7 days).
-#[tokio::test]
+#[asupersync::test]
 async fn retired_orphan_db_gc_days_key_converges_out_of_a_beta50_snapshot() {
     assert_retired_key_converges_out(
         "sync.orphan_db_gc_days.v1",
@@ -188,7 +188,7 @@ async fn retired_orphan_db_gc_days_key_converges_out_of_a_beta50_snapshot() {
 }
 
 /// Persisted prewarm settings converge through the retired-key authority.
-#[tokio::test]
+#[asupersync::test]
 async fn retired_diagnostics_prewarm_key_converges_without_reset() {
     assert_retired_key_converges_out(
         "diagnostics.prewarm.v1",

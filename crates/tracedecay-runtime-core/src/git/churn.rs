@@ -14,9 +14,7 @@ use crate::git_repository::{GitRepositoryAuthority, GitRepositoryError};
 #[tracing::instrument(name = "runtime_core.git.file_churn", level = "trace", skip_all)]
 pub async fn file_churn(project_root: &Path, days: u32) -> Result<HashMap<String, usize>> {
     let root = project_root.to_owned();
-    tokio::task::spawn_blocking(move || read_file_churn(&root, days, &GitCommandBounds::default()))
-        .await
-        .map_err(|error| churn_error(error.to_string()))?
+    off_executor(move || read_file_churn(&root, days, &GitCommandBounds::default())).await
 }
 
 /// Like [`file_churn`], but the log is restricted to `paths`.
@@ -31,11 +29,20 @@ pub async fn file_churn_paths(
     }
     let root = project_root.to_owned();
     let paths = paths.to_vec();
-    tokio::task::spawn_blocking(move || {
-        read_file_churn_paths(&root, days, &paths, &GitCommandBounds::default())
-    })
-    .await
-    .map_err(|error| churn_error(error.to_string()))?
+    off_executor(move || read_file_churn_paths(&root, days, &paths, &GitCommandBounds::default()))
+        .await
+}
+
+async fn off_executor<T: Send + 'static>(
+    read: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    let cx =
+        crate::native_runtime::cx().ok_or_else(|| churn_error("native runtime unavailable"))?;
+    cx.spawn_blocking(move |_| read())
+        .map_err(|error| churn_error(error.to_string()))?
+        .join(&cx)
+        .await
+        .map_err(|error| churn_error(error.to_string()))?
 }
 
 fn churn_error(detail: impl Into<String>) -> TraceDecayError {

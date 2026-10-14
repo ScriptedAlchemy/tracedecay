@@ -1568,6 +1568,70 @@ async fn a_released_serving_engine_closes_and_rewarms_on_the_next_read() {
     );
 }
 
+/// A park release can drop the engine again after its re-warm brought it
+/// back but before that re-warm finished. A read that waits then finds the
+/// re-warm still running and sleeps on it, so the re-warm's end must wake
+/// it to answer the cold engine instead of sleeping out its whole budget.
+///
+/// Fails if a finishing re-warm leaves its waiters asleep (issue #3819).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_read_waiting_on_a_finishing_rewarm_wakes_when_it_ends() {
+    use tracedecay_code_index::graph_projection::{
+        CodeGraphEngineReleaseV1, CodeGraphProjectionStore, CodeGraphReadinessRequirement,
+    };
+
+    let fixture = sealed_generation_fixture(
+        "project.graph-engine-rewarm-wakeup",
+        "pub fn rewarmed_value() -> usize { 13 }\n",
+    )
+    .await;
+    let snapshot = fixture
+        .runtime
+        .publish_verified_snapshot(Arc::new(AtomicBool::new(false)))
+        .expect("seal the code graph");
+    let store =
+        CodeGraphProjectionStore::from_verified_snapshot(snapshot, fixture.generation_id.clone())
+            .expect("projection store over the sealed snapshot");
+    store.warm_serving_engine().expect("background warm");
+    assert!(matches!(
+        store.release_serving_engine().expect("release"),
+        CodeGraphEngineReleaseV1::Released { .. }
+    ));
+
+    let waiter = store.with_rewarm_held_before_completion_for_test(|| {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match store.release_serving_engine().expect("park release") {
+                CodeGraphEngineReleaseV1::Released { .. } => break,
+                CodeGraphEngineReleaseV1::Busy => {
+                    assert!(Instant::now() < deadline, "the re-warmed engine stays held");
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                CodeGraphEngineReleaseV1::NotPinned => panic!("the re-warm pins the engine"),
+            }
+        }
+        let waiting = store.clone();
+        let waiter = std::thread::spawn(move || {
+            let started = Instant::now();
+            let outcome = waiting.await_rewarm_for(
+                Duration::from_secs(5),
+                CodeGraphReadinessRequirement::Engine,
+            );
+            (outcome, started.elapsed())
+        });
+        // Lets the waiter park before the re-warm finishes. A waiter that
+        // has not parked yet sees the re-warm over and starts its own, which
+        // wakes it, so a short sleep can only pass vacuously, never fail.
+        std::thread::sleep(Duration::from_millis(200));
+        waiter
+    });
+    let (outcome, waited) = waiter.join().expect("waiter thread");
+    assert!(
+        waited < Duration::from_secs(2),
+        "the finished re-warm left its waiter asleep for {waited:?} ({outcome:?})"
+    );
+}
+
 /// A crate of documented functions that call each other and structs with
 /// methods, so the graph carries symbol records, docstrings, and edges.
 fn accounting_source(functions: usize) -> String {
@@ -3011,13 +3075,23 @@ async fn concurrent_worktree_scopes_publish_with_one_corpus_build_and_bounded_rs
 
 #[test]
 fn off_thread_staging_release_retains_its_permit_and_leases_until_terminal_drain() {
-    let executor = tokio::runtime::Builder::new_multi_thread()
+    let executor = asupersync::runtime::RuntimeBuilder::multi_thread()
         .worker_threads(2)
-        .max_blocking_threads(1)
-        .enable_all()
+        .blocking_threads(1, 1)
+        .enable_time()
+        .enable_platform_reactor(true)
         .build()
         .expect("isolated blocking-pool runtime");
+    // The registry's remote replay authority binds the daemon's Tokio
+    // runtime, so the fixture provides one beside the native executor.
+    let daemon_runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("daemon Tokio runtime");
+    let _daemon_context = daemon_runtime.enter();
     executor.block_on(async {
+        let cx = asupersync::Cx::current().expect("native fixture execution context");
         let temporary = tempfile::tempdir().expect("temporary fixture parent");
         let root = temporary
             .path()
@@ -3122,12 +3196,14 @@ fn off_thread_staging_release_retains_its_permit_and_leases_until_terminal_drain
         // Occupy the actual blocking-pool slot. Dropping the sender on any
         // assertion failure also releases this worker, so teardown cannot hang.
         let (release, blocked) = std::sync::mpsc::channel::<()>();
-        let (started, entered) = tokio::sync::oneshot::channel();
-        let blocker = tokio::task::spawn_blocking(move || {
-            started.send(()).unwrap();
-            let _ = blocked.recv();
-        });
-        entered.await.unwrap();
+        let (started, mut entered) = asupersync::channel::oneshot::channel();
+        let mut blocker = cx
+            .spawn_blocking(move |_| {
+                started.send_blocking(()).unwrap();
+                let _ = blocked.recv();
+            })
+            .expect("native blocking-pool admission");
+        entered.recv(&cx).await.unwrap();
         std::thread::scope(|scope| {
             scope
                 .spawn(|| runtime.release_sealed_staging_rows(build, projection))
@@ -3147,26 +3223,26 @@ fn off_thread_staging_release_retains_its_permit_and_leases_until_terminal_drain
 
         // Poll the operation owner itself: terminal shutdown has other blocking
         // phases, which must not make a detached release falsely pass this test.
-        let mut operation_drain = std::pin::pin!(runtime.operation_task_owner.shutdown());
+        let mut operation_drain = std::pin::pin!(runtime.operation_task_owner.shutdown(&cx));
         std::future::poll_fn(|cx| {
             assert!(std::future::Future::poll(operation_drain.as_mut(), cx).is_pending());
             std::task::Poll::Ready(())
         })
         .await;
-        let mut terminal_drain = std::pin::pin!(registry.shutdown_terminal_tasks());
+        let mut terminal_drain = std::pin::pin!(registry.shutdown_terminal_tasks(&cx));
         std::future::poll_fn(|cx| {
             assert!(std::future::Future::poll(terminal_drain.as_mut(), cx).is_pending());
             std::task::Poll::Ready(())
         })
         .await;
-        assert!(!runtime.operation_task_owner.retain(async {}));
+        assert!(runtime.operation_task_owner.retain_blocking(|| {}).is_err());
         assert!(
             Arc::clone(&runtime.publication_locks.build)
                 .try_lock_owned()
                 .is_err()
         );
         release.send(()).unwrap();
-        blocker.await.unwrap();
+        blocker.join(&cx).await.unwrap();
         operation_drain.await.expect("accepted sweep is joined");
         terminal_drain
             .await

@@ -25,13 +25,14 @@ use crate::work_retry::{RetryWorkAttemptCommandV1, WorkRetryAttemptOutcomeV1};
 use crate::{
     AcceptWorkProposalRequestV1, AdjudicateWorkLeakCommandV1, AdmitWorkExecutionRequestV1,
     AdmitWorkPlacementCommand, AdmitWorkSynthesisCommand, AdmittedWorkExecutionV1,
-    CancelWorkAttemptCommand, CreateWorkTaskRequestV1, ExecutionTopologyMetricsRequestV1,
-    ExecutionTopologyMetricsV1, ExecutionTopologyViewV1, GenerateProposalRequest,
-    GeneratedWorkProposal, PauseWorkRunCommand, PrepareWorkDuplicateAdjudicationRequestV1,
-    PrepareWorkProductMutationRequestV1, ReleaseWorkPlacementCommand, ResumeWorkAttemptsCommand,
-    ResumeWorkRunCommand, ReviewWorkProposalRequestV1, StartWorkAttemptCommand,
-    WorkArtifactHydrationRequestV1, WorkArtifactHydrationV1, WorkAttemptListRequestV1,
-    WorkAttemptListV1, WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
+    AdvanceWorkJobRequestV1, AdvanceWorkJobResultV1, CancelWorkAttemptCommand,
+    CreateWorkTaskRequestV1, ExecutionTopologyMetricsRequestV1, ExecutionTopologyMetricsV1,
+    ExecutionTopologyViewV1, GenerateProposalRequest, GeneratedWorkProposal, PauseWorkRunCommand,
+    PrepareWorkDuplicateAdjudicationRequestV1, PrepareWorkProductMutationRequestV1,
+    ReleaseWorkPlacementCommand, ResumeWorkAttemptsCommand, ResumeWorkRunCommand,
+    ReviewWorkProposalRequestV1, StartWorkAttemptCommand, WorkArtifactHydrationRequestV1,
+    WorkArtifactHydrationV1, WorkAttemptListRequestV1, WorkAttemptListV1,
+    WorkAttemptRecoveryReportV1, WorkAttemptStatusRequestV1,
     WorkDuplicateAdjudicationAppendOutcomeV1, WorkEvidenceRetrievalV1,
     WorkEvidenceRetrieveRequestV1, WorkExecutionHistoryV1, WorkExperienceRequestV1,
     WorkExperienceV1, WorkGraphReadRequestV1, WorkGraphReadV1, WorkLeakAdjudicationOutcomeV1,
@@ -42,7 +43,7 @@ use crate::{
 };
 
 const WORK_SERVICE_ID: &str = "service.work";
-pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 32] = [
+pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 33] = [
     (
         "generate_proposal",
         "capability.work.generate_proposal",
@@ -194,6 +195,11 @@ pub const WORK_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 32] = [
         "release_placement",
         "capability.work.release_placement",
         "use-case.work.release_placement",
+    ),
+    (
+        "advance_job",
+        "capability.work.advance_job",
+        "use-case.work.advance_job",
     ),
 ];
 
@@ -440,6 +446,13 @@ fn build_work_executable_binding_registry()
             "tracedecay_contracts::ReleaseWorkPlacementCommand",
             "tracedecay_domain::WorkPlacementV1",
         )?,
+        available::<AdvanceWorkJobRequestV1, AdvanceWorkJobResultV1>(
+            "advance_job",
+            "/application/work/advance-job",
+            EffectClass::Administrative,
+            "tracedecay_contracts::AdvanceWorkJobRequestV1",
+            "tracedecay_contracts::AdvanceWorkJobResultV1",
+        )?,
     ];
     ExecutableBindingRegistryV1::new(bindings)
 }
@@ -601,12 +614,18 @@ fn work_manifest(
         terminal_states: TerminalStateContract::new(terminal_states(read_only))?,
         availability: AvailabilityContract::Available,
         binding_ids: vec![binding_id],
-        profile_eligibility: vec![
-            ProfileId::new("profile.default")
-                .map_err(|_| invalid_identity("profile_id", "work profile ID is not canonical"))?,
-        ],
+        profile_eligibility: work_profile_eligibility()?,
         required_features: Vec::new(),
     })
+}
+
+/// Catalog profiles every Work capability is eligible for. The manifests and
+/// the serve-time profile filter both read it, since Work tools are mounted
+/// outside the application catalog snapshot.
+pub fn work_profile_eligibility() -> Result<Vec<ProfileId>, CatalogValidationError> {
+    Ok(vec![ProfileId::new("profile.default").map_err(|_| {
+        invalid_identity("profile_id", "work profile ID is not canonical")
+    })?])
 }
 
 fn terminal_states(read_only: bool) -> Vec<TerminalState> {

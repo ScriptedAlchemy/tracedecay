@@ -574,6 +574,73 @@ async fn published_text_projection_outlasts_a_store_reader_beside_graph_activati
     fixture.registry.shutdown().await;
 }
 
+/// Graph activation waits for the publication's text projection to open its
+/// build and take its reservation, nothing more. Releasing it only after a
+/// first advance that also committed a corpus-sized page batch serialized the
+/// graph build behind that batch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn graph_activation_starts_before_the_published_text_projection_commits_a_page() {
+    let (fixture, admission) =
+        Fixture::mount_with_poisoned_artifacts_root_held("project.graph-before-pages", |_| {})
+            .await;
+    let scope = fixture
+        .registry
+        .serving_code_scope(&fixture.project)
+        .await
+        .expect("mounted scope");
+    let gate = install_injected_activation_gate(&scope.worktree_id);
+    let (opened, release_opened) = fixture
+        .registry
+        .pause_next_opened_published_text_projection(fixture.project.clone());
+    drop(admission);
+
+    tokio::time::timeout(CONVERGENCE_DEADLINE, opened)
+        .await
+        .expect("the published text projection opens its build")
+        .expect("opened gate sender");
+    tokio::time::timeout(CONVERGENCE_DEADLINE, gate.wait_until_started())
+        .await
+        .expect("graph activation starts beside the opened text projection");
+    let canonical = canonical_existing_identity(&fixture.project).expect("canonical project");
+    let text = {
+        let mounted = fixture.registry.mounted.lock().await;
+        mounted
+            .get(&canonical)
+            .expect("mounted worktree")
+            .text_generation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+    .expect("the publication installed its text owner before activation");
+    let generation_id = text.metadata().manifest().generation_id.clone();
+    let committed_pages = text
+        .text_progress_slot
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .snapshot()
+        .filter(|progress| progress.generation_id == generation_id.as_str())
+        .map_or(0, |progress| progress.committed_pages);
+    assert_eq!(
+        committed_pages, 0,
+        "graph activation started only after the text projection committed source pages"
+    );
+
+    release_opened
+        .send(())
+        .expect("release the opened projection");
+    let mut signals = OwnerSignals::subscribe(&fixture.registry, &fixture.project).await;
+    tokio::time::timeout(CONVERGENCE_DEADLINE, async {
+        while !text.query_owners_are_ready() {
+            signals.changed().await;
+        }
+    })
+    .await
+    .expect("the text owner finishes its pages beside the held graph activation");
+    gate.release();
+    fixture.registry.shutdown().await;
+}
+
 /// Exact and lexical serving does not depend on native graph. A retryable
 /// activation failure used to replace the whole prepared triple with
 /// `Ok((Err, None, None))`, which failed the serving swap's own guard, so the

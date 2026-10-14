@@ -350,7 +350,7 @@ mod tests {
         assert!(spawned);
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn grant_expiring_during_memory_scan_withholds_lcm() {
         let now = Arc::new(std::sync::atomic::AtomicI64::new(1));
         let scan_now = Arc::clone(&now);
@@ -672,7 +672,7 @@ mod tests {
             .expect("commit pre-purge superseded payload fixture");
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn at_rest_rescan_quarantines_and_erases_legacy_detector_hits() {
         let temp = TempDir::new().expect("privacy remediation fixture root");
         let profile_root = temp.path().join("profile");
@@ -792,7 +792,7 @@ mod tests {
         assert!(second.curation_receipts.is_empty());
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn at_rest_rescan_commit_denial_fails_closed_without_mutation() {
         let temp = TempDir::new().expect("privacy remediation denial fixture root");
         let profile_root = temp.path().join("profile");
@@ -899,7 +899,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn at_rest_rescan_purges_detector_flagged_history_already_superseded_by_clean_content() {
         let temp = TempDir::new().expect("privacy remediation fixture root");
         let profile_root = temp.path().join("profile");
@@ -999,7 +999,7 @@ mod tests {
         assert_eq!(orphaned_payload_fts_rows(&database).await, 0);
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn remediation_commits_more_than_one_curation_batch_without_leaving_secret_bytes() {
         let home = TempDir::new().expect("isolated home");
         let profile_root = home.path().join("profile");

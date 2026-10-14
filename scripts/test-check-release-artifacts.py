@@ -13,34 +13,22 @@ import tempfile
 SCRIPT = Path(__file__).with_name("check-release-artifacts.py")
 
 
-def run(
-    root: Path,
-    profile: str = "stable",
-    *,
-    allow_missing: bool = False,
-) -> subprocess.CompletedProcess[str]:
-    command = [
-        sys.executable,
-        str(SCRIPT),
-        "--manifest",
-        str(root / "targets.json"),
-        "--tag",
-        "v1.2.3",
-        "--profile",
-        profile,
-        "--binaries",
-        str(root / "binaries"),
-    ]
-    if allow_missing:
-        command.append("--allow-missing-targets")
-    command.extend(
+def run(root: Path, profile: str = "stable") -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
         [
+            sys.executable,
+            str(SCRIPT),
+            "--manifest",
+            str(root / "targets.json"),
+            "--tag",
+            "v1.2.3",
+            "--profile",
+            profile,
+            "--binaries",
+            str(root / "binaries"),
             "--mcpbs",
             str(root / "mcpbs"),
-        ]
-    )
-    return subprocess.run(
-        command,
+        ],
         capture_output=True,
         text=True,
     )
@@ -51,17 +39,12 @@ def expect(
     status: int,
     message: str,
     profile: str = "stable",
-    *,
-    allow_missing: bool = False,
 ) -> None:
     """Success reports on stdout and a refusal on stderr, each as one line."""
-    completed = run(root, profile, allow_missing=allow_missing)
+    completed = run(root, profile)
     output = completed.stdout if status == 0 else completed.stderr
     if completed.returncode != status or output != f"{message}\n":
         raise AssertionError(completed.stdout + completed.stderr)
-
-
-BETA_PARTIAL = {"profile": "beta", "allow_missing": True}
 
 
 def main() -> int:
@@ -125,30 +108,16 @@ def main() -> int:
             profile="beta",
         )
 
-        # Partial publish: a whole missing target is accepted, a half target
-        # (archive without MCPB) is not, a foreign file is not, and an empty
-        # set is not.
-        expect(
-            root,
-            1,
-            "release target linux is half built: archive=missing, mcpb=present",
-            **BETA_PARTIAL,
-        )
+        # A whole missing target (beta.86 lost macOS, #3756) is refused too.
         (root / "mcpbs" / "tracedecay-beta-v1.2.3-linux.mcpb").unlink()
         expect(
             root,
-            0,
-            "release artifact coverage is partial; missing targets: linux",
-            **BETA_PARTIAL,
+            1,
+            "binary coverage mismatch: missing tracedecay-beta-v1.2.3-linux.tar.gz",
+            profile="beta",
         )
-        (root / "binaries" / "stray.tar.gz").write_bytes(b"artifact")
-        expect(root, 1, "unexpected release artifacts: stray.tar.gz", **BETA_PARTIAL)
-        (root / "binaries" / "stray.tar.gz").unlink()
-        (root / "binaries" / "tracedecay-beta-v1.2.3-windows.zip").unlink()
-        (root / "mcpbs" / "tracedecay-beta-v1.2.3-windows.mcpb").unlink()
-        expect(root, 1, "no release target is complete; nothing to publish", **BETA_PARTIAL)
         # An MCPB that leaked into the binaries directory (a `tracedecay-beta-*`
-        # artifact glob did this) is foreign there, in both modes.
+        # artifact glob did this) is foreign there.
         for child in ("binaries", "mcpbs"):
             for item in (root / child).iterdir():
                 item.unlink()
@@ -165,12 +134,6 @@ def main() -> int:
             1,
             "binary coverage mismatch: unexpected tracedecay-beta-v1.2.3-linux.mcpb",
             profile="beta",
-        )
-        expect(
-            root,
-            1,
-            "unexpected release artifacts: tracedecay-beta-v1.2.3-linux.mcpb",
-            **BETA_PARTIAL,
         )
     print("release artifact validator tests passed")
     return 0

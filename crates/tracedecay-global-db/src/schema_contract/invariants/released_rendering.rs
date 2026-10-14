@@ -558,7 +558,7 @@ mod tests {
     /// the whole store, so profile-session convergence reported `degraded` on
     /// every open and never advanced. It must instead admit the released
     /// rendering and re-stamp it, byte-for-byte, to what this binary derives.
-    #[tokio::test]
+    #[asupersync::test]
     async fn released_codex_goal_rendering_converges_instead_of_degrading() {
         let directory = TempDir::new().unwrap();
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -625,7 +625,7 @@ mod tests {
     /// observation plus the uniquely owned current provenance authorize the
     /// current row, so reopening must finish that projection write rather than
     /// degrade ProfileSessions forever.
-    #[tokio::test]
+    #[asupersync::test]
     async fn current_provenance_repairs_its_stale_output_row() {
         let directory = TempDir::new().unwrap();
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -680,7 +680,7 @@ mod tests {
     /// A row whose content survived but whose content hash did not still
     /// fails hydration with `PayloadIntegrityMismatch`. Content equality alone
     /// is not the row a fresh projection write stores.
-    #[tokio::test]
+    #[asupersync::test]
     async fn current_provenance_repairs_a_row_with_a_stale_hash() {
         let directory = TempDir::new().unwrap();
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -742,7 +742,7 @@ mod tests {
     /// The repair above is the shipped rendering, not any disagreement under
     /// current provenance. A body neither this binary nor a release wrote is
     /// tamper: the audit refuses it and does not rewrite the row.
-    #[tokio::test]
+    #[asupersync::test]
     async fn current_provenance_refuses_a_tampered_output_row() {
         let directory = TempDir::new().unwrap();
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -793,7 +793,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn current_provenance_restores_its_missing_session_row() {
         let directory = TempDir::new().unwrap();
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -1019,7 +1019,7 @@ mod tests {
     /// profile's session history. A quarantine is a legitimate current
     /// rendering, so the released row must converge to exactly the durable
     /// refusal a fresh capture of the same envelope writes.
-    #[tokio::test]
+    #[asupersync::test]
     async fn quarantined_codex_goal_rendering_converges_to_the_withheld_capture() {
         let directory = TempDir::new().unwrap();
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())
@@ -1138,7 +1138,7 @@ mod tests {
     /// is stored beside is corruption, not a release: it stays refused, and the
     /// refusal names the field, the projector, and the row so an operator log
     /// says which output to look at.
-    #[tokio::test]
+    #[asupersync::test]
     async fn provenance_disagreeing_with_its_own_output_stays_refused() {
         let directory = TempDir::new().unwrap();
         let runtime = HostAdmissionTestRuntimeV1::profile(directory.path())

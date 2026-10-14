@@ -357,12 +357,16 @@ impl Default for MaintenanceCoordinator {
     }
 }
 
-/// One unit of bounded per-tick maintenance work: either a mounted session
-/// database or a mounted project graph. Arcs are cloned into the item so the
-/// store stays alive for the duration of the writer-held critical section.
+/// One unit of bounded per-tick maintenance work: a mounted session database
+/// or a mounted project graph, named by its database path. A tick holds no
+/// mounted store between units. Each unit resolves its store when its
+/// writer-held section starts and drops it when that section ends. Capacity
+/// retirement of an idle project refuses while anything leases its stores, so
+/// a tick that kept every listed store for its whole run refused those
+/// retirements. A store unmounted since the listing is skipped.
 enum MaintenanceStoreWork {
-    Session(tracedecay_global_db::RegisteredGlobalDbLeaseV1),
-    Graph(Arc<tracedecay_project::project::TraceDecay>),
+    Session(PathBuf),
+    Graph(PathBuf),
     /// The code-index scopes of a registered project that no mounted graph
     /// owns; its database is never opened by this unit.
     Registered(RegisteredProjectStoreV1),
@@ -371,11 +375,28 @@ enum MaintenanceStoreWork {
 impl MaintenanceStoreWork {
     fn database_path(&self) -> Option<&Path> {
         match self {
-            Self::Session(database) => Some(database.db_path()),
-            Self::Graph(graph) => Some(graph.db().database_path()),
+            Self::Session(database_path) | Self::Graph(database_path) => Some(database_path),
             Self::Registered(_) => None,
         }
     }
+}
+
+/// What a tick reads from one mounted project graph, copied out at listing.
+struct MountedGraphListing {
+    key: String,
+    database_path: PathBuf,
+    project_root: PathBuf,
+    data_root: PathBuf,
+    code_index_store_root: PathBuf,
+}
+
+/// The work-list key of a mounted project graph: its root and serving branch.
+fn graph_work_key(graph: &tracedecay_project::project::TraceDecay) -> String {
+    format!(
+        "g:{}\u{1f}{}",
+        graph.project_root().display(),
+        graph.serving_branch().unwrap_or_default()
+    )
 }
 
 pub(crate) fn project_store_maintenance_lease(
@@ -503,7 +524,6 @@ impl MaintenanceCoordinator {
     /// join below stays correct whether or not it already ran.
     pub(super) fn cancel(&self) {
         self.cancellation.cancel();
-        self.wake.notify_waiters();
     }
 
     pub(super) async fn shutdown(&self) {
@@ -637,18 +657,43 @@ impl MaintenanceCoordinator {
             );
             return MaintenanceTickOutcome::Retry;
         };
-        let Some(_background_cpu) = background_cpu.try_acquire() else {
-            return MaintenanceTickOutcome::Retry;
-        };
         administration
             .store_telemetry_sampling()
             .begin_retention_tick_log_window();
         let session_databases = if continuation.is_none() {
-            administration.mounted_registered_session_databases().await
+            administration
+                .mounted_registered_session_databases()
+                .await
+                .iter()
+                .map(|database| database.db_path().to_path_buf())
+                .collect()
         } else {
             Vec::new()
         };
-        let project_graphs = administration.mounted_project_graphs().await;
+        let project_graphs = administration
+            .mounted_project_graphs()
+            .await
+            .iter()
+            .map(|graph| MountedGraphListing {
+                key: graph_work_key(graph),
+                database_path: graph.db().database_path().to_path_buf(),
+                project_root: graph.project_root().to_path_buf(),
+                data_root: graph.store_layout().data_root.clone(),
+                code_index_store_root: code_index_store_root(
+                    &graph.store_layout().data_root,
+                    &graph.store_layout().project_root,
+                ),
+            })
+            .collect::<Vec<_>>();
+        #[cfg(any(test, feature = "test-helpers"))]
+        {
+            let _ = crate::test_support::hold_after_maintenance_listing_for_test().await;
+        }
+        // The listing copies in-memory mounts and is not CPU work, so a tick
+        // parked at the listing holds no background CPU unit.
+        let Some(_background_cpu) = background_cpu.try_acquire() else {
+            return MaintenanceTickOutcome::Retry;
+        };
         let (registered_projects, registry_listed) =
             match registered_project_stores(profile_root, profile_database).await {
                 Ok(stores) => (stores, true),
@@ -666,21 +711,14 @@ impl MaintenanceCoordinator {
             };
         let mounted_store_roots = project_graphs
             .iter()
-            .map(|graph| {
-                let layout = graph.store_layout();
-                code_index_store_root(&layout.data_root, &layout.project_root)
-            })
+            .map(|graph| graph.code_index_store_root.clone())
             .collect::<BTreeSet<_>>();
         let mut active_telemetry_paths = BTreeSet::from([profile_database.db_path().to_path_buf()]);
-        active_telemetry_paths.extend(
-            session_databases
-                .iter()
-                .map(|database| database.db_path().to_path_buf()),
-        );
+        active_telemetry_paths.extend(session_databases.iter().cloned());
         active_telemetry_paths.extend(
             project_graphs
                 .iter()
-                .map(|graph| graph.db().database_path().to_path_buf()),
+                .map(|graph| graph.database_path.clone()),
         );
         // Build one stably-sorted work list across both store kinds so the
         // per-tick budget and round-robin cursor bound the total work, not each
@@ -690,20 +728,16 @@ impl MaintenanceCoordinator {
         let mut work: Vec<(String, MaintenanceStoreWork)> = Vec::with_capacity(
             session_databases.len() + project_graphs.len() + registered_projects.len(),
         );
-        for database in &session_databases {
+        for database_path in &session_databases {
             work.push((
-                format!("s:{}", database.db_path().display()),
-                MaintenanceStoreWork::Session(database.clone()),
+                format!("s:{}", database_path.display()),
+                MaintenanceStoreWork::Session(database_path.clone()),
             ));
         }
         for graph in &project_graphs {
             work.push((
-                format!(
-                    "g:{}\u{1f}{}",
-                    graph.project_root().display(),
-                    graph.serving_branch().unwrap_or_default()
-                ),
-                MaintenanceStoreWork::Graph(Arc::clone(graph)),
+                graph.key.clone(),
+                MaintenanceStoreWork::Graph(graph.database_path.clone()),
             ));
         }
         for (project_id, store) in registered_projects {
@@ -727,7 +761,7 @@ impl MaintenanceCoordinator {
         let maintenance_observations = administration.store_telemetry_sampling();
         let active_maintenance_projects = project_graphs
             .iter()
-            .map(|graph| graph.project_root().to_path_buf())
+            .map(|graph| graph.project_root.clone())
             .collect::<BTreeSet<_>>();
         maintenance_observations.retain_project_maintenance_state(&active_maintenance_projects);
         let telemetry_sampling = if continuation.is_none() {
@@ -753,17 +787,34 @@ impl MaintenanceCoordinator {
             }
             let admitted = administration
                 .try_with_writer(|| async {
-                    match &work[index].1 {
-                        MaintenanceStoreWork::Session(database) => {
-                            if run_registered_store_retention(database, retention).await {
+                    let (key, unit) = &work[index];
+                    match unit {
+                        MaintenanceStoreWork::Session(database_path) => {
+                            let Some(database) = administration
+                                .mounted_registered_session_databases()
+                                .await
+                                .into_iter()
+                                .find(|database| database.db_path() == database_path)
+                            else {
+                                return MaintenanceTickOutcome::Complete;
+                            };
+                            if run_registered_store_retention(&database, retention).await {
                                 MaintenanceTickOutcome::Complete
                             } else {
                                 MaintenanceTickOutcome::Retry
                             }
                         }
-                        MaintenanceStoreWork::Graph(graph) => {
+                        MaintenanceStoreWork::Graph(_) => {
+                            let Some(graph) = administration
+                                .mounted_project_graphs()
+                                .await
+                                .into_iter()
+                                .find(|graph| graph_work_key(graph) == *key)
+                            else {
+                                return MaintenanceTickOutcome::Complete;
+                            };
                             run_project_generation_maintenance(
-                                &project_store_maintenance_lease(graph),
+                                &project_store_maintenance_lease(&graph),
                                 code_index_schedulers,
                                 &maintenance_observations,
                                 &self.cancellation,
@@ -856,7 +907,7 @@ impl MaintenanceCoordinator {
             owner_roots.extend(
                 project_graphs
                     .iter()
-                    .map(|graph| graph.project_root().to_path_buf()),
+                    .map(|graph| graph.project_root.clone()),
             );
             match administration
                 .try_with_writer(|| {
@@ -912,7 +963,8 @@ impl MaintenanceCoordinator {
                         administration,
                         code_index_schedulers,
                         branch_gc.branch_gc_days,
-                        graph,
+                        &graph.project_root,
+                        &graph.data_root,
                     )
                     .await;
                 }
@@ -1135,14 +1187,11 @@ mod tests {
     use tracedecay_domain::UtcMicros;
 
     use super::{MaintenanceCoordinator, run_resident_memory_sampler_loop};
-    use tracedecay_maintenance::loop_run::{
-        MaintenanceWake, maintenance_futures_active, run_maintenance_loop,
-    };
     use tracedecay_maintenance::telemetry::{
         StoreTelemetrySamplingRegistry, TableGrowthObservation, compare_table_growth,
     };
     use tracedecay_maintenance::tick::{
-        CadenceInstant, MaintenanceCadence, MaintenanceContinuation, MaintenanceTickOutcome,
+        MaintenanceCadence, MaintenanceContinuation, MaintenanceTickOutcome,
         cursor_after_attempted_units, select_store_window,
     };
 
@@ -1199,7 +1248,7 @@ mod tests {
 
     #[test]
     fn cadence_rate_limits_failures_and_successes() {
-        let started = CadenceInstant::now();
+        let started = std::time::Instant::now();
         let mut cadence = MaintenanceCadence::new(Duration::from_mins(1));
 
         assert!(cadence.reserve(started));
@@ -1335,198 +1384,6 @@ mod tests {
             registry.graph_replay_release_attempt_admitted(retired),
             "a retired project's backoff state must be dropped"
         );
-    }
-
-    /// `MAINTENANCE_FUTURES_ACTIVE` is a process-wide counter, so a test that
-    /// observes absolute readings must not overlap another test that runs a
-    /// maintenance loop. Every test that starts `run_maintenance_loop` holds
-    /// this lock for the whole lifetime of its loop.
-    static MAINTENANCE_LOOP_LIFECYCLE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-    #[tokio::test(start_paused = true)]
-    async fn repeated_wakes_do_not_move_the_maintenance_due_deadline() {
-        let _lifecycle_isolation = MAINTENANCE_LOOP_LIFECYCLE.lock().await;
-        let cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
-        let wake = Arc::new(MaintenanceWake::default());
-        let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let baseline = maintenance_futures_active();
-        let task_cancellation = cancellation.clone();
-        let task_wake = Arc::clone(&wake);
-        let task_ticks = Arc::clone(&ticks);
-        let task = tokio::spawn(async move {
-            run_maintenance_loop(
-                &task_cancellation,
-                &task_wake,
-                Duration::from_mins(10),
-                move |_| {
-                    let ticks = Arc::clone(&task_ticks);
-                    async move {
-                        ticks.fetch_add(1, Ordering::SeqCst);
-                        MaintenanceTickOutcome::Complete
-                    }
-                },
-            )
-            .await;
-        });
-        tokio::task::yield_now().await;
-        assert_eq!(
-            maintenance_futures_active(),
-            baseline + 1,
-            "the loop lifecycle must become observable while the task is live"
-        );
-
-        for _ in 0..3 {
-            wake.wake();
-            tokio::task::yield_now().await;
-            assert_eq!(ticks.load(Ordering::SeqCst), 0);
-        }
-        tokio::time::advance(Duration::from_secs(59)).await;
-        tokio::task::yield_now().await;
-        assert_eq!(ticks.load(Ordering::SeqCst), 0);
-
-        tokio::time::advance(Duration::from_secs(1)).await;
-        tokio::task::yield_now().await;
-        assert_eq!(
-            ticks.load(Ordering::SeqCst),
-            1,
-            "the original absolute deadline must run exactly once despite early wakes"
-        );
-
-        cancellation.cancel();
-        task.await
-            .expect("maintenance loop joins after cancellation");
-        assert_eq!(
-            maintenance_futures_active(),
-            baseline,
-            "cancellation must drop the lifecycle guard and clear the active count"
-        );
-    }
-
-    /// A due request is the publication signal: it pulls the next tick to at
-    /// most one retry delay away, coalesces with other requests inside that
-    /// window, and never runs a tick while one is in flight.
-    #[tokio::test(start_paused = true)]
-    async fn due_request_pulls_the_next_tick_forward_without_busy_looping() {
-        let _lifecycle_isolation = MAINTENANCE_LOOP_LIFECYCLE.lock().await;
-        let cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
-        let wake = Arc::new(MaintenanceWake::default());
-        let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let task_cancellation = cancellation.clone();
-        let task_wake = Arc::clone(&wake);
-        let task_ticks = Arc::clone(&ticks);
-        let task = tokio::spawn(async move {
-            run_maintenance_loop(
-                &task_cancellation,
-                &task_wake,
-                Duration::from_hours(24),
-                move |_| {
-                    let ticks = Arc::clone(&task_ticks);
-                    async move {
-                        ticks.fetch_add(1, Ordering::SeqCst);
-                        MaintenanceTickOutcome::Complete
-                    }
-                },
-            )
-            .await;
-        });
-        tokio::task::yield_now().await;
-        // The first tick runs one retry delay after start, then the daily
-        // cadence applies.
-        tokio::time::advance(Duration::from_mins(1)).await;
-        tokio::task::yield_now().await;
-        assert_eq!(ticks.load(Ordering::SeqCst), 1);
-
-        // A plain wake leaves the daily deadline alone.
-        tokio::time::advance(Duration::from_hours(1)).await;
-        wake.wake();
-        tokio::task::yield_now().await;
-        tokio::time::advance(Duration::from_mins(5)).await;
-        tokio::task::yield_now().await;
-        assert_eq!(ticks.load(Ordering::SeqCst), 1);
-
-        // Three publications inside one retry delay make exactly one tick due
-        // one retry delay after the first request, not after 24 hours.
-        for _ in 0..3 {
-            wake.request_due();
-            tokio::task::yield_now().await;
-            assert_eq!(
-                ticks.load(Ordering::SeqCst),
-                1,
-                "a due request never runs early"
-            );
-        }
-        tokio::time::advance(Duration::from_secs(59)).await;
-        tokio::task::yield_now().await;
-        assert_eq!(ticks.load(Ordering::SeqCst), 1);
-        tokio::time::advance(Duration::from_secs(1)).await;
-        tokio::task::yield_now().await;
-        assert_eq!(
-            ticks.load(Ordering::SeqCst),
-            2,
-            "coalesced due requests run one tick after one retry delay"
-        );
-
-        // After that tick the daily cadence is back in force.
-        tokio::time::advance(Duration::from_hours(1)).await;
-        tokio::task::yield_now().await;
-        assert_eq!(ticks.load(Ordering::SeqCst), 2);
-
-        cancellation.cancel();
-        task.await
-            .expect("maintenance loop joins after cancellation");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn progress_continuation_reenters_only_the_owning_phase() {
-        let _lifecycle_isolation = MAINTENANCE_LOOP_LIFECYCLE.lock().await;
-        let cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
-        let wake = Arc::new(MaintenanceWake::default());
-        let phases = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let task_cancellation = cancellation.clone();
-        let task_wake = Arc::clone(&wake);
-        let task_phases = Arc::clone(&phases);
-        let task = tokio::spawn(async move {
-            run_maintenance_loop(
-                &task_cancellation,
-                &task_wake,
-                Duration::from_mins(10),
-                move |continuation| {
-                    let phases = Arc::clone(&task_phases);
-                    async move {
-                        let mut phases = phases
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        phases.push(continuation);
-                        if phases.len() == 1 {
-                            MaintenanceTickOutcome::Continue(
-                                MaintenanceContinuation::CodeGenerationRetention,
-                            )
-                        } else {
-                            MaintenanceTickOutcome::Complete
-                        }
-                    }
-                },
-            )
-            .await;
-        });
-        tokio::task::yield_now().await;
-
-        tokio::time::advance(Duration::from_mins(1)).await;
-        tokio::task::yield_now().await;
-        tokio::time::advance(Duration::from_mins(1)).await;
-        tokio::task::yield_now().await;
-
-        assert_eq!(
-            *phases
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-            vec![None, Some(MaintenanceContinuation::CodeGenerationRetention)],
-            "bounded progress must resume its code-generation phase instead of a full tick"
-        );
-
-        cancellation.cancel();
-        task.await
-            .expect("maintenance loop joins after cancellation");
     }
 
     fn store_keys(count: usize) -> Vec<String> {

@@ -108,8 +108,13 @@ fn activation_drives_the_hosts_own_mcp_add_with_the_registered_server_contract()
     let copilot_cli = bin_dir.path().join("copilot");
     fake_copilot_cli(&copilot_cli, &log, FAKE_REGISTRY_BODY);
 
-    copilot_mcp_add_with(&copilot_cli, home.path(), "/bin/tracedecay")
-        .expect("a clean host CLI run is a completed registration");
+    copilot_mcp_add_with(
+        &copilot_cli,
+        home.path(),
+        "/bin/tracedecay",
+        &crate::agents::serve_args::ServeArgs::default(),
+    )
+    .expect("a clean host CLI run is a completed registration");
 
     assert_eq!(
         recorded_invocations(&log),
@@ -134,7 +139,13 @@ fn removal_drives_the_hosts_own_mcp_remove_and_reverses_the_registration() {
     let mcp_path = copilot_cli_mcp_config_path(home.path());
     assert!(!mcp_path.exists(), "precondition: nothing registered yet");
 
-    copilot_mcp_add_with(&copilot_cli, home.path(), "/bin/tracedecay").unwrap();
+    copilot_mcp_add_with(
+        &copilot_cli,
+        home.path(),
+        "/bin/tracedecay",
+        &crate::agents::serve_args::ServeArgs::default(),
+    )
+    .unwrap();
     copilot_mcp_remove_with(&copilot_cli, home.path())
         .expect("a clean host CLI run is a completed removal");
 
@@ -168,8 +179,13 @@ fn refresh_replaces_an_existing_registration_and_preserves_an_operator_owned_pee
     )
     .unwrap();
 
-    copilot_mcp_add_with(&copilot_cli, home.path(), "/new/tracedecay")
-        .expect("host refresh must replace tracedecay while preserving the peer");
+    copilot_mcp_add_with(
+        &copilot_cli,
+        home.path(),
+        "/new/tracedecay",
+        &crate::agents::serve_args::ServeArgs::default(),
+    )
+    .expect("host refresh must replace tracedecay while preserving the peer");
     assert_eq!(
         recorded_invocations(&log),
         vec![
@@ -207,8 +223,13 @@ fn failed_refresh_restores_the_exact_previous_registration() {
     let original = br#"{"mcpServers":{"other":{"command":"other","args":[]},"tracedecay":{"command":"/old/tracedecay","args":["serve"]}}}"#;
     std::fs::write(&mcp_path, original).unwrap();
 
-    let error = copilot_mcp_add_with(&copilot_cli, home.path(), "/new/tracedecay")
-        .expect_err("a rejected replacement must fail the refresh");
+    let error = copilot_mcp_add_with(
+        &copilot_cli,
+        home.path(),
+        "/new/tracedecay",
+        &crate::agents::serve_args::ServeArgs::default(),
+    )
+    .expect_err("a rejected replacement must fail the refresh");
 
     assert!(
         error
@@ -247,8 +268,13 @@ fn a_host_command_that_discards_a_peer_server_is_refused() {
     )
     .unwrap();
 
-    let error = copilot_mcp_add_with(&copilot_cli, home.path(), "/bin/tracedecay")
-        .expect_err("losing an operator-owned peer must not be accepted as a registration");
+    let error = copilot_mcp_add_with(
+        &copilot_cli,
+        home.path(),
+        "/bin/tracedecay",
+        &crate::agents::serve_args::ServeArgs::default(),
+    )
+    .expect_err("losing an operator-owned peer must not be accepted as a registration");
 
     let TraceDecayError::Config { message } = error else {
         panic!("a peer-preservation refusal must surface as a config error");
@@ -275,6 +301,7 @@ fn component_registration_reads_the_cli_owned_mcp_state() {
         profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
         home: home.path().to_path_buf(),
         project_path: home.path().to_path_buf(),
+        catalog_profiles: Default::default(),
     };
 
     assert_eq!(

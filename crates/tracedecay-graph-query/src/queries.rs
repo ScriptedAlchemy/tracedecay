@@ -1041,7 +1041,7 @@ mod dead_code_scope_tests {
     /// A fixture corpus that sorts ahead of product source used to consume the
     /// whole page: the limit was applied to the unfiltered census, so no
     /// `crates/` symbol was ever reported.
-    #[tokio::test]
+    #[asupersync::test]
     async fn path_prefix_bounds_the_limit_to_the_filtered_symbols() {
         let reader = fixture_reader(
             &[
@@ -1087,7 +1087,7 @@ mod dead_code_scope_tests {
     }
 
     /// Scoping the report must not turn an outside caller into no caller.
-    #[tokio::test]
+    #[asupersync::test]
     async fn path_prefix_does_not_discard_callers_outside_the_prefix() {
         let reader = fixture_reader(
             &[

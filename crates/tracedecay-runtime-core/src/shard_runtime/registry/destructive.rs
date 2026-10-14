@@ -265,7 +265,7 @@ impl StoreRuntimeRegistry {
                     | RegistryEntry::Evicting(_) => None,
                 })
                 .collect::<Vec<_>>();
-            let (released, _) = tokio::sync::watch::channel(false);
+            let (released, _) = asupersync::channel::watch::channel(false);
             state.destructive_paths.insert(
                 attempt,
                 DestructivePathReservation {
@@ -301,7 +301,7 @@ impl StoreRuntimeRegistry {
     pub(super) fn destructive_wait(
         &self,
         path: &Path,
-    ) -> Option<tokio::sync::watch::Receiver<bool>> {
+    ) -> Option<asupersync::channel::watch::Receiver<bool>> {
         self.lock_state()
             .destructive_paths
             .values()
@@ -318,13 +318,19 @@ impl StoreRuntimeRegistry {
                 operation: "release destructive store maintenance",
                 message: "destructive maintenance reservation was lost".to_owned(),
             })?;
-        reservation.released.send_replace(true);
-        Ok(())
+        reservation.released.send(true).map_err(|error| {
+            StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "release destructive store maintenance",
+                message: error.to_string(),
+            }
+        })
     }
 
     fn release_destructive_after_cancellation(&self, attempt: u64) {
-        if let Some(reservation) = self.lock_state().destructive_paths.remove(&attempt) {
-            reservation.released.send_replace(true);
+        if let Some(reservation) = self.lock_state().destructive_paths.remove(&attempt)
+            && let Err(error) = reservation.released.send(true)
+        {
+            tracing::error!(%error, "failed to publish destructive reservation release");
         }
     }
 }
@@ -460,7 +466,7 @@ mod tests {
     struct BlockingCloseControl {
         opened_file_identity: u64,
         drained: AtomicBool,
-        close_started: tokio::sync::Notify,
+        close_started: asupersync::sync::Notify,
         close_released: Mutex<bool>,
         close_wake: Condvar,
         closed: AtomicBool,
@@ -532,7 +538,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn destructive_reservation_rejects_a_matching_evicting_runtime() {
         let temporary = tempfile::tempdir().unwrap();
         let profile_path = temporary.path().join("profile.db");
@@ -545,7 +551,7 @@ mod tests {
         let control = Arc::new(BlockingCloseControl {
             opened_file_identity,
             drained: AtomicBool::new(false),
-            close_started: tokio::sync::Notify::new(),
+            close_started: asupersync::sync::Notify::new(),
             close_released: Mutex::new(false),
             close_wake: Condvar::new(),
             closed: AtomicBool::new(false),
@@ -554,11 +560,13 @@ mod tests {
             DatabaseAuthority::for_runtime(&code_path, "reserve destructive evicting runtime")
                 .unwrap();
         let registry = StoreRuntimeRegistry::new(
+            asupersync::runtime::Runtime::current_handle().unwrap(),
             Arc::new(FixtureResolver { profile_path }),
             Arc::new(BlockingClosePublisher {
                 control: Arc::clone(&control),
             }),
-        );
+        )
+        .unwrap();
         let incarnation = StoreIncarnationV1::new(1).unwrap();
         let profile = match registry
             .open(StoreRuntimeOpenRequest::new(
@@ -598,14 +606,21 @@ mod tests {
         let close_registry = registry.clone();
         let close_binding = binding.clone();
         let close_authority = authority.clone();
-        let close = tokio::spawn(async move {
-            close_registry
-                .close_exact(&close_binding, &close_authority)
-                .await
-        });
-        if tokio::time::timeout(Duration::from_secs(2), control.close_started.notified())
-            .await
-            .is_err()
+        let mut close = asupersync::Cx::current()
+            .unwrap()
+            .spawn(move |_| async move {
+                close_registry
+                    .close_exact(&close_binding, &close_authority)
+                    .await
+            })
+            .unwrap();
+        if asupersync::time::timeout(
+            asupersync::Cx::current().unwrap().now(),
+            Duration::from_secs(2),
+            control.close_started.notified(),
+        )
+        .await
+        .is_err()
         {
             control.release_close();
             panic!("exact close did not enter the blocking physical close");
@@ -618,14 +633,18 @@ mod tests {
             .await;
 
         control.release_close();
-        close.await.unwrap().unwrap();
+        close
+            .join(&asupersync::Cx::current().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
         assert!(matches!(
             reservation,
             Err(StoreRuntimeRegistryFailure::RuntimeEvictionInProgress { .. })
         ));
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[asupersync::test(flavor = "multi_thread", workers = 2)]
     async fn cancelling_destructive_reservation_releases_and_reopens_runtime() {
         let temporary = tempfile::tempdir().unwrap();
         let profile_path = temporary.path().join("profile.db");
@@ -638,7 +657,7 @@ mod tests {
         let control = Arc::new(BlockingCloseControl {
             opened_file_identity,
             drained: AtomicBool::new(false),
-            close_started: tokio::sync::Notify::new(),
+            close_started: asupersync::sync::Notify::new(),
             close_released: Mutex::new(false),
             close_wake: Condvar::new(),
             closed: AtomicBool::new(false),
@@ -649,11 +668,13 @@ mod tests {
         )
         .unwrap();
         let registry = StoreRuntimeRegistry::new(
+            asupersync::runtime::Runtime::current_handle().unwrap(),
             Arc::new(FixtureResolver { profile_path }),
             Arc::new(BlockingClosePublisher {
                 control: Arc::clone(&control),
             }),
-        );
+        )
+        .unwrap();
         let incarnation = StoreIncarnationV1::new(1).unwrap();
         let profile = match registry
             .open(StoreRuntimeOpenRequest::new(
@@ -692,20 +713,32 @@ mod tests {
         let target =
             DestructiveMaintenanceTarget::new(temporary.path(), [code_path.clone()]).unwrap();
         let reservation_registry = registry.clone();
-        let reservation = tokio::spawn(async move {
-            reservation_registry
-                .begin_destructive_maintenance(target)
-                .await
-        });
-        if tokio::time::timeout(Duration::from_secs(2), control.close_started.notified())
-            .await
-            .is_err()
+        let mut reservation = asupersync::Cx::current()
+            .unwrap()
+            .spawn(move |_| async move {
+                reservation_registry
+                    .begin_destructive_maintenance(target)
+                    .await
+            })
+            .unwrap();
+        if asupersync::time::timeout(
+            asupersync::Cx::current().unwrap().now(),
+            Duration::from_secs(2),
+            control.close_started.notified(),
+        )
+        .await
+        .is_err()
         {
             control.release_close();
             panic!("destructive close did not enter the blocking physical close");
         }
         reservation.abort();
-        assert!(matches!(reservation.await, Err(error) if error.is_cancelled()));
+        assert!(matches!(
+            reservation.join(&asupersync::Cx::current().unwrap()).await,
+            Ok(Err(StoreRuntimeRegistryFailure::WaitCancelled {
+                operation: "wait for exact registered runtime close",
+            }))
+        ));
         assert!(matches!(
             registry.lookup(&binding),
             StoreRuntimeLookup::Evicting { .. }
@@ -725,14 +758,18 @@ mod tests {
         ));
 
         control.release_close();
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while !matches!(
-                registry.lookup(&binding),
-                StoreRuntimeLookup::Missing { .. }
-            ) {
-                tokio::task::yield_now().await;
-            }
-        })
+        asupersync::time::timeout(
+            asupersync::Cx::current().unwrap().now(),
+            Duration::from_secs(2),
+            async {
+                while !matches!(
+                    registry.lookup(&binding),
+                    StoreRuntimeLookup::Missing { .. }
+                ) {
+                    asupersync::runtime::yield_now().await;
+                }
+            },
+        )
         .await
         .unwrap();
         assert!(control.closed.load(Ordering::SeqCst));

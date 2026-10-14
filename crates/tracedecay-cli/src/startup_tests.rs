@@ -150,6 +150,22 @@ fn default_component_set_adoption_requires_confirmation() {
     }
 }
 
+/// Help offers one MCP component; scripts that spell the retired one still
+/// parse.
+#[test]
+fn component_help_lists_one_mcp_choice_and_keeps_the_retired_spelling() {
+    let help = Cli::command().render_long_help().to_string();
+    assert!(help.contains("context-mcp"), "{help}");
+    assert!(!help.contains("operator-mcp"), "{help}");
+
+    let cli = Cli::try_parse_from(["tracedecay", "update-plugin", "--component", "operator-mcp"])
+        .expect("the retired component spelling still parses");
+    assert_eq!(
+        cli.component,
+        Some(super::HostBundleComponentArg::OperatorMcp)
+    );
+}
+
 #[test]
 fn adoption_without_confirmation_is_refused() {
     let cli = Cli::try_parse_from(["tracedecay", "update-plugin", "--adopt"])
@@ -314,6 +330,7 @@ fn explicit_agent_config_commands_skip_startup_maintenance() {
         no_dashboard: false,
         automation: false,
         git_hook: false,
+        catalog_profile: None,
     }));
     assert!(should_skip_startup_maintenance(&Commands::Reinstall {
         local: false,
@@ -525,6 +542,7 @@ fn agent_install_health_check_is_selective() {
         path: None,
         timings: false,
         full_tool_list: false,
+        catalog_profile: None,
     }));
     assert!(should_skip_agent_install_check(&Commands::Install {
         agent: Some("cursor".to_string()),
@@ -532,6 +550,7 @@ fn agent_install_health_check_is_selective() {
         no_dashboard: false,
         automation: false,
         git_hook: false,
+        catalog_profile: None,
     }));
     assert!(should_skip_agent_install_check(&Commands::Reinstall {
         local: false,
@@ -748,6 +767,62 @@ fn the_beta_83_claude_plugin_flag_serves_the_full_tool_list() {
                 })
             ),
             "{flag} must select the full tool list"
+        );
+    }
+}
+
+#[test]
+fn serve_selects_a_catalog_profile_by_its_short_name() {
+    for args in [
+        &["tracedecay", "serve", "--catalog-profile=compact"][..],
+        &["tracedecay", "serve", "--catalog-profile", "compact"][..],
+    ] {
+        let cli = Cli::try_parse_from(args)
+            .unwrap_or_else(|error| panic!("{args:?} must parse: {error}"));
+        let Some(Commands::Serve {
+            catalog_profile: Some(profile),
+            ..
+        }) = cli.command
+        else {
+            panic!("{args:?} must select a catalog profile");
+        };
+        assert_eq!(profile.name(), "compact");
+    }
+    let error = Cli::try_parse_from(["tracedecay", "serve", "--catalog-profile=profile.compact"])
+        .err()
+        .expect("a catalog profile ID is not its short name");
+    assert!(
+        error
+            .to_string()
+            .contains(r#"unknown catalog profile "profile.compact""#),
+        "{error}"
+    );
+}
+
+#[test]
+fn every_launch_an_install_writes_parses_as_that_serve_profile() {
+    let catalog =
+        tracedecay_daemon_service::application_surface::application_surface_binding_catalog_ref()
+            .expect("binding catalog");
+    for name in ["default", "compact", "administrative", "host-limited"] {
+        let profile =
+            tracedecay_contracts::catalog_composition::CatalogProfileName::parse(catalog, name)
+                .expect("catalog profile");
+        let written =
+            tracedecay_agent_hosts::agents::serve_args::ServeArgs::from(profile).to_vec(&[]);
+        let cli = Cli::try_parse_from(iter::once("tracedecay".to_owned()).chain(written.clone()))
+            .unwrap_or_else(|error| panic!("{written:?} must parse: {error}"));
+        let Some(Commands::Serve {
+            catalog_profile, ..
+        }) = cli.command
+        else {
+            panic!("{written:?} must be a serve command");
+        };
+        let expected = (name != "default").then_some(name);
+        assert_eq!(
+            catalog_profile.as_ref().map(|profile| profile.name()),
+            expected,
+            "{written:?}"
         );
     }
 }

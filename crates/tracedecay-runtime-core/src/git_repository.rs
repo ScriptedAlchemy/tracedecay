@@ -198,8 +198,9 @@ impl TopologyWalk {
 
 /// Retained checkout-root topologies.
 ///
-/// Bounded by [`MAX_RETAINED_CHECKOUT_TOPOLOGIES`]; a full map drops its least
-/// recently used settled slot. Clearing it whole instead let a burst of
+/// Bounded by [`MAX_RETAINED_CHECKOUT_TOPOLOGIES`]; a full map drops a settled
+/// slot that retains nothing before one that retains a root, least recently
+/// used first within each. Clearing it whole, or plain LRU, let a burst of
 /// one-off probes evict the roots a daemon keeps serving, so a deferred route
 /// on a slow volume walked again instead of converging.
 static CHECKOUT_TOPOLOGY: LazyLock<Mutex<HashMap<PathBuf, Arc<CheckoutTopologySlot>>>> =
@@ -252,7 +253,7 @@ impl HeadFileStamp {
 /// shape a dozen times, and each question ran a complete `gix` discovery,
 /// an upward walk to the filesystem root plus a repository open. On a slow
 /// volume that is seconds per question, paid again by every concurrent
-/// client, and it ran inline on the tokio workers that also poll the daemon's
+/// client, and it ran inline on the async workers that also poll the daemon's
 /// accept loop.
 ///
 /// Only a path that **is** its own worktree root is retained. The checkout's
@@ -454,8 +455,9 @@ fn checkout_topology_slot(path: &Path) -> Arc<CheckoutTopologySlot> {
     slot
 }
 
-/// Drop the least recently used slot whose walk has settled, reporting
-/// whether one was dropped. A slot with a walk in flight stays, because its
+/// Drop a settled slot, reporting whether one was dropped: the least recently
+/// used vacant slot, else the least recently used retained root, whose loss
+/// costs a discovery walk. A slot with a walk in flight stays, because its
 /// owner publishes into that slot and an evicted one would discard the
 /// answer; the map may then exceed its bound until those walks settle and a
 /// later insertion evicts back down to it. `try_lock` skips a slot another
@@ -465,13 +467,16 @@ fn evict_least_recently_used_settled_slot(
 ) -> bool {
     let victim = slots
         .iter()
-        .filter(|(_, slot)| {
-            slot.state
-                .try_lock()
-                .is_ok_and(|state| !matches!(*state, CheckoutTopologyState::Resolving(_)))
+        .filter_map(|(path, slot)| {
+            let retains = match &*slot.state.try_lock().ok()? {
+                CheckoutTopologyState::Resolving(_) => return None,
+                CheckoutTopologyState::Vacant => false,
+                CheckoutTopologyState::Ready(_) => true,
+            };
+            Some((path, retains, slot.last_used.load(Ordering::Relaxed)))
         })
-        .min_by_key(|(_, slot)| slot.last_used.load(Ordering::Relaxed))
-        .map(|(path, _)| path.clone());
+        .min_by_key(|&(_, retains, last_used)| (retains, last_used))
+        .map(|(path, _, _)| path.clone());
     victim.is_some_and(|victim| slots.remove(&victim).is_some())
 }
 
@@ -595,8 +600,7 @@ fn observe_repository_discovery(path: &Path) {
 /// [`DiscoveryBlocked`].
 #[cfg(any(test, feature = "test-helpers"))]
 struct RepositoryDiscoveryBlockGate {
-    entered_tx: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-    entered: tokio::sync::watch::Sender<bool>,
+    entered: asupersync::channel::watch::Sender<bool>,
     release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
 }
 
@@ -611,15 +615,7 @@ impl RepositoryDiscoveryBlockGate {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
-        self.entered.send_replace(true);
-        if let Some(entered) = self
-            .entered_tx
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
-        {
-            let _ = entered.send(());
-        }
+        let _ = self.entered.send(true);
         if let Some(release) = release {
             let _ = release.recv();
         }
@@ -628,19 +624,22 @@ impl RepositoryDiscoveryBlockGate {
 
 /// Handle for a discovery walk parked on a channel.
 ///
-/// Dropping `release` unblocks the walk. Await [`Self::entered`] to learn the
-/// walk has reached the blocking section.
+/// Dropping `release` unblocks the walk. Await [`Self::wait_entered`] to learn
+/// the walk has reached the blocking section.
 #[cfg(any(test, feature = "test-helpers"))]
 pub struct RepositoryDiscoveryBlock {
-    pub entered: tokio::sync::oneshot::Receiver<()>,
+    entered: asupersync::channel::watch::Receiver<bool>,
     release: std::sync::mpsc::Sender<()>,
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
 impl RepositoryDiscoveryBlock {
-    /// Wait until the parked walk has entered its blocking section.
+    /// Wait until the parked walk has entered its blocking section. Callable
+    /// from any executor.
+    #[allow(clippy::expect_used)]
     pub async fn wait_entered(&mut self) {
-        let _ = (&mut self.entered).await;
+        let cx = crate::native_runtime::cx().expect("native runtime for the discovery block");
+        discovery_block_entered(&cx, &mut self.entered).await;
     }
 
     /// Let the parked walk finish.
@@ -656,15 +655,13 @@ impl RepositoryDiscoveryBlock {
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn block_repository_discovery_for_test(root: &Path) -> RepositoryDiscoveryBlock {
     forget_retained_checkout_topology_for_test(root);
-    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let (watch_tx, _watch_rx) = tokio::sync::watch::channel(false);
+    let (entered_tx, entered_rx) = asupersync::channel::watch::channel(false);
     repository_discovery_observations().insert(
         observed_discovery_root(root),
         RepositoryDiscoveryObservation {
             block: Some(std::sync::Arc::new(RepositoryDiscoveryBlockGate {
-                entered_tx: Mutex::new(Some(entered_tx)),
-                entered: watch_tx,
+                entered: entered_tx,
                 release: Mutex::new(Some(release_rx)),
             })),
             ..RepositoryDiscoveryObservation::default()
@@ -676,25 +673,32 @@ pub fn block_repository_discovery_for_test(root: &Path) -> RepositoryDiscoveryBl
     }
 }
 
-/// `true` once a test block for `directory` has entered its wait.
-///
-/// `false` immediately when no block is armed, so production deadlines keep
-/// their own timer.
+/// Completes once a test block for `directory` has entered its wait, and
+/// never when no block is armed, so production deadlines keep their own timer.
 #[cfg(any(test, feature = "test-helpers"))]
-pub(crate) async fn wait_until_repository_discovery_blocks(directory: &Path) -> bool {
-    let Some(block) = armed_discovery_block(directory) else {
-        return false;
-    };
-    let mut entered = block.entered.subscribe();
-    if *entered.borrow() {
-        return true;
+pub(crate) async fn repository_discovery_parked(cx: &asupersync::Cx, directory: &Path) {
+    if let Some(block) = armed_discovery_block(directory)
+        && discovery_block_entered(cx, &mut block.entered.subscribe()).await
+    {
+        return;
     }
-    while entered.changed().await.is_ok() {
-        if *entered.borrow() {
+    std::future::pending::<()>().await;
+}
+
+/// Whether the walk entered its block before the block was disarmed.
+#[cfg(any(test, feature = "test-helpers"))]
+async fn discovery_block_entered(
+    cx: &asupersync::Cx,
+    entered: &mut asupersync::channel::watch::Receiver<bool>,
+) -> bool {
+    loop {
+        if entered.borrow_and_update_clone() {
             return true;
         }
+        if entered.changed(cx).await.is_err() {
+            return false;
+        }
     }
-    *entered.borrow()
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -807,18 +811,26 @@ fn observed_count(root: &Path, count: impl Fn(&RepositoryDiscoveryObservation) -
 /// A caller that returned without joining is the defect a test asserts on,
 /// so both end the wait; a caller that did neither within ten seconds fails.
 #[cfg(any(test, feature = "test-helpers"))]
+#[allow(clippy::expect_used)]
 pub async fn wait_for_topology_callers_for_test(
     root: &Path,
     callers: u64,
     returned: impl Fn() -> u64,
 ) {
+    let cx = crate::native_runtime::cx().expect("native runtime for the caller wait");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while repository_topology_wait_count_for_test(root) + returned() < callers {
         assert!(
             std::time::Instant::now() < deadline,
             "callers neither joined the parked discovery walk nor returned"
         );
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        // The timer runs in a native task so a Tokio caller never polls it.
+        let mut pause = cx
+            .spawn(|cx| async move {
+                asupersync::time::sleep(cx.now(), std::time::Duration::from_millis(5)).await;
+            })
+            .expect("native pause task");
+        let _ = pause.join(&cx).await;
     }
 }
 
@@ -896,9 +908,9 @@ impl GitRepositoryAuthority {
     ///
     /// A retained topology answers the *where* half of a discovery, the
     /// upward walk for `.git` and the canonical form of each directory it
-    /// names, so this opens the repository directly at its own Git directory
-    /// instead of walking the volume again. Live reads (HEAD, refs, status)
-    /// still come from a freshly opened repository.
+    /// names, so this opens the repository directly at its checkout root (its
+    /// Git directory when bare) instead of walking the volume again. Live
+    /// reads (HEAD, refs, status) still come from a freshly opened repository.
     ///
     /// Live defect this exists for: the topology memo only short-circuited
     /// `repository_topology`. Every HEAD read, one per route resolution, from
@@ -925,7 +937,9 @@ impl GitRepositoryAuthority {
     fn open_retained(topology: &GitRepositoryTopologyV1) -> Option<Self> {
         let repository = {
             let _span = tracing::trace_span!("runtime_core.git.repository_open_retained").entered();
-            crate::git_open::open(&topology.git_dir)
+            // A `--separate-git-dir` directory has no link back to its
+            // checkout, so opened by itself it reads as bare.
+            crate::git_open::open(topology.worktree_root.as_ref().unwrap_or(&topology.git_dir))
         }
         .ok()?;
         Some(Self {
@@ -1658,17 +1672,18 @@ mod tests {
         GitRepositoryError, GitRepositoryTopologyV1, MAX_RETAINED_CHECKOUT_TOPOLOGIES,
         TopologyResult, block_repository_discovery_for_test, observe_repository_discovery,
         observe_repository_discovery_for_test, repository_discovery_count_for_test,
-        repository_topology, repository_topology_resolution_count_for_test,
-        reset_repository_discovery_for_test, wait_for_topology_callers_for_test,
-        wait_until_repository_discovery_blocks,
+        repository_discovery_parked, repository_topology,
+        repository_topology_resolution_count_for_test, reset_repository_discovery_for_test,
+        wait_for_topology_callers_for_test,
     };
 
-    /// A full memo makes room by dropping its least recently used path, so a
-    /// root that keeps being asked for survives churn from many one-off
-    /// probes. Clearing the whole memo instead dropped that root too, and a
-    /// deferred route on a slow volume walked again instead of converging.
+    /// A full memo makes room by dropping slots that retain nothing, so a
+    /// root survives a burst of one-off probes however long the burst runs.
+    /// Clearing the whole memo, or plain LRU once the burst outgrew the
+    /// bound, dropped that root too, and a deferred route on a slow volume
+    /// walked again instead of converging.
     #[test]
-    fn a_full_topology_memo_keeps_a_recently_used_root() {
+    fn a_full_topology_memo_keeps_a_retained_root() {
         let temporary = tempfile::tempdir().expect("temporary directory");
         let repository = temporary.path().join("repository");
         std::fs::create_dir_all(&repository).expect("repository directory");
@@ -1687,37 +1702,40 @@ mod tests {
             let path = probes.path().join(probe.to_string());
             std::fs::create_dir_all(&path).expect("probe path");
             let _ = repository_topology(&path);
-            if probe % 8 == 0 {
-                repository_topology(&repository).expect("repository topology");
-            }
         }
+        repository_topology(&repository).expect("repository topology");
 
         assert_eq!(
             repository_topology_resolution_count_for_test(&repository),
             1,
-            "a root asked for between probes must stay retained"
+            "a burst of one-off probes evicted the retained root"
         );
         reset_repository_discovery_for_test(&repository);
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn discovery_block_retains_entry_for_late_subscribers() {
+        let cx = asupersync::Cx::current().expect("test task context");
         let root = tempfile::tempdir().expect("discovery root");
         let mut block = block_repository_discovery_for_test(root.path());
         let path = root.path().to_path_buf();
-        let discovery = tokio::task::spawn_blocking(move || observe_repository_discovery(&path));
+        let discovery = std::thread::spawn(move || observe_repository_discovery(&path));
         block.wait_entered().await;
 
-        let entered = tokio::time::timeout(
+        let entered = asupersync::time::timeout(
+            cx.now(),
             Duration::from_secs(1),
-            wait_until_repository_discovery_blocks(root.path()),
+            repository_discovery_parked(&cx, root.path()),
         )
         .await;
         block.release();
-        discovery.await.expect("discovery worker");
+        discovery.join().expect("discovery worker");
         reset_repository_discovery_for_test(root.path());
 
-        assert!(entered.expect("late subscriber sees the parked walk"));
+        assert!(
+            entered.is_ok(),
+            "a late subscriber must see the parked walk"
+        );
     }
 
     /// Park the first walk of `path`, join it from a second caller, release,
@@ -1749,7 +1767,7 @@ mod tests {
 
     /// A subdirectory's walk is not retained under its own path, and a failed
     /// walk is retained nowhere; both still answer the callers that joined it.
-    #[tokio::test(flavor = "multi_thread")]
+    #[asupersync::test]
     async fn unretained_walks_hand_their_answer_to_joined_callers() {
         let temporary = tempfile::tempdir().expect("temporary directory");
         let repository = temporary.path().join("repository");

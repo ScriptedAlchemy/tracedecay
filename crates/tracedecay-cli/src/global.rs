@@ -586,39 +586,27 @@ mod gather_tests {
     }
 
     #[test]
-    fn skips_projects_inside_node_modules() {
-        let profile_dir = tempfile::tempdir().unwrap();
-        let profile = &ProfileRoot::new(profile_dir.path());
-        let dir = tempfile::tempdir().unwrap();
-        let cwd = dir.path().canonicalize().unwrap();
-        let buried = cwd.join("node_modules").join("pkg");
-        fs::create_dir_all(&buried).unwrap();
-        make_enrolled_project(profile, &buried, "proj_buried");
-
-        let out = gather_local_projects_from(profile, &cwd);
-        assert!(
-            !out.contains(&buried),
-            "projects inside node_modules must be skipped, got {out:?}"
-        );
-    }
-
-    #[test]
     fn skips_projects_inside_generated_directories() {
-        let profile_dir = tempfile::tempdir().unwrap();
-        let profile = &ProfileRoot::new(profile_dir.path());
-        let dir = tempfile::tempdir().unwrap();
-        let cwd = dir.path().canonicalize().unwrap();
         // `.worktrees` is in the canonical generated-dir list but was missing
         // from the hardcoded descendant skip set.
-        let buried = cwd.join(".worktrees").join("lane");
-        fs::create_dir_all(&buried).unwrap();
-        make_enrolled_project(profile, &buried, "proj_worktree");
+        for (generated, project_id) in [
+            ("node_modules", "proj_buried"),
+            (".worktrees", "proj_worktree"),
+        ] {
+            let profile_dir = tempfile::tempdir().unwrap();
+            let profile = &ProfileRoot::new(profile_dir.path());
+            let dir = tempfile::tempdir().unwrap();
+            let cwd = dir.path().canonicalize().unwrap();
+            let buried = cwd.join(generated).join("lane");
+            fs::create_dir_all(&buried).unwrap();
+            make_enrolled_project(profile, &buried, project_id);
 
-        let out = gather_local_projects_from(profile, &cwd);
-        assert!(
-            !out.contains(&buried),
-            "projects inside generated directories must be skipped, got {out:?}"
-        );
+            let out = gather_local_projects_from(profile, &cwd);
+            assert!(
+                !out.contains(&buried),
+                "projects inside {generated} must be skipped, got {out:?}"
+            );
+        }
     }
 
     #[test]

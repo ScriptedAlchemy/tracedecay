@@ -160,6 +160,7 @@ fn fixture(writer_digest: char, reader_digest: char) -> Fixture {
     let path = path.canonicalize().unwrap();
     let binding = binding();
     let writer = PersistentWriter::start(
+        &crate::native_runtime::handle().expect("native runtime"),
         ExistingWriterLocator::new(
             binding.clone(),
             locator(&binding, writer_digest),

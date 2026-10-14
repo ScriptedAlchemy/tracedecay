@@ -3,6 +3,7 @@ use super::{
     DatabaseEngineWriteConnection, DatabaseMemoryTransaction, DatabaseWriteTransaction,
     DatabaseWriterConnection, Result, TraceDecayError,
 };
+use tracedecay_rusqlite_runtime::exact_sql::ExactSqlStatementBudget;
 
 impl DatabaseWriterConnection<'_> {
     pub(crate) fn engine_connection(&self) -> DatabaseEngineWriteConnection {
@@ -147,6 +148,20 @@ impl DatabaseEngineReadConnection {
                 snapshot,
                 _client_guard: self._client_guard.clone(),
             })
+    }
+
+    /// A background snapshot for schema-convergence audits whose single
+    /// statements scan a whole table. Its statements carry no wall-clock
+    /// deadline (see [`ExactSqlStatementBudget::Convergence`]), so an audit
+    /// over a store too large for the request deadline still completes.
+    pub async fn convergence_snapshot(
+        &self,
+    ) -> crate::db::engine::Result<DatabaseEngineReadSnapshot> {
+        let mut snapshot = self.background().read_snapshot().await?;
+        snapshot.snapshot = snapshot
+            .snapshot
+            .with_budget(ExactSqlStatementBudget::Convergence);
+        Ok(snapshot)
     }
 
     /// Live reader-pool occupancy for this exact database runtime.
@@ -406,11 +421,28 @@ impl DatabaseWriteTransaction<'_> {
         self.transaction.query(sql, params).await
     }
 
+    /// A query for schema-convergence audits whose single statement scans a
+    /// whole table. It carries no statement deadline and is accepted only by
+    /// a bulk (authority-bound long-lease) transaction.
+    pub async fn convergence_query<P>(
+        &self,
+        sql: &str,
+        params: P,
+    ) -> crate::db::engine::Result<crate::db::engine::Rows>
+    where
+        P: crate::db::engine::IntoParams,
+    {
+        self.transaction
+            .query_authority_revalidated(sql, params)
+            .await
+    }
+
     pub async fn commit(self) -> Result<()> {
         let Self {
             transaction,
             guard,
             _client_guard,
+            ..
         } = self;
         let tracks_graph_generation = {
             let mut rows = transaction
@@ -502,6 +534,7 @@ impl DatabaseWriteTransaction<'_> {
             transaction,
             guard,
             _client_guard,
+            ..
         } = self;
         let transaction = transaction.rollback().await;
         drop(guard);

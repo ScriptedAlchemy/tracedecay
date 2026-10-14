@@ -31,7 +31,10 @@ use tracedecay_contracts::remote::query::{
     RemoteQueryResultV1,
 };
 use tracedecay_contracts::remote::recovery::{PromotionCasReceiptV1, PromotionConfirmationV1};
-use tracedecay_contracts::remote::replay::{RemoteReplayOutcomeV1, RemoteReplayRequestV1};
+use tracedecay_contracts::remote::replay::{
+    RemoteReplayOutcomeV1, RemoteReplayPendingReceiptV1, RemoteReplayPendingRequestV1,
+    RemoteReplayRequestV1,
+};
 use tracedecay_contracts::remote::transfer::{
     RemoteFrameTransferReceiptV1, RemoteFrameTransferRequestV1,
 };
@@ -151,9 +154,14 @@ macro_rules! unreachable_protocol_port {
 
 unreachable_protocol_port!(RemoteCaptureRequestV1, RemoteCaptureReceiptV1);
 unreachable_protocol_port!(RemoteReplayRequestV1, RemoteReplayOutcomeV1);
+unreachable_protocol_port!(RemoteReplayPendingRequestV1, RemoteReplayPendingReceiptV1);
 unreachable_protocol_port!(RemoteQueryRequestV1, RemoteQueryResultV1);
 unreachable_protocol_port!(PromotionConfirmationV1, PromotionCasReceiptV1);
 unreachable_protocol_port!(RemoteFrameTransferRequestV1, RemoteFrameTransferReceiptV1);
+unreachable_protocol_port!(
+    tracedecay_contracts::remote::protocol::CurrentAuthorityRequestV1,
+    tracedecay_contracts::remote::discovery::RemoteAuthorityDiscoveryV1
+);
 
 fn unavailable_response<Request, Output>(
     request: RemoteProtocolRequestV1<Request>,
@@ -205,6 +213,7 @@ fn credential_authority() -> RemoteCredentialAdmissionServiceV1<OneCredentialAut
         capabilities: std::collections::BTreeSet::from([
             RemoteCapabilityV1::Query,
             RemoteCapabilityV1::Promote,
+            RemoteCapabilityV1::ServeAuthority,
         ]),
         scope: scope.clone(),
     };
@@ -331,9 +340,11 @@ fn test_protocol_router(
         RemoteOperationProtocolPortsV1 {
             capture: port.clone(),
             replay: port.clone(),
+            replay_pending: port.clone(),
             frame_transfer: port.clone(),
             query: port.clone(),
-            promotion: port,
+            promotion: port.clone(),
+            authority: port,
         },
         admission,
         clock,
@@ -489,6 +500,46 @@ fn credential_authority_failures_share_one_concealed_response() {
         );
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
+}
+
+#[tokio::test]
+async fn revoked_enrollment_holder_gets_a_typed_refusal_without_reaching_the_port() {
+    let port_calls = Arc::new(AtomicUsize::new(0));
+    let body = serde_json::to_vec(&query_request(repository_scope("snapshot.remote"))).unwrap();
+    let response = rejecting_router(
+        RemoteCredentialAdmissionErrorV1::Revoked,
+        Arc::new(AtomicUsize::new(0)),
+        Arc::clone(&port_calls),
+    )
+    .oneshot(query_http_request(Body::from(body)))
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let request_id = RequestId::new("request.remote.query").unwrap();
+    let expected = RemoteProtocolResponseV1::<()>::new(
+        request_id.clone(),
+        CurrentRemoteAuthorityStateV1::Unavailable {
+            reason: RemoteAuthorityUnavailableReasonV1::EnrollmentRevoked,
+            observed_at: fixed_remote_clock(),
+        },
+        Err(remote_protocol_problem(
+            tracedecay_contracts::remote::query::remote_exact_observation_query_result_contract_v1(
+            ),
+            request_id,
+            RemoteProtocolFailureV1::EnrollmentRevoked,
+        )
+        .unwrap()),
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::to_value(RemoteHttpResponseV1::from(expected)).unwrap()
+    );
+    assert_eq!(port_calls.load(Ordering::SeqCst), 0);
 }
 
 #[test]

@@ -27,7 +27,8 @@ fn database(runtime: &HostAdmissionTestRuntimeV1) -> &RegisteredGlobalDb {
 async fn load(
     database: &RegisteredGlobalDb,
 ) -> Result<SessionTemporalCursorKeyProvider, SessionTemporalCursorKeyProviderError> {
-    tokio::time::timeout(
+    asupersync::time::timeout(
+        asupersync::time::wall_now(),
         LOAD_DEADLINE,
         SessionTemporalAccess::new(database).load_session_cursor_key_provider_result(),
     )
@@ -65,13 +66,13 @@ async fn mutate(database: &RegisteredGlobalDb, sql: &str, params: impl IntoParam
         .expect("fixture mutation");
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn concurrent_first_use_callers_mint_exactly_one_active_key() {
     let directory = tempdir().expect("temporary session store");
     let runtime = registered_runtime(directory.path()).await;
     let database = database(&runtime);
 
-    let (left, right) = tokio::join!(load(database), load(database));
+    let (left, right) = asupersync::join!(load(database), load(database));
     let left = left.expect("left first-use load");
     let right = right.expect("right first-use load");
 
@@ -88,7 +89,7 @@ async fn concurrent_first_use_callers_mint_exactly_one_active_key() {
 /// The schema's guard triggers make two simultaneously active keys
 /// unreachable through SQL; disabling the rotation trigger models a corrupted
 /// store so the read path's refusal can be exercised.
-#[tokio::test]
+#[asupersync::test]
 async fn multiple_active_keys_refuse_without_minting() {
     let directory = tempdir().expect("temporary session store");
     let runtime = registered_runtime(directory.path()).await;
@@ -129,7 +130,7 @@ async fn multiple_active_keys_refuse_without_minting() {
 
 /// Key material is immutable under the retire-update guard; disabling it
 /// models on-disk corruption of the active key.
-#[tokio::test]
+#[asupersync::test]
 async fn invalid_active_key_material_refuses_without_minting() {
     let directory = tempdir().expect("temporary session store");
     let runtime = registered_runtime(directory.path()).await;
@@ -163,7 +164,7 @@ async fn invalid_active_key_material_refuses_without_minting() {
 /// Rotation inserts a successor; the schema retires the predecessor. The
 /// rotated store still has an active key, so loading it is read-only, and a
 /// cursor frozen under the retired key keeps verifying within retention.
-#[tokio::test]
+#[asupersync::test]
 async fn rotated_store_loads_read_only_and_keeps_retired_key_verifiable() {
     let directory = tempdir().expect("temporary session store");
     let runtime = registered_runtime(directory.path()).await;

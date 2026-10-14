@@ -8,6 +8,8 @@ pub struct RemoteStorageStatusSnapshotV1 {
     /// sequence-contiguous, a truthful recoverable state, never silently
     /// collapsed into an empty spool.
     pub has_sequence_gap: bool,
+    /// True when any enrollment in this store is not revoked.
+    pub has_active_enrollment: bool,
     pub authority: CurrentRemoteAuthorityStateV1,
 }
 
@@ -36,6 +38,10 @@ impl RemoteSqliteStorageV1 {
                     SELECT 1 FROM remote_spool_frames
                     GROUP BY enrollment_id
                     HAVING COUNT(*) != MAX(sequence) - MIN(sequence) + 1
+                ),
+                EXISTS(
+                    SELECT 1 FROM remote_enrollments
+                    WHERE json_extract(enrollment_json, '$.revoked_at') IS NULL
                 )
              FROM remote_spool_frames",
             Vec::new(),
@@ -44,22 +50,33 @@ impl RemoteSqliteStorageV1 {
         let pending_spool_items = count(&row, 0)?;
         let quarantined_spool_items = count(&row, 1)?;
         let has_sequence_gap = count(&row, 2)? != 0;
-        let authority = match load_authority_state(self.handle(), brain_id) {
-            Ok(authority) => authority,
-            Err(RemoteSqliteStorageErrorV1::WriterAuthorityUnpublished) => {
-                CurrentRemoteAuthorityStateV1::Unavailable {
-                    reason: tracedecay_domain::RemoteAuthorityUnavailableReasonV1::WriterAuthorityUnpublished,
-                    observed_at,
-                }
-            }
-            Err(error) => return Err(error),
-        };
+        let has_active_enrollment = count(&row, 3)? != 0;
         Ok(RemoteStorageStatusSnapshotV1 {
             pending_spool_items,
             quarantined_spool_items,
             has_sequence_gap,
-            authority,
+            has_active_enrollment,
+            authority: self.authority_at(brain_id, observed_at)?,
         })
+    }
+
+    /// Current writer authority for `brain_id`. A never-published writer is
+    /// the typed `Unavailable { WriterAuthorityUnpublished }` state observed
+    /// at `observed_at`, not a storage error.
+    pub fn authority_at(
+        &self,
+        brain_id: &BrainId,
+        observed_at: UtcMicros,
+    ) -> Result<CurrentRemoteAuthorityStateV1, RemoteSqliteStorageErrorV1> {
+        match load_authority_state(self.handle(), brain_id) {
+            Err(RemoteSqliteStorageErrorV1::WriterAuthorityUnpublished) => {
+                Ok(CurrentRemoteAuthorityStateV1::Unavailable {
+                    reason: tracedecay_domain::RemoteAuthorityUnavailableReasonV1::WriterAuthorityUnpublished,
+                    observed_at,
+                })
+            }
+            authority => authority,
+        }
     }
 }
 

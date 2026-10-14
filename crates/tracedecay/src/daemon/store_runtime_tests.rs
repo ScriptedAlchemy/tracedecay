@@ -18,8 +18,8 @@ use tracedecay_contracts::remote::recovery::{
 use tracedecay_daemon_identity::profile_identity::LocalProfileIdentityAuthorityV1;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_domain::{
-    BrainNodeId, Confidence, EntityId, FactCategoryV1, FactCurationActionV1,
-    FactLineageEventKindV1, FactOwnerV1, FactRelationKindV1, UtcMicros, canonical_sha256,
+    BrainNodeId, Confidence, CurrentRemoteAuthorityStateV1, EntityId, FactCategoryV1,
+    FactCurationActionV1, FactLineageEventKindV1, FactOwnerV1, FactRelationKindV1, UtcMicros,
 };
 use tracedecay_global_db::register_registered_schema_installer;
 use tracedecay_graph_db::{
@@ -729,6 +729,7 @@ impl ProvisionedWriterFixture {
                 &self.node_id,
                 self.writer.clone(),
                 crate::daemon::remote_protocol_tests::replay_policy(&self.writer.scope),
+                crate::daemon::remote_protocol_tests::query_policy(&self.writer.scope),
             )
             .await
     }
@@ -835,14 +836,11 @@ async fn provisioned_writer_fixture() -> ProvisionedWriterFixture {
         .remote_recovery_authority(&node_id)
         .await
         .expect("mounted remote recovery authority");
-    let fence = writer.authority.fence.clone();
-    let authority_key = canonical_sha256(&(
-        "tracedecay.remote-recovery-authority.v1",
-        &fence.brain_id,
-        &fence.shard_id,
-        &fence.generation_id,
-    ))
-    .expect("recovery authority key");
+    let authority_key = writer
+        .authority
+        .fence
+        .recovery_authority_key()
+        .expect("recovery authority key");
     let caller = RemoteRecoveryCallerV1 {
         node_id: node_id.clone(),
         enrollment_id: EntityId::new("enrollment.cancel-test").expect("enrollment identity"),
@@ -963,6 +961,38 @@ async fn republishing_a_writer_restores_a_lost_project_writer_fence_before_failo
     .expect("failover thread");
 
     assert_eq!((republished, failover), (Ok(()), Ok((1, 2, true))));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failover_names_the_promoted_node_credential_as_the_authority_credential() {
+    let fixture = provisioned_writer_fixture().await;
+    let promotion = fixture.promotion("request.cancel-test.promoted-credential");
+    fixture.publish().await.expect("publish the first writer");
+    let mut caller = fixture.caller.clone();
+    caller.enrollment_revision = fixture.writer.authority.credential_revision + 1;
+    let expected = (fixture.node_id.clone(), caller.enrollment_revision);
+
+    let promote_recovery = Arc::clone(&fixture.recovery);
+    let authority = tokio::task::spawn_blocking(move || {
+        promote_recovery
+            .promote(&promotion, &caller, &PromotionControl(None))
+            .map(|committed| committed.authority)
+    })
+    .await
+    .expect("failover thread")
+    .expect("failover commits");
+
+    let CurrentRemoteAuthorityStateV1::Available(authority) = authority else {
+        panic!("failover reports an available authority, got {authority:?}");
+    };
+    assert_eq!(
+        (
+            authority.fence.authority_node_id,
+            authority.credential_revision
+        ),
+        expected,
+        "replay authenticates the promoted node's own enrollment revision"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1444,10 +1474,13 @@ async fn terminal_shutdown_cancels_and_joins_blocked_schema_convergence() {
     convergence_gate.wait_until_blocked().await;
 
     registry.cancel_terminal_tasks();
-    tokio::time::timeout(MUST_NOT_BLOCK, registry.shutdown_terminal_tasks())
-        .await
-        .expect("terminal shutdown must not wait for cancelled convergence work")
-        .expect("session runtime terminal tasks shut down cleanly");
+    tokio::time::timeout(
+        MUST_NOT_BLOCK,
+        registry.shutdown_terminal_tasks(&tracedecay_runtime_core::native_runtime::cx().unwrap()),
+    )
+    .await
+    .expect("terminal shutdown must not wait for cancelled convergence work")
+    .expect("session runtime terminal tasks shut down cleanly");
     convergence_gate.release();
     tokio::task::yield_now().await;
 
@@ -1955,7 +1988,7 @@ async fn corrupt_derived_graph_preserves_relational_owner_lifecycle() {
     drop(first_database);
     first_registry.cancel_terminal_tasks();
     first_registry
-        .shutdown_terminal_tasks()
+        .shutdown_terminal_tasks(&tracedecay_runtime_core::native_runtime::cx().unwrap())
         .await
         .expect("first terminal tasks shut down");
     first_registry.cancel_memory_graph_reconciliation_tasks();
@@ -2058,7 +2091,7 @@ async fn corrupt_session_relation_graph_preserves_relational_session_database() 
     drop(first_database);
     first_registry.cancel_terminal_tasks();
     first_registry
-        .shutdown_terminal_tasks()
+        .shutdown_terminal_tasks(&tracedecay_runtime_core::native_runtime::cx().unwrap())
         .await
         .expect("first terminal tasks shut down");
     first_registry
@@ -2104,7 +2137,7 @@ async fn corrupt_session_relation_graph_preserves_relational_session_database() 
     drop(reopened);
     reopened_registry.cancel_terminal_tasks();
     reopened_registry
-        .shutdown_terminal_tasks()
+        .shutdown_terminal_tasks(&tracedecay_runtime_core::native_runtime::cx().unwrap())
         .await
         .expect("detached session relation graph task shuts down");
     reopened_registry

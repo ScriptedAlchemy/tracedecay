@@ -284,11 +284,20 @@ pub(super) async fn ensure_registered_project_route(
             .profile_root()
             .to_path_buf();
         let probe_path = project_path.clone();
-        if let Some(layout) = bounded_repository_probe(&project_path, move || {
-            tracedecay_runtime_core::storage::resolve_persisted_layout(&probe_path, &profile_root)
-        })
-        .await??
-        {
+        if let Some(layout) = tracedecay_runtime_core::git_discovery::bounded_repository_probe(
+            &project_path,
+            super::core_proxy::repository_discovery_parent_deadline(),
+            move || {
+                tracedecay_runtime_core::storage::resolve_persisted_layout(
+                    &probe_path,
+                    &profile_root,
+                )
+            },
+        )
+        .await
+        .map_err(|reason| {
+            super::core_proxy::repository_discovery_deferred(&project_path, reason)
+        })?? {
             let project_id =
                 layout
                     .identity
@@ -376,20 +385,26 @@ pub(super) async fn durable_enrollment_resolves_existing_store(
     };
     let profile_root = identity.profile_root().to_path_buf();
     let probe_path = project_path.to_path_buf();
-    bounded_repository_probe(project_path, move || {
-        let Ok(Some(layout)) =
-            tracedecay_runtime_core::storage::resolve_persisted_layout(&probe_path, &profile_root)
-        else {
-            return false;
-        };
-        layout.graph_db_path.is_file()
-            || layout.sessions_db_path.is_file()
-            || layout
-                .manifest_path
-                .as_deref()
-                .is_some_and(std::path::Path::is_file)
-    })
+    tracedecay_runtime_core::git_discovery::bounded_repository_probe(
+        project_path,
+        super::core_proxy::repository_discovery_parent_deadline(),
+        move || {
+            let Ok(Some(layout)) = tracedecay_runtime_core::storage::resolve_persisted_layout(
+                &probe_path,
+                &profile_root,
+            ) else {
+                return false;
+            };
+            layout.graph_db_path.is_file()
+                || layout.sessions_db_path.is_file()
+                || layout
+                    .manifest_path
+                    .as_deref()
+                    .is_some_and(std::path::Path::is_file)
+        },
+    )
     .await
+    .map_err(|reason| super::core_proxy::repository_discovery_deferred(project_path, reason))
 }
 
 fn unenrolled_project_route_error(project_path: &Path) -> TraceDecayError {

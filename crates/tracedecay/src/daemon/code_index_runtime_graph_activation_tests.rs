@@ -13,15 +13,15 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use tracedecay_code_index::graph_projection::{
-    CodeGraphCatalogReleaseV1, CodeGraphReadinessRequirement,
+    CodeGraphCatalogReleaseV1, CodeGraphEngineReleaseV1, CodeGraphReadinessRequirement,
 };
 use tracedecay_code_index_runtime::CodeGraphSeatRuntimePortV1;
 use tracedecay_code_index_runtime::code_index_executor::code_index_search_executor;
 use tracedecay_code_index_runtime::code_index_scheduler::{
     CodeGraphActivationAuthorityV1, CodeGraphActivationPolicyV1, CodeIndexDemandAdmissionV1,
-    CodeIndexOwnerSignalsV1, CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1,
-    CodeIndexWorktreeSchedulerV1, RetainedGraphRecoveryPauseV1, SharedCodeIndexBytePoolV1,
-    scoped_code_index_store_root,
+    CodeIndexIgnoredDependencyRequestV1, CodeIndexOwnerSignalsV1, CodeIndexReconcileOutcomeV1,
+    CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1, RetainedGraphRecoveryPauseV1,
+    SharedCodeIndexBytePoolV1, install_injected_catalog_warm_gate, scoped_code_index_store_root,
 };
 use tracedecay_code_index_runtime::mcp_admission::{
     CodeIndexMcpAdmissionUnavailableV1, CodeIndexMcpReadAdmissionV1, CodeIndexMcpReadGrantV1,
@@ -863,7 +863,7 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
     // project graph store until it is joined, and a restart opened beside it
     // cannot take the store's write lock.
     graph_runtime
-        .shutdown_terminal_tasks()
+        .shutdown_terminal_tasks(&tracedecay_runtime_core::native_runtime::cx().unwrap())
         .await
         .expect("join graph terminal tasks before restart");
     graph_runtime
@@ -1041,8 +1041,16 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
     }
 
     let settled_context = graph_request_context(scope.clone(), "restart-settled");
-    let settled_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    // Publishing a rebuilt or repaired graph is background work with no
+    // latency bound, so the wait follows the worker's activity instead of a
+    // clock. Settlement is sampled before the observation, because a worker
+    // that had already settled cannot seat the graph afterwards.
+    let mut activity = registry
+        .subscribe_owner_activity(fixture.path())
+        .await
+        .expect("mounted owner activity");
     let (settled, settled_read) = loop {
+        let worker_settled = activity.pass_finished() && !activity.wake_pending();
         let observed = registry
             .latest_text_serving_freshness_for_scope(&scope)
             .await;
@@ -1067,15 +1075,16 @@ async fn restart_status_case(corrupt_graph: bool, dirty_before_restart: bool) {
             );
         }
         assert!(
-            std::time::Instant::now() <= settled_deadline,
-            "persistent graph generation did not become query-serving: text={:?}, graph={graph_read:?}",
+            !worker_settled,
+            "the worker settled without a query-serving persistent graph generation: \
+             text={:?}, graph={graph_read:?}",
             observed.as_ref().map(|(latest, current)| (
                 current,
                 latest.code_graph_serving_readiness(),
                 latest.interactive_graph_store().err(),
             ))
         );
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        activity.changed().await.expect("live owner activity");
     };
     if corrupt_graph {
         assert_eq!(
@@ -1554,7 +1563,7 @@ async fn restart_with_published_graph_head(
     // The daemon's terminal order: the publication's staging sweep holds the
     // project graph store until it is joined.
     graph_runtime
-        .shutdown_terminal_tasks()
+        .shutdown_terminal_tasks(&tracedecay_runtime_core::native_runtime::cx().unwrap())
         .await
         .expect("join graph terminal tasks before restart");
     graph_runtime
@@ -1993,13 +2002,32 @@ async fn first_index_serves_graph_reads_without_decoding_the_generation() {
 async fn admitted_graph_read_retains_only_the_catalog_it_requires() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
     let store = TempDir::new().expect("store root");
+    let owners = Arc::new(ResidentOwnersV1::new(RESIDENT_OWNER_IDLE_WINDOW_V1));
     let mount = PersistentGraphMountV1::mount(
-        CodeIndexSchedulerRegistryV1::new(1),
+        CodeIndexSchedulerRegistryV1::new(1).with_resident_owners(Arc::clone(&owners)),
         &fixture,
         &store,
         "graph read catalog retention",
     )
     .await;
+    // A read after the publisher's park re-warms the engine on a background
+    // thread that briefly holds the catalog after the read is served, and
+    // the releases below would race it. Restore both here instead.
+    initial_publisher_parks_and_releases_its_graph(&mount, &fixture, &owners).await;
+    let serving = mount
+        .registry
+        .retained_text_owner_for_root(fixture.path())
+        .await
+        .expect("text owner")
+        .interactive_graph_store()
+        .expect("serving graph store");
+    serving.warm_serving_engine().expect("restore the engine");
+    serving
+        .warm_interactive_catalog_with_cancellation(
+            None,
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("restore the catalog");
     let context = graph_request_context(mount.scope.clone(), "catalog-retention");
     let port = project_code_graph_projection_read_port(
         mount.registry.clone(),
@@ -2070,6 +2098,49 @@ async fn admitted_graph_read_retains_only_the_catalog_it_requires() {
     );
     drop(read);
     drop(graph);
+    mount.shutdown().await;
+}
+
+/// A worktree parks between a graph read's admission and its reader opening
+/// (the `files` tool reads freshness in that gap). The engine the admission
+/// waited out must still be there when the reader opens.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admitted_graph_read_retains_the_engine_until_its_reader_opens() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let mount = PersistentGraphMountV1::mount(
+        CodeIndexSchedulerRegistryV1::new(1),
+        &fixture,
+        &store,
+        "graph read engine retention",
+    )
+    .await;
+    let context = graph_request_context(mount.scope.clone(), "engine-retention");
+    let port = project_code_graph_projection_read_port(
+        mount.registry.clone(),
+        fixture.path().into(),
+        mount.scope.clone(),
+    );
+    for readiness in [
+        CodeGraphReadinessRequirement::Catalog,
+        CodeGraphReadinessRequirement::Engine,
+    ] {
+        let read = port
+            .open(
+                CodeGraphReadRequest::from_context(&context, now_micros())
+                    .with_readiness(readiness),
+            )
+            .await
+            .expect("admit graph read");
+        let graph = Arc::clone(read.store());
+        assert_eq!(
+            graph.release_serving_engine().expect("park release"),
+            CodeGraphEngineReleaseV1::Busy,
+            "a {readiness:?} read's admission must hold the engine its reader opens on"
+        );
+        read.reader(&context, now_micros())
+            .expect("the admitted read opens on the engine it waited for");
+    }
     mount.shutdown().await;
 }
 
@@ -2198,6 +2269,44 @@ fn serving_graph_owners(
         .collect()
 }
 
+/// The initial publisher releases its graph when it parks. A test that reads
+/// or releases the graph itself waits for that release first, so the two
+/// never take the same owners concurrently.
+async fn initial_publisher_parks_and_releases_its_graph(
+    mount: &PersistentGraphMountV1,
+    fixture: &GitFixture,
+    owners: &ResidentOwnersV1,
+) {
+    let mut activity = mount
+        .registry
+        .subscribe_owner_activity(fixture.path())
+        .await
+        .expect("mounted owner activity");
+    let mut headroom = owners.subscribe_headroom();
+    let cx = tracedecay_runtime_core::native_runtime::cx().expect("native task context");
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if activity.worker_phase()
+                == tracedecay_code_index_runtime::code_index_scheduler::CodeIndexWorkerPhaseV1::Parked
+                && !activity.wake_pending()
+                && serving_graph_owners(
+                    &owners.report(std::time::Instant::now()),
+                    mount.generation_id.as_str(),
+                )
+                .is_empty()
+            {
+                break;
+            }
+            tokio::select! {
+                changed = activity.changed() => changed.expect("live owner activity"),
+                changed = headroom.changed(&cx) => changed.expect("live resident owners"),
+            }
+        }
+    })
+    .await
+    .expect("initial publisher parks and releases its graph");
+}
+
 /// Status reads the generation census and freshness on every poll. Neither
 /// needs the graph resident, so neither renews the residency lease that keeps
 /// it resident; a graph read does.
@@ -2215,35 +2324,9 @@ async fn status_polls_let_the_graph_lease_lapse_and_graph_reads_renew_it() {
         "status polls leave the graph lease",
     )
     .await;
-    let mut activity = mount
-        .registry
-        .subscribe_owner_activity(fixture.path())
-        .await
-        .expect("mounted owner activity");
-    let mut headroom = owners.subscribe_headroom();
-    // The initial publisher releases its graph when it parks. Measure the
-    // read lease after that release, rather than racing the publisher's tail.
-    tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            if activity.worker_phase()
-                == tracedecay_code_index_runtime::code_index_scheduler::CodeIndexWorkerPhaseV1::Parked
-                && !activity.wake_pending()
-                && serving_graph_owners(
-                    &owners.report(std::time::Instant::now()),
-                    mount.generation_id.as_str(),
-                )
-                .is_empty()
-            {
-                break;
-            }
-            tokio::select! {
-                changed = activity.changed() => changed.expect("live owner activity"),
-                changed = headroom.changed() => changed.expect("live resident owners"),
-            }
-        }
-    })
-    .await
-    .expect("initial publisher parks and releases its graph");
+    // Measure the read lease after the publisher's own release, rather than
+    // racing the publisher's tail.
+    initial_publisher_parks_and_releases_its_graph(&mount, &fixture, &owners).await;
     let graph_idle_for = || {
         let report = owners.report(std::time::Instant::now());
         assert!(
@@ -2332,6 +2415,7 @@ async fn an_idle_release_reports_warming_until_a_read_restores_the_graph() {
         "idle release reports warming",
     )
     .await;
+    initial_publisher_parks_and_releases_its_graph(&mount, &fixture, &owners).await;
     let port = project_code_graph_projection_read_port(
         mount.registry.clone(),
         fixture.path().to_path_buf(),
@@ -2655,6 +2739,159 @@ async fn a_refresh_refused_beside_the_serving_graph_publishes_under_status_polli
     );
 
     mount.shutdown().await;
+}
+
+struct ActiveAdmissionControl;
+
+impl tracedecay_code_index::production::CodeIndexExecutionControlV1 for ActiveAdmissionControl {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+
+    fn is_deadline_exceeded(&self) -> bool {
+        false
+    }
+}
+
+/// Admission answers "the generation advanced, retry", and that retry reads
+/// the successor's catalog, so the answer waits until the catalog serves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ignored_dependency_admission_answers_once_the_successor_catalog_serves() {
+    let fixture = GitFixture::new(&[
+        (".gitignore", "node_modules/\n"),
+        (
+            "src/app.ts",
+            "import type { PublicWidget } from \"pkg\";\nexport function GenerationAnchor(value: PublicWidget) { return value; }\n",
+        ),
+        (
+            "node_modules/pkg/index.d.ts",
+            "export interface PublicWidget { value: string }\n",
+        ),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let profile = TempDir::new().expect("profile root");
+    let profile_root = profile.path().join("profile");
+    let project_id = test_project_id();
+    tracedecay_runtime_core::storage::pin_fixture_repository_identity(
+        fixture.path(),
+        project_id.as_str(),
+    )
+    .expect("project enrollment");
+    let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+        .expect("profile identity");
+    let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+        &profile_root,
+        97,
+        "ignored dependency admission catalog warm",
+    )
+    .expect("daemon database scope");
+    let graph_runtime = Arc::new(
+        DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("graph runtime registry"),
+    );
+    let project_database = graph_runtime
+        .project_memory(project_id.clone(), [fixture.path().to_path_buf()])
+        .await
+        .expect("writable project database");
+    tracedecay_project::test_support::host_admission::await_bound_graph_runtime(
+        &project_database,
+        "bind admission graph runtime",
+    )
+    .await
+    .expect("bound project graph runtime");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    registry
+        .mount_worktree_with_graph_runtime(
+            project_id,
+            fixture.path(),
+            store.path().to_path_buf(),
+            graph_runtime.code_graph_seat_port(),
+            project_database,
+            CodeGraphActivationPolicyV1::Enabled,
+            tracedecay_code_index_runtime::registry_default_index_path_policy(),
+        )
+        .await
+        .expect("mount admission fixture");
+    let reached = registry
+        .wait_for_readiness(
+            fixture.path(),
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessTargetV1::Ready,
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("readiness read");
+    assert!(
+        matches!(
+            reached,
+            tracedecay_contracts::code_index_freshness::CodeIndexReadinessWaitReadV1::Reached { .. }
+        ),
+        "the baseline must serve its graph: {reached:?}"
+    );
+    // Building the request needs the decoded baseline, which a first index
+    // seats only on demand.
+    let mut signals = CodeIndexOwnerSignalsV1::subscribe(&registry, fixture.path()).await;
+    registry.request_complete_generation(fixture.path()).await;
+    let baseline = loop {
+        if let Some(baseline) = registry.latest_complete_fresh(fixture.path()).await {
+            break baseline;
+        }
+        signals
+            .changed()
+            .await
+            .expect("the registry outlives the test's owner signals");
+    };
+    let request =
+        CodeIndexIgnoredDependencyRequestV1::for_verified_import_for_test(&baseline, "pkg")
+            .expect("verified import row for pkg");
+    let catalog_warm = install_injected_catalog_warm_gate(&request.scope.worktree_id);
+
+    let admission_registry = registry.clone();
+    let admission_root = fixture.path().to_path_buf();
+    let mut admission = tokio::spawn(async move {
+        admission_registry
+            .index_verified_ignored_dependency(
+                &admission_root,
+                request,
+                Arc::new(ActiveAdmissionControl),
+                tokio::time::Instant::now() + DEFAULT_TOOL_REQUEST_DEADLINE,
+            )
+            .await
+    });
+    catalog_warm.wait_until_started().await;
+    tokio::select! {
+        biased;
+        answered = &mut admission => panic!(
+            "admission answered while the successor catalog was still warming: ok={}",
+            answered.is_ok_and(|outcome| outcome.is_ok())
+        ),
+        () = catalog_warm.wait_until_awaited() => catalog_warm.release(),
+    }
+    let outcome = admission
+        .await
+        .expect("admission task joins")
+        .expect("verified ignored dependency indexes");
+    let served = registry
+        .latest_complete_fresh(fixture.path())
+        .await
+        .expect("successor generation");
+    assert_eq!(
+        served.generation().manifest().generation_id,
+        outcome.generation_id
+    );
+    assert_eq!(
+        served
+            .interactive_graph_store()
+            .expect("admission seats a persistent graph")
+            .interactive_catalog_is_warm(),
+        Ok(true),
+        "a retry after admission reads a warm catalog"
+    );
+    registry.shutdown().await;
+    graph_runtime
+        .shutdown_memory_graph_reconciliation_tasks()
+        .await
+        .expect("join graph reconciliation tasks");
 }
 
 fn graph_request_context(scope: ResolvedScope, suffix: &str) -> RequestContext {

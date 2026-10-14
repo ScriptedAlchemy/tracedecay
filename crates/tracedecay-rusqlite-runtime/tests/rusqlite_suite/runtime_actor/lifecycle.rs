@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 
+use tracedecay_rusqlite_runtime::native_runtime;
 use tracedecay_rusqlite_runtime::{
     CheckpointBlockers, CheckpointOutcome, CheckpointPressure, CheckpointRequest, CheckpointStatus,
     WriterState,
@@ -40,7 +41,11 @@ fn cancellation_before_commit_rolls_back_and_after_commit_returns_the_receipt() 
     runtime().block_on(async {
         let task_writer = Arc::clone(&before_writer);
         let before_probe = TestProbe::controlled(&before, Arc::clone(&before_state));
-        let task = tokio::spawn(async move { task_writer.submit(before, before_probe).await });
+        let task = tokio::spawn(async move {
+            task_writer
+                .submit(&native_runtime::cx().unwrap(), before, before_probe)
+                .await
+        });
         tokio::task::yield_now().await;
         before_barrier.wait_until_arrived();
         before_state.store(1, Ordering::SeqCst);
@@ -91,7 +96,11 @@ fn cancellation_before_commit_rolls_back_and_after_commit_returns_the_receipt() 
             &database,
             after_barrier.clone(),
         );
-        let task = tokio::spawn(async move { task_writer.submit(after, probe).await });
+        let task = tokio::spawn(async move {
+            task_writer
+                .submit(&native_runtime::cx().unwrap(), after, probe)
+                .await
+        });
         tokio::task::yield_now().await;
         after_barrier.wait_until_arrived();
         after_state.store(1, Ordering::SeqCst);
@@ -138,7 +147,11 @@ fn drain_rejects_new_work_but_joins_after_accepted_work_replies() {
     runtime().block_on(async {
         let task_writer = Arc::clone(&writer);
         let probe = TestProbe::fixed(&accepted);
-        let task = tokio::spawn(async move { task_writer.submit(accepted, probe).await });
+        let task = tokio::spawn(async move {
+            task_writer
+                .submit(&native_runtime::cx().unwrap(), accepted, probe)
+                .await
+        });
         tokio::task::yield_now().await;
         entered_rx.recv().unwrap();
         writer.begin_drain();
@@ -153,7 +166,11 @@ fn drain_rejects_new_work_but_joins_after_accepted_work_replies() {
         );
         assert_eq!(
             writer
-                .submit(rejected.clone(), TestProbe::fixed(&rejected))
+                .submit(
+                    &native_runtime::cx().unwrap(),
+                    rejected.clone(),
+                    TestProbe::fixed(&rejected)
+                )
                 .await
                 .unwrap(),
             RuntimeSubmitOutcomeV1::Unavailable {
@@ -194,7 +211,11 @@ fn checkpoint_handle_is_the_external_mount_surface() {
     assert_eq!(checkpoint.pressure(), CheckpointPressure::Open);
     let runtime = runtime();
     runtime
-        .block_on(writer.submit(request.clone(), TestProbe::fixed(&request)))
+        .block_on(writer.submit(
+            &native_runtime::cx().unwrap(),
+            request.clone(),
+            TestProbe::fixed(&request),
+        ))
         .unwrap();
     let outcome = runtime
         .block_on(async {
@@ -204,7 +225,7 @@ fn checkpoint_handle_is_the_external_mount_surface() {
                     TestProbe::fixed(&request),
                 ))
                 .unwrap()
-                .wait()
+                .wait(&native_runtime::cx().unwrap())
                 .await
         })
         .unwrap();

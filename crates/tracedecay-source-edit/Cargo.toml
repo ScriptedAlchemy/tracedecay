@@ -8,13 +8,14 @@ description = "Durable source-edit preview, apply, rollback, and reconciliation"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [dependencies]
+asupersync.workspace = true
 cap-fs-ext = "4.0.2"
 cap-std = "4.0.2"
 same-file = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
-tokio = { version = "1", features = ["rt", "sync", "time"] }
+tokio = { version = "1", features = ["rt", "sync"] }
 tree-sitter = "0.26"
 tracing = "0.1"
 tracedecay-contracts = { path = "../tracedecay-contracts" }

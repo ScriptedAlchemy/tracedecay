@@ -96,8 +96,9 @@ impl RemoteProtocolBodyV1 for RemoteFrameTransferRequestV1 {
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RemoteFrameTransferDispositionV1 {
+    /// The authority holds the frame pending replay. A retried transfer of the
+    /// same frame answers with this original receipt.
     TransferredPending,
-    AlreadyTransferred,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]

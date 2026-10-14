@@ -76,6 +76,7 @@ pub mod work_evidence;
 pub mod work_execution_history;
 pub mod work_handoff_frontier;
 pub mod work_intelligence;
+pub mod work_job;
 pub mod work_leak_adjudication;
 pub mod work_owner_observation;
 pub mod work_placement;
@@ -460,7 +461,7 @@ pub use work_attempt_effect::{
 };
 pub use work_catalog::{
     WORK_APPLICATION_OPERATION_IDS_V1, work_executable_binding, work_executable_binding_registry,
-    work_executable_catalog_digest,
+    work_executable_catalog_digest, work_profile_eligibility,
 };
 pub use work_duplicate_adjudication::{
     MAX_WORK_DUPLICATE_CLASSIFICATION_ATTEMPTS_V1, PrepareWorkDuplicateAdjudicationRequestV1,
@@ -502,6 +503,15 @@ pub use work_intelligence::{
     WorkExpertiseConsentPinV1, WorkExpertiseConsentSnapshotV1, WorkExpertiseContextDurabilityV1,
     WorkExpertiseLegalActionV1, WorkExpertiseUnavailableReasonV1, WorkIntelligenceServiceV1,
     WorkProposalComparisonEffectV1, WorkProposalComparisonRequestV1, WorkProposalComparisonV1,
+};
+pub use work_job::{
+    AdvanceWorkJobRequestV1, AdvanceWorkJobResultV1, MAX_WORK_JOB_TASKS, WORK_JOB_CONFLICT_CODE,
+    WORK_JOB_NEEDS_OPERATOR_CODE, WORK_JOB_PROPOSAL_WITHHELD_CODE, WorkJobBaseV1,
+    WorkJobIdentitiesV1, WorkJobKeyV1, WorkJobNameV1, WorkJobNextV1, WorkJobObservationV1,
+    WorkJobStateV1, WorkJobStepRecordV1, WorkJobStepResultV1, WorkJobStepV1,
+    WorkJobSynthesisPlanV1, WorkJobSynthesisV1, WorkJobTaskIdentitiesV1, WorkJobTaskPlanV1,
+    WorkJobTaskV1, WorkJobV1, WorkJobWaitV1, next_work_job_step, work_job_proposal_withheld,
+    work_job_synthesis_unsynthesized,
 };
 pub use work_leak_adjudication::{
     AdjudicateWorkLeakCommandV1, MAX_WORK_LEAK_EVIDENCE_REFS_V1, MAX_WORK_LEAK_HORIZON_MICROS_V1,
@@ -572,6 +582,7 @@ pub use work_topology_view::{
 pub use workflow_admission::WorkflowCatalogAdmissionError;
 pub use workflow_catalog::{
     WORKFLOW_APPLICATION_OPERATION_IDS, workflow_executable_binding_registry,
+    workflow_profile_eligibility,
 };
 pub use workflow_coordination::{
     TASK_HANDOFF_LIFETIME_MICROS, TaskHandoffAuthorityError, TaskHandoffAuthorityPort,

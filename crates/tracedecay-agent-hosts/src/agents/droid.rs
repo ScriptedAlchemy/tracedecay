@@ -30,6 +30,7 @@ use serde_json::{Value, json};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::host_bundle::{HostBundleRegistrationStateV1, HostComponentV1};
+use super::serve_args::ServeArgs;
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, JsonConfigDialect,
     JsonConfigMutation, load_json_file, read_optional_config_bytes,
@@ -46,11 +47,6 @@ const DROID_CLI_LIFECYCLE: &str = "Factory Droid MCP registry lifecycle";
 /// Name Droid's registry selects the server by (`droid mcp add <name>`,
 /// `droid mcp remove <name>`) and the key it lands under in `mcpServers`.
 const DROID_MCP_SERVER_NAME: &str = "tracedecay";
-
-/// Arguments the tracedecay MCP server is launched with, shared by the
-/// CLI-driven registration and the doctor readback so the two spellings of
-/// the same server cannot drift apart.
-const MCP_SERVER_ARGS: &[&str] = &["serve"];
 
 /// Droid's stdio transport spelling, passed explicitly so the stored
 /// registration pins the transport instead of relying on the CLI default.
@@ -199,7 +195,10 @@ fn droid_hooks_registration_state(home: &Path) -> HostBundleRegistrationStateV1 
 
 /// Readback state for the one host-owned registration this integration
 /// drives: the `mcpServers.tracedecay` entry inside `~/.factory/mcp.json`.
-fn droid_context_mcp_registration_state(home: &Path) -> HostBundleRegistrationStateV1 {
+fn droid_context_mcp_registration_state(
+    home: &Path,
+    serve_args: &ServeArgs,
+) -> HostBundleRegistrationStateV1 {
     let config_path = droid_mcp_config_path(home);
     let Ok(config_bytes) = std::fs::read(&config_path) else {
         return HostBundleRegistrationStateV1::Missing;
@@ -221,7 +220,8 @@ fn droid_context_mcp_registration_state(home: &Path) -> HostBundleRegistrationSt
         .get("command")
         .and_then(Value::as_str)
         .is_some_and(|command| !command.is_empty());
-    if transport_is_stdio && command_is_present && server_args_are_current(server) {
+    if transport_is_stdio && command_is_present && serve_args.matches_json(server.get("args"), &[])
+    {
         HostBundleRegistrationStateV1::Current
     } else {
         HostBundleRegistrationStateV1::Repairable
@@ -272,11 +272,7 @@ impl AgentIntegration for DroidIntegration {
         let args_current = entry
             .get("args")
             .and_then(Value::as_array)
-            .is_some_and(|args| {
-                MCP_SERVER_ARGS
-                    .iter()
-                    .all(|expected| args.iter().any(|arg| arg.as_str() == Some(expected)))
-            });
+            .is_some_and(|args| args.iter().any(|arg| arg.as_str() == Some("serve")));
         if args_current {
             dc.pass(&format!(
                 "MCP server registered in {}",
@@ -318,7 +314,10 @@ impl AgentIntegration for DroidIntegration {
         ctx: &HealthcheckContext,
     ) -> HostBundleRegistrationStateV1 {
         match component {
-            HostComponentV1::ContextMcp => droid_context_mcp_registration_state(&ctx.home),
+            HostComponentV1::ContextMcp => droid_context_mcp_registration_state(
+                &ctx.home,
+                &ctx.catalog_profiles.serve_args(self.id()),
+            ),
             HostComponentV1::Core => droid_hooks_registration_state(&ctx.home),
             HostComponentV1::Agent | HostComponentV1::OperatorMcp => {
                 HostBundleRegistrationStateV1::Missing
@@ -350,7 +349,7 @@ impl AgentIntegration for DroidIntegration {
     ) -> Result<()> {
         if components.contains(&HostComponentV1::ContextMcp) {
             let droid_cli = require_droid_cli()?;
-            droid_mcp_add_with(&droid_cli, &ctx.home, &ctx.tracedecay_bin)?;
+            droid_mcp_add_with(&droid_cli, &ctx.home, &ctx.tracedecay_bin, &ctx.serve_args)?;
         }
         if components.contains(&HostComponentV1::Core) {
             install_droid_hooks(&droid_hooks_path(&ctx.home), &ctx.tracedecay_bin)?;
@@ -404,7 +403,12 @@ fn require_droid_cli() -> Result<PathBuf> {
 /// instead of failing on the duplicate name; on add failure the previous
 /// document bytes are restored when the host left them unchanged.
 #[tracing::instrument(name = "droid_mcp_install", level = "trace", skip_all)]
-fn droid_mcp_add_with(droid_cli: &Path, home: &Path, tracedecay_bin: &str) -> Result<()> {
+fn droid_mcp_add_with(
+    droid_cli: &Path,
+    home: &Path,
+    tracedecay_bin: &str,
+    serve_args: &ServeArgs,
+) -> Result<()> {
     let config_path = droid_mcp_config_path(home);
     let previous_registration =
         if super::mcp_config_has_tracedecay(&config_path, "mcpServers", load_json_file) {
@@ -424,7 +428,7 @@ fn droid_mcp_add_with(droid_cli: &Path, home: &Path, tracedecay_bin: &str) -> Re
     if previous_registration.is_some() {
         droid_mcp_remove_with(droid_cli, home)?;
     }
-    let launch_command = format!("{tracedecay_bin} serve");
+    let launch_command = serve_args.command_line(tracedecay_bin);
     let args = vec![
         "mcp",
         "add",
@@ -475,20 +479,6 @@ fn droid_mcp_remove_with(droid_cli: &Path, home: &Path) -> Result<()> {
         DROID_MCP_SERVER_NAME,
         "Droid CLI",
     )
-}
-
-// Healthcheck helpers
-
-/// True when a registered server's `args` array carries every argument in
-/// [`MCP_SERVER_ARGS`]. Binding the doctor's expectation to the same constant
-/// the CLI invocation spells keeps the two from drifting.
-fn server_args_are_current(server: &serde_json::Map<String, Value>) -> bool {
-    let Some(args) = server.get("args").and_then(Value::as_array) else {
-        return false;
-    };
-    MCP_SERVER_ARGS
-        .iter()
-        .all(|expected| args.iter().any(|arg| arg.as_str() == Some(*expected)))
 }
 
 #[cfg(test)]
@@ -569,6 +559,7 @@ mod tests {
                     profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
                     home: home.path().to_path_buf(),
                     project_path: home.path().to_path_buf(),
+                    catalog_profiles: Default::default(),
                 }
             ),
             HostBundleRegistrationStateV1::Current
@@ -647,6 +638,7 @@ mod tests {
             profile: tracedecay_runtime_core::config::ProfileRoot::under_home(home.path()),
             home: home.path().to_path_buf(),
             project_path: home.path().to_path_buf(),
+            catalog_profiles: Default::default(),
         };
         let integration = DroidIntegration;
 
@@ -873,13 +865,19 @@ exit 0"#;
         std::fs::create_dir_all(droid_config_dir(home.path())).unwrap();
         std::fs::write(&mcp_path, format!("{PEER_ONLY}\n")).unwrap();
 
-        droid_mcp_add_with(&droid_cli, home.path(), "/bin/tracedecay").unwrap();
+        droid_mcp_add_with(
+            &droid_cli,
+            home.path(),
+            "/bin/tracedecay",
+            &ServeArgs::default(),
+        )
+        .unwrap();
         assert_eq!(
             std::fs::read_to_string(&mcp_path).unwrap(),
             "{\"mcpServers\":{\"peer\":{\"type\":\"http\",\"url\":\"https://example.invalid/mcp\"},\"tracedecay\":{\"type\":\"stdio\",\"command\":\"/bin/tracedecay\",\"args\":[\"serve\"]}}}\n"
         );
         assert_eq!(
-            droid_context_mcp_registration_state(home.path()),
+            droid_context_mcp_registration_state(home.path(), &ServeArgs::default()),
             HostBundleRegistrationStateV1::Current
         );
 
@@ -896,7 +894,7 @@ exit 0"#;
             format!("{PEER_ONLY}\n")
         );
         assert_eq!(
-            droid_context_mcp_registration_state(home.path()),
+            droid_context_mcp_registration_state(home.path(), &ServeArgs::default()),
             HostBundleRegistrationStateV1::Missing
         );
     }
@@ -917,7 +915,13 @@ exit 0"#;
         )
         .unwrap();
 
-        droid_mcp_add_with(&droid_cli, home.path(), "/new/tracedecay").unwrap();
+        droid_mcp_add_with(
+            &droid_cli,
+            home.path(),
+            "/new/tracedecay",
+            &ServeArgs::default(),
+        )
+        .unwrap();
 
         assert_eq!(
             invocations(&log),
@@ -959,7 +963,13 @@ exit 0"#,
         let original = r#"{"mcpServers":{"peer":{"type":"http","url":"https://example.invalid/mcp"},"tracedecay":{"type":"stdio","command":"/old/tracedecay","args":["serve"]}}}"#;
         std::fs::write(&mcp_path, original).unwrap();
 
-        let error = droid_mcp_add_with(&droid_cli, home.path(), "/new/tracedecay").unwrap_err();
+        let error = droid_mcp_add_with(
+            &droid_cli,
+            home.path(),
+            "/new/tracedecay",
+            &ServeArgs::default(),
+        )
+        .unwrap_err();
 
         assert!(
             error

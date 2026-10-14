@@ -60,16 +60,25 @@ impl AgentIntegration for KiloIntegration {
             return State::Missing;
         };
         let settings = super::parse_jsonc(&bytes);
-        if settings
+        let enabled = settings
             .pointer("/mcp/tracedecay/enabled")
             .and_then(serde_json::Value::as_bool)
-            == Some(true)
-            && settings
-                .pointer("/mcp/tracedecay/command")
-                .and_then(serde_json::Value::as_array)
-                .is_some_and(|args| args.iter().any(|arg| arg.as_str() == Some("serve")))
+            == Some(true);
+        let command = settings.pointer("/mcp/tracedecay/command");
+        let launches_serve = command
+            .and_then(serde_json::Value::as_array)
+            .and_then(|argv| argv.get(1))
+            .and_then(serde_json::Value::as_str)
+            == Some("serve");
+        if enabled
+            && ctx
+                .catalog_profiles
+                .serve_args(self.id())
+                .matches_command_json(command)
         {
             State::Current
+        } else if enabled && launches_serve {
+            State::Repairable
         } else {
             State::Missing
         }
@@ -112,7 +121,7 @@ impl AgentIntegration for KiloIntegration {
                 "mcp",
                 serde_json::json!({
                     "type": "local",
-                    "command": [ctx.tracedecay_bin.clone(), "serve"],
+                    "command": ctx.serve_args.command_json(&ctx.tracedecay_bin),
                     "enabled": true
                 }),
                 "Kilo",

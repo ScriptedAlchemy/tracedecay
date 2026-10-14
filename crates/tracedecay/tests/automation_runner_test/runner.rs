@@ -18,7 +18,7 @@ async fn scheduler_memory_curator_respects_failure_cooldown() {
     .unwrap();
     let backend = JsonBackend::new(json!({"ops": []}));
 
-    let run = run_memory_curator_with_backend(
+    let run = run_memory_curator(
         &cg,
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
@@ -59,7 +59,7 @@ async fn scheduler_memory_curator_respects_interval_gate() {
     .unwrap();
     let backend = JsonBackend::new(json!({"ops": []}));
 
-    let run = run_memory_curator_with_backend(
+    let run = run_memory_curator(
         &cg,
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
@@ -106,7 +106,7 @@ async fn scheduler_session_reflector_respects_interval_gate() {
     .unwrap();
     let backend = SessionJsonBackend::new(json!({"facts": []}));
 
-    let run = run_session_reflector_with_backend(
+    let run = run_session_reflector(
         &cg,
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
@@ -141,7 +141,7 @@ async fn scheduler_skill_writer_respects_idle_window_after_recent_session_activi
         "no_action",
     ));
 
-    let run = run_skill_writer_with_backend(
+    let run = run_skill_writer(
         &cg,
         &config,
         &backend,
@@ -187,7 +187,10 @@ async fn scheduler_skill_writer_skips_without_new_session_activity_since_last_su
         "insufficient_repeated_evidence",
     ));
 
-    let run = run_skill_writer_with_backend(
+    // The daemon found the task due, but by the time the runner re-checks
+    // its schedule no new activity remains. That race must settle as a
+    // clean skip, not a recovery problem.
+    let run = run_skill_writer(
         &cg,
         &config,
         &backend,
@@ -209,7 +212,7 @@ async fn scheduler_skill_writer_skips_without_new_session_activity_since_last_su
 
     // New activity after the run: the very next tick is due again.
     seed_session_activity(&cg, now - 30).await;
-    let run = run_skill_writer_with_backend(
+    let run = run_skill_writer(
         &cg,
         &config,
         &backend,
@@ -238,7 +241,7 @@ async fn memory_curator_runner_recovers_stale_scheduler_lock_file() {
     let mut config = scheduler_config(None, None);
     config.tasks.memory_curator.stale_lock_secs = Some(1);
 
-    let run = run_memory_curator_with_backend(
+    let run = run_memory_curator(
         &cg,
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),
@@ -282,7 +285,7 @@ async fn scheduler_memory_curator_ledgers_active_lock_skip() {
     let backend = JsonBackend::new(json!({"ops": []}));
     let config = scheduler_config(None, None);
 
-    let run = run_memory_curator_with_backend(
+    let run = run_memory_curator(
         &cg,
         &config,
         &test_automation_run_control(Arc::new(AtomicBool::new(false))),

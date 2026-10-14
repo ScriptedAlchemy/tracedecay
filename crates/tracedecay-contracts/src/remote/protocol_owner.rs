@@ -5,10 +5,14 @@ use std::sync::Arc;
 use super::{
     capture::RemoteCaptureReceiptV1,
     capture_protocol::RemoteCaptureRequestV1,
-    protocol::RemoteProtocolPortV1,
+    discovery::RemoteAuthorityDiscoveryV1,
+    protocol::{CurrentAuthorityRequestV1, RemoteProtocolPortV1},
     query::{RemoteQueryRequestV1, RemoteQueryResultV1},
     recovery::{PromotionCasReceiptV1, PromotionConfirmationV1},
-    replay::{RemoteReplayOutcomeV1, RemoteReplayRequestV1},
+    replay::{
+        RemoteReplayOutcomeV1, RemoteReplayPendingReceiptV1, RemoteReplayPendingRequestV1,
+        RemoteReplayRequestV1,
+    },
     transfer::{RemoteFrameTransferReceiptV1, RemoteFrameTransferRequestV1},
 };
 
@@ -16,6 +20,9 @@ pub type RemoteCaptureProtocolOwnerPortV1 =
     dyn RemoteProtocolPortV1<RemoteCaptureRequestV1, Output = RemoteCaptureReceiptV1> + Send + Sync;
 pub type RemoteReplayProtocolOwnerPortV1 =
     dyn RemoteProtocolPortV1<RemoteReplayRequestV1, Output = RemoteReplayOutcomeV1> + Send + Sync;
+pub type RemoteReplayPendingProtocolOwnerPortV1 = dyn RemoteProtocolPortV1<RemoteReplayPendingRequestV1, Output = RemoteReplayPendingReceiptV1>
+    + Send
+    + Sync;
 pub type RemoteFrameTransferProtocolOwnerPortV1 = dyn RemoteProtocolPortV1<RemoteFrameTransferRequestV1, Output = RemoteFrameTransferReceiptV1>
     + Send
     + Sync;
@@ -24,10 +31,16 @@ pub type RemoteQueryProtocolOwnerPortV1 =
 pub type RemotePromotionProtocolOwnerPortV1 =
     dyn RemoteProtocolPortV1<PromotionConfirmationV1, Output = PromotionCasReceiptV1> + Send + Sync;
 
+pub type RemoteAuthorityProtocolOwnerPortV1 = dyn RemoteProtocolPortV1<CurrentAuthorityRequestV1, Output = RemoteAuthorityDiscoveryV1>
+    + Send
+    + Sync;
+
 pub struct RemoteOperationProtocolPortsV1 {
     pub capture: Arc<RemoteCaptureProtocolOwnerPortV1>,
     pub replay: Arc<RemoteReplayProtocolOwnerPortV1>,
+    pub replay_pending: Arc<RemoteReplayPendingProtocolOwnerPortV1>,
     pub frame_transfer: Arc<RemoteFrameTransferProtocolOwnerPortV1>,
     pub query: Arc<RemoteQueryProtocolOwnerPortV1>,
     pub promotion: Arc<RemotePromotionProtocolOwnerPortV1>,
+    pub authority: Arc<RemoteAuthorityProtocolOwnerPortV1>,
 }

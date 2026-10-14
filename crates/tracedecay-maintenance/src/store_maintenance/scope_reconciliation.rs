@@ -17,6 +17,7 @@ use tracedecay_code_index_retention::code_index_generations::{
 };
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
 use tracedecay_runtime_core::logging::log_daemon_event;
+use tracedecay_runtime_core::native_runtime;
 
 use crate::clock::now_secs_i64;
 use crate::lease::ProjectStoreMaintenanceLeaseV1;
@@ -71,7 +72,7 @@ pub async fn run_code_index_scope_reconciliation(
     let mounted = scheduler_owner_roots(schedulers).await;
     let plan_root = store_root.clone();
     let plan_project_root = project_root.clone();
-    let planned = tokio::task::spawn_blocking(move || {
+    let planned = native_runtime::spawn_blocking(move || {
         recover_scope_root_retention(&plan_root)
             .map_err(|error| ("scope_recovery_failed", Some(error)))?;
         let proof = scope_root_liveness_proof(&plan_project_root, &mounted)
@@ -96,7 +97,7 @@ pub async fn run_code_index_scope_reconciliation(
 
     let mounted = scheduler_owner_roots(schedulers).await;
     let completed_at = tracedecay_contracts::clock::now_micros();
-    let executed = tokio::task::spawn_blocking(move || {
+    let executed = native_runtime::spawn_blocking(move || {
         let revalidated = scope_root_liveness_proof(&project_root, &mounted)
             .map_err(|failure| (failure, None))?;
         execute_scope_root_retention(

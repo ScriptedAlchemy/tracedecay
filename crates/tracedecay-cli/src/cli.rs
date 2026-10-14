@@ -32,6 +32,8 @@ scripts or hooks; `--json` emits the one canonical application envelope.";
 
 const WORK_AFTER_HELP: &str = "\
 Examples:
+  tracedecay work advance-job --request-file job.json --until-settled
+                                                           Run a parallel job with synthesis
   tracedecay work views --request-file views.json --json    Read the current Work projection
   tracedecay work prepare-graph-mutation --request-file - --json
   tracedecay work create --request-file create.json --json  Create work items
@@ -74,6 +76,9 @@ pub enum HostBundleComponentArg {
     Core,
     Agent,
     ContextMcp,
+    /// Retired name of `context-mcp`, still accepted on the hosts that
+    /// offered it.
+    #[value(hide = true)]
     OperatorMcp,
 }
 
@@ -302,6 +307,18 @@ pub enum Commands {
         /// repository away from `.git/hooks`. Never prompts.
         #[arg(long)]
         git_hook: bool,
+        /// List only this catalog profile's tools in the agent's MCP server
+        /// (`default`, `compact`, `administrative`, `host-limited`). Saved for the
+        /// agent; later installs, reinstalls, and updates keep it until
+        /// `--catalog-profile default` resets it.
+        #[arg(
+            long,
+            value_name = "NAME",
+            requires = "agent",
+            conflicts_with = "local",
+            value_parser = crate::serve_cmd::parse_catalog_profile
+        )]
+        catalog_profile: Option<tracedecay_contracts::catalog_composition::CatalogProfileName>,
     },
     /// Refresh settings for all already-installed agents
     #[command(long_about = REINSTALL_LONG_ABOUT, after_help = REINSTALL_AFTER_HELP)]
@@ -482,6 +499,11 @@ pub enum Commands {
         // `--claude-code-tool-search`, which served the same full list.
         #[arg(long, alias = "claude-code-tool-search")]
         full_tool_list: bool,
+        /// List only the tools in this catalog profile (`default`, `compact`,
+        /// `administrative`, `host-limited`). Unlisted tools stay callable by
+        /// name and join the list once called.
+        #[arg(long, value_name = "NAME", value_parser = crate::serve_cmd::parse_catalog_profile)]
+        catalog_profile: Option<tracedecay_contracts::catalog_composition::CatalogProfileName>,
     },
     /// Manage the long-running TraceDecay daemon used by MCP clients
     #[command(long_about = DAEMON_LONG_ABOUT, after_help = DAEMON_AFTER_HELP)]
@@ -740,19 +762,6 @@ pub struct RemoteAuthorityArgs {
     pub json: bool,
 }
 
-impl From<RemoteAuthorityArgs> for crate::remote_command::RemoteProtocolArgs {
-    fn from(args: RemoteAuthorityArgs) -> Self {
-        Self {
-            endpoint: args.endpoint,
-            credential_file: args.credential_file,
-            trust_root_file: args.trust_root_file,
-            timeout_secs: args.timeout_secs,
-            request_file: args.request_file,
-            json: args.json,
-        }
-    }
-}
-
 #[derive(Subcommand)]
 pub enum RemoteAction {
     /// Read the running daemon's mounted Remote Brain operational state
@@ -768,6 +777,21 @@ pub enum RemoteAction {
         /// File containing the new enrollment credential bytes
         #[arg(long, value_name = "FILE")]
         enrollment_credential_file: PathBuf,
+    },
+    /// Make this profile the enrolled node of another profile's Brain. The
+    /// running daemon discovers the authority with the enrollment credential
+    /// (`--credential-file`) and adopts the enrollment the authority holds.
+    /// `--request-file` holds a `CurrentAuthorityRequestV1` protocol request.
+    Join {
+        #[command(flatten)]
+        authority: RemoteAuthorityArgs,
+    },
+    /// Send this joined node's pending offline-capture frames, in sequence
+    /// order, to the owning authority. Takes the same arguments as `join`;
+    /// each frame is released only after the authority's receipt.
+    Drain {
+        #[command(flatten)]
+        authority: RemoteAuthorityArgs,
     },
     /// Capture one observation into a node's offline spool while the
     /// authority is unreachable
@@ -785,8 +809,16 @@ pub enum RemoteAction {
         #[command(flatten)]
         authority: RemoteAuthorityArgs,
     },
-    /// Replay pending offline-capture frames through the current authority
+    /// Replay one transferred frame, named by event id, through the current
+    /// authority
     Replay {
+        #[command(flatten)]
+        authority: RemoteAuthorityArgs,
+    },
+    /// Replay every frame the authority holds for the caller's enrollment,
+    /// lowest sequence first, stopping at the first refusal. A resend reports
+    /// the same receipts and commits nothing.
+    ReplayPending {
         #[command(flatten)]
         authority: RemoteAuthorityArgs,
     },
@@ -795,36 +827,17 @@ pub enum RemoteAction {
         #[command(flatten)]
         authority: RemoteAuthorityArgs,
     },
-}
-
-impl From<RemoteAction> for crate::remote_command::RemoteCommand {
-    fn from(action: RemoteAction) -> Self {
-        match action {
-            RemoteAction::Status { json } => Self::Status { json },
-            RemoteAction::Enroll {
-                authority,
-                enrollment_credential_file,
-            } => Self::Enroll {
-                args: authority.into(),
-                enrollment_credential_file,
-            },
-            RemoteAction::Capture { authority } => Self::Capture {
-                args: authority.into(),
-            },
-            RemoteAction::Query { authority } => Self::Query {
-                args: authority.into(),
-            },
-            RemoteAction::TransferFrame { authority } => Self::TransferFrame {
-                args: authority.into(),
-            },
-            RemoteAction::Replay { authority } => Self::Replay {
-                args: authority.into(),
-            },
-            RemoteAction::Failover { authority } => Self::Failover {
-                args: authority.into(),
-            },
-        }
-    }
+    /// Revoke every enrollment and unredeemed grant of a node this daemon
+    /// provisioned, such as a lost machine; its enrollment, capture, transfer
+    /// and replay are refused afterward
+    Revoke {
+        /// Node identity the node was provisioned with
+        #[arg(long, value_name = "NODE")]
+        node_id: String,
+        /// Emit one canonical JSON object and newline
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]

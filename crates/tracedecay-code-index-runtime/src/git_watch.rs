@@ -988,8 +988,7 @@ async fn request_freshness_for_repository(
         if cancellation.is_cancelled() {
             return;
         }
-        let remaining = deadline.saturating_duration_since(StdInstant::now());
-        if remaining.is_zero() {
+        if deadline <= StdInstant::now() {
             retry.insert(project_root);
             continue;
         }
@@ -1001,9 +1000,9 @@ async fn request_freshness_for_repository(
         let identity = tokio::select! {
             biased;
             () = cancellation.cancelled() => return,
-            outcome = tokio::time::timeout(remaining, discovery) => match outcome {
-                Ok(GitRepositoryIdentityOutcome::Resolved(identity)) => identity,
-                Ok(GitRepositoryIdentityOutcome::NotRepository) => {
+            outcome = discovery => match outcome {
+                GitRepositoryIdentityOutcome::Resolved(identity) => identity,
+                GitRepositoryIdentityOutcome::NotRepository => {
                     log_daemon_event(
                         "git_watch_freshness_rejected",
                         &[
@@ -1013,12 +1012,12 @@ async fn request_freshness_for_repository(
                     );
                     continue;
                 }
-                Ok(GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::Cancelled))
+                GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::Cancelled)
                     if cancellation.is_cancelled() =>
                 {
                     return;
                 }
-                Ok(GitRepositoryIdentityOutcome::Unknown(reason)) => {
+                GitRepositoryIdentityOutcome::Unknown(reason) => {
                     log_daemon_event(
                         "git_watch_freshness_rejected",
                         &[
@@ -1027,10 +1026,6 @@ async fn request_freshness_for_repository(
                             ("error", format!("{reason:?}")),
                         ],
                     );
-                    retry.insert(project_root);
-                    continue;
-                }
-                Err(_) => {
                     retry.insert(project_root);
                     continue;
                 }

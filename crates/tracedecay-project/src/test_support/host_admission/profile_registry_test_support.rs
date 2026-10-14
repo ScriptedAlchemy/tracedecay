@@ -327,7 +327,16 @@ fn registered_registry_reap_entry(
 async fn vacuum_into_for_test(source: &Path, destination: &Path) -> Result<()> {
     let source = source.to_path_buf();
     let destination = destination.to_path_buf();
-    tokio::task::spawn_blocking(move || {
+    let cx =
+        tracedecay_runtime_core::native_runtime::cx().ok_or_else(|| TraceDecayError::Database {
+            operation: "copy test database".to_owned(),
+            message: "native execution runtime unavailable".to_owned(),
+        })?;
+    let join_failed = |error: &dyn std::fmt::Display| TraceDecayError::Database {
+        operation: "join test database copy".to_owned(),
+        message: error.to_string(),
+    };
+    cx.spawn_blocking(move |_| {
         let connection = rusqlite::Connection::open_with_flags(
             &source,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -338,11 +347,10 @@ async fn vacuum_into_for_test(source: &Path, destination: &Path) -> Result<()> {
         )?;
         Ok::<(), rusqlite::Error>(())
     })
+    .map_err(|error| join_failed(&error))?
+    .join(&cx)
     .await
-    .map_err(|error| TraceDecayError::Database {
-        operation: "join test database copy".to_owned(),
-        message: error.to_string(),
-    })?
+    .map_err(|error| join_failed(&error))?
     .map_err(|error| TraceDecayError::Database {
         operation: "copy test database".to_owned(),
         message: error.to_string(),

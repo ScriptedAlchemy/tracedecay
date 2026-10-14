@@ -112,9 +112,11 @@ impl UserSettingsDaemonClient for ProductionUserSettingsDaemonClient {
                     .await
                     .map_err(|error| unavailable(format!("profile configuration: {error}")))?;
             let profile_root = profile_root.ok_or_else(|| unavailable("user profile root"))?;
-            let metadata = tokio::task::spawn_blocking(move || read_user_metadata(&profile_root))
-                .await
-                .map_err(|error| unavailable(format!("user settings metadata task: {error}")))??;
+            let metadata = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+                read_user_metadata(&profile_root)
+            })
+            .await
+            .map_err(|error| unavailable(format!("user settings metadata task: {error}")))??;
             user_settings_snapshot(&current, metadata)
         })
     }

@@ -959,7 +959,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn registered_database_lease_keeps_runtime_alive_after_map_owner_drops() {
         let fixture = crate::tests::harness::RegisteredGlobalDbRetirementHarnessV1::open(
             "registered-global-db-lease-foreign-survival",
@@ -1050,7 +1050,7 @@ mod tests {
         assert_eq!(reopened.locator().verified(), retirement.locator());
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn weak_registered_owner_issuer_mints_fresh_guarded_command_leases() {
         let fixture = crate::tests::harness::RegisteredGlobalDbRetirementHarnessV1::open(
             "weak-registered-global-db-owner-issuer",
@@ -1075,7 +1075,7 @@ mod tests {
         assert!(!first.shares_client_with(&second));
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn registered_project_graph_binding_retains_only_the_database_weak_proxy() {
         crate::register_registered_schema_installer();
         let directory = tempfile::tempdir().expect("registered weak graph proxy directory");

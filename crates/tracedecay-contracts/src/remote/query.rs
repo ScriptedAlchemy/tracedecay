@@ -630,9 +630,14 @@ pub(super) fn validate_returned_provenance(
     expected_generation: &ProjectionGenerationId,
     expected_scope: &RemoteRepositoryScopeV1,
 ) -> Result<(), RemoteExactObservationQueryErrorV1> {
-    let provenance = repository_provenance
-        .value()
-        .ok_or(RemoteExactObservationQueryErrorV1::ReceiptMismatch)?;
+    // A replayed remote frame carries no repository capture, so a row may
+    // report its provenance as unavailable; it must then carry no anchor.
+    let Some(provenance) = repository_provenance.value() else {
+        return match repository_anchor_generation {
+            None => Ok(()),
+            Some(_) => Err(RemoteExactObservationQueryErrorV1::ReceiptMismatch),
+        };
+    };
     let capture = provenance.capture();
     if provenance.generation_id() != expected_generation
         || provenance.source_observation() != Some(expected_observation_id)

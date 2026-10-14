@@ -10,7 +10,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    CurrentRemoteAuthorityStateV1, EnrollmentCredentialRecordV1, ManifestDigest,
+    CurrentRemoteAuthorityStateV1, EnrollmentCredentialRecordV1, EntityId, ManifestDigest,
     RemoteAuthorityUnavailableReasonV1, RemoteCapabilityV1, RemoteRepositoryScopeV1,
     RemoteWriterFenceV1, UtcMicros, canonical_sha256, sha256_hex_suffix,
 };
@@ -33,9 +33,17 @@ use crate::clock::try_now_micros;
 use crate::{
     ApplicationContractError, ApplicationEnvelope, Deadline, EffectId, EffectReceipt, EffectResult,
     EffectTermination, IdempotencyKey, OperationBudgetUsage, OperationReceipt, PolicyDecisionRef,
-    ReconciliationState, ResolvedScope,
+    ReconciliationState, RequestId, ResolvedScope, ResultContractRef,
 };
 use tracedecay_tool_catalog::{EffectClass, UseCaseId};
+
+mod pending;
+
+pub use pending::{
+    RemoteReplayBacklogEntryV1, RemoteReplayPendingFrameV1, RemoteReplayPendingReceiptV1,
+    RemoteReplayPendingRequestV1, RemoteReplayPendingServiceOutcomeV1, RemoteReplayPendingStopV1,
+    RemoteReplayRefusalV1, remote_replay_pending_result_contract_v1,
+};
 
 /// Secret-free replay selector. The authority loads the canonical admitted
 /// capture from its encrypted spool; callers cannot resubmit or alter payload.
@@ -223,6 +231,17 @@ impl RemoteReplayStateV1 {
                 | (Self::Acknowledged, Self::GarbageCollectionEligible)
         )
     }
+
+    /// No replay will ever move the frame again.
+    pub const fn is_settled(self) -> bool {
+        matches!(
+            self,
+            Self::Acknowledged
+                | Self::Rejected
+                | Self::Quarantined
+                | Self::GarbageCollectionEligible
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -231,6 +250,7 @@ pub enum RemoteReplayFindingV1 {
     EnrollmentRevoked,
     PolicyChanged,
     LostAcknowledgement,
+    StoreRefused,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -270,6 +290,9 @@ pub struct RemoteReplaySpoolStateV1 {
     pub state: RemoteReplayStateV1,
     pub receipt: Option<RemoteReplayCommitReceiptV1>,
     pub last_attempt: u64,
+    /// The finding the last transition recorded, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finding: Option<RemoteReplayFindingV1>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -402,6 +425,12 @@ pub trait RemoteReplaySpoolPortV1: Send + Sync {
         event_id: &str,
         replay_attempt: u64,
     ) -> Result<(), RemoteCapturePersistenceErrorV1>;
+
+    /// The enrollment's spooled frames, lowest sequence first.
+    fn replay_backlog(
+        &self,
+        enrollment_id: &EntityId,
+    ) -> Result<Vec<RemoteReplayBacklogEntryV1>, RemoteCapturePersistenceErrorV1>;
 }
 
 pub trait RemoteReplayFrameLookupPortV1: Send + Sync {
@@ -414,7 +443,7 @@ pub trait RemoteReplayFrameLookupPortV1: Send + Sync {
 pub trait RemoteReplayCurrentWriterPortV1: Send + Sync {
     fn current_writer(
         &self,
-        frame: &RemoteReplayFrameV1,
+        fence: &RemoteWriterFenceV1,
     ) -> Result<RemoteReplayCurrentWriterV1, RemoteCapturePersistenceErrorV1>;
 }
 
@@ -547,33 +576,11 @@ impl RemoteReplayServiceV1 {
         {
             return Err(RemoteReplayServiceErrorV1::RequestBindingMismatch);
         }
-        let caller_admission = self
-            .credentials
-            .enrollment_commit_receipt(&frame.capture.enrollment_id)
-            .map_err(RemoteReplayServiceErrorV1::Credential)?;
-        caller_admission
-            .validate()
-            .map_err(|_| RemoteReplayServiceErrorV1::RequestBindingMismatch)?;
-        if caller_admission.enrollment != caller
-            || caller_admission.admission.scope().project_id != caller.scope.project_id
-            || caller_admission.admission.scope().repository_id != caller.scope.repository_id
-            || caller_admission.admission.scope().worktree_id != caller.scope.worktree_id
-            || caller_admission.admission.scope().reference != caller.scope.reference
-        {
-            return Err(RemoteReplayServiceErrorV1::RequestBindingMismatch);
-        }
-        let current = self
-            .current_writer
-            .current_writer(&frame)
-            .map_err(RemoteReplayServiceErrorV1::Persistence)?;
-        let writer = current.writer.as_ref().ok_or_else(|| {
-            RemoteReplayServiceErrorV1::AuthorityUnavailable(Box::new(current.state.clone()))
-        })?;
-        if request.expected_authority.as_ref() != Some(&writer.authority.fence) {
-            return Err(RemoteReplayServiceErrorV1::ExpectedAuthorityMismatch(
-                Box::new(current.state.clone()),
-            ));
-        }
+        let caller_admission = self.caller_admission(&caller)?;
+        let (writer, authority) = self.expected_writer(
+            request.expected_authority.as_ref(),
+            &frame.capture.writer.authority.fence,
+        )?;
         let authority_credential = self
             .credentials
             .authority_enrollment(
@@ -592,18 +599,66 @@ impl RemoteReplayServiceV1 {
             &caller,
             presented_credential,
             &frame,
-            writer,
+            &writer,
             self.clock.as_ref(),
         )?;
         Ok(RemoteReplayServiceOutcomeV1 {
             outcome,
-            authority: current.state,
+            authority,
             frame,
             caller_admission,
             caller,
             policy,
             input_digest,
         })
+    }
+
+    fn caller_admission(
+        &self,
+        caller: &EnrollmentCredentialRecordV1,
+    ) -> Result<RemoteEnrollmentCommitReceiptV1, RemoteReplayServiceErrorV1> {
+        let caller_admission = self
+            .credentials
+            .enrollment_commit_receipt(&caller.enrollment_id)
+            .map_err(RemoteReplayServiceErrorV1::Credential)?;
+        caller_admission
+            .validate()
+            .map_err(|_| RemoteReplayServiceErrorV1::RequestBindingMismatch)?;
+        let scope = caller_admission.admission.scope();
+        if caller_admission.enrollment != *caller
+            || scope.project_id != caller.scope.project_id
+            || scope.repository_id != caller.scope.repository_id
+            || scope.worktree_id != caller.scope.worktree_id
+            || scope.reference != caller.scope.reference
+        {
+            return Err(RemoteReplayServiceErrorV1::RequestBindingMismatch);
+        }
+        Ok(caller_admission)
+    }
+
+    /// The current writer, admitted only when it is the writer the caller
+    /// expects. `gate` selects the Brain and promotion guard to read.
+    fn expected_writer(
+        &self,
+        expected: Option<&RemoteWriterFenceV1>,
+        gate: &RemoteWriterFenceV1,
+    ) -> Result<(RemoteWriterAuthorityV1, CurrentRemoteAuthorityStateV1), RemoteReplayServiceErrorV1>
+    {
+        let current = self
+            .current_writer
+            .current_writer(gate)
+            .map_err(RemoteReplayServiceErrorV1::Persistence)?;
+        let Some(writer) = current.writer else {
+            return Err(RemoteReplayServiceErrorV1::AuthorityUnavailable(Box::new(
+                current.state,
+            )));
+        };
+        if expected != Some(&writer.authority.fence) {
+            return Err(RemoteReplayServiceErrorV1::ExpectedAuthorityMismatch(
+                Box::new(current.state),
+            ));
+        }
+        Ok((writer, current.state))
     }
 }
 
@@ -649,7 +704,54 @@ impl RemoteProtocolPortV1<RemoteReplayRequestV1> for RemoteReplayProtocolAdapter
     ) -> Result<RemoteProtocolResponseV1<Self::Output>, ApplicationContractError> {
         let request_id = request.request_id.clone();
         let observed_at = request.sent_at;
-        let fallback_authority = request.expected_authority.clone().map_or_else(
+        match self.service.replay(&request, &credential) {
+            Ok(outcome) => {
+                let authority = outcome.authority.clone();
+                let result =
+                    match replay_effect_envelope(request, outcome, self.service.clock.as_ref()) {
+                        Ok(envelope) => Ok(envelope),
+                        Err(failure) => Err(remote_protocol_problem(
+                            remote_replay_result_contract_v1(),
+                            request_id.clone(),
+                            failure,
+                        )?),
+                    };
+                RemoteProtocolResponseV1::new_or_unavailable(
+                    request_id,
+                    authority,
+                    result,
+                    remote_replay_result_contract_v1(),
+                    observed_at,
+                )
+            }
+            Err(error) => replay_failure_response(
+                request_id,
+                observed_at,
+                request.expected_authority,
+                remote_replay_result_contract_v1(),
+                error,
+            ),
+        }
+    }
+}
+
+fn replay_failure_response<T>(
+    request_id: RequestId,
+    observed_at: UtcMicros,
+    expected_authority: Option<RemoteWriterFenceV1>,
+    contract: ResultContractRef,
+    error: RemoteReplayServiceErrorV1,
+) -> Result<RemoteProtocolResponseV1<T>, ApplicationContractError> {
+    let authority = match &error {
+        RemoteReplayServiceErrorV1::AuthorityUnavailable(state)
+        | RemoteReplayServiceErrorV1::ExpectedAuthorityMismatch(state) => state.as_ref().clone(),
+        RemoteReplayServiceErrorV1::Persistence(
+            RemoteCapturePersistenceErrorV1::WriterAuthorityUnpublished,
+        ) => CurrentRemoteAuthorityStateV1::Unavailable {
+            reason: RemoteAuthorityUnavailableReasonV1::WriterAuthorityUnpublished,
+            observed_at,
+        },
+        _ => expected_authority.map_or_else(
             || CurrentRemoteAuthorityStateV1::Unavailable {
                 reason: RemoteAuthorityUnavailableReasonV1::PlacementUnknown,
                 observed_at,
@@ -659,92 +761,56 @@ impl RemoteProtocolPortV1<RemoteReplayRequestV1> for RemoteReplayProtocolAdapter
                 missing: BTreeSet::from([RemoteAuthorityUnavailableReasonV1::FenceUnverified]),
                 observed_at,
             },
-        );
-        match self.service.replay(&request, &credential) {
-            Ok(outcome) => {
-                let authority = outcome.authority.clone();
-                let result = match replay_effect_envelope(request, outcome) {
-                    Ok(envelope) => Ok(envelope),
-                    Err(failure) => Err(remote_protocol_problem(
-                        remote_replay_result_contract_v1(),
-                        request_id.clone(),
-                        failure,
-                    )?),
-                };
-                RemoteProtocolResponseV1::new_or_unavailable(
-                    request_id,
-                    authority,
-                    result,
-                    remote_replay_result_contract_v1(),
-                    observed_at,
-                )
-            }
-            Err(error) => {
-                let authority = match &error {
-                    RemoteReplayServiceErrorV1::AuthorityUnavailable(state)
-                    | RemoteReplayServiceErrorV1::ExpectedAuthorityMismatch(state) => {
-                        state.as_ref().clone()
-                    }
-                    RemoteReplayServiceErrorV1::Persistence(
-                        RemoteCapturePersistenceErrorV1::WriterAuthorityUnpublished,
-                    ) => CurrentRemoteAuthorityStateV1::Unavailable {
-                        reason: RemoteAuthorityUnavailableReasonV1::WriterAuthorityUnpublished,
-                        observed_at,
-                    },
-                    _ => fallback_authority,
-                };
-                let failure = replay_protocol_failure(error);
-                RemoteProtocolResponseV1::new_or_unavailable(
-                    request_id.clone(),
-                    authority,
-                    Err(remote_protocol_problem(
-                        remote_replay_result_contract_v1(),
-                        request_id,
-                        failure,
-                    )?),
-                    remote_replay_result_contract_v1(),
-                    observed_at,
-                )
-            }
-        }
-    }
+        ),
+    };
+    let failure = replay_protocol_failure(error);
+    RemoteProtocolResponseV1::new_or_unavailable(
+        request_id.clone(),
+        authority,
+        Err(remote_protocol_problem(
+            contract.clone(),
+            request_id,
+            failure,
+        )?),
+        contract,
+        observed_at,
+    )
 }
 
 fn replay_effect_envelope(
     request: RemoteProtocolRequestV1<RemoteReplayRequestV1>,
     outcome: RemoteReplayServiceOutcomeV1,
+    clock: &dyn RemoteReplayClockPortV1,
 ) -> Result<ApplicationEnvelope<RemoteReplayOutcomeV1>, RemoteProtocolFailureV1> {
-    let operation_receipt = match &outcome.outcome {
+    let deadline = Deadline::new(outcome.caller.expires_at)
+        .map_err(|_| RemoteProtocolFailureV1::EnrollmentExpired)?;
+    let (expected_state, committed_state, execution) = match &outcome.outcome {
         RemoteReplayOutcomeV1::Acknowledged {
             receipt,
             operation_receipt,
             ..
-        } if operation_receipt.transaction.as_ref() == Some(receipt) => operation_receipt,
+        } if operation_receipt.transaction.as_ref() == Some(receipt) => {
+            replayed_effect(&request, operation_receipt, deadline)?
+        }
         RemoteReplayOutcomeV1::Rejected { operation_receipt }
         | RemoteReplayOutcomeV1::Quarantined { operation_receipt }
             if operation_receipt.transaction.is_none() =>
         {
-            operation_receipt
+            replayed_effect(&request, operation_receipt, deadline)?
         }
+        // Answered like a retried transfer: the effect names the state the
+        // original replay committed, and this request changed nothing.
+        RemoteReplayOutcomeV1::AlreadyAcknowledged { receipt } => {
+            settled_effect(&request, receipt, deadline, clock)?
+        }
+        RemoteReplayOutcomeV1::AlreadyRefused { .. } => settled_effect(
+            &request,
+            &(&outcome.frame.event_id, &outcome.outcome),
+            deadline,
+            clock,
+        )?,
         _ => return Err(RemoteProtocolFailureV1::AuthorityUnavailable),
     };
-    operation_receipt
-        .validate()
-        .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;
-    if operation_receipt.committed_at < request.sent_at {
-        return Err(RemoteProtocolFailureV1::AuthorityUnavailable);
-    }
-    let expected_state = operation_receipt.pre_state_digest.clone();
-    let committed_state = operation_receipt.committed_effect_digest.clone();
-    let deadline = Deadline::new(outcome.caller.expires_at)
-        .map_err(|_| RemoteProtocolFailureV1::EnrollmentExpired)?;
-    let execution = OperationReceipt::completed(
-        request.sent_at,
-        operation_receipt.committed_at,
-        deadline,
-        operation_receipt.budget,
-    )
-    .map_err(|_| RemoteProtocolFailureV1::EnrollmentExpired)?;
     let event_digest = canonical_sha256(&(
         "tracedecay.remote-replay-effect.v1",
         &outcome.frame.event_id,
@@ -799,6 +865,59 @@ fn replay_effect_envelope(
         request.request_id,
         outcome.policy.scope,
         effect,
+    ))
+}
+
+/// The expected state, committed state, and execution of a request that found
+/// the frame settled: both states are the digest of `settled`.
+fn settled_effect(
+    request: &RemoteProtocolRequestV1<RemoteReplayRequestV1>,
+    settled: &impl Serialize,
+    deadline: Deadline,
+    clock: &dyn RemoteReplayClockPortV1,
+) -> Result<(ManifestDigest, ManifestDigest, OperationReceipt), RemoteProtocolFailureV1> {
+    let state =
+        canonical_sha256(settled).map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;
+    let answered_at = clock
+        .now()
+        .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;
+    let execution = OperationReceipt::completed(
+        request.sent_at,
+        answered_at,
+        deadline,
+        OperationBudgetUsage {
+            units_consumed: 1,
+            bytes_consumed: 0,
+            elapsed_micros: 0,
+        },
+    )
+    .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;
+    Ok((state.clone(), state, execution))
+}
+
+/// The expected state, committed state, and execution of a replay this request ran.
+fn replayed_effect(
+    request: &RemoteProtocolRequestV1<RemoteReplayRequestV1>,
+    operation_receipt: &RemoteReplayOperationReceiptV1,
+    deadline: Deadline,
+) -> Result<(ManifestDigest, ManifestDigest, OperationReceipt), RemoteProtocolFailureV1> {
+    operation_receipt
+        .validate()
+        .map_err(|_| RemoteProtocolFailureV1::AuthorityUnavailable)?;
+    if operation_receipt.committed_at < request.sent_at {
+        return Err(RemoteProtocolFailureV1::AuthorityUnavailable);
+    }
+    let execution = OperationReceipt::completed(
+        request.sent_at,
+        operation_receipt.committed_at,
+        deadline,
+        operation_receipt.budget,
+    )
+    .map_err(|_| RemoteProtocolFailureV1::EnrollmentExpired)?;
+    Ok((
+        operation_receipt.pre_state_digest.clone(),
+        operation_receipt.committed_effect_digest.clone(),
+        execution,
     ))
 }
 
@@ -894,6 +1013,8 @@ fn replay_protocol_failure(error: RemoteReplayServiceErrorV1) -> RemoteProtocolF
 pub enum RemoteReplayTransactionOutcomeV1 {
     Admitted(RemoteReplayCommitReceiptV1),
     Duplicate(RemoteReplayCommitReceiptV1),
+    /// The project store permanently refused the frame and committed nothing.
+    Refused,
 }
 
 pub trait RemoteReplayTransactionPortV1: Send + Sync {
@@ -918,6 +1039,29 @@ pub enum RemoteReplayOutcomeV1 {
     Quarantined {
         operation_receipt: RemoteReplayOperationReceiptV1,
     },
+    /// An earlier replay acknowledged the frame; this request committed nothing.
+    AlreadyAcknowledged {
+        receipt: RemoteReplayCommitReceiptV1,
+    },
+    /// An earlier replay refused the frame for good; this request committed nothing.
+    AlreadyRefused {
+        refusal: RemoteReplayRefusalV1,
+        finding: RemoteReplayFindingV1,
+    },
+}
+
+impl RemoteReplayOutcomeV1 {
+    /// This request's replay receipt; `None` when an earlier replay settled the frame.
+    pub fn into_operation_receipt(self) -> Option<RemoteReplayOperationReceiptV1> {
+        match self {
+            Self::Acknowledged {
+                operation_receipt, ..
+            }
+            | Self::Rejected { operation_receipt }
+            | Self::Quarantined { operation_receipt } => Some(operation_receipt),
+            Self::AlreadyAcknowledged { .. } | Self::AlreadyRefused { .. } => None,
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -934,6 +1078,40 @@ pub fn replay_remote_capture(
     clock: &dyn RemoteReplayClockPortV1,
 ) -> Result<RemoteReplayOutcomeV1, RemoteReplayApplicationErrorV1> {
     let observed_at = clock.now()?;
+    let spool_state = spool
+        .state(&frame.event_id)
+        .map_err(RemoteReplayApplicationErrorV1::Persistence)?;
+    // A settled row is answered before an attempt opens: no transition would
+    // close an attempt opened on it, so the next replay would see corruption.
+    if spool_state.state.is_settled() {
+        validate_scope_and_fence(frame, current_writer, caller_credential)?;
+        authenticate_remote_request(
+            authentication,
+            &current_writer.authority,
+            authority_credential,
+            caller_credential,
+            presented_caller_credential,
+            RemoteCapabilityV1::Replay,
+            &frame.capture.writer.scope,
+            observed_at,
+        )
+        .map_err(RemoteReplayApplicationErrorV1::Authentication)?;
+        if let Some(refusal) = RemoteReplayRefusalV1::of(spool_state.state) {
+            let finding = spool_state
+                .finding
+                .ok_or(RemoteReplayApplicationErrorV1::InvalidSpoolState)?;
+            return Ok(RemoteReplayOutcomeV1::AlreadyRefused { refusal, finding });
+        }
+        let receipt = spool_state
+            .receipt
+            .ok_or(RemoteReplayApplicationErrorV1::ReceiptMissing)?;
+        // The writer fence is not compared: after a failover the stored
+        // receipt still names the writer that committed it.
+        if receipt.event_id != frame.event_id {
+            return Err(RemoteReplayApplicationErrorV1::ReceiptMismatch);
+        }
+        return Ok(RemoteReplayOutcomeV1::AlreadyAcknowledged { receipt });
+    }
     with_replay_attempt(spool, &frame.event_id, observed_at, |replay_attempt| {
         replay_remote_capture_attempt(
             authentication,
@@ -1118,6 +1296,21 @@ fn replay_remote_capture_attempt(
             receipt,
             Some(RemoteReplayFindingV1::LostAcknowledgement),
         ),
+        RemoteReplayTransactionOutcomeV1::Refused => {
+            let terminal = transition(
+                spool,
+                frame,
+                RemoteReplayStateV1::Pending,
+                RemoteReplayStateV1::Rejected,
+                replay_attempt,
+                clock.now()?,
+                Some(RemoteReplayFindingV1::StoreRefused),
+                None,
+            )?;
+            return Ok(RemoteReplayOutcomeV1::Rejected {
+                operation_receipt: replay_operation_receipt(&terminal, &terminal, None)?,
+            });
+        }
     };
     receipt.validate_for(frame, current_writer)?;
     let admitted_at = clock.now()?;
@@ -1424,6 +1617,13 @@ mod tests {
             _replay_attempt: u64,
         ) -> Result<(), RemoteCapturePersistenceErrorV1> {
             self.abandon
+        }
+
+        fn replay_backlog(
+            &self,
+            _enrollment_id: &EntityId,
+        ) -> Result<Vec<RemoteReplayBacklogEntryV1>, RemoteCapturePersistenceErrorV1> {
+            unreachable!("the attempt guard never lists the backlog")
         }
     }
 

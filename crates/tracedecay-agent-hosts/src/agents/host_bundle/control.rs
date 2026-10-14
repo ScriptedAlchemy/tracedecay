@@ -1,7 +1,7 @@
 //! Layout of the `.tracedecay-host-bundle-v1` control directory: file names,
 //! path-rooted receipt readers, and receipt validators.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -13,7 +13,7 @@ use tracedecay_host_integration::host_bundle_storage_failure;
 use super::model::{
     HostComponentSetExecutionRequestV1, HostComponentSetLifecyclePreviewV1, HostComponentSetV1,
 };
-use super::planner::inspect_install_target;
+use super::planner::{inspect_install_target, observe_artifact_at};
 use super::{
     HOST_BUNDLE_RECEIPT_SCHEMA_VERSION, HostBundleError, HostBundleInstallReceiptV1,
     HostBundleLifecycleOpV1, HostComponentSetReceiptV1, HostComponentV1, HostKindV1,
@@ -90,6 +90,28 @@ pub fn latest_host_component_receipt_at(
     component: HostComponentV1,
 ) -> Result<Option<HostBundleInstallReceiptV1>, HostBundleError> {
     read_receipt_at(lifecycle_root, host, component)
+}
+
+/// Deploy paths that `component`'s receipt, or the receipt of any identity
+/// sharing its route, claims. `component`'s next transaction owns these paths
+/// rather than adopting them.
+pub fn host_component_owned_paths_at(
+    lifecycle_root: &Path,
+    host: HostKindV1,
+    component: HostComponentV1,
+) -> Result<BTreeSet<String>, HostBundleError> {
+    let mut paths = BTreeSet::new();
+    for identity in std::iter::once(component).chain(superseded_identities(component)) {
+        if let Some(receipt) = read_receipt_at(lifecycle_root, host, identity)? {
+            paths.extend(
+                receipt
+                    .artifacts
+                    .into_iter()
+                    .map(|artifact| artifact.relative_path),
+            );
+        }
+    }
+    Ok(paths)
 }
 
 pub(super) fn read_receipt_at(
@@ -398,6 +420,132 @@ pub(super) fn receipt_identity_from_file_name(
             .find(|component| receipt_file(host, *component) == file_name)
             .map(|component| (host, component))
     })
+}
+
+/// Retired component identities and the canonical identity that owns their
+/// route. Every identity of one route shares its deploy paths, so a
+/// transaction for one of them supersedes and retires the receipts of the
+/// others.
+const LEGACY_COMPONENT_IDENTITIES: [(HostComponentV1, HostComponentV1); 1] =
+    [(HostComponentV1::OperatorMcp, HostComponentV1::ContextMcp)];
+
+/// The identity a component's receipts converge to.
+pub fn canonical_component(component: HostComponentV1) -> HostComponentV1 {
+    LEGACY_COMPONENT_IDENTITIES
+        .into_iter()
+        .find(|(legacy, _)| *legacy == component)
+        .map_or(component, |(_, canonical)| canonical)
+}
+
+/// Legacy identities that share `canonical`'s route.
+fn legacy_aliases(canonical: HostComponentV1) -> impl Iterator<Item = HostComponentV1> {
+    LEGACY_COMPONENT_IDENTITIES
+        .into_iter()
+        .filter(move |(_, owner)| *owner == canonical)
+        .map(|(legacy, _)| legacy)
+}
+
+/// The other identities sharing `component`'s route, whose receipts a
+/// transaction for `component` supersedes. A legacy selection still plans its
+/// own identity, so it supersedes the canonical receipt in turn.
+pub(super) fn superseded_identities(component: HostComponentV1) -> Vec<HostComponentV1> {
+    let canonical = canonical_component(component);
+    std::iter::once(canonical)
+        .chain(legacy_aliases(canonical))
+        .filter(|identity| *identity != component)
+        .collect()
+}
+
+/// Every receipt one component's lifecycle must account for on one host.
+pub(super) struct ComponentReceiptsV1 {
+    /// The component's own receipt as read. Restored verbatim on rollback.
+    pub(super) own: Option<HostBundleInstallReceiptV1>,
+    /// Receipts of the other identities sharing the route, as read (live or
+    /// uninstall). Retired after the own receipt is written; restored verbatim
+    /// on rollback.
+    pub(super) superseded: Vec<HostBundleInstallReceiptV1>,
+    /// Ownership evidence for planning, always in the planned identity: the
+    /// live receipt whose artifacts all match disk (own first), else the live
+    /// own receipt, else a live superseded receipt, else `own`. Never
+    /// persisted. A translated receipt keeps its original `manifest_digest`,
+    /// so it can never pass as an unchanged companion.
+    pub(super) evidence: Option<HostBundleInstallReceiptV1>,
+}
+
+impl ComponentReceiptsV1 {
+    /// Every receipt file read, whose creation facts the next receipt inherits.
+    pub(super) fn recorded(&self) -> impl Iterator<Item = &HostBundleInstallReceiptV1> + Clone {
+        self.own.iter().chain(&self.superseded)
+    }
+}
+
+/// Read `component`'s receipt and the receipts it supersedes through `load`,
+/// and pick the planning evidence by observing `artifact_root`.
+pub(super) fn component_receipts(
+    artifact_root: &Path,
+    host: HostKindV1,
+    component: HostComponentV1,
+    load: impl Fn(
+        HostKindV1,
+        HostComponentV1,
+    ) -> Result<Option<HostBundleInstallReceiptV1>, HostBundleError>,
+) -> Result<ComponentReceiptsV1, HostBundleError> {
+    let own = load(host, component)?;
+    let superseded = superseded_identities(component)
+        .into_iter()
+        .filter_map(|identity| load(host, identity).transpose())
+        .collect::<Result<Vec<_>, _>>()?;
+    let live = own
+        .iter()
+        .chain(&superseded)
+        .filter(|receipt| receipt.operation != HostBundleLifecycleOpV1::Uninstall)
+        .collect::<Vec<_>>();
+    let mut chosen = None;
+    for receipt in &live {
+        if receipt_matches_disk(artifact_root, receipt)? {
+            chosen = Some(*receipt);
+            break;
+        }
+    }
+    let evidence = match chosen.or(live.first().copied()) {
+        Some(receipt) => Some(translate_to_identity(receipt, component)),
+        None => own.clone(),
+    };
+    Ok(ComponentReceiptsV1 {
+        own,
+        superseded,
+        evidence,
+    })
+}
+
+fn receipt_matches_disk(
+    artifact_root: &Path,
+    receipt: &HostBundleInstallReceiptV1,
+) -> Result<bool, HostBundleError> {
+    for artifact in &receipt.artifacts {
+        let observed =
+            observe_artifact_at(artifact_root, &artifact.relative_path, None, None, None)?;
+        if observed.artifact_digest != Some(artifact.artifact_digest) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// `receipt` under `component`'s identity: the component and every artifact
+/// marker become `component`'s, so the planner sees a path the planned
+/// component already owns.
+fn translate_to_identity(
+    receipt: &HostBundleInstallReceiptV1,
+    component: HostComponentV1,
+) -> HostBundleInstallReceiptV1 {
+    let marker = expected_ownership_marker(receipt.host, component);
+    let mut translated = receipt.clone();
+    translated.component = component;
+    for artifact in &mut translated.artifacts {
+        artifact.ownership_marker.clone_from(&marker);
+    }
+    translated
 }
 
 pub(super) fn expected_ownership_marker(host: HostKindV1, component: HostComponentV1) -> String {

@@ -25,6 +25,7 @@ test-helpers = [
 ]
 
 [dependencies]
+asupersync.workspace = true
 futures-util = "0.3.33"
 gix = { version = "=0.87.1", default-features = false, features = [
     "revision",

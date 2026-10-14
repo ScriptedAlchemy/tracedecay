@@ -8,7 +8,9 @@ description: Assess project or directory architecture, coupling, and structural 
 Start with the requested project's health dimensions, then investigate the weak
 ones: cycles and depth for architecture, modularity and coupling for boundaries,
 and test risk for poorly covered hubs. A score is a lead, not a finding; inspect
-the implicated code and its callers.
+the implicated code and its callers. Skip the dimensions the panel lists under
+`no evidence:`; the scope gave them nothing to measure, and `quality_signal`
+does not summarize such a scope.
 
 Check indexed coverage before comparing scores. Unmounted files may look healthy
 in the graph while no build root reaches them; inspect the real build or runtime
@@ -17,4 +19,7 @@ prove execution coverage.
 
 For before/after analysis, retain the generation- and path-bound `health_delta`
 cursor. Compare the same scope and explain changed coverage rather than treating
-a score increase alone as proof of better architecture.
+a score increase alone as proof of better architecture. Ignore dimensions whose
+status is `no_evidence`. A `definition-mismatch` or `definition-unrecorded`
+refusal means the cursor predates the current health definition: call again
+without `before_cursor` to record a new baseline.

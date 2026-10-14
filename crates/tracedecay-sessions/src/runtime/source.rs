@@ -400,7 +400,7 @@ pub trait TranscriptSource: Send + Sync {
     }
 }
 
-/// Runs one synchronous transcript discovery/parse section on Tokio's
+/// Runs one synchronous transcript discovery/parse section on the native
 /// blocking pool so historical ingest cannot pin a request-runtime worker.
 ///
 /// [`TranscriptSource`] is deliberately synchronous: adapters walk host
@@ -424,17 +424,19 @@ where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
-    tokio::task::spawn_blocking(work).await.map_err(|error| {
-        tracing::error!(provider, error = %error, "blocking transcript section failed");
-        TranscriptIngestError::BlockingScanTaskFailed { provider }
-    })
+    tracedecay_runtime_core::native_runtime::spawn_blocking(work)
+        .await
+        .map_err(|error| {
+            tracing::error!(provider, error = %error, "blocking transcript section failed");
+            TranscriptIngestError::BlockingScanTaskFailed { provider }
+        })
 }
 
 /// Spawns a task on `handle` and waits for it from a blocking section.
 ///
 /// On a one-worker multi-thread runtime this only succeeds when the caller
-/// is inside [`run_blocking_transcript_section`]: `spawn_blocking` frees
-/// the worker so the spawned task can run. An inline filesystem/JSONL
+/// is inside [`run_blocking_transcript_section`]: the native blocking pool
+/// leaves the worker free so the spawned task can run. An inline filesystem/JSONL
 /// section deadlocks until the receive timeout fails.
 #[cfg(test)]
 pub(crate) fn require_blocking_section_releases_worker(handle: tokio::runtime::Handle) {

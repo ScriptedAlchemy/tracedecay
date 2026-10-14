@@ -31,7 +31,8 @@ use crate::unique_file_paths;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_graph_query::VerifiedGraphQuery;
 use tracedecay_graph_query::health::{
-    dependency_depth, depth_score, dsm_clusters, gini_coefficient, gini_label,
+    HealthDimension, dependency_depth, depth_score, dsm_clusters, gini_coefficient, gini_label,
+    health_panel,
 };
 
 /// Coarse human label for a modularity score in [0,1].

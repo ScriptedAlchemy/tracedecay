@@ -1334,6 +1334,10 @@ fn check_host_integrations(
         home: home.to_path_buf(),
         profile: profile.clone(),
         project_path: project_path.to_path_buf(),
+        catalog_profiles: saved_catalog_profiles(profile.data_dir()).unwrap_or_else(|message| {
+            dc.fail(&message);
+            agents::serve_args::HostCatalogProfiles::default()
+        }),
     };
     let tracked = tracked_hosts(dc, profile.data_dir());
     for agent in agents::all_integrations() {
@@ -1401,6 +1405,22 @@ fn warn_detected_unintegrated_host(
 
 /// The hosts the profile tracks; an unreadable profile config is a warning,
 /// with no host treated as tracked.
+/// Every agent's saved catalog profile. An unreadable profile config is
+/// reported by [`tracked_hosts`]; a saved name the catalog lacks is an error
+/// naming the reset command.
+fn saved_catalog_profiles(
+    profile_root: &Path,
+) -> Result<agents::serve_args::HostCatalogProfiles, String> {
+    let Ok(config) = tracedecay_session_memory::user_config::UserConfig::load(profile_root) else {
+        return Ok(agents::serve_args::HostCatalogProfiles::default());
+    };
+    let catalog =
+        tracedecay_daemon_service::application_surface::application_surface_binding_catalog_ref()
+            .map_err(|error| format!("Catalog profiles are unavailable: {error}"))?;
+    agents::serve_args::HostCatalogProfiles::parse(&config.agent_catalog_profile, catalog)
+        .map_err(|error| error.to_string())
+}
+
 fn tracked_hosts(dc: &mut DoctorCounters, profile_root: &Path) -> Vec<String> {
     match tracedecay_session_memory::user_config::UserConfig::load(profile_root) {
         Ok(config) => config.installed_agents,

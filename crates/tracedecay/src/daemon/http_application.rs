@@ -29,6 +29,7 @@ use tower::ServiceExt;
 use tracedecay_application::http_agent::http_agent;
 use tracedecay_contracts::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
 use tracedecay_contracts::remote::capture::RemoteWriterAuthorityV1;
+use tracedecay_contracts::remote::query::RemoteQueryPolicyRecordV1;
 use tracedecay_contracts::remote::replay::RemoteReplayPolicyEvidenceV1;
 use tracedecay_contracts::remote::status::RemoteOperationalStatusReadV1;
 use tracedecay_contracts::{
@@ -43,6 +44,7 @@ use tracedecay_daemon_service::remote_http_transport::{
 };
 use tracedecay_domain::{BrainNodeId, EnrollmentGrantV1, ProjectId};
 use tracedecay_rusqlite_runtime::remote::RemoteWriterPublicationErrorV1;
+use tracedecay_store_runtime::RemoteNodeOperatorErrorV1;
 
 use tracedecay_contracts::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -139,6 +141,7 @@ struct RemoteWriterAuthorityPublicationRequestV1 {
     node_id: BrainNodeId,
     writer: RemoteWriterAuthorityV1,
     replay_policy: RemoteReplayPolicyEvidenceV1,
+    query_policy: RemoteQueryPolicyRecordV1,
 }
 
 #[derive(Clone)]
@@ -315,8 +318,20 @@ impl DaemonHttpApplicationRegistry {
             )
             .route("/remote-nodes/provision", post(provision_remote_node))
             .route(
+                "/remote-nodes/join",
+                post(super::remote_join::join_remote_node),
+            )
+            .route(
+                "/remote-nodes/drain",
+                post(super::remote_drain::drain_remote_node),
+            )
+            .route(
                 "/remote-nodes/writer-authority",
                 post(publish_remote_writer_authority),
+            )
+            .route(
+                "/remote-nodes/revoke",
+                post(super::remote_revocation::revoke_remote_node),
             )
             .route("/remote-status", get(remote_operational_status))
             // Deletion lifecycle intake. The upstream lanes mounted this at
@@ -371,7 +386,7 @@ impl DaemonHttpApplicationRegistry {
         self.active.load(Ordering::Acquire)
     }
 
-    fn remote_runtime(
+    pub(super) fn remote_runtime(
         &self,
     ) -> Option<Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>> {
         self.remote.read().ok().and_then(|remote| {
@@ -410,11 +425,23 @@ async fn provision_remote_node(
     .await
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(error) => {
-            tracing::error!(%error, "remote node provision failed");
-            (StatusCode::CONFLICT, error.to_string()).into_response()
-        }
+        Err(error) => remote_node_operator_refusal(error),
     }
+}
+
+pub(super) fn remote_node_operator_refusal(error: RemoteNodeOperatorErrorV1) -> Response {
+    tracing::warn!(%error, "remote node operator request refused");
+    let status = match error {
+        RemoteNodeOperatorErrorV1::InvalidRequest => StatusCode::BAD_REQUEST,
+        RemoteNodeOperatorErrorV1::BrainIdentityConflict | RemoteNodeOperatorErrorV1::Conflict => {
+            StatusCode::CONFLICT
+        }
+        RemoteNodeOperatorErrorV1::CapacityExceeded => StatusCode::TOO_MANY_REQUESTS,
+        RemoteNodeOperatorErrorV1::AuthorityUnavailable
+        | RemoteNodeOperatorErrorV1::AuthorityUnreachable => StatusCode::BAD_GATEWAY,
+        RemoteNodeOperatorErrorV1::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    (status, Json(serde_json::json!({ "code": error }))).into_response()
 }
 
 async fn publish_remote_writer_authority(
@@ -429,6 +456,7 @@ async fn publish_remote_writer_authority(
             &request.node_id,
             request.writer,
             request.replay_policy,
+            request.query_policy,
         ),
         tracing::trace_span!("daemon.http.application.remote_writer_authority_publish"),
     )
@@ -483,27 +511,14 @@ const REMOTE_STATUS_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 pub fn live_remote_operational_status(
     profile: &tracedecay_runtime_core::config::ProfileRoot,
 ) -> Result<RemoteOperationalStatusReadV1> {
-    let connection = super::current_profile_daemon_connection(profile)?;
-    let Some(endpoint) = connection.http_application_endpoint() else {
-        return Err(TraceDecayError::Config {
-            message: "TraceDecay daemon HTTP application endpoint is not published. Start or restart the daemon.".to_owned(),
-        });
-    };
-    let auth_token = connection.auth_token();
-    let origin = format!("http://{endpoint}");
-    let url = format!("http://{endpoint}/remote-status");
-    let agent = http_agent(
-        ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .timeout_global(Some(REMOTE_STATUS_HTTP_TIMEOUT))
-            .build(),
-    );
+    let (origin, auth_token, agent) = live_local_http(profile)?;
+    let url = format!("{origin}/remote-status");
     let mut response = agent
         .get(&url)
         .header("Authorization", format!("Bearer {auth_token}"))
         .header("Origin", origin)
         .call()
-        .map_err(|_| remote_status_daemon_unavailable(profile))?;
+        .map_err(|_| live_daemon_unavailable(profile))?;
     if response.status().as_u16() != 200 {
         return Err(TraceDecayError::Config {
             message: format!(
@@ -527,7 +542,31 @@ pub fn live_remote_operational_status(
     }
 }
 
-fn remote_status_daemon_unavailable(
+/// Origin, bearer token and agent for an operator call to the running
+/// daemon's authenticated loopback HTTP application.
+pub(super) fn live_local_http(
+    profile: &tracedecay_runtime_core::config::ProfileRoot,
+) -> Result<(String, String, ureq::Agent)> {
+    let connection = super::current_profile_daemon_connection(profile)?;
+    let Some(endpoint) = connection.http_application_endpoint() else {
+        return Err(TraceDecayError::Config {
+            message: "TraceDecay daemon HTTP application endpoint is not published. Start or restart the daemon.".to_owned(),
+        });
+    };
+    let agent = http_agent(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(REMOTE_STATUS_HTTP_TIMEOUT))
+            .build(),
+    );
+    Ok((
+        format!("http://{endpoint}"),
+        connection.auth_token().to_owned(),
+        agent,
+    ))
+}
+
+pub(super) fn live_daemon_unavailable(
     profile: &tracedecay_runtime_core::config::ProfileRoot,
 ) -> TraceDecayError {
     match tracedecay_daemon_control::default_socket_path(profile.data_dir()) {

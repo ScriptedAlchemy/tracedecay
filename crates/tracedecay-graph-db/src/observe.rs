@@ -72,11 +72,44 @@ pub(crate) const LOCK_WAIT_VERIFIED_GENERATIONS: &str = "graph_db.lock.wait.veri
 
 #[inline(always)]
 pub(crate) fn wait_lock<T>(label: &'static str, acquire: impl FnOnce() -> T) -> T {
-    {
-        {
-            let _span = tracing::trace_span!("graph_db.lock.wait", label = label).entered();
-            acquire()
+    #[cfg(any(test, feature = "test-helpers"))]
+    lock_wait_hook::reached(label);
+    let _span = tracing::trace_span!("graph_db.lock.wait", label = label).entered();
+    acquire()
+}
+
+/// A per-thread callback run before each lock wait. Tests that pause a reader
+/// at a lock cannot use a scoped `tracing` subscriber for it: `tracing` caches
+/// each callsite's interest process-wide, and a lock wait on any other thread
+/// that registers the callsite first caches it as disabled for every thread.
+#[cfg(any(test, feature = "test-helpers"))]
+pub(crate) mod lock_wait_hook {
+    use std::cell::RefCell;
+
+    type Hook = Box<dyn FnMut(&'static str)>;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) fn reached(label: &'static str) {
+        HOOK.with_borrow_mut(|hook| {
+            if let Some(hook) = hook {
+                hook(label);
+            }
+        });
+    }
+
+    pub(crate) fn with<R>(hook: impl FnMut(&'static str) + 'static, run: impl FnOnce() -> R) -> R {
+        struct Uninstall;
+        impl Drop for Uninstall {
+            fn drop(&mut self) {
+                HOOK.with_borrow_mut(Option::take);
+            }
         }
+        HOOK.with_borrow_mut(|installed| *installed = Some(Box::new(hook)));
+        let _uninstall = Uninstall;
+        run()
     }
 }
 

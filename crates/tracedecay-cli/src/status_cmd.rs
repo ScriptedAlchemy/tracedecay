@@ -207,8 +207,8 @@ pub(crate) fn format_memory_status_report(status: &MemoryStatusV1) -> String {
             "facts: {}\n",
             "entities: {}\n",
             "algebra: {}\n",
-            "hrr dim: {}\n",
-            "estimated capacity: {}\n",
+            "vector dim: {}\n",
+            "superposition estimate per vector: {} (not a fact limit or recall guarantee)\n",
             "below recall floor: {}\n",
             "helpful feedback: {}\n",
             "unhelpful feedback: {}\n",
@@ -406,19 +406,12 @@ async fn handle_status_command_within(
                 print!("{}", include_str!("resources/logo.ansi"));
             }
             let branch_info = status_branch_info(&project_path, &daemon_status);
-            if short {
-                crate::display::print_status_header(
-                    &census,
-                    freshness.as_ref(),
-                    branch_info.as_ref(),
-                );
-            } else {
-                crate::display::print_status_table_with(crate::display::StatusTable {
-                    census: &census,
-                    freshness: freshness.as_ref(),
-                    branch_info: branch_info.as_ref(),
-                });
-            }
+            crate::display::print_status_table(
+                &census,
+                freshness.as_ref(),
+                branch_info.as_ref(),
+                short,
+            );
             for finding in &schema_convergences {
                 match finding.state {
                     SchemaConvergenceStateV1::PendingSchemaMigration
@@ -522,6 +515,48 @@ mod tests {
         SchemaConvergenceFindingV1, SchemaConvergenceProgressV1, SchemaConvergenceStageV1,
         SchemaConvergenceStateV1,
     };
+
+    #[test]
+    fn memory_status_report_never_presents_superposition_estimate_as_capacity() {
+        let released: super::MemoryStatusV1 = serde_json::from_value(json!({
+            "owner": {"kind": "profile"},
+            "fact_count": 5000,
+            "entity_count": 12,
+            "algebra": {"name": "amari_fhrr", "hrr_dim": 2048, "estimated_capacity": 268},
+            "trust_0_025_count": 0,
+            "trust_025_050_count": 0,
+            "trust_050_075_count": 0,
+            "trust_075_100_count": 5000,
+            "below_default_recall_threshold_count": 0,
+            "helpful_count": 0,
+            "unhelpful_count": 0,
+            "feedback_funnel": {
+                "retrieval_count_total": 0,
+                "access_count_total": 0,
+                "retrieved_fact_count": 0,
+                "rated_fact_count": 0,
+                "feedback_total": 0,
+                "seen_to_feedback_ratio": null
+            }
+        }))
+        .expect("a released daemon's memory status must still decode");
+
+        let report = super::format_memory_status_report(&released);
+
+        assert!(report.contains("facts: 5000\n"), "{report}");
+        assert!(report.contains("algebra: amari_fhrr\n"), "{report}");
+        assert!(report.contains("vector dim: 2048\n"), "{report}");
+        assert!(
+            report.contains(
+                "superposition estimate per vector: 268 (not a fact limit or recall guarantee)\n"
+            ),
+            "{report}"
+        );
+        assert!(
+            !report.lines().any(|line| line.contains("capacity")),
+            "a fact count above the estimate must not read as over capacity: {report}"
+        );
+    }
 
     #[test]
     fn status_deadline_boundaries_preserve_override_and_maximum() {

@@ -25,7 +25,10 @@ pub use live_transcript_refresh::{
 pub use project_host_admission_replay::{
     ProjectHostAdmissionReplayTask, ProjectHostAdmissionReplayWorker,
 };
-pub use protocol::{McpMethod, classify_mcp_method, initialize_result, resources_list_result};
+pub use protocol::{
+    McpMethod, classify_mcp_method, initialize_result, request_protocol_version,
+    resources_list_result, speaks_2026_07_28, stamp_2026_07_28_result,
+};
 pub use read_coalescing::{
     IdenticalReadCoalescer, ReadCoalescingSnapshot, ReadFlight, ReadFlightClaim, ReadFlightLeader,
     tool_allows_identical_read_coalescing,

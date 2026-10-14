@@ -103,7 +103,13 @@ fn repository_factory_attaches_writer_and_reserved_reader_runtime() {
     );
 
     let attachment = RepositoryPhysicalAttachmentFactory
-        .attach(binding.clone(), locator, path, AdmissionConfigV1::default())
+        .attach(
+            &tracedecay_rusqlite_runtime::native_runtime::handle().expect("native runtime"),
+            binding.clone(),
+            locator,
+            path,
+            AdmissionConfigV1::default(),
+        )
         .unwrap();
 
     assert_eq!(attachment.binding(), binding);
@@ -130,7 +136,13 @@ fn temporal_health_dispatch_uses_the_reserved_reader_lane() {
         LocatorDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
     );
     let attachment = RepositoryPhysicalAttachmentFactory
-        .attach(binding.clone(), locator, path, AdmissionConfigV1::default())
+        .attach(
+            &tracedecay_rusqlite_runtime::native_runtime::handle().expect("native runtime"),
+            binding.clone(),
+            locator,
+            path,
+            AdmissionConfigV1::default(),
+        )
         .unwrap();
     let (request, probe) = health_request(binding, ConsistencyModeV1::LatestAvailable);
 
@@ -157,7 +169,13 @@ fn at_least_reads_refuse_coverage_without_a_committed_watermark() {
         LocatorDigest::new(format!("sha256:{}", "e".repeat(64))).unwrap(),
     );
     let attachment = RepositoryPhysicalAttachmentFactory
-        .attach(binding.clone(), locator, path, AdmissionConfigV1::default())
+        .attach(
+            &tracedecay_rusqlite_runtime::native_runtime::handle().expect("native runtime"),
+            binding.clone(),
+            locator,
+            path,
+            AdmissionConfigV1::default(),
+        )
         .unwrap();
     let commit_sequence = CommitSequenceV1(7);
     let (request, probe) = health_request(
@@ -252,7 +270,13 @@ fn repository_read_dispatch_routes_to_the_repository_executor() {
         LocatorDigest::new(format!("sha256:{}", "c".repeat(64))).unwrap(),
     );
     let attachment = RepositoryPhysicalAttachmentFactory
-        .attach(binding.clone(), locator, path, AdmissionConfigV1::default())
+        .attach(
+            &tracedecay_rusqlite_runtime::native_runtime::handle().expect("native runtime"),
+            binding.clone(),
+            locator,
+            path,
+            AdmissionConfigV1::default(),
+        )
         .unwrap();
 
     let (request, probe) = repository_read_request(

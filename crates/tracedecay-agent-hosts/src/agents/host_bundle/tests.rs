@@ -1351,6 +1351,10 @@ impl HostBundleRegistrationInspectorV1 for CurrentRegistration {
     ) -> HostBundleRegistrationStateV1 {
         HostBundleRegistrationStateV1::Current
     }
+
+    fn serve_args(&self, _host: HostKindV1) -> crate::agents::serve_args::ServeArgs {
+        crate::agents::serve_args::ServeArgs::default()
+    }
 }
 
 struct MissingRegistration;
@@ -1362,6 +1366,10 @@ impl HostBundleRegistrationInspectorV1 for MissingRegistration {
         _component: HostComponentV1,
     ) -> HostBundleRegistrationStateV1 {
         HostBundleRegistrationStateV1::Missing
+    }
+
+    fn serve_args(&self, _host: HostKindV1) -> crate::agents::serve_args::ServeArgs {
+        crate::agents::serve_args::ServeArgs::default()
     }
 }
 
@@ -1691,6 +1699,10 @@ impl HostBundleRegistrationInspectorV1 for InteractiveActivationRegistration {
     fn interactive_activation_guidance(&self, _host: HostKindV1) -> Option<String> {
         Some(INTERACTIVE_ACTIVATION_GUIDANCE.to_string())
     }
+
+    fn serve_args(&self, _host: HostKindV1) -> crate::agents::serve_args::ServeArgs {
+        crate::agents::serve_args::ServeArgs::default()
+    }
 }
 
 /// A host TraceDecay can activate without the operator: no guidance, so a
@@ -1704,6 +1716,10 @@ impl HostBundleRegistrationInspectorV1 for NonInteractiveStagedRegistration {
         _component: HostComponentV1,
     ) -> HostBundleRegistrationStateV1 {
         HostBundleRegistrationStateV1::Repairable
+    }
+
+    fn serve_args(&self, _host: HostKindV1) -> crate::agents::serve_args::ServeArgs {
+        crate::agents::serve_args::ServeArgs::default()
     }
 }
 
@@ -2030,4 +2046,295 @@ fn pi_hook_capability_is_proven_by_its_embedded_fixture() {
 
     require_component_capabilities(HostKindV1::Pi, HostComponentV1::Core)
         .expect("Pi Core is admitted over proven Hooks and Cli");
+}
+
+const MCP_PATH: &str = "mcp.json";
+
+fn mcp_set(bytes: &[u8]) -> HostComponentSetV1 {
+    HostComponentSetV1 {
+        host: HostKindV1::CursorDesktop,
+        components: vec![component_entry(
+            component_manifest(
+                HostKindV1::CursorDesktop,
+                HostComponentV1::ContextMcp,
+                MCP_PATH,
+                bytes,
+            ),
+            bytes,
+        )],
+    }
+}
+
+fn mcp_set_request(
+    operation: HostBundleLifecycleOpV1,
+    operation_id: u8,
+) -> HostComponentSetExecutionRequestV1 {
+    let mut request = component_set_request(HostKindV1::CursorDesktop, operation, operation_id);
+    request.lifecycle.expected_components = vec![HostComponentV1::ContextMcp];
+    request
+}
+
+/// Deploy `bytes` and the receipt a released binary's `--component
+/// operator-mcp` install wrote for them.
+fn seed_legacy_mcp_install(root: &Path, writer: &HostBundleWriterV1, bytes: &[u8]) {
+    std::fs::write(root.join(MCP_PATH), bytes).unwrap();
+    writer
+        .write_receipt(&HostBundleInstallReceiptV1 {
+            schema_version: HOST_BUNDLE_RECEIPT_SCHEMA_VERSION,
+            operation_id: [40; 16],
+            host: HostKindV1::CursorDesktop,
+            component: HostComponentV1::OperatorMcp,
+            operation: HostBundleLifecycleOpV1::Install,
+            manifest_digest: component_manifest(
+                HostKindV1::CursorDesktop,
+                HostComponentV1::OperatorMcp,
+                MCP_PATH,
+                bytes,
+            )
+            .canonical_digest()
+            .unwrap(),
+            artifacts: vec![HostBundleReceiptArtifactV1 {
+                relative_path: MCP_PATH.to_string(),
+                artifact_digest: Sha256::digest(bytes).into(),
+                ownership_marker: expected_ownership_marker(
+                    HostKindV1::CursorDesktop,
+                    HostComponentV1::OperatorMcp,
+                ),
+            }],
+            created_directories: Vec::new(),
+            created_config: Some(Vec::new()),
+        })
+        .unwrap();
+}
+
+fn legacy_mcp_receipt_path(root: &Path) -> PathBuf {
+    root.join(HOST_BUNDLE_CONTROL_DIR).join(receipt_file(
+        HostKindV1::CursorDesktop,
+        HostComponentV1::OperatorMcp,
+    ))
+}
+
+/// A run killed after it wrote the canonical receipt and before it retired the
+/// legacy one leaves both; the rerun finds nothing to write and finishes the
+/// retirement.
+#[test]
+fn interrupted_migration_with_both_receipts_converges_without_writes() {
+    let root = tempfile::tempdir().unwrap();
+    let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
+    let component_set = mcp_set(b"mcp-v2");
+    let verifier = ComponentSetVerifier::from_set(&component_set);
+    HostComponentSetTransactionV1::new(&mut writer)
+        .execute(
+            &component_set,
+            &mcp_set_request(HostBundleLifecycleOpV1::Install, 41),
+            &verifier,
+            &mut ArtifactOnlyTestRegistration,
+        )
+        .unwrap();
+    let canonical_bytes = std::fs::read(root.path().join(MCP_PATH)).unwrap();
+    seed_legacy_mcp_install(root.path(), &writer, b"mcp-v1");
+    std::fs::write(root.path().join(MCP_PATH), &canonical_bytes).unwrap();
+
+    let request = mcp_set_request(HostBundleLifecycleOpV1::Update, 42);
+    let preview = HostComponentSetTransactionV1::new(&mut writer)
+        .preview(
+            &component_set,
+            &request,
+            &verifier,
+            &mut ArtifactOnlyTestRegistration,
+        )
+        .unwrap();
+    assert!(
+        preview
+            .component_plans
+            .iter()
+            .flat_map(|plan| &plan.mutations)
+            .all(|mutation| mutation.action == HostArtifactActionV1::Noop)
+    );
+    HostComponentSetTransactionV1::new(&mut writer)
+        .execute_confirmed(
+            &component_set,
+            &request,
+            &preview,
+            &verifier,
+            &mut ArtifactOnlyTestRegistration,
+        )
+        .unwrap();
+
+    assert_eq!(
+        writer
+            .load_receipt(HostKindV1::CursorDesktop, HostComponentV1::OperatorMcp)
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        writer
+            .load_receipt(HostKindV1::CursorDesktop, HostComponentV1::ContextMcp)
+            .unwrap()
+            .expect("the canonical receipt owns the route")
+            .operation_id,
+        [42; 16]
+    );
+    assert_eq!(
+        std::fs::read(root.path().join(MCP_PATH)).unwrap(),
+        b"mcp-v2"
+    );
+}
+
+#[test]
+fn legacy_receipt_drift_between_preview_and_apply_is_stale() {
+    let root = tempfile::tempdir().unwrap();
+    let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
+    seed_legacy_mcp_install(root.path(), &writer, b"mcp");
+    let component_set = mcp_set(b"mcp");
+    let verifier = ComponentSetVerifier::from_set(&component_set);
+    let request = mcp_set_request(HostBundleLifecycleOpV1::Update, 43);
+    let preview = HostComponentSetTransactionV1::new(&mut writer)
+        .preview(
+            &component_set,
+            &request,
+            &verifier,
+            &mut ArtifactOnlyTestRegistration,
+        )
+        .unwrap();
+
+    writer
+        .remove_receipt(HostKindV1::CursorDesktop, HostComponentV1::OperatorMcp)
+        .unwrap();
+
+    assert!(matches!(
+        HostComponentSetTransactionV1::new(&mut writer).execute_confirmed(
+            &component_set,
+            &request,
+            &preview,
+            &verifier,
+            &mut ArtifactOnlyTestRegistration,
+        ),
+        Err(HostBundleError::StalePreview(_))
+    ));
+    assert_eq!(
+        writer
+            .load_receipt(HostKindV1::CursorDesktop, HostComponentV1::ContextMcp)
+            .unwrap(),
+        None
+    );
+    assert_eq!(writer.load_component_set_receipt([43; 16]).unwrap(), None);
+    assert_eq!(std::fs::read(root.path().join(MCP_PATH)).unwrap(), b"mcp");
+}
+
+#[test]
+fn migration_rollback_restores_legacy_receipt_and_artifact() {
+    let root = tempfile::tempdir().unwrap();
+    let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
+    seed_legacy_mcp_install(root.path(), &writer, b"mcp-v1");
+    let legacy_receipt = std::fs::read(legacy_mcp_receipt_path(root.path())).unwrap();
+    let component_set = mcp_set(b"mcp-v2");
+    let mut registration = FailingSetRegistration::default();
+
+    assert_eq!(
+        HostComponentSetTransactionV1::new(&mut writer).execute(
+            &component_set,
+            &mcp_set_request(HostBundleLifecycleOpV1::Update, 44),
+            &ComponentSetVerifier::from_set(&component_set),
+            &mut registration,
+        ),
+        Err(FAILING_SET_REGISTRATION_VERIFY)
+    );
+
+    assert!(registration.rolled_back);
+    assert_eq!(
+        std::fs::read(root.path().join(MCP_PATH)).unwrap(),
+        b"mcp-v1"
+    );
+    assert_eq!(
+        std::fs::read(legacy_mcp_receipt_path(root.path())).unwrap(),
+        legacy_receipt
+    );
+    assert_eq!(
+        writer
+            .load_receipt(HostKindV1::CursorDesktop, HostComponentV1::ContextMcp)
+            .unwrap(),
+        None
+    );
+    assert_eq!(writer.load_component_set_receipt([44; 16]).unwrap(), None);
+}
+
+#[test]
+fn single_component_execute_refuses_while_legacy_receipt_owns_route() {
+    let root = tempfile::tempdir().unwrap();
+    let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
+    seed_legacy_mcp_install(root.path(), &writer, b"mcp");
+    let manifest = component_manifest(
+        HostKindV1::CursorDesktop,
+        HostComponentV1::ContextMcp,
+        MCP_PATH,
+        b"mcp",
+    );
+    let mut request = execution(
+        HostKindV1::CursorDesktop,
+        HostBundleLifecycleOpV1::Install,
+        45,
+        true,
+    );
+    request.lifecycle.expected_component = HostComponentV1::ContextMcp;
+
+    let refusal = writer
+        .execute(
+            &manifest,
+            &request,
+            &component_entry(manifest.clone(), b"mcp").contents,
+            &verifier(&manifest),
+        )
+        .unwrap_err();
+
+    assert!(
+        matches!(&refusal, HostBundleError::OwnershipConflict(reason) if reason.contains("tracedecay update --agent cursor")),
+        "{refusal:?}"
+    );
+    assert_eq!(
+        writer
+            .load_receipt(HostKindV1::CursorDesktop, HostComponentV1::ContextMcp)
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
+fn doctor_reports_dual_claim_as_one_owner_with_canonical_repair() {
+    let artifacts = tempfile::tempdir().unwrap();
+    let lifecycle = tempfile::tempdir().unwrap();
+    drop(HostBundleWriterV1::open_with_lifecycle_root(artifacts.path(), lifecycle.path()).unwrap());
+    for component in [HostComponentV1::ContextMcp, HostComponentV1::OperatorMcp] {
+        write_component_receipt(
+            artifacts.path(),
+            lifecycle.path(),
+            HostKindV1::CursorDesktop,
+            component,
+            &[(MCP_PATH, Some(b"mcp"))],
+        );
+    }
+
+    let report = inspect_installed_host_bundle_components_at(
+        artifacts.path(),
+        lifecycle.path(),
+        &CurrentRegistration,
+        crate::agents::TEST_GENERATOR_COMMIT,
+    )
+    .unwrap();
+
+    assert_eq!(report.components.len(), 2);
+    for component in &report.components {
+        assert_eq!(
+            component.artifacts[0].state,
+            HostBundleComponentDoctorStateV1::Current,
+            "{}",
+            component.label()
+        );
+        assert_eq!(
+            component.repair_action,
+            "run `tracedecay reinstall --component context-mcp`",
+            "{}",
+            component.label()
+        );
+    }
 }

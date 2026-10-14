@@ -7,7 +7,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use tokio::sync::Mutex;
 use tracedecay_contracts::remote::auth::RemoteEnrollmentAdmissionEvidenceV1;
-use tracedecay_domain::{BrainNodeId, EnrollmentGrantV1};
+use tracedecay_contracts::remote::discovery::RemoteAuthorityDiscoveryV1;
+use tracedecay_domain::{BrainId, BrainNodeId, EnrollmentGrantV1};
 use tracedecay_graph_db::{GraphDbRegistry, GraphDbRegistryConfig};
 use tracedecay_runtime_core::RuntimeOperationTaskOwnerV1;
 use tracedecay_runtime_core::storage::{
@@ -35,6 +36,7 @@ use super::{
     StoreRuntimeRegistry, StoreRuntimeResolver, bind_ready_project_memory_graph, open_runtime,
     open_runtime_with_presence, registry_open_error, runtime_incarnation, session_registry_error,
 };
+use crate::RemoteNodeOperatorErrorV1;
 use tracedecay_domain::errors::TraceDecayError;
 use tracedecay_global_db::register_registered_schema_installer;
 use tracedecay_global_db::schema_contract::registered_schema_admission_digest;
@@ -144,17 +146,29 @@ impl DaemonSessionRuntimeRegistryV1 {
         identity: LocalProfileIdentityAuthorityV1,
         long_lived_session_maintenance: bool,
     ) -> Result<Self> {
+        let operation_runtime =
+            tracedecay_runtime_core::native_runtime::handle().ok_or_else(|| {
+                TraceDecayError::Config {
+                    message: "session runtime registry requires a native execution runtime"
+                        .to_owned(),
+                }
+            })?;
+        let operation_task_owner = Arc::new(
+            RuntimeOperationTaskOwnerV1::new(operation_runtime.clone()).map_err(|error| {
+                TraceDecayError::Config {
+                    message: error.to_string(),
+                }
+            })?,
+        );
         let remote_credential_authority = Arc::new(crate::DaemonRemoteCredentialAuthorityV1::new(
             identity.brain_id().clone(),
             identity.profile_id().clone(),
         ));
         let remote_replay_transaction = Arc::new(
-            crate::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1::new(
-                tokio::runtime::Handle::current(),
-            )
-            .map_err(|error| {
-                session_registry_error("start remote replay transaction authority", error)
-            })?,
+            crate::remote_replay_transaction::DaemonRemoteReplayTransactionAuthorityV1::new()
+                .map_err(|error| {
+                    session_registry_error("start remote replay transaction authority", error)
+                })?,
         );
         // The kernel's registry initialises profile- and session-scoped shards
         // through a fail-closed port, because the registered schema lives in
@@ -171,8 +185,14 @@ impl DaemonSessionRuntimeRegistryV1 {
             ),
         ));
         let registry_resolver: Arc<dyn StoreRuntimeResolver> = resolver.clone();
-        let registry =
-            StoreRuntimeRegistry::new(registry_resolver, Arc::new(LifecycleShardRuntimePublisher));
+        let registry = StoreRuntimeRegistry::new(
+            operation_runtime,
+            registry_resolver,
+            Arc::new(LifecycleShardRuntimePublisher),
+        )
+        .map_err(|error| {
+            session_registry_error("create store runtime registry", format!("{error:?}"))
+        })?;
         let graph_manifest_provider =
             Arc::new(super::code_graph_manifest::DaemonCodeGraphManifestProviderV1::default());
         let graph_registry = GraphDbRegistry::new_with_manifest_provider(
@@ -225,7 +245,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             graph_registry,
             graph_manifest_provider,
             graph_lifecycle_cancelled: Arc::new(AtomicBool::new(false)),
-            operation_task_owner: Arc::new(RuntimeOperationTaskOwnerV1::new()),
+            operation_task_owner,
             profile_pin: Mutex::new(Some(profile_pin)),
             profile_database_mount: Mutex::new(()),
             profile_database: std::sync::Mutex::new(None),
@@ -415,7 +435,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         for database in databases {
             let node_id = RemoteSqliteStorageV1::discover_registered_node(
                 &database,
-                self.identity.brain_id(),
                 self.identity.profile_id(),
             )
             .map_err(|error| {
@@ -906,48 +925,104 @@ impl DaemonSessionRuntimeRegistryV1 {
         node_id: BrainNodeId,
         keyring: Arc<dyn RemoteSpoolKeyringV1>,
     ) -> Result<RemoteSqliteStorageV1> {
-        self.mount_remote_node_storage(node_id, keyring, false)
+        self.mount_remote_node_storage(node_id, keyring, None).await
+    }
+
+    /// Makes this profile the node that `discovery` names in another
+    /// profile's Brain. Only the operator join route reaches this, with an
+    /// answer the authority returned to the node's own credential and the
+    /// caller already verified; provisioning keeps refusing every foreign
+    /// grant. The store adopts the authority's enrollment record verbatim, so
+    /// both sides hold one enrollment identity and revision. A rerun with the
+    /// same answer converges.
+    pub async fn join_remote_node(
+        &self,
+        discovery: &RemoteAuthorityDiscoveryV1,
+    ) -> std::result::Result<(), RemoteNodeOperatorErrorV1> {
+        let enrollment = &discovery.enrollment.enrollment;
+        if &enrollment.brain_id == self.identity.brain_id() {
+            return Err(RemoteNodeOperatorErrorV1::BrainIdentityConflict);
+        }
+        let keyring: Arc<dyn RemoteSpoolKeyringV1> = Arc::new(UnavailableRemoteSpoolKeyringV1);
+        let storage = self
+            .mount_remote_node_storage(
+                enrollment.node_id.clone(),
+                keyring,
+                Some(&enrollment.brain_id),
+            )
             .await
+            .map_err(|error| {
+                tracing::warn!(%error, "remote node store mount failed during join");
+                RemoteNodeOperatorErrorV1::Unavailable
+            })?;
+        if storage.member_brain() != &enrollment.brain_id {
+            return Err(RemoteNodeOperatorErrorV1::BrainIdentityConflict);
+        }
+        storage
+            .record_authority_discovery(discovery, tracedecay_contracts::clock::now_micros())
+            .map_err(|error| match error {
+                RemoteSqliteStorageErrorV1::Conflict
+                | RemoteSqliteStorageErrorV1::BindingMismatch => {
+                    RemoteNodeOperatorErrorV1::Conflict
+                }
+                error => {
+                    tracing::warn!(%error, "remote node join persistence failed");
+                    RemoteNodeOperatorErrorV1::Unavailable
+                }
+            })?;
+        self.remote_credential_authority
+            .refresh_storage(&enrollment.node_id)
+            .map_err(map_registry_error)
     }
 
     pub async fn provision_remote_node(
         &self,
         grant: EnrollmentGrantV1,
         admission: RemoteEnrollmentAdmissionEvidenceV1,
-    ) -> Result<()> {
-        grant.validate().map_err(|error| {
-            session_registry_error("provision Remote Brain node", error.to_string())
-        })?;
-        admission.validate_for(&grant).map_err(|error| {
-            session_registry_error("authenticate Remote Brain provisioning", error.to_string())
-        })?;
+    ) -> std::result::Result<(), RemoteNodeOperatorErrorV1> {
+        grant
+            .validate()
+            .map_err(|_| RemoteNodeOperatorErrorV1::InvalidRequest)?;
+        admission
+            .validate_for(&grant)
+            .map_err(|_| RemoteNodeOperatorErrorV1::InvalidRequest)?;
         if &grant.brain_id != self.identity.brain_id() {
-            return Err(session_registry_error(
-                "provision Remote Brain node",
-                "grant brain identity does not match the profile authority".to_owned(),
-            ));
+            return Err(RemoteNodeOperatorErrorV1::BrainIdentityConflict);
         }
         let keyring: Arc<dyn RemoteSpoolKeyringV1> = Arc::new(UnavailableRemoteSpoolKeyringV1);
         let storage = self
-            .mount_remote_node_storage(grant.node_id.clone(), keyring, true)
-            .await?;
+            .mount_remote_node_storage(
+                grant.node_id.clone(),
+                keyring,
+                Some(self.identity.brain_id()),
+            )
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "remote node store mount failed during provisioning");
+                RemoteNodeOperatorErrorV1::Unavailable
+            })?;
+        if storage.is_joined() {
+            return Err(RemoteNodeOperatorErrorV1::BrainIdentityConflict);
+        }
         storage
             .store_enrollment_grant(&grant, &admission)
-            .map_err(|error| {
-                session_registry_error("publish Remote Brain enrollment grant", error.to_string())
+            .map_err(|error| match error {
+                RemoteSqliteStorageErrorV1::Corruption => RemoteNodeOperatorErrorV1::Conflict,
+                error => {
+                    tracing::warn!(%error, "remote enrollment grant persistence failed");
+                    RemoteNodeOperatorErrorV1::Unavailable
+                }
             })?;
         self.remote_credential_authority
             .refresh_storage(&grant.node_id)
-            .map_err(|error| {
-                session_registry_error("register Remote Brain enrollment grant", error.to_string())
-            })
+            .map_err(map_registry_error)
     }
 
     async fn mount_remote_node_storage(
         &self,
         node_id: BrainNodeId,
         keyring: Arc<dyn RemoteSpoolKeyringV1>,
-        provision_if_new: bool,
+        provision_member_brain: Option<&BrainId>,
     ) -> Result<RemoteSqliteStorageV1> {
         let (database, newly_mounted, existed) = match self.admit_remote_node_owner(&node_id)? {
             super::RemoteNodeOwnerAdmissionV1::Existing(database) => (database, false, true),
@@ -988,10 +1063,11 @@ impl DaemonSessionRuntimeRegistryV1 {
                 (database, true, existed)
             }
         };
-        let storage = if provision_if_new && newly_mounted && !existed {
-            database.provision_remote_storage(keyring)
-        } else {
-            database.remote_storage(keyring)
+        let storage = match provision_member_brain {
+            Some(member_brain) if newly_mounted && !existed => {
+                database.provision_remote_storage(keyring, member_brain)
+            }
+            _ => database.remote_storage(keyring),
         }
         .map_err(|error| {
             session_registry_error("attach Remote Brain node store", error.to_string())
@@ -1027,7 +1103,6 @@ impl DaemonSessionRuntimeRegistryV1 {
                 storage.clone(),
                 Arc::clone(&self.remote_replay_transaction),
                 self.remote_recovery_project_lifecycle(),
-                tokio::runtime::Handle::current(),
             ));
             let recovery = database.remote_recovery_authority(effects)?;
             let recovery = Arc::new(recovery);
@@ -1917,6 +1992,23 @@ impl DaemonSessionRuntimeRegistryV1 {
             mounted.get(project_id),
             Some(ProjectRuntimeOwnerStateV1::Ready(owners)) if owners.memory.is_some()
         )
+    }
+}
+
+fn map_registry_error(
+    error: crate::DaemonRemoteCredentialRegistryErrorV1,
+) -> RemoteNodeOperatorErrorV1 {
+    match error {
+        crate::DaemonRemoteCredentialRegistryErrorV1::IdentityConflict => {
+            RemoteNodeOperatorErrorV1::Conflict
+        }
+        crate::DaemonRemoteCredentialRegistryErrorV1::CapacityExceeded => {
+            RemoteNodeOperatorErrorV1::CapacityExceeded
+        }
+        error => {
+            tracing::warn!(%error, "remote node credential registration failed");
+            RemoteNodeOperatorErrorV1::Unavailable
+        }
     }
 }
 

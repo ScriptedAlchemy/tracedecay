@@ -218,6 +218,8 @@ Examples:
   tracedecay install --agent kimi --component context-mcp
   tracedecay install --agent opencode --component context-mcp
   tracedecay install --agent codex --automation  Also enable the automation loop
+  tracedecay install --agent cursor --catalog-profile compact
+                                                 Serve Cursor the compact tool list
   tracedecay install --agent hermes              Configure every existing Hermes profile
   tracedecay install --local                     Project-local config in cwd
 
@@ -319,7 +321,12 @@ except to debug the protocol. For ad-hoc tool calls from a shell, use \
 names every tool but carries full schemas only for the always-loaded set; \
 the rest are stubs with a short description and an open schema. Calling a \
 stub works and lists its full schema from then on. `--full-tool-list` lists \
-every schema, for hosts that defer tool schemas themselves. With \
+every schema, for hosts that defer tool schemas themselves. \
+`--catalog-profile <NAME>` lists only the tools in that catalog profile \
+(`default`, `compact`, `administrative`, `host-limited`); a tool outside it is \
+not listed, but calling it by name still works, adds it to this session's \
+list, and announces `notifications/tools/list_changed`. The profile changes \
+what is listed, never what a call may do. With \
 TRACEDECAY_MCP_REPEAT_READ_POINTERS=1, a repeated identical source, context, \
 or file-listing read whose answer is unchanged returns a short pointer to \
 the earlier result, and repeating the call once more returns it in full. \
@@ -332,6 +339,7 @@ Examples:
   tracedecay serve --path /path/to/repo          Pin the project explicitly
   tracedecay serve --timings                     Annotate responses with handler time
   tracedecay serve --full-tool-list              Every tool with its full schema
+  tracedecay serve --catalog-profile=compact     List only the compact profile's tools
 
 Related: tracedecay tool (same tools from the shell), tracedecay install
 (writes this command into agent MCP config), tracedecay daemon.";
@@ -712,15 +720,21 @@ status (one project's statistics).";
 pub(crate) const REMOTE_LONG_ABOUT: &str = "\
 Operates the Remote Brain production journey from the shell: live mounted \
 status from the running daemon, plus enrolled enroll/capture/query/\
-transfer-frame/replay/failover against an authenticated \
+transfer-frame/replay/replay-pending/failover against an authenticated \
 authority endpoint. `status` never probes local stores; it reads the \
 daemon's in-memory remote mount. `capture` spools one observation on a node \
 whose authority is unreachable, `transfer-frame` moves one encrypted spool \
-frame to an enrolled node, and `query` reads one exact observation and \
+frame to an enrolled node, `drain` has the running daemon send a joined \
+node's pending frames to its authority in sequence order, `replay-pending` \
+replays every frame the authority holds for the caller in sequence order \
+until the first refusal, and `query` reads \
+one exact observation and \
 renders the honest remote shard coverage next to the caller's own pending \
-local spool. Protocol actions take a typed `RemoteProtocolRequestV1` JSON \
-body from `--request-file` (`-` reads stdin) and send credentials only from \
-files. `--json` emits one canonical JSON line.";
+local spool. `revoke` asks the running daemon to revoke every enrollment of \
+a node it provisioned; that node's later capture, transfer and replay are \
+refused as revoked, and its unredeemed grants can no longer enroll it. Protocol actions take a typed `RemoteProtocolRequestV1` \
+JSON body from `--request-file` (`-` reads stdin) and send credentials only \
+from files. `--json` emits one canonical JSON line.";
 
 pub(crate) const REMOTE_AFTER_HELP: &str = "\
 Examples:
@@ -735,10 +749,16 @@ Examples:
       --credential-file cred.bin --request-file query.json
   tracedecay remote transfer-frame --endpoint https://peer.example/remote/ \\
       --credential-file cred.bin --request-file frame.json --json
+  tracedecay remote drain --endpoint https://brain.example/remote/ \\
+      --credential-file cred.bin --trust-root-file root.pem \\
+      --request-file discovery.json
   tracedecay remote replay --endpoint https://brain.example/remote/ \\
       --credential-file cred.bin --request-file replay.json
+  tracedecay remote replay-pending --endpoint https://brain.example/remote/ \\
+      --credential-file cred.bin --request-file replay-pending.json
   tracedecay remote failover --endpoint https://brain.example/remote/ \\
       --credential-file cred.bin --request-file failover.json
+  tracedecay remote revoke --node-id node.lost   Revoke a lost machine's node
 
 Related: tracedecay daemon (local HTTP + optional Remote Brain TLS listener),
 tracedecay doctor (same operational identities).";

@@ -5,7 +5,7 @@
 //! measures what happened *after* automatic application:
 //!
 //! - automatically activated managed skills: adoption derived from the usage ledger
-//!   (`adopted` / `ignored` / `too_early`),
+//!   (`adopted` / `too_early` / `unknown`),
 //! - automatic-fact receipts: terminal application state plus any post-apply
 //!   recall trajectory in the memory store (`recalled_and_helpful` / `recalled`
 //!   / `never_recalled` / `deleted` / `quarantined` / `unavailable`).
@@ -40,6 +40,7 @@ use tracedecay_session_memory::memory::{
 };
 
 const AUTOMATION_OUTCOMES_FILENAME: &str = "automation_outcomes.json";
+const AUTOMATION_OUTCOMES_SCHEMA_VERSION: u32 = 4;
 /// Outcome refreshes update independent halves of one snapshot. This lock
 /// serializes their read-modify-write critical sections for one dashboard.
 static AUTOMATION_OUTCOMES_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Weak<tokio::sync::Mutex<()>>>>> =
@@ -51,20 +52,26 @@ pub const SKILL_ACTIVATION_WINDOW_SECS: i64 = 7 * 24 * 60 * 60;
 
 const SECS_PER_DAY: i64 = 24 * 60 * 60;
 
+/// `adopted` means a use was recorded after activation. It is an adoption
+/// proxy, not evidence that the skill improved any task. `unknown` means no use was
+/// recorded and neither task opportunity nor reliable host use telemetry
+/// exists, so it is never a failure. Snapshots written before that
+/// distinction stored `unknown` as `ignored`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillOutcomeVerdict {
     Adopted,
-    Ignored,
     TooEarly,
+    #[serde(alias = "ignored")]
+    Unknown,
 }
 
 impl SkillOutcomeVerdict {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Adopted => "adopted",
-            Self::Ignored => "ignored",
             Self::TooEarly => "too_early",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -197,7 +204,7 @@ pub fn skill_outcome(summary: &SkillUsageSummary, now_unix: i64) -> Option<Skill
     } else if secs_since_activation < SKILL_ACTIVATION_WINDOW_SECS {
         SkillOutcomeVerdict::TooEarly
     } else {
-        SkillOutcomeVerdict::Ignored
+        SkillOutcomeVerdict::Unknown
     };
     Some(SkillOutcomeRecord {
         skill_id: summary.skill_id.clone(),
@@ -353,7 +360,7 @@ pub async fn refresh_skill_outcomes(
     let lock = outcomes_snapshot_lock(dashboard_root);
     let _guard = lock.lock().await;
     let mut snapshot = load_outcomes_snapshot(dashboard_root).await?;
-    snapshot.schema_version = 3;
+    snapshot.schema_version = AUTOMATION_OUTCOMES_SCHEMA_VERSION;
     snapshot.skills = outcomes.clone();
     snapshot.skills_refreshed_at = Some(now_unix);
     save_outcomes_snapshot_unlocked(dashboard_root, &snapshot).await?;
@@ -372,7 +379,7 @@ pub async fn refresh_fact_outcomes<A: ProjectMemoryFactStore>(
     let lock = outcomes_snapshot_lock(dashboard_root);
     let _guard = lock.lock().await;
     let mut snapshot = load_outcomes_snapshot(dashboard_root).await?;
-    snapshot.schema_version = 3;
+    snapshot.schema_version = AUTOMATION_OUTCOMES_SCHEMA_VERSION;
     snapshot.facts = outcomes.clone();
     snapshot.facts_refreshed_at = Some(now_unix);
     save_outcomes_snapshot_unlocked(dashboard_root, &snapshot).await?;
@@ -577,6 +584,11 @@ pub(super) fn outcome_feedback_section(
             "available"
         },
         "source": "post_activation_outcome_tracking",
+        "signals": {
+            "skills": "adoption_proxy",
+            "facts": "recall_proxy",
+            "task_improvement": "not_measured",
+        },
         "skills_refreshed_at": snapshot.skills_refreshed_at,
         "facts_refreshed_at": snapshot.facts_refreshed_at,
         "skill_verdicts": skill_verdicts,
@@ -586,9 +598,12 @@ pub(super) fn outcome_feedback_section(
     })
 }
 
-/// Generated-eval entries derived from real post-activation outcomes rather
-/// than validation-time signals. Kept separate from the validation examples so
-/// the record-integrity check covers only what the validation report recorded.
+/// Observations of applied changes derived from post-activation proxies
+/// (skill adoption, fact recall). They are never evaluated pass/fail: no
+/// telemetry records when a task had an opportunity to use the change, so the
+/// proxies cannot establish task improvement. Kept separate from the
+/// validation examples so the record-integrity check covers only what the
+/// validation report recorded.
 pub(super) fn outcome_eval_definitions(
     task: AgentTaskKind,
     task_key: &str,
@@ -597,38 +612,49 @@ pub(super) fn outcome_eval_definitions(
     let (skills, facts) = task_outcomes(task, snapshot);
     let mut definitions = Vec::new();
     for record in skills {
+        let (status, unknowns) = match record.verdict {
+            SkillOutcomeVerdict::Adopted => ("observed", vec!["task_opportunity"]),
+            SkillOutcomeVerdict::TooEarly => ("pending", vec!["task_opportunity"]),
+            SkillOutcomeVerdict::Unknown => {
+                ("unknown", vec!["task_opportunity", "host_use_telemetry"])
+            }
+        };
         definitions.push(json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "eval_id": format!("{task_key}:outcome:skill:{}", record.skill_id),
-            "kind": "applied_change_outcome",
+            "kind": "applied_change_observation",
+            "proxy": "adoption",
             "subject": { "type": "managed_skill", "skill_id": record.skill_id },
             "observed_outcome": record.verdict.as_str(),
-            "expected_outcome": "adopted",
-            "passed": record.verdict == SkillOutcomeVerdict::Adopted,
-            "pending": record.verdict == SkillOutcomeVerdict::TooEarly,
+            "status": status,
+            "evaluation": "not_run",
+            "unknowns": unknowns,
             "metrics": {
                 "activated_at": record.activated_at,
                 "days_since_activation": record.days_since_activation,
                 "views_since_activation": record.views_since_activation,
                 "uses_since_activation": record.uses_since_activation,
             },
-            "assertions": [{
-                "type": "outcome_equals",
-                "expected": "adopted",
-                "actual": record.verdict.as_str(),
-            }],
         }));
     }
     for record in facts {
-        let passed = record.state == ProjectMemoryAutomaticFactStateV1::Applied
-            && matches!(
-                record.verdict,
-                FactOutcomeVerdict::RecalledAndHelpful | FactOutcomeVerdict::Recalled
-            );
+        // TraceDecay owns the recall counters, so every readable trajectory is
+        // observed; only an unreadable fact leaves recall unknown.
+        let (status, unknowns) = match record.verdict {
+            FactOutcomeVerdict::Unavailable => {
+                ("unknown", vec!["task_opportunity", "recall_telemetry"])
+            }
+            FactOutcomeVerdict::RecalledAndHelpful
+            | FactOutcomeVerdict::Recalled
+            | FactOutcomeVerdict::NeverRecalled
+            | FactOutcomeVerdict::Deleted
+            | FactOutcomeVerdict::Quarantined => ("observed", vec!["task_opportunity"]),
+        };
         definitions.push(json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "eval_id": format!("{task_key}:outcome:fact:{}", record.apply_id),
-            "kind": "applied_change_outcome",
+            "kind": "applied_change_observation",
+            "proxy": "recall",
             "subject": {
                 "type": "automatic_fact_receipt",
                 "apply_id": record.apply_id,
@@ -636,9 +662,9 @@ pub(super) fn outcome_eval_definitions(
                 "canonical_fact_id": record.canonical_fact_id,
             },
             "observed_outcome": record.verdict.as_str(),
-            "expected_outcome": "recalled",
-            "passed": passed,
-            "pending": false,
+            "status": status,
+            "evaluation": "not_run",
+            "unknowns": unknowns,
             "metrics": {
                 "recorded_at": record.recorded_at,
                 "days_since_recorded": record.days_since_recorded,
@@ -648,11 +674,6 @@ pub(super) fn outcome_eval_definitions(
                 "unhelpful_count": record.unhelpful_count,
                 "still_exists": record.still_exists,
             },
-            "assertions": [{
-                "type": "outcome_in",
-                "expected": ["recalled", "recalled_and_helpful"],
-                "actual": record.verdict.as_str(),
-            }],
         }));
     }
     definitions

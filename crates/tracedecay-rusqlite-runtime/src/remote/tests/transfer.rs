@@ -27,9 +27,11 @@ fn encrypted_frame_transfer_preserves_exact_frame_and_is_idempotent() {
         capture
     );
     assert_eq!(
-        destination.transfer_pending(&transfer).unwrap().disposition,
-        RemoteFrameTransferDispositionV1::AlreadyTransferred
+        destination.transfer_pending(&transfer).unwrap(),
+        first,
+        "a retried transfer returns the original receipt"
     );
+    assert_eq!(spool_frame_count(&destination_fixture), 1);
 
     let mut tampered = transfer;
     tampered.ciphertext[0] ^= 0x01;
@@ -76,7 +78,7 @@ fn transferred_frames_cannot_exceed_the_registered_spool_limits() {
         )
         .unwrap();
 
-        destination.transfer_pending(&first_transfer).unwrap();
+        let first = destination.transfer_pending(&first_transfer).unwrap();
         assert_eq!(
             destination.transfer_pending(&second_transfer),
             Err(RemoteFrameTransferErrorV1::Overflow)
@@ -90,11 +92,8 @@ fn transferred_frames_cannot_exceed_the_registered_spool_limits() {
         .unwrap();
         assert_eq!(row_u64(&rows.rows[0], 0).unwrap(), 0);
         assert_eq!(
-            destination
-                .transfer_pending(&first_transfer)
-                .unwrap()
-                .disposition,
-            RemoteFrameTransferDispositionV1::AlreadyTransferred
+            destination.transfer_pending(&first_transfer).unwrap(),
+            first
         );
     }
 }

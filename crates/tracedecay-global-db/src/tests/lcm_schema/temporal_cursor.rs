@@ -20,7 +20,7 @@ fn assert_cursor_rotation_verdict(error: TraceDecayError, context: &str) {
     }
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn temporal_schema_persists_cursor_keys_without_read_creation() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -83,7 +83,7 @@ async fn temporal_schema_persists_cursor_keys_without_read_creation() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn temporal_schema_rejects_direct_cursor_retirement() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -117,7 +117,7 @@ async fn temporal_schema_rejects_direct_cursor_retirement() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn temporal_schema_rotates_cursor_keys_atomically_and_survives_restart() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -246,7 +246,7 @@ async fn temporal_schema_rotates_cursor_keys_atomically_and_survives_restart() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn temporal_schema_cursor_audit_rejects_nonmax_active_key() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
@@ -292,7 +292,7 @@ async fn temporal_schema_cursor_audit_rejects_nonmax_active_key() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn temporal_schema_cursor_audit_rejects_skipped_successor_chain() {
     let tmp = TempDir::new().unwrap();
     for (fixture, versions) in [
@@ -350,7 +350,7 @@ async fn temporal_schema_cursor_audit_rejects_skipped_successor_chain() {
     }
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn temporal_schema_cursor_audit_accepts_valid_successor_chains() {
     let tmp = TempDir::new().unwrap();
     for (fixture, versions) in [
@@ -398,8 +398,8 @@ async fn temporal_schema_cursor_audit_accepts_valid_successor_chains() {
     }
 }
 
-#[tokio::test]
-async fn temporal_schema_concurrent_cursor_rotations_serialize_safely() {
+#[asupersync::test]
+async fn temporal_schema_concurrent_cursor_rotations_serialize_safely(cx: &asupersync::Cx) {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join(".tracedecay").join("sessions.db");
     let db = open_global_db(&db_path)
@@ -428,9 +428,9 @@ async fn temporal_schema_concurrent_cursor_rotations_serialize_safely() {
     let lower_conn = (*runtime).clone();
     let higher_conn = (*runtime).clone();
 
-    let (lock_held_tx, lock_held_rx) = oneshot::channel::<()>();
-    let (submitted_tx, submitted_rx) = oneshot::channel::<()>();
-    let (release_tx, release_rx) = oneshot::channel::<()>();
+    let (lock_held_tx, mut lock_held_rx) = oneshot::channel::<()>();
+    let (submitted_tx, mut submitted_rx) = oneshot::channel::<()>();
+    let (release_tx, mut release_rx) = oneshot::channel::<()>();
 
     let lower_sql = "INSERT INTO session_query_cursor_keys (
         key_id, key_version, key_material, created_at, retired_at
@@ -454,8 +454,8 @@ async fn temporal_schema_concurrent_cursor_rotations_serialize_safely() {
             )
             .await
             .expect("holder must keep the write lock with an in-txn mutation");
-        let _ = lock_held_tx.send(());
-        match timeout(Duration::from_secs(5), release_rx).await {
+        let _ = lock_held_tx.send(cx, ());
+        match timeout(wall_now(), Duration::from_secs(5), release_rx.recv(cx)).await {
             Ok(Ok(())) => {}
             Ok(Err(_)) => panic!("release signal dropped before holder cleanup"),
             Err(error) => panic!("timed out waiting to release holder after contention: {error}"),
@@ -467,35 +467,36 @@ async fn temporal_schema_concurrent_cursor_rotations_serialize_safely() {
     };
 
     let competitors_fut = async {
-        timeout(Duration::from_secs(2), lock_held_rx)
+        timeout(wall_now(), Duration::from_secs(2), lock_held_rx.recv(cx))
             .await
             .expect("timed out waiting for holder write lock")
             .expect("lock-held signal dropped");
         submitted_tx
-            .send(())
+            .send(cx, ())
             .expect("competitor submission signal must remain live");
-        tokio::join!(
+        asupersync::join!(
             lower_conn.execute(lower_sql, ()),
             higher_conn.execute(higher_sql, ())
         )
     };
 
     let coordinator_fut = async {
-        timeout(Duration::from_secs(3), submitted_rx)
+        timeout(wall_now(), Duration::from_secs(3), submitted_rx.recv(cx))
             .await
             .expect("competitors must submit while the writer transaction is held")
             .expect("competitor submission signal dropped");
-        tokio::task::yield_now().await;
+        asupersync::runtime::yield_now().await;
         release_tx
-            .send(())
+            .send(cx, ())
             .expect("holder must still be waiting for release");
     };
 
-    let ((), (lower_result, higher_result), ()) = timeout(Duration::from_secs(10), async {
-        tokio::join!(holder_fut, competitors_fut, coordinator_fut)
-    })
-    .await
-    .expect("cursor-key contention test deadlocked or exceeded bound");
+    let ((), (lower_result, higher_result), ()) =
+        timeout(wall_now(), Duration::from_secs(10), async {
+            asupersync::join!(holder_fut, competitors_fut, coordinator_fut)
+        })
+        .await
+        .expect("cursor-key contention test deadlocked or exceeded bound");
 
     assert!(
         higher_result.is_ok(),

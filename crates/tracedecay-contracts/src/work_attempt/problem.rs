@@ -27,11 +27,19 @@ pub(super) fn storage_problem(error: WorkAttemptStorageError) -> ApplicationProb
             "application.work-attempt.capacity-exhausted",
             "The registered Work topology has no parallel attempt capacity.",
         ),
+        WorkAttemptStorageError::PlacementRootConflict => placement_root_conflict_problem(),
         WorkAttemptStorageError::Unavailable => ApplicationProblem::unavailable(SafeDiagnostic {
             code: "application.work-attempt.storage-unavailable".to_owned(),
             message: "The Work attempt authority is unavailable.".to_owned(),
         }),
     }
+}
+
+pub(super) fn placement_root_conflict_problem() -> ApplicationProblem {
+    ApplicationProblem::conflict(
+        "application.work-attempt.placement-root-conflict",
+        "The Work attempt worktree root is outside its run's admitted placement root.",
+    )
 }
 
 pub(super) fn contract_problem(_error: WorkRuntimeContractError) -> ApplicationProblem {

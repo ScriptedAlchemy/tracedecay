@@ -5,6 +5,7 @@ use super::*;
 mod attempt_operations;
 mod evidence_retrieval;
 mod intelligence;
+mod job;
 mod leak_adjudication;
 mod outcome;
 mod preparation;
@@ -177,6 +178,9 @@ const fn work_invocation_mutates(request: &WorkApplicationInvocationV1) -> bool 
         | WorkApplicationInvocationV1::RunControl(_)
         | WorkApplicationInvocationV1::PlacementPreflight(_)
         | WorkApplicationInvocationV1::PlacementStatus(_) => false,
+        // Each step a guided job runs is its own Work invocation and publishes
+        // its own activity pulse when it commits.
+        WorkApplicationInvocationV1::AdvanceJob(_) => false,
         WorkApplicationInvocationV1::Create(_)
         | WorkApplicationInvocationV1::ReviewProposal(_)
         | WorkApplicationInvocationV1::AcceptProposal(_)
@@ -217,13 +221,18 @@ fn observe_placement_target(
             None => return Ok(unreadable),
         },
     };
-    let Ok(repository) =
-        tracedecay_runtime_core::git_repository::GitRepositoryAuthority::discover(&root)
-    else {
-        return Ok(unreadable);
-    };
-    let Ok(status) = repository.status() else {
-        return Ok(unreadable);
+    let status = tracedecay_runtime_core::git_repository::GitRepositoryAuthority::discover(&root)
+        .and_then(|repository| repository.status().map(|status| (repository, status)));
+    let (repository, status) = match status {
+        Ok(read) => read,
+        Err(error) => {
+            tracing::warn!(
+                root = %root.display(),
+                %error,
+                "work placement target is unreadable"
+            );
+            return Ok(unreadable);
+        }
     };
     let unique_commits = placement_unique_commits(&repository, &root);
     let mut dirty_tracked_paths = 0u32;

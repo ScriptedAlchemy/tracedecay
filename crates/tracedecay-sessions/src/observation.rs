@@ -1,10 +1,11 @@
+use futures_util::StreamExt;
+use futures_util::stream::FuturesUnordered;
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
-use tokio::task::JoinSet;
 use tracedecay_contracts::clock::now_micros;
 use tracedecay_domain::{
     CanonicalObservationIdV1, ManifestDigest, ObservationContractError,
@@ -448,7 +449,7 @@ where
     /// the Git index. Running that inline on a runtime worker starves every
     /// other task sharing the worker, with enough concurrent ingest frames,
     /// every worker at once, so the accept loop and unrelated requests stop
-    /// making progress. Awaiting a `spawn_blocking` join handle keeps the
+    /// making progress. Running it on the native blocking pool keeps the
     /// worker free, and the background-CPU permit bounds how many of these
     /// spans run at once.
     #[tracing::instrument(
@@ -462,7 +463,7 @@ where
     ) -> Result<PreparedObservationCapture, ObservationApplicationError> {
         let sanitizer = self.sanitizer.clone();
         let background_cpu = self.background_cpu.clone();
-        tokio::task::spawn_blocking(move || match background_cpu {
+        tracedecay_runtime_core::native_runtime::spawn_blocking(move || match background_cpu {
             Some(authority) => {
                 authority.with_permit(|| Self::prepare_capture_with_sanitizer(&sanitizer, request))
             }
@@ -752,7 +753,11 @@ where
         let total = requests.len();
         let mut pending = requests.into_iter().enumerate();
         let limit = self.batch_concurrency.get().min(total);
-        let mut tasks = JoinSet::new();
+        let cx = tracedecay_runtime_core::native_runtime::cx()
+            .ok_or(ObservationApplicationError::PreparationWorkerStopped)?;
+        // Dropping a `join` cancels sections still queued on the pool; running
+        // ones finish detached.
+        let mut tasks = FuturesUnordered::new();
         let mut prepared = (0..total).map(|_| None).collect::<Vec<_>>();
 
         loop {
@@ -761,23 +766,26 @@ where
                     break;
                 };
                 if request.cancellation.is_cancelled() {
-                    tasks.abort_all();
                     return Err(ObservationApplicationError::Cancelled);
                 }
                 let sanitizer = self.sanitizer.clone();
                 let background_cpu = self.background_cpu.clone();
-                tasks.spawn_blocking(move || {
-                    let capture = match background_cpu {
-                        Some(authority) => authority.with_permit(|| {
-                            Self::prepare_capture_with_sanitizer(&sanitizer, request)
-                        }),
-                        None => Self::prepare_capture_with_sanitizer(&sanitizer, request),
-                    };
-                    (index, capture)
-                });
+                let mut task = cx
+                    .spawn_blocking(move |_cx| {
+                        let capture = match background_cpu {
+                            Some(authority) => authority.with_permit(|| {
+                                Self::prepare_capture_with_sanitizer(&sanitizer, request)
+                            }),
+                            None => Self::prepare_capture_with_sanitizer(&sanitizer, request),
+                        };
+                        (index, capture)
+                    })
+                    .map_err(|_| ObservationApplicationError::PreparationWorkerStopped)?;
+                let cx = cx.clone();
+                tasks.push(async move { task.join(&cx).await });
             }
 
-            let Some(joined) = tasks.join_next().await else {
+            let Some(joined) = tasks.next().await else {
                 break;
             };
             let (index, capture) =

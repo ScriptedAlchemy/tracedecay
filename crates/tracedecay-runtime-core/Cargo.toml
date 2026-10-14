@@ -20,6 +20,7 @@ test-transport = ["tracedecay-rusqlite-runtime/test-transport"]
 test-helpers = ["dep:tracing-subscriber"]
 
 [dependencies]
+asupersync.workspace = true
 tracedecay-capture = { path = "../tracedecay-capture" }
 tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-graph-db = { path = "../tracedecay-graph-db" }
@@ -43,7 +44,7 @@ tokio-util = "0.7.19"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", optional = true, default-features = false, features = ["fmt"] }
 
-[target.'cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))'.dependencies]
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]

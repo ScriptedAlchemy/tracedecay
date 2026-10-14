@@ -95,14 +95,17 @@ impl Database {
         })
     }
 
-    /// Owner-bound initial Remote Brain storage that seeds its node identity.
+    /// Owner-bound initial Remote Brain storage that seeds its node identity
+    /// serving `member_brain`.
     pub fn provision_remote_storage(
         &self,
         keyring: std::sync::Arc<dyn tracedecay_rusqlite_runtime::remote::RemoteSpoolKeyringV1>,
+        member_brain: &tracedecay_domain::BrainId,
     ) -> Result<tracedecay_rusqlite_runtime::remote::RemoteSqliteStorageV1> {
         tracedecay_rusqlite_runtime::remote::RemoteSqliteStorageV1::provision_retained_exact_sql(
             self.retained_exact_sql_for_purpose("provision Remote Brain storage")?,
             keyring,
+            member_brain,
         )
         .map_err(|error| TraceDecayError::Database {
             message: format!("failed to provision Remote Brain storage: {error:?}"),

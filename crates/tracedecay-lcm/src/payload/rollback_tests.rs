@@ -8,7 +8,7 @@ use super::{
     ExternalPayloadWrite, PayloadFileRollback, payload_dir, write_external_payload_tracked,
 };
 
-#[tokio::test]
+#[asupersync::test]
 async fn cancellation_guard_removes_new_file_on_drop() {
     let tmp = TempDir::new().unwrap();
     let storage_root = tmp.path().join(".tracedecay");
@@ -37,7 +37,7 @@ async fn cancellation_guard_removes_new_file_on_drop() {
     assert!(!payload_path.exists());
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn disarmed_guard_preserves_committed_file() {
     let tmp = TempDir::new().unwrap();
     let storage_root = tmp.path().join(".tracedecay");
@@ -65,7 +65,7 @@ async fn disarmed_guard_preserves_committed_file() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn direct_store_failure_rolls_back_metadata_and_payload_file() {
     let tmp = TempDir::new().unwrap();
     let storage_root = tmp.path().join(".tracedecay");

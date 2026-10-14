@@ -1112,7 +1112,7 @@ async fn memory_status_reports_canonical_similarity_projection_shape() {
         "status must include the stored fact: {status}"
     );
     assert_eq!(
-        status["memory"]["algebra"]["name"], "amari_fhrr",
+        status["memory"]["algebra"]["name"], "map_c",
         "status must name the canonical similarity algebra: {status}"
     );
     assert_eq!(status["memory"]["algebra"]["hrr_dim"].as_u64(), Some(2048));

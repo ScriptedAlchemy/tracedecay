@@ -22,7 +22,7 @@ use tracedecay_domain::configuration::{
     USER_REPEATED_QUERY_HINTS_SETTING_KEY, USER_UPLOAD_ENABLED_SETTING_KEY,
 };
 
-#[tokio::test]
+#[asupersync::test]
 async fn profile_worker_default_is_durable_and_project_registry_excludes_it() {
     let directory = tempfile::tempdir().unwrap();
     let profile_root = directory.path().join("profile");
@@ -107,7 +107,7 @@ async fn profile_worker_default_is_durable_and_project_registry_excludes_it() {
 /// A profile store written when it held only the worker selection converges
 /// onto the profile registry on first read: the operator's selection survives
 /// and the user settings resolve to their defaults.
-#[tokio::test]
+#[asupersync::test]
 async fn worker_only_profile_store_converges_onto_the_profile_registry() {
     let directory = tempfile::tempdir().unwrap();
     let profile_root = directory.path().join("profile");
@@ -188,7 +188,7 @@ async fn worker_only_profile_store_converges_onto_the_profile_registry() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn project_revision_store_rejects_profile_worker_snapshot() {
     let (_directory, runtime, root) = global_setup().await;
     let db = runtime
@@ -218,7 +218,7 @@ async fn project_revision_store_rejects_profile_worker_snapshot() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn activation_failure_preserves_last_working() {
     let (_directory, runtime, root) = global_setup().await;
     let db = runtime
@@ -284,7 +284,7 @@ async fn activation_failure_preserves_last_working() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn owned_store_resolves_component_observation_from_revision_history() {
     let (_directory, runtime, root) = global_setup().await;
     let lease = runtime
@@ -311,7 +311,7 @@ async fn owned_store_resolves_component_observation_from_revision_history() {
     assert_eq!(observed.snapshot, root.snapshot);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn revision_store_round_trips_typed_snapshot_plan_receipt_and_audit() {
     let (_directory, runtime, root) = global_setup().await;
     let db = runtime
@@ -384,7 +384,7 @@ async fn revision_store_round_trips_typed_snapshot_plan_receipt_and_audit() {
     assert_eq!(count(&read, "configuration_audit_events").await, 1);
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn rollback_terminal_event_is_persisted_and_visible_in_audit() {
     let (_directory, runtime, root) = global_setup().await;
     let db = runtime
@@ -425,7 +425,7 @@ async fn rollback_terminal_event_is_persisted_and_visible_in_audit() {
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn failed_configuration_commit_leaves_no_partial_revision_receipt_or_audit() {
     let (_directory, runtime, root) = global_setup().await;
     let db = runtime
@@ -476,7 +476,7 @@ async fn revision_three_store() -> (tempfile::TempDir, TestConnection) {
 /// without a data migration: the configuration store's durable contract is
 /// exact-final-shape fail-closed, so a store still carrying the retired entry
 /// surfaces the typed reset state instead of being interpreted or repaired.
-#[tokio::test]
+#[asupersync::test]
 async fn store_carrying_the_retired_default_collection_entry_fails_closed_typed() {
     let (_directory, connection) = revision_three_store().await;
 
@@ -540,7 +540,7 @@ async fn store_carrying_the_retired_default_collection_entry_fails_closed_typed(
     );
 }
 
-#[tokio::test]
+#[asupersync::test]
 async fn fresh_stores_resolve_without_the_retired_default_collection_setting() {
     let registry = ConfigurationRegistry::core().unwrap();
     let retired = SettingKey::new(RETIRED_DEFAULT_COLLECTION_SETTING_KEY).unwrap();
