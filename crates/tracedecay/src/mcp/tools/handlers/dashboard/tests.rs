@@ -89,3 +89,57 @@ async fn shutdown_observes_a_completion_signalled_before_the_stop_began() {
 
     assert!(get_manager().lock().await.is_empty());
 }
+
+/// The daemon coordinator drops the hosted-dashboard join at its phase
+/// deadline. A serving task that ignores its shutdown request must be
+/// aborted then, not left serving past the shutdown receipt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn timed_out_shutdown_owner_aborts_the_dashboard_task() {
+    let _guard = TEST_LOCK.lock().await;
+    let project_root = std::path::PathBuf::from("/dashboard-test/timed-out-owner");
+    let (shutdown, _shutdown_requested) = tokio::sync::oneshot::channel();
+    let completed = Arc::new(tokio::sync::Semaphore::new(0));
+    let completion = DashboardTaskCompletion(Arc::clone(&completed));
+    let (alive, task_dropped) = std::sync::mpsc::channel::<()>();
+    let task = tokio::spawn(async move {
+        let _completion = completion;
+        let _alive = alive;
+        std::future::pending::<()>().await;
+    });
+    get_manager().lock().await.insert(
+        project_root,
+        RunningDashboard {
+            url: "http://127.0.0.1:0/".to_owned(),
+            addr: "127.0.0.1:0".parse().expect("socket addr"),
+            shutdown: Some(shutdown),
+            task,
+            completed,
+        },
+    );
+
+    let receipt = tracedecay_daemon_service::shutdown::join_shutdown_owners(
+        std::time::Instant::now() + std::time::Duration::from_millis(100),
+        vec![
+            tracedecay_daemon_service::shutdown::ShutdownOwner::with_deadline_result(
+                "hosted_dashboard",
+                || {},
+                |_| async { super::shutdown_dashboard().await },
+            ),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        receipt.owners[0].status,
+        tracedecay_daemon_service::shutdown::ShutdownStatus::TimedOut
+    );
+    assert_eq!(
+        task_dropped.recv_timeout(std::time::Duration::from_secs(5)),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
+        "a timed-out owner must not leave the dashboard task it was joining running"
+    );
+    let _ =
+        shutdown_dashboard_until(tokio::time::Instant::now() + std::time::Duration::from_secs(5))
+            .await;
+    assert!(get_manager().lock().await.is_empty());
+}

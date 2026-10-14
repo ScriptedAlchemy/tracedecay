@@ -643,9 +643,17 @@ pub(crate) async fn shutdown_dashboard_for(project_root: &Path) -> Result<()> {
 /// [`shutdown_dashboard_for`] instead so one project's stop never takes down
 /// another project's dashboard.
 pub(crate) async fn shutdown_dashboard_until(deadline: tokio::time::Instant) -> Result<()> {
-    let project_roots: Vec<PathBuf> = {
+    let (project_roots, _abort_unjoined) = {
         let manager = get_manager().lock().await;
-        manager.keys().cloned().collect()
+        (
+            manager.keys().cloned().collect::<Vec<_>>(),
+            crate::daemon::AbortTasksOnDrop(
+                manager
+                    .values()
+                    .map(|dashboard| dashboard.task.abort_handle())
+                    .collect(),
+            ),
+        )
     };
     let mut first_error = None;
     for project_root in project_roots {
