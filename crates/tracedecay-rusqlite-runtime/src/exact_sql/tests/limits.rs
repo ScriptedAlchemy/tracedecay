@@ -124,6 +124,29 @@ fn until_budget_interrupts_at_its_deadline_not_the_request_limit() {
 }
 
 #[test]
+fn until_budget_refuses_a_short_statement_past_its_deadline() {
+    // The progress handler first runs after 1000 VM steps, so a statement
+    // shorter than that never sees the deadline. A paged audit made of short
+    // statements ran ~20 s past its budget on a 1.2M-observation store.
+    let clock = FakeClock::ticking(Duration::ZERO);
+    clock.install();
+    let connection = rusqlite::Connection::open_in_memory().unwrap();
+    let deadline = clock::now();
+
+    let error = execute_query(
+        &connection,
+        statement("SELECT 1", vec![]),
+        ExactSqlStatementBudget::Until(deadline),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(error, ExactSqlError::Sqlite { code: Some(9), .. }),
+        "a statement past its deadline is interrupted before it runs: {error}"
+    );
+}
+
+#[test]
 fn invalid_sqlite_text_is_rejected_without_lossy_conversion() {
     let fixture = fixture('a', 'a');
     let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
