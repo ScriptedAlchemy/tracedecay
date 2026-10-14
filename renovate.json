@@ -18,6 +18,16 @@
       "customType": "regex",
       "managerFilePatterns": ["/^\\.github/workflows/[^/]+\\.ya?ml$/"],
       "matchStrings": ["# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+[A-Z_]+: \"?(?<currentValue>[^\\s\"]+)\"?"]
+    },
+    {
+      "description": "rules_rust's nightly pin, and the .bazelrc note that names it, must match rust-toolchain.toml",
+      "customType": "regex",
+      "managerFilePatterns": ["/^MODULE\\.bazel$/", "/^\\.bazelrc$/"],
+      "matchStrings": ["nightly/(?<currentValue>\\d{4}-\\d{2}-\\d{2})"],
+      "depNameTemplate": "rust",
+      "datasourceTemplate": "rust-version",
+      "extractVersionTemplate": "^nightly-(?<version>\\d{4}-\\d{2}-\\d{2})$",
+      "versioningTemplate": "regex:^(?<major>\\d{4})-(?<minor>\\d{2})-(?<patch>\\d{2})$"
     }
   ],
   "packageRules": [
@@ -25,6 +35,13 @@
       "description": "Cargo lockfiles require the repository's external vendoring workflow",
       "matchManagers": ["cargo"],
       "enabled": false
+    },
+    {
+      "description": "One PR moves every Rust nightly pin; a year rollover reads as major to the date versioning, so keep it in the same branch",
+      "matchDepNames": ["rust"],
+      "matchDatasources": ["rust-version"],
+      "groupName": "rust nightly",
+      "separateMajorMinor": false
     }
   ]
 }
