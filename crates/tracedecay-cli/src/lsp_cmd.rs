@@ -4,7 +4,6 @@ use tracedecay_runtime_core::config::ProfileRoot;
 use futures_util::StreamExt;
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio::time::{Duration, interval};
 use tokio_util::codec::FramedRead;
 use tracedecay_contracts::{CancellationSignal, Deadline, InvocationError};
 use tracedecay_daemon_protocol::{
@@ -112,7 +111,6 @@ where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let mut poll_timer = interval(Duration::from_millis(25));
     loop {
         // Keep each pump fair: a queued daemon burst must not starve host input.
         if flush_daemon_frame(session, stdout).await? {
@@ -146,7 +144,10 @@ where
                     bridge_config_error("LSP bridge received a non-UTF-8 JSON-RPC payload")
                 })?);
             }
-            _ = poll_timer.tick() => {}
+            () = asupersync::time::sleep(
+                asupersync::time::wall_now(),
+                std::time::Duration::from_millis(25),
+            ) => {}
         }
     }
 }
