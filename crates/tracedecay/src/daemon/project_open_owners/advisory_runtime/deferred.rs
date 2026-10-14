@@ -280,8 +280,8 @@ async fn try_mount(
     indexed_files.sort();
     let admitted_providers = {
         let mut broker = state.diagnostic_broker.lock().await;
-        let admitted = broker.admitted_providers_for_files(&indexed_files);
-        state.mounted_providers = broker.mounted_providers_for_files(&indexed_files);
+        let admitted = broker.admitted_providers_for_files(&indexed_files).await;
+        state.mounted_providers = broker.mounted_providers_for_files(&indexed_files).await;
         admitted
     };
     // Feedback first, then the LSP owner it feeds. The published feedback

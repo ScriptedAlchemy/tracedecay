@@ -16,7 +16,7 @@ use std::{
 use rusqlite::{Connection, DropBehavior, ErrorCode, Transaction, TransactionBehavior};
 
 use super::clock;
-use super::guard::with_exact_sql_guard;
+use super::guard::{ExactSqlAuthority, with_exact_sql_guard};
 use super::{
     EXACT_SQL_TRANSACTION_IDLE_LIMIT, EXACT_SQL_TRANSACTION_LIMIT, ExactSqlAttachment,
     ExactSqlCommitReceipt, ExactSqlError, ExactSqlRollbackReceipt, ExactSqlRows, ExactSqlStatement,
@@ -24,6 +24,7 @@ use super::{
     SqlRequest, SqlResult, TransactionPolicy, attach_database, detach_database,
     execute_query_unchecked, execute_request, sqlite_error, verify_write_authority,
 };
+use crate::connection::ConnectionMode;
 use rusqlite::limits::Limit;
 
 pub(crate) enum WriterCommand {
@@ -399,14 +400,10 @@ pub(crate) fn run_writer_command(
                 {
                     with_exact_sql_guard(
                         connection,
-                        false,
-                        false,
+                        ExactSqlAuthority::Canonical(ConnectionMode::Writer),
                         Some(Arc::clone(shutdown_requested)),
                         None,
                         true,
-                        None,
-                        crate::connection::authorize_writer,
-                        false,
                         None,
                         || execute_query_unchecked(connection, statement),
                     )

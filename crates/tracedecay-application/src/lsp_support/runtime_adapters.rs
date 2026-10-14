@@ -3,9 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::runtime::Handle;
 use tokio::sync::Mutex as AsyncMutex;
-use tokio::task::AbortHandle;
 use tracedecay_lsp::analyzer::broker::{
     CodeDiagnostic, DiagnosticBroker, DiagnosticSeverity as BrokerDiagnosticSeverity,
     RefreshCommitOutcome,
@@ -18,6 +16,7 @@ use tracedecay_lsp::{
     LspRuntimeSpawner, LspRuntimeTask, ManagedDiagnosticSnapshotPort, WorkspaceDocumentDiagnostics,
     WorkspaceGenerationDiagnostics,
 };
+use tracedecay_runtime_core::native_runtime::NativeTask;
 
 pub(crate) fn managed_diagnostic_authority_digest(
     scope: &crate::lsp_runtime::LspFeedbackProjectionScope,
@@ -65,31 +64,36 @@ pub(crate) fn validate_managed_diagnostic_scope(
     Ok(())
 }
 
-#[derive(Clone)]
-struct TokioLspRuntime {
-    handle: Handle,
-}
+struct NativeLspTask(Option<NativeTask<()>>);
 
-struct TokioLspTask {
-    abort: AbortHandle,
-}
-
-impl LspRuntimeTask for TokioLspTask {
+impl LspRuntimeTask for NativeLspTask {
     fn abort(&self) {
-        self.abort.abort();
+        if let Some(task) = &self.0 {
+            task.abort();
+        }
     }
 }
 
-impl LspRuntimeSpawner for TokioLspRuntime {
+struct NativeLspRuntime;
+
+impl LspRuntimeSpawner for NativeLspRuntime {
     fn spawn(&self, future: LspRuntimeFuture<()>) -> Box<dyn LspRuntimeTask> {
-        Box::new(TokioLspTask {
-            abort: self.handle.spawn(future).abort_handle(),
-        })
+        match NativeTask::spawn(future) {
+            Ok(task) => Box::new(NativeLspTask(Some(task))),
+            Err(error) => {
+                // The dropped future closes its result channel, so the
+                // operation table reports the operation as dropped.
+                tracing::error!(%error, "LSP runtime work was not started");
+                Box::new(NativeLspTask(None))
+            }
+        }
     }
 }
 
-pub(crate) fn runtime_spawner(handle: Handle) -> Arc<dyn LspRuntimeSpawner> {
-    Arc::new(TokioLspRuntime { handle })
+/// Runs LSP broker work on the native runtime. Only for work that never
+/// reaches Tokio: the analyzer clients, the store, and in-process state.
+pub fn native_lsp_runtime() -> Arc<dyn LspRuntimeSpawner> {
+    Arc::new(NativeLspRuntime)
 }
 
 /// Reads an admitted document through the daemon's source/overlay authority.
@@ -284,6 +288,7 @@ where
         let mut broker = broker.lock().await;
         let prepared = broker
             .prepare_refresh(&language, vec![document])
+            .await
             .map_err(|_| LspRuntimeFailure::new("diagnostic-broker-preparation-failed"))?;
         let immediate_snapshot = prepared.is_none().then(|| broker.snapshot());
         (prepared, immediate_snapshot)

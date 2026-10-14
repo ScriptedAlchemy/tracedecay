@@ -41,6 +41,21 @@ rust_library(
 )
 
 rust_test(
+    name = "native_runtime_install",
+    srcs = glob(["tests/**/*.rs"], exclude = ["tests/fixtures/**"]) + ["//tests:storage_runtime_rusqlite_suite_sources"],
+    crate_root = "tests/native_runtime_install.rs",
+    edition = crate_edition(),
+    version = "0.1.0",
+    deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-rusqlite-runtime:tracedecay-rusqlite-runtime__+test-transport__dev", "//crates/tracedecay-contracts:tracedecay-contracts__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-store:tracedecay-store__dev", "//crates/tracedecay-tool-catalog:tracedecay-tool-catalog__dev"],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+    aliases = aliases(normal = True, normal_dev = True),
+    rustc_flags = perf_rustc_flags(2),
+    crate_features = ["test-transport"],
+    compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
+    data = glob(["tests/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**"], allow_empty = True) + ["//tests:storage_runtime_rusqlite_suite"],
+)
+
+rust_test(
     name = "rusqlite_suite",
     srcs = glob(["tests/rusqlite_suite/**/*.rs"]) + glob(["tests/support/**/*.rs"]) + ["//tests:storage_runtime_rusqlite_suite_sources"],
     crate_root = "tests/rusqlite_suite/main.rs",

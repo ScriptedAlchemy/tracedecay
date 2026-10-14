@@ -5906,7 +5906,7 @@ dependencies = [
  "cap-fs-ext",
  "cap-std",
  "flate2",
- "getrandom 0.4.3",
+ "getrandom 0.2.17",
  "gix",
  "hex",
  "jsonc-parser",
@@ -5975,7 +5975,8 @@ name = "tracedecay-application"
 version = "0.1.0"
 dependencies = [
  "cap-std",
- "getrandom 0.4.3",
+ "futures-util",
+ "getrandom 0.2.17",
  "gix",
  "glob",
  "hex",
@@ -6039,7 +6040,7 @@ version = "0.1.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
- "getrandom 0.4.3",
+ "getrandom 0.2.17",
  "hex",
  "rustls",
  "schemars",
@@ -6299,7 +6300,7 @@ name = "tracedecay-contracts"
 version = "0.1.0"
 dependencies = [
  "asupersync",
- "getrandom 0.4.3",
+ "getrandom 0.2.17",
  "hex",
  "schemars",
  "serde",
@@ -6334,7 +6335,7 @@ dependencies = [
 name = "tracedecay-daemon-identity"
 version = "0.1.0"
 dependencies = [
- "getrandom 0.4.3",
+ "getrandom 0.2.17",
  "hex",
  "serde",
  "serde_json",
@@ -6372,7 +6373,7 @@ name = "tracedecay-daemon-service"
 version = "0.1.0"
 dependencies = [
  "axum",
- "getrandom 0.4.3",
+ "getrandom 0.2.17",
  "hex",
  "hyper",
  "hyper-util",
@@ -6435,7 +6436,7 @@ dependencies = [
  "base64 0.22.1",
  "clru",
  "futures-util",
- "getrandom 0.4.3",
+ "getrandom 0.2.17",
  "httpdate",
  "schemars",
  "semver",
@@ -6500,7 +6501,7 @@ dependencies = [
  "base64 0.22.1",
  "criterion",
  "futures-util",
- "getrandom 0.4.3",
+ "getrandom 0.2.17",
  "hex",
  "hmac",
  "rusqlite",
@@ -6646,6 +6647,7 @@ dependencies = [
 name = "tracedecay-lsp"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
  "constant_time_eq",
  "futures-util",
  "globset",
@@ -6904,7 +6906,7 @@ version = "0.1.0"
 dependencies = [
  "asupersync",
  "criterion",
- "getrandom 0.4.3",
+ "getrandom 0.2.17",
  "gix",
  "hex",
  "libc",
@@ -6937,6 +6939,7 @@ dependencies = [
  "asupersync",
  "async-channel",
  "dunce",
+ "futures-util",
  "proptest",
  "ring",
  "rusqlite",
@@ -7074,7 +7077,7 @@ version = "0.1.0"
 dependencies = [
  "asupersync",
  "futures-util",
- "getrandom 0.4.3",
+ "getrandom 0.2.17",
  "hex",
  "serde",
  "serde_json",
@@ -7105,7 +7108,7 @@ dependencies = [
  "criterion",
  "filetime",
  "futures-util",
- "getrandom 0.4.3",
+ "getrandom 0.2.17",
  "gix",
  "hex",
  "rayon",
@@ -7177,7 +7180,6 @@ name = "tracedecay-store-runtime"
 version = "0.1.0"
 dependencies = [
  "asupersync",
- "futures-util",
  "hex",
  "libc",
  "serde",

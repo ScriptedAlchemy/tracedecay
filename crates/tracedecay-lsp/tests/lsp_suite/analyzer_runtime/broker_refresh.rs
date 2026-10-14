@@ -2,8 +2,8 @@ use tracedecay_lsp::LspSemanticRequestAuthority;
 
 use super::*;
 
-#[tokio::test]
-async fn broker_refresh_documents_populates_cached_diagnostics() {
+#[test]
+fn broker_refresh_documents_populates_cached_diagnostics() {
     let temp = tempfile::tempdir().unwrap();
     let script_path = temp.path().join("fake_lsp.py");
     std::fs::write(&script_path, fake_lsp_script()).unwrap();
@@ -12,14 +12,12 @@ async fn broker_refresh_documents_populates_cached_diagnostics() {
         vec![fake_python_adapter(FAKE_LANGUAGE, "fake", &script_path)],
     );
 
-    broker
-        .refresh_documents(
-            FAKE_LANGUAGE,
-            vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
-            FAKE_LSP_TIMEOUT,
-        )
-        .await
-        .unwrap();
+    block(broker.refresh_documents(
+        FAKE_LANGUAGE,
+        vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
+        FAKE_LSP_TIMEOUT,
+    ))
+    .unwrap();
 
     let snapshot = broker.snapshot();
     assert_eq!(snapshot.summary.total_errors, 1);
@@ -239,6 +237,7 @@ async fn broker_bounds_lsp_document_write_hangs() {
                 .to_string(),
             hang_after_start_fake_lsp_timeouts(),
         )
+        .await
         .unwrap()
         .expect("fake analyzer is executable");
 
@@ -368,6 +367,7 @@ async fn broker_drops_lsp_client_after_partial_diagnostics_frame_timeout() {
                 .to_string(),
             hang_after_start_fake_lsp_timeouts(),
         )
+        .await
         .unwrap()
         .expect("fake analyzer is executable");
 
@@ -506,6 +506,7 @@ async fn broker_cancels_partial_refresh_without_poisoning_warm_client() {
                 .to_string(),
             loaded_runner_fake_lsp_timeouts(),
         )
+        .await
         .unwrap()
         .expect("fake analyzer is executable");
     let cancellations = usize::from(tracedecay_lsp::MAX_ANALYZER_RESTARTS) + 1;
@@ -520,6 +521,7 @@ async fn broker_cancels_partial_refresh_without_poisoning_warm_client() {
                     "let nope",
                 )],
             )
+            .await
             .unwrap()
             .expect("refresh should prepare");
         let handle = tokio::spawn(async move {
@@ -627,6 +629,7 @@ with open({counter_path:?}, "a", encoding="utf-8") as f:
             FAKE_LANGUAGE,
             vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
         )
+        .await
         .unwrap()
         .expect("first refresh should prepare");
     let second = broker
@@ -634,6 +637,7 @@ with open({counter_path:?}, "a", encoding="utf-8") as f:
             FAKE_LANGUAGE,
             vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
         )
+        .await
         .unwrap()
         .expect("second refresh should prepare");
 
@@ -678,6 +682,7 @@ async fn broker_ignores_stale_refresh_completion() {
             FAKE_LANGUAGE,
             vec![fake_document(FAKE_LANGUAGE, "src/stale.fake", "let nope")],
         )
+        .await
         .unwrap()
         .expect("stale refresh should prepare");
     let latest = broker
@@ -685,6 +690,7 @@ async fn broker_ignores_stale_refresh_completion() {
             FAKE_LANGUAGE,
             vec![fake_document(FAKE_LANGUAGE, "src/latest.fake", "let nope")],
         )
+        .await
         .unwrap()
         .expect("latest refresh should prepare");
 
@@ -882,6 +888,7 @@ async fn broker_ignores_refresh_completion_after_language_is_disabled() {
             FAKE_LANGUAGE,
             vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
         )
+        .await
         .unwrap()
         .expect("enabled language should prepare a refresh");
 
@@ -1042,6 +1049,7 @@ with open({starts:?}, "a", encoding="utf-8") as f:
                 .to_string(),
             loaded_runner_fake_lsp_timeouts(),
         )
+        .await
         .unwrap()
         .expect("fake analyzer is executable");
     assert_eq!(
@@ -1144,6 +1152,7 @@ with open({starts:?}, "a", encoding="utf-8") as f:
                 .to_string(),
             loaded_runner_fake_lsp_timeouts(),
         )
+        .await
         .unwrap()
         .expect("fake analyzer is executable");
 
@@ -1244,6 +1253,7 @@ time.sleep(60)
             root_uri.clone(),
             bounded_fake_lsp_timeouts(),
         )
+        .await
         .unwrap()
         .expect("fake analyzer is executable");
 

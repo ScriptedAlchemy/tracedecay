@@ -88,7 +88,6 @@ pub use diagnostics::{
 };
 pub use framing::{
     AsyncContentLengthError, ContentLengthCodec, ContentLengthCodecError, MAX_LSP_HEADER_BYTES,
-    read_content_length_frame_until,
 };
 pub use gateway::{
     AdmittedRoot, AnalyzerCancellationAdapter, CallHierarchyItem, DaemonLspGateway,

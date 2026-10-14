@@ -12,6 +12,7 @@ use tracedecay_application::pr_tracking::{
     manual_branch_source_owns_artifacts,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_host_admission::{HostAdmissionBroker, HostAdmissionRuntime, SpoolOpenReport};
 use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 #[cfg(unix)]
 use tracedecay_runtime_core::branch::BranchAddOutcome;
@@ -47,8 +48,9 @@ mod remote_deletion_lifecycle;
 pub(in crate::daemon) mod remote_recovery_lifecycle;
 mod session_runtime_shutdown;
 
-type HostAdmissionBrokers =
-    Arc<tokio::sync::Mutex<HashMap<PathBuf, tracedecay_host_admission::SharedHostAdmissionBroker>>>;
+type HostAdmissionBrokerSlot =
+    Arc<tokio::sync::OnceCell<tracedecay_host_admission::SharedHostAdmissionBroker>>;
+type HostAdmissionBrokers = Arc<tokio::sync::Mutex<HashMap<PathBuf, HostAdmissionBrokerSlot>>>;
 /// One profile session refresh service per profile session store. The service
 /// owns the opaque refresh handles it issued, so every route that reaches the
 /// same store (project MCP servers and the projectless client) must share the
@@ -337,7 +339,6 @@ struct ProfileHostAdmissionBootstrapContext {
     session_runtime_registry:
         Arc<tokio::sync::OnceCell<Arc<tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1>>>,
     host_admission_brokers: HostAdmissionBrokers,
-    host_admission_broker_gate: Arc<tokio::sync::Mutex<()>>,
     profile_host_admission_replay: Weak<ProfileHostAdmissionReplayRegistry>,
 }
 
@@ -381,8 +382,8 @@ impl ProfileHostAdmissionBootstrapContext {
             })?;
         let broker = open_host_admission_broker(
             &self.host_admission_brokers,
-            &self.host_admission_broker_gate,
             &broker_path,
+            HostAdmissionRuntime::open_for_database,
         )
         .await?;
         let Some(replay) = self.profile_host_admission_replay.upgrade() else {
@@ -400,42 +401,34 @@ impl ProfileHostAdmissionBootstrapContext {
 }
 
 /// Returns the cached broker for `path`, opening its runtime at most once.
-/// First-open publication is serialized by `gate` without holding the broker
-/// map lock across blocking filesystem work.
+/// Openers of one path share its in-flight open; a slow spool open never
+/// delays the first open of another path.
 #[tracing::instrument(name = "daemon.branch_admin.open_broker", level = "trace", skip_all)]
 async fn open_host_admission_broker(
     brokers: &HostAdmissionBrokers,
-    gate: &tokio::sync::Mutex<()>,
     path: &Path,
+    open: impl FnOnce(&Path) -> Result<(HostAdmissionRuntime, SpoolOpenReport)> + Send + 'static,
 ) -> Result<tracedecay_host_admission::SharedHostAdmissionBroker> {
-    if let Some(broker) = brokers.lock().await.get(path).cloned() {
-        return Ok(broker);
-    }
-
-    let _open = gate.lock().await;
-    if let Some(broker) = brokers.lock().await.get(path).cloned() {
-        return Ok(broker);
-    }
-    let open_path = path.to_path_buf();
-    let (runtime, _) = tokio::task::spawn_blocking(move || {
-        let _span =
-            tracing::trace_span!("daemon.branch_admin.host_admission_runtime.open").entered();
-        tracedecay_host_admission::HostAdmissionRuntime::open_for_database(&open_path)
+    let slot = Arc::clone(brokers.lock().await.entry(path.to_path_buf()).or_default());
+    slot.get_or_try_init(|| async {
+        let open_path = path.to_path_buf();
+        let (runtime, _) = tokio::task::spawn_blocking(move || {
+            let _span =
+                tracing::trace_span!("daemon.branch_admin.host_admission_runtime.open").entered();
+            open(&open_path)
+        })
+        .await
+        .map_err(|_| {
+            TraceDecayError::project_route(
+                "spool_runtime_unavailable",
+                true,
+                "host-admission spool runtime task failed",
+            )
+        })??;
+        Ok(Arc::new(HostAdmissionBroker::new(runtime)))
     })
     .await
-    .map_err(|_| {
-        TraceDecayError::project_route(
-            "spool_runtime_unavailable",
-            true,
-            "host-admission spool runtime task failed",
-        )
-    })??;
-    let broker = Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));
-    brokers
-        .lock()
-        .await
-        .insert(path.to_path_buf(), Arc::clone(&broker));
-    Ok(broker)
+    .cloned()
 }
 
 /// Coordinates every daemon operation that can create, rekey, or remove a
@@ -465,7 +458,6 @@ pub(super) struct StoreAdministration {
         Arc<tokio::sync::Mutex<Vec<RetainedProjectShutdownOwner>>>,
     project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
     host_admission_brokers: HostAdmissionBrokers,
-    host_admission_broker_gate: Arc<tokio::sync::Mutex<()>>,
     profile_host_admission_replay: Arc<ProfileHostAdmissionReplayRegistry>,
     profile_session_refresh_services: ProfileSessionRefreshServices,
     session_sync_service: Arc<tracedecay_session_runtime::session_sync::DaemonSessionSyncService>,
@@ -567,7 +559,6 @@ impl Default for StoreAdministration {
             retained_project_shutdown_owners: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             project_routes: crate::mcp::project_route::SharedHookProjectRouteCache::default(),
             host_admission_brokers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            host_admission_broker_gate: Arc::new(tokio::sync::Mutex::new(())),
             profile_host_admission_replay: Arc::new(
                 ProfileHostAdmissionReplayRegistry::with_replay_pass(Arc::new(
                     |broker, profile_root| {
@@ -1186,8 +1177,8 @@ impl StoreAdministration {
         let path = authority::canonical_identity_path(database_path)?;
         let broker = open_host_admission_broker(
             &self.host_admission_brokers,
-            &self.host_admission_broker_gate,
             &path,
+            HostAdmissionRuntime::open_for_database,
         )
         .await?;
         self.maybe_ensure_user_profile_host_admission_replay(&path, &broker)
@@ -1265,7 +1256,6 @@ impl StoreAdministration {
             profile_identity,
             session_runtime_registry,
             host_admission_brokers: Arc::clone(&self.host_admission_brokers),
-            host_admission_broker_gate: Arc::clone(&self.host_admission_broker_gate),
             profile_host_admission_replay: Arc::downgrade(&self.profile_host_admission_replay),
         };
         let operation: ProfileHostAdmissionBootstrapOperation = Arc::new(move || {
@@ -1305,7 +1295,7 @@ impl StoreAdministration {
         broker: &tracedecay_host_admission::SharedHostAdmissionBroker,
     ) {
         let is_user_sessions = broker_path.file_name().and_then(|name| name.to_str())
-            == Some(tracedecay_sessions::runtime::USER_SESSIONS_DB_FILENAME);
+            == Some(tracedecay_runtime_core::storage::USER_SESSIONS_DB_FILENAME);
         if !is_user_sessions {
             return;
         }
@@ -2151,6 +2141,55 @@ mod tests {
         administration.shutdown_host_admission_replay().await;
     }
 
+    /// A spool open can stall for seconds on fsync under load. A first open of
+    /// one database must not park the first open of an unrelated database,
+    /// while a second opener of the same database shares the in-flight open.
+    #[tokio::test]
+    async fn stalled_first_open_does_not_block_an_unrelated_first_open() {
+        let temp = tempfile::tempdir().unwrap();
+        let stalled_path = temp.path().join("stalled.db");
+        let unrelated_path = temp.path().join("unrelated.db");
+        let brokers: HostAdmissionBrokers = Arc::default();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+
+        let (stalled, (shared, unrelated)) = tokio::join!(
+            open_host_admission_broker(&brokers, &stalled_path, move |path| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                HostAdmissionRuntime::open_for_database(path)
+            }),
+            async {
+                entered_rx.await.expect("stalled open started");
+                tokio::join!(
+                    open_host_admission_broker(&brokers, &stalled_path, |_| {
+                        panic!("a concurrent opener of the same path must share the open")
+                    }),
+                    async {
+                        // Deadlock guard only: the stalled open stays held
+                        // until the unrelated open returns.
+                        let unrelated = tokio::time::timeout(
+                            Duration::from_mins(1),
+                            open_host_admission_broker(
+                                &brokers,
+                                &unrelated_path,
+                                HostAdmissionRuntime::open_for_database,
+                            ),
+                        )
+                        .await
+                        .expect("an unrelated first open waited on another path's open");
+                        release_tx.send(()).unwrap();
+                        unrelated
+                    },
+                )
+            },
+        );
+
+        let stalled = stalled.unwrap();
+        assert!(Arc::ptr_eq(&stalled, &shared.unwrap()));
+        assert!(!Arc::ptr_eq(&stalled, &unrelated.unwrap()));
+    }
+
     #[tokio::test]
     async fn profile_replay_uses_installed_hermes_callback_to_commit_receipt() {
         let temp = tempfile::tempdir().unwrap();
@@ -2311,11 +2350,10 @@ mod tests {
 
         let unrelated_path = temp.path().join("unrelated.db");
         std::fs::File::create(&unrelated_path).unwrap();
-        // An unrelated first open takes only the broker map and the first-open
-        // gate; its own spool fsyncs are real IO with no latency contract.
+        // An unrelated first open takes only the broker map lock; its own
+        // spool fsyncs are real IO with no latency contract.
         assert!(
-            administration.host_admission_brokers.try_lock().is_ok()
-                && administration.host_admission_broker_gate.try_lock().is_ok(),
+            administration.host_admission_brokers.try_lock().is_ok(),
             "typed bootstrap terminal must not block unrelated broker opens"
         );
         administration
