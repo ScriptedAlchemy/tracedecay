@@ -1495,4 +1495,42 @@ mod lsp_lease_tests {
         })
         .expect("native runtime");
     }
+
+    struct SignalOnDrop(Option<tokio::sync::oneshot::Sender<()>>);
+
+    impl Drop for SignalOnDrop {
+        fn drop(&mut self) {
+            if let Some(signal) = self.0.take() {
+                let _ = signal.send(());
+            }
+        }
+    }
+
+    /// A lease task dropped without being stopped, as by a shutdown owner
+    /// whose join timed out, is aborted rather than left running.
+    #[test]
+    fn a_lease_task_dropped_without_a_stop_is_aborted() {
+        native_runtime::block_on(async {
+            let registry = Arc::new(LspLeaseTaskRegistry::default());
+            let session_id = LspSessionId::new("lsp-native-dropped").expect("session id");
+            let (signal, dropped) = tokio::sync::oneshot::channel();
+            let guard = SignalOnDrop(Some(signal));
+            registry
+                .start(session_id.clone(), async move {
+                    let _guard = guard;
+                    std::future::pending::<()>().await;
+                })
+                .await
+                .expect("lease task starts");
+            drop(
+                registry
+                    .take_generation(&session_id, None)
+                    .expect("registered lease task"),
+            );
+            let _ = native_runtime::timeout(Duration::from_secs(30), dropped)
+                .await
+                .expect("a dropped lease task must be aborted");
+        })
+        .expect("native runtime");
+    }
 }
