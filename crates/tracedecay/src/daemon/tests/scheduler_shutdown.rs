@@ -25,7 +25,7 @@ async fn pr_autotrack_is_cancelled_before_invocation_join() {
     );
 
     let _ = prepared
-        .join(tokio::time::Instant::now() + std::time::Duration::from_secs(1))
+        .join(std::time::Instant::now() + std::time::Duration::from_secs(1))
         .await;
 }
 
@@ -73,7 +73,7 @@ async fn manual_branch_add_journey_is_joined_by_daemon_shutdown() {
 
     let shutdown = tokio::spawn(async move {
         prepared
-            .join(tokio::time::Instant::now() + std::time::Duration::from_secs(1))
+            .join(std::time::Instant::now() + std::time::Duration::from_secs(1))
             .await
     });
     tokio::task::yield_now().await;
@@ -129,7 +129,7 @@ async fn stalled_manual_branch_publication_settles_before_shutdown_receipt() {
     );
     let shutdown = tokio::spawn(async move {
         prepared
-            .join(tokio::time::Instant::now() + std::time::Duration::from_secs(15))
+            .join(std::time::Instant::now() + std::time::Duration::from_secs(15))
             .await
     });
     tokio::time::advance(std::time::Duration::from_secs(16)).await;
@@ -770,7 +770,7 @@ async fn manual_branch_publication_panic_survives_reaping_in_shutdown_receipt() 
     let mut phases = engine.shutdown_owner_phases().await;
     let receipt =
         tracedecay_daemon_service::shutdown::prepare_shutdown_owner_phases(vec![phases.remove(0)])
-            .join(tokio::time::Instant::now() + std::time::Duration::from_secs(1))
+            .join(std::time::Instant::now() + std::time::Duration::from_secs(1))
             .await;
     assert!(
         matches!(&receipt.owners[0].status, tracedecay_daemon_service::shutdown::ShutdownStatus::Failed(reason) if reason.contains("failed to join"))

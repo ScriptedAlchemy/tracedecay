@@ -1072,24 +1072,57 @@ async fn persistent_idle_client_closes_on_draining_without_timeout() {
         Ok(())
     });
 
-    let receipt = tracedecay_daemon_service::shutdown::coordinate_daemon_shutdown(
-        &lifecycle,
-        tokio::time::Instant::now() + tokio::time::Duration::from_secs(5),
-        async move {
-            tracedecay_daemon_service::shutdown::DaemonShutdownPlan::new(
-                clients,
-                Vec::new(),
-                |_| async { tracedecay_store_runtime::ShutdownTaskReceipt::default() },
-            )
-        },
-    )
-    .await;
+    let receipt = shutdown_with_clients(&lifecycle, clients).await;
 
     assert_eq!(
         receipt.clients,
         tracedecay_daemon_service::shutdown::ShutdownStatus::Clean
     );
     assert!(lifecycle.try_enter().is_none());
+}
+
+#[tokio::test]
+async fn client_errors_and_panics_are_named_while_aborted_clients_are_clean() {
+    let lifecycle = DaemonLifecycle::default();
+    let mut clients = tokio::task::JoinSet::new();
+    clients.spawn(async {
+        Err(tracedecay_domain::errors::TraceDecayError::Config {
+            message: "client failed during shutdown".to_owned(),
+        })
+    });
+    clients.spawn(async { panic!("client panicked during shutdown") });
+    clients.spawn(std::future::pending());
+    tokio::task::yield_now().await;
+
+    let receipt = shutdown_with_clients(&lifecycle, clients).await;
+
+    let tracedecay_daemon_service::shutdown::ShutdownStatus::Failed(error) = &receipt.clients
+    else {
+        panic!("client failures must be reported: {:?}", receipt.clients);
+    };
+    assert!(
+        error.contains("config error: client failed during shutdown")
+            && error.contains("client panicked during shutdown")
+            && !error.contains("cancelled"),
+        "{error}"
+    );
+}
+
+async fn shutdown_with_clients(
+    lifecycle: &DaemonLifecycle,
+    clients: tokio::task::JoinSet<tracedecay_domain::errors::Result<()>>,
+) -> Arc<tracedecay_daemon_service::shutdown::DaemonShutdownReceipt> {
+    tracedecay_daemon_service::shutdown::coordinate_daemon_shutdown(
+        lifecycle,
+        std::time::Instant::now() + std::time::Duration::from_secs(5),
+        async move {
+            tracedecay_daemon_service::shutdown::DaemonShutdownPlan::new(Vec::new(), |_| async {
+                tracedecay_store_runtime::ShutdownTaskReceipt::default()
+            })
+            .with_clients(crate::daemon::bootstrap::client_shutdown_owner(clients))
+        },
+    )
+    .await
 }
 
 #[tokio::test]

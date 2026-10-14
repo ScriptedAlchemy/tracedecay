@@ -22,10 +22,11 @@ use tracedecay_daemon_service::shutdown::DAEMON_CLIENT_DRAIN_DEADLINE;
 use tracedecay_daemon_service::shutdown::{DaemonLifecycle, ShutdownStatus};
 use tracedecay_runtime_core::logging::log_daemon_event;
 
-/// Slice of the shutdown budget reserved for writing the terminal shutdown
-/// receipts to the daemon log after the coordinator returns.
-pub(super) const DAEMON_SHUTDOWN_RECEIPT_LOG_RESERVE: tokio::time::Duration =
-    tokio::time::Duration::from_millis(100);
+/// The shutdown budget handed to the coordinator: the daemon deadline less the
+/// slice reserved for writing the terminal shutdown receipts to the daemon log
+/// after the coordinator returns.
+const DAEMON_SHUTDOWN_COORDINATION_DEADLINE: std::time::Duration =
+    DAEMON_SHUTDOWN_DEADLINE.saturating_sub(std::time::Duration::from_millis(100));
 
 #[tracing::instrument(name = "daemon.bootstrap.catalog_prewarm", level = "trace", skip_all)]
 fn prewarm_static_daemon_bootstrap_catalog() {
@@ -263,8 +264,7 @@ async fn run_foreground_loopback(
     drop(listener);
     spooled_hook_opener.abort();
     cancel_retained_session_history(&store_administration).await;
-    let shutdown_deadline = tokio::time::Instant::now() + DAEMON_SHUTDOWN_DEADLINE
-        - DAEMON_SHUTDOWN_RECEIPT_LOG_RESERVE;
+    let shutdown_deadline = Instant::now() + DAEMON_SHUTDOWN_COORDINATION_DEADLINE;
     let endpoint_cleanup = authority.cleanup_owned_endpoint();
     let maintenance_join = maintenance.clone();
     let project_open = project_open_tasks(project_open_gates.as_ref()).await;
@@ -388,17 +388,17 @@ async fn run_foreground_loopback(
         shutdown_deadline,
         async move {
             tracedecay_daemon_service::shutdown::DaemonShutdownPlan::new(
-                clients,
                 owner_phases,
                 move |project_server_deadline| async move {
                     shutdown_project_servers(
-                        project_server_deadline,
+                        tokio::time::Instant::from_std(project_server_deadline),
                         &server_store_administration,
                         &http_application_registry,
                     )
                     .await
                 },
             )
+            .with_clients(client_shutdown_owner(clients))
             .with_terminal_owner_phases(vec![vec![memory_graph_reconciliation]])
         },
     )
@@ -491,6 +491,34 @@ fn log_project_server_shutdown_receipt(receipt: &tracedecay_store_runtime::Shutd
             ],
         );
     }
+}
+
+/// Aborts the accepted client connections and joins them. An aborted client is
+/// clean; a client that failed or panicked is reported.
+pub(super) fn client_shutdown_owner(
+    mut clients: JoinSet<Result<()>>,
+) -> tracedecay_daemon_service::shutdown::ShutdownOwner {
+    tracedecay_daemon_service::shutdown::ShutdownOwner::with_deadline_result(
+        "clients",
+        || {},
+        move |_| async move {
+            clients.abort_all();
+            let mut failures = Vec::new();
+            while let Some(completed) = clients.join_next().await {
+                match completed {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => failures.push(error.to_string()),
+                    Err(error) if error.is_cancelled() => {}
+                    Err(error) => failures.push(error.to_string()),
+                }
+            }
+            if failures.is_empty() {
+                Ok(())
+            } else {
+                Err(failures.join("; "))
+            }
+        },
+    )
 }
 
 fn hosted_dashboard_shutdown_owner() -> tracedecay_daemon_service::shutdown::ShutdownOwner {
@@ -771,8 +799,7 @@ async fn run_foreground_unix(
     drop(listener);
     let endpoint_cleanup = authority.cleanup_owned_endpoint();
     cancel_retained_session_history(&engine.store_administration).await;
-    let shutdown_deadline = tokio::time::Instant::now() + DAEMON_SHUTDOWN_DEADLINE
-        - DAEMON_SHUTDOWN_RECEIPT_LOG_RESERVE;
+    let shutdown_deadline = Instant::now() + DAEMON_SHUTDOWN_COORDINATION_DEADLINE;
     // Keep auxiliary process creation blocked until every scheduler and client
     // task is drained or abandoned. A killed app-server call may retry before
     // unwinding, so a shorter guard leaves a shutdown-time respawn race. The
@@ -810,7 +837,6 @@ async fn run_foreground_unix(
             }
             let server_engine = shutdown_engine.clone();
             tracedecay_daemon_service::shutdown::DaemonShutdownPlan::new(
-                client_tasks,
                 owner_phases,
                 move |project_server_deadline| async move {
                     server_engine
@@ -818,6 +844,7 @@ async fn run_foreground_unix(
                         .await
                 },
             )
+            .with_clients(client_shutdown_owner(client_tasks))
             .with_terminal_owner_phases(vec![vec![memory_graph_reconciliation]])
         },
     )
