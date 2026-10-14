@@ -1,9 +1,11 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracedecay_domain::{CanonicalObservationIdV1, DurableObservationV1};
 use tracedecay_lcm::retrieval_content::projected_content_hash;
 use tracedecay_runtime_core::db::{
-    Database,
+    Database, DatabaseWriteTransaction,
     engine::{Executor, QueryExecutor, Row, params},
 };
 use tracedecay_store::{
@@ -137,7 +139,15 @@ pub async fn project_observation(
             })?,
         });
     }
-    match project_observation_in_transaction(&transaction, observation_id).await {
+    // The apply future is erased so this function's `Send` proof stops here
+    // (rust-lang/rust#159228). The concrete child is what overflowed.
+    let projected: Pin<
+        Box<dyn Future<Output = ProjectionStoreResult<ProjectionPersistOutcome>> + Send + '_>,
+    > = Box::pin(project_observation_in_transaction(
+        &transaction,
+        observation_id,
+    ));
+    match projected.await {
         Ok(outcome) => match transaction.commit().await {
             Ok(()) => Ok(outcome),
             Err(commit_error) => {
@@ -564,7 +574,7 @@ async fn advance_projection_rebuild(
 }
 
 async fn project_observation_in_transaction(
-    transaction: &impl Executor,
+    transaction: &DatabaseWriteTransaction<'_>,
     observation_id: &CanonicalObservationIdV1,
 ) -> ProjectionStoreResult<ProjectionPersistOutcome> {
     project_observation_in_transaction_with_session(transaction, observation_id)
@@ -576,7 +586,7 @@ async fn project_observation_in_transaction(
 /// observation's session identity so batched drains need no follow-up point
 /// read per projected item.
 async fn project_observation_in_transaction_with_session(
-    transaction: &impl Executor,
+    transaction: &DatabaseWriteTransaction<'_>,
     observation_id: &CanonicalObservationIdV1,
 ) -> ProjectionStoreResult<(ProjectionPersistOutcome, String)> {
     ensure_projection_output_state_cache(transaction).await?;
@@ -794,7 +804,7 @@ async fn stage_projection_alias_batch_transaction(
 }
 
 async fn stage_projection_rebuild_batch_transaction(
-    transaction: &impl Executor,
+    transaction: &DatabaseWriteTransaction<'_>,
     cancelled: &AtomicBool,
 ) -> ProjectionStoreResult<RebuildBatchStage> {
     let job = read_rebuild_job(transaction).await?;
@@ -919,7 +929,7 @@ enum RebuildBatchStage {
 }
 
 async fn activate_projection_rebuild_transaction(
-    transaction: &impl Executor,
+    transaction: &(impl Executor + super::apply::SendProjectionDerive),
     frontier_sequence: u64,
 ) -> ProjectionStoreResult<ProjectionRebuildOutcome> {
     validate_rebuild_frontier(transaction, frontier_sequence).await?;
@@ -1003,15 +1013,27 @@ enum CollisionGuardedWrite<'a> {
 impl CollisionGuardedWrite<'_> {
     async fn run(
         &self,
-        conn: &impl Executor,
+        conn: &DatabaseWriteTransaction<'_>,
         sequence: u64,
         observation: &DurableObservationV1,
         effect: &ObservationProjection,
     ) -> ProjectionStoreResult<()> {
         match self {
-            Self::Drain => apply_effect(conn, sequence, observation, effect).await,
+            Self::Drain => {
+                let applied: Pin<Box<dyn Future<Output = ProjectionStoreResult<()>> + Send + '_>> =
+                    Box::pin(apply_effect(conn, sequence, observation, effect));
+                applied.await
+            }
             Self::Stage { generation } => {
-                stage_rebuild_effect(conn, generation, sequence, observation, effect).await
+                let staged: Pin<Box<dyn Future<Output = ProjectionStoreResult<()>> + Send + '_>> =
+                    Box::pin(stage_rebuild_effect(
+                        conn,
+                        generation,
+                        sequence,
+                        observation,
+                        effect,
+                    ));
+                staged.await
             }
         }
     }
@@ -1024,7 +1046,7 @@ impl CollisionGuardedWrite<'_> {
 /// wedging on the collided output. This is the write-time backstop for
 /// collisions not yet recorded as a disposition.
 async fn write_effect_converging_collisions(
-    conn: &impl Executor,
+    conn: &DatabaseWriteTransaction<'_>,
     write: &CollisionGuardedWrite<'_>,
     sequence: u64,
     observation: &DurableObservationV1,
@@ -1033,7 +1055,11 @@ async fn write_effect_converging_collisions(
     conn.execute_batch(&format!("SAVEPOINT {PROJECTION_COLLISION_SAVEPOINT};"))
         .await
         .map_err(|error| storage("begin projection collision savepoint", error))?;
-    match write.run(conn, sequence, observation, effect).await {
+    // The guarded write is its own `Send` root. Inlining it here overflows
+    // the projection future (rust-lang/rust#159228).
+    let ran: Pin<Box<dyn Future<Output = ProjectionStoreResult<()>> + Send + '_>> =
+        Box::pin(write.run(conn, sequence, observation, effect));
+    match ran.await {
         Ok(()) => {
             conn.execute_batch(&format!("RELEASE {PROJECTION_COLLISION_SAVEPOINT};"))
                 .await
@@ -1050,7 +1076,15 @@ async fn write_effect_converging_collisions(
                 observation = observation.observation_id().as_str(),
                 "projection output collided; recording a durable skip disposition"
             );
-            converge_collided_effect(conn, write, sequence, observation, effect).await
+            let converged: Pin<Box<dyn Future<Output = ProjectionStoreResult<()>> + Send + '_>> =
+                Box::pin(converge_collided_effect(
+                    conn,
+                    write,
+                    sequence,
+                    observation,
+                    effect,
+                ));
+            converged.await
         }
         Err(ProjectionStoreError::SessionOutputCollision {
             provider,
@@ -1071,11 +1105,31 @@ async fn write_effect_converging_collisions(
             );
             match write {
                 CollisionGuardedWrite::Drain => {
-                    isolate_session_collision(conn, observation, &collision, effect).await?;
-                    write.run(conn, sequence, observation, effect).await
+                    let isolated: Pin<
+                        Box<dyn Future<Output = ProjectionStoreResult<()>> + Send + '_>,
+                    > = Box::pin(isolate_session_collision(
+                        conn,
+                        observation,
+                        &collision,
+                        effect,
+                    ));
+                    isolated.await?;
+                    let rerun: Pin<
+                        Box<dyn Future<Output = ProjectionStoreResult<()>> + Send + '_>,
+                    > = Box::pin(write.run(conn, sequence, observation, effect));
+                    rerun.await
                 }
                 CollisionGuardedWrite::Stage { .. } => {
-                    converge_collided_effect(conn, write, sequence, observation, effect).await
+                    let converged: Pin<
+                        Box<dyn Future<Output = ProjectionStoreResult<()>> + Send + '_>,
+                    > = Box::pin(converge_collided_effect(
+                        conn,
+                        write,
+                        sequence,
+                        observation,
+                        effect,
+                    ));
+                    converged.await
                 }
             }
         }
@@ -1095,7 +1149,7 @@ async fn write_effect_converging_collisions(
 /// The projected-output ownership cache is re-aggregated for every output the
 /// removed rows touched.
 async fn converge_collided_effect(
-    conn: &impl Executor,
+    conn: &DatabaseWriteTransaction<'_>,
     write: &CollisionGuardedWrite<'_>,
     sequence: u64,
     observation: &DurableObservationV1,
@@ -1111,7 +1165,9 @@ async fn converge_collided_effect(
         reconcile_collided_observation_provenance(conn, observation).await?;
     }
     *effect = ObservationProjection::Skipped(ProjectionSkipReason::OutputCollision);
-    write.run(conn, sequence, observation, effect).await
+    let rerun: Pin<Box<dyn Future<Output = ProjectionStoreResult<()>> + Send + '_>> =
+        Box::pin(write.run(conn, sequence, observation, effect));
+    rerun.await
 }
 
 /// Live-drain session collision: keep the queue row, record the error, and
@@ -1843,7 +1899,7 @@ async fn stage_rebuild_disposition(
 }
 
 async fn stage_rebuild_effect(
-    conn: &impl Executor,
+    conn: &(impl Executor + super::apply::SendProjectionDerive),
     generation: &str,
     sequence: u64,
     observation: &DurableObservationV1,

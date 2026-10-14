@@ -167,9 +167,8 @@ pub(super) fn visit_test_call(state: &mut ExtractionState<'_>, call: TsNode<'_>)
 
     let callback = test_call_callback(args);
     let is_async = callback.is_some_and(|cb| TypeScriptExtractor::has_child_kind(cb, "async"));
-    let metrics = callback
-        .map(|cb| count_complexity(cb, &TYPESCRIPT_COMPLEXITY, state.source))
-        .unwrap_or_default();
+    let metrics =
+        callback.map_or_default(|cb| count_complexity(cb, &TYPESCRIPT_COMPLEXITY, state.source));
 
     let call_text = state.node_text(call);
     let signature = truncate_title(call_text.lines().next().unwrap_or_default());

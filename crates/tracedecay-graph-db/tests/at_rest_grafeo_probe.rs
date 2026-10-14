@@ -191,7 +191,7 @@ fn grafeo_at_rest_probe() {
     let hwm_closed = peak_rss_kib().unwrap();
     let rss_closed = live_rss_kib().unwrap();
 
-    let on_disk = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+    let on_disk = std::fs::metadata(&path).map_or(0, |meta| meta.len());
 
     let open_started = Instant::now();
     let reopened = GrafeoDB::open(&path).unwrap();

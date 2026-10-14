@@ -980,8 +980,10 @@ fn measure_seal_peak(symbols: usize) -> u64 {
     let peak = stdout
         .lines()
         .find_map(|line| line.split_once(SEAL_PEAK_PROBE_LINE))
-        .map(|(_, peak)| peak.trim().parse().unwrap())
-        .unwrap_or_else(|| panic!("seal peak probe printed no peak: {stdout}"));
+        .map_or_else(
+            || panic!("seal peak probe printed no peak: {stdout}"),
+            |(_, peak)| peak.trim().parse().unwrap(),
+        );
     println!("{symbols}-symbol base: layered seal +{peak} KiB");
     peak
 }

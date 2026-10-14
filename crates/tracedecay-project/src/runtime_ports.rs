@@ -201,10 +201,7 @@ fn resolve_project_root_with_identity<'a>(
     profile: &'a ProfileRoot,
     start: &'a Path,
 ) -> Pin<Box<dyn Future<Output = Option<std::path::PathBuf>> + Send + 'a>> {
-    Box::pin(tracing::Instrument::instrument(
-        crate::config::discover_project_root_with_identity(profile, start),
-        tracing::trace_span!("runtime_ports.resolve_project_root"),
-    ))
+    crate::config::discover_project_root_with_identity(profile, start)
 }
 
 #[tracing::instrument(name = "runtime_ports.resolve_hook_scope", level = "trace", skip_all)]

@@ -473,8 +473,7 @@ pub(super) fn append_coverage_md(md: &mut Md, value: &Value) {
 fn display_unavailable_suffix(row: &Value) -> String {
     row.get("display_unavailable")
         .and_then(Value::as_str)
-        .map(|reason| format!(" · display unavailable: {reason}"))
-        .unwrap_or_default()
+        .map_or_default(|reason| format!(" · display unavailable: {reason}"))
 }
 
 /// One result row with its rendered markdown.

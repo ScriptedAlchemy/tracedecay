@@ -329,12 +329,8 @@ pub(super) fn seal_code_graph_page(
         .unwrap_or_default();
     let page = PersistedCodeGraphPageV1 {
         file: snapshot_file.clone(),
-        imports: artifacts
-            .map(|file| file.artifacts.imports.clone())
-            .unwrap_or_default(),
-        symbols: artifacts
-            .map(|file| file.artifacts.symbols.clone())
-            .unwrap_or_default(),
+        imports: artifacts.map_or_default(|file| file.artifacts.imports.clone()),
+        symbols: artifacts.map_or_default(|file| file.artifacts.symbols.clone()),
         edges,
         bindings,
         unresolved_calls,

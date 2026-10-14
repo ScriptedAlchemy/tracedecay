@@ -1,7 +1,9 @@
 //! Read-only retention diagnostics owned beside the retention kernels.
 
 use std::collections::BTreeSet;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 
 use tracedecay_contracts::doctor::{
     DoctorCoverageCompletenessV1, DoctorCoverageStatementV1, DoctorEvidenceRefV1,
@@ -108,24 +110,37 @@ pub async fn collect_profile_storage_findings(
     observed_at_secs: i64,
 ) -> ProfileStorageFindingsV1 {
     let scan_root = profile_root.join("projects");
-    let permitted = native_runtime::spawn_blocking(move || {
-        let _span = tracing::trace_span!("maintenance.diagnostics.profile_scan").entered();
-        permits_synchronous_exhaustive_scan(&scan_root)
-    })
-    .await
-    .is_ok_and(|permitted| permitted);
+    let permitted_scan: Pin<Box<dyn Future<Output = Result<bool, String>> + Send>> =
+        Box::pin(native_runtime::spawn_blocking(move || {
+            let _span = tracing::trace_span!("maintenance.diagnostics.profile_scan").entered();
+            permits_synchronous_exhaustive_scan(&scan_root)
+        }));
+    let permitted = permitted_scan.await.is_ok_and(|permitted| permitted);
     if !permitted {
         return ProfileStorageFindingsV1::unknown();
     }
-    let (registered_census, unregistered) = futures_util::join!(
-        super::orphan_stores::build_store_census(global_db, profile_root),
-        collect_unregistered_store_findings(
-            global_db,
-            profile_root,
-            retention_secs,
-            observed_at_secs,
-        ),
-    );
+    let census: Pin<
+        Box<
+            dyn Future<
+                    Output = tracedecay_domain::errors::Result<
+                        Vec<super::orphan_stores::StoreCensusEntry>,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > = Box::pin(super::orphan_stores::build_store_census(
+        global_db,
+        profile_root,
+    ));
+    let unregistered_findings: Pin<
+        Box<dyn Future<Output = DoctorStorageFamilyReadV1> + Send + '_>,
+    > = Box::pin(collect_unregistered_store_findings(
+        global_db,
+        profile_root,
+        retention_secs,
+        observed_at_secs,
+    ));
+    let (registered_census, unregistered) = futures_util::join!(census, unregistered_findings);
     let (orphan_stores, incident_debris) = registered_census.as_deref().map_or(
         (
             DoctorStorageFamilyReadV1::Unknown,

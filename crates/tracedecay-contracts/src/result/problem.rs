@@ -823,9 +823,10 @@ impl ApplicationProblem {
     /// Stable client-facing reason: the diagnostic code when one exists,
     /// otherwise the problem kind's canonical code.
     pub fn reason_code(&self) -> &str {
-        self.diagnostic()
-            .map(|diagnostic| diagnostic.code.as_str())
-            .unwrap_or_else(|| self.canonical_code())
+        self.diagnostic().map_or_else(
+            || self.canonical_code(),
+            |diagnostic| diagnostic.code.as_str(),
+        )
     }
 
     /// Preserve reason code and retryability when a root caller must surface

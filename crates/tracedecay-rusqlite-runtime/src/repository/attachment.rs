@@ -596,11 +596,9 @@ impl RepositoryRuntimePhysicalAttachment {
                 break;
             }
             if started.elapsed() >= ATTACHMENT_DRAIN_TIMEOUT {
-                let queued = state
-                    .writer
-                    .as_ref()
-                    .map(|writer| writer.telemetry_snapshot().queue.queued_operations)
-                    .unwrap_or(0);
+                let queued = state.writer.as_ref().map_or(0, |writer| {
+                    writer.telemetry_snapshot().queue.queued_operations
+                });
                 let leased = state.readers.as_ref().map_or(0, |readers| {
                     let snapshot = readers.snapshot();
                     u32::from(snapshot.leased_general) + u32::from(snapshot.leased_health)

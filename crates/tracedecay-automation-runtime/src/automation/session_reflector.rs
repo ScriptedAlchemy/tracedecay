@@ -1,4 +1,6 @@
 use std::collections::BTreeSet;
+use std::future::Future;
+use std::pin::Pin;
 
 use serde_json::{Value, json};
 use tracedecay_domain::{Confidence, FactCategoryV1, PayloadAccessState};
@@ -38,7 +40,14 @@ pub(crate) async fn validate_fact_candidates<A: ProjectMemoryFactStore>(
     let mut accepted = Vec::new();
     let mut quarantined = Vec::new();
     for proposal in proposals {
-        match validate_fact_candidate(memory, run_control, proposal, &citations).await? {
+        let validated: Pin<Box<dyn Future<Output = Result<FactCandidateValidation>> + Send + '_>> =
+            Box::pin(validate_fact_candidate(
+                memory,
+                run_control,
+                proposal,
+                &citations,
+            ));
+        match validated.await? {
             FactCandidateValidation::Accepted(value) => accepted.push(value),
             FactCandidateValidation::Quarantined(value) => quarantined.push(value),
         }

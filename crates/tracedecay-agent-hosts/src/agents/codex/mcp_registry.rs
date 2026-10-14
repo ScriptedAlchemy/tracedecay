@@ -724,8 +724,7 @@ exit 0"#;
         config
             .get(CODEX_MCP_SERVERS_KEY)
             .and_then(toml::Value::as_table)
-            .map(|servers| servers.keys().cloned().collect())
-            .unwrap_or_default()
+            .map_or_default(|servers| servers.keys().cloned().collect())
     }
 
     /// A fresh MCP-only install ends with exactly one standalone server that

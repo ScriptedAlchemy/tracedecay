@@ -328,8 +328,7 @@ fn run_inner(
         let canonical = canonical_tool_name(&raw_name);
         let Some(def) = defs.iter().find(|definition| definition.name == canonical) else {
             let suggestion = nearest_tool_name(&canonical, defs)
-                .map(|name| format!(" Did you mean '{name}'?"))
-                .unwrap_or_default();
+                .map_or_default(|name| format!(" Did you mean '{name}'?"));
             return Err(TraceDecayError::project_route(
                 "unknown_tool",
                 false,
@@ -541,8 +540,9 @@ fn cli_request_controls(
     let remaining = deadline.saturating_duration_since(Instant::now());
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| i64::try_from(duration.as_micros()).unwrap_or(i64::MAX))
-        .unwrap_or(i64::MAX);
+        .map_or(i64::MAX, |duration| {
+            i64::try_from(duration.as_micros()).unwrap_or(i64::MAX)
+        });
     let request_deadline = Deadline::new(UtcMicros(
         now.saturating_add(i64::try_from(remaining.as_micros()).unwrap_or(i64::MAX)),
     ))
@@ -1133,14 +1133,13 @@ fn tool_result_process_outcome(result_value: &Value, tool_name: &str) -> Result<
         let untested = result_value
             .pointer("/structuredContent/test_gate/untested")
             .and_then(Value::as_array)
-            .map(|items| {
+            .map_or_default(|items| {
                 items
                     .iter()
                     .filter_map(Value::as_str)
                     .collect::<Vec<_>>()
                     .join(", ")
-            })
-            .unwrap_or_default();
+            });
         std::io::stdout().flush()?;
         return Err(TraceDecayError::tool_refused(
             tool_name,

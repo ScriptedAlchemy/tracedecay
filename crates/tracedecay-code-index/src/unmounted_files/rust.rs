@@ -274,14 +274,13 @@ fn workspace_declarations(project_root: &Path) -> Result<(Vec<String>, Vec<PathB
         .and_then(|metadata| metadata.get("cargo-shear"))
         .and_then(|shear| shear.get("ignored-paths"))
         .and_then(toml::Value::as_array)
-        .map(|globs| {
+        .map_or_default(|globs| {
             globs
                 .iter()
                 .filter_map(toml::Value::as_str)
                 .map(str::to_owned)
                 .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+        });
 
     // `exclude` names a directory, and cargo excludes everything under it,
     // comparing for equality would keep auditing every member below an
@@ -290,14 +289,13 @@ fn workspace_declarations(project_root: &Path) -> Result<(Vec<String>, Vec<PathB
         .get("workspace")
         .and_then(|workspace| workspace.get("exclude"))
         .and_then(toml::Value::as_array)
-        .map(|entries| {
+        .map_or_default(|entries| {
             entries
                 .iter()
                 .filter_map(toml::Value::as_str)
                 .map(|entry| normalized(&project_root.join(entry)))
                 .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+        });
 
     Ok((excluded_globs, excluded_dirs))
 }
@@ -620,7 +618,7 @@ fn parse_rust(source: &str) -> Option<tree_sitter::Tree> {
 /// The directory a non-root module file's own declarations resolve against:
 /// `a/b/mod.rs` declares into `a/b/`, `a/b.rs` declares into `a/b/`.
 fn module_child_directory(file: &Path) -> PathBuf {
-    let parent = file.parent().map(Path::to_path_buf).unwrap_or_default();
+    let parent = file.parent().map_or_default(Path::to_path_buf);
     match file.file_stem().and_then(|stem| stem.to_str()) {
         Some("mod") | None => parent,
         Some(stem) => parent.join(stem),

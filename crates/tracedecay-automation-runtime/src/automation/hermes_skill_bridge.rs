@@ -448,17 +448,15 @@ fn read_bounded_regular_utf8(
 }
 
 fn parse_scalar_frontmatter(contents: &str) -> BTreeMap<String, String> {
-    parse_skill_frontmatter(contents)
-        .map(|fields| {
-            fields
-                .into_iter()
-                .filter_map(|(key, value)| match value {
-                    SkillFrontmatterValue::Scalar(value) => Some((key.to_ascii_lowercase(), value)),
-                    SkillFrontmatterValue::Block(_) => None,
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+    parse_skill_frontmatter(contents).map_or_default(|fields| {
+        fields
+            .into_iter()
+            .filter_map(|(key, value)| match value {
+                SkillFrontmatterValue::Scalar(value) => Some((key.to_ascii_lowercase(), value)),
+                SkillFrontmatterValue::Block(_) => None,
+            })
+            .collect()
+    })
 }
 
 #[cfg(test)]

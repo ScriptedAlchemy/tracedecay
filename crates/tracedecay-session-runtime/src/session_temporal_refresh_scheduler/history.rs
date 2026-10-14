@@ -159,7 +159,14 @@ impl SessionHistoricalIngestor for ProjectSessionHistoricalIngestor {
             let authority =
                 tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority::new(self.database.clone())
                     .with_background_cpu(Arc::clone(&self.background_cpu));
-            let pass = Box::pin(
+            let pass: Pin<
+                Box<
+                    dyn Future<
+                            Output = tracedecay_sessions::runtime::TranscriptIngestOutcome,
+                        > + Send
+                        + '_,
+                >,
+            > = Box::pin(
                 tracedecay_sessions::runtime::ingest_project_sources_for_provider_with_cancellation_and_codex_state(
                     self.profile_identity.brain_id(),
                     self.profile_identity.profile_id(),
@@ -279,7 +286,14 @@ impl SessionHistoricalIngestor for ProfileSessionHistoricalIngestor {
             let registry_authority =
                 tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority::new(self.registry_database.clone())
                     .with_background_cpu(Arc::clone(&self.background_cpu));
-            let pass = Box::pin(
+            let pass: Pin<
+                Box<
+                    dyn Future<
+                            Output = tracedecay_sessions::runtime::TranscriptIngestOutcome,
+                        > + Send
+                        + '_,
+                >,
+            > = Box::pin(
                 tracedecay_sessions::runtime::ingest_user_global_sources_for_startup_with_db_and_codex_state(
                     self.profile_identity.brain_id(),
                     self.profile_identity.profile_id(),

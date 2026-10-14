@@ -617,8 +617,6 @@ jobs:
       # One graph walk per push. The release resolver repeats it on the tag it
       # builds, since a release is dispatched without waiting on this run.
       - name: Check the production feature graph
-        env:
-          RUSTUP_TOOLCHAIN: stable
         run: python3 scripts/check-production-feature-profile.py
 
   # The configuration users actually receive: the release build of

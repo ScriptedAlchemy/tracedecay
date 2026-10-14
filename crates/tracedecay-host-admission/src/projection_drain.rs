@@ -1,4 +1,6 @@
 use std::collections::BTreeSet;
+use std::future::Future;
+use std::pin::Pin;
 
 use tracedecay_sessions::admission::{HostAdmissionOutcome, HostProjectionDrainOutcome};
 use tracedecay_sessions::runtime::git_correlation::SystemGit;
@@ -31,16 +33,23 @@ impl HostAdmissionFacade<'_> {
             .registered_database(host_scope(scope))?
             .ok_or_else(HostAdmissionOutcome::registered_authority_unavailable)?;
         let store = self.store(provider, scope)?;
-        let predecessor = store
-            .converge_projection_predecessor()
-            .await
-            .map_err(|error| {
-                tracing::warn!(
-                    error = %error.durable_detail(),
-                    "predecessor projection convergence failed during host drain"
-                );
-                projection_error_outcome(&error)
-            })?;
+        let predecessor: Pin<
+            Box<
+                dyn Future<
+                        Output = tracedecay_store::ProjectionStoreResult<
+                            tracedecay_store::ProjectionPredecessorConvergence,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > = Box::pin(store.converge_projection_predecessor());
+        let predecessor = predecessor.await.map_err(|error| {
+            tracing::warn!(
+                error = %error.durable_detail(),
+                "predecessor projection convergence failed during host drain"
+            );
+            projection_error_outcome(&error)
+        })?;
         if cancellation.is_cancelled() {
             return Err(classify_error(&ObservationApplicationError::Cancelled));
         }
@@ -57,13 +66,21 @@ impl HostAdmissionFacade<'_> {
             tracedecay_session_memory::external_source_store::RuntimeExternalSourceStore::new(
                 database.runtime_client(),
             );
-        let external_replay = external_source
-            .drain_host_projection_replay(max, cancellation)
-            .await
-            .map_err(|error| {
-                tracing::warn!(%error, "external-source projection replay failed during host drain");
-                HostAdmissionOutcome::retained_unavailable("external_source_projection_unavailable")
-            })?;
+        let replay: Pin<
+            Box<
+                dyn Future<
+                        Output = Result<
+                            tracedecay_session_memory::external_source_store::RuntimeProjectionReplayOutcomeV1,
+                            tracedecay_session_memory::external_source_store::RuntimeExternalSourceErrorV1,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > = Box::pin(external_source.drain_host_projection_replay(max, cancellation));
+        let external_replay = replay.await.map_err(|error| {
+            tracing::warn!(%error, "external-source projection replay failed during host drain");
+            HostAdmissionOutcome::retained_unavailable("external_source_projection_unavailable")
+        })?;
         if cancellation.is_cancelled() {
             return Err(classify_error(&ObservationApplicationError::Cancelled));
         }
@@ -85,7 +102,17 @@ impl HostAdmissionFacade<'_> {
                 return Err(classify_error(&ObservationApplicationError::Cancelled));
             }
             let window = PROJECTION_DRAIN_TXN_WINDOW.min(remaining);
-            match store.project_queued_observations(window).await {
+            let queued: Pin<
+                Box<
+                    dyn Future<
+                            Output = tracedecay_store::ProjectionStoreResult<
+                                Option<tracedecay_store::ProjectionDrainBatch>,
+                            >,
+                        > + Send
+                        + '_,
+                >,
+            > = Box::pin(store.project_queued_observations(window));
+            match queued.await {
                 Ok(Some(batch)) => {
                     let item_count = batch.items.len();
                     for item in batch.items {
@@ -136,7 +163,17 @@ impl HostAdmissionFacade<'_> {
             if cancellation.is_cancelled() {
                 return Err(classify_error(&ObservationApplicationError::Cancelled));
             }
-            let Some(observation_id) = store.next_queued_observation().await.map_err(|error| {
+            let next_queued: Pin<
+                Box<
+                    dyn Future<
+                            Output = tracedecay_store::ProjectionStoreResult<
+                                Option<tracedecay_domain::CanonicalObservationIdV1>,
+                            >,
+                        > + Send
+                        + '_,
+                >,
+            > = Box::pin(store.next_queued_observation());
+            let Some(observation_id) = next_queued.await.map_err(|error| {
                 warn_projection_drain_store_error(
                     &error,
                     "projection store operation failed during host drain",
@@ -147,7 +184,17 @@ impl HostAdmissionFacade<'_> {
                 observation_queue_exhausted = true;
                 break;
             };
-            let projected = match store.project_observation(&observation_id).await {
+            let projected_item: Pin<
+                Box<
+                    dyn Future<
+                            Output = tracedecay_store::ProjectionStoreResult<
+                                tracedecay_store::ProjectionPersistOutcome,
+                            >,
+                        > + Send
+                        + '_,
+                >,
+            > = Box::pin(store.project_observation(&observation_id));
+            let projected = match projected_item.await {
                 Ok(projected) => projected,
                 Err(ProjectionStoreError::RetryDeferred { .. }) => {
                     observation_deferred = true;
@@ -191,17 +238,23 @@ impl HostAdmissionFacade<'_> {
                     outcome.projected_outputs = outcome.projected_outputs.saturating_add(
                         u64::try_from(projected.output_count()).unwrap_or(u64::MAX),
                     );
-                    if let Some(observation) = store
-                        .get_observation(&observation_id)
-                        .await
-                        .map_err(|error| {
-                            warn_projection_drain_store_error(
-                                &error,
-                                "projection store operation failed during host drain",
-                            );
-                            observation_store_drain_outcome(&error)
-                        })?
-                    {
+                    let loaded: Pin<
+                        Box<
+                            dyn Future<
+                                    Output = tracedecay_store::ObservationStoreResult<
+                                        Option<tracedecay_store::StoredObservation>,
+                                    >,
+                                > + Send
+                                + '_,
+                        >,
+                    > = Box::pin(store.get_observation(&observation_id));
+                    if let Some(observation) = loaded.await.map_err(|error| {
+                        warn_projection_drain_store_error(
+                            &error,
+                            "projection store operation failed during host drain",
+                        );
+                        observation_store_drain_outcome(&error)
+                    })? {
                         session_ids.insert(
                             observation
                                 .observation()
@@ -224,8 +277,17 @@ impl HostAdmissionFacade<'_> {
             if cancellation.is_cancelled() {
                 return Err(classify_error(&ObservationApplicationError::Cancelled));
             }
-            observation_deferred = store
-                .next_queued_observation()
+            let suffix: Pin<
+                Box<
+                    dyn Future<
+                            Output = tracedecay_store::ProjectionStoreResult<
+                                Option<tracedecay_domain::CanonicalObservationIdV1>,
+                            >,
+                        > + Send
+                        + '_,
+                >,
+            > = Box::pin(store.next_queued_observation());
+            observation_deferred = suffix
                 .await
                 .map_err(|error| {
                     warn_projection_drain_store_error(
@@ -244,9 +306,21 @@ impl HostAdmissionFacade<'_> {
             if cancellation.is_cancelled() {
                 return Err(classify_error(&ObservationApplicationError::Cancelled));
             }
-            let convergence = database
-                .converge_session_git_evidence(&SystemGit, self.authorities.project_root.as_deref())
-                .await;
+            let git_evidence: Pin<
+                Box<
+                    dyn Future<
+                            Output = std::result::Result<
+                                tracedecay_sessions::runtime::git_correlation::GitEvidencePassOutcome,
+                                tracedecay_sessions::runtime::git_correlation::GitCorrelationError,
+                            >,
+                        > + Send
+                        + '_,
+                >,
+            > = Box::pin(database.converge_session_git_evidence(
+                &SystemGit,
+                self.authorities.project_root.as_deref(),
+            ));
+            let convergence = git_evidence.await;
             if cancellation.is_cancelled() {
                 return Err(classify_error(&ObservationApplicationError::Cancelled));
             }

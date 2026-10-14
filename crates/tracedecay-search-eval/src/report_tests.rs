@@ -36,13 +36,15 @@ fn assert_baseline_report_retains_raw_fallback_current_and_exact_ten_x_samples(
             .find(|output| {
                 output.profile_id == profile.profile_id && output.partition == profile.partition
             })
-            .map(|output| {
-                format!(
-                    "observed {} vs pinned {}",
-                    output.query_fallback_digest, output.expected_query_fallback_digest
-                )
-            })
-            .unwrap_or_else(|| "no generated output for this profile".to_owned());
+            .map_or_else(
+                || "no generated output for this profile".to_owned(),
+                |output| {
+                    format!(
+                        "observed {} vs pinned {}",
+                        output.query_fallback_digest, output.expected_query_fallback_digest
+                    )
+                },
+            );
         assert!(
             profile.fallback_matches_expected,
             "{}:{} ranking receipt drifted from \

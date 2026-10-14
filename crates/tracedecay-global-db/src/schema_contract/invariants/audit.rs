@@ -658,7 +658,7 @@ fn validate_alias_binding(
 }
 
 async fn validate_message_projection_row(
-    conn: &impl QueryExecutor,
+    conn: &impl crate::observation_projection::SendProjectionDerive,
     observation_id: &str,
     effect: &ObservationProjection,
     resolved: &ResolvedOutputAuthority<'_>,
@@ -921,7 +921,7 @@ fn owned_storage_columns_need_rewrite(
 
 #[allow(clippy::too_many_arguments)]
 async fn validate_message_projection(
-    conn: &impl QueryExecutor,
+    conn: &impl crate::observation_projection::SendProjectionDerive,
     observation_id: &str,
     state: ProjectionAuthorityState,
     unaliased: &ObservationProjection,
@@ -988,7 +988,7 @@ fn validate_skipped_projection_row(
 
 #[allow(clippy::too_many_arguments)]
 async fn validate_composite_projection(
-    conn: &impl QueryExecutor,
+    conn: &impl crate::observation_projection::SendProjectionDerive,
     observation_id: &str,
     state: ProjectionAuthorityState,
     unaliased: &ObservationProjection,
@@ -1071,7 +1071,7 @@ async fn validate_composite_projection(
 /// durable output-collision skip re-derives as `Skipped(OutputCollision)` and
 /// audits through the `Skipped` arm natively.
 async fn derive_projection_effect(
-    conn: &impl QueryExecutor,
+    conn: &impl crate::observation_projection::SendProjectionDerive,
     observation: &DurableObservationV1,
 ) -> tracedecay_domain::errors::Result<ObservationProjection> {
     crate::observation_projection::derive_projection_with_alias(conn, observation)
@@ -1103,7 +1103,7 @@ fn requested_outputs(effects: &[ObservationProjection]) -> BTreeSet<(String, Str
     skip_all
 )]
 async fn derive_page_effects(
-    conn: &impl QueryExecutor,
+    conn: &impl crate::observation_projection::SendProjectionDerive,
     observations: &[&DurableObservationV1],
 ) -> tracedecay_domain::errors::Result<Vec<ObservationProjection>> {
     let mut effects = Vec::with_capacity(observations.len());
@@ -1170,7 +1170,7 @@ async fn resolve_output_authority<'a>(
 /// per-row invariant is unchanged; only the number of round trips spent
 /// re-reading the same stored authority is.
 async fn validate_projection_effects(
-    conn: &impl QueryExecutor,
+    conn: &impl crate::observation_projection::SendProjectionDerive,
     observations: &[&DurableObservationV1],
     released: &ReleasedRenderingLedger,
 ) -> tracedecay_domain::errors::Result<()> {
@@ -1190,7 +1190,7 @@ async fn validate_projection_effects(
 }
 
 async fn validate_projection_effect(
-    conn: &impl QueryExecutor,
+    conn: &impl crate::observation_projection::SendProjectionDerive,
     observation: &DurableObservationV1,
     effect: &ObservationProjection,
     resolved: &ResolvedOutputAuthority<'_>,
@@ -1351,7 +1351,7 @@ fn historical_projection_delta_required(checkpoint: AuditCheckpoint) -> bool {
 }
 
 async fn validate_projection_authority_suffix_pages(
-    conn: &impl QueryExecutor,
+    conn: &impl crate::observation_projection::SendProjectionDerive,
     mut checkpoint: AuditCheckpoint,
     page_limit: Option<i64>,
     released: &ReleasedRenderingLedger,
@@ -1633,7 +1633,7 @@ async fn validate_projection_authority_suffix_pages(
 }
 
 pub(super) async fn validate_projection_authority_suffix(
-    conn: &impl QueryExecutor,
+    conn: &impl crate::observation_projection::SendProjectionDerive,
     checkpoint: AuditCheckpoint,
     released: &ReleasedRenderingLedger,
 ) -> tracedecay_domain::errors::Result<(AuditCheckpoint, i64, i64, i64)> {
@@ -1643,7 +1643,7 @@ pub(super) async fn validate_projection_authority_suffix(
 }
 
 pub(super) async fn validate_projection_authority_chunk(
-    conn: &impl QueryExecutor,
+    conn: &impl crate::observation_projection::SendProjectionDerive,
     checkpoint: AuditCheckpoint,
     released: &ReleasedRenderingLedger,
 ) -> tracedecay_domain::errors::Result<(AuditCheckpoint, i64, i64, i64, bool)> {
@@ -1777,6 +1777,8 @@ mod tests {
             self.inner.execute_batch(sql).await
         }
     }
+
+    crate::observation_projection::impl_send_projection_derive!(CountingQuery<'_>);
 
     #[asupersync::test]
     async fn audit_checkpoint_schema_tracks_source_cursor_progress() {
@@ -2425,6 +2427,10 @@ mod tests {
             self.inner.query(sql, params).await
         }
     }
+
+    crate::observation_projection::impl_send_projection_derive!(
+        CountingSnapshot<'_, tracedecay_runtime_core::db::DatabaseEngineReadSnapshot>
+    );
 
     const CURSOR_COLLISION_MESSAGE_ID: &str = "fixture-session:0:generation:5552477573209801791";
 

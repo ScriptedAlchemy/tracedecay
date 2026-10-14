@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::ops::Range;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::PoisonError;
 use std::sync::atomic::Ordering;
@@ -265,8 +266,20 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 .take()
                 .filter(|_| history_requested);
             let history_outcome = if history_requested {
+                let history_pass: Pin<
+                    Box<
+                        dyn Future<
+                                Output = (SessionHistoricalIngestOutcome, Option<HistoryRelease>),
+                            > + Send
+                            + '_,
+                    >,
+                > = Box::pin(session_history_refresh(
+                    &history,
+                    &history_admission,
+                    granted,
+                ));
                 let (outcome, release) = tracing::Instrument::instrument(
-                    session_history_refresh(&history, &history_admission, granted),
+                    history_pass,
                     tracing::trace_span!("daemon.scheduler.session_temporal.history"),
                 )
                 .await;
@@ -319,8 +332,16 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 || state.has_requests()
                 || history_requires_projection
             {
+                let projection: Pin<
+                    Box<dyn Future<Output = SessionTemporalRefreshPassReport> + Send + '_>,
+                > = Box::pin(session_projection_refresh(
+                    &database,
+                    &state,
+                    projector.as_ref(),
+                    policy,
+                ));
                 let pass = tracing::Instrument::instrument(
-                    session_projection_refresh(&database, &state, projector.as_ref(), policy),
+                    projection,
                     tracing::trace_span!("daemon.scheduler.session_temporal.projection"),
                 );
                 tokio::pin!(pass);
@@ -405,22 +426,27 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                     };
                     let summary_result = {
                         let permit = summary_admission;
-                        let page = async {
-                            match convergence_page {
-                            LcmConvergencePage::PredecessorRangeRewrite => {
+                        let page: Pin<
+                            Box<
+                                dyn Future<
+                                        Output = Result<
+                                            crate::lcm_summary_convergence::LcmSummaryConvergencePage,
+                                            LcmError,
+                                        >,
+                                    > + Send,
+                            >,
+                        > = match convergence_page {
+                            LcmConvergencePage::PredecessorRangeRewrite => Box::pin(
                                 crate::lcm_summary_convergence::run_predecessor_range_rewrite_page(
                                     database.clone(),
-                                )
-                                .await
-                            }
-                            LcmConvergencePage::Full => {
+                                ),
+                            ),
+                            LcmConvergencePage::Full => Box::pin(
                                 crate::lcm_summary_convergence::run_summary_convergence_page(
                                     database.clone(),
                                     crate::lcm_summary_convergence::LCM_SUMMARY_CONVERGENCE_PAGE_LIMIT,
-                                )
-                                .await
-                            }
-                        }
+                                ),
+                            ),
                         };
                         tokio::pin!(page);
                         let result = tokio::select! {
@@ -1092,7 +1118,14 @@ async fn commit_deferred_begins<'a>(
         .map(|deferred| (deferred.item, deferred.prepared))
         .unzip();
     let outcomes = match commit_refresh_groups(items.len(), policy.operation_deadline, |range| {
-        access.commit_session_refresh_begin_batch_group(&items[range], state.completion_control())
+        let committed = tracedecay_runtime_core::erase_send!(
+            access.commit_session_refresh_begin_batch_group(
+                &items[range],
+                state.completion_control(),
+            ),
+            SessionStoreResult<Vec<SessionStoreResult<SessionRefreshBeginBatchOutcomeV1>>>
+        );
+        committed
     })
     .await
     {
@@ -1161,7 +1194,11 @@ async fn drain_staged_completions<'a>(
     let receipt_control = state.completion_control();
     let receipt_outcomes =
         match commit_refresh_groups(projections.len(), policy.operation_deadline, |range| {
-            access.record_relation_receipts_group(&projections[range], &receipt_control)
+            let recorded = tracedecay_runtime_core::erase_send!(
+                access.record_relation_receipts_group(&projections[range], &receipt_control),
+                SessionStoreResult<Vec<SessionStoreResult<tracedecay_graph_db::GraphWatermark>>>
+            );
+            recorded
         })
         .await
         {
@@ -1232,8 +1269,16 @@ async fn drain_staged_completions<'a>(
         .collect::<Vec<_>>();
     let outcomes =
         match commit_refresh_groups(complete_items.len(), policy.operation_deadline, |range| {
-            access
-                .complete_session_refresh_group(&complete_items[range], state.completion_control())
+            let completed = tracedecay_runtime_core::erase_send!(
+                access.complete_session_refresh_group(
+                    &complete_items[range],
+                    state.completion_control(),
+                ),
+                SessionStoreResult<
+                    Vec<SessionStoreResult<tracedecay_store::SessionRefreshReceiptV1>>,
+                >
+            );
+            completed
         })
         .await
         {
@@ -1390,16 +1435,23 @@ async fn apply_prepared_refresh_effect(
 ) {
     match effect {
         SessionTemporalRefreshEffect::Projection { progress, batch } => {
-            match store
-                .commit_session_refresh_begin_batch(
-                    prepared.request.clone(),
-                    prepared.recovery.accepted_at(),
-                    progress,
-                    batch,
-                    state.completion_control(),
-                )
-                .await
-            {
+            let committed: Pin<
+                Box<
+                    dyn Future<
+                            Output = SessionStoreResult<
+                                tracedecay_session_temporal_store::SessionRefreshBeginBatchOutcomeV1,
+                            >,
+                        > + Send
+                        + '_,
+                >,
+            > = Box::pin(store.commit_session_refresh_begin_batch(
+                prepared.request.clone(),
+                prepared.recovery.accepted_at(),
+                progress,
+                batch,
+                state.completion_control(),
+            ));
+            match committed.await {
                 Ok(SessionRefreshBeginBatchOutcomeV1::Persisted { .. }) => {
                     prepared.disarm();
                     report.begun += 1;
@@ -1430,10 +1482,17 @@ async fn apply_prepared_refresh_effect(
         SessionTemporalRefreshEffect::Fail(request) => {
             // The durable failure marker needs an operation row: begin through
             // the committing path, then retire it like any durable refresh.
-            match store
-                .begin_or_join_session_refresh(prepared.request.clone())
-                .await
-            {
+            let begun: Pin<
+                Box<
+                    dyn Future<
+                            Output = SessionStoreResult<
+                                tracedecay_store::SessionRefreshBeginOrJoinReceiptV1,
+                            >,
+                        > + Send
+                        + '_,
+                >,
+            > = Box::pin(store.begin_or_join_session_refresh(prepared.request.clone()));
+            match begun.await {
                 Ok(receipt) => {
                     prepared.disarm();
                     match receipt.disposition() {
@@ -1578,11 +1637,19 @@ async fn project_running_refresh<'a>(
                         });
                     }
                     effect => {
-                        apply_prepared_refresh_effect(store, state, prepared, effect, report)
-                            .await;
+                        let applied: Pin<Box<dyn Future<Output = ()> + Send + '_>> = Box::pin(
+                            apply_prepared_refresh_effect(
+                                store, state, prepared, effect, report,
+                            ),
+                        );
+                        applied.await;
                     }
                 },
-                None => apply_refresh_effect(store, state, &recovery, effect, report).await,
+                None => {
+                    let applied: Pin<Box<dyn Future<Output = ()> + Send + '_>> =
+                        Box::pin(apply_refresh_effect(store, state, &recovery, effect, report));
+                    applied.await;
+                }
             }
         } => {}
     }
@@ -1663,16 +1730,23 @@ pub async fn run_session_temporal_refresh_pass(
     if state.cancelled.load(Ordering::Acquire) {
         return report;
     }
-    let mut prepared = process_refresh_begin_requests(
-        &store,
-        state,
-        policy.max_begin_requests_per_pass,
-        &mut report,
-    )
-    .await;
-    let Some((mut recoveries, admitted, discovery_deferred)) =
-        recoveries_for_pass(database, &store, state, policy, &mut report).await
-    else {
+    let begins: Pin<Box<dyn Future<Output = Vec<PreparedSessionRefresh<'_>>> + Send + '_>> =
+        Box::pin(process_refresh_begin_requests(
+            &store,
+            state,
+            policy.max_begin_requests_per_pass,
+            &mut report,
+        ));
+    let mut prepared = begins.await;
+    let recovered = tracedecay_runtime_core::erase_send!(
+        recoveries_for_pass(database, &store, state, policy, &mut report,),
+        Option<(
+            Vec<SessionRefreshRecoveryV1>,
+            Vec<PreparedSessionRefresh<'_>>,
+            bool,
+        )>
+    );
+    let Some((mut recoveries, admitted, discovery_deferred)) = recovered.await else {
         return report;
     };
     prepared.extend(admitted);
@@ -1741,29 +1815,31 @@ pub async fn run_session_temporal_refresh_pass(
         }
         match recovery.restart_state() {
             SessionRefreshRestartStateV1::ReadyToComplete => {
-                stage_ready_completion(
-                    &access,
-                    &store,
-                    state,
-                    policy,
-                    recovery,
-                    &mut drain,
-                    &mut report,
-                )
-                .await;
+                let staged: Pin<Box<dyn Future<Output = ()> + Send + '_>> =
+                    Box::pin(stage_ready_completion(
+                        &access,
+                        &store,
+                        state,
+                        policy,
+                        recovery,
+                        &mut drain,
+                        &mut report,
+                    ));
+                staged.await;
             }
             SessionRefreshRestartStateV1::BeginProjection
             | SessionRefreshRestartStateV1::ResumeProjection { .. } => {
-                project_running_refresh(
-                    &context,
-                    ProjectionWorkItem {
-                        recovery,
-                        prepared: prepared_by_key.remove(&operation),
-                    },
-                    &mut drain,
-                    &mut report,
-                )
-                .await;
+                let projected: Pin<Box<dyn Future<Output = ()> + Send + '_>> =
+                    Box::pin(project_running_refresh(
+                        &context,
+                        ProjectionWorkItem {
+                            recovery,
+                            prepared: prepared_by_key.remove(&operation),
+                        },
+                        &mut drain,
+                        &mut report,
+                    ));
+                projected.await;
             }
         }
         selection.complete(&operation);
@@ -1771,17 +1847,21 @@ pub async fn run_session_temporal_refresh_pass(
             break;
         }
     }
-    commit_deferred_begins(&access, state, policy, drain.deferred_begins, &mut report).await;
-    drain_staged_completions(
-        database,
-        &access,
-        &store,
-        state,
-        policy,
-        drain.staged_completions,
-        &mut report,
-    )
-    .await;
+    let committed: Pin<Box<dyn Future<Output = ()> + Send + '_>> = Box::pin(
+        commit_deferred_begins(&access, state, policy, drain.deferred_begins, &mut report),
+    );
+    committed.await;
+    let drained: Pin<Box<dyn Future<Output = ()> + Send + '_>> =
+        Box::pin(drain_staged_completions(
+            database,
+            &access,
+            &store,
+            state,
+            policy,
+            drain.staged_completions,
+            &mut report,
+        ));
+    drained.await;
     let terminal = report
         .completed
         .saturating_add(report.failed)

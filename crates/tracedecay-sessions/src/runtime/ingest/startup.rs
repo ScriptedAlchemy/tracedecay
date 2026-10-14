@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
+use tracedecay_runtime_core::erase_send;
+
 use asupersync::channel::watch;
 
 use super::authority::SessionIngestAuthority;
@@ -185,7 +187,6 @@ pub async fn ingest_user_global_sources_for_startup_with_db_and_codex_state<
     .await
 }
 
-#[tracing::instrument(name = "sessions.ingest.startup", level = "trace", skip_all)]
 async fn ingest_user_global_sources_for_startup_inner<A: SessionIngestAuthority>(
     registered: (&BrainId, &UserProfileId, &A),
     registry_db: &A,
@@ -220,7 +221,11 @@ async fn ingest_user_global_sources_for_startup_inner<A: SessionIngestAuthority>
             vec![TranscriptCatchUpFailure::pass_cancelled()],
         );
     }
-    let Some(roots) = registered_project_roots_from(registry_db).await else {
+    let roots = erase_send!(
+        registered_project_roots_from(registry_db),
+        Option<Vec<PathBuf>>
+    );
+    let Some(roots) = roots.await else {
         return TranscriptIngestOutcome::new(
             TranscriptIngestStats::default(),
             vec![TranscriptCatchUpFailure::new(
@@ -240,29 +245,34 @@ async fn ingest_user_global_sources_for_startup_inner<A: SessionIngestAuthority>
     let (brain_id, profile_id, registered) = registered;
     let outcome = match codex_discovery {
         Some((hub, consumer)) => {
-            ingest_user_global_sources_for_provider_with_roots_bounded_and_codex_state(
-                (brain_id, profile_id, registered),
-                profile_root,
-                None,
-                roots,
-                default_ingest_pass_bounds(),
-                cancellation,
-                (hub, consumer),
-            )
-            .await
-            .into_transcript_outcome()
+            let ingested = erase_send!(
+                ingest_user_global_sources_for_provider_with_roots_bounded_and_codex_state(
+                    (brain_id, profile_id, registered),
+                    profile_root,
+                    None,
+                    roots,
+                    default_ingest_pass_bounds(),
+                    cancellation,
+                    (hub, consumer),
+                ),
+                IngestPassOutcome
+            );
+            ingested.await.into_transcript_outcome()
         }
         None => {
-            ingest_user_global_sources_for_provider_with_roots_and_cancellation(
-                brain_id,
-                profile_id,
-                registered,
-                profile_root,
-                None,
-                roots,
-                cancellation,
-            )
-            .await
+            let ingested = erase_send!(
+                ingest_user_global_sources_for_provider_with_roots_and_cancellation(
+                    brain_id,
+                    profile_id,
+                    registered,
+                    profile_root,
+                    None,
+                    roots,
+                    cancellation,
+                ),
+                TranscriptIngestOutcome
+            );
+            ingested.await
         }
     };
     if !outcome.is_success() {

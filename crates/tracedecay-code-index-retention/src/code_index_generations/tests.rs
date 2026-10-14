@@ -2056,16 +2056,13 @@ fn failed_receipt_commit_withdraws_the_graph_replay_pool_exposure() {
         "rollback must withdraw the graph replay pool exposure"
     );
     let queued_releases = store.path().join(GRAPH_REPLAY_RELEASE_QUEUE_DIRECTORY);
-    let queued = std::fs::read_dir(&queued_releases)
-        .map(|entries| entries.count())
-        .unwrap_or(0);
+    let queued = std::fs::read_dir(&queued_releases).map_or(0, |entries| entries.count());
     assert_eq!(queued, 0, "rollback must remove the queued release events");
 }
 
 fn queued_release_count(store_root: &Path) -> usize {
     std::fs::read_dir(store_root.join(GRAPH_REPLAY_RELEASE_QUEUE_DIRECTORY))
-        .map(|entries| entries.count())
-        .unwrap_or(0)
+        .map_or(0, |entries| entries.count())
 }
 
 #[test]

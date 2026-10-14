@@ -1158,8 +1158,7 @@ fn doctor_check_permissions_json(dc: &mut DoctorCounters, home: &Path) {
 
     let installed: Vec<&str> = settings["permissions"]["allow"]
         .as_array()
-        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
-        .unwrap_or_default();
+        .map_or_default(|arr| arr.iter().filter_map(|v| v.as_str()).collect());
 
     // The plugin-namespace entries are the ones the plugin MCP server actually
     // matches against; without coverage every call to a tool prompts
@@ -1241,8 +1240,7 @@ pub fn check_install_stale(home: &Path) {
 fn warn_missing_permissions(settings: &serde_json::Value) {
     let installed: Vec<&str> = settings["permissions"]["allow"]
         .as_array()
-        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
-        .unwrap_or_default();
+        .map_or_default(|arr| arr.iter().filter_map(|v| v.as_str()).collect());
 
     // Check the plugin namespace, the entries the plugin MCP server matches.
     // Missing coverage of `mcp__plugin_tracedecay_graph__*` is exactly what

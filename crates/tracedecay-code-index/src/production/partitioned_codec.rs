@@ -2391,42 +2391,33 @@ impl CodeIndexPublishedGenerationV1 {
                 "sealed segment reuse parent does not match the generation manifest".to_owned(),
             ));
         }
-        let parent_segments = parent
-            .as_ref()
-            .map(|parent| {
-                parent
-                    .file_segments
-                    .iter()
-                    .filter_map(|descriptor| {
-                        parent
-                            .snapshot
-                            .files
-                            .get(descriptor.file_key as usize)
-                            .map(|file| (&file.file_occurrence_id, (file, descriptor)))
-                    })
-                    .collect::<HashMap<_, _>>()
-            })
-            .unwrap_or_default();
-        let reusable_graph_page_digests = parent
-            .as_ref()
-            .map(|parent| {
-                parent
-                    .code_graph_pages
-                    .iter()
-                    .map(|page| page.page_digest.clone())
-                    .collect::<BTreeSet<_>>()
-            })
-            .unwrap_or_default();
-        let reusable_index_digests = parent
-            .as_ref()
-            .map(|parent| {
-                parent
-                    .resolution_index
-                    .segments()
-                    .map(|page| page.segment_digest.clone())
-                    .collect::<BTreeSet<_>>()
-            })
-            .unwrap_or_default();
+        let parent_segments = parent.as_ref().map_or_default(|parent| {
+            parent
+                .file_segments
+                .iter()
+                .filter_map(|descriptor| {
+                    parent
+                        .snapshot
+                        .files
+                        .get(descriptor.file_key as usize)
+                        .map(|file| (&file.file_occurrence_id, (file, descriptor)))
+                })
+                .collect::<HashMap<_, _>>()
+        });
+        let reusable_graph_page_digests = parent.as_ref().map_or_default(|parent| {
+            parent
+                .code_graph_pages
+                .iter()
+                .map(|page| page.page_digest.clone())
+                .collect::<BTreeSet<_>>()
+        });
+        let reusable_index_digests = parent.as_ref().map_or_default(|parent| {
+            parent
+                .resolution_index
+                .segments()
+                .map(|page| page.segment_digest.clone())
+                .collect::<BTreeSet<_>>()
+        });
         let file_keys = snapshot_file_keys(
             self.snapshot
                 .files
@@ -2537,16 +2528,13 @@ impl CodeIndexPublishedGenerationV1 {
             }
         }
         file_segments.sort_by_key(|segment| segment.file_key);
-        let reusable_file_evidence_digests = parent
-            .as_ref()
-            .map(|parent| {
-                parent
-                    .file_evidence
-                    .iter()
-                    .map(|evidence| evidence.segment_digest.clone())
-                    .collect::<BTreeSet<_>>()
-            })
-            .unwrap_or_default();
+        let reusable_file_evidence_digests = parent.as_ref().map_or_default(|parent| {
+            parent
+                .file_evidence
+                .iter()
+                .map(|evidence| evidence.segment_digest.clone())
+                .collect::<BTreeSet<_>>()
+        });
         let (lineage_prior_generation, file_evidence) = {
             let _span = tracing::trace_span!("code_index.sealed_encode.file_evidence").entered();
             self.encode_file_evidence(

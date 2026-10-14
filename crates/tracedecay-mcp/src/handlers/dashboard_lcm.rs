@@ -412,16 +412,13 @@ impl DashboardLcmReadAdapter {
                 // anchor to hydrate from: the raw-store stats carry the
                 // session's transcript counts instead.
                 (Some(_), Some(raw_stats)) => {
-                    let session_stats = raw_stats
-                        .first()
-                        .map(|stats| {
-                            (
-                                stats.raw_message_count,
-                                stats.unpublished_message_count,
-                                stats.summary_node_count,
-                            )
-                        })
-                        .unwrap_or_default();
+                    let session_stats = raw_stats.first().map_or_default(|stats| {
+                        (
+                            stats.raw_message_count,
+                            stats.unpublished_message_count,
+                            stats.summary_node_count,
+                        )
+                    });
                     DashboardLcmCanonicalStatsV1 {
                         message_count: session_stats.0,
                         unpublished_message_count: session_stats.1,

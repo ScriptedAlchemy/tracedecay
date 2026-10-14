@@ -572,10 +572,10 @@ impl ApplicationProblemRecord {
             .as_ref()
             .and_then(ApplicationProblemDetailV1::retry_after_millis);
         let committed_receipt = source.committed_receipt().cloned();
-        let code = diagnostic
-            .as_ref()
-            .map(|diagnostic| diagnostic.code.clone())
-            .unwrap_or_else(|| source.canonical_code().to_owned());
+        let code = diagnostic.as_ref().map_or_else(
+            || source.canonical_code().to_owned(),
+            |diagnostic| diagnostic.code.clone(),
+        );
         let record = Self {
             revision: APPLICATION_PROBLEM_REVISION,
             kind,
@@ -637,11 +637,10 @@ impl ApplicationProblemRecord {
         }
 
         if self.code
-            != self
-                .source
-                .diagnostic()
-                .map(|diagnostic| diagnostic.code.as_str())
-                .unwrap_or_else(|| self.source.canonical_code())
+            != self.source.diagnostic().map_or_else(
+                || self.source.canonical_code(),
+                |diagnostic| diagnostic.code.as_str(),
+            )
             || self.message != self.source.safe_message()
             || self.diagnostic.as_ref() != self.source.diagnostic()
             || self.detail.as_ref() != self.source.detail()

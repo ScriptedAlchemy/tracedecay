@@ -667,9 +667,18 @@ jobs:
           ref: ${{ needs.validate-release.outputs.source_sha }}
           persist-credentials: false
 
+      # rust-toolchain.toml is the only compiler. A floating stable channel
+      # would rebuild the SDK conformance daemon on a different rustc than
+      # the release binaries.
+      - name: Resolve pinned toolchain
+        id: rust-toolchain
+        shell: bash
+        run: |
+          python3 -c 'import pathlib, tomllib; print("toolchain=" + tomllib.loads(pathlib.Path("rust-toolchain.toml").read_text(encoding="utf-8"))["toolchain"]["channel"])' >> "$GITHUB_OUTPUT"
+
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
-          toolchain: stable
+          toolchain: ${{ steps.rust-toolchain.outputs.toolchain }}
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:

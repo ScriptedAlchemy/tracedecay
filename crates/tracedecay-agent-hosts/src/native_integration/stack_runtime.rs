@@ -792,6 +792,25 @@ async fn drain_loop(coordinator: Arc<DaemonGitHubStackCoordinatorV1>, ports: Sta
     }
 }
 
+// A `BTreeMap` of these runtimes proves the native service before `Send`
+// bottoms out (rust-lang/rust#159228). Each field is checked on its own.
+unsafe impl Send for DaemonGitHubStackRuntimeV1 {}
+unsafe impl Sync for DaemonGitHubStackRuntimeV1 {}
+
+const _: fn(&DaemonGitHubStackRuntimeV1) = |value| {
+    fn assert_send_sync<T: Send + Sync>(_: &T) {}
+    let DaemonGitHubStackRuntimeV1 {
+        scope,
+        coordinator,
+        ports,
+        tick_task,
+    } = value;
+    assert_send_sync(scope);
+    assert_send_sync(coordinator);
+    assert_send_sync(ports);
+    assert_send_sync(tick_task);
+};
+
 impl DaemonGitHubStackRuntimeV1 {
     #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(

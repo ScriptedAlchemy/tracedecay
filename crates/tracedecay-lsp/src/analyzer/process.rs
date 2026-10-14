@@ -190,8 +190,7 @@ impl AnalyzerProcess {
     pub(super) fn stderr(&self) -> String {
         self.stderr
             .lock()
-            .map(|captured| String::from_utf8_lossy(&captured).trim().to_owned())
-            .unwrap_or_default()
+            .map_or_default(|captured| String::from_utf8_lossy(&captured).trim().to_owned())
     }
 }
 

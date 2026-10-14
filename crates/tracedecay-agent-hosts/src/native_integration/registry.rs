@@ -164,6 +164,33 @@ pub struct DaemonNativeIntegrationOwner {
     stack_runtimes: Arc<Mutex<BTreeMap<ManifestDigest, Arc<DaemonGitHubStackRuntimeV1>>>>,
 }
 
+// The stack-runtime map's `Send` proof walks the native coordinator past the
+// recursion limit (rust-lang/rust#159228). Each field is checked on its own.
+unsafe impl Send for DaemonNativeIntegrationOwner {}
+unsafe impl Sync for DaemonNativeIntegrationOwner {}
+
+const _: fn(&DaemonNativeIntegrationOwner) = |value| {
+    fn assert_send_sync<T: Send + Sync>(_: &T) {}
+    let DaemonNativeIntegrationOwner {
+        project_id,
+        repository_id,
+        service,
+        snapshots,
+        worktrees,
+        store,
+        scope_sets,
+        stack_runtimes,
+    } = value;
+    assert_send_sync(project_id);
+    assert_send_sync(repository_id);
+    assert_send_sync(service);
+    assert_send_sync(snapshots);
+    assert_send_sync(worktrees);
+    assert_send_sync(store);
+    assert_send_sync(scope_sets);
+    assert_send_sync(stack_runtimes);
+};
+
 impl DaemonNativeIntegrationOwner {
     pub fn service(&self) -> &DaemonProjectNativeIntegrationService {
         &self.service

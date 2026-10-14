@@ -222,8 +222,7 @@ fn payload_dir_holds(storage_root: &std::path::Path, needle: &str) -> bool {
     };
     entries.filter_map(Result::ok).any(|entry| {
         std::fs::read(entry.path())
-            .map(|bytes| String::from_utf8_lossy(&bytes).contains(needle))
-            .unwrap_or(false)
+            .is_ok_and(|bytes| String::from_utf8_lossy(&bytes).contains(needle))
     })
 }
 

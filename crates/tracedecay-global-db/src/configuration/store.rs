@@ -1,5 +1,8 @@
 //! `SQLite` persistence behind the final configuration control plane.
 
+use std::future::Future;
+use std::pin::Pin;
+
 use super::contracts::{
     ActivationDriftV1, AuthorizedActor, CONFIGURATION_AUDIT_PAGE_LIMIT,
     ComponentConfigurationState, ConfigurationAuditPage, ConfigurationAuditQuery,
@@ -378,7 +381,13 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
             .begin_write_transaction()
             .await
             .map_err(|_| ConfigurationError::Unavailable)?;
-        let outcome = async {
+        let outcome: Pin<
+            Box<
+                dyn Future<Output = Result<ConfigurationCurrentStateV1, ConfigurationError>>
+                    + Send
+                    + '_,
+            >,
+        > = Box::pin(async {
             let current = current_state_from_transaction(&transaction).await?;
             if &current.revision_id != expected_revision_id {
                 return Err(ConfigurationError::RevisionConflict);
@@ -511,8 +520,8 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 revision_id: revision.revision_id,
                 snapshot: revision.snapshot,
             })
-        }
-        .await;
+        });
+        let outcome = outcome.await;
         match outcome {
             Ok(state) => {
                 transaction

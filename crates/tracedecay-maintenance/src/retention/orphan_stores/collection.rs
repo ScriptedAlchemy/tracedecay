@@ -2,7 +2,7 @@
 
 use std::future::{Future, poll_fn};
 use std::path::{Path, PathBuf};
-use std::pin::pin;
+use std::pin::{Pin, pin};
 use std::task::Poll;
 use std::time::Instant;
 
@@ -717,7 +717,10 @@ pub(super) async fn check_store_durable_memory(
     match durable_database_inventory(manifest_bytes, store_relpath, control) {
         DurableDatabaseInventoryV1::Interrupted => DurableMemoryCheck::Interrupted,
         DurableDatabaseInventoryV1::Resolved(relpath) => {
-            check_durable_memory_rows(profile_root, &relpath, scratch_root, control).await
+            let checked: Pin<Box<dyn Future<Output = DurableMemoryCheck> + Send + '_>> = Box::pin(
+                check_durable_memory_rows(profile_root, &relpath, scratch_root, control),
+            );
+            checked.await
         }
         DurableDatabaseInventoryV1::Unverifiable => DurableMemoryCheck::Unverifiable,
     }
@@ -903,7 +906,15 @@ pub(crate) async fn execute_unregistered_collection_controlled(
             outcome.completion = completion;
             break;
         }
-        let step = collect_unregistered_finding(db, finding, profile_root, control).await?;
+        let stepped: Pin<
+            Box<dyn Future<Output = tracedecay_domain::errors::Result<FindingStep>> + Send + '_>,
+        > = Box::pin(collect_unregistered_finding(
+            db,
+            finding,
+            profile_root,
+            control,
+        ));
+        let step = stepped.await?;
         let store = CollectedStore {
             project_id: finding.project_dir_name.clone(),
             store_id: finding.project_dir_name.clone(),
@@ -939,10 +950,10 @@ pub(super) async fn collect_unregistered_finding(
     ) {
         return Ok(step);
     }
-    match control
-        .race(db.code_project_exists(&finding.project_dir_name))
-        .await
-    {
+    let registered: Pin<
+        Box<dyn Future<Output = tracedecay_domain::errors::Result<bool>> + Send + '_>,
+    > = Box::pin(db.code_project_exists(&finding.project_dir_name));
+    match control.race(registered).await {
         Ok(exists) => {
             if exists? {
                 return Ok(FindingStep::Refused(CollectionFailureKind::RegistryChanged));
@@ -963,18 +974,21 @@ pub(super) async fn collect_unregistered_finding(
         .join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME);
     let check = match read_regular_file(&manifest_path) {
         RegularFileSnapshot::Bytes(manifest_bytes) => {
-            check_store_durable_memory(
-                profile_root,
-                &finding.data_root,
-                Some(&manifest_bytes),
-                &scratch_root,
-                control,
-            )
-            .await
+            let checked: Pin<Box<dyn Future<Output = DurableMemoryCheck> + Send + '_>> =
+                Box::pin(check_store_durable_memory(
+                    profile_root,
+                    &finding.data_root,
+                    Some(&manifest_bytes),
+                    &scratch_root,
+                    control,
+                ));
+            checked.await
         }
         RegularFileSnapshot::Missing => {
-            check_manifestless_store_durable_memory(&finding.data_root, &scratch_root, control)
-                .await
+            let checked: Pin<Box<dyn Future<Output = DurableMemoryCheck> + Send + '_>> = Box::pin(
+                check_manifestless_store_durable_memory(&finding.data_root, &scratch_root, control),
+            );
+            checked.await
         }
         RegularFileSnapshot::Unverifiable => DurableMemoryCheck::Unverifiable,
     };
@@ -1004,7 +1018,17 @@ pub(super) async fn collect_unregistered_finding(
 
     // The writer transaction orders this final absence proof after any
     // in-flight registration commit.
-    let transaction = match control.race(db.begin_write_transaction()).await {
+    let begun: Pin<
+        Box<
+            dyn Future<
+                    Output = tracedecay_domain::errors::Result<
+                        tracedecay_global_db::RegisteredGlobalDbWriteTransaction<'_>,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > = Box::pin(db.begin_write_transaction());
+    let transaction = match control.race(begun).await {
         Ok(transaction) => transaction?,
         Err(completion) => return Ok(FindingStep::Interrupted(completion)),
     };
@@ -1063,7 +1087,10 @@ async fn check_manifestless_store_durable_memory(
         if control.completion().is_some() {
             return DurableMemoryCheck::Interrupted;
         }
-        match check_durable_memory_rows(data_root, &relpath, scratch_root, control).await {
+        let checked: Pin<Box<dyn Future<Output = DurableMemoryCheck> + Send + '_>> = Box::pin(
+            check_durable_memory_rows(data_root, &relpath, scratch_root, control),
+        );
+        match checked.await {
             DurableMemoryCheck::Empty => {}
             protected => return protected,
         }

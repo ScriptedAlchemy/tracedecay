@@ -1,3 +1,6 @@
+use std::future::Future;
+use std::pin::Pin;
+
 use super::*;
 
 const GIT_SYNC_COMMAND_DEADLINE: Duration = Duration::from_secs(5);
@@ -431,10 +434,15 @@ impl SessionSyncProjectContext {
             ("project", project_sessions.as_ref()),
             ("profile", self.user_sessions.as_ref()),
         ] {
-            for (source_json, scope_json, committed_cursor_json) in database
-                .list_session_sync_source_frontiers()
-                .await
-                .map_err(store_error)?
+            let listed = tracedecay_runtime_core::erase_send!(
+                database.list_session_sync_source_frontiers(),
+                std::result::Result<
+                    Vec<(String, String, String)>,
+                    tracedecay_domain::TraceDecayError,
+                >
+            );
+            for (source_json, scope_json, committed_cursor_json) in
+                listed.await.map_err(store_error)?
             {
                 frontiers.push(SessionSyncSourceFrontierV1 {
                     store_scope: store_scope.to_owned(),
@@ -480,9 +488,9 @@ impl SessionSyncProjectContext {
         .await
         .map_err(store_error)?;
         Ok(
-            git_history_frontier_from_meta(change_sequence, source_rowid)
-                .map(|frontier| vec![git_history_source_frontier(&self.project_id, frontier)])
-                .unwrap_or_default(),
+            git_history_frontier_from_meta(change_sequence, source_rowid).map_or_default(
+                |frontier| vec![git_history_source_frontier(&self.project_id, frontier)],
+            ),
         )
     }
 
@@ -497,18 +505,27 @@ impl SessionSyncProjectContext {
             Ok(observation) => observation,
             Err(interruption) => return SessionSyncWorkResult::Interrupted(interruption),
         };
+        let stats = import_transcript_stats(tracedecay_sessions::TranscriptIngestStats::default());
+        let coverage = observation.coverage.clone();
+        let persisted: Pin<
+            Box<
+                dyn Future<
+                        Output = tracedecay_domain::errors::Result<
+                            Vec<SessionSyncSourceFrontierV1>,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > = Box::pin(service.persist_progress(
+            self,
+            &project_sessions,
+            journal_key,
+            stats.clone(),
+            coverage.clone(),
+        ));
         let pass = async {
-            let stats =
-                import_transcript_stats(tracedecay_sessions::TranscriptIngestStats::default());
-            let coverage = observation.coverage.clone();
             let source_frontiers = tracing::Instrument::instrument(
-                service.persist_progress(
-                    self,
-                    &project_sessions,
-                    journal_key,
-                    stats.clone(),
-                    coverage.clone(),
-                ),
+                persisted,
                 tracing::trace_span!("daemon.session_sync.combined_frontier_persist"),
             )
             .await;
@@ -565,7 +582,17 @@ impl SessionSyncProjectContext {
             dry_run: options.dry_run(),
             project_root: Some(self.project_root.clone()),
         };
-        let backfill = store.run_bounded_history_index_page(&backfill_options, &control);
+        let backfill: Pin<
+            Box<
+                dyn Future<
+                        Output = Result<
+                            tracedecay_sessions::runtime::git_correlation::BoundedBackfillOutcome,
+                            tracedecay_sessions::runtime::git_correlation::GitCorrelationError,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > = Box::pin(store.run_bounded_history_index_page(&backfill_options, &control));
         tokio::pin!(backfill);
         let (result, mut requested_interruption) = tokio::select! {
             biased;

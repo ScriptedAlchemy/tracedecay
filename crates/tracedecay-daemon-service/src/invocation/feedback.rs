@@ -481,19 +481,17 @@ pub fn advisory_cycle_invocation_result(
                 | OperationTermination::Failed
                 | OperationTermination::EffectUnknown => None,
             };
-            let omissions = omission_reason
-                .map(|reason| {
-                    vec![Omission {
-                        domain: EvidenceDomain::Diagnostic,
-                        count: cycle
-                            .execution
-                            .cycle
-                            .omitted_findings
-                            .max(u64::from(returned == total)),
-                        reason,
-                    }]
-                })
-                .unwrap_or_default();
+            let omissions = omission_reason.map_or_default(|reason| {
+                vec![Omission {
+                    domain: EvidenceDomain::Diagnostic,
+                    count: cycle
+                        .execution
+                        .cycle
+                        .omitted_findings
+                        .max(u64::from(returned == total)),
+                    reason,
+                }]
+            });
             let finding_handles = cycle
                 .finding_handles
                 .iter()
@@ -733,15 +731,13 @@ pub fn feedback_proximity_invocation_result(
     execution
         .validate()
         .map_err(|_| feedback_proximity_contract_problem())?;
-    let omissions = omission_reason
-        .map(|reason| {
-            vec![Omission {
-                domain: EvidenceDomain::Graph,
-                count: 1,
-                reason,
-            }]
-        })
-        .unwrap_or_default();
+    let omissions = omission_reason.map_or_default(|reason| {
+        vec![Omission {
+            domain: EvidenceDomain::Graph,
+            count: 1,
+            reason,
+        }]
+    });
     let payload =
         serde_json::to_value(result).map_err(|_| feedback_proximity_contract_problem())?;
     Ok(DaemonFeedbackInvocationResult {

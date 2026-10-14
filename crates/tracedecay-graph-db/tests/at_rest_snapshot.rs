@@ -326,9 +326,7 @@ fn at_rest_reopen_probe() {
     let hwm_closed = peak_rss_kib().unwrap();
     let rss_closed = live_rss_kib().unwrap();
 
-    let on_disk = std::fs::metadata(root.join("graph.grafeo"))
-        .map(|meta| meta.len())
-        .unwrap_or(0);
+    let on_disk = std::fs::metadata(root.join("graph.grafeo")).map_or(0, |meta| meta.len());
 
     // ---- activation path ----
     let open_started = Instant::now();

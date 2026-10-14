@@ -1436,12 +1436,10 @@ impl GoExtractor {
     ) -> GoMethodSignatureV1 {
         let name = node
             .child_by_field_name("name")
-            .map(|name| state.node_text(name).to_string())
-            .unwrap_or_default();
+            .map_or_default(|name| state.node_text(name).to_string());
         let params = node
             .child_by_field_name("parameters")
-            .map(|list| Self::parameter_types(state, list, type_params))
-            .unwrap_or_default();
+            .map_or_default(|list| Self::parameter_types(state, list, type_params));
         let results = match node.child_by_field_name("result") {
             Some(list) if list.kind() == "parameter_list" => {
                 Self::parameter_types(state, list, type_params)

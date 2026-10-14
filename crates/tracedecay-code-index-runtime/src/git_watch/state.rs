@@ -160,6 +160,74 @@ pub struct WatchState {
     pub retirement_probe: RetirementRaceProbe,
 }
 
+// Futures that capture a watcher prove this state through the maintenance
+// coordinator. That walk exceeds the recursion limit (rust-lang/rust#159228);
+// each field is checked on its own.
+unsafe impl Send for WatchState {}
+unsafe impl Sync for WatchState {}
+
+const _: fn(&WatchState) = |value| {
+    fn assert_send_sync<T: Send + Sync>(_: &T) {}
+    let WatchState {
+        common_dir,
+        ownership,
+        dirty,
+        reconciliation_pending,
+        wake,
+        reconfigure,
+        retry_not_before,
+        retry_backoff_ms,
+        maintenance,
+        health,
+        task,
+        retirement,
+        #[cfg(test)]
+        retained_tasks,
+        #[cfg(test)]
+        entered_debounce,
+        #[cfg(test)]
+        heartbeat,
+        #[cfg(test)]
+        drained_plans,
+        #[cfg(test)]
+        plan_drained,
+        #[cfg(test)]
+        operation_held,
+        #[cfg(test)]
+        operation_scan_probe,
+        #[cfg(test)]
+        retirement_probe,
+    } = value;
+    assert_send_sync(common_dir);
+    assert_send_sync(ownership);
+    assert_send_sync(dirty);
+    assert_send_sync(reconciliation_pending);
+    assert_send_sync(wake);
+    assert_send_sync(reconfigure);
+    assert_send_sync(retry_not_before);
+    assert_send_sync(retry_backoff_ms);
+    assert_send_sync(maintenance);
+    assert_send_sync(health);
+    assert_send_sync(task);
+    assert_send_sync(retirement);
+    #[cfg(test)]
+    assert_send_sync(retained_tasks);
+    #[cfg(test)]
+    assert_send_sync(entered_debounce);
+    #[cfg(test)]
+    assert_send_sync(heartbeat);
+    #[cfg(test)]
+    assert_send_sync(drained_plans);
+    #[cfg(test)]
+    assert_send_sync(plan_drained);
+    #[cfg(test)]
+    assert_send_sync(operation_held);
+    #[cfg(test)]
+    assert_send_sync(operation_scan_probe);
+    #[cfg(test)]
+    assert_send_sync(retirement_probe);
+};
+
 impl WatchState {
     #[cfg(test)]
     pub fn new(

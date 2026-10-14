@@ -2498,8 +2498,7 @@ fn materialize_present_file(
         .chunks
         .chunks
         .first()
-        .map(|chunk| chunk.sensitivity.level)
-        .unwrap_or(SensitivityLevelV1::Public);
+        .map_or(SensitivityLevelV1::Public, |chunk| chunk.sensitivity.level);
     let physical_reuse_key = physical_reuse_key(config, file, descriptor, sensitivity)?;
     let reused = u64::try_from(carried.artifacts.clone_bodies.len()).unwrap_or(u64::MAX);
     physical_artifacts.record_clone_payloads(reused, 0);

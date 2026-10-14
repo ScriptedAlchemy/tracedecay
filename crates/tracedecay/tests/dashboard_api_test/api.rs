@@ -975,7 +975,7 @@ fn lcm_large_session_pages_preserve_continuation_and_timeline_counts() {
         let cursor = first["payload"]["next_cursor"]
             .as_str()
             .expect("bounded page continuation");
-        let second_url = url::Url::parse_with_params(&base, &[("cursor", cursor)]).unwrap();
+        let second_url = url::Url::parse_with_params(&base, [("cursor", cursor)]).unwrap();
         let (status, second) = get_json(&agent, second_url.as_str());
         assert_eq!(status, 200);
         let second_messages = second["payload"]["messages"]

@@ -32,8 +32,7 @@ impl<'s> ExtractionState<'s> {
         let end = node
             .child_by_field_name("body")
             .or_else(|| find_direct_child_by_kind(node, "compound_statement"))
-            .map(|body| body.start_byte())
-            .unwrap_or_else(|| node.end_byte());
+            .map_or_else(|| node.end_byte(), |body| body.start_byte());
         self.text_before(node, end)
             .trim()
             .trim_end_matches(';')

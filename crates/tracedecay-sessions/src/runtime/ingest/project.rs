@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use tracedecay_runtime_core::erase_send;
 
 use super::authority::{IngestAdmissionBinding, SessionIngestAuthority};
 use crate::observation::ObservationCancellation;
@@ -185,7 +186,6 @@ async fn plan_project_provider_rotation<S: crate::runtime::store_port::Transcrip
 }
 
 #[allow(clippy::too_many_arguments)]
-#[tracing::instrument(name = "sessions.ingest.project", level = "trace", skip_all)]
 async fn ingest_project_sources_for_provider_bounded_inner<A: SessionIngestAuthority>(
     registered: (&BrainId, &UserProfileId, &A),
     project_root: &Path,
@@ -258,13 +258,14 @@ async fn ingest_project_sources_for_provider_bounded_inner<A: SessionIngestAutho
         })
         .collect();
     let transcript_store = registered.transcript_store();
-    let (rotation_frontier, plan) =
-        match plan_project_provider_rotation(&transcript_store, provider, selected.len(), bounds)
-            .await
-        {
-            Ok(planned) => planned,
-            Err(failure) => return IngestPassOutcome::failed(failure).into_transcript_outcome(),
-        };
+    let planned = erase_send!(
+        plan_project_provider_rotation(&transcript_store, provider, selected.len(), bounds),
+        Result<(Option<u64>, RoundRobinAdmission), TranscriptCatchUpFailure>
+    );
+    let (rotation_frontier, plan) = match planned.await {
+        Ok(planned) => planned,
+        Err(failure) => return IngestPassOutcome::failed(failure).into_transcript_outcome(),
+    };
     // File-transcript multi-source scheduling is retired: every catch-up
     // provider is observation/port driven. Start at the rotation plan's
     // coverage and fold provider-run backpressure onto that baseline.
@@ -332,13 +333,14 @@ async fn ingest_project_sources_for_provider_bounded_inner<A: SessionIngestAutho
     }
 
     if !cancelled {
-        match Box::pin(claude_observation::drain_projection_queue(
-            facade,
-            &scope,
-            cancellation,
-        ))
-        .await
-        {
+        let drained = erase_send!(
+            claude_observation::drain_projection_queue(facade, &scope, cancellation),
+            Result<
+                claude_observation::ClaudeObservationIngestStats,
+                claude_observation::ClaudeObservationIngestError,
+            >
+        );
+        match drained.await {
             Ok(projection_stats) => {
                 provider_runs.deferred_units = provider_runs
                     .deferred_units
@@ -390,8 +392,11 @@ async fn ingest_project_sources_for_provider_bounded_inner<A: SessionIngestAutho
             .push(TranscriptCatchUpFailure::pass_backpressured());
     }
     if !cancelled
-        && let Some(failure) =
-            ingest_project_workflow_runs(registered, &canonical_project_id, project_root).await
+        && let Some(failure) = erase_send!(
+            ingest_project_workflow_runs(registered, &canonical_project_id, project_root),
+            Option<TranscriptCatchUpFailure>
+        )
+        .await
     {
         provider_runs.failures.push(failure);
     }
@@ -401,11 +406,14 @@ async fn ingest_project_sources_for_provider_bounded_inner<A: SessionIngestAutho
     if let Some(frontier) = rotation_frontier
         && scheduling_write_required(source_outcome.coverage, attempted, cancelled)
     {
-        source_outcome.scheduling_state_written = write_ingest_frontier(
-            &transcript_store,
-            PROJECT_INGEST_PROVIDER_FRONTIER_KEY,
-            frontier,
-            attempted,
+        source_outcome.scheduling_state_written = erase_send!(
+            write_ingest_frontier(
+                &transcript_store,
+                PROJECT_INGEST_PROVIDER_FRONTIER_KEY,
+                frontier,
+                attempted,
+            ),
+            bool
         )
         .await;
         if !source_outcome.scheduling_state_written {

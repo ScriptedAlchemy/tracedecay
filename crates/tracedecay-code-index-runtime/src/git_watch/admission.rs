@@ -253,10 +253,13 @@ impl GitWatcher {
             {
                 break;
             }
-            match self
-                .ensure_watching_with_config(&project_root, &config)
-                .await
-            {
+            // Erased so the retry task's `Send` proof does not nest the whole
+            // admission (rust-lang/rust#159228).
+            let admitted = tracedecay_runtime_core::erase_send!(
+                self.ensure_watching_with_config(&project_root, &config),
+                GitWatcherAdmission
+            );
+            match admitted.await {
                 GitWatcherAdmission::IdentityUnavailable => {
                     backoff = (backoff * 2).min(RESTART_BACKOFF_MAX);
                 }

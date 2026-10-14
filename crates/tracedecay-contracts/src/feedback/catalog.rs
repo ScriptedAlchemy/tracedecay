@@ -500,8 +500,7 @@ mod tests {
     fn property_keys(body: &Value) -> Vec<&str> {
         let mut keys = body["properties"]
             .as_object()
-            .map(|properties| properties.keys().map(String::as_str).collect::<Vec<_>>())
-            .unwrap_or_default();
+            .map_or_default(|properties| properties.keys().map(String::as_str).collect::<Vec<_>>());
         keys.sort_unstable();
         keys
     }

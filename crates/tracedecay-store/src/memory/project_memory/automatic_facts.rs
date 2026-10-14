@@ -346,8 +346,9 @@ impl ProjectMemoryAutomaticFactApplyResultV1 {
         let (target_owner, target_fact_id) = receipt
             .effect()
             .applied_target()
-            .map(|target| (Some(target.owner()), Some(target.fact_id())))
-            .unwrap_or((None, None));
+            .map_or((None, None), |target| {
+                (Some(target.owner()), Some(target.fact_id()))
+            });
         canonical_sha256(&AutomaticFactDigestProjection {
             domain: "tracedecay.project-memory.automatic-fact-apply-result.v1",
             apply_id: receipt.apply_id(),

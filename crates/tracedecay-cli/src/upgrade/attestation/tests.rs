@@ -71,9 +71,7 @@ fn verify_served(
 ) -> (Result<String, AttestationRefusal>, Vec<String>) {
     let server = FakeGitHub::bind();
     let base = server.base.clone();
-    let responses = body
-        .map(|body| vec![(attestations_path(hex_digest), body)])
-        .unwrap_or_default();
+    let responses = body.map_or_default(|body| vec![(attestations_path(hex_digest), body)]);
     let requests = server.serve(responses);
     let provenance = ReleaseProvenance::for_release(&base, None, tag, is_beta);
     let outcome = verify_release_attestation(&provenance, digest(hex_digest));

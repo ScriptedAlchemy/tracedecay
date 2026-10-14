@@ -162,14 +162,14 @@ class SdkPublishWorkflowPolicyTests(unittest.TestCase):
         old = self.workflow_fragment(
             r"      - uses: dtolnay/rust-toolchain@[0-9a-f]{40} # stable\n"
             r"        with:\n"
-            r"          toolchain: stable",
+            r"          toolchain: \$\{\{ steps\.rust-toolchain\.outputs\.toolchain \}\}",
             missing="build-typescript rust-toolchain pin missing from release.yml",
         )
         self.assert_rejected_after(
             old,
             "      - uses: dtolnay/rust-toolchain@stable\n"
             "        with:\n"
-            "          toolchain: stable",
+            "          toolchain: ${{ steps.rust-toolchain.outputs.toolchain }}",
             "'build-typescript' uses unpinned action 'dtolnay/rust-toolchain@stable'",
         )
 
@@ -216,9 +216,9 @@ class SdkPublishWorkflowPolicyTests(unittest.TestCase):
         self.assert_rejected_after(
             "          ref: ${{ needs.validate-release.outputs.source_sha }}\n"
             "          persist-credentials: false\n\n"
-            "      - uses: dtolnay/rust-toolchain@",
+            "      # rust-toolchain.toml is the only compiler.",
             "          persist-credentials: false\n\n"
-            "      - uses: dtolnay/rust-toolchain@",
+            "      # rust-toolchain.toml is the only compiler.",
             "'build-typescript' must first and only check out the validated source "
             "SHA without persisted credentials",
         )

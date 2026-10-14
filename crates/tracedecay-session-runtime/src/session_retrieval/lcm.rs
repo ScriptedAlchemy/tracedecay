@@ -97,8 +97,7 @@ impl DaemonSessionRetrievalService {
             source_coverage: result
                 .snapshot
                 .source_coverage()
-                .map(|receipt| receipt.sources().to_vec())
-                .unwrap_or_default(),
+                .map_or_default(|receipt| receipt.sources().to_vec()),
             cursor: result.next_cursor.clone(),
             explanations: result
                 .ranked

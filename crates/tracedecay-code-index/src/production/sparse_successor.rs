@@ -376,19 +376,17 @@ impl<'p> SealedSuccessorV1<'p> {
                     (Some((artifacts, _)), None) => Arc::clone(artifacts),
                     (None, None) => return Err(contract("a re-decided file has no artifacts")),
                 };
-                let edges = resolved
-                    .map(|(_, resolved)| {
-                        resolved
-                            .edges
-                            .iter()
-                            .map(|(edge, path, identity)| (edge, path.as_str(), identity))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
+                let edges = resolved.map_or_default(|(_, resolved)| {
+                    resolved
+                        .edges
+                        .iter()
+                        .map(|(edge, path, identity)| (edge, path.as_str(), identity))
+                        .collect::<Vec<_>>()
+                });
                 counts.after = counts.after.saturating_add(count(edges.len())?);
-                let calls = resolved
-                    .map(|(_, resolved)| resolved.unresolved_calls.iter().collect::<Vec<_>>())
-                    .unwrap_or_default();
+                let calls = resolved.map_or_default(|(_, resolved)| {
+                    resolved.unresolved_calls.iter().collect::<Vec<_>>()
+                });
                 let identity;
                 let file_lineage = match edited_file {
                     Some(_) => lineage_by_file
@@ -502,17 +500,14 @@ impl<'p> SealedSuccessorV1<'p> {
             };
             let inputs = match artifacts.as_deref() {
                 Some(artifacts) => {
-                    let cross_file = resolved
-                        .map(|(_, resolved)| resolved.edges.as_slice())
-                        .unwrap_or_default();
+                    let cross_file =
+                        resolved.map_or_default(|(_, resolved)| resolved.edges.as_slice());
                     self.page_inputs(
                         key,
                         file,
                         artifacts,
                         cross_file,
-                        resolved
-                            .map(|(_, resolved)| resolved.unresolved_calls.clone())
-                            .unwrap_or_default(),
+                        resolved.map_or_default(|(_, resolved)| resolved.unresolved_calls.clone()),
                     )?
                 }
                 None => CodeGraphPageInputsV1 {

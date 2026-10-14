@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::{Arc, OnceLock, RwLock, Weak};
 
 use crate::schema_stages::RegisteredSchemaAttachmentV1;
@@ -159,16 +160,23 @@ impl RegisteredGlobalDbOwnerV1 {
     )> {
         let temporary = database.issue_lease().map_err(registered_owner_error)?;
         let registered = RegisteredGlobalDb::from_owned_database(temporary);
-        let (convergence, refused_authority) =
-            match super::schema_stages::ensure_attached_registered_schema(
-                &registered.database,
-                cancellation,
-            )
-            .await?
-            {
-                RegisteredSchemaAttachmentV1::Admitted(convergence) => (Some(convergence), None),
-                RegisteredSchemaAttachmentV1::SessionsRefused(refused) => (None, Some(refused)),
-            };
+        let attached: Pin<
+            Box<
+                dyn Future<
+                        Output = tracedecay_domain::errors::Result<
+                            super::schema_stages::RegisteredSchemaAttachmentV1,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > = Box::pin(super::schema_stages::ensure_attached_registered_schema(
+            &registered.database,
+            cancellation,
+        ));
+        let (convergence, refused_authority) = match attached.await? {
+            RegisteredSchemaAttachmentV1::Admitted(convergence) => (Some(convergence), None),
+            RegisteredSchemaAttachmentV1::SessionsRefused(refused) => (None, Some(refused)),
+        };
         drop(registered);
         Ok((
             Self {
@@ -351,6 +359,25 @@ pub struct RegisteredGlobalDb {
     session_relation_graph: Arc<SessionRelationGraphStateV1>,
     refused_authority: Option<RefusedAuthorityV1>,
 }
+
+// Futures that capture this client were proving the database lease and the
+// graph binding in one walk, past the recursion limit (rust-lang/rust#159228).
+unsafe impl Send for RegisteredGlobalDb {}
+unsafe impl Sync for RegisteredGlobalDb {}
+
+const _: fn(&RegisteredGlobalDb) = |value| {
+    fn assert_send_sync<T: Send + Sync>(_: &T) {}
+    let RegisteredGlobalDb {
+        database,
+        project_graph,
+        session_relation_graph,
+        refused_authority,
+    } = value;
+    assert_send_sync(database);
+    assert_send_sync(project_graph);
+    assert_send_sync(session_relation_graph);
+    assert_send_sync(refused_authority);
+};
 
 impl RegisteredGlobalDb {
     #[tracing::instrument(name = "global_db.registered.schema", level = "trace", skip_all)]

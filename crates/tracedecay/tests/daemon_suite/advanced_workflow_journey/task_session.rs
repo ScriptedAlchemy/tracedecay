@@ -100,8 +100,7 @@ impl DashboardProcess {
                 self.base_url,
                 self.diagnostics
                     .lock()
-                    .map(|captured| captured.clone())
-                    .unwrap_or_default()
+                    .map_or_default(|captured| captured.clone())
             );
             std::thread::sleep(Duration::from_millis(200));
         }

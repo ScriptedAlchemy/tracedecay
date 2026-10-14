@@ -1,5 +1,8 @@
 //! Registered-store adapter for canonical observability envelopes.
 
+use std::future::Future;
+use std::pin::Pin;
+
 use tracedecay_contracts::{
     ApplicationContractError, ExecutionTopologyRollupFragmentPageV1,
     ExecutionTopologyRollupFragmentQueryV1, ExecutionTopologyRollupQueryPort, ObservabilityFuture,
@@ -37,12 +40,18 @@ impl<'a> RegisteredObservabilityPortV1<'a> {
         authorized_scope_ref: &str,
         idempotency_key: &str,
     ) -> Result<Option<ObservabilityEnvelopeV1>, ApplicationContractError> {
-        let Some(row) = self
-            .db
-            .read_observability_event(authorized_scope_ref, idempotency_key)
-            .await
-            .map_err(ApplicationContractError::Domain)?
-        else {
+        let row: Pin<
+            Box<
+                dyn Future<
+                        Output = Result<Option<tracedecay_global_db::AnalyticsEventRecord>, String>,
+                    > + Send
+                    + '_,
+            >,
+        > = Box::pin(
+            self.db
+                .read_observability_event(authorized_scope_ref, idempotency_key),
+        );
+        let Some(row) = row.await.map_err(ApplicationContractError::Domain)? else {
             return Ok(None);
         };
         let envelope = row

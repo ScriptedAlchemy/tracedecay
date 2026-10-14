@@ -199,8 +199,7 @@ pub(super) async fn execute_grep(
     let message_type = message_type(request.message_type);
     let roles = request
         .role
-        .map(|role| vec![role.as_str().to_owned()])
-        .unwrap_or_default();
+        .map_or_default(|role| vec![role.as_str().to_owned()]);
     let start_time = time_filter(
         request.start_time.as_ref().or(request.since.as_ref()),
         SearchTimeBound::Start,
