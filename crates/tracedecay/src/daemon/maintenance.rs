@@ -263,6 +263,7 @@ fn observability_retention_expired_rows(
     receipt.expired_detail > 0
         || receipt.expired_rollup > 0
         || receipt.expired_rollups.expired_generations > 0
+        || receipt.expired_rollups.advanced_frontiers > 0
 }
 
 fn log_observability_retention(
@@ -278,6 +279,10 @@ fn log_observability_retention(
             (
                 "expired_rollup_generations",
                 receipt.expired_rollups.expired_generations.to_string(),
+            ),
+            (
+                "advanced_rollup_frontiers",
+                receipt.expired_rollups.advanced_frontiers.to_string(),
             ),
         ],
     );
