@@ -17,7 +17,7 @@ gix = { version = "=0.87.1", default-features = false, features = ["revision", "
 hex = "0.4"
 hmac = "0.13.0"
 rayon = "1"
-roaring = { version = "=0.11.4", default-features = false }
+roaring = { version = "=0.11.5", default-features = false }
 # Lexical artifact finalization installs a SQLite progress_handler, and
 # receipt-verification tests install an authorizer. Both APIs live behind
 # rusqlite's `hooks` feature and must be selected here; they are not part
