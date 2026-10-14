@@ -51,7 +51,7 @@ tracedecay-temporal-query = { path = "../tracedecay-temporal-query" }
 tempfile = { version = "3", optional = true }
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["async"] }
+criterion = { version = "0.8", features = ["async"] }
 tempfile = "3"
 # Test-only helper surfaces this crate's test targets reach across crate
 # boundaries: engine fixtures, session normalizers, and temporal page requests.

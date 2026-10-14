@@ -64,7 +64,7 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.8"
 tracedecay-graph-db = { path = "../tracedecay-graph-db", features = ["test-helpers"] }
 
 tokio = { version = "1", features = ["full", "test-util"] }
