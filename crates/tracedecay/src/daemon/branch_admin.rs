@@ -12,6 +12,7 @@ use tracedecay_application::pr_tracking::{
     manual_branch_source_owns_artifacts,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_host_admission::{HostAdmissionRuntime, SpoolOpenReport};
 use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 #[cfg(unix)]
 use tracedecay_runtime_core::branch::BranchAddOutcome;
@@ -383,6 +384,7 @@ impl ProfileHostAdmissionBootstrapContext {
             &self.host_admission_brokers,
             &self.host_admission_broker_gate,
             &broker_path,
+            HostAdmissionRuntime::open_for_database,
         )
         .await?;
         let Some(replay) = self.profile_host_admission_replay.upgrade() else {
@@ -407,6 +409,7 @@ async fn open_host_admission_broker(
     brokers: &HostAdmissionBrokers,
     gate: &tokio::sync::Mutex<()>,
     path: &Path,
+    open: impl FnOnce(&Path) -> Result<(HostAdmissionRuntime, SpoolOpenReport)> + Send + 'static,
 ) -> Result<tracedecay_host_admission::SharedHostAdmissionBroker> {
     if let Some(broker) = brokers.lock().await.get(path).cloned() {
         return Ok(broker);
@@ -420,7 +423,7 @@ async fn open_host_admission_broker(
     let (runtime, _) = tokio::task::spawn_blocking(move || {
         let _span =
             tracing::trace_span!("daemon.branch_admin.host_admission_runtime.open").entered();
-        tracedecay_host_admission::HostAdmissionRuntime::open_for_database(&open_path)
+        open(&open_path)
     })
     .await
     .map_err(|_| {
@@ -1188,6 +1191,7 @@ impl StoreAdministration {
             &self.host_admission_brokers,
             &self.host_admission_broker_gate,
             &path,
+            HostAdmissionRuntime::open_for_database,
         )
         .await?;
         self.maybe_ensure_user_profile_host_admission_replay(&path, &broker)
@@ -2149,6 +2153,57 @@ mod tests {
             .await
             .unwrap();
         administration.shutdown_host_admission_replay().await;
+    }
+
+    /// A spool open can stall for seconds on fsync under load. A first open of
+    /// one database must not park the first open of an unrelated database,
+    /// while a second opener of the same database shares the in-flight open.
+    #[tokio::test]
+    async fn stalled_first_open_does_not_block_an_unrelated_first_open() {
+        let temp = tempfile::tempdir().unwrap();
+        let stalled_path = temp.path().join("stalled.db");
+        let unrelated_path = temp.path().join("unrelated.db");
+        let brokers: HostAdmissionBrokers = Arc::default();
+        let gate = tokio::sync::Mutex::new(());
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+
+        let (stalled, (shared, unrelated)) = tokio::join!(
+            open_host_admission_broker(&brokers, &gate, &stalled_path, move |path| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                HostAdmissionRuntime::open_for_database(path)
+            }),
+            async {
+                entered_rx.await.expect("stalled open started");
+                tokio::join!(
+                    open_host_admission_broker(&brokers, &gate, &stalled_path, |_| {
+                        panic!("a concurrent opener of the same path must share the open")
+                    }),
+                    async {
+                        // Deadlock guard only: the stalled open stays held
+                        // until the unrelated open returns.
+                        let unrelated = tokio::time::timeout(
+                            Duration::from_mins(1),
+                            open_host_admission_broker(
+                                &brokers,
+                                &gate,
+                                &unrelated_path,
+                                HostAdmissionRuntime::open_for_database,
+                            ),
+                        )
+                        .await
+                        .expect("an unrelated first open waited on another path's open");
+                        release_tx.send(()).unwrap();
+                        unrelated
+                    },
+                )
+            },
+        );
+
+        let stalled = stalled.unwrap();
+        assert!(Arc::ptr_eq(&stalled, &shared.unwrap()));
+        assert!(!Arc::ptr_eq(&stalled, &unrelated.unwrap()));
     }
 
     #[tokio::test]
