@@ -5,6 +5,10 @@ startup --windows_enable_symlinks
 common --enable_bzlmod
 common --announce_rc
 common --show_progress_rate_limit=15
+# crate_universe re-fetches git dependencies on every splice. libgit2 indexes
+# asupersync's ~1 GB history on one thread for over 25 minutes; the git CLI
+# indexes it in about 2.
+common --repo_env=CARGO_NET_GIT_FETCH_WITH_CLI=true
 # MODULE.bazel registers only nightly/2026-09-27. Without this, rules_rust
 # resolves the stable channel and the build fails closed.
 build --@rules_rust//rust/toolchain/channel=nightly

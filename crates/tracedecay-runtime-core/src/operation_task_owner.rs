@@ -527,7 +527,10 @@ mod tests {
 
     #[test]
     fn construction_rejects_native_runtime_without_blocking_pool() {
-        let runtime = RuntimeBuilder::current_thread().build().unwrap();
+        let runtime = RuntimeBuilder::current_thread()
+            .blocking_threads(0, 0)
+            .build()
+            .unwrap();
         runtime.block_on(async {
             assert!(matches!(
                 RuntimeOperationTaskOwnerV1::new(runtime.handle()),
