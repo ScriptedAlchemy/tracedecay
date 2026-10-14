@@ -1056,7 +1056,13 @@ async fn settle_blocking_git_worker<T>(
 
 async fn sleep_until_deadline(deadline: &Deadline) {
     if let Some(remaining) = tracedecay_daemon_protocol::deadline_remaining(deadline) {
-        tokio::time::sleep(remaining).await;
+        // A deadline past the clock's range never fires; an unavailable timer
+        // reads as elapsed.
+        let _ = tracedecay_runtime_core::native_runtime::timeout(
+            remaining,
+            std::future::pending::<()>(),
+        )
+        .await;
     }
 }
 
