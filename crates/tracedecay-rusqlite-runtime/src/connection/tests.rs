@@ -108,6 +108,28 @@ fn writer_close_never_bypasses_explicit_checkpoint_policy() {
 }
 
 #[test]
+fn rebinding_a_cached_statement_keeps_its_compiled_plan() {
+    let file = database();
+    let writer = open(file.path(), ConnectionMode::Writer).expect("prepare WAL database");
+    let reader = open(file.path(), ConnectionMode::Reader).expect("reader policy");
+    for connection in [&writer, &reader] {
+        let mut reprepares = 0;
+        for limit in 0..32_i64 {
+            let mut statement = connection
+                .prepare_cached("SELECT count(*) FROM (SELECT value FROM items LIMIT ?1)")
+                .unwrap();
+            let count: i64 = statement.query_row([limit], |row| row.get(0)).unwrap();
+            assert_eq!(count, limit.min(1));
+            reprepares += statement.reset_status(rusqlite::StatementStatus::RePrepare);
+        }
+        assert_eq!(
+            reprepares, 0,
+            "a bound LIMIT must not recompile the statement"
+        );
+    }
+}
+
+#[test]
 fn reader_mode_is_private_query_only_and_denies_writes() {
     let file = database();
     let writer = open(file.path(), ConnectionMode::Writer).expect("prepare WAL database");

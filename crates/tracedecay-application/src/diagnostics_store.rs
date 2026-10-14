@@ -266,8 +266,8 @@ impl<'a> DiagnosticsStore<'a> {
                     .query(
                         "SELECT generation_id
                  FROM diagnostic_generation_publications
-                 WHERE record_state = ?1",
-                        params![STATE_CURRENT],
+                 WHERE record_state = 'current'",
+                        params![],
                     )
                     .await
                     .map_err(|e| db_error(operation, e))?;
@@ -509,7 +509,7 @@ impl<'a> DiagnosticsStore<'a> {
                      AND (generation_id, publication_revision) IN (
                        SELECT generation_id, publication_revision
                        FROM diagnostic_generation_publications
-                       WHERE record_state = ?3
+                       WHERE record_state = 'current'
                      )",
                     params![STATE_CLEARED, generation.as_str(), STATE_CURRENT],
                 )
@@ -520,8 +520,8 @@ impl<'a> DiagnosticsStore<'a> {
                 .execute(
                     "UPDATE diagnostic_generation_publications
                      SET record_state = ?1, state_generation = ?2
-                     WHERE record_state = ?3",
-                    params![STATE_CLEARED, generation.as_str(), STATE_CURRENT],
+                     WHERE record_state = 'current'",
+                    params![STATE_CLEARED, generation.as_str()],
                 )
                 .await
                 .map_err(|e| db_error(operation, e))?;

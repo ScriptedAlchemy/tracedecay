@@ -780,6 +780,14 @@ fn apply_pragmas(
     connection
         .set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
         .map_err(|source| policy("checkpoint-on-close", source))?;
+    // Without the stability guarantee SQLite plans with the values bound to a
+    // `LIMIT ?`, `LIKE ?` or partial-index comparison, then marks the
+    // statement expired on every rebind, so each execution of a cached
+    // statement compiles it again. With it, a query can only use a partial
+    // index when it names the index predicate's literal instead of binding it.
+    connection
+        .set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_QPSG, true)
+        .map_err(|source| policy("query planner stability", source))?;
     connection
         .pragma_update(None, "foreign_keys", true)
         .map_err(|source| policy("foreign keys", source))?;

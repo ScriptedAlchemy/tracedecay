@@ -5,6 +5,29 @@ use rusqlite::types::{ToSqlOutput, Type, Value, ValueRef};
 use rusqlite::{OptionalExtension, ToSql};
 use serde::{Serialize, de::DeserializeOwned};
 
+pub(super) trait CachedStatements {
+    fn execute_cached<P: rusqlite::Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize>;
+
+    fn query_row_cached<T, P, F>(&self, sql: &str, params: P, f: F) -> rusqlite::Result<T>
+    where
+        P: rusqlite::Params,
+        F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>;
+}
+
+impl CachedStatements for rusqlite::Connection {
+    fn execute_cached<P: rusqlite::Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
+        self.prepare_cached(sql)?.execute(params)
+    }
+
+    fn query_row_cached<T, P, F>(&self, sql: &str, params: P, f: F) -> rusqlite::Result<T>
+    where
+        P: rusqlite::Params,
+        F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+    {
+        self.prepare_cached(sql)?.query_row(params, f)
+    }
+}
+
 pub(super) fn encode<T: Serialize + ?Sized>(value: &T) -> rusqlite::Result<String> {
     encode_json(value, |error| conversion(error.to_string()))
 }
@@ -123,7 +146,7 @@ fn insert(
         .map(|index| format!("?{index}"))
         .collect::<Vec<_>>()
         .join(", ");
-    connection.execute(
+    connection.execute_cached(
         &format!(
             "INSERT{conflict_clause} INTO {table} ({}) VALUES ({placeholders})",
             column_names(columns).join(", ")
@@ -170,7 +193,7 @@ pub(super) fn stored_row_matches(
         .collect::<Vec<_>>()
         .join(" AND ");
     let stored = connection
-        .query_row(
+        .query_row_cached(
             &format!("SELECT {projection} FROM {table} WHERE {predicate}"),
             rusqlite::params_from_iter(bindings(keys)),
             |row| {

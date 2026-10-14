@@ -110,15 +110,15 @@ impl DiagnosticExecutor {
              AND (generation_id, publication_revision) IN (
                SELECT generation_id, publication_revision
                FROM diagnostic_generation_publications
-               WHERE record_state = ?3
+               WHERE record_state = 'current'
              )",
             params![CLEARED, generation.as_str(), CURRENT],
         )?;
         savepoint.execute(
             "UPDATE diagnostic_generation_publications
              SET record_state = ?1, state_generation = ?2
-             WHERE record_state = ?3",
-            params![CLEARED, generation.as_str(), CURRENT],
+             WHERE record_state = 'current'",
+            params![CLEARED, generation.as_str()],
         )?;
         for record in snapshot.records() {
             insert_record(savepoint, publication_revision, record)?;

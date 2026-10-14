@@ -6,7 +6,7 @@ use tracedecay_store::{
     RetrievalAnchorReadResultV1, RetrievalAnchorTombstoneV1,
 };
 
-use super::support::{decode, encode, idempotent_insert, invalid};
+use super::support::{CachedStatements, decode, encode, idempotent_insert, invalid};
 
 #[derive(Clone, Default)]
 pub struct RetrievalAnchorExecutor;
@@ -21,7 +21,7 @@ impl RetrievalAnchorExecutor {
         let owner_json = encode(record.owner())?;
         let record_json = encode(record)?;
         if let Some(existing) = savepoint
-            .query_row(
+            .query_row_cached(
                 "SELECT record_json FROM retrieval_anchor_dispositions
                  WHERE disposition_id = ?1",
                 [record.disposition_id()],
@@ -39,7 +39,7 @@ impl RetrievalAnchorExecutor {
         if !AnchorDispositionStateV1::transition_allowed(current, record.state()) {
             return Err(invalid("invalid retrieval anchor disposition transition"));
         }
-        savepoint.execute(
+        savepoint.execute_cached(
             "INSERT INTO retrieval_anchor_dispositions (
                 disposition_id, anchor_id, owner_json, state, superseded_by,
                 reason_class, effective_at, record_json
@@ -56,7 +56,7 @@ impl RetrievalAnchorExecutor {
             ],
         )?;
         if record.state().suppresses_derivatives() {
-            savepoint.execute(
+            savepoint.execute_cached(
                 "INSERT INTO retrieval_anchor_derivative_tombstones (
                     source_anchor_id, owner_json, derivative_kind, derivative_id,
                     disposition_id, effective_at
@@ -175,7 +175,7 @@ fn read_anchor(
         return Ok(None);
     }
     connection
-        .query_row(
+        .query_row_cached(
             "SELECT anchor_json, projection_generation FROM retrieval_anchors
              WHERE anchor_id = ?1 AND owner_json = ?2",
             params![anchor_id.as_str(), owner_json],
@@ -213,7 +213,7 @@ fn current_record(
     owner_json: &str,
 ) -> rusqlite::Result<Option<RetrievalAnchorDispositionRecordV1>> {
     connection
-        .query_row(
+        .query_row_cached(
             "SELECT disposition_id, state, superseded_by, reason_class,
                     effective_at, record_json
              FROM retrieval_anchor_dispositions
@@ -373,7 +373,7 @@ mod tests {
 
     fn insert_anchor(connection: &rusqlite::Connection, anchor_id: &RetrievalAnchorId) {
         connection
-            .execute(
+            .execute_cached(
                 "INSERT INTO retrieval_anchors (
                     anchor_id, anchor_json, owner_json, projection_generation
                  ) VALUES (?1, '{}', ?2, 'projection.fixture')",
@@ -628,7 +628,7 @@ mod tests {
         savepoint.commit().unwrap();
         transaction.commit().unwrap();
         connection
-            .execute(
+            .execute_cached(
                 "UPDATE retrieval_anchor_dispositions
                  SET state = 'deleted' WHERE disposition_id = ?1",
                 [active.disposition_id()],
