@@ -544,7 +544,7 @@ pub(super) async fn build_state_inner(
     // Pre-count non-usage messages in the background so the first Savings
     // tab paint doesn't pay the initial BPE pass over the session store.
     if warm_token_counts {
-        token_count::spawn_warm(state.clone());
+        token_count::spawn_warm(&state);
     }
     Ok(state)
 }
