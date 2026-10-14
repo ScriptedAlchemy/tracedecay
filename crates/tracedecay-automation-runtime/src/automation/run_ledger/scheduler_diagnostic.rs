@@ -15,7 +15,7 @@ pub(crate) async fn append_or_reuse_scheduler_diagnostic(
     let path = run_ledger_path(dashboard_root);
     let candidate = candidate.clone();
     let anchor = effectful_anchor_run_id.map(str::to_owned);
-    tokio::task::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         append_or_reuse_blocking(&path, &candidate, anchor.as_deref())
     })
     .await
