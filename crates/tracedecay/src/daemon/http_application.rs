@@ -40,7 +40,8 @@ use tracedecay_daemon_service::logging::unavailable_error;
 use tracedecay_daemon_service::remote_http_transport::RemoteBrainTlsListener;
 #[cfg(test)]
 use tracedecay_daemon_service::remote_http_transport::{
-    RemoteBrainTlsEgressObserver, RemoteBrainTlsEgressSnapshot, RemoteBrainTlsIngressSnapshot,
+    RemoteBrainTlsDeadlines, RemoteBrainTlsEgressObserver, RemoteBrainTlsEgressSnapshot,
+    RemoteBrainTlsIngressSnapshot,
 };
 use tracedecay_domain::{BrainNodeId, EnrollmentGrantV1, ProjectId};
 use tracedecay_rusqlite_runtime::remote::RemoteWriterPublicationErrorV1;
@@ -838,6 +839,26 @@ impl DaemonHttpApplicationService {
             Some(config) => Some(bind_remote_brain_tls_server(&registry, config).await?),
             None => None,
         };
+        Self::bind_serving_remote_tls(registry, auth_token, remote_tls_server).await
+    }
+
+    #[cfg(test)]
+    pub(super) async fn bind_with_remote_tls_deadlines(
+        registry: DaemonHttpApplicationRegistry,
+        auth_token: &str,
+        remote_tls: &RemoteBrainTlsConfig,
+        deadlines: RemoteBrainTlsDeadlines,
+    ) -> Result<Self> {
+        let mut server = bind_remote_brain_tls_server(&registry, remote_tls).await?;
+        server.listener = server.listener.with_deadlines(deadlines);
+        Self::bind_serving_remote_tls(registry, auth_token, Some(server)).await
+    }
+
+    async fn bind_serving_remote_tls(
+        registry: DaemonHttpApplicationRegistry,
+        auth_token: &str,
+        remote_tls_server: Option<RemoteBrainTlsServer>,
+    ) -> Result<Self> {
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .map_err(|error| TraceDecayError::Config {

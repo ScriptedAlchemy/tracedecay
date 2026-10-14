@@ -12,34 +12,63 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
+use asupersync::net::{TcpListener, TcpStream};
+use asupersync::time::{Sleep, wall_now};
+use asupersync::tls::{TlsAcceptor, TlsStream};
+use asupersync::types::Time;
 use axum::body::Body;
 use axum::extract::Request;
 use axum::http::{HeaderValue, header::CONNECTION};
 use axum::middleware::Next;
 use axum::response::Response;
 use axum::{Router, middleware};
-use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
 use rustls::client::{verify_server_cert_signed_by_trust_anchor, verify_server_name};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::server::ParsedCertificate;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 use tracedecay_daemon_control::RemoteBrainTlsConfig;
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::native_runtime;
 
 const MAX_REMOTE_BRAIN_TLS_CONNECTIONS: usize = 128;
 const MAX_REMOTE_BRAIN_TLS_HEADER_BYTES: usize = 64 * 1024;
-const REMOTE_BRAIN_TLS_READ_IDLE_DEADLINE: Duration = Duration::from_secs(5);
-const REMOTE_BRAIN_TLS_REQUEST_READ_DEADLINE: Duration = Duration::from_mins(1);
-const REMOTE_BRAIN_TLS_WRITE_IDLE_DEADLINE: Duration = Duration::from_secs(5);
-const REMOTE_BRAIN_TLS_RESPONSE_DEADLINE: Duration = Duration::from_secs(30);
-const REMOTE_BRAIN_TLS_CLOSE_DEADLINE: Duration = Duration::from_secs(5);
-const REMOTE_BRAIN_TLS_SHUTDOWN_DRAIN_DEADLINE: Duration = Duration::from_secs(5);
+
+/// Per-connection deadlines of the Remote Brain TLS listener. Production uses
+/// [`RemoteBrainTlsDeadlines::PRODUCTION`]; tests inject shorter ones through
+/// `RemoteBrainTlsListener::with_deadlines` and age them in real time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RemoteBrainTlsDeadlines {
+    /// Longest silence while the handshake or request is still being read.
+    pub read_idle: Duration,
+    /// Absolute bound on reading one request, restarted when the handshake
+    /// completes.
+    pub request_read: Duration,
+    /// Longest stall of a started response write.
+    pub write_idle: Duration,
+    /// Absolute bound on writing one response, from its first byte.
+    pub response: Duration,
+    /// Bound on closing the connection, close notification included.
+    pub close: Duration,
+    /// Bound on draining connections after shutdown is requested.
+    pub shutdown_drain: Duration,
+}
+
+impl RemoteBrainTlsDeadlines {
+    pub const PRODUCTION: Self = Self {
+        read_idle: Duration::from_secs(5),
+        request_read: Duration::from_mins(1),
+        write_idle: Duration::from_secs(5),
+        response: Duration::from_secs(30),
+        close: Duration::from_secs(5),
+        shutdown_drain: Duration::from_secs(5),
+    };
+}
 
 #[cfg(any(test, feature = "test-helpers"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,14 +130,22 @@ async fn force_remote_connection_close(request: Request<Body>, next: Next) -> Re
 }
 
 pub struct RemoteBrainTlsListener {
-    listener: tokio::net::TcpListener,
-    server: Arc<rustls::ServerConfig>,
+    listener: TcpListener,
+    acceptor: TlsAcceptor,
     admission: Arc<Semaphore>,
+    deadlines: RemoteBrainTlsDeadlines,
     #[cfg(any(test, feature = "test-helpers"))]
     egress: Arc<RemoteBrainTlsEgressObserver>,
 }
 
 impl RemoteBrainTlsListener {
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    pub fn with_deadlines(mut self, deadlines: RemoteBrainTlsDeadlines) -> Self {
+        self.deadlines = deadlines;
+        self
+    }
+
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn admission(&self) -> Arc<Semaphore> {
         Arc::clone(&self.admission)
@@ -154,7 +191,7 @@ impl RemoteBrainTlsListener {
                 observe_remote_brain_connection_join(joined);
             }
         };
-        if tokio::time::timeout(REMOTE_BRAIN_TLS_SHUTDOWN_DRAIN_DEADLINE, drain)
+        if native_runtime::timeout(self.deadlines.shutdown_drain, drain)
             .await
             .is_err()
         {
@@ -202,13 +239,14 @@ impl RemoteBrainTlsListener {
             .with_single_cert(certificates, private_key)
             .map_err(|error| tls_configuration_error("bind Remote Brain TLS identity", error))?;
         server.alpn_protocols = vec![b"http/1.1".to_vec()];
-        let listener = tokio::net::TcpListener::bind(config.listen())
+        let listener = TcpListener::bind(config.listen())
             .await
             .map_err(|error| tls_configuration_error("bind Remote Brain TLS listener", error))?;
         Ok(Self {
             listener,
-            server: Arc::new(server),
+            acceptor: TlsAcceptor::new(server),
             admission: Arc::new(Semaphore::new(MAX_REMOTE_BRAIN_TLS_CONNECTIONS)),
+            deadlines: RemoteBrainTlsDeadlines::PRODUCTION,
             #[cfg(any(test, feature = "test-helpers"))]
             egress: Arc::new(RemoteBrainTlsEgressObserver::default()),
         })
@@ -224,7 +262,7 @@ impl RemoteBrainTlsListener {
             Ok(accepted) => accepted,
             Err(error) => {
                 tracing::warn!(%error, "Remote Brain TLS listener accept failed");
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                Sleep::after(wall_now(), Duration::from_millis(50)).await;
                 return None;
             }
         };
@@ -235,11 +273,14 @@ impl RemoteBrainTlsListener {
                 return None;
             }
         };
-        let handshake = tokio_rustls::TlsAcceptor::from(Arc::clone(&self.server)).accept(stream);
+        let acceptor = self.acceptor.clone();
+        let handshake =
+            Box::pin(async move { acceptor.accept(stream).await.map_err(io::Error::other) });
         Some((
             RemoteBrainTlsIo::new(
                 handshake,
                 permit,
+                self.deadlines,
                 #[cfg(any(test, feature = "test-helpers"))]
                 Arc::clone(&self.egress),
             ),
@@ -327,7 +368,7 @@ async fn serve_remote_brain_tls_connection(
     let service = TowerToHyperService::new(service);
     let mut builder = hyper::server::conn::http1::Builder::new();
     builder.keep_alive(false);
-    let connection = builder.serve_connection(TokioIo::new(io), service);
+    let connection = builder.serve_connection(HyperIo(io), service);
     tokio::pin!(connection);
     let result = tokio::select! {
         result = &mut connection => result,
@@ -349,19 +390,98 @@ fn observe_remote_brain_connection_join(joined: std::result::Result<(), tokio::t
     }
 }
 
+/// Adapts an Asupersync byte stream to hyper's IO traits.
+struct HyperIo<T>(T);
+
+impl<T: AsyncRead + Unpin> hyper::rt::Read for HyperIo<T> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        mut cursor: hyper::rt::ReadBufCursor<'_>,
+    ) -> Poll<io::Result<()>> {
+        let filled = {
+            let mut buffer = ReadBuf::new(cursor.initialize_unfilled());
+            match Pin::new(&mut self.0).poll_read(context, &mut buffer) {
+                Poll::Ready(Ok(())) => buffer.filled().len(),
+                other => return other,
+            }
+        };
+        // SAFETY: `initialize_unfilled` initialized the whole unfilled region
+        // and the read filled its first `filled` bytes.
+        unsafe { cursor.advance(filled) };
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl<T: AsyncWrite + Unpin> hyper::rt::Write for HyperIo<T> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.0).poll_write(context, buffer)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.0).poll_flush(context)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.0).poll_shutdown(context)
+    }
+}
+
+/// A resettable connection deadline that reports expiry on every poll.
+///
+/// The connection task runs on Tokio, so this polls an Asupersync `Sleep`
+/// through Asupersync's process-global fallback timer. It is a documented
+/// exception to `native_runtime::sleep_until`: the read and write deadlines
+/// reset on every transferred chunk, and a native task per reset would cost
+/// tens of microseconds each. `Sleep` panics when polled after it completes,
+/// so expiry is latched here until the next reset.
+struct IoDeadline {
+    sleep: Sleep,
+    expired: bool,
+}
+
+impl IoDeadline {
+    fn after(duration: Duration) -> Self {
+        Self {
+            sleep: Sleep::after(wall_now(), duration),
+            expired: false,
+        }
+    }
+
+    fn reset_after(&mut self, now: Time, duration: Duration) {
+        self.sleep.reset_after(now, duration);
+        self.expired = false;
+    }
+
+    fn poll_expired(&mut self, context: &mut Context<'_>) -> bool {
+        if !self.expired {
+            self.expired = Pin::new(&mut self.sleep).poll(context).is_ready();
+        }
+        self.expired
+    }
+}
+
+type RemoteBrainTlsHandshake =
+    Pin<Box<dyn Future<Output = io::Result<TlsStream<TcpStream>>> + Send>>;
+
 enum RemoteBrainTlsTransport {
-    Handshaking(Pin<Box<tokio_rustls::Accept<tokio::net::TcpStream>>>),
-    Streaming(Box<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>),
+    Handshaking(RemoteBrainTlsHandshake),
+    Streaming(Box<TlsStream<TcpStream>>),
     Failed,
 }
 
 struct RemoteBrainTlsIo {
     transport: RemoteBrainTlsTransport,
-    read_idle_deadline: Pin<Box<tokio::time::Sleep>>,
-    request_read_deadline: Pin<Box<tokio::time::Sleep>>,
-    write_idle_deadline: Pin<Box<tokio::time::Sleep>>,
-    response_deadline: Pin<Box<tokio::time::Sleep>>,
-    close_deadline: Option<Pin<Box<tokio::time::Sleep>>>,
+    deadlines: RemoteBrainTlsDeadlines,
+    read_idle_deadline: IoDeadline,
+    request_read_deadline: IoDeadline,
+    write_idle_deadline: IoDeadline,
+    response_deadline: IoDeadline,
+    close_deadline: Option<IoDeadline>,
     egress_started: bool,
     #[cfg(any(test, feature = "test-helpers"))]
     egress_write_pending: bool,
@@ -372,9 +492,9 @@ struct RemoteBrainTlsIo {
     #[cfg(any(test, feature = "test-helpers"))]
     egress_response_expired: bool,
     #[cfg(any(test, feature = "test-helpers"))]
-    egress_last_positive_write: Option<tokio::time::Instant>,
+    egress_last_positive_write: Option<Time>,
     #[cfg(any(test, feature = "test-helpers"))]
-    egress_write_idle_deadline_at: Option<tokio::time::Instant>,
+    egress_write_idle_deadline_at: Option<Time>,
     #[cfg(any(test, feature = "test-helpers"))]
     egress: Arc<RemoteBrainTlsEgressObserver>,
     header_bytes: Vec<u8>,
@@ -388,18 +508,18 @@ struct RemoteBrainTlsIo {
 
 impl RemoteBrainTlsIo {
     fn new(
-        handshake: tokio_rustls::Accept<tokio::net::TcpStream>,
+        handshake: RemoteBrainTlsHandshake,
         permit: OwnedSemaphorePermit,
+        deadlines: RemoteBrainTlsDeadlines,
         #[cfg(any(test, feature = "test-helpers"))] egress: Arc<RemoteBrainTlsEgressObserver>,
     ) -> Self {
         Self {
-            transport: RemoteBrainTlsTransport::Handshaking(Box::pin(handshake)),
-            read_idle_deadline: Box::pin(tokio::time::sleep(REMOTE_BRAIN_TLS_READ_IDLE_DEADLINE)),
-            request_read_deadline: Box::pin(tokio::time::sleep(
-                REMOTE_BRAIN_TLS_REQUEST_READ_DEADLINE,
-            )),
-            write_idle_deadline: Box::pin(tokio::time::sleep(REMOTE_BRAIN_TLS_WRITE_IDLE_DEADLINE)),
-            response_deadline: Box::pin(tokio::time::sleep(REMOTE_BRAIN_TLS_RESPONSE_DEADLINE)),
+            transport: RemoteBrainTlsTransport::Handshaking(handshake),
+            deadlines,
+            read_idle_deadline: IoDeadline::after(deadlines.read_idle),
+            request_read_deadline: IoDeadline::after(deadlines.request_read),
+            write_idle_deadline: IoDeadline::after(deadlines.write_idle),
+            response_deadline: IoDeadline::after(deadlines.response),
             close_deadline: None,
             egress_started: false,
             #[cfg(any(test, feature = "test-helpers"))]
@@ -430,7 +550,7 @@ impl RemoteBrainTlsIo {
         if self.request_read_complete {
             return Ok(());
         }
-        if self.request_read_deadline.as_mut().poll(context).is_ready() {
+        if self.request_read_deadline.poll_expired(context) {
             self.transport = RemoteBrainTlsTransport::Failed;
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -444,7 +564,7 @@ impl RemoteBrainTlsIo {
         if self.request_read_complete {
             return Ok(());
         }
-        if self.read_idle_deadline.as_mut().poll(context).is_pending() {
+        if !self.read_idle_deadline.poll_expired(context) {
             return Ok(());
         }
         self.transport = RemoteBrainTlsTransport::Failed;
@@ -460,27 +580,19 @@ impl RemoteBrainTlsIo {
         start_egress: bool,
     ) -> io::Result<()> {
         if !self.egress_started && start_egress {
-            let now = tokio::time::Instant::now();
-            self.write_idle_deadline
-                .as_mut()
-                .reset(now + REMOTE_BRAIN_TLS_WRITE_IDLE_DEADLINE);
+            let now = wall_now();
+            self.reset_write_idle_deadline(now);
             self.response_deadline
-                .as_mut()
-                .reset(now + REMOTE_BRAIN_TLS_RESPONSE_DEADLINE);
+                .reset_after(now, self.deadlines.response);
             self.egress_started = true;
             #[cfg(any(test, feature = "test-helpers"))]
-            {
-                self.egress_last_positive_write = Some(now);
-                self.egress_write_idle_deadline_at =
-                    Some(now + REMOTE_BRAIN_TLS_WRITE_IDLE_DEADLINE);
-                self.egress.active.fetch_add(1, Ordering::SeqCst);
-            }
+            self.egress.active.fetch_add(1, Ordering::SeqCst);
         }
         if !self.egress_started {
             return Ok(());
         }
-        let write_idle_expired = self.write_idle_deadline.as_mut().poll(context).is_ready();
-        let response_expired = self.response_deadline.as_mut().poll(context).is_ready();
+        let write_idle_expired = self.write_idle_deadline.poll_expired(context);
+        let response_expired = self.response_deadline.poll_expired(context);
         if !write_idle_expired && !response_expired {
             return Ok(());
         }
@@ -493,8 +605,8 @@ impl RemoteBrainTlsIo {
                 .egress_last_positive_write
                 .zip(self.egress_write_idle_deadline_at)
                 .is_none_or(|(last_write, deadline_at)| {
-                    deadline_at.saturating_duration_since(last_write)
-                        != std::time::Duration::from_secs(5)
+                    Duration::from_nanos(deadline_at.duration_since(last_write))
+                        != self.deadlines.write_idle
                 });
             if violates_idle_deadline {
                 self.egress
@@ -517,23 +629,22 @@ impl RemoteBrainTlsIo {
         ))
     }
 
-    fn reset_write_idle_deadline(&mut self) {
-        let now = tokio::time::Instant::now();
+    fn reset_write_idle_deadline(&mut self, now: Time) {
         self.write_idle_deadline
-            .as_mut()
-            .reset(now + REMOTE_BRAIN_TLS_WRITE_IDLE_DEADLINE);
+            .reset_after(now, self.deadlines.write_idle);
         #[cfg(any(test, feature = "test-helpers"))]
         {
             self.egress_last_positive_write = Some(now);
-            self.egress_write_idle_deadline_at = Some(now + REMOTE_BRAIN_TLS_WRITE_IDLE_DEADLINE);
+            self.egress_write_idle_deadline_at = Some(self.write_idle_deadline.sleep.deadline());
         }
     }
 
     fn poll_close_deadline(&mut self, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let close = self.deadlines.close;
         let deadline = self
             .close_deadline
-            .get_or_insert_with(|| Box::pin(tokio::time::sleep(REMOTE_BRAIN_TLS_CLOSE_DEADLINE)));
-        if deadline.as_mut().poll(context).is_pending() {
+            .get_or_insert_with(|| IoDeadline::after(close));
+        if !deadline.poll_expired(context) {
             Poll::Pending
         } else {
             self.transport = RemoteBrainTlsTransport::Failed;
@@ -552,13 +663,11 @@ impl RemoteBrainTlsIo {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Ok(stream)) => {
                 self.transport = RemoteBrainTlsTransport::Streaming(Box::new(stream));
-                let now = tokio::time::Instant::now();
+                let now = wall_now();
                 self.read_idle_deadline
-                    .as_mut()
-                    .reset(now + REMOTE_BRAIN_TLS_READ_IDLE_DEADLINE);
+                    .reset_after(now, self.deadlines.read_idle);
                 self.request_read_deadline
-                    .as_mut()
-                    .reset(now + REMOTE_BRAIN_TLS_REQUEST_READ_DEADLINE);
+                    .reset_after(now, self.deadlines.request_read);
                 Poll::Ready(Ok(()))
             }
             Poll::Ready(Err(error)) => {
@@ -693,9 +802,8 @@ impl AsyncRead for RemoteBrainTlsIo {
         };
         if matches!(result, Poll::Ready(Ok(()))) {
             if buffer.filled().len() > before {
-                self.read_idle_deadline
-                    .as_mut()
-                    .reset(tokio::time::Instant::now() + REMOTE_BRAIN_TLS_READ_IDLE_DEADLINE);
+                let read_idle = self.deadlines.read_idle;
+                self.read_idle_deadline.reset_after(wall_now(), read_idle);
             }
             if let Err(error) = self.observe_http_request(&buffer.filled()[before..]) {
                 return Poll::Ready(Err(error));
@@ -732,7 +840,7 @@ impl AsyncWrite for RemoteBrainTlsIo {
             RemoteBrainTlsTransport::Handshaking(_) => Poll::Pending,
         };
         if matches!(result, Poll::Ready(Ok(written)) if written > 0) {
-            self.reset_write_idle_deadline();
+            self.reset_write_idle_deadline(wall_now());
         }
         #[cfg(any(test, feature = "test-helpers"))]
         self.observe_egress_write_pending(result.is_pending());
