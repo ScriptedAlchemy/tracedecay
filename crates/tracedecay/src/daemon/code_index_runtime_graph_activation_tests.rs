@@ -2471,7 +2471,24 @@ async fn an_idle_release_reports_warming_until_a_read_restores_the_graph() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     };
-    until_ready("first activation").await;
+    // A read-driven re-warm finishes on background threads that still hold a
+    // catalog reader lease after status reports `ready`, so the idle release
+    // below would find the catalog busy. Restore both on this thread instead.
+    let restored = mount
+        .registry
+        .retained_text_owner_for_root(fixture.path())
+        .await
+        .expect("text owner")
+        .interactive_graph_store()
+        .expect("serving graph store");
+    restored.warm_serving_engine().expect("restore the engine");
+    restored
+        .warm_interactive_catalog_with_cancellation(
+            None,
+            Arc::new(tracedecay_graph_db::NeverCancelled),
+        )
+        .expect("restore the catalog");
+    assert_eq!(serving().await, (ready.clone(), fresh));
     let warm = resolve_alpha()
         .await
         .expect("the warm graph resolves `alpha`");
