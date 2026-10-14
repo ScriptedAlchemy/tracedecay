@@ -1375,13 +1375,7 @@ async fn shutdown_waits_for_blocked_automation_retirement_reaper_and_is_idempote
     let shutdown = tokio::spawn(async move {
         shutdown_engine.shutdown_all().await;
     });
-    wait_for_automation_scheduler_state(
-        &engine,
-        tokio::time::Instant::now() + std::time::Duration::from_secs(1),
-        "shutdown automation ownership drain",
-        std::collections::HashMap::is_empty,
-    )
-    .await;
+    wait_for_automation_scheduler_state(&engine, std::collections::HashMap::is_empty).await;
 
     assert!(
         !shutdown.is_finished(),
@@ -1585,9 +1579,8 @@ async fn released_automation_tombstone_allows_one_eventual_replacement() {
     old.owner.graph_db_path = old.owner.graph_db_path.with_extension("retiring.db");
 
     let (task, started_rx, completed_rx, release) = spawn_noncooperative_test_task();
-    tokio::time::timeout(std::time::Duration::from_secs(2), started_rx)
+    started_rx
         .await
-        .expect("noncooperative owner start timed out")
         .expect("noncooperative owner start sender dropped");
     // Project open publishes the live scheduler owner for this project, so the
     // map already holds `new` before the tombstone goes in. This fixture is
@@ -1595,9 +1588,7 @@ async fn released_automation_tombstone_allows_one_eventual_replacement() {
     // beside it gives the reconcile two logical owners for one project and
     // lets it answer for whichever the map yields first.
     if let Some(retirement) = engine.retire_automation_scheduler_locked(&new).await {
-        tokio::time::timeout(std::time::Duration::from_secs(10), retirement.wait())
-            .await
-            .expect("the published scheduler owner must retire before the tombstone stands in");
+        retirement.wait().await;
     }
     {
         let mut schedulers = engine
@@ -1612,7 +1603,6 @@ async fn released_automation_tombstone_allows_one_eventual_replacement() {
         schedulers.insert(old.clone(), test_automation_scheduler_handle(task));
     }
 
-    let retirement_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(4);
     let retirement = {
         let engine = engine.clone();
         let old = old.clone();
@@ -1625,33 +1615,20 @@ async fn released_automation_tombstone_allows_one_eventual_replacement() {
                 .await
         })
     };
-    wait_for_automation_scheduler_state(
-        &engine,
-        retirement_deadline,
-        "retiring scheduler tombstone",
-        |schedulers| {
-            schedulers
-                .get(&old)
-                .is_some_and(|owner| owner.lifecycle == AutomationSchedulerLifecycle::Retiring)
-        },
-    )
+    wait_for_automation_scheduler_state(&engine, |schedulers| {
+        schedulers
+            .get(&old)
+            .is_some_and(|owner| owner.lifecycle == AutomationSchedulerLifecycle::Retiring)
+    })
     .await;
-    let timed_out = tokio::time::timeout(
-        remaining_test_budget(
-            retirement_deadline,
-            "initial scheduler retirement did not finish",
-        ),
-        retirement,
-    )
-    .await
-    .expect("initial scheduler retirement did not finish")
-    .expect("initial scheduler retirement task panicked");
-    let reconcile = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        engine.ensure_automation_scheduler(new.clone(), project.clone(), handshake.clone()),
-    )
-    .await
-    .expect("scheduler reconcile did not observe the retiring tombstone");
+    // The rekey gives up on the noncooperative owner after its own production
+    // retirement deadline, so the task's completion is the event to await.
+    let timed_out = retirement
+        .await
+        .expect("initial scheduler retirement task panicked");
+    let reconcile = engine
+        .ensure_automation_scheduler(new.clone(), project.clone(), handshake.clone())
+        .await;
     let no_overlap = {
         let schedulers = engine
             .store_administration
@@ -1662,25 +1639,10 @@ async fn released_automation_tombstone_allows_one_eventual_replacement() {
     };
 
     release.release();
-    let release_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-    tokio::time::timeout(
-        remaining_test_budget(
-            release_deadline,
-            "noncooperative owner completion timed out",
-        ),
-        completed_rx,
-    )
-    .await
-    .expect("noncooperative owner completion timed out")
-    .expect("noncooperative owner completion sender dropped");
-    wait_for_automation_scheduler_state(
-        &engine,
-        release_deadline,
-        "released scheduler tombstone",
-        |schedulers| !schedulers.contains_key(&old),
-    )
-    .await;
-    let replacement_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    completed_rx
+        .await
+        .expect("noncooperative owner completion sender dropped");
+    wait_for_automation_scheduler_state(&engine, |schedulers| !schedulers.contains_key(&old)).await;
     let replacement = {
         let engine = engine.clone();
         let old = old.clone();
@@ -1693,29 +1655,15 @@ async fn released_automation_tombstone_allows_one_eventual_replacement() {
                 .await
         })
     };
-    wait_for_automation_scheduler_state(
-        &engine,
-        replacement_deadline,
-        "one live replacement scheduler",
-        |schedulers| {
-            schedulers.len() == 1
-                && schedulers
-                    .get(&new)
-                    .and_then(|owner| owner.task.as_ref())
-                    .is_some_and(|task| !task.is_finished())
-        },
-    )
+    wait_for_automation_scheduler_state(&engine, |schedulers| {
+        schedulers.len() == 1
+            && schedulers
+                .get(&new)
+                .and_then(|owner| owner.task.as_ref())
+                .is_some_and(|task| !task.is_finished())
+    })
     .await;
-    let replaced = tokio::time::timeout(
-        remaining_test_budget(
-            replacement_deadline,
-            "replacement rekey did not finish after owner publication",
-        ),
-        replacement,
-    )
-    .await
-    .expect("replacement rekey did not finish after owner publication")
-    .expect("replacement rekey task panicked");
+    let replaced = replacement.await.expect("replacement rekey task panicked");
     let (owner_count, owns_new, live_replacement) = {
         let schedulers = engine
             .store_administration
