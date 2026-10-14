@@ -990,9 +990,11 @@ async fn daemon_http_saturated_cold_resolution_preserves_curate_request_identity
     service.shutdown().await.expect("shutdown HTTP service");
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn daemon_http_timed_out_cold_resolution_preserves_curate_request_identity() {
-    let registry = DaemonHttpApplicationRegistry::default();
+    const COLD_RESOLUTION_DEADLINE: std::time::Duration = std::time::Duration::from_millis(100);
+    let registry = DaemonHttpApplicationRegistry::default()
+        .with_cold_resolution_deadline(COLD_RESOLUTION_DEADLINE);
     let resolver_calls = Arc::new(AtomicUsize::new(0));
     let observed_resolver_calls = Arc::clone(&resolver_calls);
     registry
@@ -1011,7 +1013,9 @@ async fn daemon_http_timed_out_cold_resolution_preserves_curate_request_identity
     let authorization = format!("Bearer {AUTH_TOKEN}");
     let origin = service.origin().to_owned();
     let supplied = "request.sdk.curate.cold-timed-out";
-    let request = tokio::spawn(async move {
+    let started = std::time::Instant::now();
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
         request_path_with_headers_at(
             endpoint,
             "POST",
@@ -1021,15 +1025,17 @@ async fn daemon_http_timed_out_cold_resolution_preserves_curate_request_identity
             Some("application/json"),
             &[(APPLICATION_REQUEST_ID_HEADER, supplied)],
             b"{}",
-        )
-        .await
-    });
-    while resolver_calls.load(Ordering::Relaxed) < 1 {
-        tokio::task::yield_now().await;
-    }
-    tokio::time::advance(std::time::Duration::from_secs(6)).await;
-    let response = request.await.expect("timed-out cold-resolution request");
+        ),
+    )
+    .await
+    .expect("timed-out cold-resolution request");
+    let waited = started.elapsed();
 
+    assert_eq!(resolver_calls.load(Ordering::Relaxed), 1);
+    assert!(
+        waited >= COLD_RESOLUTION_DEADLINE,
+        "the cold resolution must spend its deadline, waited {waited:?}"
+    );
     assert_eq!(status(&response), StatusCode::GATEWAY_TIMEOUT);
     assert_eq!(json_body(&response)["value"]["request_id"], supplied);
     assert_eq!(

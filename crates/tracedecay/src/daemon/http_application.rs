@@ -43,6 +43,7 @@ use tracedecay_daemon_service::remote_http_transport::{
     RemoteBrainTlsEgressObserver, RemoteBrainTlsEgressSnapshot, RemoteBrainTlsIngressSnapshot,
 };
 use tracedecay_domain::{BrainNodeId, EnrollmentGrantV1, ProjectId};
+use tracedecay_runtime_core::native_runtime::{self, TimeoutError};
 use tracedecay_rusqlite_runtime::remote::RemoteWriterPublicationErrorV1;
 use tracedecay_store_runtime::RemoteNodeOperatorErrorV1;
 
@@ -149,6 +150,7 @@ pub(super) struct DaemonHttpApplicationRegistry {
     routers: Arc<Mutex<ProjectRouterCache>>,
     resolver: Arc<SyncRwLock<Option<ProjectRouterResolver>>>,
     resolver_admission: Arc<Semaphore>,
+    cold_resolution_deadline: Duration,
     remote: Arc<SyncRwLock<Option<RemoteHttpApplicationMount>>>,
     active: Arc<AtomicBool>,
     remote_deletion_runtime_owners:
@@ -161,6 +163,7 @@ impl Default for DaemonHttpApplicationRegistry {
             routers: Arc::new(Mutex::new(ProjectRouterCache::default())),
             resolver: Arc::new(SyncRwLock::new(None)),
             resolver_admission: Arc::new(Semaphore::new(MAX_HTTP_APPLICATION_COLD_RESOLUTIONS)),
+            cold_resolution_deadline: HTTP_APPLICATION_COLD_RESOLUTION_DEADLINE,
             remote: Arc::new(SyncRwLock::new(None)),
             active: Arc::new(AtomicBool::new(false)),
             remote_deletion_runtime_owners: Arc::new(SyncRwLock::new(None)),
@@ -169,6 +172,12 @@ impl Default for DaemonHttpApplicationRegistry {
 }
 
 impl DaemonHttpApplicationRegistry {
+    #[cfg(test)]
+    pub(super) fn with_cold_resolution_deadline(mut self, deadline: Duration) -> Self {
+        self.cold_resolution_deadline = deadline;
+        self
+    }
+
     pub(super) async fn mount(&self, project_id: &str, router: Router) -> Result<()> {
         let project_id =
             ProjectId::new(project_id.to_owned()).map_err(|error| TraceDecayError::Config {
@@ -280,14 +289,14 @@ impl DaemonHttpApplicationRegistry {
         // A cold project route resolution can park on daemon project-open
         // work; bound it so an HTTP caller never waits unboundedly.
         let resolved = tracing::Instrument::instrument(
-            tokio::time::timeout(
-                HTTP_APPLICATION_COLD_RESOLUTION_DEADLINE,
-                resolver(project_id.clone()),
-            ),
+            native_runtime::timeout(self.cold_resolution_deadline, resolver(project_id.clone())),
             tracing::trace_span!("daemon.http.application.router_resolve"),
         )
         .await
-        .map_err(|_| ProjectRouterResolutionError::TimedOut)?
+        .map_err(|error| match error {
+            TimeoutError::Elapsed => ProjectRouterResolutionError::TimedOut,
+            TimeoutError::TimerUnavailable(_) => ProjectRouterResolutionError::Unavailable,
+        })?
         .map_err(|_| ProjectRouterResolutionError::Unavailable)?;
         let Some(router) = resolved else {
             return Ok(None);

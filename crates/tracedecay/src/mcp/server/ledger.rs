@@ -280,7 +280,10 @@ impl McpServer {
                 notified.await;
             }
         };
-        if tokio::time::timeout(timeout, wait).await.is_ok() {
+        if tracedecay_runtime_core::native_runtime::timeout(timeout, wait)
+            .await
+            .is_ok()
+        {
             return true;
         }
         let started = self.ledger_writes_started.load(Ordering::SeqCst);

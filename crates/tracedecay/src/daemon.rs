@@ -12,7 +12,7 @@ use serde_json::json;
 #[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::task::JoinHandle;
-use tokio::time::{Duration, timeout};
+use tokio::time::Duration;
 use tokio_stream::StreamExt;
 use tracedecay_lsp::{AdmittedRoot, AuthorizedLspWorkspace};
 

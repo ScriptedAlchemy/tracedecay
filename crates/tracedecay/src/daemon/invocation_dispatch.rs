@@ -87,7 +87,9 @@ async fn await_lsp_route_rejoin<Output>(
         .ok_or_else(tracedecay_contracts::ApplicationProblem::timed_out_before_admission)?;
     let remaining_micros = u64::try_from(remaining_micros)
         .map_err(|_| tracedecay_contracts::ApplicationProblem::timed_out_before_admission())?;
-    let sleep = tokio::time::sleep(Duration::from_micros(remaining_micros));
+    let sleep = tracedecay_runtime_core::native_runtime::sleep_until(
+        std::time::Instant::now() + Duration::from_micros(remaining_micros),
+    );
     tokio::pin!(sleep);
     tokio::pin!(route_read);
     tokio::select! {
@@ -95,7 +97,8 @@ async fn await_lsp_route_rejoin<Output>(
         () = request_cancellation.cancelled() => {
             Err(tracedecay_contracts::ApplicationProblem::cancelled_before_admission())
         }
-        () = &mut sleep => {
+        // A timer that cannot start fails closed, as an elapsed deadline.
+        _ = &mut sleep => {
             Err(tracedecay_contracts::ApplicationProblem::timed_out_before_admission())
         }
         output = &mut route_read => {

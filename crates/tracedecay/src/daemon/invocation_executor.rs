@@ -17,6 +17,7 @@ use tracedecay_daemon_service::{
     WorkApplicationOutcomeV1,
 };
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::native_runtime;
 
 use super::*;
 
@@ -391,7 +392,7 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for InProcessDaemonInvo
                     let mut terminated = false;
                     for _ in 0..max_events {
                         let Ok(Some(event)) =
-                            timeout(Duration::from_millis(1), stream.next()).await
+                            native_runtime::timeout(Duration::from_millis(1), stream.next()).await
                         else {
                             break;
                         };
@@ -489,6 +490,11 @@ impl tracedecay_contracts::ApplicationInvocationExecutor for InProcessDaemonInvo
 /// Settles one in-process invocation. `request_cancellations` is the owning
 /// service's table: a caller-side cancellation or deadline is relayed to the
 /// daemon-side registration through it when no pre-admitted token exists.
+/// An authoritative effect gets `response_grace` past cancellation to settle.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one settlement owns its join, deadline, both cancellation sources, policy and grace"
+)]
 pub(super) async fn settle_in_process_invocation(
     request_cancellations: &tracedecay_daemon_service::RequestCancellationRegistryV1,
     request_id: &str,
@@ -497,6 +503,7 @@ pub(super) async fn settle_in_process_invocation(
     cancellation: tracedecay_contracts::CancellationSignal,
     admitted_cancellation: Option<tracedecay_runtime_core::cancellation::CancellationToken>,
     policy: tracedecay_daemon_protocol::InvocationCancellationPolicy,
+    response_grace: Duration,
 ) -> std::result::Result<DaemonInvocationResponse, tracedecay_daemon_protocol::DaemonInvocationError>
 {
     use tracedecay_contracts::CancellationStage;
@@ -527,14 +534,15 @@ pub(super) async fn settle_in_process_invocation(
         }
         () = &mut cancellation_wait => false,
         () = &mut admitted_cancellation_wait => false,
-        () = tokio::time::sleep(remaining) => true,
+        // A timer that cannot start fails closed, as an elapsed deadline.
+        _ = native_runtime::sleep_until(std::time::Instant::now() + remaining) => true,
     };
     if !has_admitted_cancellation {
         request_cancellations.cancel(request_id);
     }
     match policy {
         tracedecay_daemon_protocol::InvocationCancellationPolicy::ReadOnly => {
-            if tokio::time::timeout(Duration::from_secs(1), &mut invocation)
+            if native_runtime::timeout(Duration::from_secs(1), &mut invocation)
                 .await
                 .is_err()
             {
@@ -557,12 +565,17 @@ pub(super) async fn settle_in_process_invocation(
             // effect merely outlived its budget. Wait for the authoritative
             // settlement over the same grace the daemon's own clients keep
             // reading for, so the effect's real terminal is the one reported.
-            match tokio::time::timeout(DAEMON_TOOL_RESPONSE_GRACE, &mut invocation).await {
+            match native_runtime::timeout(response_grace, &mut invocation).await {
                 Ok(Ok(response)) => Ok(response),
-                Ok(Err(_)) | Err(_) => Ok(DaemonInvocationResponse::problem(
-                    request_id,
-                    tracedecay_daemon_protocol::DaemonInvocationProblem::ResetRequired,
-                )),
+                Err(native_runtime::TimeoutError::TimerUnavailable(_)) => {
+                    Err(tracedecay_daemon_protocol::DaemonInvocationError::Unavailable)
+                }
+                Ok(Err(_)) | Err(native_runtime::TimeoutError::Elapsed) => {
+                    Ok(DaemonInvocationResponse::problem(
+                        request_id,
+                        tracedecay_daemon_protocol::DaemonInvocationProblem::ResetRequired,
+                    ))
+                }
             }
         }
     }
@@ -652,6 +665,7 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for InProcessDaemonInv
                     cancellation,
                     admitted_cancellation,
                     policy,
+                    DAEMON_TOOL_RESPONSE_GRACE,
                 )
                 .await
             })

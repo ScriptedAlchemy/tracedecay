@@ -18,6 +18,7 @@ use super::bootstrap::set_owner_only_permissions;
 // `use super::*` cannot carry it into a `test-transport` build.
 use super::project_server_lifecycle::{detach_project_servers, shutdown_detached_project_servers};
 use super::*;
+use tokio::time::timeout;
 #[cfg(unix)]
 use tracedecay_application::pr_tracking::acquire_manual_branch_lifecycle;
 use tracedecay_code_index_runtime::CodeIndexSchedulerRegistryV1;

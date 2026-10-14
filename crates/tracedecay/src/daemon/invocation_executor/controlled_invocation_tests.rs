@@ -70,6 +70,7 @@ async fn in_process_effect_cancellation_requests_daemon_cancel_and_awaits_settle
             cancellation,
             None,
             InvocationCancellationPolicy::AuthoritativeEffect,
+            DAEMON_TOOL_RESPONSE_GRACE,
         ),
     )
     .await
@@ -108,6 +109,7 @@ async fn in_process_effect_deadline_requests_daemon_cancel_and_awaits_settlement
                 .expect("cancellation signal"),
             None,
             InvocationCancellationPolicy::AuthoritativeEffect,
+            DAEMON_TOOL_RESPONSE_GRACE,
         ),
     )
     .await
@@ -118,8 +120,10 @@ async fn in_process_effect_deadline_requests_daemon_cancel_and_awaits_settlement
     assert!(completed.load(Ordering::Acquire), "work was not detached");
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn in_process_effect_without_settlement_returns_reset_required() {
+    const REMAINING: Duration = Duration::from_millis(10);
+    const RESPONSE_GRACE: Duration = Duration::from_millis(100);
     const REQUEST_ID: &str = "request.in-process-effect-no-settlement";
     let request_cancellations = RequestCancellationRegistryV1::default();
     let lease = request_cancellations
@@ -127,34 +131,30 @@ async fn in_process_effect_without_settlement_returns_reset_required() {
         .expect("register invocation cancellation");
     let invocation = tokio::spawn(std::future::pending::<DaemonInvocationResponse>());
 
-    let settlement_cancellations = request_cancellations.clone();
-    let settlement = tokio::spawn(async move {
+    let started = std::time::Instant::now();
+    let response = tokio::time::timeout(
+        Duration::from_secs(10),
         settle_in_process_invocation(
-            &settlement_cancellations,
+            &request_cancellations,
             REQUEST_ID,
             invocation,
-            Duration::from_millis(10),
+            REMAINING,
             CancellationSignal::active("cancel.in-process-effect-no-settlement")
                 .expect("cancellation signal"),
             None,
             InvocationCancellationPolicy::AuthoritativeEffect,
-        )
-        .await
-    });
-    tokio::task::yield_now().await;
-    tokio::time::advance(Duration::from_millis(10)).await;
-    tokio::task::yield_now().await;
-    tokio::time::advance(DAEMON_TOOL_RESPONSE_GRACE).await;
-    tokio::task::yield_now().await;
-    assert!(
-        settlement.is_finished(),
-        "authoritative join did not terminate after its response grace"
-    );
-    let response = settlement
-        .await
-        .expect("join authoritative settlement")
-        .expect("indeterminate settlement is typed");
+            RESPONSE_GRACE,
+        ),
+    )
+    .await
+    .expect("authoritative join did not terminate after its response grace")
+    .expect("indeterminate settlement is typed");
+    let waited = started.elapsed();
 
+    assert!(
+        waited >= REMAINING + RESPONSE_GRACE,
+        "authoritative join must wait out its deadline and response grace, waited {waited:?}"
+    );
     assert_authoritative_settlement(response);
     assert!(lease.token().is_cancelled());
 }
@@ -217,6 +217,7 @@ async fn in_process_read_observes_admitted_outer_cancellation_after_start() {
                 .expect("independent cancellation signal"),
             Some(admitted_cancellation),
             InvocationCancellationPolicy::ReadOnly,
+            DAEMON_TOOL_RESPONSE_GRACE,
         ),
     )
     .await

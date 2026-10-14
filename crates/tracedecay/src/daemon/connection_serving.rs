@@ -12,6 +12,7 @@ use tracedecay_daemon_service::{DaemonInvocationService, DaemonLspSessionAccess,
 use tracedecay_mcp::BrokerSelectedResponseLease;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::logging::log_daemon_event;
+use tracedecay_runtime_core::native_runtime::{self, TimeoutError};
 
 /// Hermetic production-route benchmark support for the typed RMCP transport.
 ///
@@ -312,7 +313,7 @@ async fn bind_authenticated_profile_identity_within_deadline(
         .await
         .map(|administration| (binding_handshake, administration))
     });
-    match tokio::time::timeout(PROFILE_IDENTITY_BIND_DEADLINE, binding).await {
+    match native_runtime::timeout(PROFILE_IDENTITY_BIND_DEADLINE, binding).await {
         Ok(Ok(Ok((bound_handshake, administration)))) => {
             *handshake = bound_handshake;
             Ok(administration)
@@ -321,7 +322,10 @@ async fn bind_authenticated_profile_identity_within_deadline(
         Ok(Err(join)) => Err(TraceDecayError::Config {
             message: format!("daemon profile identity binding failed to join: {join}"),
         }),
-        Err(_) => Err(profile_identity_warming_error()),
+        Err(TimeoutError::Elapsed) => Err(profile_identity_warming_error()),
+        Err(error @ TimeoutError::TimerUnavailable(_)) => Err(TraceDecayError::Config {
+            message: error.to_string(),
+        }),
     }
 }
 
@@ -365,7 +369,7 @@ async fn write_refusal_and_drain(
         let _ = transport.flush().await;
     }
     for _ in 0..4 {
-        match tokio::time::timeout(
+        match native_runtime::timeout(
             Duration::from_millis(100),
             read_line_handling_wire_oversized(transport),
         )
@@ -729,7 +733,9 @@ where
         result = read_line_handling_wire_oversized(transport) =>
             result.map(DaemonDeliveryAckWait::Line),
         () = &mut draining => Ok(DaemonDeliveryAckWait::Draining),
-        () = tokio::time::sleep(timeout) => Ok(DaemonDeliveryAckWait::Deadline),
+        // A timer that cannot start fails closed, as an elapsed deadline.
+        _ = native_runtime::sleep_until(std::time::Instant::now() + timeout) =>
+            Ok(DaemonDeliveryAckWait::Deadline),
         () = &mut cancellation_wait => Ok(DaemonDeliveryAckWait::Cancelled),
     }
 }
@@ -783,7 +789,11 @@ where
                             result = &mut open =>
                                 result.map(|owner| Some((owner, pending_lines))),
                             () = &mut peer_full_close => Ok(None),
-                            () = tokio::time::sleep(PROJECT_OWNER_HALF_CLOSE_GRACE) =>
+                            // A timer that cannot start fails closed, as an
+                            // elapsed grace.
+                            _ = native_runtime::sleep_until(
+                                std::time::Instant::now() + PROJECT_OWNER_HALF_CLOSE_GRACE,
+                            ) =>
                                 Err(TraceDecayError::project_route(
                                     PROJECT_WARMING_REASON_CODE,
                                     true,
@@ -2131,21 +2141,27 @@ mod delivery_ack_tests {
     };
     use std::time::Duration;
     use tracedecay_mcp::transport::ChannelTransport;
+    use tracedecay_runtime_core::native_runtime;
 
-    #[tokio::test(start_paused = true)]
-    async fn delivery_ack_wait_uses_the_exact_deadline_budget() {
+    /// Runs outside any Tokio runtime: the deadline must be a native timer.
+    #[test]
+    fn delivery_ack_wait_uses_the_exact_deadline_budget() {
+        const BUDGET: Duration = Duration::from_millis(100);
         let (mut transport, _input, _output) = ChannelTransport::new();
-        let wait = await_daemon_delivery_ack(
-            &mut transport,
-            Duration::from_secs(3),
-            None,
-            std::future::pending::<()>(),
-        );
-        tokio::pin!(wait);
-        tokio::task::yield_now().await;
-        tokio::time::advance(Duration::from_secs(3)).await;
+        let started = std::time::Instant::now();
+        let wait = native_runtime::block_on(native_runtime::timeout(
+            Duration::from_secs(10),
+            await_daemon_delivery_ack(&mut transport, BUDGET, None, std::future::pending::<()>()),
+        ))
+        .expect("native runtime runs the ack wait")
+        .expect("the ack wait ends at its deadline");
+        let waited = started.elapsed();
 
-        assert!(matches!(wait.await, Ok(DaemonDeliveryAckWait::Deadline)));
+        assert!(matches!(wait, Ok(DaemonDeliveryAckWait::Deadline)));
+        assert!(
+            waited >= BUDGET,
+            "the ack wait must spend its whole budget, waited {waited:?}"
+        );
     }
 
     #[test]
