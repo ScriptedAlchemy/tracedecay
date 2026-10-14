@@ -57,29 +57,43 @@ pub fn block_on<F: Future>(future: F) -> Result<F::Output, String> {
     Ok(started_process_runtime()?.block_on(future))
 }
 
-/// Runs `work` on the runtime's blocking pool and awaits its result.
+/// Queues `work` on the runtime's blocking pool now, at the call, and returns
+/// a future of its result, like Tokio's `spawn_blocking`.
 ///
 /// The work is owned by the runtime, not by the caller's region: cancelling or
-/// dropping the caller abandons only the wait. Work spawned through a request
-/// `Cx` can instead be cancelled with that region before it starts, which
-/// would strand anything the caller had already queued for it.
-pub async fn spawn_blocking<T, F>(work: F) -> Result<T, String>
+/// dropping the returned future abandons only the wait, and work whose future
+/// is never polled still runs. Work spawned through a request `Cx` can instead
+/// be cancelled with that region before it starts, which would strand anything
+/// the caller had already queued for it.
+pub fn spawn_blocking<T, F>(work: F) -> impl Future<Output = Result<T, String>> + Send + 'static
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let queued = queue_blocking(work);
+    async move {
+        let (cx, mut receiver) = queued?;
+        receiver
+            .recv(&cx)
+            .await
+            .map_err(|error| format!("native blocking work ended without a result: {error}"))
+    }
+}
+
+fn queue_blocking<T, F>(work: F) -> Result<(Cx, asupersync::channel::oneshot::Receiver<T>), String>
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
     let runtime = handle().ok_or("native execution runtime unavailable")?;
     let cx = cx().ok_or("native execution context unavailable")?;
-    let (sender, mut receiver) = asupersync::channel::oneshot::channel();
+    let (sender, receiver) = asupersync::channel::oneshot::channel();
     runtime
         .spawn_blocking(move || {
             let _ = sender.send_blocking(work());
         })
         .ok_or("native blocking pool unavailable")?;
-    receiver
-        .recv(&cx)
-        .await
-        .map_err(|error| format!("native blocking work ended without a result: {error}"))
+    Ok((cx, receiver))
 }
 
 /// Completes at `deadline` on a native timer task, so a foreign executor never
@@ -142,6 +156,19 @@ mod tests {
         assert!(on_native_worker, "settlement must run on a native worker");
         let mut blocking = cx.spawn_blocking(|_| 7).expect("native blocking task");
         assert_eq!(blocking.join(&cx).await.expect("native blocking join"), 7);
+    }
+
+    #[test]
+    fn blocking_work_starts_at_the_call_even_when_never_awaited() {
+        let (ran, settled) = std::sync::mpsc::channel::<()>();
+        drop(spawn_blocking(move || {
+            let _ = ran.send(());
+        }));
+        assert_eq!(
+            settled.recv_timeout(Duration::from_secs(10)),
+            Ok(()),
+            "work must run although its result future was dropped unpolled"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
