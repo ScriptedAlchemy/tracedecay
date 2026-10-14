@@ -4,7 +4,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use tokio::runtime::Handle;
 use tracedecay_contracts::NativeIntegrationStatusProjectionV1;
 use tracedecay_lsp::{
     AdmittedRoot, AnalyzerCancellationAdapter, AnalyzerCancellationPort, AuthorizedLspWorkspace,
@@ -16,11 +15,10 @@ use tracedecay_lsp::{
     DiagnosticSnapshotOutcome, DiagnosticSnapshotPort, FeedbackCycleAdapter, FeedbackCyclePort,
     FeedbackCycleRequest, FeedbackCycleResponse, FeedbackCycleRuntimePort, GatewayCapabilities,
     LspAnalyzerCancellationAuthority, LspRequestId, LspRuntimeFailure, LspRuntimeFuture,
-    NativeIntegrationStatusPort, OverlaySnapshot, SemanticProviderOutcome, SemanticProviderPort,
-    SemanticRequest, SemanticResponse, UpstreamCapabilities, WorkspaceDiagnosticSnapshotOutcome,
+    LspRuntimeSpawner, NativeIntegrationStatusPort, OverlaySnapshot, SemanticProviderOutcome,
+    SemanticProviderPort, SemanticRequest, SemanticResponse, UpstreamCapabilities,
+    WorkspaceDiagnosticSnapshotOutcome,
 };
-
-use super::runtime_adapters::runtime_spawner;
 
 /// Supplies exact upstream semantic capabilities when an LSP session is
 /// actually opened.
@@ -50,7 +48,7 @@ impl UpstreamCapabilityInitializationAuthority for StaticUpstreamCapabilities {
 /// Cloneable daemon registration for one admitted project.
 #[derive(Clone)]
 pub struct DaemonLspSessionFactory {
-    runtime: Handle,
+    runtime: Arc<dyn LspRuntimeSpawner>,
     feedback: Arc<FeedbackCycleAdapter>,
     semantics: Arc<dyn SemanticProviderPort + Send + Sync>,
     diagnostics: Arc<dyn CanonicalDiagnosticSnapshotAuthority>,
@@ -65,7 +63,7 @@ pub struct DaemonLspSessionFactory {
 impl DaemonLspSessionFactory {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        runtime: Handle,
+        runtime: Arc<dyn LspRuntimeSpawner>,
         feedback: Arc<dyn FeedbackCycleRuntimePort>,
         semantics: Arc<dyn SemanticProviderPort + Send + Sync>,
         diagnostics: Arc<dyn CanonicalDiagnosticSnapshotAuthority>,
@@ -74,10 +72,7 @@ impl DaemonLspSessionFactory {
         gateway_capabilities: GatewayCapabilities,
         upstream_capabilities: UpstreamCapabilities,
     ) -> Self {
-        let feedback = Arc::new(FeedbackCycleAdapter::new(
-            runtime_spawner(runtime.clone()),
-            feedback,
-        ));
+        let feedback = Arc::new(FeedbackCycleAdapter::new(Arc::clone(&runtime), feedback));
         Self {
             runtime,
             feedback,
@@ -131,13 +126,13 @@ impl DaemonLspSessionFactory {
             self.feedback.clone() as Arc<dyn FeedbackCyclePort + Send + Sync>,
             self.semantics.clone(),
             Arc::new(DiagnosticSnapshotAdapter::new(
-                runtime_spawner(self.runtime.clone()),
+                Arc::clone(&self.runtime),
                 self.diagnostics.clone(),
             )) as Arc<dyn DiagnosticSnapshotPort + Send + Sync>,
             Arc::new(AnalyzerCancellationAdapter::new(self.cancellation.clone()))
                 as Arc<dyn AnalyzerCancellationPort + Send + Sync>,
             Arc::new(ContextProjectionAdapter::new(
-                runtime_spawner(self.runtime.clone()),
+                Arc::clone(&self.runtime),
                 self.context.clone(),
             )) as Arc<dyn ContextProjectionPort + Send + Sync>,
             gateway_capabilities,
@@ -227,7 +222,7 @@ impl DaemonLspSessionFactory {
             diagnostics.insert(
                 root_uri.clone(),
                 Arc::new(DiagnosticSnapshotAdapter::new(
-                    runtime_spawner(factory.runtime.clone()),
+                    Arc::clone(&factory.runtime),
                     factory.diagnostics.clone(),
                 )) as Arc<dyn DiagnosticSnapshotPort + Send + Sync>,
             );
@@ -240,7 +235,7 @@ impl DaemonLspSessionFactory {
             context.insert(
                 root_uri,
                 Arc::new(ContextProjectionAdapter::new(
-                    runtime_spawner(factory.runtime.clone()),
+                    Arc::clone(&factory.runtime),
                     factory.context.clone(),
                 )) as Arc<dyn ContextProjectionPort + Send + Sync>,
             );
@@ -697,7 +692,7 @@ mod tests {
         upstream_capability_initializer: Arc<dyn UpstreamCapabilityInitializationAuthority>,
     ) -> DaemonLspSessionFactory {
         DaemonLspSessionFactory::new(
-            Handle::current(),
+            crate::lsp_support::native_lsp_runtime(),
             Arc::new(RuntimeFeedback),
             Arc::new(UnavailableSemanticProvider),
             Arc::new(ToggleWorkspaceDiagnostics(Arc::new(AtomicBool::new(false)))),
@@ -927,7 +922,7 @@ mod tests {
     {
         let ready = Arc::new(AtomicBool::new(false));
         let factory = DaemonLspSessionFactory::new(
-            Handle::current(),
+            crate::lsp_support::native_lsp_runtime(),
             Arc::new(RuntimeFeedback),
             Arc::new(UnavailableSemanticProvider),
             Arc::new(ToggleWorkspaceDiagnostics(Arc::clone(&ready))),
