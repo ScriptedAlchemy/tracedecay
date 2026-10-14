@@ -1548,7 +1548,6 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
     )
     .unwrap();
     let project = profile.enroll(repository.root()).await;
-    let project_root = project.root().to_path_buf();
     let server = project.mcp_server().await;
     let lcm_status_call = |id: i64| {
         jsonrpc_request(
