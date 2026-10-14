@@ -903,7 +903,6 @@ async fn register_production_lsp_owner(
             registered_database,
             database,
             Arc::new(invocation.code_index_schedulers.clone()),
-            tokio::runtime::Handle::current(),
             diagnostic_broker,
             &languages,
             root_uri,

@@ -18,12 +18,14 @@
 //! clean page nothing checked.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use futures_util::FutureExt;
+use futures_util::future::join_all;
 use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
-use tokio::task::JoinSet;
 use tracedecay_domain::{CodeGenerationId, ContentDigest, UtcMicros};
 use tracedecay_lsp::{
     SearchedTsconfig, TypeScriptFileOwner, TypeScriptProject, TypeScriptProjectConfigInputs,
@@ -375,47 +377,42 @@ async fn check_projects(
             .collect();
     }
     let permits = Arc::new(Semaphore::new(CONCURRENT_CHECKS));
-    let mut tasks = JoinSet::new();
-    let mut spawned = BTreeMap::new();
-    for (tsconfig, compiler) in stale {
-        let build_info = build_info_dir.join(build_info_file_name(&tsconfig));
-        let root = project_root.to_path_buf();
-        let permits = Arc::clone(&permits);
-        let key = tsconfig.clone();
-        let task = tasks.spawn(async move {
-            let Ok(_permit) = permits.acquire_owned().await else {
-                return ProjectResult::Failed {
-                    reason: "the TypeScript check admission closed".to_owned(),
+    let checks = stale
+        .into_iter()
+        .map(|(tsconfig, compiler)| {
+            let build_info = build_info_dir.join(build_info_file_name(&tsconfig));
+            let root = project_root.to_path_buf();
+            let permits = Arc::clone(&permits);
+            async move {
+                let check = async {
+                    let Ok(_permit) = permits.acquire().await else {
+                        return ProjectResult::Failed {
+                            reason: "the TypeScript check admission closed".to_owned(),
+                        };
+                    };
+                    match run_typescript_compiler(&compiler, &root, &tsconfig, Some(&build_info))
+                        .await
+                    {
+                        Ok(reported) => ProjectResult::Checked {
+                            reported: reported.into_iter().map(compiler_diagnostic).collect(),
+                            program: program_paths(&root, &build_info),
+                        },
+                        Err(error) => ProjectResult::Failed {
+                            reason: error.to_string(),
+                        },
+                    }
                 };
-            };
-            match run_typescript_compiler(&compiler, &root, &tsconfig, Some(&build_info)).await {
-                Ok(reported) => ProjectResult::Checked {
-                    reported: reported.into_iter().map(compiler_diagnostic).collect(),
-                    program: program_paths(&root, &build_info),
-                },
-                Err(error) => ProjectResult::Failed {
-                    reason: error.to_string(),
-                },
+                let result = AssertUnwindSafe(check)
+                    .catch_unwind()
+                    .await
+                    .unwrap_or_else(|_| ProjectResult::Failed {
+                        reason: "the TypeScript check panicked".to_owned(),
+                    });
+                (tsconfig, result)
             }
-        });
-        spawned.insert(task.id(), key);
-    }
-    let mut results = BTreeMap::new();
-    while let Some(joined) = tasks.join_next_with_id().await {
-        let (id, result) = match joined {
-            Ok((id, result)) => (id, result),
-            Err(error) => (
-                error.id(),
-                ProjectResult::Failed {
-                    reason: format!("the TypeScript check task ended: {error}"),
-                },
-            ),
-        };
-        if let Some(tsconfig) = spawned.remove(&id) {
-            results.insert(tsconfig, result);
-        }
-    }
-    results
+        })
+        .collect::<Vec<_>>();
+    join_all(checks).await.into_iter().collect()
 }
 
 /// One build-info file per tsconfig path, so linked worktrees sharing a store

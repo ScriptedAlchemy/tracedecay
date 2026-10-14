@@ -8,7 +8,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 use tracedecay_lsp::analyzer::broker::{DiagnosticBroker, StdioLspSemanticAuthority};
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
@@ -22,7 +21,7 @@ use tracedecay_lsp::{
 use tracedecay_domain::errors::{Result, TraceDecayError};
 
 use super::UpstreamCapabilityInitializationAuthority;
-use crate::lsp_support::{analyzer_runtime_config_error, runtime_spawner};
+use crate::lsp_support::{analyzer_runtime_config_error, native_lsp_runtime};
 
 #[derive(Clone)]
 pub struct ProductionSemanticAuthorities {
@@ -44,7 +43,6 @@ pub struct ProductionSemanticAuthorities {
 /// the upstream capability authority.
 #[tracing::instrument(name = "lsp_runtime.semantic_authorities", level = "trace", skip_all)]
 pub async fn production_semantic_authorities(
-    runtime: Handle,
     diagnostic_broker: Arc<Mutex<DiagnosticBroker>>,
     languages: &[String],
     workspace_root: PathBuf,
@@ -93,7 +91,7 @@ pub async fn production_semantic_authorities(
     let mut initializers = Vec::with_capacity(upstream_routes.len());
     for (_, adapter, upstream) in upstream_routes {
         initializers.push(Arc::clone(&upstream));
-        let authority = SemanticProviderAdapter::shared(runtime_spawner(runtime.clone()), upstream);
+        let authority = SemanticProviderAdapter::shared(native_lsp_runtime(), upstream);
         cancellation.push(authority.clone());
         routes.push(LanguageSemanticRoute::new(adapter.extensions, authority));
     }
