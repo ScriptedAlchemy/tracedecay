@@ -130,21 +130,24 @@ impl ShardRuntimePublisher for LifecycleShardRuntimePublisher {
     ) -> StoreRuntimeRegistryFuture<'_, Result<PublishedShardRuntime, StoreRuntimeRegistryFailure>>
     {
         Box::pin(async move {
-            let executor = crate::native_runtime::handle().ok_or(
-                StoreRuntimeRegistryFailure::RuntimeUnavailable {
-                    operation: "publish physical registered runtime",
-                },
-            )?;
-            let admission = AdmissionConfigV1::default();
             let pinned_profile =
                 matches!(request.binding.shard_id.scope, StoreShardScopeV1::Profile);
             let runtime = ShardRuntime::new(request.binding.clone(), pinned_profile);
             runtime
                 .transition(RuntimeMaintenanceStateV1::Opening)
                 .map_err(runtime_lifecycle_failure)?;
-            let attachment =
-                LifecycleShardRuntimeAttachment::new(RepositoryPhysicalAttachmentFactory);
-            let physical = attachment.attach(&executor, &request, admission)?;
+            // A `RuntimeHandle` held across the await overflows the `Send`
+            // proof (rust-lang/rust#159228), so it drops before publication.
+            let physical =
+                {
+                    let executor = crate::native_runtime::handle().ok_or(
+                        StoreRuntimeRegistryFailure::RuntimeUnavailable {
+                            operation: "publish physical registered runtime",
+                        },
+                    )?;
+                    LifecycleShardRuntimeAttachment::new(RepositoryPhysicalAttachmentFactory)
+                        .attach(&executor, &request, AdmissionConfigV1::default())?
+                };
             publish_lifecycle_runtime(request, runtime, physical).await
         })
     }

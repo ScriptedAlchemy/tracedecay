@@ -208,12 +208,12 @@ impl Connection {
 
     pub async fn release_connection_memory(&self) -> Result<MemoryReleaseOutcome> {
         let runtime = Arc::clone(&self.runtime);
-        let owner = crate::native_runtime::handle().ok_or(Error::RuntimeContextUnavailable)?;
-        let settlement = owner
+        let settlement = crate::native_runtime::handle()
+            .ok_or(Error::RuntimeContextUnavailable)?
             .try_request_cx_with_budget(Budget::INFINITE)
             .map_err(|error| Error::Runtime(format!("failed to admit memory release: {error}")))?;
         let mut task = settlement
-            .spawn(move |_cx| async move { runtime.release_connection_memory_async(&owner).await })
+            .spawn(move |cx| async move { runtime.release_connection_memory_async(&cx).await })
             .map_err(|error| Error::Runtime(format!("failed to spawn memory release: {error}")))?;
         std::future::poll_fn(|context| task.poll_join(context))
             .await
