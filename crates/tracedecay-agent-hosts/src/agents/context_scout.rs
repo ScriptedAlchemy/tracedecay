@@ -3128,19 +3128,81 @@ mod tests {
         })
     }
 
-    /// Measures factual drift of live Codex refinement over a synthetic
+    /// Answers the Codex app-server prompt port with `claude -p`, so the
+    /// production prompt, response schema, validation, and drift guard can be
+    /// measured against a second model when no Codex login is available.
+    #[cfg(feature = "token-counting")]
+    fn eval_claude_prompt_runner(
+        prompt: &str,
+        config: &tracedecay_automation_runtime::ports::codex_app_server::SummaryConfig,
+        _thread_source: &str,
+        response_schema: Option<&serde_json::Value>,
+    ) -> Result<
+        tracedecay_automation_runtime::ports::codex_app_server::Summary,
+        tracedecay_automation_runtime::automation::backend::AgentTaskError,
+    > {
+        use tracedecay_automation_runtime::automation::backend::{
+            AgentTaskError, AgentTaskFailureClass,
+        };
+        let mut command = std::process::Command::new(&config.codex_bin);
+        command.args([
+            "-p",
+            prompt,
+            "--output-format",
+            "json",
+            "--no-session-persistence",
+        ]);
+        command.args([
+            "--setting-sources",
+            "",
+            "--strict-mcp-config",
+            "--tools",
+            "",
+        ]);
+        if let Some(model) = &config.model {
+            command.args(["--model", model]);
+        }
+        if let Some(schema) = response_schema {
+            command.args(["--json-schema", &schema.to_string()]);
+        }
+        let output = command.output().map_err(|error| {
+            AgentTaskError::new(AgentTaskFailureClass::Unavailable, error.to_string())
+        })?;
+        let reply: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+            AgentTaskError::new(
+                AgentTaskFailureClass::MalformedOutput,
+                format!("{error}: {}", String::from_utf8_lossy(&output.stderr)),
+            )
+        })?;
+        let text = match reply.get("structured_output") {
+            Some(structured) => structured.to_string(),
+            None => reply["result"].as_str().unwrap_or_default().to_owned(),
+        };
+        Ok(
+            tracedecay_automation_runtime::ports::codex_app_server::Summary {
+                text,
+                model: reply["modelUsage"]
+                    .as_object()
+                    .and_then(|models| models.keys().next().cloned()),
+            },
+        )
+    }
+
+    /// Measures factual drift of live Scout refinement over a synthetic
     /// diagnostic corpus about the `evals/agent_adoption/fixture` orders crate.
     ///
-    /// Ignored by default; it costs one provider call per case. Run it with
-    /// `TRACEDECAY_SCOUT_LIVE_EVAL_CODEX` set to the absolute path of a `codex`
-    /// executable and, optionally, `TRACEDECAY_SCOUT_LIVE_EVAL_MODEL` set to the
-    /// model id:
+    /// Ignored by default; it costs one provider call per case and repetition.
+    /// Run it with `TRACEDECAY_SCOUT_LIVE_EVAL_CODEX` set to the absolute path
+    /// of a `codex` executable (the production backend), or with
+    /// `TRACEDECAY_SCOUT_LIVE_EVAL_CLAUDE` set to a `claude` executable that
+    /// stands in for it. `TRACEDECAY_SCOUT_LIVE_EVAL_MODEL` sets the model and
+    /// `TRACEDECAY_SCOUT_LIVE_EVAL_REPS` the repetitions per case (default 1):
     ///
     /// ```text
     /// TRACEDECAY_SCOUT_LIVE_EVAL_CODEX=/path/to/codex \
-    /// TRACEDECAY_SCOUT_LIVE_EVAL_MODEL=<model> \
+    /// TRACEDECAY_SCOUT_LIVE_EVAL_MODEL=<model> TRACEDECAY_SCOUT_LIVE_EVAL_REPS=3 \
     /// env -u CC -u CXX bazel run //crates/tracedecay-agent-hosts:unit_test -- \
-    ///   --ignored --nocapture live_codex_refinement_eval
+    ///   --ignored --nocapture live_refinement_eval
     /// ```
     ///
     /// Each row reports the route, the model outcome, the deterministic text,
@@ -3149,8 +3211,8 @@ mod tests {
     /// asserts only that every case ends in a defined route.
     #[cfg(feature = "token-counting")]
     #[tokio::test]
-    #[ignore = "live provider call per case; needs TRACEDECAY_SCOUT_LIVE_EVAL_CODEX"]
-    async fn live_codex_refinement_eval() {
+    #[ignore = "live provider call per case; needs TRACEDECAY_SCOUT_LIVE_EVAL_CODEX or _CLAUDE"]
+    async fn live_refinement_eval() {
         use super::model::ProductionContextScoutModelAssistantV1;
         use tracedecay_automation_runtime::automation::backend::{
             AgentTaskBackend, CodexAppServerBackend,
@@ -3158,15 +3220,31 @@ mod tests {
         use tracedecay_domain::configuration::LcmSummarizerExecutableV1;
 
         const TIMEOUT_SECS: u64 = 120;
-        let Some(codex) = std::env::var_os("TRACEDECAY_SCOUT_LIVE_EVAL_CODEX") else {
-            eprintln!("skipped: set TRACEDECAY_SCOUT_LIVE_EVAL_CODEX to a codex executable");
-            return;
+        let (executable, runner): (
+            _,
+            tracedecay_automation_runtime::ports::codex_app_server::RunPrompt,
+        ) = match (
+            std::env::var_os("TRACEDECAY_SCOUT_LIVE_EVAL_CODEX"),
+            std::env::var_os("TRACEDECAY_SCOUT_LIVE_EVAL_CLAUDE"),
+        ) {
+            (Some(codex), _) => (codex, eval_codex_prompt_runner),
+            (None, Some(claude)) => (claude, eval_claude_prompt_runner),
+            (None, None) => {
+                eprintln!("skipped: set TRACEDECAY_SCOUT_LIVE_EVAL_CODEX or _CLAUDE");
+                return;
+            }
         };
-        tracedecay_automation_runtime::ports::codex_app_server::register(eval_codex_prompt_runner);
+        tracedecay_automation_runtime::ports::codex_app_server::register(runner);
         let executable = LcmSummarizerExecutableV1::configured(
-            std::fs::canonicalize(codex).expect("TRACEDECAY_SCOUT_LIVE_EVAL_CODEX must exist"),
+            std::fs::canonicalize(executable).expect("the eval executable must exist"),
         )
-        .expect("canonical codex executable");
+        .expect("canonical eval executable");
+        let reps: usize = std::env::var("TRACEDECAY_SCOUT_LIVE_EVAL_REPS")
+            .ok()
+            .map_or(1, |reps| {
+                reps.parse()
+                    .expect("TRACEDECAY_SCOUT_LIVE_EVAL_REPS is a count")
+            });
         let model = std::env::var("TRACEDECAY_SCOUT_LIVE_EVAL_MODEL").ok();
         let backend: Arc<dyn AgentTaskBackend> =
             Arc::new(CodexAppServerBackend::new(model, TIMEOUT_SECS, &executable));
@@ -3209,10 +3287,11 @@ mod tests {
             ),
         ];
         println!(
-            "case\troute\tmodel_outcome\tdeterministic\trefined\tunsupported\tinput_tokens\t\
+            "case\troute\tmodel_outcome\ttext_guard\tdeterministic\trefined\tunsupported\tinput_tokens\t\
              output_tokens\tcost_microusd\twall_ms\tbackend_error"
         );
-        for (name, category, text) in cases {
+        let runs = (1..=reps).flat_map(|rep| cases.iter().map(move |&case| (rep, case)));
+        for (rep, (name, category, text)) in runs {
             let recorder = Arc::new(ErrorCapturingBackend {
                 inner: Arc::clone(&backend),
                 error: Mutex::new(None),
@@ -3236,15 +3315,34 @@ mod tests {
                 ..candidate(1, 10)
             };
             let started = Instant::now();
-            let selection =
-                select_model_assisted_context_scout(&input(vec![case]), limits, &model, execution)
-                    .await
-                    .unwrap();
+            let selection = select_model_assisted_context_scout(
+                &input(vec![case.clone()]),
+                limits,
+                &model,
+                execution,
+            )
+            .await
+            .unwrap();
             let wall_ms = started.elapsed().as_millis();
             let proposal = model.proposal.into_inner().unwrap();
             let refined = proposal
                 .as_ref()
                 .map_or("-", |proposal| &proposal.candidate.suggestion_text);
+            // The receipt gate admits only a priced Codex turn, so a stand-in
+            // model always falls back; this column judges its text alone.
+            let text_guard = proposal.as_ref().map_or("-", |proposal| {
+                let accepted = validated_model_candidate(
+                    &case,
+                    limits,
+                    case.dedupe_key,
+                    proposal.candidate.clone(),
+                );
+                if accepted.is_some() {
+                    "accepted"
+                } else {
+                    "rejected"
+                }
+            });
             let unsupported = proposal.as_ref().map_or_else(Vec::new, |proposal| {
                 unsupported_code_tokens(text, &proposal.candidate.suggestion_text)
                     .into_iter()
@@ -3254,7 +3352,7 @@ mod tests {
             let usage =
                 |value: Option<u64>| value.map_or_else(|| "-".to_owned(), |v| v.to_string());
             println!(
-                "{name}\t{:?}\t{:?}\t{text}\t{refined}\t{}\t{}\t{}\t{}\t{wall_ms}\t{}",
+                "{name}/r{rep}\t{:?}\t{:?}\t{text_guard}\t{text}\t{refined}\t{}\t{}\t{}\t{}\t{wall_ms}\t{}",
                 selection.route,
                 selection.model_outcome,
                 unsupported.join(","),

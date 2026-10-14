@@ -203,6 +203,7 @@ where
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::Poll;
     use std::time::{Duration, Instant};
 
     use futures_util::FutureExt;
@@ -305,7 +306,18 @@ mod tests {
     fn stragglers_are_dropped_after_the_cooperative_window_and_named_exactly() {
         let dropped = Arc::new(AtomicBool::new(false));
         let started = Instant::now();
-        let deadline = started + DAEMON_TASK_ABORT_DEADLINE + COOPERATIVE_WINDOW;
+        let window_end = started + COOPERATIVE_WINDOW;
+        let deadline = window_end + DAEMON_TASK_ABORT_DEADLINE;
+        // The window closes on a native timer, and load delays every native
+        // timer alike, so the reserve is measured from a reference timer due
+        // when the window ends rather than from the wall clock.
+        let reference = native_runtime::NativeTask::spawn(async move {
+            native_runtime::sleep_until(window_end)
+                .await
+                .expect("native timer");
+            Instant::now()
+        })
+        .expect("reference timer");
 
         let receipt = join(
             deadline,
@@ -313,17 +325,29 @@ mod tests {
                 ("straggler", straggler(&dropped)),
                 (
                     "late-drain",
-                    async move {
-                        native_runtime::sleep_until(started + COOPERATIVE_WINDOW / 5)
-                            .await
-                            .expect("native timer");
-                        ShutdownStatus::Clean
+                    async {
+                        // Finishes on its second poll, inside the window,
+                        // without a timer of its own to race the join's.
+                        let mut polled = false;
+                        std::future::poll_fn(|context| {
+                            if std::mem::replace(&mut polled, true) {
+                                return Poll::Ready(ShutdownStatus::Clean);
+                            }
+                            context.waker().wake_by_ref();
+                            Poll::Pending
+                        })
+                        .await
                     }
                     .boxed(),
                 ),
             ],
         );
         let returned = Instant::now();
+        let native_runtime::NativeTaskOutcome::Completed(window_closed) =
+            native_runtime::block_on(reference.wait()).expect("native runtime")
+        else {
+            panic!("the reference timer did not fire");
+        };
 
         assert_eq!(
             receipt.outcomes,
@@ -337,12 +361,12 @@ mod tests {
             "the straggler is dropped before the receipt returns"
         );
         assert!(
-            returned >= started + COOPERATIVE_WINDOW,
+            returned >= window_end,
             "stragglers keep their cooperative window"
         );
         assert!(
-            returned < deadline,
-            "the abort reserve stays inside the caller's deadline"
+            returned < window_closed + DAEMON_TASK_ABORT_DEADLINE / 2,
+            "the join closes with its window, not a reserve later at the caller's deadline"
         );
     }
 
