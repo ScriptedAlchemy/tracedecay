@@ -198,7 +198,7 @@ fn global_authority() -> Result<&'static ProcessUniqueIdentityAuthority, Request
     AUTHORITY
         .get_or_init(|| {
             let mut instance_nonce = [0_u8; 16];
-            getrandom::getrandom(&mut instance_nonce)
+            getrandom::fill(&mut instance_nonce)
                 .ok()
                 .map(|()| ProcessUniqueIdentityAuthority::from_instance_nonce(instance_nonce))
         })
@@ -325,7 +325,7 @@ pub struct McpConnectionIdentityAuthority {
 impl McpConnectionIdentityAuthority {
     pub fn from_os_entropy() -> Self {
         let mut instance_nonce = [0_u8; 16];
-        let instance_id = getrandom::getrandom(&mut instance_nonce)
+        let instance_id = getrandom::fill(&mut instance_nonce)
             .ok()
             .map(|()| hex::encode(instance_nonce));
         Self {

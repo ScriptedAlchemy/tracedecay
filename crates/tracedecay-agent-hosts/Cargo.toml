@@ -28,7 +28,7 @@ test-transport = [
 cap-fs-ext = "4.0.2"
 cap-std = "4.0.2"
 same-file = "1.0.6"
-getrandom = "0.2"
+getrandom = "0.4"
 hex = "0.4"
 jsonc-parser = { version = "0.33.2", features = ["serde_json"] }
 serde = { version = "1", features = ["derive"] }

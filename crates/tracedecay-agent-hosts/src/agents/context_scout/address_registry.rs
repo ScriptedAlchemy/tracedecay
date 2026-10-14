@@ -1051,7 +1051,7 @@ async fn load_address_ledger(
 
 fn random_address(envelope: &HookEventEnvelopeV2) -> Option<ContextScoutAddressV1> {
     let mut random = [0_u8; 96];
-    getrandom::getrandom(&mut random).ok()?;
+    getrandom::fill(&mut random).ok()?;
     let part = |index: usize| {
         let mut value = [0_u8; 16];
         value.copy_from_slice(&random[index * 16..(index + 1) * 16]);

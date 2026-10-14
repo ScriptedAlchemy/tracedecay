@@ -448,7 +448,7 @@ pub fn installation_id(profile_root: &Path) -> String {
         }
     }
     let mut token = [0u8; 16];
-    let generated = match getrandom::getrandom(&mut token) {
+    let generated = match getrandom::fill(&mut token) {
         Ok(()) => hex::encode(token),
         Err(_) => format!(
             "pid-{}-{}",

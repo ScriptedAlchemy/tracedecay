@@ -28,7 +28,7 @@ pub struct DashboardAccessToken {
 impl DashboardAccessToken {
     pub fn mint() -> Result<Self> {
         let mut bytes = [0_u8; 32];
-        getrandom::getrandom(&mut bytes).map_err(|error| TraceDecayError::Config {
+        getrandom::fill(&mut bytes).map_err(|error| TraceDecayError::Config {
             message: format!("failed to generate dashboard access token: {error}"),
         })?;
         let token: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
