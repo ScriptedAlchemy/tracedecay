@@ -1,11 +1,30 @@
 use std::future::Future;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::native_runtime;
 
 const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(5);
 const MAX_RETRY_DELAY: Duration = Duration::from_mins(5);
 const WARNING_EVERY_FAILURES: u64 = 10;
+
+/// When a recovery loop wakes without a durable-write notification.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct RecoveryScheduleV1 {
+    safety_interval: Duration,
+    initial_retry_delay: Duration,
+    max_retry_delay: Duration,
+}
+
+impl RecoveryScheduleV1 {
+    pub(super) const fn with_safety_interval(safety_interval: Duration) -> Self {
+        Self {
+            safety_interval,
+            initial_retry_delay: INITIAL_RETRY_DELAY,
+            max_retry_delay: MAX_RETRY_DELAY,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RecoveryTriggerV1 {
@@ -16,6 +35,7 @@ pub(super) enum RecoveryTriggerV1 {
 }
 
 struct RecoveryFailureTrackerV1 {
+    schedule: RecoveryScheduleV1,
     detail: Option<String>,
     consecutive: u64,
     warning_events: u64,
@@ -23,19 +43,18 @@ struct RecoveryFailureTrackerV1 {
     next_delay: Duration,
 }
 
-impl Default for RecoveryFailureTrackerV1 {
-    fn default() -> Self {
+impl RecoveryFailureTrackerV1 {
+    fn new(schedule: RecoveryScheduleV1) -> Self {
         Self {
+            schedule,
             detail: None,
             consecutive: 0,
             warning_events: 0,
             last_warned_at: 0,
-            next_delay: INITIAL_RETRY_DELAY,
+            next_delay: schedule.initial_retry_delay,
         }
     }
-}
 
-impl RecoveryFailureTrackerV1 {
     fn fail(&mut self, operation: &'static str, detail: String) -> Duration {
         if self.detail.as_deref() == Some(detail.as_str()) {
             self.consecutive = self.consecutive.saturating_add(1);
@@ -44,7 +63,7 @@ impl RecoveryFailureTrackerV1 {
             self.consecutive = 1;
             self.warning_events = 0;
             self.last_warned_at = 0;
-            self.next_delay = INITIAL_RETRY_DELAY;
+            self.next_delay = self.schedule.initial_retry_delay;
         }
         if self.consecutive == 1 || self.consecutive.is_multiple_of(WARNING_EVERY_FAILURES) {
             let suppressed = self
@@ -62,7 +81,10 @@ impl RecoveryFailureTrackerV1 {
             self.last_warned_at = self.consecutive;
         }
         let delay = self.next_delay;
-        self.next_delay = self.next_delay.saturating_mul(2).min(MAX_RETRY_DELAY);
+        self.next_delay = self
+            .next_delay
+            .saturating_mul(2)
+            .min(self.schedule.max_retry_delay);
         delay
     }
 
@@ -76,7 +98,7 @@ impl RecoveryFailureTrackerV1 {
                 "durable recovery resumed after repeated failures"
             );
         }
-        *self = Self::default();
+        *self = Self::new(self.schedule);
     }
 }
 
@@ -127,7 +149,7 @@ impl RecoveryWarningTrackerV1 {
 pub(super) async fn run_recovery_loop<F, Fut>(
     mut signal: tokio::sync::watch::Receiver<u64>,
     cancellation: CancellationToken,
-    safety_interval: Duration,
+    schedule: RecoveryScheduleV1,
     operation: &'static str,
     mut scan: F,
 ) where
@@ -135,7 +157,7 @@ pub(super) async fn run_recovery_loop<F, Fut>(
     Fut: Future<Output = Result<(), String>>,
 {
     let mut trigger = RecoveryTriggerV1::Initial;
-    let mut failures = RecoveryFailureTrackerV1::default();
+    let mut failures = RecoveryFailureTrackerV1::new(schedule);
     loop {
         match scan(trigger).await {
             Ok(()) => {
@@ -155,7 +177,10 @@ pub(super) async fn run_recovery_loop<F, Fut>(
                 tokio::select! {
                     biased;
                     () = cancellation.cancelled() => return,
-                    () = tokio::time::sleep(delay) => {
+                    fired = timer_fired(operation, delay) => {
+                        if !fired {
+                            return;
+                        }
                         trigger = RecoveryTriggerV1::Retry;
                         continue;
                     }
@@ -171,9 +196,27 @@ pub(super) async fn run_recovery_loop<F, Fut>(
                 }
                 trigger = RecoveryTriggerV1::Notification;
             }
-            () = tokio::time::sleep(safety_interval) => {
+            fired = timer_fired(operation, schedule.safety_interval) => {
+                if !fired {
+                    return;
+                }
                 trigger = RecoveryTriggerV1::Safety;
             }
+        }
+    }
+}
+
+/// A loop that cannot time its next wake stops rather than spin.
+async fn timer_fired(operation: &'static str, after: Duration) -> bool {
+    match native_runtime::sleep_until(Instant::now() + after).await {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::error!(
+                operation,
+                %error,
+                "durable recovery loop stopped: its timer is unavailable"
+            );
+            false
         }
     }
 }
@@ -181,219 +224,235 @@ pub(super) async fn run_recovery_loop<F, Fut>(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use tracedecay_runtime_core::cancellation::CancellationToken;
+    use tracedecay_runtime_core::native_runtime::{self, NativeTask, NativeTaskOutcome};
 
     use super::{
-        RecoveryFailureTrackerV1, RecoveryTriggerV1, RecoveryWarningTrackerV1, run_recovery_loop,
+        RecoveryFailureTrackerV1, RecoveryScheduleV1, RecoveryTriggerV1, RecoveryWarningTrackerV1,
+        run_recovery_loop,
     };
     use crate::invocation::types::WorkDurableWriteSignalV1;
 
-    async fn wait_for_count(counter: &AtomicUsize, expected: usize) {
-        for _ in 0..10_000 {
-            if counter.load(Ordering::SeqCst) == expected {
-                return;
-            }
-            tokio::task::yield_now().await;
+    /// Bounds every event wait so a regression fails instead of hanging.
+    const HANG_GUARD: Duration = Duration::from_secs(30);
+    const IDLE_SCHEDULE: RecoveryScheduleV1 =
+        RecoveryScheduleV1::with_safety_interval(Duration::from_mins(1));
+
+    /// Every scan one recovery loop ran, with when it started.
+    #[derive(Clone)]
+    struct Scans(Arc<tokio::sync::watch::Sender<Vec<(Instant, RecoveryTriggerV1)>>>);
+
+    impl Scans {
+        fn new() -> Self {
+            Self(Arc::new(tokio::sync::watch::channel(Vec::new()).0))
         }
-        assert_eq!(counter.load(Ordering::SeqCst), expected);
-    }
 
-    #[tokio::test(start_paused = true)]
-    async fn idle_recovery_scans_only_at_mount_and_safety_intervals() {
-        const PROJECT_COUNTS: [usize; 3] = [1, 10, 100];
-        const SAFETY_INTERVAL: Duration = Duration::from_mins(1);
-        const WINDOW: Duration = Duration::from_mins(3);
+        fn record(&self, trigger: RecoveryTriggerV1) -> usize {
+            let mut count = 0;
+            self.0.send_modify(|scans| {
+                scans.push((Instant::now(), trigger));
+                count = scans.len();
+            });
+            count
+        }
 
-        for project_count in PROJECT_COUNTS {
-            let scans = Arc::new(AtomicUsize::new(0));
-            let notifications = Arc::new(AtomicUsize::new(0));
-            let cancellation = CancellationToken::new();
-            let mut tasks = Vec::new();
-            let mut signals = Vec::new();
-            for _ in 0..project_count {
-                let signal = WorkDurableWriteSignalV1::default();
-                let scans = Arc::clone(&scans);
-                let notifications = Arc::clone(&notifications);
-                let task_cancellation = cancellation.clone();
-                tasks.push(tokio::spawn(run_recovery_loop(
-                    signal.subscribe(),
-                    task_cancellation,
-                    SAFETY_INTERVAL,
-                    "fixture idle recovery",
-                    move |trigger| {
-                        let scans = Arc::clone(&scans);
-                        let notifications = Arc::clone(&notifications);
-                        async move {
-                            scans.fetch_add(1, Ordering::SeqCst);
-                            if trigger == RecoveryTriggerV1::Notification {
-                                notifications.fetch_add(1, Ordering::SeqCst);
-                            }
-                            Ok(())
-                        }
-                    },
-                )));
-                signals.push(signal);
-            }
-            wait_for_count(&scans, project_count).await;
-            for interval in 1..=3 {
-                tokio::time::advance(SAFETY_INTERVAL).await;
-                wait_for_count(&scans, project_count * (interval + 1)).await;
-            }
+        async fn wait_for(&self, count: usize) -> Vec<(Instant, RecoveryTriggerV1)> {
+            let mut scans = self.0.subscribe();
+            native_runtime::timeout(HANG_GUARD, scans.wait_for(|scans| scans.len() >= count))
+                .await
+                .unwrap_or_else(|error| panic!("scan {count} never ran: {error}"))
+                .expect("scan log")
+                .clone()
+        }
 
-            assert_eq!(notifications.load(Ordering::SeqCst), 0);
-            assert_eq!(
-                scans.load(Ordering::SeqCst),
-                project_count
-                    * (1 + WINDOW.as_secs() as usize / SAFETY_INTERVAL.as_secs() as usize)
-            );
-            cancellation.cancel();
-            for task in tasks {
-                task.await.expect("idle recovery task");
-            }
-            drop(signals);
+        fn triggers(&self) -> Vec<RecoveryTriggerV1> {
+            self.0
+                .borrow()
+                .iter()
+                .map(|&(_, trigger)| trigger)
+                .collect()
         }
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn durable_write_signal_scans_within_one_poll_tick() {
-        let signal = WorkDurableWriteSignalV1::default();
-        let cancellation = CancellationToken::new();
-        let scans = Arc::new(AtomicUsize::new(0));
-        let notifications = Arc::new(AtomicUsize::new(0));
-        let task_scans = Arc::clone(&scans);
-        let task_notifications = Arc::clone(&notifications);
-        let task = tokio::spawn(run_recovery_loop(
+    /// Runs a recovery loop on a native task whose first `failures` scans fail.
+    fn spawn_recovery(
+        signal: &WorkDurableWriteSignalV1,
+        cancellation: &CancellationToken,
+        schedule: RecoveryScheduleV1,
+        scans: &Scans,
+        failures: usize,
+    ) -> NativeTask<()> {
+        let scans = scans.clone();
+        NativeTask::spawn(run_recovery_loop(
             signal.subscribe(),
             cancellation.clone(),
-            Duration::from_mins(1),
-            "fixture signalled recovery",
+            schedule,
+            "fixture recovery",
             move |trigger| {
-                let scans = Arc::clone(&task_scans);
-                let notifications = Arc::clone(&task_notifications);
-                async move {
-                    scans.fetch_add(1, Ordering::SeqCst);
-                    if trigger == RecoveryTriggerV1::Notification {
-                        notifications.fetch_add(1, Ordering::SeqCst);
-                    }
+                let attempt = scans.record(trigger);
+                std::future::ready(if attempt <= failures {
+                    Err("same fixture failure".to_owned())
+                } else {
                     Ok(())
-                }
+                })
             },
-        ));
-        tokio::task::yield_now().await;
-        assert_eq!(scans.load(Ordering::SeqCst), 1);
-
-        for _ in 0..100 {
-            signal.bump();
-        }
-        tokio::task::yield_now().await;
-        assert_eq!(scans.load(Ordering::SeqCst), 2);
-        assert_eq!(notifications.load(Ordering::SeqCst), 1);
-
-        cancellation.cancel();
-        task.await.expect("signalled recovery task");
+        ))
+        .expect("native recovery task")
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn cancellation_joins_before_recovery_restart() {
-        let first_signal = WorkDurableWriteSignalV1::default();
-        let first_cancellation = CancellationToken::new();
-        let scans = Arc::new(AtomicUsize::new(0));
-        let first_scans = Arc::clone(&scans);
-        let first = tokio::spawn(run_recovery_loop(
-            first_signal.subscribe(),
-            first_cancellation.clone(),
-            Duration::from_mins(1),
-            "fixture restart recovery",
-            move |_| {
-                let scans = Arc::clone(&first_scans);
-                async move {
-                    scans.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                }
-            },
+    async fn assert_cancelled_loop_returns(task: NativeTask<()>) {
+        assert!(matches!(
+            native_runtime::timeout(HANG_GUARD, task.wait()).await,
+            Ok(NativeTaskOutcome::Completed(()))
         ));
-        tokio::task::yield_now().await;
-        assert_eq!(scans.load(Ordering::SeqCst), 1);
-        assert!(!first.is_finished());
-
-        first_cancellation.cancel();
-        first.await.expect("cancelled recovery task joins");
-
-        let second_signal = WorkDurableWriteSignalV1::default();
-        let second_cancellation = CancellationToken::new();
-        let second_scans = Arc::clone(&scans);
-        let second = tokio::spawn(run_recovery_loop(
-            second_signal.subscribe(),
-            second_cancellation.clone(),
-            Duration::from_mins(1),
-            "fixture restart recovery",
-            move |_| {
-                let scans = Arc::clone(&second_scans);
-                async move {
-                    scans.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                }
-            },
-        ));
-        tokio::task::yield_now().await;
-        assert_eq!(scans.load(Ordering::SeqCst), 2);
-        assert!(!second.is_finished());
-
-        second_cancellation.cancel();
-        second.await.expect("restarted recovery task joins");
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn repeated_failures_back_off_and_rate_limit_warnings() {
-        let signal = WorkDurableWriteSignalV1::default();
-        let cancellation = CancellationToken::new();
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let task_attempts = Arc::clone(&attempts);
-        let task = tokio::spawn(run_recovery_loop(
-            signal.subscribe(),
-            cancellation.clone(),
-            Duration::from_mins(1),
-            "fixture failing recovery",
-            move |_| {
-                let attempts = Arc::clone(&task_attempts);
-                async move {
-                    let attempt = attempts.fetch_add(1, Ordering::SeqCst) + 1;
-                    if attempt <= 100 {
-                        Err("same fixture failure".to_owned())
-                    } else {
-                        Ok(())
+    // Each test runs with no Tokio runtime entered: recovery loops time their
+    // wakes on the native runtime.
+
+    #[test]
+    fn idle_recovery_scans_only_at_mount_and_safety_intervals() {
+        const SAFETY_INTERVAL: Duration = Duration::from_millis(20);
+        const SAFETY_WAKES: usize = 3;
+        let schedule = RecoveryScheduleV1::with_safety_interval(SAFETY_INTERVAL);
+
+        native_runtime::block_on(async {
+            for project_count in [1, 10, 100] {
+                let cancellation = CancellationToken::new();
+                let signals: Vec<_> = (0..project_count)
+                    .map(|_| WorkDurableWriteSignalV1::default())
+                    .collect();
+                let scans: Vec<_> = (0..project_count).map(|_| Scans::new()).collect();
+                let tasks: Vec<_> = signals
+                    .iter()
+                    .zip(&scans)
+                    .map(|(signal, scans)| {
+                        spawn_recovery(signal, &cancellation, schedule, scans, 0)
+                    })
+                    .collect();
+
+                for scans in &scans {
+                    let log = scans.wait_for(1 + SAFETY_WAKES).await;
+                    assert_eq!(log[0].1, RecoveryTriggerV1::Initial);
+                    for pair in log.windows(2) {
+                        assert_eq!(pair[1].1, RecoveryTriggerV1::Safety);
+                        let gap = pair[1].0 - pair[0].0;
+                        assert!(
+                            gap >= SAFETY_INTERVAL,
+                            "an idle loop rescanned after {gap:?}, inside its safety interval"
+                        );
                     }
                 }
-            },
-        ));
-        tokio::task::yield_now().await;
-        assert_eq!(attempts.load(Ordering::SeqCst), 1);
 
-        let mut elapsed = Duration::ZERO;
-        let mut retry = Duration::from_secs(5);
-        for expected in 2..=101 {
-            tokio::time::advance(retry).await;
-            elapsed += retry;
-            tokio::task::yield_now().await;
-            assert_eq!(attempts.load(Ordering::SeqCst), expected);
-            retry = retry.saturating_mul(2).min(Duration::from_mins(5));
-        }
-        assert!(
-            elapsed >= Duration::from_mins(5),
-            "repeated failures must not spin"
-        );
+                cancellation.cancel();
+                for task in tasks {
+                    assert_cancelled_loop_returns(task).await;
+                }
+                drop(signals);
+            }
+        })
+        .expect("native runtime");
+    }
 
-        cancellation.cancel();
-        task.await.expect("failing recovery task");
+    #[test]
+    fn durable_write_signal_scans_within_one_poll_tick() {
+        native_runtime::block_on(async {
+            let signal = WorkDurableWriteSignalV1::default();
+            let cancellation = CancellationToken::new();
+            let scans = Scans::new();
+            let task_scans = scans.clone();
+            // One task drives the loop and the writer, so all 100 writes land
+            // before the loop can observe any of them.
+            let recovery = run_recovery_loop(
+                signal.subscribe(),
+                cancellation.clone(),
+                IDLE_SCHEDULE,
+                "fixture signalled recovery",
+                move |trigger| {
+                    task_scans.record(trigger);
+                    std::future::ready(Ok(()))
+                },
+            );
+            let writer = async {
+                scans.wait_for(1).await;
+                for _ in 0..100 {
+                    signal.bump();
+                }
+                scans.wait_for(2).await;
+                cancellation.cancel();
+            };
+            tokio::join!(recovery, writer);
+
+            assert_eq!(
+                scans.triggers(),
+                [RecoveryTriggerV1::Initial, RecoveryTriggerV1::Notification]
+            );
+        })
+        .expect("native runtime");
+    }
+
+    #[test]
+    fn cancellation_joins_before_recovery_restart() {
+        native_runtime::block_on(async {
+            let scans = Scans::new();
+            for restart in 1..=2 {
+                let signal = WorkDurableWriteSignalV1::default();
+                let cancellation = CancellationToken::new();
+                let task = spawn_recovery(&signal, &cancellation, IDLE_SCHEDULE, &scans, 0);
+                scans.wait_for(restart).await;
+                assert!(!task.is_finished());
+
+                cancellation.cancel();
+                assert_cancelled_loop_returns(task).await;
+            }
+            assert_eq!(
+                scans.triggers(),
+                [RecoveryTriggerV1::Initial, RecoveryTriggerV1::Initial]
+            );
+        })
+        .expect("native runtime");
+    }
+
+    #[test]
+    fn repeated_failures_back_off_to_the_retry_cap() {
+        let schedule = RecoveryScheduleV1 {
+            initial_retry_delay: Duration::from_millis(10),
+            max_retry_delay: Duration::from_millis(40),
+            ..IDLE_SCHEDULE
+        };
+        let backoff = [10, 20, 40, 40, 40, 40].map(Duration::from_millis);
+        let mut tracker = RecoveryFailureTrackerV1::new(schedule);
+        let delays = backoff.map(|_| tracker.fail("fixture recovery", "same failure".to_owned()));
+        assert_eq!(delays, backoff);
+
+        native_runtime::block_on(async {
+            let signal = WorkDurableWriteSignalV1::default();
+            let cancellation = CancellationToken::new();
+            let scans = Scans::new();
+            let task = spawn_recovery(&signal, &cancellation, schedule, &scans, backoff.len());
+
+            let log = scans.wait_for(backoff.len() + 1).await;
+            for (pair, delay) in log.windows(2).zip(backoff) {
+                assert_eq!(pair[1].1, RecoveryTriggerV1::Retry);
+                let gap = pair[1].0 - pair[0].0;
+                assert!(
+                    gap >= delay,
+                    "a failed scan retried after {gap:?}, before its {delay:?} backoff"
+                );
+            }
+
+            cancellation.cancel();
+            assert_cancelled_loop_returns(task).await;
+        })
+        .expect("native runtime");
     }
 
     #[test]
     fn identical_failure_logs_are_byte_and_event_bounded() {
         let ((), output) = tracedecay_runtime_core::logging::capture_formatted_tracing(|| {
-            let mut failures = RecoveryFailureTrackerV1::default();
+            let mut failures = RecoveryFailureTrackerV1::new(IDLE_SCHEDULE);
             for _ in 0..100 {
                 failures.fail("fixture recovery", "same fixture failure".to_owned());
             }
