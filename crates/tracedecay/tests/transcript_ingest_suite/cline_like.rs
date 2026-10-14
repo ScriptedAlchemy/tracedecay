@@ -15,8 +15,8 @@ use tracedecay_store::ObservationReplayRequest;
 
 use crate::restart_atomicity::{
     ProjectSessionTestRuntime, assert_secret_absent_from_observation_sinks, durable_table_count,
-    ingest_global_sources_for_provider, ingest_user_provider, mark_test_project,
-    open_project_session_db, set_projection_failure,
+    ingest_global_sources_for_provider, ingest_user_provider, ingest_user_provider_reviewed_on,
+    mark_test_project, open_project_session_db, set_projection_failure,
 };
 use crate::support::{
     assert_metadata_path_eq, assert_path_text_eq, create_git_repo_with_linked_worktree,
@@ -630,7 +630,9 @@ async fn cline_like_user_scope_includes_only_unregistered_tasks() {
 /// review, and that must not reach Tokio from the polling thread.
 #[test]
 fn user_pass_schedules_its_review_without_an_entered_tokio_runtime() {
+    let daemon_tokio = tokio::runtime::Runtime::new().unwrap();
     tracedecay_runtime_core::native_runtime::block_on(async {
+        assert!(tokio::runtime::Handle::try_current().is_err());
         let tmp = TempDir::new().unwrap();
         let (home, project) = setup(&tmp);
         let projectless = tmp.path().join("general-chat");
@@ -642,7 +644,8 @@ fn user_pass_schedules_its_review_without_an_entered_tokio_runtime() {
         );
 
         let db = open_project_session_db(&project).await.unwrap();
-        let outcome = ingest_user_provider(
+        let outcome = ingest_user_provider_reviewed_on(
+            daemon_tokio.handle().clone(),
             db.runtime(),
             &home,
             SessionProvider::Cline,

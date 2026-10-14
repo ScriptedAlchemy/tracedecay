@@ -1406,7 +1406,7 @@ impl ProjectOpenInputs<'_> {
                     core.transcript_source_profile.clone(),
                     refresh_schedulers.codex_discovery(),
                     Arc::clone(&background_cpu),
-                    crate::session_review_port(),
+                    crate::session_review_port(tokio::runtime::Handle::current()),
                 )),
             )
             .await;
