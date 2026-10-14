@@ -17,6 +17,7 @@ use tracedecay_domain::{
     RetrievalAnchorId, SourceSpan, UtcMicros,
 };
 use tracedecay_store::{
+    CLEAR_CURRENT_DIAGNOSTIC_PUBLICATION_SQL, CLEAR_CURRENT_DIAGNOSTICS_SQL,
     DIAGNOSTIC_STATE_CLEARED, DIAGNOSTIC_STATE_CURRENT, DiagnosticRecordStateKindV1,
     DiagnosticStore, DiagnosticStoreError, DiagnosticStoreResult, diagnostic_evidence_class_name,
     diagnostic_producer_kind_name, diagnostic_severity_name, diagnostic_snapshot_observation_eq,
@@ -45,6 +46,13 @@ pub const SCHEMA: &str = tracedecay_store::GENERATION_DIAGNOSTICS_SCHEMA_DDL;
 // across a cutover. These aliases keep the SQL below readable.
 const STATE_CURRENT: &str = DIAGNOSTIC_STATE_CURRENT;
 const STATE_CLEARED: &str = DIAGNOSTIC_STATE_CLEARED;
+
+// Names the `'current'` literal of the `idx_diagnostic_generation_current`
+// predicate: the connection plans once without bound values, so a bound state
+// would scan the publication table.
+const CURRENT_GENERATION_SQL: &str = "SELECT generation_id
+     FROM diagnostic_generation_publications
+     WHERE record_state = 'current'";
 
 /// SQLite-backed store for durable generation-bound diagnostics.
 ///
@@ -263,12 +271,7 @@ impl<'a> DiagnosticsStore<'a> {
                 let operation = "diagnostics current_generation";
                 let mut rows = self
                     .conn
-                    .query(
-                        "SELECT generation_id
-                 FROM diagnostic_generation_publications
-                 WHERE record_state = 'current'",
-                        params![],
-                    )
+                    .query(CURRENT_GENERATION_SQL, params![])
                     .await
                     .map_err(|e| db_error(operation, e))?;
                 let generation = rows
@@ -503,14 +506,7 @@ impl<'a> DiagnosticsStore<'a> {
             let cleared = store
                 .conn
                 .execute(
-                    "UPDATE generation_diagnostics
-                     SET record_state = ?1, state_generation = ?2
-                     WHERE record_state = ?3 AND generation_id != ?2
-                     AND (generation_id, publication_revision) IN (
-                       SELECT generation_id, publication_revision
-                       FROM diagnostic_generation_publications
-                       WHERE record_state = 'current'
-                     )",
+                    CLEAR_CURRENT_DIAGNOSTICS_SQL,
                     params![STATE_CLEARED, generation.as_str(), STATE_CURRENT],
                 )
                 .await
@@ -518,9 +514,7 @@ impl<'a> DiagnosticsStore<'a> {
 
             store.conn
                 .execute(
-                    "UPDATE diagnostic_generation_publications
-                     SET record_state = ?1, state_generation = ?2
-                     WHERE record_state = 'current'",
+                    CLEAR_CURRENT_DIAGNOSTIC_PUBLICATION_SQL,
                     params![STATE_CLEARED, generation.as_str()],
                 )
                 .await
@@ -1207,6 +1201,25 @@ mod tests {
             }
             other => panic!("expected a database refusal, got {other}"),
         }
+    }
+
+    #[tokio::test]
+    async fn current_generation_lookup_searches_its_partial_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let conn = open_store(&temp.path().join("diagnostics.db")).await;
+        let mut rows = conn
+            .query(&format!("EXPLAIN QUERY PLAN {CURRENT_GENERATION_SQL}"), ())
+            .await
+            .expect("explain current-generation lookup");
+        let mut plan = Vec::new();
+        while let Some(row) = rows.next().await.expect("read query plan") {
+            plan.push(row.get::<String>(3).expect("query plan detail"));
+        }
+        assert!(
+            plan.iter()
+                .any(|detail| detail.contains("idx_diagnostic_generation_current")),
+            "the current-generation lookup must search its partial index: {plan:?}"
+        );
     }
 
     #[tokio::test]
