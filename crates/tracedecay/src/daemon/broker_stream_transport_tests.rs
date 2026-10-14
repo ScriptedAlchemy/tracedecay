@@ -139,7 +139,9 @@ async fn settled_fanout(
 #[tokio::test]
 async fn rmcp_receive_waits_for_full_close_after_request_half_close() {
     let (server, client) = tokio::net::UnixStream::pair().expect("UnixStream pair");
-    let mut transport = BrokerStreamTransport::new(BrokerStream::Unix(server));
+    let mut transport = BrokerStreamTransport::new(
+        BrokerStream::from_tokio_unix(server).expect("daemon end of the test socket"),
+    );
     let (client_reader, mut client_writer) = client.into_split();
 
     client_writer
@@ -183,7 +185,9 @@ async fn rmcp_receive_waits_for_full_close_after_request_half_close() {
 #[tokio::test]
 async fn rmcp_receive_closes_after_half_close_once_accepted_requests_settle() {
     let (server, client) = tokio::net::UnixStream::pair().expect("UnixStream pair");
-    let mut transport = BrokerStreamTransport::new(BrokerStream::Unix(server));
+    let mut transport = BrokerStreamTransport::new(
+        BrokerStream::from_tokio_unix(server).expect("daemon end of the test socket"),
+    );
     let (client_reader, mut client_writer) = client.into_split();
 
     client_writer
@@ -232,7 +236,9 @@ async fn rmcp_receive_closes_after_half_close_once_accepted_requests_settle() {
 #[tokio::test]
 async fn rmcp_receive_closes_a_request_less_connection_on_half_close() {
     let (server, client) = tokio::net::UnixStream::pair().expect("UnixStream pair");
-    let mut transport = BrokerStreamTransport::new(BrokerStream::Unix(server));
+    let mut transport = BrokerStreamTransport::new(
+        BrokerStream::from_tokio_unix(server).expect("daemon end of the test socket"),
+    );
     let (client_reader, mut client_writer) = client.into_split();
 
     client_writer
@@ -270,9 +276,11 @@ async fn rmcp_selected_target_retirement_between_handler_and_send_suppresses_res
     let active_lifecycle = crate::mcp::server::ProjectServerResponseLifecycle::default();
     let target_lifecycle = crate::mcp::server::ProjectServerResponseLifecycle::default();
     let selected_responses = crate::mcp::server::RmcpSelectedProjectResponseAuthority::default();
-    let mut transport = BrokerStreamTransport::new(BrokerStream::Unix(server))
-        .with_project_response_lifecycle(active_lifecycle.clone())
-        .with_rmcp_selected_project_responses(selected_responses.clone());
+    let mut transport = BrokerStreamTransport::new(
+        BrokerStream::from_tokio_unix(server).expect("daemon end of the test socket"),
+    )
+    .with_project_response_lifecycle(active_lifecycle.clone())
+    .with_rmcp_selected_project_responses(selected_responses.clone());
     let (client_reader, mut client_writer) = client.into_split();
 
     client_writer
@@ -354,9 +362,11 @@ async fn rmcp_selected_target_response_does_not_fall_back_to_retired_active_serv
     let active_lifecycle = crate::mcp::server::ProjectServerResponseLifecycle::default();
     let target_lifecycle = crate::mcp::server::ProjectServerResponseLifecycle::default();
     let selected_responses = crate::mcp::server::RmcpSelectedProjectResponseAuthority::default();
-    let mut transport = BrokerStreamTransport::new(BrokerStream::Unix(server))
-        .with_project_response_lifecycle(active_lifecycle.clone())
-        .with_rmcp_selected_project_responses(selected_responses.clone());
+    let mut transport = BrokerStreamTransport::new(
+        BrokerStream::from_tokio_unix(server).expect("daemon end of the test socket"),
+    )
+    .with_project_response_lifecycle(active_lifecycle.clone())
+    .with_rmcp_selected_project_responses(selected_responses.clone());
     let (client_reader, mut client_writer) = client.into_split();
 
     client_writer
@@ -422,11 +432,13 @@ async fn rmcp_selected_target_response_does_not_fall_back_to_retired_active_serv
 async fn rmcp_initialize_then_work_response_settles_after_transport_flush() {
     let fixture = delivery_settlement_fixture().await;
     let (server, client) = tokio::net::UnixStream::pair().expect("UnixStream pair");
-    let mut transport = BrokerStreamTransport::new(BrokerStream::Unix(server))
-        .with_rmcp_work_delivery_settlement(crate::mcp::server::RmcpWorkDeliverySettlement::new(
-            Some(Arc::clone(&fixture.recorder)),
-            "rmcp-transport-settlement-test".to_owned(),
-        ));
+    let mut transport = BrokerStreamTransport::new(
+        BrokerStream::from_tokio_unix(server).expect("daemon end of the test socket"),
+    )
+    .with_rmcp_work_delivery_settlement(crate::mcp::server::RmcpWorkDeliverySettlement::new(
+        Some(Arc::clone(&fixture.recorder)),
+        "rmcp-transport-settlement-test".to_owned(),
+    ));
     let (client_reader, mut client_writer) = client.into_split();
 
     client_writer
@@ -498,11 +510,13 @@ async fn rmcp_initialize_then_work_response_settles_after_transport_flush() {
 async fn rmcp_peer_disconnect_mid_delivery_settles_dropped_rather_than_unknown() {
     let fixture = delivery_settlement_fixture().await;
     let (server, client) = tokio::net::UnixStream::pair().expect("UnixStream pair");
-    let mut transport = BrokerStreamTransport::new(BrokerStream::Unix(server))
-        .with_rmcp_work_delivery_settlement(crate::mcp::server::RmcpWorkDeliverySettlement::new(
-            Some(Arc::clone(&fixture.recorder)),
-            "rmcp-transport-disconnect-test".to_owned(),
-        ));
+    let mut transport = BrokerStreamTransport::new(
+        BrokerStream::from_tokio_unix(server).expect("daemon end of the test socket"),
+    )
+    .with_rmcp_work_delivery_settlement(crate::mcp::server::RmcpWorkDeliverySettlement::new(
+        Some(Arc::clone(&fixture.recorder)),
+        "rmcp-transport-disconnect-test".to_owned(),
+    ));
     let (client_reader, mut client_writer) = client.into_split();
 
     client_writer
@@ -572,11 +586,13 @@ async fn rmcp_peer_disconnect_mid_delivery_settles_dropped_rather_than_unknown()
 async fn rmcp_client_cancellation_settles_dropped_without_stranding_the_attempt() {
     let fixture = delivery_settlement_fixture().await;
     let (server, client) = tokio::net::UnixStream::pair().expect("UnixStream pair");
-    let mut transport = BrokerStreamTransport::new(BrokerStream::Unix(server))
-        .with_rmcp_work_delivery_settlement(crate::mcp::server::RmcpWorkDeliverySettlement::new(
-            Some(Arc::clone(&fixture.recorder)),
-            "rmcp-transport-cancellation-test".to_owned(),
-        ));
+    let mut transport = BrokerStreamTransport::new(
+        BrokerStream::from_tokio_unix(server).expect("daemon end of the test socket"),
+    )
+    .with_rmcp_work_delivery_settlement(crate::mcp::server::RmcpWorkDeliverySettlement::new(
+        Some(Arc::clone(&fixture.recorder)),
+        "rmcp-transport-cancellation-test".to_owned(),
+    ));
     let (client_reader, mut client_writer) = client.into_split();
 
     client_writer

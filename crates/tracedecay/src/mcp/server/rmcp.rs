@@ -48,7 +48,7 @@ mod tests {
     use rmcp::transport::{IntoTransport, Transport};
     use rmcp::{RoleClient, ServiceExt};
     use serde_json::json;
-    use tracedecay_daemon_protocol::{BrokerListener, BrokerStream, default_loopback_endpoint};
+    use tracedecay_daemon_protocol::{BrokerListener, DaemonEndpoint, default_loopback_endpoint};
     use tracedecay_mcp::BrokerStreamTransport;
 
     use super::*;
@@ -68,11 +68,14 @@ mod tests {
     }
 
     /// A daemon-side broker stream and its connected client stream.
-    async fn broker_pair() -> (BrokerStreamTransport, BrokerStream) {
+    async fn broker_pair() -> (BrokerStreamTransport, tokio::net::TcpStream) {
         let (listener, bound) = BrokerListener::bind(&default_loopback_endpoint())
             .await
             .expect("bind loopback broker");
-        let client = BrokerStream::connect(&bound)
+        let DaemonEndpoint::Loopback(address) = bound else {
+            panic!("loopback bind returned {bound}");
+        };
+        let client = tokio::net::TcpStream::connect(address)
             .await
             .expect("connect broker client");
         let server = listener.accept().await.expect("accept broker client");
@@ -82,7 +85,7 @@ mod tests {
     /// Serves `adapter` on the daemon side of a fresh broker pair.
     async fn serve_session(
         adapter: RmcpConnectionAdapter<ProductionMcpConnectionContext>,
-    ) -> (tokio::task::JoinHandle<()>, BrokerStream) {
+    ) -> (tokio::task::JoinHandle<()>, tokio::net::TcpStream) {
         let (transport, client) = broker_pair().await;
         let serving = tokio::spawn(async move {
             adapter

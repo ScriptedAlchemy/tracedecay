@@ -347,7 +347,10 @@ async fn drive_rmcp(
     )
     .await
     .expect("bind loopback broker");
-    let client_io = tracedecay_daemon_protocol::BrokerStream::connect(&bound)
+    let tracedecay_daemon_protocol::DaemonEndpoint::Loopback(address) = bound else {
+        panic!("loopback bind returned {bound}");
+    };
+    let client_io = tokio::net::TcpStream::connect(address)
         .await
         .expect("connect broker client");
     let server_io = listener.accept().await.expect("accept broker client");

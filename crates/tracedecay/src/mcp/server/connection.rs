@@ -106,15 +106,18 @@ fn with_stateless_request_context(line: String) -> String {
 #[cfg(all(unix, any(test, feature = "test-transport")))]
 fn connected_broker_pair() -> Result<(BrokerStream, tokio::net::UnixStream)> {
     let (daemon, client) = tokio::net::UnixStream::pair()?;
-    Ok((BrokerStream::Unix(daemon), client))
+    Ok((BrokerStream::from_tokio_unix(daemon)?, client))
 }
 
 #[cfg(all(not(unix), any(test, feature = "test-transport")))]
 async fn connected_broker_pair() -> Result<(BrokerStream, tokio::net::TcpStream)> {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let client = tokio::net::TcpStream::connect(listener.local_addr()?).await?;
-    let (daemon, _) = listener.accept().await?;
-    Ok((BrokerStream::Tcp(daemon), client))
+    let (listener, endpoint) = tracedecay_daemon_protocol::BrokerListener::bind(
+        &tracedecay_daemon_protocol::default_loopback_endpoint(),
+    )
+    .await?;
+    let tracedecay_daemon_protocol::DaemonEndpoint::Loopback(address) = endpoint;
+    let client = tokio::net::TcpStream::connect(address).await?;
+    Ok((listener.accept().await?, client))
 }
 
 #[cfg(any(test, feature = "test-transport"))]
