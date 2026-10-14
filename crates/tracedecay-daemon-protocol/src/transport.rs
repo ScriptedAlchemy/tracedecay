@@ -192,6 +192,11 @@ impl DaemonClientStream {
 /// `EAGAIN` (`WouldBlock`), the saturated-daemon signal. Asupersync 0.5.0's
 /// own `UnixStream::connect` treats `EAGAIN` as an in-progress connect and,
 /// polled without its native I/O driver, re-wakes itself forever.
+///
+/// Upstream fixed this in asupersync commit 40a12bea0 (2026-10-03), which
+/// first ships in 0.6.0. When this workspace moves to asupersync 0.6.0, delete
+/// this workaround and `full_listen_backlog_fails_fast_as_saturated`, and
+/// connect with `UnixStream::connect`.
 #[cfg(unix)]
 fn connect_unix(path: &Path) -> std::io::Result<asupersync::net::unix::UnixStream> {
     let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)?;

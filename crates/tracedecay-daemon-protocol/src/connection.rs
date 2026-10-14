@@ -374,6 +374,7 @@ mod tests {
 
     /// A daemon whose listen backlog is full must surface as the typed
     /// saturated refusal at once instead of a connect that never settles.
+    /// Delete with the `connect_unix` workaround on asupersync 0.6.0.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn full_listen_backlog_fails_fast_as_saturated() {
