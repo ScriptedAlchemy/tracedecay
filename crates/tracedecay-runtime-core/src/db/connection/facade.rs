@@ -187,6 +187,16 @@ impl crate::db::engine::QueryExecutor for DatabaseEngineReadConnection {
 }
 
 impl DatabaseEngineReadSnapshot {
+    /// Every statement on this snapshot is interrupted at `deadline` instead
+    /// of at its own request deadline (see [`ExactSqlStatementBudget::Until`]).
+    #[must_use]
+    pub fn until(mut self, deadline: std::time::Instant) -> Self {
+        self.snapshot = self
+            .snapshot
+            .with_budget(ExactSqlStatementBudget::Until(deadline));
+        self
+    }
+
     pub async fn query<P>(
         &self,
         sql: &str,

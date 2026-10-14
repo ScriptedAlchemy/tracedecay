@@ -1220,12 +1220,28 @@ pub(crate) fn execute_query(
     budget: ExactSqlStatementBudget,
 ) -> Result<ExactSqlRows, ExactSqlError> {
     request.validate()?;
+    let (execution_deadline, enforce_statement_limit) = match budget {
+        ExactSqlStatementBudget::Request => (None, true),
+        ExactSqlStatementBudget::Convergence => (None, false),
+        // The progress handler never runs for a statement shorter than its
+        // interval, so it alone cannot stop a run of short statements.
+        ExactSqlStatementBudget::Until(deadline) if clock::now() >= deadline => {
+            return Err(sqlite_error(
+                "advance query",
+                rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_INTERRUPT),
+                    None,
+                ),
+            ));
+        }
+        ExactSqlStatementBudget::Until(deadline) => (Some(deadline), false),
+    };
     with_exact_sql_guard(
         connection,
         ExactSqlAuthority::Canonical(ConnectionMode::Reader),
         None,
-        None,
-        budget == ExactSqlStatementBudget::Request,
+        execution_deadline,
+        enforce_statement_limit,
         None,
         || execute_query_unchecked(connection, request),
     )

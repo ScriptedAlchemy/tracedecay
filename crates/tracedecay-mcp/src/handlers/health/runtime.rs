@@ -59,35 +59,18 @@ async fn session_temporal_health_value(
 ///
 /// Returns `(ok, typed reason, observed detail)`. `ok` is tri-state: `Some(true)`
 /// only when the audit ran and passed, `Some(false)` when it ran and failed, and
-/// `None` when it could not run at all. The typed reason uses the vocabulary
-/// Doctor already understands (`authority_invariant_failed`,
-/// `authority_store_unavailable`) so the CLI can classify without parsing the
-/// free-form detail.
+/// `None` when it could not run or did not finish inside its budget. The typed
+/// reason uses the vocabulary Doctor already understands
+/// (`authority_invariant_failed`, `authority_store_unavailable`,
+/// `authority_audit_budget_exceeded`) so the CLI can classify without parsing
+/// the free-form detail.
 async fn observation_authority_audit(
     registry: Option<&tracedecay_global_db::RegisteredGlobalDb>,
 ) -> (Option<bool>, Option<&'static str>, Option<String>) {
     match registry {
         Some(registry) => {
-            let audit = match registry.read_snapshot().await {
-                Ok(snapshot) => {
-                    tracedecay_global_db::schema_stages::validate_observation_authority_connection(
-                        &snapshot,
-                    )
-                    .await
-                }
-                Err(error) => Err(TraceDecayError::Database {
-                    operation: "begin observation authority audit".to_string(),
-                    message: error.to_string(),
-                }),
-            };
-            match audit {
-                Ok(()) => (Some(true), None, None),
-                Err(error) => (
-                    Some(false),
-                    Some("authority_invariant_failed"),
-                    Some(error.to_string()),
-                ),
-            }
+            let audit = registry.observation_authority_audit().await;
+            (audit.verdict(), audit.reason(), audit.detail())
         }
         // This handler is only reached with a routed project owner, so a missing
         // handle means the registry could not be attached here; the daemon core
