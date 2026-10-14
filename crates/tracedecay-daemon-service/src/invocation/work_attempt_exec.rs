@@ -1181,7 +1181,7 @@ async fn execute_provider_with_environment<S>(
 /// result is carried through so the terminal classification stays in one
 /// place.
 enum AppServerEnding {
-    Session(Result<Result<AppServerSessionOutput, String>, tokio::task::JoinError>),
+    Session(Result<Result<AppServerSessionOutput, String>, String>),
     TimedOut,
     Cancelled,
 }
@@ -1297,7 +1297,7 @@ async fn execute_app_server<S>(
         .clone();
     let launch_receipt = CodexAppServerLaunchReceipt::default();
     let blocking_launch_receipt = launch_receipt.clone();
-    let mut session = tokio::task::spawn_blocking(move || {
+    let session = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         run_work_with_codex_app_server(
             &prompt,
             &config,
@@ -1334,9 +1334,10 @@ async fn execute_app_server<S>(
         })
         .map_err(|error| error.to_string())
     });
+    tokio::pin!(session);
 
     // The terminal arms only decide *how* the session ended; draining the
-    // blocking worker happens after the select, where the join handle is no
+    // blocking worker happens after the select, where the session future is no
     // longer borrowed by it.
     let ending = tokio::select! {
         joined = &mut session => AppServerEnding::Session(joined),
