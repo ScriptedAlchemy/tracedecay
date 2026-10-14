@@ -18,6 +18,17 @@ use tracedecay_contracts::now_micros;
 
 const RECOVERY_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Waits `delay` on the native clock. An unavailable timer ends the wait now,
+/// like an elapsed one.
+async fn recovery_backoff(delay: std::time::Duration) {
+    if let Err(error) =
+        tracedecay_runtime_core::native_runtime::sleep_until(std::time::Instant::now() + delay)
+            .await
+    {
+        tracing::warn!(%error, "workflow fan-out recovery backoff timer unavailable");
+    }
+}
+
 pub(crate) fn reconcile_active_workflow_fan_out(
     registered: &RegisteredWorkRuntime,
     attempt_processes: Arc<super::super::super::work_attempt_exec::WorkAttemptProcessRegistryV1>,
@@ -232,7 +243,7 @@ impl WorkflowFanOutRecoveryOwnerV1 {
                     tokio::select! {
                         biased;
                         () = worker_cancellation.cancelled() => return,
-                        () = tokio::time::sleep(RECOVERY_RETRY_DELAY) => continue,
+                        () = recovery_backoff(RECOVERY_RETRY_DELAY) => continue,
                     }
                 };
 
@@ -263,7 +274,7 @@ impl WorkflowFanOutRecoveryOwnerV1 {
                             tokio::select! {
                                 biased;
                                 () = worker_cancellation.cancelled() => return,
-                                () = tokio::time::sleep(RECOVERY_RETRY_DELAY) => continue,
+                                () = recovery_backoff(RECOVERY_RETRY_DELAY) => continue,
                             }
                         }
                         Err(error) => {
@@ -275,7 +286,7 @@ impl WorkflowFanOutRecoveryOwnerV1 {
                             tokio::select! {
                                 biased;
                                 () = worker_cancellation.cancelled() => return,
-                                () = tokio::time::sleep(RECOVERY_RETRY_DELAY) => continue,
+                                () = recovery_backoff(RECOVERY_RETRY_DELAY) => continue,
                             }
                         }
                     }
@@ -333,7 +344,7 @@ impl WorkflowFanOutRecoveryOwnerV1 {
                 tokio::select! {
                     biased;
                     () = worker_cancellation.cancelled() => return,
-                    () = tokio::time::sleep(delay) => {}
+                    () = recovery_backoff(delay) => {}
                 }
             }
         });
