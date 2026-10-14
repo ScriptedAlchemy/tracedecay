@@ -148,107 +148,6 @@ fn bound_but_unadvertised_tool_names(defined: &[String]) -> BTreeSet<&'static st
         .collect()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{bound_but_unadvertised_tool_names, public_name_to_canonical, tool_tier};
-
-    #[test]
-    fn bound_unadvertised_tool_names_use_the_public_catalog() {
-        let defined: Vec<String> = crate::get_tool_definitions()
-            .expect("tool definitions are available")
-            .into_iter()
-            .map(|definition| definition.name)
-            .collect();
-
-        let bound_unadvertised = bound_but_unadvertised_tool_names(&defined);
-
-        // Served by name as an internal owner operation, with no dispatch
-        // binding row and no advertised definition.
-        assert!(
-            !crate::tools::binding::MCP_TOOL_BINDINGS
-                .iter()
-                .any(|binding| binding.name == "tracedecay_admin_cli")
-        );
-        assert!(!defined.iter().any(|name| name == "tracedecay_admin_cli"));
-        assert!(bound_unadvertised.contains("tracedecay_admin_cli"));
-        assert!(bound_unadvertised.contains("tracedecay_admin_sync"));
-        assert!(
-            defined
-                .iter()
-                .any(|name| name == "tracedecay_ast_grep_rewrite")
-        );
-        assert!(!bound_unadvertised.contains("tracedecay_ast_grep_rewrite"));
-    }
-
-    #[test]
-    fn public_lookup_normalizes_host_namespaces() {
-        let defined: Vec<String> = crate::get_tool_definitions()
-            .expect("tool definitions are available")
-            .into_iter()
-            .map(|definition| definition.name)
-            .collect();
-
-        let names = public_name_to_canonical(&defined);
-
-        let namespaced_context = tracedecay_automation::analytics::normalize_tool_name(
-            "mcp__tracedecay__tracedecay_context",
-        );
-        assert_eq!(
-            names.get(&namespaced_context),
-            Some(&"tracedecay_context".to_string())
-        );
-    }
-
-    #[test]
-    fn exact_fact_store_routes_remain_in_the_memory_tier() {
-        for route in [
-            "add",
-            "search",
-            "probe",
-            "related",
-            "reason",
-            "contradict",
-            "get",
-            "update",
-            "remove",
-            "list",
-        ] {
-            assert_eq!(
-                tool_tier(&format!("tracedecay_fact_store_{route}")),
-                "memory"
-            );
-        }
-        assert_eq!(tool_tier("tracedecay_fact_store"), "other");
-        assert_eq!(tool_tier("tracedecay_fact_store_unknown"), "other");
-    }
-
-    #[test]
-    fn every_catalog_tool_reports_a_named_tier() {
-        let other: Vec<String> = crate::get_tool_definitions()
-            .expect("tool definitions are available")
-            .into_iter()
-            .map(|definition| definition.name)
-            .filter(|name| tool_tier(name) == "other")
-            .collect();
-        assert!(
-            other.is_empty(),
-            "catalog tools in the other tier: {other:?}"
-        );
-    }
-
-    #[test]
-    fn regrouped_tools_keep_their_reported_tier() {
-        for (tool, tier) in [
-            ("tracedecay_runtime", "analysis"),
-            ("tracedecay_diagnose", "admin"),
-            ("tracedecay_run_affected_tests", "admin"),
-            ("tracedecay_status", "navigation"),
-        ] {
-            assert_eq!(tool_tier(tool), tier, "{tool}");
-        }
-    }
-}
-
 #[derive(Default)]
 struct ToolCallCounts {
     calls: i64,
@@ -729,4 +628,105 @@ async fn automation_section(
         records_truncated: records.len() >= AUTOMATION_RECORD_LIMIT,
         by_job: by_job.into_values().collect(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bound_but_unadvertised_tool_names, public_name_to_canonical, tool_tier};
+
+    #[test]
+    fn bound_unadvertised_tool_names_use_the_public_catalog() {
+        let defined: Vec<String> = crate::get_tool_definitions()
+            .expect("tool definitions are available")
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+
+        let bound_unadvertised = bound_but_unadvertised_tool_names(&defined);
+
+        // Served by name as an internal owner operation, with no dispatch
+        // binding row and no advertised definition.
+        assert!(
+            !crate::tools::binding::MCP_TOOL_BINDINGS
+                .iter()
+                .any(|binding| binding.name == "tracedecay_admin_cli")
+        );
+        assert!(!defined.iter().any(|name| name == "tracedecay_admin_cli"));
+        assert!(bound_unadvertised.contains("tracedecay_admin_cli"));
+        assert!(bound_unadvertised.contains("tracedecay_admin_sync"));
+        assert!(
+            defined
+                .iter()
+                .any(|name| name == "tracedecay_ast_grep_rewrite")
+        );
+        assert!(!bound_unadvertised.contains("tracedecay_ast_grep_rewrite"));
+    }
+
+    #[test]
+    fn public_lookup_normalizes_host_namespaces() {
+        let defined: Vec<String> = crate::get_tool_definitions()
+            .expect("tool definitions are available")
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+
+        let names = public_name_to_canonical(&defined);
+
+        let namespaced_context = tracedecay_automation::analytics::normalize_tool_name(
+            "mcp__tracedecay__tracedecay_context",
+        );
+        assert_eq!(
+            names.get(&namespaced_context),
+            Some(&"tracedecay_context".to_string())
+        );
+    }
+
+    #[test]
+    fn exact_fact_store_routes_remain_in_the_memory_tier() {
+        for route in [
+            "add",
+            "search",
+            "probe",
+            "related",
+            "reason",
+            "contradict",
+            "get",
+            "update",
+            "remove",
+            "list",
+        ] {
+            assert_eq!(
+                tool_tier(&format!("tracedecay_fact_store_{route}")),
+                "memory"
+            );
+        }
+        assert_eq!(tool_tier("tracedecay_fact_store"), "other");
+        assert_eq!(tool_tier("tracedecay_fact_store_unknown"), "other");
+    }
+
+    #[test]
+    fn every_catalog_tool_reports_a_named_tier() {
+        let other: Vec<String> = crate::get_tool_definitions()
+            .expect("tool definitions are available")
+            .into_iter()
+            .map(|definition| definition.name)
+            .filter(|name| tool_tier(name) == "other")
+            .collect();
+        assert!(
+            other.is_empty(),
+            "catalog tools in the other tier: {other:?}"
+        );
+    }
+
+    #[test]
+    fn regrouped_tools_keep_their_reported_tier() {
+        for (tool, tier) in [
+            ("tracedecay_runtime", "analysis"),
+            ("tracedecay_diagnose", "admin"),
+            ("tracedecay_run_affected_tests", "admin"),
+            ("tracedecay_status", "navigation"),
+        ] {
+            assert_eq!(tool_tier(tool), tier, "{tool}");
+        }
+    }
 }

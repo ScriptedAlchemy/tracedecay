@@ -4335,22 +4335,6 @@ impl Drop for CodeIndexWorktreeSchedulerV1 {
     }
 }
 
-#[cfg(test)]
-mod retained_empty_seat_tests {
-    use super::retained_empty_seat_settles_source;
-
-    #[test]
-    fn equal_metadata_without_a_decoded_generation_does_not_settle_the_seat() {
-        assert!(
-            !retained_empty_seat_settles_source(false, true),
-            "a matching stat sweep is not a content proof"
-        );
-        assert!(!retained_empty_seat_settles_source(true, false));
-        assert!(!retained_empty_seat_settles_source(false, false));
-        assert!(retained_empty_seat_settles_source(true, true));
-    }
-}
-
 /// Logical CPUs a fixture scheduler's own automatic runtime is sized for.
 /// Fixtures run many owners in one process, so a host-sized pool per owner
 /// oversubscribes the machine and makes a test's timing follow its core count.
@@ -4402,5 +4386,21 @@ impl SchedulerWorkerRuntimeV1 {
             let _ = resident_memory;
             Err(CodeIndexSchedulerErrorV1::WorkerPlanNotInstalled)
         }
+    }
+}
+
+#[cfg(test)]
+mod retained_empty_seat_tests {
+    use super::retained_empty_seat_settles_source;
+
+    #[test]
+    fn equal_metadata_without_a_decoded_generation_does_not_settle_the_seat() {
+        assert!(
+            !retained_empty_seat_settles_source(false, true),
+            "a matching stat sweep is not a content proof"
+        );
+        assert!(!retained_empty_seat_settles_source(true, false));
+        assert!(!retained_empty_seat_settles_source(false, false));
+        assert!(retained_empty_seat_settles_source(true, true));
     }
 }

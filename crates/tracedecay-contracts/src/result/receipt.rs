@@ -176,23 +176,6 @@ impl From<EffectTermination> for OperationTermination {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::OperationTermination;
-
-    #[test]
-    fn unavailable_read_receipt_has_a_distinct_wire_state() {
-        let encoded =
-            serde_json::to_string(&OperationTermination::Unavailable).expect("encode termination");
-
-        assert_eq!(encoded, "\"unavailable\"");
-        assert_eq!(
-            serde_json::from_str::<OperationTermination>(&encoded).expect("decode termination"),
-            OperationTermination::Unavailable
-        );
-    }
-}
-
 /// Reconciliation state retained after an admitted effect.
 #[derive(
     Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
@@ -366,5 +349,22 @@ impl<T> EffectResult<T> {
             receipt,
             payload,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OperationTermination;
+
+    #[test]
+    fn unavailable_read_receipt_has_a_distinct_wire_state() {
+        let encoded =
+            serde_json::to_string(&OperationTermination::Unavailable).expect("encode termination");
+
+        assert_eq!(encoded, "\"unavailable\"");
+        assert_eq!(
+            serde_json::from_str::<OperationTermination>(&encoded).expect("decode termination"),
+            OperationTermination::Unavailable
+        );
     }
 }
