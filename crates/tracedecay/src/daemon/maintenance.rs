@@ -1716,4 +1716,35 @@ mod tests {
             .await
             .expect("maintenance shutdown must abort an in-flight tick");
     }
+
+    /// A tick cancelled while it awaits blocking store work must not leave
+    /// that work holding its database client past the maintenance join: the
+    /// terminal store close then finds the client lease and skips the WAL
+    /// truncate.
+    #[tokio::test]
+    async fn shutdown_waits_for_the_blocking_store_work_of_a_cancelled_tick() {
+        let coordinator = MaintenanceCoordinator::default();
+        let store_client = Arc::new(());
+        let blocking_client = Arc::clone(&store_client);
+        let started = Arc::new(Notify::new());
+        let task_started = Arc::clone(&started);
+        let handle = tokio::spawn(async move {
+            let _ = tokio::task::spawn_blocking(move || {
+                task_started.notify_one();
+                std::thread::sleep(Duration::from_millis(300));
+                drop(blocking_client);
+            })
+            .await;
+        });
+        *coordinator.task.lock().await = Some(handle);
+        started.notified().await;
+
+        coordinator.shutdown().await;
+
+        assert_eq!(
+            Arc::strong_count(&store_client),
+            1,
+            "the maintenance join returned while the tick's blocking store work held its client"
+        );
+    }
 }
