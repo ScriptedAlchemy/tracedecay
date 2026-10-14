@@ -339,7 +339,7 @@ async fn execute_with_owner(
     match request {
         NativeIntegrationSurfaceRequest::StackSnapshot(snapshot) => {
             let outcome = tracing::Instrument::instrument(
-                tokio::task::spawn_blocking(move || {
+                tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
                     let sealed_snapshot = (*snapshot)
                         .seal()
                         .map_err(NativeIntegrationContractError::from)?;
@@ -379,7 +379,7 @@ async fn execute_with_owner(
             let signal_scope = context.scope().clone();
             let signal_context = context.clone();
             let outcome = tracing::Instrument::instrument(
-                tokio::task::spawn_blocking(move || {
+                tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
                     let stack_runtime = owner.github_stack_runtime(context.scope())?;
                     let topology =
                         registered_topology_request(&owner, preflight.snapshot, observed_at)?;
@@ -456,7 +456,7 @@ async fn execute_with_owner(
             )
             .map_err(|_| invalid())?;
             tracing::Instrument::instrument(
-                tokio::task::spawn_blocking(move || {
+                tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
                     let store = owner.store();
                     let preview = match store.read_preview(&approve.preview_id) {
                         Ok(Some(preview)) if preview.preview_digest == approve.preview_digest => {
@@ -537,7 +537,7 @@ async fn execute_with_owner(
             let signal_scope = context.scope().clone();
             let signal_context = context.clone();
             tracing::Instrument::instrument(
-                tokio::task::spawn_blocking(move || {
+                tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
                     // The caller names its preview and one-use approval by exact
                     // identity and digest; both must already be durable. A
                     // missing or mismatched fact is denied without disclosing
@@ -624,7 +624,9 @@ async fn execute_with_owner(
                 transaction_id: status.transaction_id,
             };
             let outcome = tracing::Instrument::instrument(
-                tokio::task::spawn_blocking(move || owner.service().status(application_request)),
+                tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+                    owner.service().status(application_request)
+                }),
                 tracing::trace_span!("daemon.service.native_integration.status"),
             )
             .await
@@ -654,7 +656,7 @@ async fn execute_with_owner(
                 requested_at: observed_at,
             };
             let outcome = tracing::Instrument::instrument(
-                tokio::task::spawn_blocking(move || {
+                tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
                     let disposition = owner.service().cancel(application_request);
                     publish_current_transaction_status(
                         status_broadcast.as_ref(),
@@ -721,7 +723,7 @@ async fn execute_worktree_with_owner(
             WorktreeUnavailableReasonV1::Unavailable,
         ));
     };
-    tokio::task::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         let outcome = match request {
             NativeWorktreeSurfaceRequest::Inventory(request) => service
                 .inventory(&request, &signal)

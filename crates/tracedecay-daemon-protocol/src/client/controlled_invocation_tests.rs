@@ -216,7 +216,7 @@ async fn measure_parallel_invocation_workload(
             server_accepts.fetch_add(1, Ordering::SeqCst);
             let delayed_admitted = Arc::clone(&delayed_admitted);
             tokio::spawn(async move {
-                let (reader, mut writer) = stream.into_split();
+                let (reader, mut writer) = tokio::io::split(stream);
                 let mut lines = authenticated_lines(reader).await;
                 lines
                     .next_line()
@@ -312,7 +312,17 @@ async fn delayed_invocation_does_not_block_short_calls_and_pool_stays_bounded() 
     );
 }
 
-#[tokio::test(start_paused = true)]
+/// A liveness probe that reports every poll to the test.
+struct ReportingProbe(tokio::sync::mpsc::UnboundedSender<()>);
+
+impl crate::connection::DaemonLivenessProbe for ReportingProbe {
+    fn ensure_live(&self, _request_label: &str) -> tracedecay_domain::errors::Result<()> {
+        let _ = self.0.send(());
+        Ok(())
+    }
+}
+
+#[tokio::test]
 async fn delayed_response_opens_no_periodic_probe_connections() {
     const REQUEST_ID: &str = "request.no-probe-connections";
     let (listener, endpoint) =
@@ -321,12 +331,15 @@ async fn delayed_response_opens_no_periodic_probe_connections() {
             .expect("bind delayed response listener");
     let accepts = Arc::new(AtomicUsize::new(0));
     let server_accepts = Arc::clone(&accepts);
+    let (polled, polls) = tokio::sync::mpsc::unbounded_channel();
     let server = tokio::spawn(async move {
+        let mut polls = Some(polls);
         loop {
             let stream = listener.accept().await.expect("accept delayed invocation");
             server_accepts.fetch_add(1, Ordering::SeqCst);
+            let polls = polls.take();
             tokio::spawn(async move {
-                let (reader, mut writer) = stream.into_split();
+                let (reader, mut writer) = tokio::io::split(stream);
                 let mut lines = authenticated_lines(reader).await;
                 let Some(_handshake) = lines.next_line().await.expect("read handshake") else {
                     return;
@@ -336,20 +349,32 @@ async fn delayed_response_opens_no_periodic_probe_connections() {
                 };
                 let request: DaemonInvocationRequest =
                     serde_json::from_str(&line).expect("typed invocation");
-                tokio::time::sleep(Duration::from_secs(12)).await;
+                // Answer only once the waiting client has polled liveness twice.
+                let mut polls = polls.expect("only the invocation connection is answered");
+                for _ in 0..2 {
+                    polls.recv().await.expect("liveness poll");
+                }
                 write_unavailable_response(&mut writer, &request.request_id).await;
             });
         }
     });
-    let client = invocation_client(endpoint, "client.no-probe-connections");
+    let probe: Arc<dyn crate::connection::DaemonLivenessProbe> = Arc::new(ReportingProbe(polled));
+    let mut client = invocation_client_for(
+        DaemonConnection::new(endpoint, TEST_AUTH_TOKEN.to_owned()).with_liveness(probe),
+        "client.no-probe-connections",
+    );
+    client.liveness_poll_interval = Duration::from_millis(10);
 
-    client
-        .invoke(invocation_request(
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        client.invoke(invocation_request(
             REQUEST_ID,
             deadline_after(Duration::from_secs(20)),
-        ))
-        .await
-        .expect("delayed invocation response");
+        )),
+    )
+    .await
+    .expect("the waiting client polls liveness on its interval")
+    .expect("delayed invocation response");
 
     assert_eq!(
         accepts.load(Ordering::SeqCst),
@@ -368,7 +393,7 @@ async fn work_delivery_ack_uses_the_response_connection() {
             .expect("bind Work delivery listener");
     let server = tokio::spawn(async move {
         let stream = listener.accept().await.expect("accept Work invocation");
-        let (reader, mut writer) = stream.into_split();
+        let (reader, mut writer) = tokio::io::split(stream);
         let mut lines = authenticated_lines(reader).await;
         lines
             .next_line()
@@ -433,7 +458,7 @@ async fn dropping_unacknowledged_work_delivery_closes_its_connection() {
     let (closed, connection_closed) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let stream = listener.accept().await.expect("accept Work invocation");
-        let (reader, mut writer) = stream.into_split();
+        let (reader, mut writer) = tokio::io::split(stream);
         let mut lines = authenticated_lines(reader).await;
         lines
             .next_line()
@@ -483,7 +508,7 @@ async fn lsp_session_pins_one_connection_through_detach() {
     let server = tokio::spawn(async move {
         let stream = listener.accept().await.expect("accept LSP session");
         server_accepts.fetch_add(1, Ordering::SeqCst);
-        let (reader, mut writer) = stream.into_split();
+        let (reader, mut writer) = tokio::io::split(stream);
         let mut lines = authenticated_lines(reader).await;
         lines
             .next_line()
@@ -607,7 +632,7 @@ async fn two_hundred_invocations_use_at_most_eight_connections_without_leaks() {
                     let stream = accepted.expect("accept bounded pool connection");
                     server_accepts.fetch_add(1, Ordering::SeqCst);
                     handlers.spawn(async move {
-                        let (reader, mut writer) = stream.into_split();
+                        let (reader, mut writer) = tokio::io::split(stream);
                         let mut lines = authenticated_lines(reader).await;
                         lines
                             .next_line()
@@ -683,7 +708,7 @@ async fn daemon_restart_with_rotated_authority_purges_idle_connections_before_re
             .await
             .expect("accept first warm connection");
         server_accepts.fetch_add(1, Ordering::SeqCst);
-        let (first_reader, mut first_writer) = first_stream.into_split();
+        let (first_reader, mut first_writer) = tokio::io::split(first_stream);
         let mut first_lines = authenticated_lines(first_reader).await;
         first_lines
             .next_line()
@@ -701,7 +726,7 @@ async fn daemon_restart_with_rotated_authority_purges_idle_connections_before_re
             .await
             .expect("accept second warm connection");
         server_accepts.fetch_add(1, Ordering::SeqCst);
-        let (second_reader, mut second_writer) = second_stream.into_split();
+        let (second_reader, mut second_writer) = tokio::io::split(second_stream);
         let mut second_lines = authenticated_lines(second_reader).await;
         second_lines
             .next_line()
@@ -735,7 +760,7 @@ async fn daemon_restart_with_rotated_authority_purges_idle_connections_before_re
             .await
             .expect("accept recovered connection");
         server_accepts.fetch_add(1, Ordering::SeqCst);
-        let (recovered_reader, mut recovered_writer) = recovered_stream.into_split();
+        let (recovered_reader, mut recovered_writer) = tokio::io::split(recovered_stream);
         let mut recovered_lines = authenticated_lines(recovered_reader).await;
         recovered_lines
             .next_line()
@@ -821,7 +846,7 @@ async fn concurrent_invocations_report_parallel_activity() {
             .accept()
             .await
             .expect("accept invocation connection");
-        let (reader, mut writer) = stream.into_split();
+        let (reader, mut writer) = tokio::io::split(stream);
         let mut lines = authenticated_lines(reader).await;
         lines
             .next_line()
@@ -844,7 +869,7 @@ async fn concurrent_invocations_report_parallel_activity() {
             .accept()
             .await
             .expect("accept second invocation connection");
-        let (second_reader, mut second_writer) = second_stream.into_split();
+        let (second_reader, mut second_writer) = tokio::io::split(second_stream);
         let mut second_lines = authenticated_lines(second_reader).await;
         second_lines
             .next_line()
@@ -918,7 +943,7 @@ async fn controlled_client(
     let (request_admitted, admitted) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let invocation_stream = listener.accept().await.expect("accept invocation");
-        let (invocation_reader, mut invocation_writer) = invocation_stream.into_split();
+        let (invocation_reader, mut invocation_writer) = tokio::io::split(invocation_stream);
         let mut invocation_lines = authenticated_lines(invocation_reader).await;
         invocation_lines
             .next_line()
@@ -936,7 +961,7 @@ async fn controlled_client(
         let _ = request_admitted.send(());
 
         let control_stream = listener.accept().await.expect("accept cancellation");
-        let (control_reader, _control_writer) = control_stream.into_split();
+        let (control_reader, _control_writer) = tokio::io::split(control_stream);
         let mut control_lines = authenticated_lines(control_reader).await;
         control_lines
             .next_line()
@@ -1001,12 +1026,8 @@ async fn controlled_client(
 
 /// Phase signals from a fixture daemon that never settles a remote effect.
 ///
-/// The choreography runs over real loopback connections, so the tests keep
-/// real time until `control_observed` fires and only then pause and advance
-/// the clock past the authoritative-settlement grace. Pausing earlier lets
-/// the paused clock auto-advance past the admission deadline while the
-/// runtime waits for loopback readiness, which drops the invocation
-/// connection before its handshake is written (observed on macOS).
+/// Its client waits [`SHORT_RESPONSE_GRACE`] for the settlement that never
+/// comes, so each test spends the grace in real time.
 struct UnsettledDaemon {
     client: DaemonInvocationClient,
     /// The daemon read the typed invocation request.
@@ -1022,17 +1043,16 @@ struct UnsettledDaemon {
     server: tokio::task::JoinHandle<()>,
 }
 
-/// Pauses the clock and advances it past the authoritative-settlement grace.
-///
-/// Only call this once every real loopback exchange the test depends on has
-/// completed and the remaining work is timer-bound; the paused clock
-/// auto-advances to the next timer whenever the runtime would otherwise wait
-/// for I/O. Tests that perform more real I/O afterwards must
-/// `tokio::time::resume()` first.
-async fn virtualize_response_grace() {
-    tokio::time::pause();
-    tokio::time::advance(crate::connection::DAEMON_TOOL_RESPONSE_GRACE + Duration::from_secs(1))
-        .await;
+const SHORT_RESPONSE_GRACE: Duration = Duration::from_millis(100);
+
+/// Bounds a test's wait on an unsettled effect: far above
+/// [`SHORT_RESPONSE_GRACE`] and far below the production grace, so a client
+/// that ignores its configured grace fails instead of passing slowly.
+const SETTLEMENT_WAIT: Duration = Duration::from_secs(5);
+
+fn with_short_response_grace(mut client: DaemonInvocationClient) -> DaemonInvocationClient {
+    client.response_grace = SHORT_RESPONSE_GRACE;
+    client
 }
 
 async fn reset_then_reconnect_client(
@@ -1052,7 +1072,7 @@ async fn reset_then_reconnect_client(
     let (cancellation_observed, control_observed) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let first_stream = listener.accept().await.expect("accept first invocation");
-        let (first_reader, _first_writer) = first_stream.into_split();
+        let (first_reader, _first_writer) = tokio::io::split(first_stream);
         let mut first_lines = authenticated_lines(first_reader).await;
         first_lines
             .next_line()
@@ -1070,7 +1090,7 @@ async fn reset_then_reconnect_client(
         let _ = first_admitted.send(());
 
         let control_stream = listener.accept().await.expect("accept cancellation");
-        let (control_reader, _control_writer) = control_stream.into_split();
+        let (control_reader, _control_writer) = tokio::io::split(control_stream);
         let mut control_lines = authenticated_lines(control_reader).await;
         control_lines
             .next_line()
@@ -1091,7 +1111,7 @@ async fn reset_then_reconnect_client(
         // connections; skip them like the real daemon's accept loop does.
         let (mut second_lines, mut second_writer) = loop {
             let second_stream = listener.accept().await.expect("accept second invocation");
-            let (second_reader, second_writer) = second_stream.into_split();
+            let (second_reader, second_writer) = tokio::io::split(second_stream);
             let mut second_lines = authenticated_lines(second_reader).await;
             if let Ok(Some(_handshake)) = second_lines.next_line().await {
                 break (second_lines, second_writer);
@@ -1142,10 +1162,10 @@ async fn reset_then_reconnect_client(
         moved_store_adoption: crate::handshake::MovedStoreAdoption::Never,
     };
     (
-        DaemonInvocationClient::for_connection_for_test(
+        with_short_response_grace(DaemonInvocationClient::for_connection_for_test(
             DaemonConnection::new(endpoint, TEST_AUTH_TOKEN.to_owned()),
             handshake,
-        ),
+        )),
         admitted,
         control_observed,
         server,
@@ -1169,7 +1189,7 @@ async fn unsettled_client(request_id: &'static str, control: UnsettledControl) -
     let (release, released) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(async move {
         let invocation_stream = listener.accept().await.expect("accept invocation");
-        let (invocation_reader, invocation_writer) = invocation_stream.into_split();
+        let (invocation_reader, invocation_writer) = tokio::io::split(invocation_stream);
         let mut invocation_lines = authenticated_lines(invocation_reader).await;
         invocation_lines
             .next_line()
@@ -1189,7 +1209,7 @@ async fn unsettled_client(request_id: &'static str, control: UnsettledControl) -
             UnsettledControl::Delivered | UnsettledControl::DeliveredThenResponseClosed => {
                 let _ = request_admitted.send(());
                 let control_stream = listener.accept().await.expect("accept cancellation");
-                let (control_reader, control_writer) = control_stream.into_split();
+                let (control_reader, control_writer) = tokio::io::split(control_stream);
                 let mut control_lines = authenticated_lines(control_reader).await;
                 control_lines
                     .next_line()
@@ -1243,10 +1263,10 @@ async fn unsettled_client(request_id: &'static str, control: UnsettledControl) -
         moved_store_adoption: crate::handshake::MovedStoreAdoption::Never,
     };
     UnsettledDaemon {
-        client: DaemonInvocationClient::for_connection_for_test(
+        client: with_short_response_grace(DaemonInvocationClient::for_connection_for_test(
             DaemonConnection::new(endpoint, TEST_AUTH_TOKEN.to_owned()),
             handshake,
-        ),
+        )),
         admitted,
         control_observed,
         release,
@@ -1283,9 +1303,9 @@ async fn settle_without_daemon_response(
     admitted.await.expect("request admission");
     assert!(cancellation.cancel(now_micros()));
     control_observed.await.expect("cancellation control phase");
-    virtualize_response_grace().await;
-    let response = call
+    let response = tokio::time::timeout(SETTLEMENT_WAIT, call)
         .await
+        .expect("the client settles once its response grace ends")
         .expect("authoritative invocation task")
         .expect("indeterminate settlement is typed");
     let _ = release.send(());
@@ -1429,29 +1449,26 @@ async fn indeterminate_effect_discards_connection_before_next_invocation() {
     let cancellation =
         CancellationSignal::active("cancel.remote-effect-reset-state").expect("cancellation");
     let cancel_after_admission = cancellation.clone();
-    // Cancel once the daemon has admitted the request, then virtualize the
-    // response grace only after the daemon has read the cancellation: the
-    // choreography itself runs over real loopback connections.
-    let clock = tokio::spawn(async move {
+    let cancel = tokio::spawn(async move {
         admitted.await.expect("request admission");
         assert!(cancel_after_admission.cancel(now_micros()));
         control_observed.await.expect("cancellation delivery");
-        virtualize_response_grace().await;
     });
     let deadline = deadline_after(Duration::from_secs(10));
-    let first = client
-        .invoke_controlled(
+    let first = tokio::time::timeout(
+        SETTLEMENT_WAIT,
+        client.invoke_controlled(
             invocation_request(FIRST_ID, deadline.clone()),
             deadline,
             cancellation,
             InvocationCancellationPolicy::AuthoritativeEffect,
-        )
-        .await
-        .expect("indeterminate effect is typed");
+        ),
+    )
+    .await
+    .expect("the client settles once its response grace ends")
+    .expect("indeterminate effect is typed");
     assert_authoritative_settlement(first);
-    clock.await.expect("clock task");
-    // The reconnect below is real loopback I/O again, so hand real time back.
-    tokio::time::resume();
+    cancel.await.expect("cancellation task");
 
     let second = client
         .invoke(invocation_request(
@@ -1486,7 +1503,7 @@ fn spawn_pool_daemon(
             server_accepts.fetch_add(1, Ordering::SeqCst);
             let warm_up = Arc::clone(&warm_up);
             tokio::spawn(async move {
-                let (reader, mut writer) = stream.into_split();
+                let (reader, mut writer) = tokio::io::split(stream);
                 let mut lines = authenticated_lines(reader).await;
                 lines
                     .next_line()

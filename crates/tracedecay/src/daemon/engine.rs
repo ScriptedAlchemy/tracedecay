@@ -648,8 +648,7 @@ impl DaemonEngine {
             let mut retry_init = handshake.allow_init;
             loop {
                 let claim = Box::pin(self.begin_project_open(handshake.clone(), None)).await?;
-                let publication_deadline =
-                    project_open_publication_deadline(tokio::time::Instant::now());
+                let publication_deadline = project_open_publication_deadline(Instant::now());
                 let result = await_claimed_project_open(
                     claim,
                     &project_path,
@@ -839,6 +838,12 @@ impl DaemonEngine {
                     log_daemon_event(
                         "git_watch_admission_rejected",
                         &[("reason", "identity_unavailable".to_string())],
+                    );
+                }
+                git_watch::GitWatcherAdmission::RuntimeUnavailable => {
+                    log_daemon_event(
+                        "git_watch_admission_rejected",
+                        &[("reason", "runtime_unavailable".to_string())],
                     );
                 }
             }

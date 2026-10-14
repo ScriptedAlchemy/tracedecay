@@ -2689,6 +2689,15 @@ impl DaemonSessionRuntimeRegistryV1 {
         self.project_owners.wait_for_session_graph(project_id).await
     }
 
+    /// Awaits settlement (attached or detached) of the project memory graph
+    /// that `project_memory` opens as bounded background work.
+    pub async fn settle_project_memory_graph(&self, project_id: &ProjectId) -> Result<()> {
+        self.project_owners
+            .wait_for_memory_graph(project_id)
+            .await
+            .map(drop)
+    }
+
     /// Waits for the project's background relation-graph open and requires an
     /// attached owner before a retrieval-capable surface is published.
     #[tracing::instrument(

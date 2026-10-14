@@ -247,11 +247,14 @@ pub(crate) enum ExecutionPolicy {
 /// for schema-convergence audits whose single statements scan a whole table:
 /// on a large store such a scan cannot fit any fixed request deadline, and an
 /// audit interrupted at the same statement on every open never converges.
-/// Reader shutdown still interrupts a convergence statement.
+/// Reader shutdown still interrupts a convergence statement. `Until` replaces
+/// the per-statement deadline with one instant shared by every statement, so
+/// a diagnostic audit made of many statements is bounded as a whole.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExactSqlStatementBudget {
     Request,
     Convergence,
+    Until(std::time::Instant),
 }
 
 pub trait ExactSqlWriteAuthority: Send + Sync {

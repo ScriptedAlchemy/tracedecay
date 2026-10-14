@@ -43,6 +43,26 @@ exports_files(["runtime/fixtures/project/tests/catalog.rs"],
 )
 
 filegroup(
+    name = "runtime_fixtures_providers_home_.codex_sessions_2026_07",
+    srcs = glob(["runtime/fixtures/providers/home/.codex/sessions/2026/07/**"]),
+    visibility = ["//visibility:public"],
+)
+
+exports_files(["runtime/fixtures/providers/home/.codex/sessions/2026/07/fixture-session.jsonl"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "runtime_fixtures_providers_home_.cursor_projects_fixture-runtime-project_agent-transcripts",
+    srcs = glob(["runtime/fixtures/providers/home/.cursor/projects/fixture-runtime-project/agent-transcripts/**"]),
+    visibility = ["//visibility:public"],
+)
+
+exports_files(["runtime/fixtures/providers/home/.cursor/projects/fixture-runtime-project/agent-transcripts/fixture-session.jsonl"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
     name = "session-temporal",
     srcs = glob(["session-temporal/**"]),
     visibility = ["//visibility:public"],

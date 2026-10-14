@@ -53,8 +53,9 @@ impl IngestTestRuntime {
     /// to run without the session review port; the fixture injects the same
     /// ones the production daemon composes.
     fn authority(&self) -> GlobalDbSessionIngestAuthority<RegisteredGlobalDbLeaseV1> {
-        self.authority_without_session_review()
-            .with_session_review(tracedecay::session_review_port())
+        self.authority_without_session_review().with_session_review(
+            tracedecay::session_review_port(tokio::runtime::Handle::current()),
+        )
     }
 
     fn authority_without_session_review(

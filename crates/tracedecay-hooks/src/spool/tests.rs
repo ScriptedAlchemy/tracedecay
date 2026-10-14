@@ -1828,3 +1828,78 @@ fn bounded_writer_admission_preserves_failfast_and_times_out_without_mutation() 
     let (_, report) = HookSpoolV1::open(&root.0, config(), UtcMicros(13)).unwrap();
     assert_eq!(report.next_sequence, 2);
 }
+
+async fn drain_stock(
+    root: &Path,
+    now: UtcMicros,
+) -> (crate::HookReplayPassReportV1, Vec<[u8; 16]>) {
+    let admitted = std::sync::Mutex::new(Vec::new());
+    let pass = crate::drain_host_spool_once(
+        root,
+        HookSpoolConfigV1::stock(NativeHostIdentityV1::CursorDesktop),
+        [1; 16],
+        &mut |_| Some(binding()),
+        now,
+        |envelope, _| {
+            admitted.lock().unwrap().push(envelope.event_id);
+            async { crate::HookReplayAdmissionOutcomeV1::Admitted }
+        },
+    )
+    .await
+    .unwrap();
+    (pass, admitted.into_inner().unwrap())
+}
+
+/// The hook returns while the other writer still holds its lock, so it never
+/// waits out the holder. A wait of a whole writer lease is the regression.
+fn spool_from_hook_while_held(root: &Path) {
+    let config = HookSpoolConfigV1::stock(NativeHostIdentityV1::CursorDesktop);
+    let started = std::time::Instant::now();
+    crate::spool_hook_event(
+        root,
+        config,
+        envelope(1, 9),
+        None,
+        &binding(),
+        UtcMicros(10),
+    )
+    .expect("a busy spool must not refuse the hook's event");
+    assert!(
+        started.elapsed() < config.writer_lease(),
+        "hook waited {:?} on a held spool lock",
+        started.elapsed()
+    );
+}
+
+#[asupersync::test]
+async fn a_hook_behind_a_held_commit_lock_returns_and_its_event_replays_once() {
+    let root = TestDir::new("hook-commit-held");
+    let held = CommitLockV1::acquire(&root.0, COMMIT_WAIT).unwrap();
+    spool_from_hook_while_held(&root.0);
+    drop(held);
+    // A crash loses the hook's unsynced frame; its event must survive it.
+    truncate_records(&root.0, 0).unwrap();
+
+    let (pass, admitted) = drain_stock(&root.0, UtcMicros(11)).await;
+    assert_eq!((pass.committed, admitted), (1, vec![[1; 16]]));
+    let (pass, admitted) = drain_stock(&root.0, UtcMicros(12)).await;
+    assert_eq!((pass.committed, admitted), (0, Vec::new()));
+}
+
+#[asupersync::test]
+async fn a_hook_behind_a_held_writer_lease_returns_and_its_event_replays_once() {
+    let root = TestDir::new("hook-lease-held");
+    let config = HookSpoolConfigV1::stock(NativeHostIdentityV1::CursorDesktop);
+    let (held, _) = HookSpoolV1::open(&root.0, config, UtcMicros(10)).unwrap();
+    spool_from_hook_while_held(&root.0);
+    drop(held);
+    assert!(
+        HookSpoolV1::has_records(&root.0).unwrap(),
+        "a staged event must wake the drain"
+    );
+
+    let (pass, admitted) = drain_stock(&root.0, UtcMicros(11)).await;
+    assert_eq!((pass.committed, admitted), (1, vec![[1; 16]]));
+    let (pass, admitted) = drain_stock(&root.0, UtcMicros(12)).await;
+    assert_eq!((pass.committed, admitted), (0, Vec::new()));
+}

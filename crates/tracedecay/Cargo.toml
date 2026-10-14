@@ -150,6 +150,7 @@ lang-lean = ["tracedecay-code-index/lang-lean"]
 test-helpers = [
     "tracedecay-project/test-helpers",
     "tracedecay-mcp/test-helpers",
+    "tracedecay-daemon-protocol/test-helpers",
     "tracedecay-automation-runtime/test-helpers",
     "tracedecay-code-index-runtime/test-helpers",
     "tracedecay-daemon-service/test-helpers",

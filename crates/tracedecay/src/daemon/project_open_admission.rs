@@ -16,6 +16,7 @@ use tracedecay_contracts::project_open::{
 };
 use tracedecay_daemon_identity::authority;
 use tracedecay_daemon_service::shutdown::DAEMON_TASK_ABORT_DEADLINE;
+use tracedecay_runtime_core::native_runtime::{self, TimeoutError};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct ProjectServerKey {
@@ -761,15 +762,20 @@ impl ProjectOpenTasks {
         route: &ProjectRouteKey,
         retry_available: &mut bool,
         error: Option<&TraceDecayError>,
-        deadline: tokio::time::Instant,
+        deadline: Instant,
     ) -> Result<bool> {
         if !*retry_available || !error.is_some_and(is_missing_index_error) {
             return Ok(false);
         }
         *retry_available = false;
-        tokio::time::timeout_at(deadline, self.wait_for_route_completion(route))
+        native_runtime::timeout_at(deadline, self.wait_for_route_completion(route))
             .await
-            .map_err(|_| project_warming_error(&route.project_path))?;
+            .map_err(|error| match error {
+                TimeoutError::Elapsed => project_warming_error(&route.project_path),
+                TimeoutError::TimerUnavailable(_) => TraceDecayError::Config {
+                    message: error.to_string(),
+                },
+            })?;
         Ok(true)
     }
 
@@ -812,22 +818,25 @@ impl ProjectOpenTasks {
             let Ok(remaining_micros) = u64::try_from(remaining_micros) else {
                 return ProjectOpenWaitOutcome::TimedOut;
             };
-            let sleep = tokio::time::sleep(Duration::from_micros(remaining_micros));
-            tokio::pin!(sleep);
-            tokio::select! {
-                biased;
-                () = request_cancellation.cancelled() => {
-                    return ProjectOpenWaitOutcome::Cancelled;
-                }
-                () = &mut sleep => {
-                    return ProjectOpenWaitOutcome::TimedOut;
-                }
-                changed = state.changed() => {
-                    if changed.is_err() {
-                        return ProjectOpenWaitOutcome::Failed(TraceDecayError::Config {
+            let woken = async {
+                tokio::select! {
+                    biased;
+                    () = request_cancellation.cancelled() => Some(ProjectOpenWaitOutcome::Cancelled),
+                    changed = state.changed() => changed.is_err().then(|| {
+                        ProjectOpenWaitOutcome::Failed(TraceDecayError::Config {
                             message: "project open task ended before reporting an outcome".to_owned(),
-                        });
-                    }
+                        })
+                    }),
+                }
+            };
+            match native_runtime::timeout(Duration::from_micros(remaining_micros), woken).await {
+                Ok(None) => {}
+                Ok(Some(outcome)) => return outcome,
+                Err(TimeoutError::Elapsed) => return ProjectOpenWaitOutcome::TimedOut,
+                Err(error @ TimeoutError::TimerUnavailable(_)) => {
+                    return ProjectOpenWaitOutcome::Failed(TraceDecayError::Config {
+                        message: error.to_string(),
+                    });
                 }
             }
         }
@@ -982,7 +991,7 @@ impl ProjectOpenTasks {
     }
 
     async fn drain_retiring_routes(&self, routes: Vec<ProjectRouteKey>, timeout: Duration) -> bool {
-        let deadline = tokio::time::Instant::now() + timeout;
+        let deadline = Instant::now() + timeout;
         let completions = {
             let mut registry = self.lock_registry();
             routes
@@ -997,7 +1006,8 @@ impl ProjectOpenTasks {
         let mut joined = Vec::new();
         let mut drained = true;
         for (route, completion) in completions {
-            match tokio::time::timeout_at(deadline, wait_for_project_open_task(completion)).await {
+            match native_runtime::timeout_at(deadline, wait_for_project_open_task(completion)).await
+            {
                 Ok(()) => joined.push(route),
                 Err(_) => drained = false,
             }

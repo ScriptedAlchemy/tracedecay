@@ -1,3 +1,9 @@
+use std::future::poll_fn;
+use std::pin::pin;
+use std::task::Poll;
+
+use tracedecay_runtime_core::native_runtime;
+
 use super::*;
 
 pub struct AdvisoryRuntime<GR, GA, CS, CE, PE, PC> {
@@ -761,18 +767,24 @@ pub(super) async fn await_provider<T>(
     if let Some(interruption) = interruption_before_await(control) {
         return Err(interruption);
     }
-    tokio::pin!(future);
-    let deadline_at = control.deadline.instant();
-    let cancelled = control.operation.cancelled();
-    tokio::pin!(cancelled);
-    let deadline = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline_at));
-    tokio::pin!(deadline);
-    tokio::select! {
-        biased;
-        () = &mut cancelled => Err(AdvisoryCycleInterruption::Cancelled),
-        () = &mut deadline => Err(AdvisoryCycleInterruption::TimedOut),
-        outcome = &mut future => Ok(outcome),
-    }
+    let mut future = pin!(future);
+    let mut deadline = pin!(native_runtime::sleep_until(control.deadline.instant()));
+    let mut cancelled = pin!(control.operation.cancelled());
+    poll_fn(|task| {
+        if cancelled.as_mut().poll(task).is_ready() {
+            return Poll::Ready(Err(AdvisoryCycleInterruption::Cancelled));
+        }
+        if let Poll::Ready(fired) = deadline.as_mut().poll(task) {
+            // Without a timer the deadline cannot hold, so the cycle stops
+            // as timed out rather than wait on the provider unbounded.
+            if let Err(error) = fired {
+                tracing::error!(event = "advisory_cycle_deadline_unavailable", %error);
+            }
+            return Poll::Ready(Err(AdvisoryCycleInterruption::TimedOut));
+        }
+        future.as_mut().poll(task).map(Ok)
+    })
+    .await
 }
 
 pub(super) fn resolved_scope_matches_feedback_scope(

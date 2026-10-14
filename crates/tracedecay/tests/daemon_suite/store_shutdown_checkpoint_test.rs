@@ -12,10 +12,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 use std::time::{Duration, Instant};
 
+use asupersync::io::{AsyncWriteExt, BufReader};
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
-use tracedecay_daemon_protocol::DaemonHandshake;
 use tracedecay_daemon_protocol::connection::write_daemon_handshake_preamble;
+use tracedecay_daemon_protocol::{
+    DaemonClientReadHalf, DaemonClientStream, DaemonClientWriteHalf, DaemonEndpoint,
+    DaemonHandshake,
+};
+use tracedecay_framing::BoundedLineReader;
 
 use crate::code_index_journey::{
     RECEIPT_TIMEOUT, commit_all, exact_identity, git, initialize_tracedecay,
@@ -261,7 +265,8 @@ async fn stop_after_independent_owners_releases_every_project_store() {
 /// it through the project's server for as long as the connection stays open,
 /// so that server is leased until [`LiveMcpSession::close`].
 struct LiveMcpSession {
-    stream: tokio::io::BufReader<tokio::net::UnixStream>,
+    reader: BoundedLineReader<BufReader<DaemonClientReadHalf>>,
+    writer: DaemonClientWriteHalf,
 }
 
 impl LiveMcpSession {
@@ -273,10 +278,12 @@ impl LiveMcpSession {
         )
         .expect("daemon authority JSON");
         let token = authority["auth_token"].as_str().expect("daemon token");
-        let mut stream = tokio::net::UnixStream::connect(daemon_socket_path(home))
-            .await
-            .expect("connect to the daemon");
-        write_daemon_handshake_preamble(&mut stream, token, handshake)
+        let (reader, mut writer) =
+            DaemonClientStream::connect(&DaemonEndpoint::Unix(daemon_socket_path(home)))
+                .await
+                .expect("connect to the daemon")
+                .into_split();
+        write_daemon_handshake_preamble(&mut writer, token, handshake)
             .await
             .expect("write the daemon preamble");
         let initialize = json!({
@@ -289,17 +296,18 @@ impl LiveMcpSession {
                 "clientInfo": {"name": "route-eviction", "version": "1"}
             }
         });
-        stream
+        writer
             .write_all(format!("{initialize}\n").as_bytes())
             .await
             .expect("write MCP initialize");
-        let mut stream = tokio::io::BufReader::new(stream);
+        let mut reader = BoundedLineReader::new(BufReader::new(reader));
         let response = tokio::time::timeout(RECEIPT_TIMEOUT, async {
-            let mut line = String::new();
             loop {
-                line.clear();
-                let read = stream.read_line(&mut line).await.expect("read MCP frame");
-                assert!(read > 0, "the daemon closed {}", project.display());
+                let line = reader
+                    .read_mcp_line()
+                    .await
+                    .expect("read MCP frame")
+                    .unwrap_or_else(|| panic!("the daemon closed {}", project.display()));
                 let frame: Value = serde_json::from_str(&line).expect("MCP frame JSON");
                 if frame["id"] == 1 {
                     return frame;
@@ -313,21 +321,23 @@ impl LiveMcpSession {
             "initialize failed for {}: {response}",
             project.display()
         );
-        Self { stream }
+        Self { reader, writer }
     }
 
     /// Ends the session and waits for the daemon to close its side.
     async fn close(mut self) {
-        self.stream
-            .get_mut()
-            .shutdown()
-            .await
-            .expect("end the MCP session");
-        let mut rest = Vec::new();
-        tokio::time::timeout(RECEIPT_TIMEOUT, self.stream.read_to_end(&mut rest))
-            .await
-            .expect("the daemon closes the ended session")
-            .expect("read until the daemon closes");
+        self.writer.shutdown().await.expect("end the MCP session");
+        tokio::time::timeout(RECEIPT_TIMEOUT, async {
+            while self
+                .reader
+                .read_mcp_line()
+                .await
+                .expect("read until the daemon closes")
+                .is_some()
+            {}
+        })
+        .await
+        .expect("the daemon closes the ended session");
     }
 }
 
