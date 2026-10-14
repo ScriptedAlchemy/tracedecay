@@ -1140,6 +1140,10 @@ pub enum ObservationStoreError {
     InvalidReplayLimit { limit: usize, max: usize },
     #[error("observation contract validation failed")]
     Contract(#[source] ObservationContractError),
+    /// Every reader was leased for the whole admission wait. Nothing failed;
+    /// the same operation can succeed once a reader returns.
+    #[error("observation storage operation {operation} found every reader leased")]
+    ReaderSaturated { operation: &'static str },
     #[error("observation storage operation {operation} failed")]
     Storage {
         operation: &'static str,
