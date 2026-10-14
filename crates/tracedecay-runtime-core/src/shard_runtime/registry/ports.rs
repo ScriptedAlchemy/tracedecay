@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use asupersync::runtime::RuntimeHandle;
 
+use tracedecay_rusqlite_runtime::reader::ReaderAcquireError;
 use tracedecay_rusqlite_runtime::repository::{
     RepositoryDispatchError, RepositoryPhysicalAttachmentFactory,
     RepositoryRuntimePhysicalAttachment, RepositoryRuntimePhysicalSnapshot,
@@ -592,9 +593,14 @@ impl PhysicalRuntimeAttachment for RepositoryRuntimePhysicalAttachment {
         probe: &dyn RuntimeRequestProbeV1,
     ) -> Result<RuntimeReadOutcomeV1, StoreRuntimeRegistryFailure> {
         RepositoryRuntimePhysicalAttachment::dispatch_read(self, request, probe).map_err(|error| {
-            StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                operation: "dispatch repository read",
-                message: error.to_string(),
+            match error {
+                RepositoryDispatchError::Reader(ReaderAcquireError::Saturated { .. }) => {
+                    StoreRuntimeRegistryFailure::ReaderSaturated
+                }
+                error => StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                    operation: "dispatch repository read",
+                    message: error.to_string(),
+                },
             }
         })
     }

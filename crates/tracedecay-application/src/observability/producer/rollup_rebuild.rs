@@ -12,6 +12,7 @@ use tracedecay_global_db::{
     ObservabilityRollupEmptyDayClaimOutcomeV1, ObservabilityRollupEmptyDayClaimV1,
     ObservabilityRollupRebuildV1,
 };
+use tracedecay_runtime_core::native_runtime;
 
 use crate::observability::RegisteredObservabilityPortV1;
 
@@ -100,7 +101,7 @@ async fn compact_one_rollup_fragment(
         }
     };
     let source_fragment_json = candidate.fragment_json.clone();
-    let compaction = tokio::task::spawn_blocking(move || {
+    let compaction = native_runtime::spawn_blocking(move || {
         check_execution_topology_rollup_retention_json(&source_fragment_json, now_micros)
     });
     let fragment_json = match timeout(persistence_deadline, compaction).await {

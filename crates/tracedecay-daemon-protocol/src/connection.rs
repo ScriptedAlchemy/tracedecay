@@ -5,13 +5,14 @@
 //! preamble, and bounded response reads.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use tokio::io::AsyncWriteExt;
-use tokio::time::Instant;
+use asupersync::io::AsyncWriteExt;
 
 use crate::handshake::DaemonHandshake;
-use crate::transport::{BrokerStream, DaemonAuthPreface, DaemonEndpoint};
+use crate::transport::{
+    DaemonAuthPreface, DaemonClientStream, DaemonClientWriteHalf, DaemonEndpoint,
+};
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_framing::{BoundedLineReader, WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error};
 
@@ -177,46 +178,41 @@ pub async fn ensure_daemon_connection_live(
 ///
 /// A delivered frame always wins over the probe: the read is polled first,
 /// keeps running while the probe runs, and a failed probe ends the wait only
-/// if the read still blocks after the I/O driver has observed everything the
-/// daemon wrote before it stopped listening.
+/// if one more read still blocks. Every poll of the socket reads it directly,
+/// so that read sees everything the daemon wrote before it stopped listening.
 ///
-/// The reader stays held across polls. `read_mcp_line_tokio` is dropped when
-/// another branch wins `select!`; the accumulator lives on the line reader.
+/// `read_mcp_line` is dropped when another branch wins `select!`; the partial
+/// frame lives on the caller's line reader, so it also survives this call.
 pub async fn poll_daemon_response_line<R, F, Fut>(
-    reader: &mut R,
+    line_reader: &mut BoundedLineReader<R>,
     request_label: &str,
     liveness_poll_interval: Duration,
     mut ensure_live: F,
 ) -> Result<Option<String>>
 where
-    R: tokio::io::AsyncBufRead + Unpin,
+    R: asupersync::io::AsyncBufRead + Unpin,
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<()>>,
 {
-    let mut line_reader = BoundedLineReader::new(reader);
     loop {
         tokio::select! {
             biased;
-            result = line_reader.read_mcp_line_tokio() => return response_line(result, request_label),
-            () = tokio::time::sleep(liveness_poll_interval) => {}
+            result = line_reader.read_mcp_line() => return response_line(result, request_label),
+            () = asupersync::time::sleep(asupersync::time::wall_now(), liveness_poll_interval) => {}
         }
         let probe = ensure_live();
         tokio::pin!(probe);
         let probe_failure = tokio::select! {
             biased;
-            result = line_reader.read_mcp_line_tokio() => return response_line(result, request_label),
+            result = line_reader.read_mcp_line() => return response_line(result, request_label),
             probe_result = &mut probe => match probe_result {
                 Ok(()) => continue,
                 Err(error) => error,
             },
         };
-        // `yield_now` resumes only after the runtime has polled its I/O
-        // driver, so readiness for bytes written before the probe failed is
-        // visible to the final read below.
-        tokio::task::yield_now().await;
         tokio::select! {
             biased;
-            result = line_reader.read_mcp_line_tokio() => return response_line(result, request_label),
+            result = line_reader.read_mcp_line() => return response_line(result, request_label),
             () = std::future::ready(()) => return Err(probe_failure),
         }
     }
@@ -243,13 +239,13 @@ fn response_line(
     skip_all
 )]
 pub async fn next_daemon_response_line<R>(
-    reader: &mut R,
+    reader: &mut BoundedLineReader<R>,
     connection: &DaemonConnection,
     request_label: &str,
     liveness_poll_interval: Duration,
 ) -> Result<Option<String>>
 where
-    R: tokio::io::AsyncBufRead + Unpin,
+    R: asupersync::io::AsyncBufRead + Unpin,
 {
     poll_daemon_response_line(reader, request_label, liveness_poll_interval, || {
         ensure_daemon_connection_live(connection, request_label)
@@ -264,7 +260,7 @@ where
 /// because its connection type is the authority record, not the protocol
 /// connection.
 pub async fn write_daemon_handshake_preamble(
-    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+    writer: &mut (impl asupersync::io::AsyncWrite + Unpin),
     auth_token: &str,
     handshake: &DaemonHandshake,
 ) -> Result<()> {
@@ -279,7 +275,7 @@ pub async fn write_daemon_handshake_preamble(
 
 #[tracing::instrument(name = "daemon_protocol.client.preamble", level = "trace", skip_all)]
 pub async fn write_daemon_preamble(
-    writer: &mut tokio::io::WriteHalf<BrokerStream>,
+    writer: &mut DaemonClientWriteHalf,
     connection: &DaemonConnection,
     handshake: &DaemonHandshake,
 ) -> Result<()> {
@@ -307,7 +303,9 @@ pub fn daemon_connect_failure_advice(kind: std::io::ErrorKind) -> &'static str {
     }
 }
 
-pub async fn connect_to_daemon_connection(connection: &DaemonConnection) -> Result<BrokerStream> {
+pub async fn connect_to_daemon_connection(
+    connection: &DaemonConnection,
+) -> Result<DaemonClientStream> {
     connect_with_restart_grace(
         connection,
         DAEMON_RESTART_GRACE,
@@ -321,10 +319,10 @@ pub async fn connect_with_restart_grace(
     connection: &DaemonConnection,
     grace: Duration,
     poll_interval: Duration,
-) -> Result<BrokerStream> {
+) -> Result<DaemonClientStream> {
     let deadline = Instant::now() + grace;
     loop {
-        match BrokerStream::connect(&connection.endpoint).await {
+        match DaemonClientStream::connect(&connection.endpoint).await {
             Ok(stream) => return Ok(stream),
             Err(TraceDecayError::Io(err)) => {
                 if !is_transient_daemon_connect_error(err.kind()) || Instant::now() >= deadline {
@@ -340,7 +338,7 @@ pub async fn connect_with_restart_grace(
                         }
                     });
                 }
-                tokio::time::sleep(poll_interval).await;
+                asupersync::time::sleep(asupersync::time::wall_now(), poll_interval).await;
             }
             Err(error) => return Err(error),
         }
@@ -370,6 +368,50 @@ mod tests {
         assert!(
             oversized.to_string().contains(TOOL_REQUEST_DEADLINE_ENV),
             "range error must name the env var, got: {oversized}"
+        );
+    }
+
+    /// A daemon whose listen backlog is full must surface as the typed
+    /// saturated refusal at once instead of a connect that never settles.
+    /// Delete with the `connect_unix` workaround on asupersync 0.6.0.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn full_listen_backlog_fails_fast_as_saturated() {
+        use socket2::{Domain, SockAddr, Socket, Type};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("daemon.sock");
+        let address = SockAddr::unix(&socket).expect("socket address");
+        let listener = Socket::new(Domain::UNIX, Type::STREAM, None).expect("listener socket");
+        listener.bind(&address).expect("bind");
+        listener.listen(0).expect("listen");
+        let mut queued = Vec::new();
+        loop {
+            assert!(queued.len() < 64, "the listen backlog never filled");
+            let peer = Socket::new(Domain::UNIX, Type::STREAM, None).expect("peer socket");
+            peer.set_nonblocking(true).expect("non-blocking peer");
+            match peer.connect(&address) {
+                Ok(()) => queued.push(peer),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("filling the listen backlog failed: {error}"),
+            }
+        }
+        let connection = DaemonConnection::new(DaemonEndpoint::Unix(socket), String::new());
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            connect_with_restart_grace(&connection, Duration::ZERO, Duration::ZERO),
+        )
+        .await
+        .expect("a saturated connect must fail instead of waiting")
+        .expect_err("a full backlog must refuse the connect");
+
+        assert_eq!(
+            error
+                .project_route_context()
+                .map(|(code, retryable, _)| (code, retryable)),
+            Some((DAEMON_CONNECT_SATURATED, true)),
+            "{error}"
         );
     }
 
@@ -410,21 +452,26 @@ mod tests {
     async fn await_response_while_daemon_stops(
         reply: Option<&'static [u8]>,
     ) -> Result<Option<String>> {
+        use tokio::io::AsyncWriteExt;
+
         let dir = tempfile::tempdir().expect("tempdir");
         let socket = dir.path().join("daemon.sock");
+        let endpoint = DaemonEndpoint::Unix(socket.clone());
         let listener = tokio::net::UnixListener::bind(&socket).expect("bind");
-        let client = tokio::net::UnixStream::connect(&socket)
+        let (client, _writer) = DaemonClientStream::connect(&endpoint)
             .await
-            .expect("connect");
+            .expect("connect")
+            .into_split();
         let (stream, _) = listener.accept().await.expect("accept");
         let daemon = std::cell::RefCell::new(Some(StoppingDaemon { listener, stream }));
         // The stopped daemon keeps the request connection open, so only the
         // probe can end a read that still blocks.
         let held_connection = std::cell::RefCell::new(None);
-        let mut reader = tokio::io::BufReader::new(client);
+        let mut reader = BoundedLineReader::new(asupersync::io::BufReader::new(client));
         poll_daemon_response_line(&mut reader, "tracedecay_status", Duration::ZERO, || {
             let stopping = daemon.borrow_mut().take();
             let socket = socket.clone();
+            let endpoint = &endpoint;
             let held_connection = &held_connection;
             async move {
                 if let Some(StoppingDaemon {
@@ -439,10 +486,7 @@ mod tests {
                     std::fs::remove_file(&socket)?;
                     held_connection.replace(Some(stream));
                 }
-                tokio::net::UnixStream::connect(&socket)
-                    .await
-                    .map(drop)
-                    .map_err(TraceDecayError::from)
+                DaemonClientStream::connect(endpoint).await.map(drop)
             }
         })
         .await

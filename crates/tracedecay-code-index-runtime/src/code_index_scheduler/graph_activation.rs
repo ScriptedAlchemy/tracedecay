@@ -22,6 +22,7 @@ use tracedecay_code_index::graph_projection::{CodeGraphProjectionError, CodeGrap
 use tracedecay_code_index::production::{
     CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1,
 };
+use tracedecay_runtime_core::native_runtime;
 
 /// Test-only graph activation faults, keyed by worktree id. The worktree id
 /// is unique per test fixture, while generation ids are content-derived and
@@ -385,7 +386,7 @@ impl CodeGraphActivationAuthorityV1 {
                 )
                 .await
                 .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
-                let pending_catalog_warm = tokio::task::spawn_blocking(move || {
+                let pending_catalog_warm = native_runtime::spawn_blocking(move || {
                     latest.activate_persistent_graph_generation(
                         retained,
                         cancellation,
@@ -399,7 +400,7 @@ impl CodeGraphActivationAuthorityV1 {
                     ))
                 })??;
                 if let Some(pending_catalog_warm) = pending_catalog_warm {
-                    drop(tokio::task::spawn_blocking(move || {
+                    drop(crate::code_index_task_support::start_blocking(move || {
                         if let Err(error) = pending_catalog_warm.run() {
                             tracing::warn!(
                                 error = %error,
@@ -467,7 +468,7 @@ impl CodeGraphActivationAuthorityV1 {
                 )
                 .await
                 .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
-                tokio::task::spawn_blocking(move || match admission {
+                native_runtime::spawn_blocking(move || match admission {
                     Some(admission) => retained
                         .publish_verified_snapshot_admitted(cancellation, admission)
                         .map(drop),
@@ -535,7 +536,7 @@ impl CodeGraphActivationAuthorityV1 {
                 )
                 .await
                 .map_err(|error| CodeIndexSchedulerErrorV1::GraphActivation(error.to_string()))?;
-                let pending_catalog_warm = tokio::task::spawn_blocking(move || {
+                let pending_catalog_warm = native_runtime::spawn_blocking(move || {
                     latest.activate_persistent_graph(retained, predecessor, cancellation)
                 })
                 .await
@@ -544,20 +545,22 @@ impl CodeGraphActivationAuthorityV1 {
                         "code graph activation task failed: {error}"
                     ))
                 })??;
-                let catalog_warm = pending_catalog_warm.map(|pending_catalog_warm| {
+                let catalog_warm = pending_catalog_warm.and_then(|pending_catalog_warm| {
                     #[cfg(any(test, feature = "test-helpers"))]
                     let gate = injected_faults()
                         .catalog_warm_gates
                         .remove(worktree_id.as_str());
                     #[cfg(any(test, feature = "test-helpers"))]
                     let warm_gate = gate.clone();
-                    let handle = tokio::task::spawn_blocking(move || {
+                    let handle = crate::code_index_task_support::start_blocking(move || {
                         #[cfg(any(test, feature = "test-helpers"))]
-                        if let Some(gate) = warm_gate {
-                            tokio::runtime::Handle::current().block_on(async {
+                        if let Some(gate) = warm_gate
+                            && let Err(error) = native_runtime::block_on(async {
                                 gate.started.notify_one();
                                 gate.release.notified().await;
-                            });
+                            })
+                        {
+                            panic!("the catalog warm gate cannot wait: {error}");
                         }
                         if let Err(error) = pending_catalog_warm.run() {
                             tracing::warn!(
@@ -565,12 +568,12 @@ impl CodeGraphActivationAuthorityV1 {
                                 "background code graph interactive catalog warm failed"
                             );
                         }
-                    });
-                    CodeGraphCatalogWarmV1 {
+                    })?;
+                    Some(CodeGraphCatalogWarmV1 {
                         handle,
                         #[cfg(any(test, feature = "test-helpers"))]
                         gate,
-                    }
+                    })
                 });
                 Self::record_seated(seated, generation_id);
                 Ok(catalog_warm)
@@ -704,7 +707,7 @@ impl GraphCancellation for SchedulerGraphCancellation {
 /// A seated generation's catalog warm, which runs in the background. Dropping
 /// it leaves the warm running.
 pub struct CodeGraphCatalogWarmV1 {
-    handle: tokio::task::JoinHandle<()>,
+    handle: native_runtime::NativeTask<Result<(), String>>,
     #[cfg(any(test, feature = "test-helpers"))]
     gate: Option<Arc<InjectedActivationGateStateV1>>,
 }
@@ -717,7 +720,7 @@ impl CodeGraphCatalogWarmV1 {
         if let Some(gate) = &self.gate {
             gate.awaited.notify_one();
         }
-        let _ = self.handle.await;
+        let _ = self.handle.wait().await;
     }
 }
 

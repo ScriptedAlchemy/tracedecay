@@ -25,6 +25,7 @@ use tracedecay_domain::{
     CursorBindingBuilderV1, CursorBindingV1, RelationEdgeKindV1, SymbolOccurrenceId, UtcMicros,
 };
 use tracedecay_graph_db::GraphCancellation;
+use tracedecay_runtime_core::native_runtime;
 
 mod ignored_dependency;
 
@@ -1325,7 +1326,10 @@ pub(crate) async fn read_symbol_source_body(
     start_line: u32,
     end_line: u32,
 ) -> std::io::Result<String> {
-    let content = tokio::fs::read_to_string(project_root.join(file)).await?;
+    let path = project_root.join(file);
+    let content = native_runtime::spawn_blocking(move || std::fs::read_to_string(path))
+        .await
+        .map_err(std::io::Error::other)??;
     let start = start_line as usize;
     let end = end_line as usize;
     Ok(content

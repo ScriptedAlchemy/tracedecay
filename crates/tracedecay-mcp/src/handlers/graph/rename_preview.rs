@@ -437,11 +437,13 @@ pub async fn compute_rename_preview(
         control,
     };
     let walk_span = tracing::trace_span!("mcp.graph.rename_preview.walk");
-    let result = tokio::task::spawn_blocking(move || walk_span.in_scope(|| walk.run()))
-        .await
-        .map_err(|join_error| TraceDecayError::Config {
-            message: format!("rename preview file scan task failed: {join_error}"),
-        })??;
+    let result = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        walk_span.in_scope(|| walk.run())
+    })
+    .await
+    .map_err(|join_error| TraceDecayError::Config {
+        message: format!("rename preview file scan task failed: {join_error}"),
+    })??;
     drop(cancel_on_drop);
     Ok(graph_tool_completion(
         GraphToolResultV1::RenamePreview(RenamePreviewPrimitiveOutcomeV1::Preview(result)),

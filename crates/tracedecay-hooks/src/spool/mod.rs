@@ -26,8 +26,8 @@ use tracedecay_private_fs::framed_log::{
 };
 
 use crate::{
-    HOOK_SYNCHRONOUS_BUDGET, HookContractError, HookEventEnvelopeV2, HookScopeBindingV1,
-    MAX_HOOK_PAYLOAD_BYTES, MAX_REPLAY_BATCH_BYTES, MAX_REPLAY_BATCH_RECORDS, MAX_SPOOL_AGE_MICROS,
+    HookContractError, HookEventEnvelopeV2, HookScopeBindingV1, MAX_HOOK_PAYLOAD_BYTES,
+    MAX_REPLAY_BATCH_BYTES, MAX_REPLAY_BATCH_RECORDS, MAX_SPOOL_AGE_MICROS,
     NativeContextScoutLifecycleV1,
 };
 
@@ -37,6 +37,7 @@ mod frame;
 mod lease;
 mod meta;
 mod replay;
+mod staging;
 mod types;
 
 #[cfg(test)]
@@ -46,7 +47,11 @@ use checkpoint::{
     RecordsFileRevisionV1, RecordsPrefixDigestV1, read_checkpoint, read_frame_at, read_transition,
     records_file_revision, write_checkpoint, write_transition,
 };
-use types::{AcknowledgedSequenceV1, HookSpoolMetaV1, PendingRecordV1, SpoolIntegrityV1};
+pub use staging::hook_spool_staged_name;
+use types::{
+    AcknowledgedSequenceV1, HookSpoolMetaV1, PendingRecordV1, STOCK_WRITER_LEASE_MICROS,
+    SpoolIntegrityV1,
+};
 pub use types::{
     HookReplayBatchV1, HookSpoolAckDispositionV1, HookSpoolAckV1, HookSpoolConfigV1,
     HookSpoolError, HookSpoolLimitsV1, HookSpoolOpenReportV1, HookSpoolRecordV1,
@@ -92,9 +97,11 @@ const TRANSITION_FILE: &str = "checkpoint-transition.v1.json";
 const LEASE_FILE: &str = "writer.v1.lease";
 const REPLAY_CURSOR_FILE: &str = "replay-cursor.v1.bin";
 const DIRECTORY_POLICY: DirectorySyncPolicy = DirectorySyncPolicy::Strict;
-// Committers queue behind at most one batch's sync, the same bounded wait a
-// hook spends on writer admission.
-const COMMIT_WAIT: Duration = HOOK_SYNCHRONOUS_BUDGET;
+// The commit lock is held across fsyncs, which a loaded disk does not bound,
+// so a background committer waits out the holder's sync. Only a holder stuck
+// past a whole writer lease times it out. A hook commits within its own
+// budget instead and stages its envelope when that runs out.
+const COMMIT_WAIT: Duration = Duration::from_micros(STOCK_WRITER_LEASE_MICROS.unsigned_abs());
 
 /// A host-local transport spool. It owns a short writer lease, performs no
 /// query/model/database work, and has no authority to rebind an event.
@@ -140,17 +147,18 @@ struct UncommittedExtentV1 {
 impl HookSpoolV1 {
     /// Cheap conservative replay probe that never acquires the writer lease.
     ///
-    /// `false` means the records file is absent or empty. `true` does not claim
-    /// that every physical record is still pending; opening under the writer
-    /// lease remains the authority for acknowledgement and recovery state.
+    /// `false` means the records file is absent or empty and nothing is
+    /// staged. `true` does not claim that every physical record is still
+    /// pending; opening under the writer lease remains the authority for
+    /// acknowledgement and recovery state.
     pub fn has_records(root: &Path) -> Result<bool, HookSpoolError> {
         let path = records_path(root);
-        if !validate_regular_or_missing(&path)? {
-            return Ok(false);
+        if validate_regular_or_missing(&path)?
+            && fs::metadata(path).map_err(|_| HookSpoolError::Io)?.len() > 0
+        {
+            return Ok(true);
         }
-        fs::metadata(path)
-            .map(|metadata| metadata.len() > 0)
-            .map_err(|_| HookSpoolError::Io)
+        staging::has_staged(root)
     }
 
     /// Explicitly recreate one exact host spool without decoding incompatible
@@ -612,13 +620,20 @@ impl HookSpoolV1 {
     /// deduplicated against durable. Concurrent committers share one sync of
     /// the records file, so the lease covers only writing frames; a caller
     /// acknowledges its records only after this returns.
-    #[tracing::instrument(name = "hooks.spool.commit", level = "trace", skip_all)]
     pub fn commit(self) -> Result<(), HookSpoolError> {
+        self.commit_within(COMMIT_WAIT)
+    }
+
+    /// [`Self::commit`], waiting at most `wait_budget` for another committer's
+    /// sync. On [`HookSpoolError::AdmissionTimedOut`] the frames stay written
+    /// for the next committer but are not yet durable.
+    #[tracing::instrument(name = "hooks.spool.commit", level = "trace", skip_all)]
+    pub fn commit_within(self, wait_budget: Duration) -> Result<(), HookSpoolError> {
         let root = self.root.clone();
         let uncommitted = self.uncommitted;
         drop(self);
         match uncommitted {
-            Some(extent) => commit_records(&root, extent.identity, extent.end, COMMIT_WAIT),
+            Some(extent) => commit_records(&root, extent.identity, extent.end, wait_budget),
             None => Ok(()),
         }
     }

@@ -19,25 +19,35 @@ use std::pin::Pin;
 /// The review hint is delivered through the root-owned daemon client. This
 /// crate must not know the daemon transport or scheduling policy.
 pub mod session_review {
+    use std::sync::Arc;
+
     use super::{Future, Pin};
 
-    pub type Scheduler =
-        for<'a> fn(&'a str, Option<&'a str>) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+    pub type ReviewFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+
+    type Scheduler = dyn for<'a> Fn(&'a str, Option<&'a str>) -> ReviewFuture<'a> + Send + Sync;
 
     /// The root-owned review scheduler as an explicit handle.
     ///
     /// Constructing one requires the scheduler, and a user ingest pass must be
     /// handed one by its authority; there is no process-global slot that can
     /// be left empty and read back as "do nothing".
-    #[derive(Clone, Copy, Debug)]
+    #[derive(Clone)]
     pub struct SessionReviewPort {
-        scheduler: Scheduler,
+        scheduler: Arc<Scheduler>,
     }
 
     impl SessionReviewPort {
         #[must_use]
-        pub const fn new(scheduler: Scheduler) -> Self {
-            Self { scheduler }
+        pub fn new(
+            scheduler: impl for<'a> Fn(&'a str, Option<&'a str>) -> ReviewFuture<'a>
+            + Send
+            + Sync
+            + 'static,
+        ) -> Self {
+            Self {
+                scheduler: Arc::new(scheduler),
+            }
         }
 
         /// Requests a review pass for the sessions the ingest pass just wrote.

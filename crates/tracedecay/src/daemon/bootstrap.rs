@@ -13,6 +13,7 @@ use tracedecay_daemon_control::RemoteBrainTlsConfig;
 use tracedecay_daemon_identity::authority;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
+use tracedecay_runtime_core::native_runtime;
 
 use super::*;
 #[cfg(unix)]
@@ -22,10 +23,11 @@ use tracedecay_daemon_service::shutdown::DAEMON_CLIENT_DRAIN_DEADLINE;
 use tracedecay_daemon_service::shutdown::{DaemonLifecycle, ShutdownStatus};
 use tracedecay_runtime_core::logging::log_daemon_event;
 
-/// Slice of the shutdown budget reserved for writing the terminal shutdown
-/// receipts to the daemon log after the coordinator returns.
-pub(super) const DAEMON_SHUTDOWN_RECEIPT_LOG_RESERVE: tokio::time::Duration =
-    tokio::time::Duration::from_millis(100);
+/// The shutdown budget handed to the coordinator: the daemon deadline less the
+/// slice reserved for writing the terminal shutdown receipts to the daemon log
+/// after the coordinator returns.
+const DAEMON_SHUTDOWN_COORDINATION_DEADLINE: std::time::Duration =
+    DAEMON_SHUTDOWN_DEADLINE.saturating_sub(std::time::Duration::from_millis(100));
 
 #[tracing::instrument(name = "daemon.bootstrap.catalog_prewarm", level = "trace", skip_all)]
 fn prewarm_static_daemon_bootstrap_catalog() {
@@ -37,7 +39,7 @@ fn prewarm_static_daemon_bootstrap_catalog() {
     }
 }
 
-fn log_catalog_prewarm_task(result: std::result::Result<(), tokio::task::JoinError>) {
+fn log_catalog_prewarm_task(result: std::result::Result<(), String>) {
     if let Err(error) = result {
         tracing::warn!(
             %error,
@@ -80,7 +82,7 @@ async fn run_foreground_loopback(
     tracedecay_runtime_core::native_runtime::process_runtime()
         .map_err(|message| TraceDecayError::Config { message })?;
     let profile_root = profile.data_dir().to_path_buf();
-    let catalog_prewarm = tokio::task::spawn_blocking(prewarm_static_daemon_bootstrap_catalog);
+    let catalog_prewarm = native_runtime::spawn_blocking(prewarm_static_daemon_bootstrap_catalog);
     let requested = default_loopback_endpoint();
     let _lifecycle_lease = {
         let _span = tracing::trace_span!("daemon.bootstrap.lifecycle_lease").entered();
@@ -198,6 +200,7 @@ async fn run_foreground_loopback(
     let admission = DaemonClientAdmission::new(MAX_CONCURRENT_DAEMON_CLIENTS);
     let per_client_admission = DaemonPerClientAdmission::default();
     let mut clients: JoinSet<Result<()>> = JoinSet::new();
+    let mut shutdown_signals = ShutdownSignals::listen()?;
     log_daemon_event(
         "daemon_ready",
         &[(
@@ -221,7 +224,7 @@ async fn run_foreground_loopback(
                 continue;
             },
             () = lifecycle.wait_for_draining() => break,
-            _ = tokio::signal::ctrl_c() => break,
+            () = shutdown_signals.recv() => break,
         };
         let permit = match admission.try_admit() {
             DaemonClientAdmissionOutcome::Admitted(permit) => permit,
@@ -263,8 +266,7 @@ async fn run_foreground_loopback(
     drop(listener);
     spooled_hook_opener.abort();
     cancel_retained_session_history(&store_administration).await;
-    let shutdown_deadline = tokio::time::Instant::now() + DAEMON_SHUTDOWN_DEADLINE
-        - DAEMON_SHUTDOWN_RECEIPT_LOG_RESERVE;
+    let shutdown_deadline = Instant::now() + DAEMON_SHUTDOWN_COORDINATION_DEADLINE;
     let endpoint_cleanup = authority.cleanup_owned_endpoint();
     let maintenance_join = maintenance.clone();
     let project_open = project_open_tasks(project_open_gates.as_ref()).await;
@@ -388,17 +390,17 @@ async fn run_foreground_loopback(
         shutdown_deadline,
         async move {
             tracedecay_daemon_service::shutdown::DaemonShutdownPlan::new(
-                clients,
                 owner_phases,
                 move |project_server_deadline| async move {
                     shutdown_project_servers(
-                        project_server_deadline,
+                        tokio::time::Instant::from_std(project_server_deadline),
                         &server_store_administration,
                         &http_application_registry,
                     )
                     .await
                 },
             )
+            .with_clients(client_shutdown_owner(clients))
             .with_terminal_owner_phases(vec![vec![memory_graph_reconciliation]])
         },
     )
@@ -493,6 +495,34 @@ fn log_project_server_shutdown_receipt(receipt: &tracedecay_store_runtime::Shutd
     }
 }
 
+/// Aborts the accepted client connections and joins them. An aborted client is
+/// clean; a client that failed or panicked is reported.
+pub(super) fn client_shutdown_owner(
+    mut clients: JoinSet<Result<()>>,
+) -> tracedecay_daemon_service::shutdown::ShutdownOwner {
+    tracedecay_daemon_service::shutdown::ShutdownOwner::with_deadline_result(
+        "clients",
+        || {},
+        move |_| async move {
+            clients.abort_all();
+            let mut failures = Vec::new();
+            while let Some(completed) = clients.join_next().await {
+                match completed {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => failures.push(error.to_string()),
+                    Err(error) if error.is_cancelled() => {}
+                    Err(error) => failures.push(error.to_string()),
+                }
+            }
+            if failures.is_empty() {
+                Ok(())
+            } else {
+                Err(failures.join("; "))
+            }
+        },
+    )
+}
+
 fn hosted_dashboard_shutdown_owner() -> tracedecay_daemon_service::shutdown::ShutdownOwner {
     tracedecay_daemon_service::shutdown::ShutdownOwner::with_deadline_result(
         "hosted_dashboard",
@@ -519,7 +549,7 @@ async fn run_foreground_unix(
     tracedecay_runtime_core::native_runtime::process_runtime()
         .map_err(|message| TraceDecayError::Config { message })?;
     let profile_root = profile.data_dir().to_path_buf();
-    let catalog_prewarm = tokio::task::spawn_blocking(prewarm_static_daemon_bootstrap_catalog);
+    let catalog_prewarm = native_runtime::spawn_blocking(prewarm_static_daemon_bootstrap_catalog);
     let endpoint = DaemonEndpoint::Unix(socket_path);
     let _lifecycle = {
         let _span = tracing::trace_span!("daemon.bootstrap.lifecycle_lease").entered();
@@ -689,9 +719,9 @@ async fn run_foreground_unix(
         .with_maintenance_coordinator(maintenance)
         .with_pr_autotrack_task(pr_autotrack_task)
         .await;
+    let mut shutdown_signals = ShutdownSignals::listen()?;
     let spooled_hook_opener =
         hook_v2_replay_consumer::spawn_spooled_hook_opener(engine.clone(), profile.clone());
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let admission = DaemonClientAdmission::new(MAX_CONCURRENT_DAEMON_CLIENTS);
     let mut client_tasks: JoinSet<Result<()>> = JoinSet::new();
     // launchd appends this daemon's stderr to a plain file with no rotation
@@ -732,8 +762,7 @@ async fn run_foreground_unix(
                 }
                 continue;
             },
-            _ = tokio::signal::ctrl_c() => break,
-            _ = sigterm.recv() => break,
+            () = shutdown_signals.recv() => break,
         };
         let permit = match admission.try_admit() {
             DaemonClientAdmissionOutcome::Admitted(permit) => permit,
@@ -771,8 +800,7 @@ async fn run_foreground_unix(
     drop(listener);
     let endpoint_cleanup = authority.cleanup_owned_endpoint();
     cancel_retained_session_history(&engine.store_administration).await;
-    let shutdown_deadline = tokio::time::Instant::now() + DAEMON_SHUTDOWN_DEADLINE
-        - DAEMON_SHUTDOWN_RECEIPT_LOG_RESERVE;
+    let shutdown_deadline = Instant::now() + DAEMON_SHUTDOWN_COORDINATION_DEADLINE;
     // Keep auxiliary process creation blocked until every scheduler and client
     // task is drained or abandoned. A killed app-server call may retry before
     // unwinding, so a shorter guard leaves a shutdown-time respawn race. The
@@ -810,7 +838,6 @@ async fn run_foreground_unix(
             }
             let server_engine = shutdown_engine.clone();
             tracedecay_daemon_service::shutdown::DaemonShutdownPlan::new(
-                client_tasks,
                 owner_phases,
                 move |project_server_deadline| async move {
                     server_engine
@@ -818,6 +845,7 @@ async fn run_foreground_unix(
                         .await
                 },
             )
+            .with_clients(client_shutdown_owner(client_tasks))
             .with_terminal_owner_phases(vec![vec![memory_graph_reconciliation]])
         },
     )
@@ -876,7 +904,7 @@ async fn install_profile_worker_plan(
 
 /// How long the accept loop pauses after a non-connection accept failure so a
 /// persistently failing listener degrades loudly instead of spinning a core.
-const DAEMON_ACCEPT_ERROR_BACKOFF: tokio::time::Duration = tokio::time::Duration::from_millis(250);
+const DAEMON_ACCEPT_ERROR_BACKOFF: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// One failed accept must never end the daemon. `accept(2)` legitimately
 /// fails for per-connection reasons, a client that resets before accept
@@ -901,8 +929,45 @@ async fn log_accept_error_and_backoff(error: &TraceDecayError) {
                 | std::io::ErrorKind::Interrupted
         )
     );
-    if !connection_scoped {
-        tokio::time::sleep(DAEMON_ACCEPT_ERROR_BACKOFF).await;
+    if !connection_scoped
+        && let Err(error) =
+            native_runtime::sleep_until(Instant::now() + DAEMON_ACCEPT_ERROR_BACKOFF).await
+    {
+        tracing::warn!(%error, "daemon accept backoff timer unavailable");
+    }
+}
+
+/// The process signals that stop the daemon: interrupt, terminate, quit and,
+/// on Unix, hangup. The streams are registered once, before the accept loop,
+/// and each counts its deliveries, so a signal that lands while the loop is
+/// between polls is returned by the next `recv` instead of being lost.
+///
+/// The first stream starts Asupersync's process-wide dispatcher, which
+/// handles every signal kind it knows. A handled SIGHUP or SIGQUIT no longer
+/// ends the process by default, so both stop the daemon here.
+struct ShutdownSignals(Vec<tracedecay_runtime_core::signal::Signal>);
+
+impl ShutdownSignals {
+    fn listen() -> std::io::Result<Self> {
+        use tracedecay_runtime_core::signal::SignalKind;
+        [
+            SignalKind::interrupt(),
+            SignalKind::terminate(),
+            SignalKind::quit(),
+            #[cfg(unix)]
+            SignalKind::hangup(),
+        ]
+        .into_iter()
+        .map(tracedecay_runtime_core::signal::signal)
+        .collect::<std::io::Result<_>>()
+        .map(Self)
+    }
+
+    /// Resolves once any shutdown signal has been delivered since the last
+    /// `recv`. Cancel-safe: dropping the future loses no delivery.
+    async fn recv(&mut self) {
+        futures_util::future::select_all(self.0.iter_mut().map(|signal| Box::pin(signal.recv())))
+            .await;
     }
 }
 
@@ -988,6 +1053,30 @@ mod tests {
             std::mem::size_of::<
                 std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>,
             >(),
+        );
+    }
+
+    /// Runs on the native runtime with no Tokio runtime, so the streams need no
+    /// Tokio signal driver. The signal lands before anything awaits `recv`,
+    /// as it does when the accept loop is between `select!` polls.
+    #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+    #[test]
+    fn a_shutdown_signal_delivered_between_polls_is_not_lost() {
+        let mut signals = ShutdownSignals::listen().expect("shutdown signal streams");
+        // SAFETY: `raise` only sends SIGHUP to this thread, and the streams
+        // above installed its handler, so the process keeps running.
+        assert_eq!(unsafe { libc::raise(libc::SIGHUP) }, 0, "raise SIGHUP");
+
+        let received = native_runtime::block_on(native_runtime::timeout(
+            std::time::Duration::from_secs(10),
+            signals.recv(),
+        ))
+        .expect("native runtime");
+
+        assert_eq!(
+            received,
+            Ok(()),
+            "a signal delivered while nothing awaited recv must still stop the daemon"
         );
     }
 

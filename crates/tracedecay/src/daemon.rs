@@ -151,7 +151,7 @@ const PROJECT_OPEN_REQUEST_DEADLINE: Duration = Duration::from_millis(500);
 /// recorded `reset_required`: the connection spent the budget before it joined
 /// the watch, so the publication wait returned immediately and never read the
 /// refusal.
-fn project_open_publication_deadline(claimed_at: tokio::time::Instant) -> tokio::time::Instant {
+fn project_open_publication_deadline(claimed_at: Instant) -> Instant {
     claimed_at + PROJECT_OPEN_REQUEST_DEADLINE
 }
 /// One budget for every blocking repository probe a route resolution runs.

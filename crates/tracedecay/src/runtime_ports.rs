@@ -47,34 +47,40 @@ pub fn hook_runtime(profile: tracedecay_runtime_core::config::ProfileRoot) -> Ho
 /// the daemon client. The daemon hands it to the profile ingestor at
 /// construction, so a user pass without one is a typed refusal in
 /// `tracedecay-sessions`, never a silent skip.
+///
+/// The daemon client is Tokio I/O, while the session refresh worker polls the
+/// ingest pass on a native thread with no Tokio runtime entered, so the review
+/// runs on `tokio`.
 #[must_use]
-pub const fn session_review_port() -> SessionReviewPort {
-    SessionReviewPort::new(schedule_user_session_review)
-}
-
-fn schedule_user_session_review<'a>(
-    provider: &'a str,
-    session_id: Option<&'a str>,
-) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-    Box::pin(tracing::Instrument::instrument(
-        async move {
-            // Review runs inside the ingest pass that just wrote the sessions,
-            // which is scoped to the owning transcript source profile.
-            let Some(profile) = tracedecay_sessions::runtime::transcript_source_profile() else {
-                tracing::warn!(
-                    provider,
-                    "session review not scheduled: ingest ran outside a transcript source profile"
-                );
-                return;
-            };
-            let runtime = hook_runtime(profile);
-            tracedecay_agent_hosts::hooks::schedule_user_session_review(
-                &runtime, provider, session_id,
-            )
-            .await;
-        },
-        tracing::trace_span!("runtime_ports.session_review"),
-    ))
+pub fn session_review_port(tokio: tokio::runtime::Handle) -> SessionReviewPort {
+    SessionReviewPort::new(move |provider, session_id| {
+        // Review runs inside the ingest pass that just wrote the sessions,
+        // which is scoped to the owning transcript source profile. The scope
+        // is task-local, so it is read here, before the hop to `tokio`.
+        let Some(profile) = tracedecay_sessions::runtime::transcript_source_profile() else {
+            tracing::warn!(
+                provider,
+                "session review not scheduled: ingest ran outside a transcript source profile"
+            );
+            return Box::pin(std::future::ready(()));
+        };
+        let provider = provider.to_owned();
+        let session_id = session_id.map(str::to_owned);
+        let review = tokio.spawn(tracing::Instrument::instrument(
+            async move {
+                tracedecay_agent_hosts::hooks::schedule_user_session_review(
+                    &hook_runtime(profile),
+                    &provider,
+                    session_id.as_deref(),
+                )
+                .await;
+            },
+            tracing::trace_span!("runtime_ports.session_review"),
+        ));
+        Box::pin(async move {
+            let _ = review.await;
+        })
+    })
 }
 
 /// The daemon-client adapters only this root composes: one-shot tool calls

@@ -8,7 +8,6 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use tokio::runtime::Handle;
 use tracedecay_contracts::feedback::{
     FeedbackBudgetUsage, FeedbackCycleAdvisoryV1, FeedbackCycleControl,
     FeedbackCycleExecutionRequest, FeedbackCycleService, FeedbackDiagnosticsPort,
@@ -383,7 +382,7 @@ impl CanonicalDiagnosticSnapshotAuthority for UnavailableDiagnostics {
 
 fn lsp_session_factory() -> Arc<DaemonLspSessionFactory> {
     Arc::new(DaemonLspSessionFactory::new(
-        Handle::current(),
+        crate::lsp_runtime::native_lsp_runtime(),
         Arc::new(NoopFeedbackCycle),
         Arc::new(UnavailableSemanticProvider),
         Arc::new(UnavailableDiagnostics),

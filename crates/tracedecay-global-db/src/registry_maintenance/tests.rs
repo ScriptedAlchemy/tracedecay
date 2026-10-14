@@ -175,16 +175,77 @@ async fn registry_gc_transaction_serializes_a_concurrent_project_refresh(cx: &as
     );
 }
 
+async fn register_code_project(db: &RegisteredGlobalDb, project_id: &str, root: &Path) {
+    let transaction = db
+        .begin_write_transaction()
+        .await
+        .expect("begin registry fixture transaction");
+    transaction
+        .execute(
+            "INSERT INTO code_projects
+             (project_id, canonical_root, display_root, created_at, last_seen_at)
+             VALUES (?1, ?2, ?2, 1, 1)",
+            params![project_id, root.to_string_lossy().as_ref()],
+        )
+        .await
+        .expect("register code project");
+    transaction.commit().await.expect("commit registry fixture");
+}
+
+/// A linked worktree registers as an alias of the primary checkout's identity.
+/// Removing the primary checkout leaves the canonical root missing while the
+/// worktree still uses the identity, so cleanup must protect it: applying the
+/// plan would cascade the live alias away with the row.
+#[asupersync::test]
+async fn registry_gc_protects_an_identity_whose_alias_is_still_live() {
+    let harness = RegisteredGlobalDbHarness::open("registry-gc-live-alias").await;
+    let db = &harness.registered;
+    let storage_root = db.db_path().parent().unwrap().to_path_buf();
+    let worktree = storage_root.join("linked-worktree");
+    std::fs::create_dir_all(&worktree).expect("create live worktree");
+    register_code_project(db, "proj_aliased", &storage_root.join("removed-primary")).await;
+    db.upsert_project_alias(&worktree, "proj_aliased")
+        .await
+        .expect("register live worktree alias");
+    register_code_project(db, "proj_dead", &storage_root.join("removed-checkout")).await;
+
+    let applied = super::apply_registry_gc(db, &storage_root, None)
+        .await
+        .expect("apply registry cleanup");
+
+    let ids = |projects: &[crate::CodeProjectRecord]| {
+        projects
+            .iter()
+            .map(|project| project.project_id.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&applied.candidates), ["proj_dead"]);
+    assert_eq!(ids(&applied.protected_code_projects), ["proj_aliased"]);
+    assert_eq!(applied.deleted_code_project_count, 1);
+    assert!(
+        db.get_code_project("proj_aliased")
+            .await
+            .expect("read protected project")
+            .is_some(),
+        "a live alias must keep its identity registered"
+    );
+    assert!(
+        db.get_code_project("proj_dead")
+            .await
+            .expect("read retired project")
+            .is_none()
+    );
+}
+
 /// Registry liveness must resolve the whole identity, aliases, the shared git
-/// common directory, and registered store instances, before an unreviewed
-/// pass retires a row. Deleting `code_projects` cascades those rows away, so a
+/// common directory, and registered store instances, before cleanup retires
+/// a row. Deleting `code_projects` cascades those rows away, so a
 /// roots-only check silently destroys a live project's registration.
 mod liveness {
     use std::path::{Path, PathBuf};
 
     use crate::registry_maintenance::{
-        RootLivenessV1, StaleRootScope, code_project_root_exists, probe_root,
-        project_context_liveness, stale_project_contexts,
+        RootLivenessV1, code_project_root_liveness, probe_root, project_context_liveness,
     };
     use crate::{
         CodeProjectRecord, ProjectAliasRecord, ProjectRegistryContext, ProjectStoreContext,
@@ -245,14 +306,9 @@ mod liveness {
             last_seen_at: 0,
         });
 
-        assert_eq!(project_context_liveness(&ctx), RootLivenessV1::Live);
-        assert!(
-            stale_project_contexts(
-                std::slice::from_ref(&ctx),
-                &[],
-                StaleRootScope::AllRootsMissing
-            )
-            .is_empty(),
+        assert_eq!(
+            project_context_liveness(&ctx),
+            RootLivenessV1::Live,
             "a project with a live alias must never be a GC candidate"
         );
     }
@@ -262,14 +318,9 @@ mod liveness {
         let mut ctx = context(project(GONE));
         ctx.stores.push(store_context());
 
-        assert_eq!(project_context_liveness(&ctx), RootLivenessV1::Live);
-        assert!(
-            stale_project_contexts(
-                std::slice::from_ref(&ctx),
-                &[],
-                StaleRootScope::AllRootsMissing
-            )
-            .is_empty(),
+        assert_eq!(
+            project_context_liveness(&ctx),
+            RootLivenessV1::Live,
             "deleting this row would cascade its live store instance away"
         );
     }
@@ -281,29 +332,15 @@ mod liveness {
         let ctx = context(record);
 
         assert_eq!(project_context_liveness(&ctx), RootLivenessV1::Live);
-        assert!(
-            stale_project_contexts(
-                std::slice::from_ref(&ctx),
-                &[],
-                StaleRootScope::AllRootsMissing
-            )
-            .is_empty()
-        );
     }
 
     #[test]
     fn every_root_proven_absent_is_still_a_candidate() {
         let ctx = context(project(GONE));
 
-        assert_eq!(project_context_liveness(&ctx), RootLivenessV1::Absent);
         assert_eq!(
-            stale_project_contexts(
-                std::slice::from_ref(&ctx),
-                &[],
-                StaleRootScope::AllRootsMissing
-            )
-            .len(),
-            1,
+            project_context_liveness(&ctx),
+            RootLivenessV1::Absent,
             "proven absence is the one condition that permits retirement"
         );
     }
@@ -329,8 +366,9 @@ mod liveness {
 
         let mut record = project(GONE);
         record.git_common_dir = Some(GONE.to_string());
-        assert!(
-            !code_project_root_exists(&record),
+        assert_eq!(
+            code_project_root_liveness(&record),
+            RootLivenessV1::Absent,
             "a row whose every root is proven absent still reports absent"
         );
     }

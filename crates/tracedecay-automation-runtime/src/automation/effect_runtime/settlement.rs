@@ -102,7 +102,24 @@ pub struct AutomationEffectAuthority {
 /// terminal durable (or proves an uncommitted reservation was abandoned).
 #[must_use = "dropping the waiter does not cancel retained automation settlement"]
 pub struct RetainedSettlementWaiter<T> {
-    task: tokio::task::JoinHandle<T>,
+    result: tokio::sync::oneshot::Receiver<T>,
+}
+
+impl<T: Send + 'static> RetainedSettlementWaiter<T> {
+    /// Queues `owner` on the native blocking pool before returning, so the
+    /// settlement runs whether or not the waiter is ever polled.
+    fn start(owner: impl FnOnce() -> T + Send + 'static) -> Self {
+        let (sender, result) = tokio::sync::oneshot::channel();
+        let queued = tracedecay_runtime_core::native_runtime::handle().and_then(|runtime| {
+            runtime.spawn_blocking(move || {
+                let _ = sender.send(owner());
+            })
+        });
+        if queued.is_none() {
+            tracing::error!("native blocking pool refused retained automation settlement");
+        }
+        Self { result }
+    }
 }
 
 pub struct ReusedSchedulerSkipStartError {
@@ -125,10 +142,10 @@ impl std::fmt::Display for ReusedSchedulerSkipStartError {
 
 impl<T: Send + 'static> RetainedSettlementWaiter<Result<T>> {
     pub async fn wait(self) -> Result<T> {
-        self.task.await.map_err(|error| {
-            contract_error(format!(
-                "retained automation settlement task failed: {error}"
-            ))
+        self.result.await.map_err(|_| {
+            contract_error(
+                "retained automation settlement task failed: it panicked or was never queued",
+            )
         })?
     }
 }
@@ -474,7 +491,11 @@ fn agent_task_kind(task: AutomationTaskV1) -> AgentTaskKind {
 async fn refuse_released_fact_proposal_history(dashboard_root: &Path) -> Result<()> {
     for name in ["fact_proposals.json", "fact_proposals.archive"] {
         let path = dashboard_root.join(name);
-        if tokio::fs::symlink_metadata(&path).await.is_ok() {
+        let probe = path.clone();
+        if crate::automation::blocking_fs(move || std::fs::symlink_metadata(probe))
+            .await
+            .is_ok()
+        {
             return Err(TraceDecayError::reset_required(
                 "automation fact proposal store",
                 format!(
@@ -584,100 +605,85 @@ impl AutomationEffectAuthority {
         P: FnOnce(T) -> R + Send + 'static,
         R: Into<RetainedAutomationSettlementProjection> + Send + 'static,
     {
-        RetainedSettlementWaiter {
-            task: tokio::task::spawn_blocking(move || {
-                match retained.into_settlement_disposition() {
-                    RetainedAutomationSettlementDisposition::Current {
-                        result,
-                        settlement_guard,
-                    } => match result {
-                        Ok(run) => {
-                            let projected =
-                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    projector(run)
-                                }));
-                            let projected = match projected {
-                                Ok(projected) => projected.into(),
-                                Err(_) => {
-                                    return self.finish_projection_failure(
-                                        RetainedSettlementGuardOwner::Single(settlement_guard),
-                                        contract_error(
-                                            "retained automation settlement projector panicked",
-                                        ),
-                                    );
-                                }
-                            };
-                            match projected {
-                                RetainedAutomationSettlementProjection::Run {
-                                    record,
-                                    committed,
-                                } => self
-                                    .settle_retained_run_blocking(
-                                        record,
-                                        committed.map(|receipt| *receipt),
-                                        RetainedSettlementGuardOwner::Single(settlement_guard),
-                                        observer,
-                                        #[cfg(test)]
-                                        phase_hook,
-                                        #[cfg(test)]
-                                        prepared_write_hook,
-                                    )
-                                    .map(|owned| {
-                                        let (terminal, record) = owned.value;
-                                        RetainedAutomationSettlementOutcome::Run {
-                                            terminal: Box::new(terminal),
-                                            record,
-                                        }
-                                    }),
-                                RetainedAutomationSettlementProjection::AbandonObserved {
-                                    record,
-                                } => {
-                                    self.abandon_retained_blocking(
-                                        RetainedSettlementGuardOwner::Single(settlement_guard),
-                                    )?;
-                                    observe_automation_ledger(observer, &record);
-                                    Ok(RetainedAutomationSettlementOutcome::AbandonedObserved {
-                                        record,
-                                    })
-                                }
-                            }
+        RetainedSettlementWaiter::start(move || match retained.into_settlement_disposition() {
+            RetainedAutomationSettlementDisposition::Current {
+                result,
+                settlement_guard,
+            } => match result {
+                Ok(run) => {
+                    let projected =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| projector(run)));
+                    let projected = match projected {
+                        Ok(projected) => projected.into(),
+                        Err(_) => {
+                            return self.finish_projection_failure(
+                                RetainedSettlementGuardOwner::Single(settlement_guard),
+                                contract_error("retained automation settlement projector panicked"),
+                            );
                         }
-                        Err(error) => self
-                            .settle_retained_problem_blocking(
-                                error,
+                    };
+                    match projected {
+                        RetainedAutomationSettlementProjection::Run { record, committed } => self
+                            .settle_retained_run_blocking(
+                                record,
+                                committed.map(|receipt| *receipt),
                                 RetainedSettlementGuardOwner::Single(settlement_guard),
                                 observer,
                                 #[cfg(test)]
                                 phase_hook,
+                                #[cfg(test)]
+                                prepared_write_hook,
                             )
                             .map(|owned| {
-                                let (problem, record) = owned.value;
-                                RetainedAutomationSettlementOutcome::Problem {
-                                    problem: Box::new(problem),
+                                let (terminal, record) = owned.value;
+                                RetainedAutomationSettlementOutcome::Run {
+                                    terminal: Box::new(terminal),
                                     record,
                                 }
                             }),
-                    },
-                    RetainedAutomationSettlementDisposition::ReusedSchedulerSkip {
-                        reused,
-                        settlement_guard,
-                    } => {
-                        if let Err(error) = self.validate_reused_scheduler_skip(&reused) {
-                            return self.finish_projection_failure(
-                                RetainedSettlementGuardOwner::Single(settlement_guard),
-                                error,
-                            );
+                        RetainedAutomationSettlementProjection::AbandonObserved { record } => {
+                            self.abandon_retained_blocking(RetainedSettlementGuardOwner::Single(
+                                settlement_guard,
+                            ))?;
+                            observe_automation_ledger(observer, &record);
+                            Ok(RetainedAutomationSettlementOutcome::AbandonedObserved { record })
                         }
-                        self.abandon_retained_blocking(RetainedSettlementGuardOwner::Single(
-                            settlement_guard,
-                        ))?;
-                        let record = *reused.prior_record;
-                        observe_automation_ledger(observer, &record);
-                        Ok(RetainedAutomationSettlementOutcome::Reused { record })
                     }
                 }
-            }),
-        }
+                Err(error) => self
+                    .settle_retained_problem_blocking(
+                        error,
+                        RetainedSettlementGuardOwner::Single(settlement_guard),
+                        observer,
+                        #[cfg(test)]
+                        phase_hook,
+                    )
+                    .map(|owned| {
+                        let (problem, record) = owned.value;
+                        RetainedAutomationSettlementOutcome::Problem {
+                            problem: Box::new(problem),
+                            record,
+                        }
+                    }),
+            },
+            RetainedAutomationSettlementDisposition::ReusedSchedulerSkip {
+                reused,
+                settlement_guard,
+            } => {
+                if let Err(error) = self.validate_reused_scheduler_skip(&reused) {
+                    return self.finish_projection_failure(
+                        RetainedSettlementGuardOwner::Single(settlement_guard),
+                        error,
+                    );
+                }
+                self.abandon_retained_blocking(RetainedSettlementGuardOwner::Single(
+                    settlement_guard,
+                ))?;
+                let record = *reused.prior_record;
+                observe_automation_ledger(observer, &record);
+                Ok(RetainedAutomationSettlementOutcome::Reused { record })
+            }
+        })
     }
 
     #[cfg(test)]
@@ -734,29 +740,25 @@ impl AutomationEffectAuthority {
         let (first_sender, first_receiver) = sync_channel(1);
         let (second_sender, second_receiver) = sync_channel(1);
         let first_guards = Arc::clone(&guards);
-        let first = RetainedSettlementWaiter {
-            task: tokio::task::spawn_blocking(move || {
-                let first_request = receive_pair_request(first_receiver);
-                first_authority.settle_pair_leg_blocking(
-                    first_request,
-                    first_guards,
-                    #[cfg(test)]
-                    first_phase_hook,
-                )
-            }),
-        };
+        let first = RetainedSettlementWaiter::start(move || {
+            let first_request = receive_pair_request(first_receiver);
+            first_authority.settle_pair_leg_blocking(
+                first_request,
+                first_guards,
+                #[cfg(test)]
+                first_phase_hook,
+            )
+        });
         let second_guards = Arc::clone(&guards);
-        let second = RetainedSettlementWaiter {
-            task: tokio::task::spawn_blocking(move || {
-                let second_request = receive_pair_request(second_receiver);
-                second_authority.settle_pair_leg_blocking(
-                    second_request,
-                    second_guards,
-                    #[cfg(test)]
-                    second_phase_hook,
-                )
-            }),
-        };
+        let second = RetainedSettlementWaiter::start(move || {
+            let second_request = receive_pair_request(second_receiver);
+            second_authority.settle_pair_leg_blocking(
+                second_request,
+                second_guards,
+                #[cfg(test)]
+                second_phase_hook,
+            )
+        });
         drop(guards);
         DeferredSettlementPairSubmission {
             payload: Some(payload),
@@ -798,21 +800,19 @@ impl AutomationEffectAuthority {
         observer: Option<AutomationLedgerObserver>,
     ) -> RetainedSettlementWaiter<Result<(AutomationSettledTerminal, AutomationRunLedgerRecord)>>
     {
-        RetainedSettlementWaiter {
-            task: tokio::task::spawn_blocking(move || {
-                self.settle_retained_run_blocking(
-                    ledger,
-                    committed,
-                    RetainedSettlementGuardOwner::Single(guard),
-                    observer,
-                    #[cfg(test)]
-                    None,
-                    #[cfg(test)]
-                    None,
-                )
-                .map(|owned| owned.value)
-            }),
-        }
+        RetainedSettlementWaiter::start(move || {
+            self.settle_retained_run_blocking(
+                ledger,
+                committed,
+                RetainedSettlementGuardOwner::Single(guard),
+                observer,
+                #[cfg(test)]
+                None,
+                #[cfg(test)]
+                None,
+            )
+            .map(|owned| owned.value)
+        })
     }
 
     pub fn start_deferred_problem_settlement_observed(
@@ -823,18 +823,16 @@ impl AutomationEffectAuthority {
     ) -> RetainedSettlementWaiter<
         Result<(AutomationSettledProblem, Option<AutomationRunLedgerRecord>)>,
     > {
-        RetainedSettlementWaiter {
-            task: tokio::task::spawn_blocking(move || {
-                self.settle_retained_problem_blocking(
-                    error,
-                    RetainedSettlementGuardOwner::Single(guard),
-                    observer,
-                    #[cfg(test)]
-                    None,
-                )
-                .map(|owned| owned.value)
-            }),
-        }
+        RetainedSettlementWaiter::start(move || {
+            self.settle_retained_problem_blocking(
+                error,
+                RetainedSettlementGuardOwner::Single(guard),
+                observer,
+                #[cfg(test)]
+                None,
+            )
+            .map(|owned| owned.value)
+        })
     }
 
     pub fn start_reused_scheduler_skip_abandonment_observed(
@@ -853,14 +851,12 @@ impl AutomationEffectAuthority {
                 _guard: guard,
             }));
         }
-        Ok(RetainedSettlementWaiter {
-            task: tokio::task::spawn_blocking(move || {
-                self.abandon_retained_blocking(RetainedSettlementGuardOwner::Single(guard))?;
-                let prior_record = *reused.prior_record;
-                observe_automation_ledger(observer, &prior_record);
-                Ok(prior_record)
-            }),
-        })
+        Ok(RetainedSettlementWaiter::start(move || {
+            self.abandon_retained_blocking(RetainedSettlementGuardOwner::Single(guard))?;
+            let prior_record = *reused.prior_record;
+            observe_automation_ledger(observer, &prior_record);
+            Ok(prior_record)
+        }))
     }
 
     fn settle_pair_leg_blocking(
@@ -1205,7 +1201,7 @@ impl AutomationEffectAuthority {
         let index_root = dashboard_root.clone();
         let index_path = journal_path.clone();
         let indexed = admission.clone();
-        let reservation = tokio::task::spawn_blocking(move || {
+        let reservation = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             let _span = tracing::trace_span!("daemon.automation.effect.reserve").entered();
             {
                 reserve_or_replay_indexed_blocking(
@@ -1598,7 +1594,7 @@ impl AutomationEffectAuthority {
         let admission = self.admission;
         let dashboard_root = self.dashboard_root;
         let index_path = path.clone();
-        tokio::task::spawn_blocking(move || {
+        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             abandon_reservation_blocking(&path, &admission)?;
             remove_pending_blocking(&dashboard_root, &index_path)
         })
@@ -1690,7 +1686,7 @@ impl AutomationEffectAuthority {
         let path = self.journal_path.clone();
         let admission = self.admission.clone();
         let journal_publication = publication.clone();
-        let terminal = tokio::task::spawn_blocking(move || {
+        let terminal = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             promote_prepared_terminal_blocking(&path, &admission, terminal, &journal_publication)
         })
         .await
@@ -1716,7 +1712,7 @@ impl AutomationEffectAuthority {
         let path = self.journal_path.clone();
         let admission = self.admission.clone();
         let cancellation = self.cancellation.clone();
-        tokio::task::spawn_blocking(move || {
+        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             persist_recovered_terminal_blocking(&path, &admission, terminal, Some(&cancellation))?
                 .ok_or_else(|| contract_error("automation recovery settlement was cancelled"))
         })

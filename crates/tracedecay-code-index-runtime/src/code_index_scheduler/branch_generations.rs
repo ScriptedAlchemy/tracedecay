@@ -461,7 +461,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let head_tree = head_tree.clone();
         let scope = scope.clone();
         let terminal_control = control.clone();
-        let task = tokio::task::spawn_blocking(move || {
+        let task = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             // The fence travels with the work it fences. The settle loop below
             // never answers before this closure returns, but the caller may drop
             // that future, a request timeout, a closed connection, which

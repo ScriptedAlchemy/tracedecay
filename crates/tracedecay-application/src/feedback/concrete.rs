@@ -15,7 +15,6 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
-use tokio::task::JoinHandle;
 use tracedecay_contracts::feedback::observations::{
     FeedbackAnchorOperationV1, FeedbackCoverageV1, FeedbackObservationDeliveryV1,
     FeedbackObservationEnvelopeV1, FeedbackOutcomeV1, FeedbackSourceEventV1,
@@ -64,6 +63,7 @@ use crate::diagnostics_store::DiagnosticsStore;
 use crate::source_authorization::ProjectSourceAccessSnapshot;
 use tracedecay_runtime_core::db::engine::params;
 use tracedecay_runtime_core::db::{Database, DatabaseWriteTransaction};
+use tracedecay_runtime_core::native_runtime::{NativeTask, NativeTaskOutcome};
 use tracedecay_session_memory::response_handles::{
     RESPONSE_HANDLE_TTL_SECS, ResponseHandleLookup, is_valid_response_handle, micros_to_seconds,
     retrieve_response_handle, store_response_handle,
@@ -190,14 +190,13 @@ struct ProjectFeedbackObservationSinkV1 {
     admission: Mutex<()>,
     closed: AtomicBool,
     shutdown_failure: AtomicU8,
-    worker: AsyncMutex<Option<JoinHandle<Result<(), FeedbackRuntimeError>>>>,
+    /// Fails with `Err(())` only when the terminal observation was not stored.
+    worker: AsyncMutex<Option<NativeTask<Result<(), ()>>>>,
 }
 
 impl ProjectFeedbackObservationSinkV1 {
     async fn start(database: Database) -> Result<Self, FeedbackRuntimeError> {
         static BOOT_NONCE: AtomicU64 = AtomicU64::new(0);
-        let runtime =
-            tokio::runtime::Handle::try_current().map_err(|_| FeedbackRuntimeError::Store)?;
         let boot_id = canonical_sha256(&(
             "tracedecay.feedback.producer-boot.v1",
             std::process::id(),
@@ -212,7 +211,7 @@ impl ProjectFeedbackObservationSinkV1 {
             mpsc::channel::<FeedbackObservationEnvelopeV1>(1);
         let dropped_count = Arc::new(AtomicU64::new(0));
         let worker_dropped_count = Arc::clone(&dropped_count);
-        let worker = runtime.spawn(async move {
+        let worker = NativeTask::spawn(async move {
             let mut data_open = true;
             let mut control_open = true;
             while data_open || control_open {
@@ -246,7 +245,7 @@ impl ProjectFeedbackObservationSinkV1 {
                 {
                     saturating_add(&worker_dropped_count, reported_drops.saturating_add(1));
                     if terminal {
-                        return Err(FeedbackRuntimeError::Store);
+                        return Err(());
                     }
                 }
                 if terminal {
@@ -254,7 +253,8 @@ impl ProjectFeedbackObservationSinkV1 {
                 }
             }
             Ok(())
-        });
+        })
+        .map_err(|_| FeedbackRuntimeError::ObservationWorker)?;
         Ok(Self {
             sender,
             control_sender,
@@ -292,10 +292,13 @@ impl ProjectFeedbackObservationSinkV1 {
         };
 
         let mut worker = self.worker.lock().await;
-        let outcome = match worker.as_mut() {
-            Some(task) => match task.await {
-                Ok(outcome) => outcome,
-                Err(_) => Err(FeedbackRuntimeError::ObservationWorker),
+        let outcome = match worker.as_ref() {
+            Some(task) => match task.wait().await {
+                NativeTaskOutcome::Completed(Ok(())) => Ok(()),
+                NativeTaskOutcome::Completed(Err(())) => Err(FeedbackRuntimeError::Store),
+                NativeTaskOutcome::Cancelled | NativeTaskOutcome::Panicked(_) => {
+                    Err(FeedbackRuntimeError::ObservationWorker)
+                }
             },
             None => Ok(()),
         };
@@ -2484,13 +2487,14 @@ mod tests {
     async fn failed_terminal_persistence_remains_sticky_across_close_retries() {
         let (sender, _receiver) = mpsc::channel(1);
         let (control_sender, mut control_receiver) = mpsc::channel(1);
-        let worker = tokio::spawn(async move {
+        let worker = NativeTask::spawn(async move {
             control_receiver
                 .recv()
                 .await
                 .expect("terminal observation command");
-            Err(FeedbackRuntimeError::Store)
-        });
+            Err(())
+        })
+        .unwrap();
         let sink = ProjectFeedbackObservationSinkV1 {
             sender,
             control_sender,

@@ -138,9 +138,6 @@ fn terminal_repository_discovery_failures_are_not_project_open_retryable() {
     }
 }
 
-// start_paused: these restart-window tests only wait on tokio timers
-// (sleep/poll intervals); paused time auto-advances them so each test
-// finishes in milliseconds instead of real 200-300 ms waits.
 #[cfg(unix)]
 #[test]
 fn transient_daemon_connect_errors_cover_restart_window_only() {
@@ -160,7 +157,7 @@ fn transient_daemon_connect_errors_cover_restart_window_only() {
 }
 
 #[cfg(unix)]
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn connect_with_restart_grace_reconnects_once_daemon_rebinds() {
     let dir = TempDir::new().expect("temp dir");
     let socket = dir.path().join("daemon.sock");
@@ -186,7 +183,7 @@ async fn connect_with_restart_grace_reconnects_once_daemon_rebinds() {
 }
 
 #[cfg(unix)]
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn connect_with_restart_grace_gives_up_with_restart_hint() {
     let dir = TempDir::new().expect("temp dir");
     let socket = dir
@@ -197,22 +194,30 @@ async fn connect_with_restart_grace_gives_up_with_restart_hint() {
     let _authority = seed_socket_authority(&socket);
     let grace = std::time::Duration::from_millis(300);
     let poll = std::time::Duration::from_millis(50);
-    let started = tokio::time::Instant::now();
+    let profile_root = socket.parent().expect("socket parent");
+    let mut attempts = 0_u32;
+    let started = std::time::Instant::now();
 
-    let err = super::super::connect_with_restart_grace(
-        socket.parent().expect("socket parent"),
-        &socket,
+    let err = super::super::connect_with_restart_grace_resolving(
+        || {
+            attempts += 1;
+            tracedecay_daemon_identity::client_connection(profile_root, &socket)
+        },
         grace,
         poll,
     )
     .await
     .expect_err("connect should fail when no daemon ever binds");
 
-    let elapsed = started.elapsed();
-    assert!(elapsed >= grace, "restart grace must be fully observed");
     assert!(
-        elapsed <= grace + poll,
-        "restart retries must stop within one poll interval after grace"
+        started.elapsed() >= grace,
+        "restart grace must be fully observed"
+    );
+    // One attempt per poll through the grace, plus the first and one past it.
+    // A loaded machine stretches each poll, so it can only lower the count.
+    assert!(
+        u128::from(attempts) <= grace.as_millis() / poll.as_millis() + 2,
+        "restart retries must stop within one poll interval after grace: {attempts} attempts"
     );
 
     let message = err.to_string();
@@ -232,20 +237,23 @@ async fn connect_with_restart_grace_gives_up_with_restart_hint() {
     );
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn client_deadline_run_reports_typed_stalled() {
     let deadline = super::super::DaemonClientDeadline::until(
-        tokio::time::Instant::now() + std::time::Duration::from_millis(20),
+        std::time::Instant::now() + std::time::Duration::from_millis(20),
     )
     .expect("future deadline");
-    let err = deadline
-        .run(
+    let err = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        deadline.run(
             "read",
             "tracedecay_status",
             std::future::pending::<super::super::Result<()>>(),
-        )
-        .await
-        .expect_err("pending future must stall");
+        ),
+    )
+    .await
+    .expect("the client deadline ends the pending stage")
+    .expect_err("pending future must stall");
     assert_eq!(
         err.project_route_context()
             .map(|(code, retryable, _)| (code, retryable)),
@@ -275,7 +283,7 @@ async fn stalled_daemon_response_is_typed_within_deadline() {
     });
 
     let local_bound = std::time::Duration::from_millis(80);
-    let request_deadline = tokio::time::Instant::now()
+    let request_deadline = std::time::Instant::now()
         .checked_add(local_bound)
         .and_then(|bound| bound.checked_sub(tracedecay_daemon_protocol::DAEMON_TOOL_RESPONSE_GRACE))
         .expect("monotonic clock must outlive the response grace");
@@ -686,7 +694,7 @@ async fn serve_stays_in_process_without_socket_or_installed_service() {
 }
 
 #[cfg(unix)]
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn serve_waits_out_restart_window_when_service_owns_socket() {
     let dir = TempDir::new().expect("temp dir");
     let socket = dir.path().join("daemon.sock");
@@ -716,7 +724,7 @@ async fn serve_waits_out_restart_window_when_service_owns_socket() {
 }
 
 #[cfg(unix)]
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn serve_attaches_during_first_service_start_once_the_record_appears() {
     let dir = TempDir::new().expect("temp dir");
     let socket = dir.path().join("daemon.sock");
@@ -747,7 +755,7 @@ async fn serve_attaches_during_first_service_start_once_the_record_appears() {
 }
 
 #[cfg(unix)]
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn serve_falls_back_when_installed_service_never_rebinds() {
     let dir = TempDir::new().expect("temp dir");
     let socket = dir.path().join("daemon.sock");
@@ -766,7 +774,7 @@ async fn serve_falls_back_when_installed_service_never_rebinds() {
 }
 
 #[cfg(unix)]
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn proxied_request_survives_daemon_restart_window() {
     let dir = TempDir::new().expect("temp dir");
     let socket = dir.path().join("daemon.sock");

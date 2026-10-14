@@ -1,10 +1,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use futures_util::FutureExt;
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
+use tracedecay_runtime_core::native_runtime;
 
 use super::super::history::{
     SessionHistoricalCapacityRelease, SessionHistoricalIngestOutcome, SessionHistoricalIngestPass,
@@ -17,14 +18,17 @@ use crate::StoreOwnerKey;
 /// A history pass that ignores cancellation until the test releases it. The
 /// pass holds a clone of `held` for as long as the worker owns it, standing in
 /// for the lease clones a live worker retains. A `busy` pass is never released
-/// and blocks its thread in every poll, so an abort lands mid-poll.
+/// and blocks its thread in every poll, so an abort lands mid-poll. A
+/// `panic_once` history panics its worker in the first pass.
 #[derive(Default)]
 struct HeldHistory {
     held: Arc<()>,
     entered: tokio::sync::Notify,
+    passes: AtomicUsize,
     release: tokio::sync::Notify,
     cancelled: AtomicBool,
     busy: bool,
+    panic_once: AtomicBool,
 }
 
 impl HeldHistory {
@@ -37,7 +41,12 @@ impl SessionHistoricalIngestor for HeldHistory {
     fn run_pass(&self) -> SessionHistoricalIngestPass<'_> {
         Box::pin(async move {
             let _held = Arc::clone(&self.held);
+            self.passes.fetch_add(1, Ordering::AcqRel);
             self.entered.notify_one();
+            assert!(
+                !self.panic_once.swap(false, Ordering::AcqRel),
+                "held history panics its worker once"
+            );
             if self.busy {
                 loop {
                     std::thread::sleep(Duration::from_millis(50));
@@ -183,24 +192,60 @@ async fn a_drain_dropped_while_joining_keeps_join_authority() {
 /// abort only requests cancellation, and a worker mid-poll on another thread
 /// keeps running until that poll returns, so the drain must still wait until
 /// the worker has dropped what it holds before it reports completion.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_drain_past_the_grace_joins_the_aborted_worker() {
-    let harness = RegisteredGlobalDbHarness::open("refresh-aborted-worker").await;
-    let registry = SessionTemporalRefreshSchedulerRegistry::default();
-    let owner = project_owner("aborted-worker");
-    let busy = HeldHistory {
-        busy: true,
-        ..HeldHistory::default()
-    };
-    let history = mount_held_project(&registry, &harness, &owner, busy).await;
+///
+/// Runs without Tokio, so a supervisor or worker that still reached Tokio
+/// would panic instead of draining.
+#[test]
+fn a_drain_past_the_grace_joins_the_aborted_worker() {
+    native_runtime::block_on(async {
+        let harness = RegisteredGlobalDbHarness::open("refresh-aborted-worker").await;
+        let registry = SessionTemporalRefreshSchedulerRegistry::default();
+        let owner = project_owner("aborted-worker");
+        let busy = HeldHistory {
+            busy: true,
+            ..HeldHistory::default()
+        };
+        let history = mount_held_project(&registry, &harness, &owner, busy).await;
 
-    registry.shutdown().await;
+        registry.shutdown().await;
 
-    assert!(history.cancelled.load(Ordering::Acquire));
-    assert!(
-        !history.worker_holds_pass(),
-        "drain completion must follow the aborted worker releasing what it holds"
-    );
+        assert!(history.cancelled.load(Ordering::Acquire));
+        assert!(
+            !history.worker_holds_pass(),
+            "drain completion must follow the aborted worker releasing what it holds"
+        );
+    })
+    .expect("native runtime");
+}
+
+/// A worker that panics is replaced after the retry backoff, and the
+/// replacement runs the history pass again.
+#[test]
+fn a_panicked_worker_is_restarted() {
+    native_runtime::block_on(async {
+        let harness = RegisteredGlobalDbHarness::open("refresh-panicked-worker").await;
+        let registry = SessionTemporalRefreshSchedulerRegistry::default();
+        let owner = project_owner("panicked-worker");
+        let panics = HeldHistory {
+            panic_once: AtomicBool::new(true),
+            ..HeldHistory::default()
+        };
+        let history = mount_held_project(&registry, &harness, &owner, panics).await;
+
+        native_runtime::timeout(Duration::from_secs(10), async {
+            while history.passes.load(Ordering::Acquire) < 2 {
+                history.entered.notified().await;
+            }
+        })
+        .await
+        .expect("the supervisor must restart a panicked worker");
+        assert!(history.worker_holds_pass());
+
+        history.release.notify_one();
+        registry.shutdown().await;
+        assert!(!history.worker_holds_pass());
+    })
+    .expect("native runtime");
 }
 
 /// Retiring a project while its worker ignores cancellation, then dropping the

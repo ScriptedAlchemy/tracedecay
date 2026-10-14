@@ -263,7 +263,7 @@ pub async fn run_cargo_tests(
     timeout: Duration,
     control: TestRunControl,
 ) -> Result<TestRunOutput, TestRunFailure> {
-    tokio::task::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         run_selected_cargo_tests(&project_root, profile, &test_names, timeout, &control)
     })
     .await

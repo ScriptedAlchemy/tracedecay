@@ -542,7 +542,8 @@ async fn dispatch_profile_scoped(
     let Some((_, timeout)) = admission_window_after_elapsed(elapsed_us(started)) else {
         return unavailable();
     };
-    let response = tokio::time::timeout(
+    let response = asupersync::time::timeout(
+        asupersync::time::wall_now(),
         timeout,
         super::daemon_hook_action(
             runtime,
@@ -723,7 +724,8 @@ async fn dispatch_decoded(
     } = prepared;
     let binding = &snapshot.binding;
     let immediate = match admission_window_after_elapsed(elapsed_us(started)) {
-        Some((deadline, timeout)) => match tokio::time::timeout(
+        Some((deadline, timeout)) => match asupersync::time::timeout(
+            asupersync::time::wall_now(),
             timeout,
             admit_async_exact_scope(&envelope, binding, deadline, admission),
         )
@@ -869,12 +871,6 @@ fn render_host_delivery(
     }))
 }
 
-/// Spool writer admission waits one synchronous budget measured from the lock
-/// attempt, not from hook start. The response lane spends its budget before it
-/// reaches the spool (analytics rows, layout resolution, the daemon admission
-/// window), so a deadline anchored at hook start was already expired on a
-/// loaded runner and refused an uncontended lock: the hook answered `{}` with
-/// exit 0 and the event was never spooled.
 fn append_for_replay(
     data_root: &Path,
     host: NativeHostIdentityV1,
@@ -883,22 +879,16 @@ fn append_for_replay(
     binding: &HookScopeBindingV1,
     now: UtcMicros,
 ) -> SpoolAppendOutcomeV1 {
-    let root = tracedecay_hooks::hook_v2_spool_root(data_root, host);
-    let Ok((mut spool, _)) = HookSpoolV1::open_within(
-        root,
+    match tracedecay_hooks::spool_hook_event(
+        &tracedecay_hooks::hook_v2_spool_root(data_root, host),
         HookSpoolConfigV1::stock(host),
+        envelope.clone(),
+        native_lifecycle,
+        binding,
         now,
-        tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
-    ) else {
-        return SpoolAppendOutcomeV1::Unavailable;
-    };
-    match spool.append_with_native_lifecycle(envelope.clone(), native_lifecycle, binding, now) {
-        Ok(_) => {}
-        Err(HookSpoolError::SpoolFull) => return SpoolAppendOutcomeV1::Full,
-        Err(_) => return SpoolAppendOutcomeV1::Unavailable,
-    }
-    match spool.commit() {
+    ) {
         Ok(()) => SpoolAppendOutcomeV1::Accepted,
+        Err(HookSpoolError::SpoolFull) => SpoolAppendOutcomeV1::Full,
         Err(_) => SpoolAppendOutcomeV1::Unavailable,
     }
 }
@@ -921,13 +911,17 @@ fn replay_envelope_if_pending(
     now: UtcMicros,
 ) -> PendingEnvelopeV1 {
     let root = tracedecay_hooks::hook_v2_spool_root(data_root, host);
-    let Ok((mut spool, _)) = HookSpoolV1::open_within(
+    let mut spool = match HookSpoolV1::open_within(
         root,
         HookSpoolConfigV1::stock(host),
         now,
         tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
-    ) else {
-        return PendingEnvelopeV1::Unavailable;
+    ) {
+        Ok((spool, _)) => spool,
+        // A busy spool proves nothing queued. Admitting the fresh envelope
+        // still lands the event once: a queued copy replays as a conflict.
+        Err(HookSpoolError::AdmissionTimedOut) => return PendingEnvelopeV1::Missing,
+        Err(_) => return PendingEnvelopeV1::Unavailable,
     };
     let queued = match spool.pending_envelope(retry.event_id) {
         Ok(Some(queued)) => queued,

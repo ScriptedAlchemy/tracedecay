@@ -19,6 +19,7 @@ use tracedecay_domain::{
     ManifestDigest, ProjectId, RetrievalGrainV1, SessionId, TemporalModeV1, UserProfileId,
     canonical_sha256,
 };
+use tracedecay_runtime_core::native_runtime;
 use tracedecay_session_memory::context::{ResolvedSessionIdentity, SessionRootId, SessionStoreId};
 use tracedecay_session_memory::session::{
     SessionDataFreshness, SessionFreshnessPolicy, SessionRetrievalScope, SessionTemporalQuery,
@@ -979,8 +980,8 @@ async fn retrieve_bounded(
         () = context.cancellation_signal.cancelled() => {
             Err(RetainedSurfaceExecutionErrorV1::Cancelled(tracedecay_contracts::CancellationStage::DuringRead))
         }
-        outcome = tokio::time::timeout(remaining, retrieval) => {
-            outcome.map_err(|_| RetainedSurfaceExecutionErrorV1::TimedOut(tracedecay_contracts::CancellationStage::DuringRead))
+        outcome = native_runtime::timeout(remaining, retrieval) => {
+            outcome.map_err(super::read_timeout_error)
         }
     }
 }

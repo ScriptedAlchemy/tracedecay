@@ -24,6 +24,9 @@ pub enum Error {
         message: String,
     },
     Busy,
+    /// Every reader was leased for the whole admission wait. Nothing failed;
+    /// the same read can succeed once a reader returns.
+    ReaderSaturated,
     InvalidOperation(String),
     StatementBatch {
         index: usize,
@@ -61,6 +64,7 @@ impl fmt::Display for Error {
                 operation, message, ..
             } => write!(formatter, "SQLite {operation} failed: {message}"),
             Self::Busy => formatter.write_str("SQLite runtime is busy"),
+            Self::ReaderSaturated => formatter.write_str("exact SQL reader lane is saturated"),
             Self::InvalidOperation(message) => formatter.write_str(message),
             Self::StatementBatch { index, source } => {
                 write!(
@@ -118,6 +122,9 @@ impl From<tracedecay_rusqlite_runtime::exact_sql::ExactSqlError> for Error {
                 message,
             },
             ExactSqlError::Busy => Self::Busy,
+            ExactSqlError::ReaderRefused(
+                tracedecay_rusqlite_runtime::exact_sql::ExactSqlReaderRefusalV1::Saturated,
+            ) => Self::ReaderSaturated,
             error => Self::Runtime(error.to_string()),
         }
     }

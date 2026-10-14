@@ -189,7 +189,8 @@ pub fn scheduler_control_path(dashboard_root: &Path) -> PathBuf {
 #[tracing::instrument(name = "automation.scheduler.load_control", level = "trace", skip_all)]
 pub async fn load_scheduler_control(dashboard_root: &Path) -> Result<AutomationSchedulerControl> {
     let path = scheduler_control_path(dashboard_root);
-    match tokio::fs::read(&path).await {
+    let read_path = path.clone();
+    match crate::automation::blocking_fs(move || std::fs::read(read_path)).await {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| TraceDecayError::Config {
             message: format!(
                 "failed to parse automation scheduler control '{}': {e}",
@@ -215,7 +216,8 @@ pub async fn save_scheduler_control(
 ) -> Result<()> {
     let path = scheduler_control_path(dashboard_root);
     if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent)
+        let directory = parent.to_path_buf();
+        crate::automation::blocking_fs(move || std::fs::create_dir_all(directory))
             .await
             .map_err(|e| TraceDecayError::Config {
                 message: format!(
@@ -227,7 +229,8 @@ pub async fn save_scheduler_control(
     let bytes = serde_json::to_vec_pretty(control).map_err(|e| TraceDecayError::Config {
         message: format!("failed to encode automation scheduler control: {e}"),
     })?;
-    tokio::fs::write(&path, bytes)
+    let write_path = path.clone();
+    crate::automation::blocking_fs(move || std::fs::write(write_path, bytes))
         .await
         .map_err(|e| TraceDecayError::Config {
             message: format!(
@@ -266,7 +269,7 @@ impl AutomationTaskLock {
         let path = lock_dir.join(format!("{key}.lock"));
         let ownership_token = new_automation_task_lock_token()?;
         let error_path = path.clone();
-        tokio::task::spawn_blocking(move || {
+        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             try_acquire_task_lock_blocking(&path, &ownership_token, stale_after_secs, now_secs)
         })
         .await
@@ -2602,10 +2605,11 @@ evidence about it",
         // Acquire the way production does (spawn_blocking), then move the guard
         // back onto an async worker so its drop runs on the runtime.
         let acquire_path = lock_path.clone();
-        let guard =
-            tokio::task::spawn_blocking(move || acquire_lock_for_release_test(&acquire_path))
-                .await
-                .unwrap();
+        let guard = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+            acquire_lock_for_release_test(&acquire_path)
+        })
+        .await
+        .unwrap();
         assert!(lock_path.exists());
 
         drop(guard);
@@ -2708,7 +2712,7 @@ evidence about it",
         // drops the guard entirely inside spawn_blocking, which is where callers
         // that cannot afford to block a worker are expected to release it.
         let owned_path = lock_path.clone();
-        tokio::task::spawn_blocking(move || {
+        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             let guard = acquire_lock_for_release_test(&owned_path);
             assert!(owned_path.exists());
             drop(guard);
