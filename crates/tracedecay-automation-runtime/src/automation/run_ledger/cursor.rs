@@ -32,7 +32,7 @@ pub(crate) async fn load_latest_task_validation_pointer(
     let path = run_ledger_path(dashboard_root);
     let task_key = requested_task_key.to_owned();
     let pointer = pointer.to_owned();
-    tokio::task::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         super::with_run_ledger_read_lock(
             &root,
             &path,

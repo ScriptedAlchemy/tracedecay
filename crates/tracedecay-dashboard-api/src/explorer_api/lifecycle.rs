@@ -1,8 +1,9 @@
 //! Exact terminal transitions for admitted Explorer query runs.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tracedecay_contracts::Deadline;
+use tracedecay_runtime_core::native_runtime;
 
 use super::{
     ExplorerFinalityV1, ExplorerQueryRunV1, ExplorerRunStateV1, ExplorerSourceIdV1,
@@ -26,7 +27,11 @@ impl ExplorerSourceProgressV1 {
 pub(super) async fn admitted_deadline_elapsed(deadline: Deadline) {
     let observed_at = tracedecay_session_memory::context::application_observed_at();
     let remaining_micros = deadline.expires_at.0.saturating_sub(observed_at.0).max(0) as u64;
-    tokio::time::sleep(Duration::from_micros(remaining_micros)).await;
+    let due = Instant::now() + Duration::from_micros(remaining_micros);
+    // A run without a timer times out at once rather than run unbounded.
+    if let Err(error) = native_runtime::sleep_until(due).await {
+        tracing::error!(%error, "dashboard explorer deadline timer unavailable");
+    }
 }
 
 pub(super) fn mark_cancelled(run: &mut ExplorerQueryRunV1) {

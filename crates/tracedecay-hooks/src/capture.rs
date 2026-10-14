@@ -5,16 +5,16 @@
 //! session, memory, sync, or indexing authority.
 
 use std::path::Path;
-use std::time::Duration;
 
 use tracedecay_domain::UtcMicros;
 
 use crate::{
-    HookConfigurationFileReaderV1, HookConfigurationReadOutcomeV1, HookConfigurationSubscriberV1,
-    HookEventEnvelopeV2, HookScopeBindingV1, HookSpoolConfigV1, HookSpoolError,
-    HookSpoolResetReasonV1, HookSpoolV1, NativeEnvelopeMaterialV1, NativeHookDecodeError,
-    OpenCodePluginSurfaceV1, decode_native_hook_event, decode_opencode_plugin_event,
-    hook_configuration_path, hook_v2_spool_root,
+    HOOK_SYNCHRONOUS_BUDGET, HookConfigurationFileReaderV1, HookConfigurationReadOutcomeV1,
+    HookConfigurationSubscriberV1, HookEventEnvelopeV2, HookScopeBindingV1, HookSpoolConfigV1,
+    HookSpoolError, HookSpoolResetReasonV1, HookSpoolV1, NativeContextScoutLifecycleV1,
+    NativeEnvelopeMaterialV1, NativeHookDecodeError, OpenCodePluginSurfaceV1,
+    decode_native_hook_event, decode_opencode_plugin_event, hook_configuration_path,
+    hook_v2_spool_root,
 };
 use tracedecay_domain::NativeHostIdentityV1;
 
@@ -76,7 +76,6 @@ pub fn capture_native_event_for_replay(
     payload: &[u8],
     material: NativeEnvelopeMaterialV1,
     now: UtcMicros,
-    wait_budget: Duration,
 ) -> NativeHookCaptureOutcomeV1 {
     let host = source.host();
     let decoded_result = match source {
@@ -103,25 +102,49 @@ pub fn capture_native_event_for_replay(
         Ok(envelope) => envelope,
         Err(_) => return NativeHookCaptureOutcomeV1::Rejected,
     };
-    let spool_root = hook_v2_spool_root(data_root, host);
-    let mut spool = match HookSpoolV1::open_within(
-        spool_root,
+    match spool_hook_event(
+        &hook_v2_spool_root(data_root, host),
         HookSpoolConfigV1::stock(host),
+        envelope,
+        None,
+        &snapshot.binding,
         now,
-        wait_budget,
     ) {
-        Ok((spool, _)) => spool,
-        Err(error) => return spool_refusal(error),
-    };
-    let envelope = redelivered_envelope(&mut spool, &snapshot.binding, envelope);
-    if let Err(error) = spool.append(envelope, &snapshot.binding, now) {
-        return spool_refusal(error);
-    }
-    // The hook reports capture only once its batch is durable.
-    match spool.commit() {
         Ok(()) => NativeHookCaptureOutcomeV1::Captured,
         Err(error) => spool_refusal(error),
     }
+}
+
+/// Durably spools one hook envelope, waiting on another writer's spool lock
+/// for at most [`HOOK_SYNCHRONOUS_BUDGET`]. When the writer lease or the
+/// commit lock stays held past it, the envelope is staged without a lock for
+/// the drain to import, so a busy spool delays the event instead of losing it.
+pub fn spool_hook_event(
+    root: &Path,
+    config: HookSpoolConfigV1,
+    envelope: HookEventEnvelopeV2,
+    native_lifecycle: Option<NativeContextScoutLifecycleV1>,
+    binding: &HookScopeBindingV1,
+    now: UtcMicros,
+) -> Result<(), HookSpoolError> {
+    let envelope = match HookSpoolV1::open_within(root, config, now, HOOK_SYNCHRONOUS_BUDGET) {
+        Ok((mut spool, _)) => {
+            let envelope = redelivered_envelope(&mut spool, binding, envelope);
+            spool.append_with_native_lifecycle(
+                envelope.clone(),
+                native_lifecycle.clone(),
+                binding,
+                now,
+            )?;
+            match spool.commit_within(HOOK_SYNCHRONOUS_BUDGET) {
+                Err(HookSpoolError::AdmissionTimedOut) => envelope,
+                committed => return committed,
+            }
+        }
+        Err(HookSpoolError::AdmissionTimedOut) => envelope,
+        Err(error) => return Err(error),
+    };
+    HookSpoolV1::stage(root, config, envelope, native_lifecycle, binding)
 }
 
 fn spool_refusal(error: HookSpoolError) -> NativeHookCaptureOutcomeV1 {

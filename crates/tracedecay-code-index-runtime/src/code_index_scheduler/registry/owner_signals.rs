@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError};
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tracedecay_runtime_core::native_runtime;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 use tracedecay_contracts::code_index_freshness::{
@@ -243,7 +244,7 @@ impl CodeIndexSchedulerRegistryV1 {
     pub(crate) async fn wait_for_seat<T, E, Probe>(
         &self,
         project_root: &Path,
-        deadline: tokio::time::Instant,
+        deadline: Instant,
         mut probe: impl FnMut(bool) -> Probe,
     ) -> Result<CodeIndexSeatWaitV1<T>, E>
     where
@@ -261,7 +262,7 @@ impl CodeIndexSchedulerRegistryV1 {
             {
                 return Ok(ended);
             }
-            match tokio::time::timeout_at(deadline, signals.changed()).await {
+            match native_runtime::timeout_at(deadline, signals.changed()).await {
                 Err(_) => return Ok(CodeIndexSeatWaitV1::Deadline),
                 Ok(Err(CodeIndexOwnerSignalsClosedV1)) => {
                     return Ok(CodeIndexSeatWaitV1::Cancelled);
@@ -334,7 +335,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.wake),
             )
         };
-        tokio::task::spawn_blocking(move || {
+        native_runtime::spawn_blocking(move || {
             match source_freshness.ladder_verdict(&canonical, &shutting_down, None) {
                 FreshnessProbeVerdictV1::Current => return,
                 FreshnessProbeVerdictV1::Unverified => {}
@@ -368,7 +369,7 @@ impl CodeIndexSchedulerRegistryV1 {
     pub(crate) async fn current_text_owner_for_scope(
         &self,
         scope: &ResolvedScope,
-        deadline: tokio::time::Instant,
+        deadline: Instant,
     ) -> Option<LatestCodeTextGenerationV1> {
         let root = {
             let mounted = self.mounted.lock().await;
@@ -423,7 +424,7 @@ impl CodeIndexSchedulerRegistryV1 {
         target: CodeIndexReadinessTargetV1,
         budget: Duration,
     ) -> Result<CodeIndexReadinessWaitReadV1, CodeIndexFreshnessReadFailureV1> {
-        let deadline = tokio::time::Instant::now() + budget;
+        let deadline = Instant::now() + budget;
         if target != CodeIndexReadinessTargetV1::Fresh
             && let Some(reading) = self
                 .dashboard_freshness_read(project_root)
@@ -442,8 +443,11 @@ impl CodeIndexSchedulerRegistryV1 {
         // The caller's budget bounds the sweep, and an unproven source cannot
         // be reported as reached.
         let sweep_source = target != CodeIndexReadinessTargetV1::GraphReady;
-        match tokio::time::timeout_at(deadline, self.request_fresh_now(project_root, sweep_source))
-            .await
+        match native_runtime::timeout_at(
+            deadline,
+            self.request_fresh_now(project_root, sweep_source),
+        )
+        .await
         {
             Ok(Err(CodeIndexFreshSweepRefusedV1::PublicationParked)) => {
                 return Ok(CodeIndexReadinessWaitReadV1::Unreachable {
@@ -528,40 +532,36 @@ impl CodeIndexSchedulerRegistryV1 {
         let reconcile_requested = AtomicBool::new(false);
         let (published, reconcile_requested) = (&published, &reconcile_requested);
         let Ok(waited) = self
-            .wait_for_seat(
-                project_root,
-                tokio::time::Instant::now() + budget,
-                |_| async move {
-                    if !published.load(Ordering::Acquire) {
-                        match self.has_active_publication(project_root).await {
-                            Some(Ok(true)) => published.store(true, Ordering::Release),
-                            Some(Ok(false)) => {
-                                return Ok(Some(CodeIndexSeatWaitV1::Parked(
-                                    CodeIndexSeatParkV1::Unpublished,
-                                )));
-                            }
-                            Some(Err(_)) => {
-                                return Ok(Some(CodeIndexSeatWaitV1::Parked(
-                                    CodeIndexSeatParkV1::PublicationUnreadable,
-                                )));
-                            }
-                            None => return Ok(None),
+            .wait_for_seat(project_root, Instant::now() + budget, |_| async move {
+                if !published.load(Ordering::Acquire) {
+                    match self.has_active_publication(project_root).await {
+                        Some(Ok(true)) => published.store(true, Ordering::Release),
+                        Some(Ok(false)) => {
+                            return Ok(Some(CodeIndexSeatWaitV1::Parked(
+                                CodeIndexSeatParkV1::Unpublished,
+                            )));
                         }
+                        Some(Err(_)) => {
+                            return Ok(Some(CodeIndexSeatWaitV1::Parked(
+                                CodeIndexSeatParkV1::PublicationUnreadable,
+                            )));
+                        }
+                        None => return Ok(None),
                     }
-                    if self.text_serves_search(project_root, scope).await {
-                        return Ok(Some(CodeIndexSeatWaitV1::Seated(())));
-                    }
-                    if !reconcile_requested.swap(true, Ordering::AcqRel)
-                        && let CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(parked) =
-                            self.request_query_background_reconcile(scope).await
-                    {
-                        return Ok(Some(CodeIndexSeatWaitV1::Parked(
-                            CodeIndexSeatParkV1::Convergence(parked),
-                        )));
-                    }
-                    Ok::<_, Infallible>(None)
-                },
-            )
+                }
+                if self.text_serves_search(project_root, scope).await {
+                    return Ok(Some(CodeIndexSeatWaitV1::Seated(())));
+                }
+                if !reconcile_requested.swap(true, Ordering::AcqRel)
+                    && let CodeIndexReconcileAdmissionV1::PublicationAuthorityCorrupt(parked) =
+                        self.request_query_background_reconcile(scope).await
+                {
+                    return Ok(Some(CodeIndexSeatWaitV1::Parked(
+                        CodeIndexSeatParkV1::Convergence(parked),
+                    )));
+                }
+                Ok::<_, Infallible>(None)
+            })
             .await;
         waited
     }
@@ -590,5 +590,41 @@ impl CodeIndexSchedulerRegistryV1 {
             owner.has_active_publication()
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use tracedecay_contracts::code_index_freshness::{
+        CodeIndexReadinessTargetV1, CodeIndexReadinessWaitReadV1,
+    };
+    use tracedecay_runtime_core::native_runtime;
+
+    use super::CodeIndexSchedulerRegistryV1;
+
+    #[test]
+    fn a_readiness_wait_off_tokio_times_out_at_its_budget() {
+        let root = tempfile::TempDir::new().expect("unmounted root");
+        let registry = CodeIndexSchedulerRegistryV1::new(1);
+        let budget = Duration::from_millis(50);
+        let started = Instant::now();
+
+        let waited = native_runtime::block_on(registry.wait_for_readiness(
+            root.path(),
+            CodeIndexReadinessTargetV1::Fresh,
+            budget,
+        ))
+        .expect("process runtime");
+
+        assert!(
+            matches!(
+                waited,
+                Ok(CodeIndexReadinessWaitReadV1::TimedOut { last: None })
+            ),
+            "an unmounted root never becomes fresh, so the wait ends at its budget: {waited:?}"
+        );
+        assert!(started.elapsed() >= budget);
     }
 }

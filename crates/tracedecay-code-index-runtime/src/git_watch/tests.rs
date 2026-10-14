@@ -36,7 +36,7 @@ fn overflow_roster_bounds_capacity_coverage() {
     use super::overflow::{OverflowAdmission, OverflowRoster};
 
     let mut roster = OverflowRoster::default();
-    let now = tokio::time::Instant::now();
+    let now = std::time::Instant::now();
     let config = crate::GitWatchSyncConfigV1::default();
     assert_eq!(
         roster.admit_bounded(overflow_identity("a"), config.clone(), now, 2),
@@ -71,7 +71,7 @@ fn overflow_roster_respects_backstop_cadence() {
     use super::overflow::OverflowRoster;
 
     let mut roster = OverflowRoster::default();
-    let now = tokio::time::Instant::now();
+    let now = std::time::Instant::now();
     let config = crate::GitWatchSyncConfigV1::default();
     let interval =
         std::time::Duration::from_secs(config.backstop_interval_mins.max(1).saturating_mul(60));
@@ -280,6 +280,17 @@ fn fast_watch_config() -> SyncConfig {
 /// tests racing for the same inotify watch slots), not a modeled production
 /// duration, so it needs real wall-clock slack.
 const TEST_READY_TIMEOUT: Duration = Duration::from_secs(8);
+
+fn native_task(work: impl Future<Output = ()> + Send + 'static) -> NativeTask<()> {
+    NativeTask::spawn(work).expect("native task")
+}
+
+fn with_cadence(mut watcher: GitWatcher, cadence: WatchCadence) -> GitWatcher {
+    Arc::get_mut(&mut watcher.inner)
+        .expect("an unshared watcher")
+        .cadence = cadence;
+    watcher
+}
 
 fn git(dir: &Path, args: &[&str]) {
     let output = Command::new(
@@ -953,21 +964,26 @@ async fn source_file_edit_triggers_no_freshness_request() {
 /// notify-callback body (`classify_and_mark`), then asserts one debounce drain
 /// and a truthful accepted-or-bounded-retry handoff.
 ///
-/// Deterministic under `start_paused = true`: there is no wall-clock guess.
-/// Readiness is a state signal (`entered_debounce`), and the coalesce sleep
-/// is driven by `tokio::time::advance` PAST the hard cap, so the drain is
-/// forced to fire regardless of scheduler latency. The coalescing guarantee
-/// is still fully asserted: the set is dirty before time advances and exactly
-/// one plan drains; the separate lifecycle test fixes the retry bound.
-#[tokio::test(start_paused = true)]
+/// Runs on the real clock: the debounce sleeps on native timers, which a
+/// paused Tokio clock cannot drive. Readiness and the drain are state signals
+/// (`entered_debounce`, `plan_drained`), so no wall-clock guess decides the
+/// outcome. The synthetic burst names refs that never exist on disk, so no
+/// live notify event joins it; the separate lifecycle test fixes the retry
+/// bound.
+#[tokio::test]
 async fn debounce_loop_coalesces_and_drains_events() {
     let repo = temp_repo();
-    let watcher = GitWatcher::new(fast_watch_config());
-    let max_delay_ms = watcher.inner.config.watch_max_delay_ms;
+    // The loop runs on a native worker while this thread marks the burst, so
+    // the quiet window must outlast any preemption inside the burst.
+    let mut config = fast_watch_config();
+    config.watch_debounce_ms = 250;
+    config.watch_max_delay_ms = 1_000;
+    let watcher = GitWatcher::new(config);
     let Some(state) = ensure_watching_or_skip(&watcher, repo.path()).await else {
         return;
     };
 
+    let drained = state.plan_drained.notified();
     for i in 0..5 {
         let event = notify::Event {
             kind: EventKind::Modify(notify::event::ModifyKind::Data(
@@ -983,20 +999,9 @@ async fn debounce_loop_coalesces_and_drains_events() {
         "events should mark the dirty set before the debounce fires"
     );
 
-    // Let the loop observe the burst and park on the debounce sleep.
-    for _ in 0..8 {
-        tokio::task::yield_now().await;
-    }
-
-    tokio::time::advance(Duration::from_millis(max_delay_ms + 1)).await;
-
-    let drained = tokio::time::timeout(TEST_READY_TIMEOUT, state.plan_drained.notified())
+    tokio::time::timeout(TEST_READY_TIMEOUT, drained)
         .await
-        .is_ok();
-    assert!(
-        drained,
-        "the real debounce loop must coalesce the event burst and drain the dirty set"
-    );
+        .expect("the real debounce loop must coalesce the event burst and drain the dirty set");
     assert_eq!(
         state.drained_plans.load(Ordering::Relaxed),
         1,
@@ -1007,4 +1012,82 @@ async fn debounce_loop_coalesces_and_drains_events() {
         clean || state.retry_not_before().is_some(),
         "drained work is either accepted or retained behind a bounded retry"
     );
+}
+
+#[tokio::test]
+async fn a_quiet_repository_heartbeats_on_its_cadence() {
+    let repo = temp_repo();
+    let watcher = with_cadence(
+        GitWatcher::new(fast_watch_config()),
+        WatchCadence {
+            heartbeat: Duration::from_millis(20),
+            ..WatchCadence::default()
+        },
+    );
+    let Some(state) = ensure_watching_or_skip(&watcher, repo.path()).await else {
+        return;
+    };
+
+    for _ in 0..2 {
+        tokio::time::timeout(TEST_READY_TIMEOUT, state.heartbeat.notified())
+            .await
+            .expect("a quiet repository must heartbeat without metadata events");
+    }
+    assert!(watcher.shutdown().await.is_clean());
+}
+
+#[tokio::test]
+async fn degraded_poll_requests_freshness_until_its_repository_retires() {
+    let repo = temp_repo();
+    let store = tempfile::tempdir().expect("code-index store");
+    let schedulers = super::super::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(2);
+    schedulers
+        .mount_worktree(
+            tracedecay_domain::ProjectId::new("project.git-watcher-degraded")
+                .expect("valid project identity"),
+            repo.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount canonical scheduler");
+    let watcher = with_cadence(
+        GitWatcher::new_with_scheduler(
+            fast_watch_config(),
+            MaintenanceCoordinator::default(),
+            schedulers.clone(),
+        ),
+        WatchCadence {
+            degraded_poll: Duration::from_millis(20),
+            ..WatchCadence::default()
+        },
+    );
+    let state = Arc::new(WatchState::new(
+        tracedecay_runtime_core::worktree::git_common_dir(repo.path())
+            .expect("git common directory"),
+        repo.path().canonicalize().expect("canonical project root"),
+        worktree_git_dir(repo.path()).expect("worktree git directory"),
+        MaintenanceCoordinator::default(),
+    ));
+    let cancellation = state.cancellation(&watcher.inner.cancellation);
+
+    let polls = async {
+        for _ in 0..2 {
+            tokio::time::timeout(
+                TEST_READY_TIMEOUT,
+                state.health.freshness_requested.notified(),
+            )
+            .await
+            .expect("a degraded watcher must request freshness on its poll cadence");
+        }
+        state.retire();
+    };
+    tokio::time::timeout(TEST_READY_TIMEOUT, async {
+        tokio::join!(
+            degraded_poll_loop(&watcher.inner, &state, &cancellation),
+            polls
+        )
+    })
+    .await
+    .expect("the degraded poll must end once its repository retires");
+    schedulers.shutdown().await;
 }

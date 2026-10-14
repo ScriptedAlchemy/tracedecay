@@ -86,6 +86,10 @@ required-features = ["test-helpers"]
 name = "git_repository_authority"
 harness = false
 
+[[bench]]
+name = "native_timer"
+harness = false
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
     "cfg(tracedecay_observation_fault_harness)",

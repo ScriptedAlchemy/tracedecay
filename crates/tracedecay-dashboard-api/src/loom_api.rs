@@ -243,7 +243,7 @@ impl From<EngineError> for LoomReadFailureV1 {
         const SQLITE_LOCKED: i32 = 6;
         const SQLITE_INTERRUPT: i32 = 9;
         let transient = match &error {
-            EngineError::Busy | EngineError::Runtime(_) => true,
+            EngineError::Busy | EngineError::ReaderSaturated | EngineError::Runtime(_) => true,
             EngineError::Sqlite { code, .. } => {
                 matches!(code, Some(SQLITE_BUSY | SQLITE_LOCKED | SQLITE_INTERRUPT))
             }

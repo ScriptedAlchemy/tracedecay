@@ -5971,6 +5971,7 @@ name = "tracedecay-application"
 version = "0.1.0"
 dependencies = [
  "cap-std",
+ "futures-util",
  "getrandom 0.2.17",
  "gix",
  "glob",
@@ -6642,6 +6643,7 @@ dependencies = [
 name = "tracedecay-lsp"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
  "constant_time_eq",
  "futures-util",
  "globset",
@@ -6933,6 +6935,7 @@ dependencies = [
  "asupersync",
  "async-channel",
  "dunce",
+ "futures-util",
  "proptest",
  "ring",
  "rusqlite",
@@ -7173,7 +7176,6 @@ name = "tracedecay-store-runtime"
 version = "0.1.0"
 dependencies = [
  "asupersync",
- "futures-util",
  "hex",
  "libc",
  "serde",
