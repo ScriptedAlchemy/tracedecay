@@ -1070,23 +1070,38 @@ async fn adjacent_linked_alias_capacity_drops_retain_distinct_policy_carriers() 
     let first_producer = first.producer();
     let linked_producer = linked.producer();
 
-    let mut index = 0_u64;
-    let first_missing_sequence = loop {
+    // Each offer takes the next shared sequence, starting at 1. The native
+    // worker can free the slot between A's drop and B's offer; B then carries
+    // A's single drop and the pair is retried until both drop adjacently.
+    let mut sequence = 0_u64;
+    let mut alias_a_drops = Vec::new();
+    let alias_b_drop = loop {
+        assert!(
+            sequence < 1_024,
+            "writer pressure must fill the bounded queue"
+        );
         let outcome = first_producer
-            .try_emit(envelope(&project_id, &format!("capacity:alias-a:{index}")))
+            .try_emit(envelope(
+                &project_id,
+                &format!("capacity:alias-a:{sequence}"),
+            ))
             .expect("bounded alias A emission");
-        index = index.saturating_add(1);
-        if outcome == ObservabilityEmissionOutcomeV1::DroppedAtCapacity {
-            break index;
+        sequence += 1;
+        if outcome != ObservabilityEmissionOutcomeV1::DroppedAtCapacity {
+            continue;
         }
-        assert!(index < 1_024, "writer pressure must fill the bounded queue");
+        alias_a_drops.push(sequence);
+        let outcome = linked_producer
+            .try_emit(envelope(
+                &project_id,
+                &format!("capacity:alias-b:{sequence}"),
+            ))
+            .expect("adjacent bounded alias B emission");
+        sequence += 1;
+        if outcome == ObservabilityEmissionOutcomeV1::DroppedAtCapacity {
+            break sequence;
+        }
     };
-    assert_eq!(
-        linked_producer
-            .try_emit(envelope(&project_id, "capacity:alias-b"))
-            .expect("adjacent bounded alias B emission"),
-        ObservabilityEmissionOutcomeV1::DroppedAtCapacity
-    );
 
     blocker.commit().await.expect("release registered writer");
     first.shutdown().await.expect("release first alias");
@@ -1101,11 +1116,11 @@ async fn adjacent_linked_alias_capacity_drops_retain_distinct_policy_carriers() 
                 until_micros: i64::MAX,
             },
             after_watermark: None,
-            limit: 8,
+            limit: 64,
         })
         .await
         .expect("query linked-root capacity drops");
-    let dropped: BTreeMap<&str, (u64, u64, u64)> = page
+    let mut dropped: Vec<(&str, (u64, u64, u64))> = page
         .events
         .iter()
         .filter_map(|event| {
@@ -1122,18 +1137,15 @@ async fn adjacent_linked_alias_capacity_drops_retain_distinct_policy_carriers() 
             ))
         })
         .collect();
+    dropped.sort_unstable();
+    let mut expected: Vec<(&str, (u64, u64, u64))> = alias_a_drops
+        .iter()
+        .map(|&sequence| (policy_a.as_str(), (sequence, sequence, 1)))
+        .chain([(policy_b.as_str(), (alias_b_drop, alias_b_drop, 1))])
+        .collect();
+    expected.sort_unstable();
     assert_eq!(
-        dropped,
-        BTreeMap::from([
-            (
-                policy_a.as_str(),
-                (first_missing_sequence, first_missing_sequence, 1),
-            ),
-            (
-                policy_b.as_str(),
-                (first_missing_sequence + 1, first_missing_sequence + 1, 1),
-            ),
-        ]),
+        dropped, expected,
         "adjacent alias losses must not coalesce or inherit core A's policy"
     );
 }
