@@ -51,9 +51,12 @@ impl Drop for SseDisconnectObserver {
         }
         let executor = Arc::clone(&self.executor);
         let subject = self.subject.clone();
-        if let (Ok(runtime), Ok(observed_at)) =
-            (tokio::runtime::Handle::try_current(), current_micros())
-        {
+        if let (Some(runtime), Ok(observed_at)) = (
+            tracedecay_runtime_core::native_runtime::tokio_handle(
+                "daemon-service.operation_events.sse_disconnect",
+            ),
+            current_micros(),
+        ) {
             runtime.spawn(async move {
                 let _ = executor
                     .observe_feedback(

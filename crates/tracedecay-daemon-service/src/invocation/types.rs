@@ -275,7 +275,9 @@ impl BoundedHookOrchestratorV1 {
         tracedecay_runtime_core::cancellation::CancellationToken,
         HookOrchestrationAdmissionV1,
     > {
-        let Ok(runtime_handle) = tokio::runtime::Handle::try_current() else {
+        let Some(runtime_handle) = tracedecay_runtime_core::native_runtime::tokio_handle(
+            "daemon-service.hook_orchestration.admit",
+        ) else {
             return Err(HookOrchestrationAdmissionV1::Unavailable);
         };
         let envelope = request.hook.envelope();
