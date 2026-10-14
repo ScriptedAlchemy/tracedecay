@@ -890,3 +890,57 @@ async fn a_search_off_tokio_completes() {
 
     registry.shutdown().await;
 }
+
+/// A cold search activates its route's index even when it is polled with no
+/// Tokio runtime entered, as the executor's native worker polls it.
+#[test]
+fn a_cold_search_off_tokio_activates_its_index() {
+    let fixture = GitFixture::new(&[("src/alpha.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let (mounted, mount_started) = mpsc::channel();
+    let activation = Arc::new(crate::code_index_scheduler::CodeIndexActivationV1::new(
+        fixture.path(),
+        Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        tracedecay_runtime_core::cancellation::CancellationToken::new(),
+        Arc::new(move || {
+            let _ = mounted.send(());
+            Box::pin(std::future::ready(Ok(())))
+        }),
+        Arc::new(|_| {
+            Box::pin(std::future::ready(
+                crate::code_index_scheduler::CodeIndexDemandAdmissionV1::Queued,
+            ))
+        }),
+    ));
+    let identity = activation.identity().expect("repository identity");
+    let scope = ResolvedScope::new(
+        test_project_id(),
+        identity.repository_id().clone(),
+        identity.worktree_id().clone(),
+        identity.head_ref().cloned(),
+    )
+    .expect("resolved scope");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    assert!(registry.register_activation(&scope, &activation));
+    let executor = code_index_search_executor(
+        registry,
+        test_project_id(),
+        OpenAdmission(CodeIndexSearchAuthorityV1 {
+            principal: PrincipalId::new("principal.cold-search.fixture").expect("principal"),
+            authorization_revision: AuthorizationRevision::new("authorization.cold-search.fixture")
+                .expect("authorization revision"),
+        }),
+        FixedScopeResolver(scope),
+    );
+
+    let outcome = native_runtime::block_on(async {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        executor(search_request(fixture.path(), None)).await
+    })
+    .expect("process runtime");
+
+    assert_eq!(
+        mount_started.recv_timeout(Duration::from_secs(30)),
+        Ok(()),
+        "a cold search must start its index mount; search answered {outcome:?}"
+    );
+}
