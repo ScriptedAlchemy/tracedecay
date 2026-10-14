@@ -2763,7 +2763,9 @@ impl CodeIndexSchedulerRegistryV1 {
                 TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1
             };
             let advance = tracing::Instrument::instrument(
-                tokio::task::spawn_blocking(move || advancing.advance_text_serving(maximum_work)),
+                native_runtime::spawn_blocking(move || {
+                    advancing.advance_text_serving(maximum_work)
+                }),
                 tracing::trace_span!("daemon.code_index.text_projection"),
             )
             .await;
@@ -3568,7 +3570,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 // long and hide it inside the owner's join budget, so the
                 // release runs on the blocking pool. Shutdown still joins it
                 // below: ownership must be gone when this returns.
-                owner_releases.push(tokio::task::spawn_blocking(move || {
+                owner_releases.extend(crate::code_index_task_support::start_blocking(move || {
                     let _span =
                         tracing::trace_span!("daemon.code_index.shutdown.owner_release").entered();
                     drop(worktree);
@@ -3584,7 +3586,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let release_count = owner_releases.len();
         for release in owner_releases {
             let _ = tracing::Instrument::instrument(
-                release,
+                release.wait(),
                 tracing::trace_span!("daemon.code_index.shutdown.owner_release_join"),
             )
             .await;
@@ -3975,7 +3977,7 @@ impl CodeIndexSchedulerRegistryV1 {
             )
         };
         let known = known.cloned();
-        let metadata = tokio::task::spawn_blocking(move || {
+        let metadata = native_runtime::spawn_blocking(move || {
             owner.active_publication_text_metadata(known.as_ref())
         })
         .await

@@ -26,6 +26,7 @@ use crate::code_index_scheduler::{
     CodeIndexSchedulerErrorV1, DaemonCodeIndexControlV1, LatestCompleteCodeIndexV1, PendingHintsV1,
     ReconcilePassGuard,
 };
+use tracedecay_runtime_core::native_runtime;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -629,7 +630,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let build_bridge = Arc::clone(bridge);
         let build_serving = serving.clone();
         let publication_flight = Arc::clone(&flight);
-        let mut build_task = tokio::task::spawn_blocking(move || {
+        let build_task = native_runtime::spawn_blocking(move || {
             let mut scheduler = build_scheduler
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -643,6 +644,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 scheduler.code_graph_replay_binding(&build.outcome.generation_id)?;
             Ok::<_, CodeIndexSchedulerErrorV1>((build, replay_binding))
         });
+        let mut build_task = std::pin::pin!(build_task);
         let (build, replay_binding) = loop {
             bridge.refresh(control, &shutting_down);
             tokio::select! {
@@ -717,7 +719,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let swap_serving_generation_epoch = Arc::clone(&serving_generation_epoch);
         let incumbent = serving.clone();
         let candidate = build.latest.clone();
-        let swap_task = tokio::task::spawn_blocking(move || {
+        let swap_task = native_runtime::spawn_blocking(move || {
             // Durable publication already committed this candidate. Do not
             // consult request cancellation while acquiring the scheduler or
             // serving locks: this CAS must converge the live head with the

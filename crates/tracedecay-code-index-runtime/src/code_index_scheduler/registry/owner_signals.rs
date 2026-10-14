@@ -335,7 +335,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.wake),
             )
         };
-        tokio::task::spawn_blocking(move || {
+        native_runtime::spawn_blocking(move || {
             match source_freshness.ladder_verdict(&canonical, &shutting_down, None) {
                 FreshnessProbeVerdictV1::Current => return,
                 FreshnessProbeVerdictV1::Unverified => {}
