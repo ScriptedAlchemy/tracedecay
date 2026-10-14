@@ -119,7 +119,7 @@ fn is_store_version_ledger(name: &str) -> bool {
 /// keys; permutation of the same pairs does not. This is the cache identity
 /// for fixtures that must not reuse a store template after the final shape
 /// changes without a `SCHEMA_VERSION` bump.
-pub fn fingerprint_schema_objects<'a, I>(objects: I) -> String
+fn fingerprint_schema_objects<'a, I>(objects: I) -> String
 where
     I: IntoIterator<Item = (&'a str, &'a str)>,
 {
@@ -198,9 +198,23 @@ pub fn expected_final_schema_fingerprint() -> Result<String> {
     let inventory = EXPECTED_FINAL_SHAPE
         .as_ref()
         .map_err(|error| database_error(error.clone()))?;
-    Ok(fingerprint_schema_objects(inventory.iter().map(
-        |(name, object)| (name.as_str(), object.sql.as_str()),
-    )))
+    Ok(fingerprint_inventory(inventory))
+}
+
+/// Fingerprint of an open store's shape, read the way admission reads it, so
+/// it equals [`expected_final_schema_fingerprint`] exactly when the store
+/// holds the admitted final shape.
+pub fn schema_fingerprint_rusqlite(connection: &rusqlite::Connection) -> Result<String> {
+    let inventory = read_rusqlite_inventory(connection).map_err(database_error)?;
+    Ok(fingerprint_inventory(&inventory))
+}
+
+fn fingerprint_inventory(inventory: &SchemaInventory) -> String {
+    fingerprint_schema_objects(
+        inventory
+            .iter()
+            .map(|(name, object)| (name.as_str(), object.sql.as_str())),
+    )
 }
 
 pub(super) fn require_admissible_final_shape_rusqlite(

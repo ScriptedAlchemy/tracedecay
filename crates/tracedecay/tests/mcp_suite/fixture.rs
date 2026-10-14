@@ -410,7 +410,10 @@ async fn build_template(dest: &Path) -> io::Result<()> {
 
     purge_configuration(&sessions_db_path)?;
     purge_global_registry(&global_db_path).await?;
-    let built_fingerprint = sqlite_master_shape_fingerprint(&graph_db_path)?;
+    let built_fingerprint = tracedecay_runtime_core::db::migrations::schema_fingerprint_rusqlite(
+        &Connection::open(&graph_db_path).map_err(io_other)?,
+    )
+    .map_err(io_other)?;
     let expected_fingerprint =
         tracedecay_runtime_core::db::migrations::expected_final_schema_fingerprint()
             .map_err(io_other)?;
@@ -598,36 +601,6 @@ fn rewrite_json(path: &Path, edit: impl FnOnce(&mut Value)) -> io::Result<()> {
 
 fn io_other(err: impl std::fmt::Display) -> io::Error {
     io::Error::other(err.to_string())
-}
-
-/// Reads `sqlite_master` (`name` + `sql`, sorted) from a freshly built
-/// template graph database and returns the same fingerprint the cache key
-/// uses. A stale template whose objects drifted without a version bump
-/// cannot match.
-fn sqlite_master_shape_fingerprint(database_path: &Path) -> io::Result<String> {
-    let conn = Connection::open(database_path).map_err(io_other)?;
-    let mut statement = conn
-        .prepare(
-            "SELECT name, COALESCE(sql, '') FROM sqlite_master
-             WHERE type IN ('table', 'index', 'trigger', 'view')
-               AND name NOT LIKE 'sqlite_%'",
-        )
-        .map_err(io_other)?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(io_other)?;
-    let objects = rows
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(io_other)?;
-    Ok(
-        tracedecay_runtime_core::db::migrations::fingerprint_schema_objects(
-            objects
-                .iter()
-                .map(|(name, sql)| (name.as_str(), sql.as_str())),
-        ),
-    )
 }
 
 #[test]

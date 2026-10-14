@@ -14,8 +14,8 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 mod final_shape;
 
 pub use final_shape::{
-    expected_final_schema_fingerprint, fingerprint_schema_objects,
-    render_expected_final_schema_markdown,
+    expected_final_schema_fingerprint, render_expected_final_schema_markdown,
+    schema_fingerprint_rusqlite,
 };
 
 const ROOT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS metadata (
