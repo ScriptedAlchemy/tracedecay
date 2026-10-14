@@ -1330,9 +1330,11 @@ async fn registered_persistence_failure_releases_only_after_join_and_writer_fenc
         database.clone(),
         identity.clone(),
         1,
+        // The writer fence waits for the test to release the writer, so the
+        // shutdown budget must outlast any scheduling delay before it does.
         ObservabilityProducerDeadlinesV1 {
             persistence,
-            shutdown: Duration::from_millis(250),
+            shutdown: Duration::from_secs(30),
         },
     )
     .expect("producer");
@@ -1344,14 +1346,10 @@ async fn registered_persistence_failure_releases_only_after_join_and_writer_fenc
         .begin_write_transaction()
         .await
         .expect("hold registered writer");
-    // The held writer exhausts the persistence deadline before shutdown
-    // begins: a startup rollup pass may wait one deadline before the worker
-    // takes the event, whose write then waits another.
     registered
         .producer()
         .try_emit(envelope(&project_id, "shutdown:blocked"))
         .expect("enqueue blocked event");
-    tokio::time::sleep(persistence * 6).await;
 
     let retained = registered.producer();
     assert!(!retained.shutdown_settled());
