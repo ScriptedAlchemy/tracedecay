@@ -284,14 +284,8 @@ pub(crate) fn compute_graph_tool_for_owner<'a>(
                 | ApplicationSurfaceOperation::RemoteStatus
                 | ApplicationSurfaceOperation::Runtime
         ) {
-            let computed = Box::pin(compute_project_info(
-                cg,
-                operation,
-                &args,
-                scope_prefix,
-                &options,
-            ));
-            return match tokio::time::timeout(budget, computed).await {
+            let computed = compute_project_info(cg, operation, &args, scope_prefix, &options);
+            return match tokio::time::timeout(budget, Box::pin(computed)).await {
                 Ok(result) => {
                     result.map(
                         |result| tracedecay_contracts::graph_tool::GraphToolCompletionV1 {
