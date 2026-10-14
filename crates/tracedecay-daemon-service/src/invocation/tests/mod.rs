@@ -78,7 +78,6 @@ impl CanonicalContextProjectionAuthority for UnavailableContextAuthority {
 
 pub(crate) fn unavailable_lsp_session_factory() -> Arc<DaemonLspSessionFactory> {
     Arc::new(DaemonLspSessionFactory::new(
-        tracedecay_application::lsp_runtime::native_lsp_runtime(),
         Arc::new(unavailable_feedback_cycle(Arc::new(
             RecordingFeedbackCycleObservations::default(),
         ))),
