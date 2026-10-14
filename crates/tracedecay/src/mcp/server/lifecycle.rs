@@ -307,12 +307,18 @@ impl McpServer {
 
     /// Polls until startup reconciliation admission settles or `timeout` elapses.
     pub async fn wait_for_startup_catch_up(&self, timeout: std::time::Duration) -> bool {
-        let deadline = tokio::time::Instant::now() + timeout;
+        let deadline = std::time::Instant::now() + timeout;
         while !self.startup_catch_up_done() {
-            if tokio::time::Instant::now() >= deadline {
+            let now = std::time::Instant::now();
+            if now >= deadline
+                || tracedecay_runtime_core::native_runtime::sleep_until(
+                    now + std::time::Duration::from_millis(25),
+                )
+                .await
+                .is_err()
+            {
                 return false;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
         true
     }
@@ -509,7 +515,7 @@ impl McpServer {
         let server = self.dispatch_authority.server();
         let spawned = self.spawn_background_task(tracing::Instrument::instrument(
             async move {
-                let latest = match tokio::task::spawn_blocking(
+                let latest = match tracedecay_runtime_core::native_runtime::spawn_blocking(
                     tracedecay_dashboard_api::cloud::fetch_latest_version,
                 )
                 .await

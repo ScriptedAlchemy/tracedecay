@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 use tracedecay_runtime_core::path_safety::{canonical_existing_identity, same_canonical_path};
 
 use serde::{Deserialize, Serialize};
-use tokio::time::timeout;
 
 use super::{
     AuthenticatedFirstRequest, BrokerStream, BrokerStreamTransport, DaemonAuthPreface,
@@ -21,6 +20,7 @@ use tracedecay_contracts::ApplicationProblem;
 use tracedecay_daemon_protocol::DAEMON_SHUTDOWN_METHOD;
 use tracedecay_mcp::ErrorCode;
 use tracedecay_runtime_core::logging::log_daemon_event;
+use tracedecay_runtime_core::native_runtime;
 use tracedecay_runtime_core::weak_registry::WeakRegistry;
 
 pub(crate) const MAX_CONCURRENT_DAEMON_CLIENTS: usize = 64;
@@ -642,7 +642,7 @@ pub(crate) async fn reject_saturated_daemon_client(
             write_daemon_response(&mut transport, &response.into_json_rpc_with_id(request_id)).await
         }
     };
-    match timeout(DAEMON_SATURATION_RESPONSE_DEADLINE, response).await {
+    match native_runtime::timeout(DAEMON_SATURATION_RESPONSE_DEADLINE, response).await {
         Ok(Ok(())) => log_daemon_event(
             "daemon_client",
             &[("outcome", "client_capacity_reached".to_string())],
@@ -654,9 +654,12 @@ pub(crate) async fn reject_saturated_daemon_client(
                 ("error", error.to_string()),
             ],
         ),
-        Err(_) => log_daemon_event(
+        Err(error) => log_daemon_event(
             "daemon_client",
-            &[("outcome", "saturation_response_timeout".to_string())],
+            &[
+                ("outcome", "saturation_response_timeout".to_string()),
+                ("error", error.to_string()),
+            ],
         ),
     }
 }

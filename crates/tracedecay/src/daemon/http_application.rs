@@ -45,6 +45,7 @@ use tracedecay_daemon_service::remote_http_transport::{
 };
 use tracedecay_dashboard_api::serve_loopback;
 use tracedecay_domain::{BrainNodeId, EnrollmentGrantV1, ProjectId};
+use tracedecay_runtime_core::native_runtime::{self, TimeoutError};
 use tracedecay_rusqlite_runtime::remote::RemoteWriterPublicationErrorV1;
 use tracedecay_store_runtime::RemoteNodeOperatorErrorV1;
 
@@ -290,14 +291,14 @@ impl DaemonHttpApplicationRegistry {
         // A cold project route resolution can park on daemon project-open
         // work; bound it so an HTTP caller never waits unboundedly.
         let resolved = tracing::Instrument::instrument(
-            tracedecay_runtime_core::native_runtime::timeout(
-                self.cold_resolution_deadline,
-                resolver(project_id.clone()),
-            ),
+            native_runtime::timeout(self.cold_resolution_deadline, resolver(project_id.clone())),
             tracing::trace_span!("daemon.http.application.router_resolve"),
         )
         .await
-        .map_err(|_| ProjectRouterResolutionError::TimedOut)?
+        .map_err(|error| match error {
+            TimeoutError::Elapsed => ProjectRouterResolutionError::TimedOut,
+            TimeoutError::TimerUnavailable(_) => ProjectRouterResolutionError::Unavailable,
+        })?
         .map_err(|_| ProjectRouterResolutionError::Unavailable)?;
         let Some(router) = resolved else {
             return Ok(None);

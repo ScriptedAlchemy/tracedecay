@@ -519,16 +519,23 @@ pub(crate) fn register_hook_v2_replay_consumer(
             // Retained records and failed spools wait at most this interval
             // for their next attempt; a hook append wakes the drain sooner. Keep
             // the pacing WAIT separate from sweep WORK.
-            tracing::Instrument::instrument(
+            let timer = tracing::Instrument::instrument(
                 async {
                     tokio::select! {
-                        () = tokio::time::sleep(REPLAY_INTERVAL) => {}
-                        () = wake.notified() => {}
+                        slept = tracedecay_runtime_core::native_runtime::sleep_until(
+                            std::time::Instant::now() + REPLAY_INTERVAL,
+                        ) => slept,
+                        () = wake.notified() => Ok(()),
                     }
                 },
                 tracing::trace_span!("daemon.hook_replay.interval_wait"),
             )
             .await;
+            if let Err(error) = timer {
+                // Without a timer every wait would return at once and spin.
+                tracing::error!(event = "hook_replay_timer_unavailable", %error);
+                break;
+            }
         }
         spool_watch::detach_consumer(&task_data_root);
         if let Ok(mut roots) = registered_replay_roots().lock()
