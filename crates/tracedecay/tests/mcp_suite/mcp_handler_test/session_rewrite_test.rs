@@ -73,13 +73,14 @@ fn rollout_records(project: &Path, shape: UserRecordShape) -> Vec<Value> {
     records
 }
 
-/// One tool answer, with a budget-truncated body recovered whole.
-async fn call_production_tool(
+/// One tool answer, with a budget-truncated body recovered whole. `Err` is
+/// the tool's own error result.
+async fn try_production_tool(
     harness: &ProductionProjectCompositionHarnessV1,
     project: &Path,
     tool: &str,
     arguments: Value,
-) -> Value {
+) -> Result<Value, Value> {
     let response = harness
         .call_tool(project, tool, arguments)
         .await
@@ -87,14 +88,35 @@ async fn call_production_tool(
     let result = response
         .result
         .unwrap_or_else(|| panic!("{tool} returned transport error: {:?}", response.error));
-    assert_ne!(
-        result["isError"], true,
-        "{tool} returned an error: {result}"
-    );
+    if result["isError"] == true {
+        return Err(result);
+    }
     let body = recovered_owner_payload(harness, project, result).await;
-    body.pointer("/outcome/value/payload")
+    Ok(body
+        .pointer("/outcome/value/payload")
         .cloned()
-        .unwrap_or(body)
+        .unwrap_or(body))
+}
+
+async fn call_production_tool(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    tool: &str,
+    arguments: Value,
+) -> Value {
+    try_production_tool(harness, project, tool, arguments)
+        .await
+        .unwrap_or_else(|result| panic!("{tool} returned an error: {result}"))
+}
+
+/// The delay the typed `temporal_refresh_unavailable` problem asks a retry to
+/// wait, or `None` for any other tool error. The ingest itself committed; a
+/// retry joins the refresh owner again.
+fn refresh_unavailable_retry_delay(result: &Value) -> Option<Duration> {
+    let body: Value = serde_json::from_str(result["content"][0]["text"].as_str()?).ok()?;
+    let problem = body.get("problem")?;
+    (problem["code"] == "temporal_refresh_unavailable")
+        .then(|| Duration::from_millis(problem["retry_after_millis"].as_u64().unwrap_or(250)))
 }
 
 /// Whether a stored message carries `text`; a native `UserMessage` stores
@@ -115,13 +137,27 @@ fn write_rollout(path: &Path, records: &[Value]) {
 }
 
 async fn ingest(harness: &ProductionProjectCompositionHarnessV1, project: &Path) {
-    let ingest = call_production_tool(
-        harness,
-        project,
-        "tracedecay_hook_runtime",
-        json!({"action": "ingest_transcript", "provider": "codex", "user_scope": false, "format": "json"}),
-    )
-    .await;
+    let arguments = json!({"action": "ingest_transcript", "provider": "codex", "user_scope": false, "format": "json"});
+    let ingest = tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            match try_production_tool(
+                harness,
+                project,
+                "tracedecay_hook_runtime",
+                arguments.clone(),
+            )
+            .await
+            {
+                Ok(ingest) => break ingest,
+                Err(result) => match refresh_unavailable_retry_delay(&result) {
+                    Some(delay) => tokio::time::sleep(delay).await,
+                    None => panic!("tracedecay_hook_runtime returned an error: {result}"),
+                },
+            }
+        }
+    })
+    .await
+    .expect("the ingest's refresh published");
     assert_eq!(ingest["completed"], true, "{ingest}");
 }
 
