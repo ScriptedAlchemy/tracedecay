@@ -21,7 +21,7 @@ test-helpers = [
 asupersync.workspace = true
 base64 = "0.22"
 futures-util = "0.3.33"
-getrandom = "0.2"
+getrandom = "0.4"
 hex = "0.4"
 hmac = { version = "0.13.0", features = ["zeroize"] }
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }

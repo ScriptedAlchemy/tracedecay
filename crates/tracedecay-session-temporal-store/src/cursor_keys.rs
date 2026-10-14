@@ -157,7 +157,7 @@ pub(super) async fn ensure_active_session_cursor_key_in_transaction(
             context: "session cursor key version exhausted",
         })?;
     let mut key_id_random = [0_u8; CURSOR_KEY_ID_RANDOM_BYTES];
-    getrandom::getrandom(&mut key_id_random).map_err(|error| {
+    getrandom::fill(&mut key_id_random).map_err(|error| {
         super::query::storage(
             PROVISION_OPERATION,
             std::io::Error::other(format!("generate session cursor key id: {error}")),
@@ -174,7 +174,7 @@ pub(super) async fn ensure_active_session_cursor_key_in_transaction(
         version: next_version,
     };
     let mut material = [0_u8; CURSOR_KEY_MATERIAL_BYTES];
-    getrandom::getrandom(&mut material).map_err(|error| {
+    getrandom::fill(&mut material).map_err(|error| {
         super::query::storage(
             PROVISION_OPERATION,
             std::io::Error::other(format!("generate session cursor key material: {error}")),

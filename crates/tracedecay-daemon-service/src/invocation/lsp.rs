@@ -860,7 +860,7 @@ impl DaemonInvocationService {
             Err(problem) => return DaemonInvocationResponse::problem(request_id, problem),
         };
         let mut credential_bytes = [0_u8; 32];
-        if getrandom::getrandom(&mut credential_bytes).is_err() {
+        if getrandom::fill(&mut credential_bytes).is_err() {
             return DaemonInvocationResponse::problem(
                 request_id,
                 DaemonInvocationProblem::Unavailable,

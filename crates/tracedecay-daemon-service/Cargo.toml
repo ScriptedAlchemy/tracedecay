@@ -31,7 +31,7 @@ tracedecay-maintenance = { path = "../tracedecay-maintenance" }
 tracedecay-code-index-retention = { path = "../tracedecay-code-index-retention" }
 tracedecay-session-runtime = { path = "../tracedecay-session-runtime" }
 axum = "0.8"
-getrandom = "0.2"
+getrandom = "0.4"
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

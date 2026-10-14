@@ -238,7 +238,7 @@ fn composer_retry_journal_key_is_valid(retry_prefix: &str, retry_key: &str) -> b
 
 fn next_composer_retry_nonce() -> Result<String, String> {
     let mut nonce = [0_u8; COMPOSER_RETRY_NONCE_BYTES];
-    getrandom::getrandom(&mut nonce)
+    getrandom::fill(&mut nonce)
         .map_err(|error| format!("could not mint Cursor composer retry nonce: {error}"))?;
     Ok(hex::encode(nonce))
 }

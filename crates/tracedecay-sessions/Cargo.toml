@@ -38,7 +38,7 @@ tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime" }
 tracedecay-store = { path = "../tracedecay-store" }
 url = "2"
-getrandom = "0.2"
+getrandom = "0.4"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
