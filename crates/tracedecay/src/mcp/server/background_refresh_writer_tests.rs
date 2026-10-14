@@ -262,7 +262,11 @@ async fn concurrent_startup_catchups_use_injected_writer_authority() {
                 calls.fetch_add(1, Ordering::AcqRel);
                 let concurrent = active.fetch_add(1, Ordering::AcqRel) + 1;
                 max_active.fetch_max(concurrent, Ordering::AcqRel);
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                tracedecay_runtime_core::native_runtime::sleep_until(
+                    std::time::Instant::now() + Duration::from_millis(50),
+                )
+                .await
+                .expect("native timer");
                 active.fetch_sub(1, Ordering::AcqRel);
                 Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(
                     Some(HashMap::new()),
