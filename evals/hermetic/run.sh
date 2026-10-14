@@ -141,21 +141,17 @@ export HERMETIC_TRACEDECAY_BIN="${staged_bin}"
 EOF
 }
 
-# Copy just enough of the real ~/.claude for `claude -p` to authenticate.
+# Give `claude -p` a credential without copying the real login.
 # We do NOT symlink the whole dir (that would let the isolated session mutate
-# the real config). We copy credentials read-only-ish and let claude create the
-# rest fresh under the isolated CLAUDE_CONFIG_DIR.
+# the real config). Claude authenticates from a setup-token or API key, and
+# creates the rest fresh under the isolated CLAUDE_CONFIG_DIR.
 seed_auth() {
   local env_dir="$1"
   local real_claude="${REAL_CLAUDE_DIR:-${ORIG_HOME}/.claude}"
   local real_codex="${REAL_CODEX_HOME:-${ORIG_HOME}/.codex}"
-  local dst="${env_dir}/home/.claude"
   local seeded=0
-  if [[ -f "${real_claude}/.credentials.json" ]]; then
-    cp -f "${real_claude}/.credentials.json" "${dst}/.credentials.json"
-    chmod 600 "${dst}/.credentials.json"
-    seeded=1
-  fi
+  # Never copy .credentials.json: its refresh token is shared with the real
+  # profile, so a refresh inside the isolated session signs the real one out.
   if [[ -n "${ANTHROPIC_API_KEY:-}" || -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
     seeded=1
   fi
@@ -167,7 +163,7 @@ seed_auth() {
       >>"${env_dir}/env.sh"
   fi
   if [[ "${seeded}" == "0" ]]; then
-    log "WARNING: no ~/.claude/.credentials.json and no ANTHROPIC_API_KEY;"
+    log "WARNING: no CLAUDE_CODE_OAUTH_TOKEN, .claude_code_oauth_token, or ANTHROPIC_API_KEY;"
     log "         'claude -p' will report 'Not logged in' and scenarios will fail."
   fi
   if [[ -f "${real_codex}/auth.json" ]]; then

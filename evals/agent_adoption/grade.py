@@ -397,7 +397,9 @@ def parse_claude(lines: list[str], host: str) -> Transcript:
             blob = "\n".join(_string_leaves(obj.get("message") or obj))
             if blob.strip():
                 timeline.append({"kind": "ctx", "text": blob})
-            content = (obj.get("message") or {}).get("content")
+            # A `permission_denied` system event carries its message as a string.
+            message = obj.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
             if isinstance(content, list):
                 tool_errors += sum(
                     1 for item in content
@@ -886,6 +888,7 @@ def score_scenario(scn: dict, tr: Transcript, seeded_facts: dict, run_meta: dict
         "condition": condition,
         # Runs from before the knob existed could not enable the hint.
         "repeated_query_hints": run_meta.get("repeated_query_hints", "off"),
+        "repeated_query_class": scn.get("repeated_query_class"),
         "channel": channel,
         "score": round(score, 4),
         "subscores": {k: round(v, 4) for k, v in subs.items()},
@@ -989,13 +992,16 @@ def _prompt_tokens(cost: dict) -> Optional[int]:
     return None if parts[0] is None else sum(p or 0 for p in parts)
 
 
-def aggregate_cost_and_hints(results: list[dict]) -> dict:
+def aggregate_cost_and_hints(results: list[dict], by_scenario: bool = False) -> dict:
     """Outcome, spend, and hint interventions per host/model x condition x hint
-    setting, so hints-on and hints-off runs of one cell sit side by side."""
+    setting (and scenario when `by_scenario`), so hints-on and hints-off runs
+    of one cell sit side by side."""
     cells: dict[str, list[dict]] = {}
     for r in results:
         host = f"{r['host']}/{r['model']}" if r.get("model") else r["host"]
         key = f"{host} {r.get('condition', 'full')} hints-{r.get('repeated_query_hints', 'off')}"
+        if by_scenario:
+            key = f"{r['id']} ({r.get('repeated_query_class')}) {key}"
         cells.setdefault(key, []).append(r)
     out = {}
     for key, rs in sorted(cells.items()):
@@ -1008,6 +1014,7 @@ def aggregate_cost_and_hints(results: list[dict]) -> dict:
             "n": len(rs),
             "mean_score": _mean([r["score"] for r in rs]),
             "outcome_mean": _mean([r["subscores"].get("outcome") for r in rs]),
+            "completion_rate": _mean([float(r.get("final_answer_chars", 0) > 0) for r in rs]),
             "mean_tool_calls": _mean([r["details"].get("tool_call_count") for r in rs]),
             "mean_cost_usd": _mean([u.get("total_cost_usd") for u in costs]),
             "mean_num_turns": _mean([u.get("num_turns") for u in costs]),
@@ -1181,19 +1188,11 @@ def render_report(scoreboard: dict) -> str:
     lines.append("")
     lines.append("Prompt tokens include cache reads and writes. `-` means the host did not report it.")
     lines.append("")
-    lines.append("| cell | n | score | outcome | tools | cost $ | turns | prompt tok | output tok | hints | runs w/ hint | after hint |")
-    lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|")
-    for cell, c in scoreboard.get("cost_and_hints", {}).items():
-        def num(x, digits=2):
-            return "-" if x is None else f"{x:.{digits}f}"
-        after = ", ".join(f"{k} {v}" for k, v in sorted(c["hint_next_steps"].items())) or "-"
-        lines.append(
-            f"| {cell} | {c['n']} | {num(c['mean_score'])} | {num(c['outcome_mean'])} | "
-            f"{num(c['mean_tool_calls'], 1)} | {num(c['mean_cost_usd'], 4)} | {num(c['mean_num_turns'], 1)} | "
-            f"{num(c['mean_prompt_tokens'], 0)} | {num(c['mean_output_tokens'], 0)} | "
-            f"{c['hints_total']} | {c['runs_with_hint']} | {after} |"
-        )
-    lines.append("")
+    lines += render_cost_and_hints(scoreboard.get("cost_and_hints", {}))
+    if scoreboard.get("repeated_query_scenarios"):
+        lines.append("### Per repeated-query scenario")
+        lines.append("")
+        lines += render_cost_and_hints(scoreboard["repeated_query_scenarios"])
 
     if scoreboard.get("learned_skill"):
         lines += render_learned_skill(scoreboard["learned_skill"])
@@ -1213,6 +1212,25 @@ def render_report(scoreboard: dict) -> str:
             f"{'-' if oc is None else f'{oc:.2f}'} |"
         )
     return "\n".join(lines) + "\n"
+
+
+def render_cost_and_hints(cells: dict) -> list[str]:
+    def num(x, digits=2):
+        return "-" if x is None else f"{x:.{digits}f}"
+    lines = [
+        "| cell | n | score | outcome | completed | tools | cost $ | turns | prompt tok | output tok | hints | runs w/ hint | after hint |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+    ]
+    for cell, c in cells.items():
+        after = ", ".join(f"{k} {v}" for k, v in sorted(c["hint_next_steps"].items())) or "-"
+        lines.append(
+            f"| {cell} | {c['n']} | {num(c['mean_score'])} | {num(c['outcome_mean'])} | "
+            f"{num(c['completion_rate'])} | "
+            f"{num(c['mean_tool_calls'], 1)} | {num(c['mean_cost_usd'], 4)} | {num(c['mean_num_turns'], 1)} | "
+            f"{num(c['mean_prompt_tokens'], 0)} | {num(c['mean_output_tokens'], 0)} | "
+            f"{c['hints_total']} | {c['runs_with_hint']} | {after} |"
+        )
+    return lines + [""]
 
 
 def split_learned_variant(base: str) -> tuple[str, Optional[str]]:
@@ -1423,6 +1441,8 @@ def main() -> int:
         },
         "aggregate": aggregate(results),
         "cost_and_hints": aggregate_cost_and_hints(results),
+        "repeated_query_scenarios": aggregate_cost_and_hints(
+            [r for r in results if r.get("repeated_query_class")], by_scenario=True),
         "results": results,
     }
     learned_rows = learned_skill_aggregate(results, invalid_runs)

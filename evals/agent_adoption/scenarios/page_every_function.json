@@ -1,0 +1,51 @@
+{
+  "id": "page_every_function",
+  "category": "code_exploration",
+  "pack": "pack_repeated_query",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "List every function and method defined in this crate, each with the file that defines it. The list must be complete.",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_source_outline",
+      "tracedecay_files",
+      "tracedecay_search",
+      "tracedecay_context"
+    ],
+    "acceptable": [
+      "tracedecay_grep",
+      "tracedecay_module_api",
+      "Read"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [
+    "raw_total_len",
+    "apply_discount",
+    "check_availability",
+    "reserve_stock",
+    "place_order",
+    "compute_total",
+    "compute_grand_total"
+  ],
+  "max_tool_calls": 8,
+  "repeated_query_class": "pagination",
+  "notes": "Exhaustive enumeration: per-file outlines and paged listings repeat one question over different files or pages. A hint here is a false-positive opportunity."
+}

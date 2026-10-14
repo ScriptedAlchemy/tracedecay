@@ -164,7 +164,7 @@ if [[ "${TRACEDECAY_AGENT_EVAL_ISOLATED:-}" != "1" ]]; then
   # Preserve only explicit read-only auth sources before changing HOME. The
   # daemon must not discover the operator's host transcripts or configuration.
   export AGENT_EVAL_CODEX_AUTH_SOURCE="${CODEX_HOME:-$HOME/.codex}"
-  export AGENT_EVAL_CLAUDE_AUTH_SOURCE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+  export AGENT_EVAL_CLAUDE_AUTH_SOURCE="${REAL_CLAUDE_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}}"
   eval_home="$(mktemp -d "${TMPDIR:-/tmp}/agent-eval-home.XXXXXX")"
   trap 'rm -rf "$eval_home"' EXIT
   mkdir -p "$eval_home/home" "$eval_home/workspace" "$eval_home/tmp"
@@ -238,10 +238,7 @@ scrub_auth_copies() {
   # $CODEX_HOME is the isolated daemon's (pinned by the re-entry check), where
   # learned-skill generation puts the writer's auth.
   rm -f "$CODEX_EVAL_CONFIG/auth.json" "$CODEX_HOME/auth.json"
-  local d
-  for d in "$work"/host-homes/claude*/.claude; do
-    rm -f "$d/.credentials.json" "$d/credentials.json" "$d/settings.json"
-  done
+  rm -f "$work"/host-homes/claude*/.claude/settings.json
 }
 trap scrub_auth_copies EXIT
 trap 'exit 130' INT TERM HUP
@@ -287,15 +284,36 @@ prepare_host_profiles() {
     HOME="$CODEX_EVAL_HOME" CODEX_HOME="$CODEX_EVAL_CONFIG" PATH="$EVAL_PATH" \
       codex plugin add tracedecay@personal --json \
       >>"$work/codex-install.log" 2>&1
+    # Codex starts plugin MCP servers with a minimal environment. Without these
+    # names `serve` looks for a daemon under the throwaway HOME, fails, and
+    # Codex drops the graph server without a transcript error.
+    python3 -c 'import json, sys
+names = ["TRACEDECAY_DATA_DIR", "TRACEDECAY_DAEMON_SOCKET", "TRACEDECAY_GLOBAL_DB", "TRACEDECAY_DISABLE_GLOBAL_DB"]
+for path in sys.argv[1:]:
+    config = json.load(open(path))
+    for server in config["mcpServers"].values():
+        server["env_vars"] = names
+    json.dump(config, open(path, "w"), indent=2)' "$CODEX_EVAL_CONFIG"/plugins/cache/*/tracedecay/*/.mcp.json
     copy_auth_readonly "$REAL_CODEX_HOME/auth.json" "$CODEX_EVAL_CONFIG/auth.json"
   fi
   if [[ " $HOSTS " == *" claude "* ]]; then
+    # A copied OAuth login shares its refresh token with the real profile, so
+    # an eval refresh would sign the real profile out. Claude runs authenticate
+    # with a `claude setup-token` grant or a carried endpoint profile instead.
+    if [[ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" && -f "$REAL_CLAUDE_CONFIG/.claude_code_oauth_token" ]]; then
+      CLAUDE_CODE_OAUTH_TOKEN="$(<"$REAL_CLAUDE_CONFIG/.claude_code_oauth_token")"
+      export CLAUDE_CODE_OAUTH_TOKEN
+    fi
     local d
     for d in "$work"/host-homes/claude*/.claude; do
-      copy_auth_readonly "$REAL_CLAUDE_CONFIG/.credentials.json" "$d/.credentials.json"
-      copy_auth_readonly "$REAL_CLAUDE_CONFIG/credentials.json" "$d/credentials.json"
       copy_claude_endpoint_profile "$REAL_CLAUDE_CONFIG/settings.json" "$d/settings.json"
     done
+    if [[ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}${ANTHROPIC_API_KEY:-}" ]] &&
+       ! grep -qs -e ANTHROPIC_API_KEY -e ANTHROPIC_AUTH_TOKEN "$CLAUDE_EVAL_CONFIG/settings.json"; then
+      echo "abort: no Claude credential for the eval. Save a \`claude setup-token\` grant as" \
+        "$REAL_CLAUDE_CONFIG/.claude_code_oauth_token or export CLAUDE_CODE_OAUTH_TOKEN." >&2
+      exit 5
+    fi
   fi
 }
 
