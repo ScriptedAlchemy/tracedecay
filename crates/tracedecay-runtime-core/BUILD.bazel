@@ -165,10 +165,27 @@ rust_test(
     data = glob(["benches/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True),
 )
 
+rust_test(
+    name = "native_timer",
+    tags = ["manual"],
+    use_libtest_harness = False,
+    srcs = glob(["benches/**/*.rs"]),
+    crate_root = "benches/native_timer.rs",
+    edition = crate_edition(),
+    version = "0.1.0",
+    deps = all_crate_deps(normal = True, normal_dev = True) + ["//crates/tracedecay-runtime-core:tracedecay-runtime-core__+test-helpers_+test-transport__dev", "//crates/tracedecay-capture:tracedecay-capture__dev", "//crates/tracedecay-domain:tracedecay-domain__dev", "//crates/tracedecay-graph-db:tracedecay-graph-db__+eval-helpers_+test-helpers__dev", "//crates/tracedecay-private-fs:tracedecay-private-fs__+test-helpers__dev", "//crates/tracedecay-rusqlite-runtime:tracedecay-rusqlite-runtime__+test-transport__dev", "//crates/tracedecay-store:tracedecay-store__dev"],
+    proc_macro_deps = all_crate_deps(proc_macro = True, proc_macro_dev = True),
+    aliases = aliases(normal = True, normal_dev = True),
+    rustc_flags = perf_rustc_flags(2),
+    crate_features = ["default", "test-helpers", "test-transport"],
+    compile_data = glob(["tests/**","assets/**","fixtures/**","data/**","resources/**","vendor/**"], allow_empty = True),
+    data = glob(["benches/**", "assets/**", "fixtures/**", "data/**", "resources/**", "vendor/**", "tests/**"], allow_empty = True),
+)
+
 filegroup(
     name = "benchmark_binaries",
     testonly = True,
-    srcs = [":exact_sql_writer_workload__binary", ":git_repository_authority_bin__binary"],
+    srcs = [":exact_sql_writer_workload__binary", ":git_repository_authority_bin__binary", ":native_timer__binary"],
 )
 
 rust_test(
