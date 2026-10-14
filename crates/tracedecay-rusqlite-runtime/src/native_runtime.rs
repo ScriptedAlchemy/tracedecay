@@ -18,6 +18,8 @@ use std::time::{Duration, Instant};
 
 use asupersync::runtime::{JoinError, RuntimeHandle};
 pub use asupersync::runtime::{Runtime, RuntimeBuilder};
+
+pub use crate::exact_sql::native_thread_writer_waits;
 use asupersync::types::PanicPayload;
 use asupersync::{Budget, Cx};
 use futures_util::future::{AbortHandle, Aborted, BoxFuture, FutureExt, Shared, abortable};
