@@ -124,9 +124,12 @@ fn schema_version(db_path: &Path) -> u32 {
     let connection =
         rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap();
-    let version = connection
-        .query_row("PRAGMA user_version", (), |row| row.get::<_, i64>(0))
-        .unwrap();
+    let version = tracedecay_runtime_core::db::schema_version::read_version_sync(
+        &connection,
+        tracedecay_runtime_core::db::schema_version::GRAPH_COMPONENT,
+    )
+    .unwrap()
+    .unwrap_or(0);
     u32::try_from(version).unwrap()
 }
 

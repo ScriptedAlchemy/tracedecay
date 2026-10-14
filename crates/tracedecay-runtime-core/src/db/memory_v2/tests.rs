@@ -43,7 +43,11 @@ async fn fresh_store_carries_only_the_final_memory_shape() {
     let (runtime, _dir) = database().await;
     let conn = (*runtime).clone();
     assert_eq!(
-        scalar(&conn, "PRAGMA user_version").await,
+        scalar(
+            &conn,
+            "SELECT version FROM tracedecay_schema_version WHERE component = 'graph'",
+        )
+        .await,
         i64::from(super::super::migrations::SCHEMA_VERSION)
     );
     assert_eq!(

@@ -87,6 +87,9 @@ fn read_rusqlite_inventory(
     for row in rows {
         let (object_type, name, table, sql) =
             row.map_err(|error| format!("failed to read canonical schema object: {error}"))?;
+        if is_store_version_ledger(&name) {
+            continue;
+        }
         if inventory
             .insert(
                 name.clone(),
@@ -102,6 +105,12 @@ fn read_rusqlite_inventory(
         }
     }
     Ok(inventory)
+}
+
+/// The ledger is the stamp, not a relational object, so a file at the pragma
+/// and a file that already adopted the ledger are one shape.
+fn is_store_version_ledger(name: &str) -> bool {
+    name == tracedecay_rusqlite_runtime::schema_version::TABLE
 }
 
 /// Deterministic fingerprint of a schema-object set (`name` + `sql`, sorted).
@@ -231,6 +240,9 @@ async fn read_inventory(conn: &impl QueryExecutor) -> Result<SchemaInventory> {
         let sql = row
             .get::<String>(3)
             .map_err(|error| database_error(format!("failed to decode object SQL: {error}")))?;
+        if is_store_version_ledger(&name) {
+            continue;
+        }
         if inventory
             .insert(
                 name.clone(),

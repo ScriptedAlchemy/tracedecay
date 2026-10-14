@@ -743,7 +743,7 @@ async fn template_recorded_at_an_older_git_correlation_version_is_rebuilt() {
     let downgraded = Connection::open(stale_sessions.canonicalize().unwrap())
         .unwrap()
         .execute(
-            "UPDATE session_schema_migrations SET version = ?1 WHERE name = 'git_correlation'",
+            "UPDATE tracedecay_schema_version SET version = ?1 WHERE component = 'git_correlation'",
             [older.git_correlation],
         )
         .unwrap();
@@ -770,7 +770,7 @@ async fn template_recorded_at_an_older_git_correlation_version_is_rebuilt() {
     let recorded: i64 = Connection::open(&cg.store_layout().sessions_db_path)
         .unwrap()
         .query_row(
-            "SELECT version FROM session_schema_migrations WHERE name = 'git_correlation'",
+            "SELECT version FROM tracedecay_schema_version WHERE component = 'git_correlation'",
             [],
             |row| row.get(0),
         )

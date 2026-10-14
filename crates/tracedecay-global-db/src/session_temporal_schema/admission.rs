@@ -11,8 +11,8 @@ use crate::schema_contract::{
 use crate::{global_db_operation_error, global_db_operation_message};
 
 use super::{
-    MIGRATION_NAME, OPERATION, SESSION_TEMPORAL_AUTHORITY, SESSION_TEMPORAL_SCHEMA_VERSION,
-    TEMPORAL_FTS_CONTRACTS, TEMPORAL_TABLE_COLUMNS,
+    OPERATION, SESSION_TEMPORAL_AUTHORITY, SESSION_TEMPORAL_SCHEMA_VERSION, TEMPORAL_FTS_CONTRACTS,
+    TEMPORAL_TABLE_COLUMNS,
 };
 
 const TEMPORAL_FTS_SHADOW_TABLES: &[&str] = &[
@@ -49,7 +49,7 @@ pub(crate) enum SessionTemporalSchemaAdmission {
 /// authority; every other non-final shape is a hard typed reset.
 #[tracing::instrument(name = "session_temporal.schema.admit", level = "trace", skip_all)]
 pub(crate) async fn require_admissible_session_temporal_schema(
-    conn: &impl QueryExecutor,
+    conn: &(impl QueryExecutor + Sync),
     fresh_store: Option<&FreshConfigurationStoreEvidence>,
 ) -> tracedecay_domain::errors::Result<Result<SessionTemporalSchemaAdmission, RefusedAuthorityV1>> {
     let version = schema_version(conn)
@@ -145,6 +145,11 @@ async fn validate_temporal_namespace_tables(
 }
 
 fn belongs_to_temporal_namespace(name: &str) -> bool {
+    // The legacy version table shares the temporal name prefix. It is a stamp,
+    // retired by the store-version ledger, and not temporal state.
+    if name.eq_ignore_ascii_case("session_temporal_schema_migrations") {
+        return false;
+    }
     [
         "session_agent_",
         "session_agents",
@@ -252,10 +257,7 @@ pub(super) async fn authority_holds_no_rows(
     }
     drop(tables);
     for (table, _) in TEMPORAL_TABLE_COLUMNS {
-        if *table == "session_temporal_schema_migrations"
-            || table.ends_with("_fts")
-            || !existing.contains(*table)
-        {
+        if table.ends_with("_fts") || !existing.contains(*table) {
             continue;
         }
         let mut rows = conn
@@ -275,59 +277,12 @@ pub(super) async fn authority_holds_no_rows(
 }
 
 async fn schema_version(
-    conn: &impl QueryExecutor,
+    conn: &(impl QueryExecutor + Sync),
 ) -> tracedecay_domain::errors::Result<Option<i64>> {
-    let mut tables = conn
-        .query(
-            "SELECT 1 FROM sqlite_master
-             WHERE type = 'table' AND name = 'session_temporal_schema_migrations'",
-            (),
-        )
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    if tables
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-        .is_none()
-    {
-        return Ok(None);
-    }
-
-    let mut rows = conn
-        .query(
-            "SELECT name, version FROM session_temporal_schema_migrations ORDER BY name",
-            (),
-        )
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-    else {
-        return Err(global_db_operation_message(
-            OPERATION,
-            "session temporal schema marker is missing",
-        ));
-    };
-    let name = row
-        .get::<String>(0)
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    let version = row
-        .get::<i64>(1)
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    if name != MIGRATION_NAME
-        || rows
-            .next()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?
-            .is_some()
-    {
-        return Err(global_db_operation_message(
-            OPERATION,
-            "session temporal schema marker is not the exact final singleton",
-        ));
-    }
-    Ok(Some(version))
+    tracedecay_runtime_core::db::schema_version::read_version(
+        conn,
+        tracedecay_runtime_core::db::schema_version::SESSION_TEMPORAL_COMPONENT,
+    )
+    .await
+    .map_err(|error| global_db_operation_message(OPERATION, error.to_string()))
 }

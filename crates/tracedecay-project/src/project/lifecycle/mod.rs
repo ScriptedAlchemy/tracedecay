@@ -437,27 +437,19 @@ impl TraceDecay {
 
     async fn schema_version(db: &Database, operation: &str) -> Result<u32> {
         let connection = db.read_connection();
-        let mut rows = connection
-            .query("PRAGMA user_version", ())
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("{operation}: failed to read user_version: {e}"),
-                operation: operation.to_string(),
-            })?;
-        let row = rows.next().await.map_err(|e| TraceDecayError::Database {
-            message: format!("{operation}: failed to read user_version row: {e}"),
+        let version = tracedecay_runtime_core::db::schema_version::read_version(
+            &connection,
+            tracedecay_runtime_core::db::schema_version::GRAPH_COMPONENT,
+        )
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("{operation}: failed to read schema version: {error}"),
             operation: operation.to_string(),
         })?;
-        match row {
-            Some(row) => {
-                let version: i64 = row.get(0).map_err(|e| TraceDecayError::Database {
-                    message: format!("{operation}: failed to read user_version value: {e}"),
-                    operation: operation.to_string(),
-                })?;
-                Ok(version as u32)
-            }
-            None => Ok(0),
-        }
+        u32::try_from(version.unwrap_or(0)).map_err(|_| TraceDecayError::Database {
+            message: format!("{operation}: schema version does not fit the graph stamp"),
+            operation: operation.to_string(),
+        })
     }
 
     async fn ensure_database_schema_current(db: &Database) -> Result<()> {

@@ -1,6 +1,7 @@
 //! Bundled SQLite storage runtime.
 
 mod admission;
+pub mod schema_version;
 mod authority;
 mod checkpoint;
 mod connection;
