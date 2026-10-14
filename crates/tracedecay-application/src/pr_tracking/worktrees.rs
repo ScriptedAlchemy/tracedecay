@@ -1156,20 +1156,37 @@ mod tests {
         let branch = "feature/resolve-unavailable";
         init_manual_branch_repo(repo.path(), branch);
 
-        let error = resolve_branch_head(
+        let missing = resolve_branch_head(
             repo.path(),
-            branch,
-            &PrCommandControlV1::with_timeout(Duration::ZERO),
+            "definitely-missing",
+            default_pr_command_control(),
         )
-        .expect_err("unavailable Git cannot resolve a branch head");
-        assert!(
-            matches!(
-                &error,
-                ManualBranchActivationError::GitAuthorityUnavailable { .. }
+        .expect_err("absent branch");
+        assert_eq!(missing.reason_code(), "invalid_branch_ref");
+        assert!(!missing.retryable());
+
+        let cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
+        cancellation.cancel();
+        for (label, control) in [
+            ("deadline", PrCommandControlV1::with_timeout(Duration::ZERO)),
+            (
+                "cancelled",
+                PrCommandControlV1::with_cancellation(cancellation),
             ),
-            "unavailable Git must not be collapsed into a missing branch: {error}"
-        );
-        assert!(error.retryable());
+        ] {
+            let error = resolve_branch_head(repo.path(), branch, &control)
+                .expect_err("unavailable Git cannot resolve a branch head");
+            assert!(
+                matches!(
+                    &error,
+                    ManualBranchActivationError::GitAuthorityUnavailable { .. }
+                ),
+                "{label}: unavailable Git must not be collapsed into a missing branch: {error}"
+            );
+            assert!(error.retryable(), "{label}: {error}");
+        }
+
+        assert!(resolve_branch_head(repo.path(), branch, default_pr_command_control()).is_ok());
     }
 
     #[test]

@@ -89,7 +89,7 @@ pub async fn proxy_stdio_to_daemon(
     repeated_query_hints: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     let surface = ToolSurface::new(full_tool_list, catalog_profile)?;
-    let mut transport = StdioTransport::new();
+    let mut transport = StdioTransport::new()?;
     proxy_transport_to_daemon_with_drain_bound(
         socket_path,
         handshake,
