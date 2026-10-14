@@ -1094,13 +1094,13 @@ impl McpServer {
         });
 
         // Detached: the sweep is best-effort and the server never waits on it.
-        drop(tracedecay_runtime_core::native_runtime::NativeTask::spawn(
-            tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        drop(tracedecay_runtime_core::native_runtime::spawn_blocking(
+            move || {
                 let _ = cleanup_expired_response_handles(
                     &response_handle_root,
                     tracedecay_runtime_core::tracedecay::current_timestamp(),
                 );
-            }),
+            },
         ));
         if own_project_host_admission_replay
             && let Some(broker) = server.host_admission_broker.clone()
