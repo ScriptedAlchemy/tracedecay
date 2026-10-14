@@ -805,6 +805,7 @@ pub async fn validate_authority_rows_exhaustive(
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     use asupersync::sync::Notify;
     use tempfile::TempDir;
@@ -817,6 +818,10 @@ mod tests {
     use crate::global_db_operation_message;
     use crate::schema_contract::invariants::test_fixture::{
         authority_fixture, open_registered, seed_observation, write_cursor,
+    };
+    use crate::schema_stages::{
+        OBSERVATION_AUTHORITY_AUDIT_BUDGET, ObservationAuthorityAuditV1,
+        audit_observation_authority,
     };
     use tracedecay_runtime_core::db::engine::TestConnection;
     use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor};
@@ -1156,6 +1161,72 @@ mod tests {
             INCOMPLETE_EXHAUSTIVE_PASS,
             "corruption must never publish a trusted checkpoint"
         );
+    }
+
+    /// On a store too large for the doctor budget, a whole-table audit
+    /// statement is interrupted. That says nothing about the rows, so Doctor
+    /// must not report it as a failed invariant.
+    #[asupersync::test]
+    async fn audit_past_its_budget_is_skipped_not_violated() {
+        let (_directory, fixture) = open_registered().await;
+        let transaction = fixture
+            .database()
+            .begin_write_transaction()
+            .await
+            .expect("begin budget fixture");
+        seed_multi_page_authority_fixture(&transaction).await;
+        transaction.commit().await.expect("commit budget fixture");
+        let database = fixture.database().runtime_database();
+
+        let audit = audit_observation_authority(database, Duration::ZERO).await;
+        assert!(
+            matches!(audit, ObservationAuthorityAuditV1::BudgetExceeded { .. }),
+            "an exhausted budget is not a verdict: {audit:?}"
+        );
+        assert_eq!(audit.verdict(), None);
+        assert_eq!(audit.reason(), Some("authority_audit_budget_exceeded"));
+
+        let audit = audit_observation_authority(database, OBSERVATION_AUTHORITY_AUDIT_BUDGET).await;
+        assert!(
+            matches!(audit, ObservationAuthorityAuditV1::Held),
+            "the same store audited within budget holds: {audit:?}"
+        );
+    }
+
+    #[asupersync::test]
+    async fn audit_within_its_budget_still_refuses_corrupt_rows() {
+        let (_directory, fixture) = open_registered().await;
+        let transaction = fixture
+            .database()
+            .begin_write_transaction()
+            .await
+            .expect("begin corrupt audit fixture");
+        seed_multi_page_authority_fixture(&transaction).await;
+        transaction
+            .execute(
+                "UPDATE source_cursors
+                 SET cursor_json = '{}'
+                 WHERE rowid = (SELECT MAX(rowid) FROM source_cursors)",
+                (),
+            )
+            .await
+            .expect("inject source cursor authority violation");
+        transaction
+            .commit()
+            .await
+            .expect("commit corrupt audit fixture");
+
+        let audit = audit_observation_authority(
+            fixture.database().runtime_database(),
+            OBSERVATION_AUTHORITY_AUDIT_BUDGET,
+        )
+        .await;
+        assert!(
+            matches!(&audit, ObservationAuthorityAuditV1::Violated(error)
+                if error.to_string().contains("invalid source cursor authority JSON")),
+            "corrupt rows inside the budget are a verdict: {audit:?}"
+        );
+        assert_eq!(audit.verdict(), Some(false));
     }
 
     #[asupersync::test]

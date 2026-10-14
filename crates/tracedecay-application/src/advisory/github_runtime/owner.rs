@@ -31,6 +31,7 @@ use crate::stack_coordinator::{
 };
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::db::Database;
+use tracedecay_runtime_core::native_runtime;
 
 /// Canonical Observatory mount for the coordinator observations this owner
 /// produces. Absent when the composition root could not mount the probe
@@ -166,7 +167,7 @@ where
                     pull_request_id: request.pull_request_id.clone(),
                     resume: super::GitHubReadResumeV1::empty(),
                 };
-                let provider_outcome = match tokio::task::spawn_blocking(move || {
+                let provider_outcome = match native_runtime::spawn_blocking(move || {
                     client.read_stack(
                         &stack_context,
                         &stack_request,

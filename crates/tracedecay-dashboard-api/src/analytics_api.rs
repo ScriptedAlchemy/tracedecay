@@ -1375,7 +1375,7 @@ async fn typed_diagnostics_summary(
     let store_root = state.store_root.clone();
     let profile_root = state.profile_root.clone();
     let project_root = state.project_root.clone();
-    let hook_analytics = tokio::task::spawn_blocking(move || {
+    let hook_analytics = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         read_hook_analytics_rows_at(&profile_root, Some(&store_root), Some(&project_root))
     })
     .await
@@ -1875,5 +1875,25 @@ mod tests {
                 "the unmounted envelope must not leak {forbidden}: {encoded}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn diagnostics_summary_reads_hooks_without_a_tokio_runtime() {
+        let (_project, state) =
+            crate::events_api::dashboard_state_fixture("project.dashboard-analytics-native").await;
+        let summary = std::thread::spawn(move || {
+            tracedecay_runtime_core::native_runtime::block_on(async {
+                super::typed_diagnostics_summary(&state, None).await
+            })
+        })
+        .join()
+        .expect("the diagnostics read must not need a Tokio runtime")
+        .expect("native block_on")
+        .expect("diagnostics summary");
+        assert_eq!(
+            (summary.message_count, summary.hook_call_count),
+            (0, 0),
+            "an empty fixture store reports no messages and no hook calls"
+        );
     }
 }

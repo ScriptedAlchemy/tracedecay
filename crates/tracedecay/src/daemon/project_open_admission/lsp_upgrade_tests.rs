@@ -82,6 +82,20 @@ async fn lsp_wait_observes_cancellation_and_deadline_before_full_open() {
             .await,
         ProjectOpenWaitOutcome::TimedOut
     ));
+
+    let pending_deadline = tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(
+        tracedecay_contracts::clock::now_micros()
+            .0
+            .saturating_add(50_000),
+    ))
+    .expect("valid test deadline");
+    assert!(matches!(
+        tasks
+            .wait_for_lsp_upgrade(&route, &pending_deadline, &CancellationToken::new())
+            .await,
+        ProjectOpenWaitOutcome::TimedOut
+    ));
+    assert!(pending_deadline.is_elapsed_at(tracedecay_contracts::clock::now_micros()));
     release.notify_one();
 }
 

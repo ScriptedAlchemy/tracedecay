@@ -12,6 +12,7 @@ use tracedecay_contracts::{
     CancellationSignal, Deadline, IdempotencyKey, OperationTermination, RequestId,
 };
 use tracedecay_domain::{ProjectId, UserProfileId, UtcMicros};
+use tracedecay_runtime_core::native_runtime::NativeTask;
 use tracedecay_sessions::admission::SESSION_INGEST_DISABLED_REASON_V1;
 
 use tracedecay_session_runtime::session_sync::test_harness::{
@@ -129,7 +130,9 @@ async fn shutdown_keeps_blocked_lease_task_owned_until_it_exits() {
     let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
     let task_release = Arc::clone(&release);
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-    let task = tokio::task::spawn_blocking(move || {
+    // The body never yields, so an abort cannot drop the lease before the
+    // test releases it.
+    let task = NativeTask::spawn(async move {
         let _lease = RetainedSessionLease {
             _databases: [project_sessions, profile_sessions],
             released: task_released,
@@ -142,7 +145,8 @@ async fn shutdown_keeps_blocked_lease_task_owned_until_it_exits() {
                 .wait(released)
                 .unwrap_or_else(PoisonError::into_inner);
         }
-    });
+    })
+    .expect("native task");
     push_task(
         &service,
         SessionSyncTaskV1 {
@@ -229,17 +233,19 @@ async fn exact_project_retirement_drains_a_keeps_b_live_and_rebinds_a() {
     let task_a_cancellation = cancellation_a.clone();
     let task_a_cancelled = Arc::clone(&cancelled_a);
     let task_a_release = Arc::clone(&release_a);
-    let task_a = tokio::spawn(async move {
+    let task_a = NativeTask::spawn(async move {
         while !task_a_cancellation.is_cancelled() {
             tokio::task::yield_now().await;
         }
         task_a_cancelled.notify_one();
         task_a_release.notified().await;
-    });
+    })
+    .expect("native task");
     let task_b_release = Arc::clone(&release_b);
-    let task_b = tokio::spawn(async move {
+    let task_b = NativeTask::spawn(async move {
         task_b_release.notified().await;
-    });
+    })
+    .expect("native task");
     extend_tasks(
         &service,
         [

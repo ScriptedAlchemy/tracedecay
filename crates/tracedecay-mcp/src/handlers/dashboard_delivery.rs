@@ -146,14 +146,14 @@ async fn live_expected_head_commit_id(
         cancel: Some(cancellation),
         ..GitQueryBounds::default()
     };
-    let mut worker = tokio::task::spawn_blocking(move || {
+    let worker = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         authority.read(&selected_scope, &GitReadRequestV1::Status, &bounds)
     });
     let cancellation_signal = control.cancellation().clone();
     let outcome = tokio::select! {
         biased;
         () = cancellation_signal.cancelled() => return None,
-        outcome = &mut worker => outcome.ok()?,
+        outcome = worker => outcome.ok()?,
     };
     let GitReadOutcomeV1::Complete {
         scope: returned_scope,

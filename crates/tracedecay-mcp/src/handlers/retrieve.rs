@@ -58,7 +58,7 @@ pub async fn compute_retrieve(
         let root = response_handle_root.to_path_buf();
         let handle = request.handle.clone();
         tracing::Instrument::instrument(
-            tokio::task::spawn_blocking(move || {
+            tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
                 retrieve_response_handle(&root, &handle, current_timestamp())
             }),
             tracing::trace_span!("mcp.retrieve.handle.load"),

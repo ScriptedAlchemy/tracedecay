@@ -22,9 +22,7 @@ use rmcp::{RoleClient, ServiceExt};
 use serde::Serialize;
 use serde_json::json;
 use tokio::io::AsyncBufReadExt;
-use tracedecay_daemon_protocol::{
-    BrokerListener, BrokerStream, DaemonEndpoint, default_loopback_endpoint,
-};
+use tracedecay_daemon_protocol::{BrokerListener, DaemonEndpoint, default_loopback_endpoint};
 use tracedecay_domain::ProjectId;
 
 use super::{BrokerStreamTransport, RoutedRmcpReplay, serve_routed_rmcp_connection};
@@ -133,7 +131,12 @@ impl BenchmarkConnection {
         endpoint: &DaemonEndpoint,
         server: Arc<McpServer>,
     ) -> Result<Self, String> {
-        let client = BrokerStream::connect(endpoint)
+        // rmcp's client runs on Tokio I/O, so this harness dials with Tokio
+        // rather than the Asupersync `DaemonClientStream`.
+        let DaemonEndpoint::Loopback(address) = endpoint else {
+            return Err("benchmark RMCP endpoint must be loopback".to_owned());
+        };
+        let client = tokio::net::TcpStream::connect(address)
             .await
             .map_err(|error| format!("connect benchmark RMCP client: {error}"))?;
         let accepted = listener

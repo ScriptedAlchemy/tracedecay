@@ -1,12 +1,10 @@
-//! Root type aliases for the transport-owned `rmcp` adapter. Production
+//! Root type aliases for the transport-owned MCP adapter. Production
 //! composes `tracedecay_mcp::server::RmcpConnectionAdapter` directly over
 //! `ProductionMcpConnectionContext` in `daemon::connection_serving`.
 
 #[cfg(test)]
 use std::sync::Arc;
 
-#[cfg(test)]
-use rmcp::RoleServer;
 #[cfg(test)]
 use tracedecay_mcp::server::RmcpConnectionAdapter;
 #[cfg(test)]
@@ -47,11 +45,11 @@ mod tests {
     use rmcp::model::{
         CallToolRequestParams, CallToolResponse, CallToolResult, ReadResourceRequestParams,
     };
-    use rmcp::service::ServiceRole;
     use rmcp::transport::{IntoTransport, Transport};
     use rmcp::{RoleClient, ServiceExt};
-    use serde::Serialize;
     use serde_json::json;
+    use tracedecay_daemon_protocol::{BrokerListener, DaemonEndpoint, default_loopback_endpoint};
+    use tracedecay_mcp::BrokerStreamTransport;
 
     use super::*;
 
@@ -69,33 +67,45 @@ mod tests {
         .expect("RMCP adapter")
     }
 
-    struct RecordingTransport<R, T>
-    where
-        R: ServiceRole,
-    {
+    /// A daemon-side broker stream and its connected client stream.
+    async fn broker_pair() -> (BrokerStreamTransport, tokio::net::TcpStream) {
+        let (listener, bound) = BrokerListener::bind(&default_loopback_endpoint())
+            .await
+            .expect("bind loopback broker");
+        let DaemonEndpoint::Loopback(address) = bound else {
+            panic!("loopback bind returned {bound}");
+        };
+        let client = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("connect broker client");
+        let server = listener.accept().await.expect("accept broker client");
+        (BrokerStreamTransport::new(server), client)
+    }
+
+    /// Serves `adapter` on the daemon side of a fresh broker pair.
+    async fn serve_session(
+        adapter: RmcpConnectionAdapter<ProductionMcpConnectionContext>,
+    ) -> (tokio::task::JoinHandle<()>, tokio::net::TcpStream) {
+        let (transport, client) = broker_pair().await;
+        let serving = tokio::spawn(async move {
+            adapter
+                .serve(transport, std::future::pending())
+                .await
+                .expect("serve MCP session");
+        });
+        (serving, client)
+    }
+
+    /// Records the client's wire traffic in both directions.
+    struct RecordingTransport<T> {
         inner: T,
-        messages: Arc<std::sync::Mutex<Vec<Value>>>,
-        _role: std::marker::PhantomData<R>,
+        sent: Arc<std::sync::Mutex<Vec<Value>>>,
+        received: Arc<std::sync::Mutex<Vec<Value>>>,
     }
 
-    impl<R, T> RecordingTransport<R, T>
+    impl<T> Transport<RoleClient> for RecordingTransport<T>
     where
-        R: ServiceRole,
-    {
-        fn new(inner: T, messages: Arc<std::sync::Mutex<Vec<Value>>>) -> Self {
-            Self {
-                inner,
-                messages,
-                _role: std::marker::PhantomData,
-            }
-        }
-    }
-
-    impl<R, T> Transport<R> for RecordingTransport<R, T>
-    where
-        R: ServiceRole,
-        T: Transport<R> + 'static,
-        rmcp::service::TxJsonRpcMessage<R>: Serialize,
+        T: Transport<RoleClient> + 'static,
     {
         type Error = T::Error;
 
@@ -105,22 +115,35 @@ mod tests {
 
         fn send(
             &mut self,
-            item: rmcp::service::TxJsonRpcMessage<R>,
+            item: rmcp::model::ClientJsonRpcMessage,
         ) -> impl std::future::Future<Output = std::result::Result<(), Self::Error>> + Send + 'static
         {
-            let encoded = serde_json::to_value(&item).expect("record RMCP wire message");
-            self.messages
+            let encoded = serde_json::to_value(&item).expect("record client wire message");
+            self.sent
                 .lock()
-                .expect("RMCP wire recording lock")
+                .expect("client wire recording lock")
                 .push(encoded);
             self.inner.send(item)
         }
 
         fn receive(
             &mut self,
-        ) -> impl std::future::Future<Output = Option<rmcp::service::RxJsonRpcMessage<R>>> + Send
+        ) -> impl std::future::Future<Output = Option<rmcp::model::ServerJsonRpcMessage>> + Send
         {
-            self.inner.receive()
+            let received = Arc::clone(&self.received);
+            let receive = self.inner.receive();
+            async move {
+                let message = receive.await;
+                if let Some(message) = &message {
+                    let encoded =
+                        serde_json::to_value(message).expect("record server wire message");
+                    received
+                        .lock()
+                        .expect("server wire recording lock")
+                        .push(encoded);
+                }
+                message
+            }
         }
 
         fn close(
@@ -160,24 +183,14 @@ mod tests {
                     });
                 })),
             );
-            let (server_io, client_io) = tokio::io::duplex(2 * 1024 * 1024);
-            let server_messages = Arc::new(std::sync::Mutex::new(Vec::new()));
-            let server_transport = RecordingTransport::<RoleServer, _>::new(
-                IntoTransport::<RoleServer, _, _>::into_transport(server_io),
-                Arc::clone(&server_messages),
-            );
-            let serving = tokio::spawn(async move {
-                let running = adapter
-                    .serve(server_transport)
-                    .await
-                    .expect("serve RMCP adapter");
-                running.waiting().await.expect("RMCP adapter task");
-            });
+            let (serving, client_io) = serve_session(adapter).await;
             let client_messages = Arc::new(std::sync::Mutex::new(Vec::new()));
-            let client_transport = RecordingTransport::<RoleClient, _>::new(
-                IntoTransport::<RoleClient, _, _>::into_transport(client_io),
-                Arc::clone(&client_messages),
-            );
+            let server_messages = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let client_transport = RecordingTransport {
+                inner: IntoTransport::<RoleClient, _, _>::into_transport(client_io),
+                sent: Arc::clone(&client_messages),
+                received: Arc::clone(&server_messages),
+            };
             let client = ().serve(client_transport).await.expect("initialize RMCP client");
             Self {
                 client,
@@ -251,14 +264,7 @@ mod tests {
             .await
             .expect("registered RMCP handshake server");
         let adapter = production_adapter(&server, None);
-        let (server_io, client_io) = tokio::io::duplex(256 * 1024);
-        let serving = tokio::spawn(async move {
-            let running = adapter
-                .serve(IntoTransport::<RoleServer, _, _>::into_transport(server_io))
-                .await
-                .expect("a malformed initialize must not fail connection initialization");
-            let _ = running.waiting().await;
-        });
+        let (serving, client_io) = serve_session(adapter).await;
 
         let (client_read, mut client_write) = tokio::io::split(client_io);
         let mut client_read = tokio::io::BufReader::new(client_read);
@@ -325,14 +331,7 @@ mod tests {
             .await
             .expect("registered RMCP stateless server");
         let adapter = production_adapter(&server, None);
-        let (server_io, client_io) = tokio::io::duplex(2 * 1024 * 1024);
-        let serving = tokio::spawn(async move {
-            let running = adapter
-                .serve(IntoTransport::<RoleServer, _, _>::into_transport(server_io))
-                .await
-                .expect("a stateless first request opens the RMCP session");
-            let _ = running.waiting().await;
-        });
+        let (serving, client_io) = serve_session(adapter).await;
         let (client_read, mut client_write) = tokio::io::split(client_io);
         let mut client_read = tokio::io::BufReader::new(client_read);
         let stateless_line = |request: Value| {
@@ -608,8 +607,8 @@ mod tests {
         fixture.shutdown().await;
     }
 
-    /// `rmcp` moves wire `params._meta` into the request context; the caller
-    /// deadline it carries must still reach dispatch as on the raw path.
+    /// The session lifts wire `params._meta` into the request context; the
+    /// caller deadline it carries must still reach dispatch as on the raw path.
     #[tokio::test]
     async fn rmcp_tool_call_honours_the_request_meta_caller_deadline() {
         let fixture = RmcpWireFixture::start().await;

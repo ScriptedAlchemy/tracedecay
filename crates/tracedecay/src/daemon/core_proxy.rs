@@ -5,11 +5,12 @@ use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
+use asupersync::io::AsyncWriteExt;
+use asupersync::time::wall_now;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
-use tokio::time::{Duration, Instant};
 
 use super::binary_version;
 #[cfg(unix)]
@@ -304,7 +305,7 @@ async fn drain_daemon_request_after_disconnect(
     daemon_request: impl Future<Output = Result<Vec<String>>>,
     drain_bound: Duration,
 ) -> Result<Vec<String>> {
-    tokio::time::timeout(drain_bound, daemon_request)
+    asupersync::time::timeout(wall_now(), drain_bound, daemon_request)
         .await
         .unwrap_or_else(|_| {
             Err(TraceDecayError::Config {
@@ -799,7 +800,7 @@ async fn send_daemon_request_with_project_open_retry(
         else {
             break;
         };
-        tokio::time::sleep(remaining.min(PROJECT_OPEN_RETRY_INTERVAL)).await;
+        asupersync::time::sleep(wall_now(), remaining.min(PROJECT_OPEN_RETRY_INTERVAL)).await;
         if cancellation.borrow().is_some() {
             break;
         }
@@ -872,7 +873,7 @@ async fn send_daemon_request_with_liveness_poll(
         connect_to_current_daemon_within(profile_root, socket_path, client_deadline),
     )
     .await?;
-    let (reader, mut writer) = stream.into_owned_split();
+    let (reader, mut writer) = stream.into_split();
 
     let write = async {
         write_daemon_preamble(&mut writer, &connection, handshake).await?;
@@ -885,7 +886,8 @@ async fn send_daemon_request_with_liveness_poll(
     };
     DaemonClientDeadline::run_optional(client_deadline, "write", &request_label, write).await?;
 
-    let mut reader = tokio::io::BufReader::new(reader);
+    let mut reader =
+        tracedecay_framing::BoundedLineReader::new(asupersync::io::BufReader::new(reader));
     let mut responses = Vec::new();
     let mut matched_response = request_id.is_none();
     let mut cancellation_open = true;
@@ -942,7 +944,7 @@ async fn read_forwarding_cancellation<W>(
     writer: &mut W,
 ) -> Result<Option<String>>
 where
-    W: tokio::io::AsyncWrite + Unpin,
+    W: asupersync::io::AsyncWrite + Unpin,
 {
     tokio::pin!(read);
     loop {

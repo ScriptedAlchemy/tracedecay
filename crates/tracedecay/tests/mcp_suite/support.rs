@@ -378,6 +378,59 @@ pub(crate) async fn wait_for_current_graph(server: &McpServer) {
     wait_for_readiness(server, "ready", Duration::from_secs(20)).await;
 }
 
+/// One production tool result, re-asked while the owner answers a typed
+/// not-ready problem: `temporal_refresh_unavailable` (an ingest that committed
+/// but missed the fixed live-refresh join under host load; the retry re-joins)
+/// or `application.runtime.mounting` (the project server is still mounting).
+/// Any other result, error results included, is returned for the caller to
+/// judge.
+#[cfg(feature = "test-transport")]
+pub(crate) async fn call_tool_when_ready(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+    tool: &str,
+    arguments: Value,
+) -> Value {
+    tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            let response = harness
+                .call_tool(project, tool, arguments.clone())
+                .await
+                .unwrap_or_else(|error| panic!("{tool} production invocation failed: {error}"));
+            let result = response.result.unwrap_or_else(|| {
+                panic!(
+                    "{tool} returned a production MCP error: {:?}",
+                    response.error
+                )
+            });
+            match not_ready_retry_delay(&result) {
+                Some(delay) => tokio::time::sleep(delay).await,
+                None => break result,
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{tool} stayed not ready past its deadline"))
+}
+
+#[cfg(feature = "test-transport")]
+fn not_ready_retry_delay(result: &Value) -> Option<Duration> {
+    let problem = match result.pointer("/structuredContent/problem") {
+        Some(problem) => problem.clone(),
+        None => serde_json::from_str::<Value>(result["content"][0]["text"].as_str()?)
+            .ok()?
+            .get("problem")?
+            .clone(),
+    };
+    match problem["code"].as_str()? {
+        "temporal_refresh_unavailable" => Some(Duration::from_millis(
+            problem["retry_after_millis"].as_u64().unwrap_or(250),
+        )),
+        "application.runtime.mounting" => Some(Duration::from_millis(250)),
+        _ => None,
+    }
+}
+
 #[cfg(feature = "test-transport")]
 pub(crate) struct ProductionCompositionFixture {
     pub(crate) harness: ProductionProjectCompositionHarnessV1,

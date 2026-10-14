@@ -313,10 +313,12 @@ async fn cursor_agent_summary(
         timeout: configured_timeout(&executable, timeout),
     };
     let source_range = request.source_range.clone();
-    let text = tokio::task::spawn_blocking(move || summarize_with_cursor_agent(&request, &config))
-        .await
-        .map_err(|_| SummaryResolutionError::Unavailable("cursor_agent_unavailable"))?
-        .map_err(|_| SummaryResolutionError::Unavailable("cursor_agent_unavailable"))?;
+    let text = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        summarize_with_cursor_agent(&request, &config)
+    })
+    .await
+    .map_err(|_| SummaryResolutionError::Unavailable("cursor_agent_unavailable"))?
+    .map_err(|_| SummaryResolutionError::Unavailable("cursor_agent_unavailable"))?;
     Ok(AuthoritativeSummary {
         text,
         route: "cursor_agent".to_string(),
@@ -355,7 +357,7 @@ async fn codex_app_server_summary(
     }
     config.timeout = configured_timeout(&executable, timeout);
     let source_range = request.source_range.clone();
-    let result = tokio::task::spawn_blocking(move || {
+    let result = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         tracedecay_sessions::runtime::hosts::codex_app_server::summarize_with_codex_app_server(
             &request, &config,
         )

@@ -52,7 +52,9 @@ pub(super) async fn compute_unmounted_files(
     // worker rather than holding the async dispatch thread through thousands
     // of synchronous reads.
     let audit = tracing::Instrument::instrument(
-        tokio::task::spawn_blocking(move || audit_project(&scan_project_root, &scan_path_policy)),
+        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+            audit_project(&scan_project_root, &scan_path_policy)
+        }),
         tracing::trace_span!("mcp.analysis.unmounted_files.scan"),
     )
     .await

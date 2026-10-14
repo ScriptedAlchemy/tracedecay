@@ -280,7 +280,7 @@ impl SessionHistoricalIngestor for ProfileSessionHistoricalIngestor {
             let authority =
                 tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority::new(self.database.clone())
                     .with_background_cpu(Arc::clone(&self.background_cpu))
-                    .with_session_review(self.session_review);
+                    .with_session_review(self.session_review.clone());
             let registry_authority =
                 tracedecay_host_admission::session_ingest_authority::GlobalDbSessionIngestAuthority::new(self.registry_database.clone())
                     .with_background_cpu(Arc::clone(&self.background_cpu));
