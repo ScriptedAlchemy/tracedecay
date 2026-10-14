@@ -17,6 +17,16 @@ py_test(
     main = "test-measure-unused-tool-context.py",
 )
 
+py_test(
+    name = "sqlite_plan_stability_check_test",
+    size = "small",
+    srcs = [
+        "check-sqlite-plan-stability.py",
+        "test-check-sqlite-plan-stability.py",
+    ],
+    main = "test-check-sqlite-plan-stability.py",
+)
+
 exports_files(
     [
         "bazel/rust_test.bzl",

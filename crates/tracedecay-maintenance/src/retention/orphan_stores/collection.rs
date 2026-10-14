@@ -801,6 +801,7 @@ async fn check_durable_memory_rows(
         return DurableMemoryCheck::Interrupted;
     }
     let connection = snapshot.connection();
+    // qpsg-exempt: pragma_table_list is a table-valued function with no index to range-scan.
     let mut rows = match control
         .race(connection.query(
             "SELECT name
