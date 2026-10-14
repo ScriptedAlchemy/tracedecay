@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::native_runtime;
 
 const SETTLEMENT_NOT_STARTED: u8 = 0;
 const SETTLEMENT_SETTLING: u8 = 1;
@@ -419,7 +420,7 @@ pub struct PreparedDispatchControl<'a> {
 pub struct DispatchControl {
     tool_name: Arc<str>,
     deadline: tracedecay_contracts::Deadline,
-    deadline_at: tokio::time::Instant,
+    deadline_at: std::time::Instant,
     cancellation: tracedecay_contracts::CancellationSignal,
     live_cancellable: bool,
     carries_effect: bool,
@@ -544,7 +545,7 @@ impl DispatchControl {
                     policy.carries_effect,
                 )
             })?;
-        let deadline_at = tokio::time::Instant::now()
+        let deadline_at = std::time::Instant::now()
             .checked_add(remaining)
             .ok_or_else(|| TraceDecayError::Config {
                 message: "MCP dispatch deadline cannot be represented by the runtime clock"
@@ -574,7 +575,12 @@ impl DispatchControl {
     /// ignores cancellation must not withhold the typed terminal.
     pub async fn settle_cancelled<T>(&self, outcome: &RetainedDispatchOutcome<T>) {
         if self.cancellation.is_cancelled() {
-            let _ = tokio::time::timeout_at(self.deadline_at, outcome.wait_for_settlement()).await;
+            // An unavailable timer ends the wait as the deadline would.
+            tokio::select! {
+                biased;
+                () = outcome.wait_for_settlement() => {}
+                _ = native_runtime::sleep_until(self.deadline_at) => {}
+            }
         }
     }
 
@@ -603,7 +609,7 @@ impl DispatchControl {
                 self.carries_effect,
             ));
         }
-        if tokio::time::Instant::now() >= self.deadline_at {
+        if std::time::Instant::now() >= self.deadline_at {
             let _ = self
                 .cancellation
                 .cancel(tracedecay_contracts::clock::now_micros());
@@ -621,7 +627,8 @@ impl DispatchControl {
             Ok(admitted) => admitted,
             Err(error) => return RetainedDispatchOutcome::failed(error),
         };
-        let deadline = tokio::time::sleep_until(self.deadline_at);
+        // An unavailable timer fails closed: its arm answers as the deadline.
+        let deadline = native_runtime::sleep_until(self.deadline_at);
         let cancellation =
             tracedecay_daemon_protocol::wait_for_cancellation(self.cancellation.clone());
         tokio::pin!(deadline);
@@ -646,7 +653,7 @@ impl DispatchControl {
                     self.carries_effect,
                 )))
             }
-            () = &mut deadline => {
+            _ = &mut deadline => {
                 // An effect worker that is already settling is *producing the
                 // authoritative answer to this very deadline*: the retained
                 // owners report a `PartialEffect` carrying the committed

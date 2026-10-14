@@ -414,26 +414,6 @@ fn truncation_handle_status(
     }
 }
 
-/// Runs the synchronous response-handle disk write without stalling the async
-/// executor worker that renders the response.
-///
-/// The truncating render path is synchronous by design (it sits under dozens
-/// of sync handler helpers), but it usually executes on a tokio worker.
-/// `block_in_place` hands that worker's run queue to another thread for the
-/// duration of the write; it panics outside a multi-thread runtime, so the
-/// flavor is checked first and everything else (current-thread runtimes,
-/// plain threads) keeps the previous inline behavior. The remaining
-/// `block_in_place` panic case is a `LocalSet` on a multi-thread runtime,
-/// which this workspace does not use.
-fn run_blocking_handle_store<T>(work: impl FnOnce() -> T) -> T {
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(work)
-        }
-        _ => work(),
-    }
-}
-
 /// The adapter records the full typed error in internal telemetry. Public
 /// output must not disclose project-local filesystem paths.
 fn handle_store_failure_status(error: &TraceDecayError) -> Value {
@@ -460,7 +440,12 @@ fn prepare_truncated_response_handle(
     if let Some(root) = response_handle_root {
         let match_result = {
             let _span = tracing::trace_span!("mcp.server.response.handle_store").entered();
-            run_blocking_handle_store(|| store_response_handle(root, text, current_timestamp()))
+            // ponytail: the truncating render path is synchronous (it sits
+            // under dozens of sync handler helpers), so this small bounded
+            // write blocks the executor worker rendering the response. Move
+            // it to `native_runtime::spawn_blocking` if the render path goes
+            // async or the write shows up in worker stall timings.
+            store_response_handle(root, text, current_timestamp())
         };
         match match_result {
             Ok(record) => TruncatedResponseHandle {
