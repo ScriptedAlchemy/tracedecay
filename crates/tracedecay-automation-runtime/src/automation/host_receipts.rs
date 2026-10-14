@@ -147,7 +147,7 @@ pub async fn record(
     let root = dashboard_root.to_path_buf();
     let route = route.map(protect_route_structural_ids).transpose()?;
     let receipt = protect_receipt_structural_ids(receipt)?;
-    tokio::task::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         with_locked_state(&root, |state| {
             let session = session_key(route.as_ref());
             let key = dedupe_key(&session, &receipt);
@@ -193,7 +193,7 @@ pub async fn mark_turn_ingested(
     let route = route.map(protect_route_structural_ids).transpose()?;
     let watermark = tracedecay_privacy::protect_sensitive_structural_id(transcript_watermark)
         .map_err(|_| config_error("invalid host receipt watermark"))?;
-    tokio::task::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         with_locked_state(&root, |state| {
             let session = session_key(route.as_ref());
             state.readiness.insert(
@@ -217,7 +217,7 @@ pub async fn mark_turn_ingested(
 )]
 pub async fn oldest_ready(dashboard_root: &Path) -> Result<Option<ReadyHostReceipt>> {
     let root = dashboard_root.to_path_buf();
-    tokio::task::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         with_locked_state(&root, |state| {
             let pending = state
                 .sessions
@@ -257,7 +257,7 @@ pub async fn mark_consumed(
 ) -> Result<()> {
     let root = dashboard_root.to_path_buf();
     let session_key = session_key.to_string();
-    tokio::task::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         with_locked_state(&root, |state| {
             if state
                 .sessions

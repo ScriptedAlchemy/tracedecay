@@ -39,12 +39,10 @@ use crate::{
     },
     checkpoint::{
         CheckpointBlockerSource, CheckpointBlockers, CheckpointError, CheckpointOutcome,
-        CheckpointPressure, CheckpointResult, CheckpointStatus, MaintenanceCheckpointMode,
-        RusqliteCheckpointError,
+        CheckpointPressure, CheckpointResult, CheckpointStatus, RusqliteCheckpointError,
     },
     connection::{OpenedDatabaseFile, OpenedDatabaseFileError},
     exact_sql::WriterCommand as ExactSqlWriterCommand,
-    maintenance::ExclusiveMaintenancePermit,
     persistence::RuntimeWriterPersistence,
     telemetry::{WriterTelemetry, WriterTelemetrySnapshot},
     watermark::CommittedWatermarkPublisher,
@@ -116,33 +114,7 @@ impl CheckpointHandle {
     ) -> Result<CheckpointTicket, CheckpointControlError> {
         let (reply, response) = oneshot::channel();
         let command = CheckpointCommand::new(request.blockers, request.probe, authority, reply);
-        self.enqueue(command, response, WriterState::Ready)
-    }
-
-    pub fn trigger_maintenance(
-        &self,
-        request: MaintenanceCheckpointRequest,
-    ) -> Result<CheckpointTicket, CheckpointControlError> {
-        self.trigger_maintenance_authorized(request, Arc::new(UnrestrictedRuntimeWriteAuthority))
-    }
-
-    pub fn trigger_maintenance_authorized(
-        &self,
-        request: MaintenanceCheckpointRequest,
-        authority: Arc<dyn RuntimeWriteAuthority>,
-    ) -> Result<CheckpointTicket, CheckpointControlError> {
-        if request.permit.binding() != &self.binding {
-            return Err(CheckpointControlError::BindingMismatch);
-        }
-        let (reply, response) = oneshot::channel();
-        let command = CheckpointCommand::new_maintenance(
-            request.blockers,
-            request.mode,
-            request.permit,
-            authority,
-            reply,
-        );
-        self.enqueue(command, response, WriterState::Draining)
+        self.enqueue(command, response)
     }
 
     fn enqueue(
@@ -151,13 +123,12 @@ impl CheckpointHandle {
         response: oneshot::Receiver<
             Result<CheckpointResult, CheckpointError<RusqliteCheckpointError>>,
         >,
-        required_state: WriterState,
     ) -> Result<CheckpointTicket, CheckpointControlError> {
         command
             .verify(RuntimeWriteAuthorityStage::BeforeAdmission)
             .map_err(checkpoint_control_error)?;
         if self.shutdown_requested.load(Ordering::Acquire)
-            || WriterState::load(&self.state) != required_state
+            || WriterState::load(&self.state) != WriterState::Ready
         {
             return Err(CheckpointControlError::Unavailable);
         }
@@ -190,38 +161,6 @@ impl CheckpointRequest {
     }
 }
 
-pub struct MaintenanceCheckpointRequest {
-    mode: MaintenanceCheckpointMode,
-    permit: ExclusiveMaintenancePermit,
-    blockers: CheckpointBlockers,
-}
-
-impl MaintenanceCheckpointRequest {
-    pub fn new(
-        mode: MaintenanceCheckpointMode,
-        permit: ExclusiveMaintenancePermit,
-        blockers: CheckpointBlockers,
-    ) -> Self {
-        Self {
-            mode,
-            permit,
-            blockers,
-        }
-    }
-
-    pub const fn mode(&self) -> MaintenanceCheckpointMode {
-        self.mode
-    }
-
-    pub fn permit(&self) -> &ExclusiveMaintenancePermit {
-        &self.permit
-    }
-
-    pub fn blockers(&self) -> &CheckpointBlockers {
-        &self.blockers
-    }
-}
-
 pub struct CheckpointTicket {
     response: oneshot::Receiver<Result<CheckpointResult, CheckpointError<RusqliteCheckpointError>>>,
 }
@@ -246,9 +185,7 @@ pub enum CheckpointControlError {
     Cancelled,
     Busy,
     Unavailable,
-    BindingMismatch,
     AuthorityDenied { stage: RuntimeWriteAuthorityStage },
-    Blocked(CheckpointBlockers),
     Driver(String),
 }
 
@@ -258,18 +195,8 @@ impl fmt::Display for CheckpointControlError {
             Self::Cancelled => formatter.write_str("checkpoint reply wait was cancelled"),
             Self::Busy => formatter.write_str("checkpoint control is busy"),
             Self::Unavailable => formatter.write_str("checkpoint control is unavailable"),
-            Self::BindingMismatch => {
-                formatter.write_str("maintenance permit belongs to another shard")
-            }
             Self::AuthorityDenied { stage } => {
                 write!(formatter, "runtime write authority denied at {stage:?}")
-            }
-            Self::Blocked(blockers) => {
-                write!(
-                    formatter,
-                    "checkpoint is blocked by {} readers",
-                    blockers.count()
-                )
             }
             Self::Driver(message) => write!(formatter, "checkpoint driver failed: {message}"),
         }
@@ -283,9 +210,6 @@ fn checkpoint_control_error(
 ) -> CheckpointControlError {
     match error {
         CheckpointError::Driver(error) => CheckpointControlError::Driver(error.to_string()),
-        CheckpointError::MaintenanceStillDraining(blockers) => {
-            CheckpointControlError::Blocked(blockers)
-        }
         CheckpointError::AuthorityDenied(stage) => {
             CheckpointControlError::AuthorityDenied { stage }
         }

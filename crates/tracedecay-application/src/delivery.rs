@@ -30,6 +30,7 @@ use tracedecay_domain::{
     feedback::GitHubPullRequestIdV1,
 };
 use tracedecay_runtime_core::db::Database;
+use tracedecay_runtime_core::native_runtime;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use crate::advisory::github_runtime::GitHubSourceAccessAuthorityV1;
@@ -1853,7 +1854,7 @@ impl ProjectDeliveryReadAuthorityV1 {
             max_releases,
         };
         let outcome = tracing::Instrument::instrument(
-            tokio::task::spawn_blocking(move || authority.read(&request, &control)),
+            native_runtime::spawn_blocking(move || authority.read(&request, &control)),
             tracing::trace_span!("usecases.delivery.release_blocking"),
         )
         .await;

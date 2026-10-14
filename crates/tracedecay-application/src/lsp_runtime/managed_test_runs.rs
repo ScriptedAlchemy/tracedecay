@@ -11,6 +11,7 @@ use tracedecay_lsp::{
     ContextProjectionKind, ContextProjectionOutcome, ContextProjectionRegistration,
     LspRuntimeFailure, LspRuntimeFuture, MAX_CONTEXT_PROJECTION_ITEMS, TRACEDECAY_CONTEXT_REVISION,
 };
+use tracedecay_runtime_core::native_runtime::NativeTask;
 use tracedecay_session_memory::response_handles::{micros_to_seconds, store_response_handle};
 
 use super::context_projection::test_run_projection;
@@ -58,8 +59,6 @@ pub trait LspTestRunProjectionPort: Send + Sync {
 pub(crate) struct ManagedTestRunProjection {
     reader: CanonicalManagedTestRunReader,
     project: Arc<RegisteredProjectLspAuthority>,
-    /// Polls are synchronous; the durable read-back they trigger runs here.
-    runtime: tokio::runtime::Handle,
     current_scopes: Arc<StdMutex<BTreeMap<String, CachedTestRunScope>>>,
     observed_revisions: Arc<StdMutex<BTreeMap<String, String>>>,
     observed_activity: Arc<StdMutex<BTreeMap<String, Option<ManagedTestRunActivity>>>>,
@@ -92,12 +91,10 @@ impl ManagedTestRunProjection {
     pub(crate) fn new(
         reader: CanonicalManagedTestRunReader,
         project: Arc<RegisteredProjectLspAuthority>,
-        runtime: tokio::runtime::Handle,
     ) -> Self {
         Self {
             reader,
             project,
-            runtime,
             current_scopes: Arc::new(StdMutex::new(BTreeMap::new())),
             observed_revisions: Arc::new(StdMutex::new(BTreeMap::new())),
             observed_activity: Arc::new(StdMutex::new(BTreeMap::new())),
@@ -174,12 +171,10 @@ impl ManagedTestRunProjection {
 pub(crate) fn lsp_test_result_port(
     project: Arc<RegisteredProjectLspAuthority>,
     store: RegisteredGlobalDbLeaseV1,
-    runtime: tokio::runtime::Handle,
 ) -> Arc<dyn LspTestRunProjectionPort> {
     Arc::new(ManagedTestRunProjection::new(
         CanonicalManagedTestRunReader::new(store, operation_event_authority()),
         project,
-        runtime,
     ))
 }
 
@@ -441,18 +436,25 @@ impl ManagedTestRunProjection {
         refreshing.insert(root.uri().to_owned());
         drop(refreshing);
         let projection = self.clone();
-        let root = root.clone();
-        self.runtime.spawn(tracing::Instrument::instrument(
+        let task_root = root.clone();
+        let started = NativeTask::spawn(tracing::Instrument::instrument(
             async move {
-                projection.refresh(&root).await;
-                projection
-                    .refreshing
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .remove(root.uri());
+                projection.refresh(&task_root).await;
+                projection.finish_refresh(&task_root);
             },
             tracing::trace_span!("usecases.lsp.test_run.refresh"),
         ));
+        if let Err(error) = started {
+            tracing::warn!(%error, "managed test-run read-back was not started");
+            self.finish_refresh(root);
+        }
+    }
+
+    fn finish_refresh(&self, root: &AdmittedRoot) {
+        self.refreshing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(root.uri());
     }
 
     async fn refresh(&self, root: &AdmittedRoot) {

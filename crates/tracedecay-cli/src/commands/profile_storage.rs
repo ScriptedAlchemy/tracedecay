@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracedecay_runtime_core::config::ProfileRoot;
+use tracedecay_runtime_core::native_runtime;
 
 use crate::cli::ProfileStorageAction;
 use tracedecay_contracts::retrieval::{AdminCliResultV1, AdminCliSurfaceRequestV1};
@@ -328,10 +329,12 @@ async fn brokered_storage_report(
             ),
             tracing::trace_span!("cli.profile_storage.report_page"),
         );
-        let result = tokio::time::timeout(Duration::from_secs(10), request)
+        let result = native_runtime::timeout(Duration::from_secs(10), request)
             .await
-            .map_err(|_| tracedecay_domain::errors::TraceDecayError::Config {
-                message: "daemon storage report authority timed out after 10 seconds".to_string(),
+            .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!(
+                    "daemon storage report authority did not answer within 10 seconds: {error}"
+                ),
             })??;
         let AdminCliResultV1::StorageReport(page) = result else {
             return Err(super::daemon::admin_cli_result_mismatch("storage_report"));
@@ -407,15 +410,15 @@ async fn handle_storage_report(
         if project_id.is_none() {
             let census_root = profile_root.clone();
             report.full_profile_size = Some(
-                tokio::task::spawn_blocking(move || {
+                native_runtime::spawn_blocking(move || {
                     tracedecay_maintenance::retention::storage_report::scan_full_profile_size(
                         &census_root,
                     )
                 })
                 .await
-                .map_err(|error| {
+                .map_err(|message| {
                     tracedecay_domain::errors::TraceDecayError::Config {
-                        message: format!("profile size census failed to join: {error}"),
+                        message: format!("profile size census failed: {message}"),
                     }
                 })?,
             );

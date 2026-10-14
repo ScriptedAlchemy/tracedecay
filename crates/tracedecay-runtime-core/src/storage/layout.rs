@@ -171,8 +171,6 @@ pub fn profile_sharded_layout(
     Ok(StoreLayout::new(
         ProjectIdentity {
             project_id: Some(project_id.to_owned()),
-            display_root: project_root.to_path_buf(),
-            primary_alias: project_root.to_path_buf(),
         },
         StoreKind::CodeProject,
         StorageMode::ProfileSharded,

@@ -3,8 +3,9 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
-use tokio::time::{Duration, timeout};
+use tracedecay_runtime_core::native_runtime;
 
 /// Watcher knobs the git-metadata watcher needs from resolved sync config.
 ///
@@ -89,7 +90,7 @@ where
     F: Future,
 {
     let mut future = std::pin::pin!(future);
-    if let Ok(output) = timeout(ADMISSION_PARK_GRACE, &mut future).await {
+    if let Ok(output) = native_runtime::timeout(ADMISSION_PARK_GRACE, &mut future).await {
         return output;
     }
     let Ok(lease) = CONNECTION_ADMISSION.try_with(Arc::clone) else {
@@ -101,4 +102,67 @@ where
     let output = future.await;
     lease.reacquire().await;
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    #[derive(Default)]
+    struct RecordingLease {
+        released: AtomicUsize,
+        reacquired: AtomicUsize,
+        on_release: tokio::sync::Notify,
+    }
+
+    impl AdmissionParkLeaseV1 for RecordingLease {
+        fn release(&self) -> bool {
+            self.released.fetch_add(1, Ordering::SeqCst);
+            self.on_release.notify_one();
+            true
+        }
+
+        fn reacquire(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+            Box::pin(async {
+                self.reacquired.fetch_add(1, Ordering::SeqCst);
+            })
+        }
+    }
+
+    #[test]
+    fn a_park_off_tokio_keeps_its_slot_through_the_grace_and_returns_it_past_it() {
+        let lease = Arc::new(RecordingLease::default());
+        let scoped: Arc<dyn AdmissionParkLeaseV1> = lease.clone();
+        let (quick, parked) = native_runtime::block_on(CONNECTION_ADMISSION.scope(scoped, async {
+            let quick = park_admission(async { lease.released.load(Ordering::SeqCst) }).await;
+            let parked = native_runtime::timeout(
+                Duration::from_secs(10),
+                park_admission(async {
+                    lease.on_release.notified().await;
+                    lease.reacquired.load(Ordering::SeqCst)
+                }),
+            )
+            .await;
+            (quick, parked)
+        }))
+        .expect("process runtime");
+
+        assert_eq!(
+            quick, 0,
+            "a park inside the grace never gives its slot back"
+        );
+        assert_eq!(
+            parked,
+            Ok(0),
+            "a park past the grace gives its slot back while it waits"
+        );
+        assert_eq!(lease.released.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            lease.reacquired.load(Ordering::SeqCst),
+            1,
+            "the slot is taken back before the park returns"
+        );
+    }
 }

@@ -32,6 +32,7 @@ use tracedecay_contracts::catalog_composition::CatalogCompositionError;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 use tracedecay_global_db::configuration::contracts::ConfigurationControlStore;
+use tracedecay_runtime_core::native_runtime;
 
 const GIT_POLICY_REVISION: u64 = 2;
 
@@ -72,7 +73,6 @@ struct ProductionDaemonGitAuthoritySource {
     access: ProjectSourceAccessSnapshot,
     configuration: OwnedGlobalDbConfigurationControlStore,
     catalog: ApplicationCatalogComposer,
-    runtime: tokio::runtime::Handle,
 }
 
 impl DaemonGitAuthoritySource for ProductionDaemonGitAuthoritySource {
@@ -85,14 +85,12 @@ impl DaemonGitAuthoritySource for ProductionDaemonGitAuthoritySource {
         if evaluated_at >= self.access.grant_expires_at {
             return Err(GitIndexTransactionPortError::PolicyDenied);
         }
-        // The Git transaction port is intentionally synchronous while the
-        // configuration authority is asynchronous. Production calls arrive
-        // on Tokio workers, so yield this worker before waiting on the same
-        // runtime; calling `Handle::block_on` directly here panics because it
-        // attempts to enter a runtime that is already driving this task.
-        let current =
-            tokio::task::block_in_place(|| self.runtime.block_on(self.configuration.current()))
-                .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
+        // The Git transaction port is synchronous while the configuration
+        // authority is asynchronous. Callers run on blocking threads, where
+        // the native runtime may park the caller until the read settles.
+        let current = native_runtime::block_on(self.configuration.current())
+            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?
+            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
         if current.snapshot.validate().is_err() {
             return Err(GitIndexTransactionPortError::PolicyDenied);
         }
@@ -480,7 +478,6 @@ impl DaemonGitIndexTransactionServiceRegistry {
         repository_root: PathBuf,
         access: ProjectSourceAccessSnapshot,
         observed_at: UtcMicros,
-        runtime: tokio::runtime::Handle,
     ) -> Result<DaemonGitInvocationOwner, GitIndexTransactionPortError> {
         let project_id = access.scope.project_id.clone();
         if access.binding.authority != AuthorityRef::Project(project_id.clone()) {
@@ -498,7 +495,6 @@ impl DaemonGitIndexTransactionServiceRegistry {
                     database.clone(),
                 ),
             catalog: self.catalog.clone(),
-            runtime,
         });
         self.mount_with(
             database_path,
@@ -558,7 +554,7 @@ impl DaemonGitIndexTransactionServiceRegistry {
         let authority = Arc::new(DaemonGitAuthoritySlot::new(source));
         let service_authority = Arc::clone(&authority);
         let mutation_queue = Arc::clone(&self.mutation_queue);
-        let (project_id, service) = tokio::task::spawn_blocking(move || {
+        let (project_id, service) = native_runtime::spawn_blocking(move || {
             let native = FixedDaemonGitIndexExecutor::new(
                 DaemonProjectGitIndexPreviewAssembler::new(native_root, project_id.clone()),
             );
@@ -675,13 +671,13 @@ impl DaemonGitIndexTransactionServiceRegistry {
         // the caller's runtime may hold, so the synchronous port cannot run
         // on that runtime's thread.
         let preview = preview.clone();
-        tokio::task::spawn_blocking(move || {
+        native_runtime::spawn_blocking(move || {
             owner
                 .service
                 .port
                 .quarantine_preview_for_test(&preview, observed_at)
         })
         .await
-        .unwrap_or_else(|join| std::panic::resume_unwind(join.into_panic()))
+        .unwrap_or(Err(GitIndexTransactionPortError::DaemonUnavailable))
     }
 }

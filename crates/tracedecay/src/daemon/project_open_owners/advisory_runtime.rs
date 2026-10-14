@@ -800,7 +800,8 @@ async fn refresh_feedback_cycle(
         .diagnostic_broker
         .lock()
         .await
-        .mounted_providers_for_files(&indexed_files);
+        .mounted_providers_for_files(&indexed_files)
+        .await;
     let compiler_seed =
         tracedecay_code_index_runtime::code_index_scheduler::feedback_language_document_identity_from_generation(
             &indexed_generation,

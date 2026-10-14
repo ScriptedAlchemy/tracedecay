@@ -88,7 +88,7 @@ fn lock_skill_store(profile_root: &Path) -> Result<FileLease> {
 
 async fn lock_skill_store_async(profile_root: &Path) -> Result<FileLease> {
     let profile_root = profile_root.to_path_buf();
-    tokio::task::spawn_blocking(move || lock_skill_store(&profile_root))
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || lock_skill_store(&profile_root))
         .await
         .map_err(|error| config_error(format!("managed skill lock task failed: {error}")))?
 }

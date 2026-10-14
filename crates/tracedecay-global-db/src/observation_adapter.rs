@@ -40,6 +40,7 @@ use tracedecay_store::{
     StoredObservationRowV1,
 };
 
+use tracedecay_runtime_core::db::engine::Error as EngineError;
 use tracedecay_runtime_core::db::{Database, DatabaseEngineReadSnapshot, DatabaseRuntimeClientV1};
 use tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeRegistryFailure;
 use tracedecay_rusqlite_runtime::repository::observation_cursor_authority::{
@@ -1050,10 +1051,7 @@ async fn load_observation_preflight(
     writes: &[AnchoredObservationWrite],
 ) -> ObservationStoreResult<ObservationPreflightSnapshot> {
     const OPERATION: &str = "load observation batch preflight";
-    let snapshot = database
-        .begin_engine_read_snapshot(OPERATION)
-        .await
-        .map_err(|error| runtime_storage_error(OPERATION, error))?;
+    let snapshot = begin_observation_read_snapshot(database, OPERATION).await?;
     let admission_refusals =
         read_admission_refusals_from_snapshot(&snapshot, writes, OPERATION).await?;
     let mut seen_observation_ids = HashSet::new();
@@ -1734,9 +1732,10 @@ impl ObservationStore for GlobalDbObservationStore {
             RuntimeSubmitOutcomeV1::IdempotencyConflict { .. } => {
                 self.restore_admitted_cursor_coverage(&replay).await
             }
-            other => Err(runtime_storage_error(
+            other => Err(rejected_submit_error(
                 "advance observation source cursor",
-                format!("runtime rejected cursor advance: {other:?}"),
+                "runtime rejected cursor advance",
+                &other,
             )),
         }
     }
@@ -1875,12 +1874,19 @@ fn dispatch_runtime_observation_read(
         work = "runtime_command",
         "dispatch observation runtime read"
     );
-    let outcome = runtime.dispatch_read(request, &probe).map_err(|error| {
-        runtime_storage_error(
-            "dispatch observation runtime read",
-            format!("runtime read failed: {error:?}"),
-        )
-    })?;
+    let outcome = runtime
+        .dispatch_read(request, &probe)
+        .map_err(|error| match error {
+            StoreRuntimeRegistryFailure::ReaderSaturated => {
+                ObservationStoreError::ReaderSaturated {
+                    operation: "dispatch observation runtime read",
+                }
+            }
+            error => runtime_storage_error(
+                "dispatch observation runtime read",
+                format!("runtime read failed: {error:?}"),
+            ),
+        })?;
     if !matches!(
         outcome.coverage(),
         RuntimeReadCoverageV1::Latest { .. } | RuntimeReadCoverageV1::Complete { .. }
@@ -2164,12 +2170,13 @@ async fn submit_observation_write_batch(
             | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. }
             | RuntimeSubmitOutcomeV1::ExactReplay { .. }
     ) {
-        return Err(runtime_storage_error(
+        return Err(rejected_submit_error(
             "submit anchored observation",
-            format!(
-                "runtime rejected {}-byte observation batch: {outcome:?}",
+            format_args!(
+                "runtime rejected {}-byte observation batch",
                 command_bytes.len()
             ),
+            &outcome,
         ));
     }
     const READBACK_OPERATION: &str = "read committed observation batch";
@@ -2178,10 +2185,7 @@ async fn submit_observation_write_batch(
         .chain(deferred_exact_duplicates.iter())
         .map(|(_, write)| write.observation().observation_id().clone())
         .collect::<Vec<_>>();
-    let snapshot = database
-        .begin_engine_read_snapshot(READBACK_OPERATION)
-        .await
-        .map_err(|error| runtime_storage_error(READBACK_OPERATION, error))?;
+    let snapshot = begin_observation_read_snapshot(database, READBACK_OPERATION).await?;
     let stored =
         read_stored_observations_from_snapshot(&snapshot, &observation_ids, READBACK_OPERATION)
             .await?;
@@ -2269,9 +2273,10 @@ fn persist_outcome_from_submit(
         RuntimeSubmitOutcomeV1::ExactReplay { .. } => {
             Ok(ObservationPersistOutcome::ExactDuplicate(receipt))
         }
-        other => Err(runtime_storage_error(
+        other => Err(rejected_submit_error(
             "submit anchored observation",
-            format!("runtime rejected observation write: {other:?}"),
+            "runtime rejected observation write",
+            &other,
         )),
     }
 }
@@ -2480,6 +2485,33 @@ fn runtime_digest_suffix(digest: &ManifestDigest) -> ObservationStoreResult<&str
     })
 }
 
+async fn begin_observation_read_snapshot(
+    database: &Database,
+    operation: &'static str,
+) -> ObservationStoreResult<DatabaseEngineReadSnapshot> {
+    database
+        .read_connection()
+        .read_snapshot()
+        .await
+        .map_err(|error| match error {
+            EngineError::ReaderSaturated => ObservationStoreError::ReaderSaturated { operation },
+            error => runtime_storage_error(operation, error),
+        })
+}
+
+fn rejected_submit_error(
+    operation: &'static str,
+    rejection: impl std::fmt::Display,
+    outcome: &RuntimeSubmitOutcomeV1,
+) -> ObservationStoreError {
+    match outcome {
+        RuntimeSubmitOutcomeV1::Saturated { .. } => {
+            ObservationStoreError::WriterSaturated { operation }
+        }
+        outcome => runtime_storage_error(operation, format!("{rejection}: {outcome:?}")),
+    }
+}
+
 fn runtime_storage_error(
     operation: &'static str,
     message: impl std::fmt::Display,
@@ -2558,4 +2590,55 @@ fn projection_runtime_error(
         "dispatch observation projection runtime operation",
         error,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use tracedecay_store::SaturationScopeV1;
+
+    use super::*;
+
+    #[test]
+    fn writer_saturation_is_backpressure_not_a_storage_failure() {
+        for scope in [
+            SaturationScopeV1::ShardOperations,
+            SaturationScopeV1::ShardBytes,
+        ] {
+            let error = rejected_submit_error(
+                "submit anchored observation",
+                "runtime rejected observation write",
+                &RuntimeSubmitOutcomeV1::Saturated {
+                    shard_id: None,
+                    scope,
+                    retry_after_ms: 25,
+                },
+            );
+            assert!(
+                matches!(
+                    error,
+                    ObservationStoreError::WriterSaturated {
+                        operation: "submit anchored observation"
+                    }
+                ),
+                "{scope:?}: {error:?}"
+            );
+        }
+        let error = rejected_submit_error(
+            "advance observation source cursor",
+            "runtime rejected cursor advance",
+            &RuntimeSubmitOutcomeV1::Unavailable {
+                reason: tracedecay_store::UnavailableReasonV1::MissingAuthority,
+            },
+        );
+        assert!(
+            matches!(
+                error,
+                ObservationStoreError::Storage {
+                    operation: "advance observation source cursor",
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
 }

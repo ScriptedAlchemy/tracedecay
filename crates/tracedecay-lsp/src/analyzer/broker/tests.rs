@@ -7,6 +7,10 @@ use crate::analyzer::adapters::DiagnosticMode;
 use crate::analyzer::client::LspSemanticRequestError;
 use crate::analyzer::error::AnalyzerRuntimeError as TraceDecayError;
 
+fn block<T>(future: impl Future<Output = T>) -> T {
+    tracedecay_runtime_core::native_runtime::block_on(future).expect("native runtime")
+}
+
 fn assert_safe_partial_detail(
     outcome: LspSemanticOperationOutcome,
     expected_coverage: &str,
@@ -139,7 +143,7 @@ fn absent_analyzer_keeps_an_admitted_graph_fallback_provider() {
     );
 
     assert_eq!(
-        broker.admitted_providers_for_files(&["src/lib.rs".to_owned()]),
+        block(broker.admitted_providers_for_files(&["src/lib.rs".to_owned()])),
         vec![AdmittedLspProvider {
             language: "rust".to_owned(),
             command: missing.to_string_lossy().into_owned(),
@@ -147,8 +151,8 @@ fn absent_analyzer_keeps_an_admitted_graph_fallback_provider() {
         }]
     );
     assert!(
-        broker
-            .semantic_authority_if_available(
+        block(
+            broker.semantic_authority_if_available(
                 "rust",
                 project.path().to_path_buf(),
                 url::Url::from_directory_path(project.path())
@@ -158,13 +162,12 @@ fn absent_analyzer_keeps_an_admitted_graph_fallback_provider() {
                     std::time::Duration::from_millis(10),
                 ),
             )
-            .expect("configured adapter")
-            .is_none()
+        )
+        .expect("configured adapter")
+        .is_none()
     );
     assert_eq!(
-        broker
-            .mounted_providers_for_files(&["src/lib.rs".to_owned()])
-            .len(),
+        block(broker.mounted_providers_for_files(&["src/lib.rs".to_owned()])).len(),
         0
     );
 }
@@ -217,7 +220,7 @@ mod rustup_proxy {
         let files = vec!["src/lib.rs".to_owned()];
 
         assert_eq!(
-            broker.admitted_providers_for_files(&files),
+            block(broker.admitted_providers_for_files(&files)),
             vec![AdmittedLspProvider {
                 language: "rust".to_owned(),
                 command: command.to_string_lossy().into_owned(),
@@ -225,8 +228,7 @@ mod rustup_proxy {
             }]
         );
 
-        let error = broker
-            .prepare_refresh("rust", vec![rust_document()])
+        let error = block(broker.prepare_refresh("rust", vec![rust_document()]))
             .err()
             .expect("a missing component must refuse the refresh");
         let TraceDecayError::Config { message } = &error else {
@@ -249,8 +251,8 @@ mod rustup_proxy {
         assert!(!last_error.contains("stderr"));
 
         assert!(
-            broker
-                .semantic_authority_if_available(
+            block(
+                broker.semantic_authority_if_available(
                     "rust",
                     project.path().to_path_buf(),
                     url::Url::from_directory_path(project.path())
@@ -260,8 +262,9 @@ mod rustup_proxy {
                         std::time::Duration::from_millis(10),
                     ),
                 )
-                .expect("configured adapter")
-                .is_none()
+            )
+            .expect("configured adapter")
+            .is_none()
         );
 
         let invocations = fake_rustup::invocations(rustup.path());
@@ -310,7 +313,7 @@ mod rustup_proxy {
             "before any probe the proxy on PATH reads as available"
         );
 
-        let admitted = broker.admitted_providers_for_files(&["src/lib.rs".to_owned()]);
+        let admitted = block(broker.admitted_providers_for_files(&["src/lib.rs".to_owned()]));
 
         assert_eq!(
             admitted,
@@ -363,13 +366,11 @@ mod rustup_proxy {
         );
 
         assert!(
-            broker
-                .admitted_providers_for_files(&["src/lib.rs".to_owned()])
+            block(broker.admitted_providers_for_files(&["src/lib.rs".to_owned()]))
                 .iter()
                 .all(|provider| provider.analyzer_available)
         );
-        let prepared = broker
-            .prepare_refresh("rust", vec![rust_document()])
+        let prepared = block(broker.prepare_refresh("rust", vec![rust_document()]))
             .expect("installed component prepares")
             .expect("active language prepares");
         let launches = prepared.batch_launches();
@@ -435,8 +436,7 @@ mod rustup_proxy {
         let canonical_root = project.path().canonicalize().expect("canonical project");
         let canonical_member = member.canonicalize().expect("canonical member");
 
-        let prepared = broker
-            .prepare_refresh("rust", documents())
+        let prepared = block(broker.prepare_refresh("rust", documents()))
             .expect("both toolchains have the component")
             .expect("active language prepares");
 
@@ -471,8 +471,7 @@ mod rustup_proxy {
         assert_eq!(probes(&invocations), 2, "one probe per root: {invocations}");
         drop(prepared);
 
-        broker
-            .prepare_refresh("rust", documents())
+        block(broker.prepare_refresh("rust", documents()))
             .expect("retained launches prepare")
             .expect("active language prepares");
         assert_eq!(
@@ -500,7 +499,7 @@ mod rustup_proxy {
             )],
         );
         let files = vec!["src/lib.rs".to_owned()];
-        broker.admitted_providers_for_files(&files);
+        block(broker.admitted_providers_for_files(&files));
         let refused = broker.snapshot().engines.remove(0);
         assert_eq!(refused.state, EngineState::Unavailable);
         assert!(refused.last_error.is_some());
@@ -516,7 +515,7 @@ mod rustup_proxy {
         )
         .expect("swap in the fake with the component installed");
 
-        let admitted = broker.admitted_providers_for_files(&files);
+        let admitted = block(broker.admitted_providers_for_files(&files));
 
         assert!(admitted.iter().all(|provider| provider.analyzer_available));
         let engine = broker.snapshot().engines.remove(0);
@@ -545,7 +544,7 @@ mod rustup_proxy {
             )],
         );
         let files = vec!["src/lib.rs".to_owned()];
-        broker.admitted_providers_for_files(&files);
+        block(broker.admitted_providers_for_files(&files));
         broker
             .engine_errors
             .insert("rust".to_owned(), "analyzer crashed".to_owned());
@@ -562,7 +561,7 @@ mod rustup_proxy {
         )
         .expect("swap in the fake with the component installed");
 
-        broker.admitted_providers_for_files(&files);
+        block(broker.admitted_providers_for_files(&files));
 
         let engine = broker.snapshot().engines.remove(0);
         assert_eq!(engine.state, EngineState::Crashed);
@@ -590,7 +589,7 @@ mod rustup_proxy {
             )],
         );
 
-        broker.admitted_providers_for_files(&["src/lib.rs".to_owned()]);
+        block(broker.admitted_providers_for_files(&["src/lib.rs".to_owned()]));
 
         let engine = broker.snapshot().engines.remove(0);
         assert_eq!(engine.state, EngineState::Unavailable);
@@ -624,10 +623,9 @@ mod rustup_proxy {
             )],
         );
 
-        let admitted = broker.admitted_providers_for_files(&["src/lib.rs".to_owned()]);
+        let admitted = block(broker.admitted_providers_for_files(&["src/lib.rs".to_owned()]));
         assert!(admitted.iter().all(|provider| !provider.analyzer_available));
-        let error = broker
-            .prepare_refresh("rust", vec![rust_document()])
+        let error = block(broker.prepare_refresh("rust", vec![rust_document()]))
             .err()
             .expect("an old rustup must refuse the refresh");
         let TraceDecayError::Config { message } = &error else {
@@ -664,7 +662,7 @@ mod rustup_proxy {
             )],
         );
 
-        broker.admitted_providers_for_files(&["src/lib.rs".to_owned()]);
+        block(broker.admitted_providers_for_files(&["src/lib.rs".to_owned()]));
 
         let engine = broker.snapshot().engines.remove(0);
         assert_eq!(engine.state, EngineState::Unavailable);
@@ -700,6 +698,7 @@ mod rustup_proxy {
 
         let prepared = broker
             .prepare_refresh("rust", vec![rust_document()])
+            .await
             .expect("installed component prepares")
             .expect("active language prepares");
         assert!(broker.launches.contains_key(&key), "the launch is retained");
@@ -721,6 +720,7 @@ mod rustup_proxy {
         std::fs::write(&real_binary, "").expect("the binary returns");
         broker
             .prepare_refresh("rust", vec![rust_document()])
+            .await
             .expect("the re-probed launch prepares")
             .expect("active language prepares");
         assert_eq!(
@@ -749,7 +749,7 @@ fn refresh_rejects_a_removed_project_root_after_one_canonicalization() {
     std::fs::remove_dir(&project).expect("remove project directory");
     reset_project_root_canonicalization_count();
 
-    let Err(error) = broker.prepare_refresh(
+    let Err(error) = block(broker.prepare_refresh(
         "rust",
         vec![LspDocument {
             language: "rust".to_owned(),
@@ -757,7 +757,7 @@ fn refresh_rejects_a_removed_project_root_after_one_canonicalization() {
             relative_path: "src/lib.rs".to_owned(),
             text: "fn removed_root() {}".to_owned(),
         }],
-    ) else {
+    )) else {
         panic!("removed project root must fail closed");
     };
 
@@ -792,7 +792,7 @@ fn refresh_rejects_root_batch_queue_saturation_before_starting_analyzers() {
         vec![adapter("rust", command.to_string_lossy(), "rs", "marker")],
     );
 
-    let Err(error) = broker.prepare_refresh("rust", documents) else {
+    let Err(error) = block(broker.prepare_refresh("rust", documents)) else {
         panic!("queue saturation must reject before analyzer startup");
     };
 

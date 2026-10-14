@@ -201,6 +201,8 @@ impl HostAdmissionTestRuntimeV1 {
                 .project_memory(project_id.clone(), [project_root.to_path_buf()])
                 .await?;
             let graph_proxy = verified_graph_test_support::await_bound_graph_runtime(
+                &self.session_registry,
+                &project_id,
                 &project_database,
                 "bind sibling test runtime project graph",
             )
@@ -305,6 +307,8 @@ impl HostAdmissionTestRuntimeV1 {
                     .project_memory(project_id.clone(), [project_root])
                     .await?;
                 let graph_proxy = verified_graph_test_support::await_bound_graph_runtime(
+                    &session_registry,
+                    &project_id,
                     &project_database,
                     "bind test runtime project graph",
                 )

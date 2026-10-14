@@ -586,7 +586,9 @@ where
                 page,
                 &state.lcm_scope,
                 &state.token_counts,
-            ) {
+            )
+            .await
+            {
                 Ok(payload) => {
                     if let Some((eligible, examined, true)) = timeline_coverage {
                         Json(DashboardEnvelopeV1::partial(
@@ -616,7 +618,9 @@ where
                 page,
                 &state.lcm_scope,
                 &state.token_counts,
-            ) {
+            )
+            .await
+            {
                 Ok(payload) => Json(DashboardEnvelopeV1::partial(
                     scope,
                     eligible,

@@ -120,7 +120,11 @@ async fn invoke_configuration_surface(
             let remaining_micros = u64::try_from(remaining_micros)
                 .map_err(|_| config_error("configuration deadline elapsed"))?;
             if delay <= std::time::Duration::from_micros(remaining_micros) {
-                tokio::time::sleep(delay).await;
+                tracedecay_runtime_core::native_runtime::sleep_until(
+                    std::time::Instant::now() + delay,
+                )
+                .await
+                .map_err(config_error)?;
                 continue;
             }
         }

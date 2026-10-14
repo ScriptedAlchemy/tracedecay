@@ -881,7 +881,6 @@ async fn mount_owner(
             repository_root.to_path_buf(),
             source_access(project_id),
             fixture_time(ordinal),
-            tokio::runtime::Handle::current(),
         )
         .await
 }

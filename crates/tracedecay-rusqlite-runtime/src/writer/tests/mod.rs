@@ -25,11 +25,10 @@ use super::*;
 use crate::{
     StorageOperationExecutor,
     checkpoint::{
-        CheckpointBlockers, CheckpointDecision, CheckpointInterruption, CheckpointKind,
-        CheckpointMode, CheckpointOutcome, CheckpointPressure, CheckpointReport, CheckpointResult,
-        MaintenanceCheckpointMode, WalPressure, WalSample,
+        CheckpointBlockers, CheckpointDecision, CheckpointInterruption, CheckpointMode,
+        CheckpointOutcome, CheckpointPressure, CheckpointReport, CheckpointResult, WalPressure,
+        WalSample,
     },
-    maintenance::{ExclusiveMaintenancePermit, MaintenanceOwnerId},
     persistence::RuntimeWriterPersistence,
     test_support::{binding, metadata, request, scope},
 };
