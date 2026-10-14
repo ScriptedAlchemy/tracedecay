@@ -67,7 +67,7 @@ lang-lean = ["tracedecay-code-extraction/lang-lean"]
 [dependencies]
 ast-grep-core = "0.50"
 flate2 = "1"
-base64 = "0.22"
+base64 = "0.23"
 hex = "0.4"
 ignore = "0.4"
 rayon = "1"

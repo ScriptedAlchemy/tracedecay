@@ -19,7 +19,7 @@ test-helpers = [
 
 [dependencies]
 asupersync.workspace = true
-base64 = "0.22"
+base64 = "0.23"
 futures-util = "0.3.33"
 getrandom = "0.2"
 hex = "0.4"

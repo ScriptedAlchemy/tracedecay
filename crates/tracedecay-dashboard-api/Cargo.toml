@@ -9,7 +9,7 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [dependencies]
 axum = "0.8"
-base64 = "0.22"
+base64 = "0.23"
 clru = "0.6"
 futures-util = "0.3.33"
 getrandom = "0.2"

@@ -6210,7 +6210,7 @@ name = "tracedecay-code-index"
 version = "0.1.0"
 dependencies = [
  "ast-grep-core",
- "base64 0.22.1",
+ "base64 0.23.1",
  "criterion",
  "flate2",
  "hex",
@@ -6456,7 +6456,7 @@ name = "tracedecay-dashboard-api"
 version = "0.1.0"
 dependencies = [
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "clru",
  "futures-util",
  "getrandom 0.2.17",
@@ -6521,7 +6521,7 @@ name = "tracedecay-global-db"
 version = "0.1.0"
 dependencies = [
  "asupersync",
- "base64 0.22.1",
+ "base64 0.23.1",
  "criterion",
  "futures-util",
  "getrandom 0.2.17",
@@ -6554,7 +6554,7 @@ dependencies = [
 name = "tracedecay-graph-db"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "criterion",
  "grafeo-adapters",
  "grafeo-common",
@@ -7127,7 +7127,7 @@ name = "tracedecay-sessions"
 version = "0.1.0"
 dependencies = [
  "asupersync",
- "base64 0.22.1",
+ "base64 0.23.1",
  "criterion",
  "filetime",
  "futures-util",
@@ -7252,7 +7252,7 @@ dependencies = [
 name = "tracedecay-tokenizer"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "flate2",
  "rustc-hash 2.1.3",
  "thiserror",
