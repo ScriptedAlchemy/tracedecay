@@ -924,7 +924,7 @@ impl CodeIndexSchedulerRegistryV1 {
     pub async fn latest_complete_fresh_for_scope_awaiting_seat(
         &self,
         scope: &tracedecay_contracts::ResolvedScope,
-        deadline: tokio::time::Instant,
+        deadline: std::time::Instant,
     ) -> Option<LatestCompleteCodeIndexV1> {
         let root = {
             let mounted = self.mounted.lock().await;

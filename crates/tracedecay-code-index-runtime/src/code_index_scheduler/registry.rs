@@ -47,6 +47,7 @@ use super::{
     LatestCompleteCodeIndexV1, PendingHintsV1, ServingReadLeaseV1, SharedCodeIndexBytePoolV1,
     newly_eligible_percentile, now_micros,
 };
+use tracedecay_runtime_core::native_runtime;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 #[cfg(test)]
@@ -3646,14 +3647,14 @@ impl CodeIndexSchedulerRegistryV1 {
             worktree.wake.notify_one();
             retiring.insert(root, worktree);
         }
-        let deadline = tokio::time::Instant::now() + timeout;
+        let deadline = std::time::Instant::now() + timeout;
         let mut drained = true;
         // A cold owner needs `retiring` for its final cancellation fence before
         // it can drop the reservation that this wait observes. The retired
         // reservation itself blocks remounts while this guard is released.
         drop(retiring);
         for (root, mut completion) in cold_mount_waiting {
-            match tokio::time::timeout_at(deadline, completion.changed()).await {
+            match native_runtime::timeout_at(deadline, completion.changed()).await {
                 Ok(_) => {
                     completed_cold_mounts.insert(root);
                 }
@@ -3668,7 +3669,7 @@ impl CodeIndexSchedulerRegistryV1 {
             let Some(worktree) = retiring.get_mut(root) else {
                 continue;
             };
-            match tokio::time::timeout_at(deadline, &mut worktree.task).await {
+            match native_runtime::timeout_at(deadline, &mut worktree.task).await {
                 Ok(_) => {
                     joined.insert(root.clone());
                 }

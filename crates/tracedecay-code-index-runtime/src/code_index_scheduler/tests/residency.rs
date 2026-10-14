@@ -965,7 +965,7 @@ async fn a_complete_read_serves_the_seat_its_demand_lands_after_its_miss() {
             registry
                 .latest_complete_fresh_for_scope_awaiting_seat(
                     &scope,
-                    tokio::time::Instant::now() + SERVING_SEAT_FAILURE_CEILING,
+                    std::time::Instant::now() + SERVING_SEAT_FAILURE_CEILING,
                 )
                 .await
         }

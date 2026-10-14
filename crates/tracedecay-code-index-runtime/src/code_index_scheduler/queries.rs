@@ -333,12 +333,9 @@ impl CodeIndexSchedulerRegistryV1 {
                 // longer held, so no later retry can serve it either.
                 .ok_or(CallableCodeCursorError::Stale)
             } else if is_unpinned_latest(requested) {
-                self.latest_complete_fresh_for_scope_awaiting_seat(
-                    request.scope(),
-                    tokio::time::Instant::from_std(deadline),
-                )
-                .await
-                .ok_or(CallableCodeCursorError::Unavailable)
+                self.latest_complete_fresh_for_scope_awaiting_seat(request.scope(), deadline)
+                    .await
+                    .ok_or(CallableCodeCursorError::Unavailable)
             } else {
                 self.generation_for(request.scope(), requested)
                     .await
@@ -473,12 +470,9 @@ impl CodeIndexSchedulerRegistryV1 {
                 .map_err(|_| CallableCodeCursorError::Unavailable)?
                 .ok_or(CallableCodeCursorError::Stale)
             } else if is_unpinned_latest(requested) {
-                self.current_text_owner_for_scope(
-                    request.scope(),
-                    tokio::time::Instant::from_std(deadline),
-                )
-                .await
-                .ok_or(CallableCodeCursorError::Unavailable)
+                self.current_text_owner_for_scope(request.scope(), deadline)
+                    .await
+                    .ok_or(CallableCodeCursorError::Unavailable)
             } else if let Some(latest) = self
                 .retained_text_owner_freshness_for_scope(request.scope())
                 .await

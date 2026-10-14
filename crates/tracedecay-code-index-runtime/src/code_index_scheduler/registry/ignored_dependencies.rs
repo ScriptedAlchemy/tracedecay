@@ -398,7 +398,7 @@ impl CodeIndexSchedulerRegistryV1 {
         project_root: &Path,
         request: CodeIndexIgnoredDependencyRequestV1,
         control: Arc<dyn CodeIndexExecutionControlV1 + Send + Sync + '_>,
-        deadline: tokio::time::Instant,
+        deadline: std::time::Instant,
     ) -> Result<CodeIndexIgnoredDependencyIndexOutcomeV1, CodeIndexSchedulerErrorV1> {
         let project_root = canonical_existing_identity(project_root)?;
         let flight_key = AdmissionFlightKeyV1::for_request(&request)?;
@@ -498,7 +498,7 @@ impl CodeIndexSchedulerRegistryV1 {
         &self,
         project_root: &Path,
         control: &(dyn CodeIndexExecutionControlV1 + Send + Sync),
-        deadline: tokio::time::Instant,
+        deadline: std::time::Instant,
     ) -> Result<(), CodeIndexSchedulerErrorV1> {
         let demanded = &AtomicBool::new(false);
         let Ok(waited) = self
@@ -651,7 +651,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         format!("ignored-dependency indexing task failed: {error}"),
                     ))??;
                 }
-                () = tokio::time::sleep(Duration::from_millis(5)) => {}
+                () = control_poll() => {}
             }
         };
         // `build_and_publish` has now atomically advanced the durable active
@@ -864,7 +864,7 @@ async fn await_flight(
         refuse_if_interrupted(control, &active_route)?;
         tokio::select! {
             () = flight.completed.notified() => {}
-            () = tokio::time::sleep(Duration::from_millis(5)) => {}
+            () = control_poll() => {}
         }
     }
 }
@@ -904,7 +904,7 @@ async fn await_catalog_warm(
     loop {
         tokio::select! {
             () = &mut settled => return,
-            () = tokio::time::sleep(Duration::from_millis(5)) => {
+            () = control_poll() => {
                 if refuse_if_interrupted(control, shutting_down).is_err() {
                     return;
                 }
@@ -922,7 +922,7 @@ async fn acquire_publication_gate<'a>(
     loop {
         tokio::select! {
             guard = &mut lock => return Ok(guard),
-            () = tokio::time::sleep(Duration::from_millis(5)) => {
+            () = control_poll() => {
                 refuse_if_interrupted(control, shutting_down)?;
             }
         }
@@ -941,11 +941,19 @@ async fn acquire_daemon_admission(
                 return permit
                     .map_err(|_| CodeIndexIgnoredDependencyRefusalV1::Cancelled.into());
             }
-            () = tokio::time::sleep(Duration::from_millis(5)) => {
+            () = control_poll() => {
                 refuse_if_interrupted(control, shutting_down)?;
             }
         }
     }
+}
+
+/// The request control is a synchronous predicate with no wake, so every
+/// wait in an admission re-checks it on this period. Each tick is a direct
+/// Asupersync sleep rather than `native_runtime::sleep_until`, which spawns a
+/// native timer task per call.
+fn control_poll() -> asupersync::time::Sleep {
+    asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_millis(5))
 }
 
 fn refuse_if_interrupted(
@@ -990,5 +998,83 @@ mod flight_recovery_tests {
         flight.owner_abandoned();
         flight.publication_committed();
         assert_eq!(epoch.load(Ordering::Acquire), 1);
+    }
+}
+
+#[cfg(test)]
+mod interruption_poll_tests {
+    use super::*;
+    use tracedecay_runtime_core::native_runtime;
+
+    /// The gate wait reaches the control only through its poll, so this
+    /// control acts on its first check: it releases `held`, then answers
+    /// `cancel`.
+    struct OnFirstCheck {
+        held: Mutex<Option<tokio::sync::OwnedMutexGuard<()>>>,
+        cancel: bool,
+    }
+
+    impl CodeIndexExecutionControlV1 for OnFirstCheck {
+        fn is_cancelled(&self) -> bool {
+            drop(
+                self.held
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take(),
+            );
+            self.cancel
+        }
+
+        fn is_deadline_exceeded(&self) -> bool {
+            false
+        }
+    }
+
+    async fn gate_wait_polls_its_control() {
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let shutting_down = AtomicBool::new(false);
+
+        let releasing = OnFirstCheck {
+            held: Mutex::new(Some(Arc::clone(&gate).lock_owned().await)),
+            cancel: false,
+        };
+        drop(
+            acquire_publication_gate(&gate, &releasing, &shutting_down)
+                .await
+                .expect("the gate released at the first poll is taken"),
+        );
+
+        let _held = Arc::clone(&gate).lock_owned().await;
+        let cancelling = OnFirstCheck {
+            held: Mutex::new(None),
+            cancel: true,
+        };
+        let refused = acquire_publication_gate(&gate, &cancelling, &shutting_down).await;
+        assert!(
+            matches!(
+                refused,
+                Err(CodeIndexSchedulerErrorV1::IgnoredDependency(
+                    CodeIndexIgnoredDependencyRefusalV1::Cancelled
+                ))
+            ),
+            "a request cancelled while the gate is held is refused"
+        );
+    }
+
+    #[test]
+    fn a_gate_wait_off_tokio_polls_its_control() {
+        native_runtime::block_on(native_runtime::timeout(
+            Duration::from_secs(30),
+            gate_wait_polls_its_control(),
+        ))
+        .expect("process runtime")
+        .expect("the gate wait settles within its bound");
+    }
+
+    #[tokio::test]
+    async fn a_gate_wait_on_tokio_polls_its_control() {
+        native_runtime::timeout(Duration::from_secs(30), gate_wait_polls_its_control())
+            .await
+            .expect("the gate wait settles within its bound");
     }
 }
