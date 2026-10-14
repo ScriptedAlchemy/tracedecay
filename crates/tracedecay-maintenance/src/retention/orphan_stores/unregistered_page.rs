@@ -1,7 +1,9 @@
 //! Bounded, resumable census and collection of unregistered project leaves.
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
@@ -96,7 +98,16 @@ pub async fn sweep_unregistered_store_page(
     {
         return Ok(interrupted_report(completion, CollectionOutcome::default()));
     }
-    let census = census_unregistered_project_dirs_page(
+    let census_page: Pin<
+        Box<
+            dyn Future<
+                    Output = tracedecay_domain::errors::Result<
+                        Option<(Vec<UnregisteredStoreFinding>, Option<String>)>,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > = Box::pin(census_unregistered_project_dirs_page(
         db,
         profile_root,
         request.cursor.as_deref(),
@@ -104,8 +115,8 @@ pub async fn sweep_unregistered_store_page(
         request.now,
         request.cancellation,
         request.deadline,
-    )
-    .await?;
+    ));
+    let census = census_page.await?;
     let Some((findings, next_cursor)) = census else {
         return Ok(interrupted_report(
             UnregisteredSweepCompletionV1::interrupted(request.cancellation, request.deadline)
@@ -134,13 +145,15 @@ pub async fn sweep_unregistered_store_page(
             completion,
         });
     }
-    let outcome = execute_unregistered_collection_controlled(
+    let collected: Pin<
+        Box<dyn Future<Output = tracedecay_domain::errors::Result<CollectionOutcome>> + Send + '_>,
+    > = Box::pin(execute_unregistered_collection_controlled(
         db,
         &plan,
         profile_root,
         CollectionControl::new(request.cancellation, request.deadline),
-    )
-    .await?;
+    ));
+    let outcome = collected.await?;
     let completion = match outcome.completion {
         CollectionCompletionV1::Complete => UnregisteredSweepCompletionV1::Complete,
         CollectionCompletionV1::Cancelled => UnregisteredSweepCompletionV1::Cancelled,

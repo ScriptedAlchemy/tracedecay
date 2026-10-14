@@ -393,12 +393,14 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
                     Ok(binding) => binding,
                     Err(outcome) => return describe_binding_outcome(*outcome),
                 };
+            let described: Pin<Box<dyn Future<Output = LcmDescribeServiceOutcome> + Send + '_>> =
+                Box::pin(self.execute_lcm_describe_admitted(context, &binding, command));
             tokio::select! {
                 biased;
                 () = cancellation.cancelled() => {
                     LcmDescribeServiceOutcome::Cancelled
                 }
-                outcome = self.execute_lcm_describe_admitted(context, &binding, command) => outcome,
+                outcome = described => outcome,
             }
         })
     }
@@ -421,12 +423,14 @@ impl SessionApplicationRetrievalPortV1 for DaemonSessionRetrievalService {
                     Ok(binding) => binding,
                     Err(outcome) => return expand_binding_outcome(*outcome),
                 };
+            let expanded: Pin<Box<dyn Future<Output = LcmExpandServiceOutcome> + Send + '_>> =
+                Box::pin(self.execute_lcm_expand_admitted(context, &binding, command));
             tokio::select! {
                 biased;
                 () = cancellation.cancelled() => {
                     LcmExpandServiceOutcome::Cancelled
                 }
-                outcome = self.execute_lcm_expand_admitted(context, &binding, command) => outcome,
+                outcome = expanded => outcome,
             }
         })
     }

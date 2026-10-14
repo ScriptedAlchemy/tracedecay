@@ -24,7 +24,9 @@
 //! explicit init at the renamed path mints a fresh identity instead of
 //! offering the old one.
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 
 use tracedecay_daemon_protocol::MovedStoreAdoption;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -84,7 +86,13 @@ pub async fn adopt_moved_nongit_project(
         return refuse_if_adoption_conflicts(adoption, &existing.project.project_id, &new_root);
     }
 
-    let candidates = discover_moved_nongit_candidates(&new_root, profile_root, registry).await?;
+    let discovered: Pin<Box<dyn Future<Output = Result<Vec<MovedNongitCandidate>>> + Send + '_>> =
+        Box::pin(discover_moved_nongit_candidates(
+            &new_root,
+            profile_root,
+            registry,
+        ));
+    let candidates = discovered.await?;
     let resuming = candidates
         .iter()
         .filter(|candidate| candidate.records_new_root)
@@ -152,7 +160,10 @@ pub async fn adopt_moved_nongit_project(
         }
     };
 
-    remap_moved_nongit_project(&new_root, profile_root, registry, selected).await
+    let remapped: Pin<Box<dyn Future<Output = Result<Option<StoreLayout>>> + Send + '_>> = Box::pin(
+        remap_moved_nongit_project(&new_root, profile_root, registry, selected),
+    );
+    remapped.await
 }
 
 fn candidate_ids(candidates: &[MovedNongitCandidate]) -> String {

@@ -1,5 +1,8 @@
 //! Work and workflow application daemon invocation handlers.
 
+use std::future::Future;
+use std::pin::Pin;
+
 use super::*;
 
 mod attempt_operations;
@@ -108,18 +111,19 @@ pub async fn execute_work_application(
         let activity_database = registered.database.clone();
         let activity_root = project_root.clone();
         let mutates = work_invocation_mutates(&request);
-        let response = request_dispatch::dispatch_work_application(
-            registered,
-            attempt_processes,
-            observability_producer,
-            project_root,
-            request_id,
-            request,
-            observed_at,
-            deadline,
-            cancellation,
-        )
-        .await;
+        let dispatched: Pin<Box<dyn Future<Output = DaemonInvocationResponse> + Send>> =
+            Box::pin(request_dispatch::dispatch_work_application(
+                registered,
+                attempt_processes,
+                observability_producer,
+                project_root,
+                request_id,
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            ));
+        let response = dispatched.await;
         if mutates
             && matches!(
                 response.outcome,

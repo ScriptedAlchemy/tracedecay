@@ -7,6 +7,7 @@ use tracedecay_domain::{
     TemporalCoverageCountsV1, TemporalModeV1, UtcMicros,
 };
 use tracedecay_runtime_core::db::engine::{Row, params};
+use tracedecay_runtime_core::erase_send;
 use tracedecay_store::{
     SessionFrozenWatermarksV1, SessionRefreshBeginOrJoinReceiptV1,
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshCancellationRequestV1,
@@ -1085,11 +1086,19 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         &self,
         request: SessionRefreshProgressRequestV1,
     ) -> SessionStoreResult<Option<SessionRefreshProgressV1>> {
-        let snapshot = self
-            .read_snapshot()
-            .await
-            .map_err(|error| storage(READ_REFRESH, error))?;
-        read_progress(&snapshot, request.session_id(), request.operation_id()).await
+        let opened = erase_send!(
+            self.read_snapshot(),
+            Result<
+                tracedecay_runtime_core::db::DatabaseEngineReadSnapshot,
+                tracedecay_domain::TraceDecayError,
+            >
+        );
+        let snapshot = opened.await.map_err(|error| storage(READ_REFRESH, error))?;
+        erase_send!(
+            read_progress(&snapshot, request.session_id(), request.operation_id()),
+            SessionStoreResult<Option<SessionRefreshProgressV1>>
+        )
+        .await
     }
 
     #[tracing::instrument(
@@ -1526,11 +1535,19 @@ impl<D: SessionTemporalRegisteredDb + Sync> SessionTemporalAccess<'_, D> {
         &self,
         request: SessionRefreshReceiptRequestV1,
     ) -> SessionStoreResult<Option<SessionRefreshReceiptV1>> {
-        let snapshot = self
-            .read_snapshot()
-            .await
-            .map_err(|error| storage(READ_REFRESH, error))?;
-        read_receipt(&snapshot, request.session_id(), request.operation_id()).await
+        let opened = erase_send!(
+            self.read_snapshot(),
+            Result<
+                tracedecay_runtime_core::db::DatabaseEngineReadSnapshot,
+                tracedecay_domain::TraceDecayError,
+            >
+        );
+        let snapshot = opened.await.map_err(|error| storage(READ_REFRESH, error))?;
+        erase_send!(
+            read_receipt(&snapshot, request.session_id(), request.operation_id()),
+            SessionStoreResult<Option<SessionRefreshReceiptV1>>
+        )
+        .await
     }
 
     #[tracing::instrument(

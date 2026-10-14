@@ -8,6 +8,9 @@
 //! channel receivers, which wake through ordinary `Waker`s, so a foreign
 //! executor never blocks on the native runtime.
 
+use std::any::Any;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -68,18 +71,49 @@ where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
+    let value = drive_blocking(Box::new(move || Box::new(work()))).await?;
+    value
+        .downcast::<T>()
+        .map(|value| *value)
+        .map_err(|_| "native blocking work returned an unexpected type".to_owned())
+}
+
+struct AdmittedBlocking {
+    cx: Cx,
+    receiver: asupersync::channel::oneshot::Receiver<Box<dyn Any + Send>>,
+}
+
+/// Admits `work` on the blocking pool before any future is built.
+///
+/// [`RuntimeHandle`] is self-referential through `BrowserWorkerPump::self_weak`.
+/// A future that captures it makes every `Send` proof overflow
+/// (rust-lang/rust#159228). The handle is used only to admit the closure;
+/// the returned wait holds the context and the oneshot, not the handle.
+fn admit_blocking(
+    work: Box<dyn FnOnce() -> Box<dyn Any + Send> + Send>,
+) -> Result<AdmittedBlocking, String> {
     let runtime = handle().ok_or("native execution runtime unavailable")?;
     let cx = cx().ok_or("native execution context unavailable")?;
-    let (sender, mut receiver) = asupersync::channel::oneshot::channel();
+    let (sender, receiver) = asupersync::channel::oneshot::channel();
     runtime
         .spawn_blocking(move || {
             let _ = sender.send_blocking(work());
         })
         .ok_or("native blocking pool unavailable")?;
-    receiver
-        .recv(&cx)
-        .await
-        .map_err(|error| format!("native blocking work ended without a result: {error}"))
+    Ok(AdmittedBlocking { cx, receiver })
+}
+
+fn drive_blocking(
+    work: Box<dyn FnOnce() -> Box<dyn Any + Send> + Send>,
+) -> Pin<Box<dyn Future<Output = Result<Box<dyn Any + Send>, String>> + Send>> {
+    let admitted = admit_blocking(work);
+    Box::pin(async move {
+        let AdmittedBlocking { cx, mut receiver } = admitted?;
+        receiver
+            .recv(&cx)
+            .await
+            .map_err(|error| format!("native blocking work ended without a result: {error}"))
+    })
 }
 
 /// Completes at `deadline` on a native timer task, so a foreign executor never

@@ -671,23 +671,41 @@ impl DaemonSessionRuntimeRegistryV1 {
         runtime: StoreRuntimeClientLease,
     ) -> Pin<Box<dyn Future<Output = Result<RegisteredGlobalDbOwnerV1>> + Send + '_>> {
         Box::pin(async move {
-            let database =
-                Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?;
+            let published: Pin<
+                Box<
+                    dyn Future<Output = Result<tracedecay_runtime_core::db::DatabaseOwnerV1>>
+                        + Send,
+                >,
+            > = Box::pin(Database::publish_runtime(
+                runtime,
+                DatabaseAccessMode::ReadWrite,
+            ));
+            let database = published.await?;
             // Only long-lived daemons defer schema convergence to resumable
             // maintenance. A store refused for reset is never converged: its
             // reset deletes it.
             let long_lived = self.long_lived_session_maintenance;
             let (database, convergence) = if long_lived {
-                RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(
+                let admitted: Pin<
+                    Box<
+                        dyn Future<
+                                Output = Result<(
+                                    RegisteredGlobalDbOwnerV1,
+                                    Option<RegisteredSchemaConvergence>,
+                                )>,
+                            > + Send
+                            + '_,
+                    >,
+                > = Box::pin(RegisteredGlobalDbOwnerV1::admit_and_attach_for_daemon(
                     database,
                     self.registry.open_cancellation(),
-                )
-                .await?
+                ));
+                admitted.await?
             } else {
-                (
-                    RegisteredGlobalDbOwnerV1::admit_and_attach(database).await?,
-                    None,
-                )
+                let admitted: Pin<
+                    Box<dyn Future<Output = Result<RegisteredGlobalDbOwnerV1>> + Send>,
+                > = Box::pin(RegisteredGlobalDbOwnerV1::admit_and_attach(database));
+                (admitted.await?, None)
             };
             if convergence.is_some() {
                 let lease = database.issue_lease().map_err(|error| {

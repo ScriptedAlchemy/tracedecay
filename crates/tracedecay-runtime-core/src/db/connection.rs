@@ -63,6 +63,18 @@ pub struct Database {
     client: Arc<DatabaseClientLeaseV1>,
 }
 
+// A combined `Send` proof of this client walks the registry attachment past
+// the recursion limit (rust-lang/rust#159228). Each field is checked alone.
+unsafe impl Send for Database {}
+unsafe impl Sync for Database {}
+
+const _: fn(&Database) = |value| {
+    fn assert_send_sync<T: Send + Sync>(_: &T) {}
+    let Database { inner, client } = value;
+    assert_send_sync(inner);
+    assert_send_sync(client);
+};
+
 #[derive(Clone)]
 pub struct WeakDatabase {
     inner: Weak<DatabaseInner>,

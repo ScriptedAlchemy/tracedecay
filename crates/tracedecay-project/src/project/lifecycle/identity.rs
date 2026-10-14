@@ -1,7 +1,9 @@
 //! Store-layout identity resolution: mapping a project root to its
 //! authoritative store layout.
 
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 
 use tracedecay_domain::errors::{ProjectOpenFailureKind, Result, TraceDecayError};
 use tracedecay_global_db::RegisteredGlobalDb;
@@ -145,17 +147,20 @@ impl TraceDecay {
                 {
                     return Err(TraceDecayError::Config { message });
                 }
-                if let Some(registry_database) = registry_database
-                    && let Some(layout) =
+                if let Some(registry_database) = registry_database {
+                    let adopted: Pin<
+                        Box<dyn Future<Output = Result<Option<StoreLayout>>> + Send + '_>,
+                    > = Box::pin(
                         tracedecay_application::project_adoption::adopt_moved_nongit_project(
                             project_root,
                             &profile_root,
                             registry_database,
                             adoption,
-                        )
-                        .await?
-                {
-                    return Ok(layout);
+                        ),
+                    );
+                    if let Some(layout) = adopted.await? {
+                        return Ok(layout);
+                    }
                 }
                 storage::default_profile_sharded_layout(project_root, &profile_root)
             }
@@ -244,14 +249,16 @@ impl TraceDecay {
         project_root: &Path,
         open_options: &TraceDecayOpenOptions,
     ) -> Result<StoreLayout> {
-        Self::resolve_store_layout_for_authority(
-            project_root,
-            open_options,
-            None,
-            true,
-            &MovedStoreAdoption::Never,
-        )
-        .await
+        let adoption = MovedStoreAdoption::Never;
+        let resolved: Pin<Box<dyn Future<Output = Result<StoreLayout>> + Send + '_>> =
+            Box::pin(Self::resolve_store_layout_for_authority(
+                project_root,
+                open_options,
+                None,
+                true,
+                &adoption,
+            ));
+        resolved.await
     }
 }
 

@@ -137,10 +137,16 @@ async fn observation_authority_audit_observes_the_real_invariant_pass() {
     .await
     .expect("open uninitialized doctor audit fixture");
 
+    let uninitialized_snapshot = uninitialized
+        .read_connection()
+        .read_snapshot()
+        .await
+        .expect("snapshot the uninitialized doctor audit fixture");
     assert!(
-        !observation_authority_audit_passed(&uninitialized.read_connection()).await,
+        !observation_authority_audit_passed(&uninitialized_snapshot).await,
         "a store without the registered authority schema must fail the audit it ran"
     );
+    drop(uninitialized_snapshot);
     drop(uninitialized);
 
     let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
@@ -157,8 +163,13 @@ async fn observation_authority_audit_observes_the_real_invariant_pass() {
     .await
     .expect("install the registered authority schema");
 
+    let snapshot = database
+        .read_connection()
+        .read_snapshot()
+        .await
+        .expect("snapshot the registered doctor audit fixture");
     assert!(
-        observation_authority_audit_passed(&database.read_connection()).await,
+        observation_authority_audit_passed(&snapshot).await,
         "a converged registered authority must report a passing audit rather than \
          unavailable audit data"
     );

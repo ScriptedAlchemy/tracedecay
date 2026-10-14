@@ -1,3 +1,5 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
@@ -211,6 +213,44 @@ struct ObservabilityProducerCoreV1 {
     emission_lock: Mutex<()>,
     worker: Mutex<Option<JoinHandle<()>>>,
 }
+
+// Proving these fields `Send + Sync` walks the registered database lease past
+// the recursion limit (rust-lang/rust#159228). The const is that field proof;
+// the impls keep every registry that stores this producer from repeating it.
+unsafe impl Send for ObservabilityProducerCoreV1 {}
+unsafe impl Sync for ObservabilityProducerCoreV1 {}
+
+const _: fn(&ObservabilityProducerCoreV1) = |value| {
+    fn assert_send_sync<T: Send + Sync>(_: &T) {}
+    let ObservabilityProducerCoreV1 {
+        db,
+        identity,
+        data,
+        control,
+        pending_drops,
+        total_dropped,
+        next_sequence,
+        state,
+        final_coverage_persisted,
+        durable_emission_lock,
+        deadlines,
+        emission_lock,
+        worker,
+    } = value;
+    assert_send_sync(db);
+    assert_send_sync(identity);
+    assert_send_sync(data);
+    assert_send_sync(control);
+    assert_send_sync(pending_drops);
+    assert_send_sync(total_dropped);
+    assert_send_sync(next_sequence);
+    assert_send_sync(state);
+    assert_send_sync(final_coverage_persisted);
+    assert_send_sync(durable_emission_lock);
+    assert_send_sync(deadlines);
+    assert_send_sync(emission_lock);
+    assert_send_sync(worker);
+};
 
 pub struct BoundedObservabilityProducerV1 {
     core: Arc<ObservabilityProducerCoreV1>,
@@ -916,12 +956,21 @@ async fn record_batch(
         return false;
     }
     let count = u64::try_from(envelopes.len()).unwrap_or(u64::MAX);
-    match timeout(
+    let recorded: Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        Result<Vec<String>, ApplicationContractError>,
+                        tokio::time::error::Elapsed,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > = Box::pin(timeout(
         persistence_deadline,
         record_observability_batch(db, envelopes),
-    )
-    .await
-    {
+    ));
+    match recorded.await {
         Ok(Ok(_)) => {
             *persisted = persisted.saturating_add(count);
             true

@@ -1025,7 +1025,7 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
         let generation_id = metadata.manifest().generation_id.clone();
         let mut progress_slot = CodeIndexBuildProgressSlotStateV1::default();
         let text_progress_owner_epoch = progress_slot.replace_generation(generation_id);
-        LatestCodeTextGenerationV1 {
+        LatestCodeTextGenerationV1::from_shared(super::serving::CodeTextGenerationSharedV1 {
             metadata: Arc::new(metadata),
             sealed_format_revision,
             query_owners: Arc::new(RwLock::new(None)),
@@ -1050,11 +1050,10 @@ impl HistoricalCodeIndexGenerationOwnerV1 {
             ),
             preopened_source: Arc::new(Mutex::new(None)),
             publication_binding: None,
-            graph_predecessor: Arc::default(),
             catalog_warm_settled: Arc::new(tokio::sync::Notify::new()),
             park_release_after_catalog_warm_armed: Arc::new(AtomicBool::new(false)),
             parked_graph_release: Arc::new(RwLock::new(None)),
-        }
+        })
     }
 
     pub(super) fn bind_complete(
@@ -2683,7 +2682,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         }
         let metadata = Arc::new(metadata);
         Some(RetainedTextGenerationRestoreV1::Servable(
-            LatestCodeTextGenerationV1 {
+            LatestCodeTextGenerationV1::from_shared(super::serving::CodeTextGenerationSharedV1 {
                 metadata,
                 sealed_format_revision,
                 query_owners: Arc::new(RwLock::new(None)),
@@ -2704,11 +2703,10 @@ impl CodeIndexWorktreeSchedulerV1 {
                     generation_file: pointer.generation_file,
                     state_digest: ManifestDigest::new(pointer.state_digest).ok()?,
                 })),
-                graph_predecessor: Arc::default(),
                 catalog_warm_settled: Arc::new(tokio::sync::Notify::new()),
                 park_release_after_catalog_warm_armed: Arc::new(AtomicBool::new(false)),
                 parked_graph_release: Arc::new(RwLock::new(None)),
-            },
+            }),
         ))
     }
 
@@ -3655,9 +3653,8 @@ impl CodeIndexWorktreeSchedulerV1 {
         let metadata = Arc::new(
             VerifiedSealedTextGenerationMetadataV1::from_published_generation(&generation),
         );
-        let text = retained_text
-            .cloned()
-            .unwrap_or_else(|| LatestCodeTextGenerationV1 {
+        let text = retained_text.cloned().unwrap_or_else(|| {
+            LatestCodeTextGenerationV1::from_shared(super::serving::CodeTextGenerationSharedV1 {
                 metadata,
                 sealed_format_revision:
                     tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1,
@@ -3683,11 +3680,11 @@ impl CodeIndexWorktreeSchedulerV1 {
                 ),
                 preopened_source: Arc::new(Mutex::new(None)),
                 publication_binding: None,
-                graph_predecessor: Arc::default(),
                 catalog_warm_settled: Arc::new(tokio::sync::Notify::new()),
                 park_release_after_catalog_warm_armed: Arc::new(AtomicBool::new(false)),
                 parked_graph_release: Arc::new(RwLock::new(None)),
-            });
+            })
+        });
         LatestCompleteCodeIndexV1 {
             generation,
             text,

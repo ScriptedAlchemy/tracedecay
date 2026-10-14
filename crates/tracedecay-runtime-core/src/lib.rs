@@ -88,6 +88,18 @@
 #![allow(rustdoc::broken_intra_doc_links)]
 #![allow(rustdoc::private_intra_doc_links)]
 
+/// Coerce one concrete future to `dyn Future + Send` where this macro expands.
+/// A generic function proves `Send` in the caller, so the overflow stays put.
+#[macro_export]
+macro_rules! erase_send {
+    ($future:expr, $output:ty) => {{
+        let erased: ::std::pin::Pin<
+            ::std::boxed::Box<dyn ::std::future::Future<Output = $output> + Send + '_>,
+        > = ::std::boxed::Box::pin($future);
+        erased
+    }};
+}
+
 /// Upper bound for daemon-owned shutdown persistence work.
 pub const DAEMON_SHUTDOWN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(45);
 /// Grace retained for forced task abort and join during daemon shutdown.

@@ -1,8 +1,12 @@
 use std::{
+    future::Future,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
     sync::{Arc, OnceLock},
 };
+
+use tracing::Instrument;
 
 use serde_json::{Value, json};
 use tracedecay_automation::backend::extract_json_object_prefix;
@@ -506,75 +510,89 @@ pub(crate) fn task_skip_reason(
     None
 }
 
-#[tracing::instrument(name = "automation.scheduler.gate", level = "trace", skip_all)]
-async fn scheduler_gate_with_lock_retention(
-    config: &AutomationConfig,
-    executable: Option<&Path>,
-    dashboard_root: &Path,
-    sessions_db: &RegisteredGlobalDb,
+fn scheduler_gate_with_lock_retention<'a>(
+    config: &'a AutomationConfig,
+    executable: Option<&'a Path>,
+    dashboard_root: &'a Path,
+    sessions_db: &'a RegisteredGlobalDb,
     task: AgentTaskKind,
     trigger: AutomationTrigger,
-    retained_state: Option<&RetainedAutomationState>,
-) -> Result<(SchedulerGate, Option<AutomationRunLedgerTaskSummary>)> {
-    let scheduled = matches!(
-        trigger,
-        AutomationTrigger::Scheduler | AutomationTrigger::HostReceipt
-    );
+    retained_state: Option<&'a RetainedAutomationState>,
+) -> Pin<
+    Box<
+        dyn Future<Output = Result<(SchedulerGate, Option<AutomationRunLedgerTaskSummary>)>>
+            + Send
+            + 'a,
+    >,
+> {
+    let span = tracing::trace_span!("automation.scheduler.gate");
+    Box::pin(
+        async move {
+            let scheduled = matches!(
+                trigger,
+                AutomationTrigger::Scheduler | AutomationTrigger::HostReceipt
+            );
 
-    let lock_now_secs = current_timestamp();
-    let Some(lock) = AutomationTaskLock::try_acquire(
-        dashboard_root,
-        task,
-        stale_lock_secs(config, task),
-        lock_now_secs,
+            let lock_now_secs = current_timestamp();
+            let Some(lock) = AutomationTaskLock::try_acquire(
+                dashboard_root,
+                task,
+                stale_lock_secs(config, task),
+                lock_now_secs,
+            )
+            .await?
+            else {
+                super::scheduler_trace::observe_skip_reason(
+                    AutomationSkipReasonV1::SchedulerLockActive,
+                );
+                let summary = if scheduled {
+                    Some(load_run_ledger_task_summary(dashboard_root, task, task_key(task)).await?)
+                } else {
+                    None
+                };
+                return Ok((
+                    SchedulerGate::Skip(AutomationSkipReasonV1::SchedulerLockActive),
+                    summary,
+                ));
+            };
+            let lock = retain_task_lock(lock, retained_state)?;
+            if !scheduled {
+                return Ok((SchedulerGate::Proceed(lock), None));
+            }
+
+            let summary =
+                load_run_ledger_task_summary(dashboard_root, task, task_key(task)).await?;
+            let activity = load_session_activity(sessions_db).await;
+            let decision_now_secs = current_timestamp();
+            let decision = if trigger == AutomationTrigger::HostReceipt {
+                super::scheduler::host_receipt_decision(
+                    config,
+                    executable,
+                    task,
+                    summary.records(),
+                    activity,
+                    decision_now_secs,
+                )
+            } else {
+                schedule_decision(
+                    config,
+                    executable,
+                    task,
+                    summary.records(),
+                    activity,
+                    decision_now_secs,
+                )
+            };
+            if let Some(reason) = decision.skip_reason() {
+                super::scheduler_trace::observe_skip_reason(reason);
+                return Ok((SchedulerGate::Skip(reason), Some(summary)));
+            }
+
+            super::scheduler_trace::observe_due();
+            Ok((SchedulerGate::Proceed(lock), Some(summary)))
+        }
+        .instrument(span),
     )
-    .await?
-    else {
-        super::scheduler_trace::observe_skip_reason(AutomationSkipReasonV1::SchedulerLockActive);
-        let summary = if scheduled {
-            Some(load_run_ledger_task_summary(dashboard_root, task, task_key(task)).await?)
-        } else {
-            None
-        };
-        return Ok((
-            SchedulerGate::Skip(AutomationSkipReasonV1::SchedulerLockActive),
-            summary,
-        ));
-    };
-    let lock = retain_task_lock(lock, retained_state)?;
-    if !scheduled {
-        return Ok((SchedulerGate::Proceed(lock), None));
-    }
-
-    let summary = load_run_ledger_task_summary(dashboard_root, task, task_key(task)).await?;
-    let activity = load_session_activity(sessions_db).await;
-    let decision_now_secs = current_timestamp();
-    let decision = if trigger == AutomationTrigger::HostReceipt {
-        super::scheduler::host_receipt_decision(
-            config,
-            executable,
-            task,
-            summary.records(),
-            activity,
-            decision_now_secs,
-        )
-    } else {
-        schedule_decision(
-            config,
-            executable,
-            task,
-            summary.records(),
-            activity,
-            decision_now_secs,
-        )
-    };
-    if let Some(reason) = decision.skip_reason() {
-        super::scheduler_trace::observe_skip_reason(reason);
-        return Ok((SchedulerGate::Skip(reason), Some(summary)));
-    }
-
-    super::scheduler_trace::observe_due();
-    Ok((SchedulerGate::Proceed(lock), Some(summary)))
 }
 
 pub(crate) async fn task_run_gate(

@@ -7,6 +7,8 @@
 
 use std::borrow::Borrow;
 use std::collections::BTreeSet;
+use std::future::Future;
+use std::pin::Pin;
 
 use tracedecay_runtime_core::db::DatabaseEngineReadSnapshot;
 use tracedecay_store::StoreShardScopeV1;
@@ -196,11 +198,6 @@ where
         converge_git_evidence_pass(self, git, project_root).await
     }
 
-    #[tracing::instrument(
-        name = "global_db.git_correlation.bounded_history",
-        level = "trace",
-        skip_all
-    )]
     pub async fn run_bounded_history_index_page(
         &self,
         opts: &BackfillOptions,
@@ -246,12 +243,43 @@ where
     ) -> Result<(Vec<SessionGitCorrelationHit>, CorrelationIndexPresence), GitCorrelationError>
     {
         self.require_project_sessions_authority()?;
-        let snapshot = self.read_snapshot().await?;
+        let opened: Pin<
+            Box<
+                dyn Future<Output = Result<DatabaseEngineReadSnapshot, GitCorrelationError>>
+                    + Send
+                    + '_,
+            >,
+        > = Box::pin(self.read_snapshot());
+        let snapshot = opened.await?;
         let backfill_watermark =
             read_meta_value(&snapshot, GIT_HISTORY_SEQUENCE_FRONTIER_KEY).await?;
-        Ok(match open_git_evidence_view(&snapshot).await? {
+        let viewed: Pin<
+            Box<
+                dyn Future<
+                        Output = Result<
+                            Option<
+                                tracedecay_sessions::runtime::git_correlation::GitEvidenceView<
+                                    '_,
+                                    DatabaseEngineReadSnapshot,
+                                >,
+                            >,
+                            GitCorrelationError,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > = Box::pin(open_git_evidence_view(&snapshot));
+        Ok(match viewed.await? {
             Some(view) => {
-                let results = view.sessions_for(query, relation).await?;
+                let matched: Pin<
+                    Box<
+                        dyn Future<
+                                Output = Result<Vec<SessionGitCorrelationHit>, GitCorrelationError>,
+                            > + Send
+                            + '_,
+                    >,
+                > = Box::pin(view.sessions_for(query, relation));
+                let results = matched.await?;
                 (results, view.presence(backfill_watermark))
             }
             None => (

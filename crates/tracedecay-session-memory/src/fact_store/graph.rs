@@ -1,7 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use asupersync::Cx;
+use tracing::Instrument;
 
 use tracedecay_domain::canonical_text::sha256_hex;
 use tracedecay_domain::{
@@ -419,90 +422,125 @@ pub(super) fn schedule_project_memory_graph_reconciliation(
 /// cannot release the shutdown join while a task still owns a graph
 /// operation or snapshot lease. The scheduled worker and the post-write
 /// task pass `None`: their own join/admission already spans the whole pass.
-#[tracing::instrument(
-    name = "runtime_core.memory_graph.reconcile_pass",
-    level = "trace",
-    skip_all
-)]
-async fn reconcile_project_memory_graph_pass(
-    cx: &Cx,
-    db: &Database,
-    read_control: Option<&FactReadControl>,
-    inline_pass: Option<&Arc<MemoryGraphReconciliationInlinePassV1>>,
-) -> FactStoreResult<tracedecay_graph_db::VerifiedGraphSnapshot> {
-    let _pass = db
-        .begin_project_memory_reconciliation_pass()
-        .map_err(|counter| {
-            storage_message(
-                OPERATION,
-                format!("project memory reconciliation telemetry overflowed: {counter}"),
-            )
-        })?;
-    let owner = bound_owner(db)?;
-    let fact_runtime =
-        super::runtime::retained_fact_runtime(db)?.ok_or(FactStoreError::GraphUnavailable)?;
-    super::runtime::validate_owner_binding(fact_runtime.binding(), &owner, OPERATION)?;
-    let projection = GraphProjectionIdentity::new(
-        namespace(&owner)?,
-        GraphProjectionId::new(PROJECTION).map_err(|error| graph_error(&owner, error))?,
-    );
-    let loaded = load_source(db, &owner, read_control, Some(db)).await?;
-    let watermark = source_watermark(&owner, &loaded.source, loaded.lineage_stamp, read_control)?;
-    if let Some(stamp) = loaded.lineage_stamp {
-        db.record_memory_graph_source_watermark(stamp, watermark.clone());
-    }
-    let manifest = {
-        let _span = tracing::trace_span!("runtime_core.memory_graph.manifest_build").entered();
-        build_manifest(
-            &owner,
-            projection.clone(),
-            &loaded.source,
-            watermark.clone(),
-            None,
-        )
-    }?;
-    let source_stamp = loaded.lineage_stamp;
-    let expected_generation = manifest.generation.clone();
-    let idempotency_key =
-        GraphIdempotencyKey::new(format!("publish:{}", expected_generation.as_str()))
-            .map_err(|error| graph_error(&owner, error))?;
-    db.project_memory_reconciliation_telemetry()
-        .record_publication_attempt()
-        .map_err(|counter| {
-            storage_message(
-                OPERATION,
-                format!("project memory reconciliation telemetry overflowed: {counter}"),
-            )
-        })?;
-    let head_read_control = read_control
-        .cloned()
-        .unwrap_or_else(|| FactReadControl::new(Arc::new(|| false)));
-    ensure_source_read_active(read_control)?;
-    let runtime = issue_memory_graph_operation(db)?;
-    let publish_admission = inline_pass.cloned();
-    let snapshot = match cx
-        .spawn_blocking(move |_cx| {
-            let _span = tracing::trace_span!("runtime_core.memory_graph.publish_apply").entered();
-            let _inline_pass = publish_admission;
-            runtime
-                .runtime()
-                .reconcile_verified_manifest(&manifest, idempotency_key)
-        })
-        .map_err(|error| storage_error(OPERATION, error))?
-        .join(cx)
-        .await
-        .map_err(|error| storage_error(OPERATION, error))?
-    {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            // The typed mapping below collapses the graph error into unit
-            // variants for wire states; record the full message first so a
-            // persistently failing reconciliation names its cause in
-            // operator logs instead of a bare kind.
-            tracing::warn!(%error, "memory graph verified-manifest publication failed");
-            let mapped = graph_error(&owner, error);
-            if matches!(mapped, FactStoreError::GraphConflict)
-                && let Some(snapshot) = verified_head_matching(
+fn reconcile_project_memory_graph_pass<'a>(
+    cx: &'a Cx,
+    db: &'a Database,
+    read_control: Option<&'a FactReadControl>,
+    inline_pass: Option<&'a Arc<MemoryGraphReconciliationInlinePassV1>>,
+) -> Pin<
+    Box<
+        dyn Future<Output = FactStoreResult<tracedecay_graph_db::VerifiedGraphSnapshot>>
+            + Send
+            + 'a,
+    >,
+> {
+    // One span for the sweep. The concrete pass future stays behind this box
+    // so a caller's `Send` proof does not walk the sweep (rust-lang/rust#159228).
+    let span = tracing::trace_span!("runtime_core.memory_graph.reconcile_pass");
+    Box::pin(
+        async move {
+            let _pass = db
+                .begin_project_memory_reconciliation_pass()
+                .map_err(|counter| {
+                    storage_message(
+                        OPERATION,
+                        format!("project memory reconciliation telemetry overflowed: {counter}"),
+                    )
+                })?;
+            let owner = bound_owner(db)?;
+            let fact_runtime = super::runtime::retained_fact_runtime(db)?
+                .ok_or(FactStoreError::GraphUnavailable)?;
+            super::runtime::validate_owner_binding(fact_runtime.binding(), &owner, OPERATION)?;
+            let projection = GraphProjectionIdentity::new(
+                namespace(&owner)?,
+                GraphProjectionId::new(PROJECTION).map_err(|error| graph_error(&owner, error))?,
+            );
+            let loaded = load_source(db, &owner, read_control, Some(db)).await?;
+            let watermark =
+                source_watermark(&owner, &loaded.source, loaded.lineage_stamp, read_control)?;
+            if let Some(stamp) = loaded.lineage_stamp {
+                db.record_memory_graph_source_watermark(stamp, watermark.clone());
+            }
+            let manifest = {
+                let _span =
+                    tracing::trace_span!("runtime_core.memory_graph.manifest_build").entered();
+                build_manifest(
+                    &owner,
+                    projection.clone(),
+                    &loaded.source,
+                    watermark.clone(),
+                    None,
+                )
+            }?;
+            let source_stamp = loaded.lineage_stamp;
+            let expected_generation = manifest.generation.clone();
+            let idempotency_key =
+                GraphIdempotencyKey::new(format!("publish:{}", expected_generation.as_str()))
+                    .map_err(|error| graph_error(&owner, error))?;
+            db.project_memory_reconciliation_telemetry()
+                .record_publication_attempt()
+                .map_err(|counter| {
+                    storage_message(
+                        OPERATION,
+                        format!("project memory reconciliation telemetry overflowed: {counter}"),
+                    )
+                })?;
+            let head_read_control = read_control
+                .cloned()
+                .unwrap_or_else(|| FactReadControl::new(Arc::new(|| false)));
+            ensure_source_read_active(read_control)?;
+            let runtime = issue_memory_graph_operation(db)?;
+            let publish_admission = inline_pass.cloned();
+            let snapshot = match cx
+                .spawn_blocking(move |_cx| {
+                    let _span =
+                        tracing::trace_span!("runtime_core.memory_graph.publish_apply").entered();
+                    let _inline_pass = publish_admission;
+                    runtime
+                        .runtime()
+                        .reconcile_verified_manifest(&manifest, idempotency_key)
+                })
+                .map_err(|error| storage_error(OPERATION, error))?
+                .join(cx)
+                .await
+                .map_err(|error| storage_error(OPERATION, error))?
+            {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    // The typed mapping below collapses the graph error into unit
+                    // variants for wire states; record the full message first so a
+                    // persistently failing reconciliation names its cause in
+                    // operator logs instead of a bare kind.
+                    tracing::warn!(%error, "memory graph verified-manifest publication failed");
+                    let mapped = graph_error(&owner, error);
+                    if matches!(mapped, FactStoreError::GraphConflict)
+                        && let Some(snapshot) = verified_head_matching(
+                            cx,
+                            db,
+                            &projection,
+                            &expected_generation,
+                            &owner,
+                            head_read_control.clone(),
+                            inline_pass.cloned(),
+                        )
+                        .await?
+                    {
+                        finish_reconciliation_watermark(
+                            db,
+                            &owner,
+                            watermark,
+                            source_stamp,
+                            read_control,
+                        )
+                        .await?;
+                        return Ok(snapshot);
+                    }
+                    return Err(mapped);
+                }
+            };
+            if snapshot.projection() != &projection || snapshot.generation() != &expected_generation
+            {
+                if let Some(snapshot) = verified_head_matching(
                     cx,
                     db,
                     &projection,
@@ -512,34 +550,25 @@ async fn reconcile_project_memory_graph_pass(
                     inline_pass.cloned(),
                 )
                 .await?
-            {
-                finish_reconciliation_watermark(db, &owner, watermark, source_stamp, read_control)
+                {
+                    finish_reconciliation_watermark(
+                        db,
+                        &owner,
+                        watermark,
+                        source_stamp,
+                        read_control,
+                    )
                     .await?;
-                return Ok(snapshot);
+                    return Ok(snapshot);
+                }
+                return Err(FactStoreError::GraphConflict);
             }
-            return Err(mapped);
-        }
-    };
-    if snapshot.projection() != &projection || snapshot.generation() != &expected_generation {
-        if let Some(snapshot) = verified_head_matching(
-            cx,
-            db,
-            &projection,
-            &expected_generation,
-            &owner,
-            head_read_control.clone(),
-            inline_pass.cloned(),
-        )
-        .await?
-        {
             finish_reconciliation_watermark(db, &owner, watermark, source_stamp, read_control)
                 .await?;
-            return Ok(snapshot);
+            Ok(snapshot)
         }
-        return Err(FactStoreError::GraphConflict);
-    }
-    finish_reconciliation_watermark(db, &owner, watermark, source_stamp, read_control).await?;
-    Ok(snapshot)
+        .instrument(span),
+    )
 }
 
 async fn finish_reconciliation_watermark(

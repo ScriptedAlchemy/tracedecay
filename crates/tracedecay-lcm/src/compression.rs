@@ -361,69 +361,119 @@ fn canonical_replay_messages(raw_messages: &[LcmRawMessage]) -> Vec<Value> {
     replay_transactions::normalize_replay_tool_pairs(&replay)
 }
 
-/// Runs canonical compression for one request.
+/// Admission outcome for one compression request.
+///
+/// `Publish` is a separate future from admission so the summary-publication
+/// transaction is its own `Send` root. One generic async function that awaits
+/// both exceeds the trait solver's recursion limit.
+pub enum CompressionAdmission {
+    Finished(super::summary_convergence::LcmBoundedCompressionResponse),
+    Classify(CompressionPublish),
+}
+
+pub enum CompressionClassification {
+    Finished(super::summary_convergence::LcmBoundedCompressionResponse),
+    Publish(CompressionPublish),
+}
+
+pub struct CompressionPublish {
+    summarizer: CompressionSummarizerAdapter,
+    context: CompressionTransactionContext,
+}
+
+fn bounded_compression(
+    response: LcmCompressionResponse,
+    rows_scanned: usize,
+    bytes_scanned: u64,
+    has_more: bool,
+) -> super::summary_convergence::LcmBoundedCompressionResponse {
+    super::summary_convergence::LcmBoundedCompressionResponse {
+        response,
+        rows_scanned,
+        bytes_scanned,
+        has_more,
+    }
+}
+
+pub async fn classify_compression_pass(
+    conn: &impl Executor,
+    publisher: &impl dag::LcmSummaryPublicationPort,
+    request: &LcmCompressionRequest,
+    publish: CompressionPublish,
+) -> Result<CompressionClassification, LcmError> {
+    let CompressionPublish {
+        summarizer,
+        context,
+    } = publish;
+    let scan = (
+        context.raw_rows_scanned,
+        context.raw_bytes_scanned,
+        context.raw_has_more,
+    );
+    if let Some(response) =
+        no_backlog_compression_response(conn, publisher, request, &summarizer, &context).await?
+    {
+        return Ok(CompressionClassification::Finished(bounded_compression(
+            response, scan.0, scan.1, scan.2,
+        )));
+    }
+    if let Some(response) = backlog_below_threshold_response(conn, request, &context).await? {
+        return Ok(CompressionClassification::Finished(bounded_compression(
+            response, scan.0, scan.1, scan.2,
+        )));
+    }
+    if let Some(response) = auxiliary_summary_response(request, &summarizer, &context) {
+        return Ok(CompressionClassification::Finished(bounded_compression(
+            response, scan.0, scan.1, scan.2,
+        )));
+    }
+    Ok(CompressionClassification::Publish(CompressionPublish {
+        summarizer,
+        context,
+    }))
+}
+
+pub async fn publish_compression_pass(
+    conn: &impl Executor,
+    publisher: &impl dag::LcmSummaryPublicationPort,
+    request: &LcmCompressionRequest,
+    publish: CompressionPublish,
+) -> Result<super::summary_convergence::LcmBoundedCompressionResponse, LcmError> {
+    let rows_scanned = publish.context.raw_rows_scanned;
+    let bytes_scanned = publish.context.raw_bytes_scanned;
+    let has_more = publish.context.raw_has_more;
+    let response = persist_and_replay_backlog_compression(
+        conn,
+        publisher,
+        request,
+        &publish.summarizer,
+        publish.context,
+    )
+    .await?;
+    Ok(bounded_compression(
+        response,
+        rows_scanned,
+        bytes_scanned,
+        has_more,
+    ))
+}
+
+/// Runs canonical compression until the summary-publication transaction.
 ///
 /// The request is borrowed: a daemon journey that needs an authoritative
 /// summary runs a planning pass and a commit pass over the same message
 /// corpus, changing only `summarizer` in between, so the corpus is owned
-/// once by the caller rather than cloned per pass.
-#[tracing::instrument(name = "sessions.lcm.compress", level = "trace", skip_all)]
-pub async fn compress(
+/// once by the caller rather than cloned per pass. Retained convergence
+/// passes `retained_scan`; interactive compression passes `None` and keeps
+/// the complete replay contract.
+pub async fn begin_compression_pass(
     conn: &impl Executor,
     scope: &ObservationScopeV1,
-    publisher: &impl dag::LcmSummaryPublicationPort,
-    storage_root: &Path,
-    request: &LcmCompressionRequest,
-    payload_rollback: &mut payload::PayloadFileRollback,
-) -> Result<LcmCompressionResponse, LcmError> {
-    compress_inner(
-        conn,
-        scope,
-        publisher,
-        storage_root,
-        request,
-        payload_rollback,
-        None,
-    )
-    .await
-    .map(|bounded| bounded.response)
-}
-
-/// Runs canonical compression over one bounded retained-session raw page.
-///
-/// This is the background-convergence entry point. Interactive compression
-/// keeps its complete replay contract, while retained convergence advances the
-/// same lifecycle CAS without materializing a mega-session in one future.
-pub async fn compress_retained_page(
-    conn: &impl Executor,
-    scope: &ObservationScopeV1,
-    publisher: &impl dag::LcmSummaryPublicationPort,
-    storage_root: &Path,
-    request: &LcmCompressionRequest,
-    payload_rollback: &mut payload::PayloadFileRollback,
-    guard: RetainedCompressionGuard,
-) -> Result<super::summary_convergence::LcmBoundedCompressionResponse, LcmError> {
-    compress_inner(
-        conn,
-        scope,
-        publisher,
-        storage_root,
-        request,
-        payload_rollback,
-        Some(guard),
-    )
-    .await
-}
-
-async fn compress_inner(
-    conn: &impl Executor,
-    scope: &ObservationScopeV1,
-    publisher: &impl dag::LcmSummaryPublicationPort,
     storage_root: &Path,
     request: &LcmCompressionRequest,
     payload_rollback: &mut payload::PayloadFileRollback,
     retained_scan: Option<RetainedCompressionGuard>,
-) -> Result<super::summary_convergence::LcmBoundedCompressionResponse, LcmError> {
+) -> Result<CompressionAdmission, LcmError> {
     let assembly_token_cap = compression_decision::effective_assembly_token_cap(AssemblyCapInput {
         max_assembly_tokens: request.max_assembly_tokens,
         context_length: request.context_length,
@@ -441,8 +491,8 @@ async fn compress_inner(
             &request.session_id,
         )
         .await?;
-        return Ok(super::summary_convergence::LcmBoundedCompressionResponse {
-            response: compression_response(
+        return Ok(CompressionAdmission::Finished(bounded_compression(
+            compression_response(
                 "ok",
                 reason,
                 Vec::new(),
@@ -451,10 +501,10 @@ async fn compress_inner(
                 None,
                 assembly_token_cap,
             ),
-            rows_scanned: 0,
-            bytes_scanned: 0,
-            has_more: false,
-        });
+            0,
+            0,
+            false,
+        )));
     }
 
     ensure_session(conn, scope, &request.provider, &request.session_id).await?;
@@ -488,39 +538,21 @@ async fn compress_inner(
             None,
             assembly_token_cap,
         );
-        return Ok(super::summary_convergence::LcmBoundedCompressionResponse {
-            response,
-            rows_scanned: 0,
-            bytes_scanned: 0,
-            has_more: false,
-        });
+        return Ok(CompressionAdmission::Finished(bounded_compression(
+            response, 0, 0, false,
+        )));
     }
 
-    let (response, rows_scanned, bytes_scanned, has_more) = compress_in_transaction(
-        conn,
-        publisher,
-        request,
-        assembly_token_cap,
-        &summarizer,
-        retained_scan,
-    )
-    .await?;
-    Ok(super::summary_convergence::LcmBoundedCompressionResponse {
-        response,
-        rows_scanned,
-        bytes_scanned,
-        has_more,
-    })
+    open_compression_transaction(conn, request, assembly_token_cap, summarizer, retained_scan).await
 }
 
-async fn compress_in_transaction(
+async fn open_compression_transaction(
     conn: &impl Executor,
-    publisher: &impl dag::LcmSummaryPublicationPort,
     request: &LcmCompressionRequest,
     assembly_token_cap: Option<i64>,
-    summarizer: &CompressionSummarizerAdapter,
+    summarizer: CompressionSummarizerAdapter,
     retained_scan: Option<RetainedCompressionGuard>,
-) -> Result<(LcmCompressionResponse, usize, u64, bool), LcmError> {
+) -> Result<CompressionAdmission, LcmError> {
     let expected_summary_source_range = retained_scan
         .as_ref()
         .and_then(|guard| guard.expected_summary_source_range.as_ref())
@@ -546,30 +578,19 @@ async fn compress_in_transaction(
         context.raw_has_more,
     );
     if let Some(response) = frontier_changed_response(request, &context) {
-        return Ok((response, scan.0, scan.1, scan.2));
+        return Ok(CompressionAdmission::Finished(bounded_compression(
+            response, scan.0, scan.1, scan.2,
+        )));
     }
-    if let Some(response) =
-        no_backlog_compression_response(conn, publisher, request, summarizer, &context).await?
-    {
-        return Ok((response, scan.0, scan.1, scan.2));
-    }
-    if let Some(response) = backlog_below_threshold_response(conn, request, &context).await? {
-        return Ok((response, scan.0, scan.1, scan.2));
-    }
-    if let Some(response) = auxiliary_summary_response(request, summarizer, &context) {
-        return Ok((response, scan.0, scan.1, scan.2));
-    }
-
-    let response =
-        persist_and_replay_backlog_compression(conn, publisher, request, summarizer, context)
-            .await?;
-    Ok((response, scan.0, scan.1, scan.2))
+    Ok(CompressionAdmission::Classify(CompressionPublish {
+        summarizer,
+        context,
+    }))
 }
 
 // The read phase: whole-session raw load plus window/plan derivation.
 // Together with `ingest_active`, `persist`, and `assemble_replay` this splits
 // the inclusive `compress` span into its sequential phases.
-#[tracing::instrument(name = "sessions.lcm.compress.prepare", level = "trace", skip_all)]
 async fn prepare_compression_context(
     conn: &impl QueryExecutor,
     request: &LcmCompressionRequest,
@@ -954,7 +975,6 @@ async fn persist_and_replay_backlog_compression(
 
 // The summary-publication transaction: chunk selection, immutable summary
 // publication, and the lifecycle/debt writes that commit the new frontier.
-#[tracing::instrument(name = "sessions.lcm.compress.persist", level = "trace", skip_all)]
 async fn persist_compression_transaction_writes<'a>(
     conn: &impl Executor,
     publisher: &impl dag::LcmSummaryPublicationPort,
@@ -1261,11 +1281,6 @@ struct ReplayWindowParts<'a> {
 /// is trimmed under the effective assembly cap.
 // Replay assembly; its DAG-build share is the nested
 // `sessions.lcm.dag.load_uncondensed` span.
-#[tracing::instrument(
-    name = "sessions.lcm.compress.assemble_replay",
-    level = "trace",
-    skip_all
-)]
 async fn assemble_replay_context(
     conn: &impl QueryExecutor,
     provider: &str,
@@ -1297,11 +1312,6 @@ async fn assemble_replay_context(
 /// Mirrors hermes-lcm `_assemble_overflow_recovery_context`: assemble under
 /// the cap; when nothing beyond the anchors fits, fall back to anchors plus
 /// the most recent message even if that stays over budget.
-#[tracing::instrument(
-    name = "sessions.lcm.compress.assemble_overflow_replay",
-    level = "trace",
-    skip_all
-)]
 async fn assemble_overflow_recovery_replay(
     conn: &impl QueryExecutor,
     provider: &str,
@@ -1971,11 +1981,6 @@ async fn load_condensation_candidates(
 // Active-context ingest: sanitization, payload externalization, and raw
 // upserts. This is compression's write-side file I/O + CPU phase, distinct
 // from the summary-publication transaction in `persist`.
-#[tracing::instrument(
-    name = "sessions.lcm.compress.ingest_active",
-    level = "trace",
-    skip_all
-)]
 async fn ingest_active_messages(
     conn: &impl Executor,
     storage_root: &Path,

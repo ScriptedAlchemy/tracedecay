@@ -1,5 +1,7 @@
+use std::future::Future;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::time::Duration;
 use tracedecay_maintenance::retention::orphan_stores::dir_size_bytes;
 use tracedecay_runtime_core::config::ProfileRoot;
@@ -225,8 +227,27 @@ pub(crate) async fn try_admit_profile_registry(
         return Ok(None);
     }
     let identity = tracedecay_daemon_identity::profile_identity::load_existing(&profile_root)?;
-    let registry = tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity).await?;
-    let profile_database = registry.profile_database().await?;
+    let registry: Pin<
+        Box<
+            dyn Future<
+                    Output = tracedecay_domain::errors::Result<
+                        tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1,
+                    >,
+                > + Send,
+        >,
+    > = Box::pin(tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity));
+    let registry = registry.await?;
+    let profile_database: Pin<
+        Box<
+            dyn Future<
+                    Output = tracedecay_domain::errors::Result<
+                        tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > = Box::pin(registry.profile_database());
+    let profile_database = profile_database.await?;
     Ok(Some(
         ProfileRegistryMaintenanceRuntime::from_admitted_lease(profile_database),
     ))
