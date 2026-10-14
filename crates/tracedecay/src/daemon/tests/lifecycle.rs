@@ -561,7 +561,8 @@ async fn one_shot_tool_call_receives_a_matching_saturation_response() {
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept tool call");
         super::super::reject_saturated_daemon_client(
-            tracedecay_daemon_protocol::BrokerStream::Unix(stream),
+            tracedecay_daemon_protocol::BrokerStream::from_tokio_unix(stream)
+                .expect("daemon end of the test socket"),
             super::super::DaemonClientSaturationResponse {
                 kind: super::super::DaemonClientSaturationKind::ClientCapacityReached,
                 retryable: true,

@@ -361,7 +361,8 @@ async fn serve_authenticated_test_client(
     engine: DaemonEngine,
 ) -> tracedecay_domain::errors::Result<()> {
     Box::pin(super::serve_authenticated_socket_client_with_class(
-        tracedecay_daemon_protocol::BrokerStream::Unix(stream),
+        tracedecay_daemon_protocol::BrokerStream::from_tokio_unix(stream)
+            .expect("daemon end of the test socket"),
         engine,
         TEST_AUTH_TOKEN.to_owned(),
         super::DaemonClientAdmissionClass::General,

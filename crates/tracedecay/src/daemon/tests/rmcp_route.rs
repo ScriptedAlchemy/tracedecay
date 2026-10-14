@@ -446,7 +446,8 @@ async fn serve_proxy_host_session_is_served_only_over_rmcp() {
             let token = token.clone();
             tokio::spawn(async move {
                 Box::pin(super::super::serve_authenticated_socket_client_with_class(
-                    tracedecay_daemon_protocol::BrokerStream::Unix(stream),
+                    tracedecay_daemon_protocol::BrokerStream::from_tokio_unix(stream)
+                        .expect("daemon end of the test socket"),
                     engine,
                     token,
                     super::super::DaemonClientAdmissionClass::General,
@@ -1313,7 +1314,8 @@ async fn serve_proxy_cancels_running_and_queued_requests_without_host_disconnect
             let token = token.clone();
             tokio::spawn(async move {
                 Box::pin(super::super::serve_authenticated_socket_client_with_class(
-                    tracedecay_daemon_protocol::BrokerStream::Unix(stream),
+                    tracedecay_daemon_protocol::BrokerStream::from_tokio_unix(stream)
+                        .expect("daemon end of the test socket"),
                     engine,
                     token,
                     super::super::DaemonClientAdmissionClass::General,
