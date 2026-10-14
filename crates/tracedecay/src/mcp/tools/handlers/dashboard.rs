@@ -720,7 +720,7 @@ fn opening_project_sessions(
     project_root: PathBuf,
 ) -> watch::Receiver<DashboardSessionResolutionV1> {
     let (publication, receiver) = watch::channel(DashboardSessionResolutionV1::Opening);
-    tokio::spawn(async move {
+    let spawned = tracedecay_runtime_core::native_runtime::NativeTask::spawn(async move {
         tokio::select! {
             resolution = project_sessions_once_published(resolver, &project_runtimes, project_root) => {
                 publication.send_replace(resolution);
@@ -728,7 +728,13 @@ fn opening_project_sessions(
             () = publication.closed() => {}
         }
     });
-    receiver
+    match spawned {
+        Ok(_detached) => receiver,
+        Err(error) => {
+            tracing::error!(%error, "dashboard session resolution could not start");
+            watch::channel(DashboardSessionResolutionV1::Unavailable).1
+        }
+    }
 }
 
 async fn project_sessions_once_published(

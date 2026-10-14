@@ -377,3 +377,79 @@ async fn parked_freshness_probe_logs_cause_and_remedy_as_fields() {
         )
     );
 }
+
+fn native_server_catch_up(
+    refresh_writer: BackgroundRefreshWriter,
+    observe: impl AsyncFnOnce(&McpServer),
+) {
+    let hazards = crate::test_support::native_runtime_hazards();
+    tracedecay_runtime_core::native_runtime::block_on(async {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let (cg, _dir, _authority) = init_indexed_repo().await;
+        let server = McpServer::new_with_context(
+            McpServerConstructionContext::direct(cg, None)
+                .with_background_refresh_writer(refresh_writer),
+        )
+        .await;
+        observe(&server).await;
+        server.shutdown_background_tasks().await;
+    })
+    .expect("native runtime");
+    assert_eq!(crate::test_support::native_runtime_hazards(), hazards);
+}
+
+/// The catch-up a server dispatches at construction runs where no Tokio
+/// runtime exists and lands its token map.
+#[test]
+fn startup_catch_up_settles_without_a_tokio_runtime() {
+    let refresh_writer: BackgroundRefreshWriter = Arc::new(|_request| {
+        Box::pin(async {
+            Ok(super::hook_writes::BackgroundRefreshOutcome::Admitted(
+                Some(HashMap::from([("startup.rs".to_string(), 3)])),
+            ))
+        })
+    });
+    native_server_catch_up(refresh_writer, async |server| {
+        assert!(
+            server
+                .wait_for_startup_catch_up(Duration::from_secs(30))
+                .await,
+            "startup catch-up must settle off Tokio"
+        );
+        assert_eq!(
+            server.file_token_map_snapshot(),
+            HashMap::from([("startup.rs".to_string(), 3)])
+        );
+    });
+}
+
+/// Shutdown aborts a catch-up still waiting on its admission and joins it.
+#[test]
+fn shutdown_aborts_a_parked_startup_catch_up_without_a_tokio_runtime() {
+    struct Dropped(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let refresh_writer: BackgroundRefreshWriter = {
+        let entered = Arc::clone(&entered);
+        let dropped = Arc::clone(&dropped);
+        Arc::new(move |_request| {
+            let entered = Arc::clone(&entered);
+            let guard = Dropped(Arc::clone(&dropped));
+            Box::pin(async move {
+                let _guard = guard;
+                entered.notify_one();
+                std::future::pending().await
+            })
+        })
+    };
+    native_server_catch_up(refresh_writer, async |_server| entered.notified().await);
+    assert!(
+        dropped.load(Ordering::Acquire),
+        "shutdown must abort and join the parked catch-up"
+    );
+}
