@@ -9,6 +9,7 @@ use tracedecay_application::observability::{
     DeliverySettlementAuthorityV1, ObservabilityProducerIdentityV1, WorkOwnerObservationRecoveryV1,
 };
 use tracedecay_contracts::ApplicationContractError;
+use tracedecay_runtime_core::native_runtime;
 
 /// The live observability owners for one registered project-session store.
 ///
@@ -333,7 +334,8 @@ impl StoreObservabilityRegistryV1 {
                         drain,
                         StoreObservabilityDrainV1::Deferred
                             | StoreObservabilityDrainV1::AwaitingWriter
-                    ) && let Ok(runtime) = tokio::runtime::Handle::try_current()
+                    ) && let Some(runtime) =
+                        native_runtime::tokio_handle("daemon-service.observability.mount_drain")
                     {
                         let writer_only =
                             matches!(drain, StoreObservabilityDrainV1::AwaitingWriter);
@@ -585,7 +587,8 @@ impl StoreObservabilityRegistryV1 {
                 if matches!(
                     *drain,
                     StoreObservabilityDrainV1::Deferred | StoreObservabilityDrainV1::AwaitingWriter
-                ) && let Ok(runtime) = tokio::runtime::Handle::try_current()
+                ) && let Some(runtime) =
+                    native_runtime::tokio_handle("daemon-service.observability.settle_drain")
                 {
                     let writer_only = matches!(*drain, StoreObservabilityDrainV1::AwaitingWriter);
                     *drain = StoreObservabilityDrainV1::InFlight;
@@ -769,7 +772,7 @@ impl Drop for RegisteredObservabilityProducerV1 {
         // retiring, refusing replacement mounts that would start a
         // duplicate producer, until the deferred drain, started by the next
         // mount attempt on a live runtime, confirms the close.
-        let runtime = tokio::runtime::Handle::try_current().ok();
+        let runtime = native_runtime::tokio_handle("daemon-service.observability.producer_drop");
         let drain = if runtime.is_some() {
             StoreObservabilityDrainV1::InFlight
         } else {

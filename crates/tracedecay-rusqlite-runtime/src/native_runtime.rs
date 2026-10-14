@@ -9,9 +9,10 @@
 //! channel receivers, which wake through ordinary `Waker`s, so a foreign
 //! executor never blocks on the native runtime.
 
+use std::collections::BTreeMap;
 use std::future::poll_fn;
 use std::pin::{Pin, pin};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -319,6 +320,38 @@ pub fn install(builder: RuntimeBuilder) -> Result<&'static Runtime, InstallError
         .map_err(|message| InstallError::StartFailed(message.clone()))
 }
 
+static TOKIO_RUNTIME_MISSING: Mutex<BTreeMap<&'static str, u64>> = Mutex::new(BTreeMap::new());
+
+/// The Tokio runtime entered on this thread, for a `site` whose work still
+/// needs one. A miss is logged and counted against `site`: the caller skips
+/// that work, which would otherwise stop silently once the caller runs on the
+/// native runtime.
+#[must_use]
+pub fn tokio_handle(site: &'static str) -> Option<tokio::runtime::Handle> {
+    let handle = tokio::runtime::Handle::try_current().ok();
+    if handle.is_none() {
+        *TOKIO_RUNTIME_MISSING
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(site)
+            .or_default() += 1;
+        tracing::error!(site, "Tokio runtime missing; path skipped");
+    }
+    handle
+}
+
+/// How many times [`tokio_handle`] found no Tokio runtime for `site` in this
+/// process.
+#[must_use]
+pub fn tokio_runtime_missing_count(site: &str) -> u64 {
+    TOKIO_RUNTIME_MISSING
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(site)
+        .copied()
+        .unwrap_or(0)
+}
+
 fn started_process_runtime() -> Result<&'static Runtime, String> {
     PROCESS_RUNTIME
         .get_or_init(|| {
@@ -348,6 +381,21 @@ mod tests {
     use super::*;
 
     const HANG_GUARD: Duration = Duration::from_secs(10);
+
+    #[test]
+    fn a_missing_tokio_runtime_is_counted_per_site_and_a_present_one_is_not() {
+        const SITE: &str = "native_runtime.tests.tokio_handle";
+        let before = tokio_runtime_missing_count(SITE);
+        assert!(tokio_handle(SITE).is_none());
+        assert_eq!(tokio_runtime_missing_count(SITE), before + 1);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("tokio runtime");
+        let _entered = runtime.enter();
+        assert!(tokio_handle(SITE).is_some());
+        assert_eq!(tokio_runtime_missing_count(SITE), before + 1);
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn timeout_returns_a_value_that_lands_before_the_deadline() {
