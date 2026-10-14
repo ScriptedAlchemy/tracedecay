@@ -47,7 +47,7 @@ tracing = "0.1"
 tempfile = "3"
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.8"
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime" }
 

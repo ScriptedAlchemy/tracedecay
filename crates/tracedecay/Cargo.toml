@@ -316,7 +316,7 @@ filetime = "0.2"
 shell-words = "1.1"
 socket2 = "0.6"
 rmcp = { version = "3.0.1", default-features = false, features = ["client", "server", "transport-async-rw"] }
-criterion = { version = "0.5", features = ["async_tokio"] }
+criterion = { version = "0.8", features = ["async_tokio"] }
 # test-util enables tokio::test(start_paused = true) so timer-driven unit
 # tests (daemon restart-grace windows) run on virtual time instead of real
 # sleeps.
