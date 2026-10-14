@@ -404,7 +404,6 @@ pub(super) async fn register_project_open_production_owners(
                 repository_root.to_path_buf(),
                 access.clone(),
                 now_micros(),
-                tokio::runtime::Handle::current(),
             ), tracing::trace_span!("daemon.project.open.owners.git_transactions"))
         .await
         .map_err(|error| TraceDecayError::Config {

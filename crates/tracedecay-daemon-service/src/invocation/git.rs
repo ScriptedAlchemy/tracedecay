@@ -236,7 +236,7 @@ pub(super) async fn execute_git_read(
             ApplicationProblem::timed_out_before_admission(),
         );
     }
-    let initial = match owner.current_read_authority(&request.request) {
+    let initial = match current_read_authority(&owner, &request.request).await {
         Ok(authority) => authority,
         Err(error) => return application_problem(wire_request_id, map_git_port_problem(error)),
     };
@@ -355,7 +355,7 @@ pub(super) async fn execute_git_read(
         Ok(outcome) => outcome,
         Err(problem) => return application_problem(wire_request_id, problem),
     };
-    let terminal = match owner.current_read_authority(&request.request) {
+    let terminal = match current_read_authority(&owner, &request.request).await {
         Ok(authority) => authority,
         Err(error) => return application_problem(wire_request_id, map_git_port_problem(error)),
     };
@@ -472,6 +472,21 @@ pub(super) async fn execute_git_read(
             DaemonInvocationResponse::problem(wire_request_id, DaemonInvocationProblem::Unavailable)
         }
     }
+}
+
+/// The authority blocks its caller on the configuration store, so it runs on
+/// the blocking pool rather than on the worker polling this request.
+async fn current_read_authority(
+    owner: &DaemonGitInvocationOwner,
+    request: &tracedecay_contracts::git::GitReadRequestV1,
+) -> Result<DaemonGitAuthorityStateV1, GitIndexTransactionPortError> {
+    let owner = owner.clone();
+    let request = request.clone();
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        owner.current_read_authority(&request)
+    })
+    .await
+    .unwrap_or(Err(GitIndexTransactionPortError::DaemonUnavailable))
 }
 
 pub(super) fn git_read_output_limit_problem() -> ApplicationProblem {
