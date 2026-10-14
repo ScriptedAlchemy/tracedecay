@@ -1732,9 +1732,10 @@ impl ObservationStore for GlobalDbObservationStore {
             RuntimeSubmitOutcomeV1::IdempotencyConflict { .. } => {
                 self.restore_admitted_cursor_coverage(&replay).await
             }
-            other => Err(runtime_storage_error(
+            other => Err(rejected_submit_error(
                 "advance observation source cursor",
-                format!("runtime rejected cursor advance: {other:?}"),
+                "runtime rejected cursor advance",
+                &other,
             )),
         }
     }
@@ -2169,12 +2170,13 @@ async fn submit_observation_write_batch(
             | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. }
             | RuntimeSubmitOutcomeV1::ExactReplay { .. }
     ) {
-        return Err(runtime_storage_error(
+        return Err(rejected_submit_error(
             "submit anchored observation",
-            format!(
-                "runtime rejected {}-byte observation batch: {outcome:?}",
+            format_args!(
+                "runtime rejected {}-byte observation batch",
                 command_bytes.len()
             ),
+            &outcome,
         ));
     }
     const READBACK_OPERATION: &str = "read committed observation batch";
@@ -2271,9 +2273,10 @@ fn persist_outcome_from_submit(
         RuntimeSubmitOutcomeV1::ExactReplay { .. } => {
             Ok(ObservationPersistOutcome::ExactDuplicate(receipt))
         }
-        other => Err(runtime_storage_error(
+        other => Err(rejected_submit_error(
             "submit anchored observation",
-            format!("runtime rejected observation write: {other:?}"),
+            "runtime rejected observation write",
+            &other,
         )),
     }
 }
@@ -2496,6 +2499,19 @@ async fn begin_observation_read_snapshot(
         })
 }
 
+fn rejected_submit_error(
+    operation: &'static str,
+    rejection: impl std::fmt::Display,
+    outcome: &RuntimeSubmitOutcomeV1,
+) -> ObservationStoreError {
+    match outcome {
+        RuntimeSubmitOutcomeV1::Saturated { .. } => {
+            ObservationStoreError::WriterSaturated { operation }
+        }
+        outcome => runtime_storage_error(operation, format!("{rejection}: {outcome:?}")),
+    }
+}
+
 fn runtime_storage_error(
     operation: &'static str,
     message: impl std::fmt::Display,
@@ -2574,4 +2590,55 @@ fn projection_runtime_error(
         "dispatch observation projection runtime operation",
         error,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use tracedecay_store::SaturationScopeV1;
+
+    use super::*;
+
+    #[test]
+    fn writer_saturation_is_backpressure_not_a_storage_failure() {
+        for scope in [
+            SaturationScopeV1::ShardOperations,
+            SaturationScopeV1::ShardBytes,
+        ] {
+            let error = rejected_submit_error(
+                "submit anchored observation",
+                "runtime rejected observation write",
+                &RuntimeSubmitOutcomeV1::Saturated {
+                    shard_id: None,
+                    scope,
+                    retry_after_ms: 25,
+                },
+            );
+            assert!(
+                matches!(
+                    error,
+                    ObservationStoreError::WriterSaturated {
+                        operation: "submit anchored observation"
+                    }
+                ),
+                "{scope:?}: {error:?}"
+            );
+        }
+        let error = rejected_submit_error(
+            "advance observation source cursor",
+            "runtime rejected cursor advance",
+            &RuntimeSubmitOutcomeV1::Unavailable {
+                reason: tracedecay_store::UnavailableReasonV1::MissingAuthority,
+            },
+        );
+        assert!(
+            matches!(
+                error,
+                ObservationStoreError::Storage {
+                    operation: "advance observation source cursor",
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
 }

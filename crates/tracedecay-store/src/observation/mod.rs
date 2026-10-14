@@ -1144,6 +1144,10 @@ pub enum ObservationStoreError {
     /// the same operation can succeed once a reader returns.
     #[error("observation storage operation {operation} found every reader leased")]
     ReaderSaturated { operation: &'static str },
+    /// The shard writer's admission queue was full. Nothing was written; the
+    /// same command can commit once queued writes drain.
+    #[error("observation storage operation {operation} found the writer queue full")]
+    WriterSaturated { operation: &'static str },
     #[error("observation storage operation {operation} failed")]
     Storage {
         operation: &'static str,

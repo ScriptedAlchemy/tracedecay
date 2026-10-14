@@ -1451,6 +1451,7 @@ fn classify_store_error(error: &ObservationStoreError) -> HostAdmissionOutcome {
         }
         ObservationStoreError::CursorConflict { .. }
         | ObservationStoreError::ReaderSaturated { .. }
+        | ObservationStoreError::WriterSaturated { .. }
         | ObservationStoreError::Storage { .. } => {
             unreachable!("retryable store failures are classified before static reason mapping")
         }
@@ -1526,6 +1527,9 @@ fn classify_error(error: &ObservationApplicationError) -> HostAdmissionOutcome {
         }
         ObservationApplicationError::Store(ObservationStoreError::ReaderSaturated { .. }) => {
             HostAdmissionOutcome::retained_backpressured("reader_pool_saturated")
+        }
+        ObservationApplicationError::Store(ObservationStoreError::WriterSaturated { .. }) => {
+            HostAdmissionOutcome::retained_backpressured("writer_lane_saturated")
         }
         ObservationApplicationError::Store(ObservationStoreError::Storage {
             operation,
