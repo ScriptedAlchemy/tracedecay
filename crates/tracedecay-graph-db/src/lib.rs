@@ -172,6 +172,17 @@ pub struct GraphDbTraversalCounters {
 pub fn take_graph_db_traversal_counters() -> GraphDbTraversalCounters {
     observe::take_traversal_counters()
 }
+
+/// Runs `run` with `hook` called on **this thread** just before each lock
+/// wait, with the lock's `graph_db.lock.wait.*` label. Lock waits on other
+/// threads never call it.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn with_graph_db_lock_wait_hook<R>(
+    hook: impl FnMut(&'static str) + 'static,
+    run: impl FnOnce() -> R,
+) -> R {
+    observe::lock_wait_hook::with(hook, run)
+}
 pub use traversal::{
     GraphRelationTarget, GraphTraversalDirection, RelationFanoutOverflow, TraversalRequest,
     TraversalResult, TraversalVisit,

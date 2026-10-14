@@ -138,6 +138,18 @@ fn control_and_probe() -> (RuntimeRequestControlV1, Probe) {
     )
 }
 
+/// The shared `registration` helper carries a 30s deadline, which a
+/// production-width publication legitimately outruns on a loaded host.
+/// Measurement harnesses use this; deadline contracts stay on the default.
+fn unhurried_registration(
+    binding: tracedecay_store::StoreRuntimeBindingV1,
+    root: &std::path::Path,
+) -> tracedecay_graph_db::GraphDbRegistration {
+    let mut registration = registration(binding, root);
+    registration.deadline = std::time::Instant::now() + std::time::Duration::from_secs(3_600);
+    registration
+}
+
 #[derive(Default)]
 struct RelationalAuthority {
     next_sequence: u64,
