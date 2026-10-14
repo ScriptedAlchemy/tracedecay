@@ -14,6 +14,10 @@ use tracedecay_lsp::{
 #[path = "analyzer_runtime/broker_refresh.rs"]
 mod broker_refresh;
 
+fn block<T>(future: impl Future<Output = T>) -> T {
+    tracedecay_runtime_core::native_runtime::block_on(future).expect("native runtime")
+}
+
 const FAKE_LANGUAGE: &str = "fake";
 const FAKE_PATH: &str = "src/lib.fake";
 // The stdio client intentionally keeps listening until this deadline expires
@@ -345,15 +349,14 @@ fn broker_exposes_project_scoped_readiness_without_lsp_transport() {
         .unwrap()
         .to_string();
 
-    let authority = broker
-        .semantic_authority_if_available(
-            FAKE_LANGUAGE,
-            project.path().to_path_buf(),
-            root_uri,
-            bounded_fake_lsp_timeouts(),
-        )
-        .unwrap()
-        .expect("fake analyzer is executable");
+    let authority = block(broker.semantic_authority_if_available(
+        FAKE_LANGUAGE,
+        project.path().to_path_buf(),
+        root_uri,
+        bounded_fake_lsp_timeouts(),
+    ))
+    .unwrap()
+    .expect("fake analyzer is executable");
     let readiness = authority.analyzer_readiness();
 
     // The slot is keyed by the canonical project root, so its supervisor names
@@ -385,12 +388,12 @@ fn broker_rejects_analyzer_workspace_outside_project_scope() {
         .unwrap()
         .to_string();
 
-    let result = broker.semantic_authority_if_available(
+    let result = block(broker.semantic_authority_if_available(
         FAKE_LANGUAGE,
         outside.path().to_path_buf(),
         root_uri,
         bounded_fake_lsp_timeouts(),
-    );
+    ));
 
     assert!(matches!(
         result,
@@ -412,12 +415,12 @@ fn broker_rejects_analyzer_root_uri_for_another_project() {
         .unwrap()
         .to_string();
 
-    let result = broker.semantic_authority_if_available(
+    let result = block(broker.semantic_authority_if_available(
         FAKE_LANGUAGE,
         project.path().to_path_buf(),
         other_uri,
         bounded_fake_lsp_timeouts(),
-    );
+    ));
 
     assert!(matches!(
         result,
@@ -425,27 +428,23 @@ fn broker_rejects_analyzer_root_uri_for_another_project() {
     ));
 }
 
-#[tokio::test]
-async fn settings_persist_under_dashboard_root() {
+#[test]
+fn settings_persist_under_dashboard_root() {
     let temp = tempfile::tempdir().unwrap();
     let mut settings = lsp::settings::CodeDiagnosticsSettings::default();
     settings.set_language_enabled("python", false);
     settings.idle_backfill = lsp::settings::IdleBackfillMode::Off;
 
-    lsp::settings::save_settings(temp.path(), &settings)
-        .await
-        .unwrap();
-    let loaded = lsp::settings::load_settings(temp.path()).await.unwrap();
+    block(lsp::settings::save_settings(temp.path(), &settings)).unwrap();
+    let loaded = block(lsp::settings::load_settings(temp.path())).unwrap();
 
     assert!(!loaded.language_enabled("python"));
     assert_eq!(loaded.idle_backfill, lsp::settings::IdleBackfillMode::Off);
 
     let replacement = lsp::settings::CodeDiagnosticsSettings::default();
-    lsp::settings::save_settings(temp.path(), &replacement)
-        .await
-        .unwrap();
+    block(lsp::settings::save_settings(temp.path(), &replacement)).unwrap();
     assert_eq!(
-        lsp::settings::load_settings(temp.path()).await.unwrap(),
+        block(lsp::settings::load_settings(temp.path())).unwrap(),
         replacement
     );
     assert!(
@@ -500,16 +499,13 @@ fn stdio_client_collects_diagnostics_without_a_tokio_runtime() {
     let script_path = temp.path().join("fake_lsp.py");
     std::fs::write(&script_path, fake_lsp_script()).unwrap();
 
-    let diagnostics = tracedecay_runtime_core::native_runtime::block_on(
-        lsp::client::collect_document_diagnostics(
-            python_command(),
-            &[script_path.display().to_string()],
-            temp.path(),
-            vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
-            FAKE_LSP_TIMEOUT,
-        ),
-    )
-    .expect("native runtime")
+    let diagnostics = block(lsp::client::collect_document_diagnostics(
+        python_command(),
+        &[script_path.display().to_string()],
+        temp.path(),
+        vec![fake_document(FAKE_LANGUAGE, FAKE_PATH, "let nope")],
+        FAKE_LSP_TIMEOUT,
+    ))
     .unwrap();
 
     assert_eq!(diagnostics.len(), 1);

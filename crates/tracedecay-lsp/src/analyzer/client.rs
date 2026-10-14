@@ -331,11 +331,11 @@ impl StdioLspClient {
         project_root: &Path,
         timeouts: LspRefreshTimeouts,
     ) -> Result<Self> {
-        let launch = resolve_analyzer_launch(command, project_root).map_err(|error| {
-            TraceDecayError::Config {
+        let launch = resolve_analyzer_launch(command, project_root)
+            .await
+            .map_err(|error| TraceDecayError::Config {
                 message: error.engine_error(),
-            }
-        })?;
+            })?;
         Self::start_with_launch(&launch, args, project_root, timeouts).await
     }
 

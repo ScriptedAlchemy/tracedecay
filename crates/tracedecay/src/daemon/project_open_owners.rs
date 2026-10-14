@@ -650,8 +650,8 @@ pub(super) async fn register_project_open_production_owners(
         indexed_files.sort();
         let admitted_providers = {
             let mut broker = diagnostic_broker.lock().await;
-            let admitted = broker.admitted_providers_for_files(&indexed_files);
-            mounted_providers = broker.mounted_providers_for_files(&indexed_files);
+            let admitted = broker.admitted_providers_for_files(&indexed_files).await;
+            mounted_providers = broker.mounted_providers_for_files(&indexed_files).await;
             admitted
         };
         owner_phase("lsp_languages_discovered");
