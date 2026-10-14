@@ -197,6 +197,14 @@ struct WorkAttemptProcessHolderV1 {
     handle: Option<tokio::task::JoinHandle<()>>,
 }
 
+impl Drop for WorkAttemptProcessHolderV1 {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.handle {
+            handle.abort();
+        }
+    }
+}
+
 impl WorkAttemptProcessRegistryV1 {
     fn key(worktree_id: Option<&WorktreeId>, identity: &WorkAttemptIdentityV1) -> String {
         format!(
@@ -437,11 +445,11 @@ impl WorkAttemptProcessRegistryV1 {
         let deadline =
             tokio::time::Instant::now() + tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE;
         let mut clean = true;
-        for process in processes.into_values() {
-            let Some(mut handle) = process.handle else {
+        for mut process in processes.into_values() {
+            let Some(handle) = process.handle.as_mut() else {
                 continue;
             };
-            match tokio::time::timeout_at(deadline, &mut handle).await {
+            match tokio::time::timeout_at(deadline, &mut *handle).await {
                 Ok(Ok(())) => {}
                 Ok(Err(_)) => clean = false,
                 Err(_) => {
@@ -473,9 +481,6 @@ impl Drop for WorkAttemptProcessRegistryV1 {
         for process in state.processes.values() {
             process.cancellation.notify_one();
             process.lifecycle.cancel();
-            if let Some(handle) = &process.handle {
-                handle.abort();
-            }
         }
     }
 }

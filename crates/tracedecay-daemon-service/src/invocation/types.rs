@@ -1026,15 +1026,16 @@ struct LspLeaseTask {
 }
 
 impl LspLeaseTask {
-    async fn stop(self) -> Result<(), DaemonInvocationProblem> {
+    async fn stop(mut self) -> Result<(), DaemonInvocationProblem> {
         self.cancellation.cancel();
-        self.handle
+        (&mut self.handle)
             .await
             .map_err(|_| DaemonInvocationProblem::Unavailable)
     }
+}
 
-    fn abort(&self) {
-        self.cancellation.cancel();
+impl Drop for LspLeaseTask {
+    fn drop(&mut self) {
         self.handle.abort();
     }
 }
@@ -1276,19 +1277,6 @@ impl LspLeaseTaskRegistry {
         };
         for finished in receivers {
             let _ = finished.await;
-        }
-    }
-}
-
-impl Drop for LspLeaseTaskRegistry {
-    fn drop(&mut self) {
-        let state = match self.state.get_mut() {
-            Ok(state) => state,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        state.accepting = false;
-        for task in state.tasks.values() {
-            task.abort();
         }
     }
 }
