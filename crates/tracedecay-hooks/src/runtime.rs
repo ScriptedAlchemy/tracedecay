@@ -18,11 +18,9 @@ use crate::{
 
 pub const HOOK_SYNCHRONOUS_BUDGET_MICROS: u64 = 100_000;
 
-/// The same budget as a bounded lock wait: how long one spool writer admission
-/// may wait for a held lease, measured from the lock attempt. It holds on every
-/// platform, whatever a durability barrier costs, because neither the capture
-/// spool's writer lease nor the delivery-receipt writer lock is held across a
-/// barrier in steady state.
+/// The same budget as a bounded lock wait: how long a delivery-receipt writer
+/// may wait for its lock, measured from the lock attempt. A receipt that misses
+/// it stays staged for the next owner instead of being lost.
 pub const HOOK_SYNCHRONOUS_BUDGET: std::time::Duration =
     std::time::Duration::from_micros(HOOK_SYNCHRONOUS_BUDGET_MICROS);
 

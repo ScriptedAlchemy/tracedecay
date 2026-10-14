@@ -5,7 +5,6 @@
 //! session, memory, sync, or indexing authority.
 
 use std::path::Path;
-use std::time::Duration;
 
 use tracedecay_domain::UtcMicros;
 
@@ -76,7 +75,6 @@ pub fn capture_native_event_for_replay(
     payload: &[u8],
     material: NativeEnvelopeMaterialV1,
     now: UtcMicros,
-    wait_budget: Duration,
 ) -> NativeHookCaptureOutcomeV1 {
     let host = source.host();
     let decoded_result = match source {
@@ -104,12 +102,8 @@ pub fn capture_native_event_for_replay(
         Err(_) => return NativeHookCaptureOutcomeV1::Rejected,
     };
     let spool_root = hook_v2_spool_root(data_root, host);
-    let mut spool = match HookSpoolV1::open_within(
-        spool_root,
-        HookSpoolConfigV1::stock(host),
-        now,
-        wait_budget,
-    ) {
+    let config = HookSpoolConfigV1::stock(host);
+    let mut spool = match HookSpoolV1::open_within(spool_root, config, now, config.writer_lease()) {
         Ok((spool, _)) => spool,
         Err(error) => return spool_refusal(error),
     };

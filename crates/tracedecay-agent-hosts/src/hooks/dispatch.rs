@@ -869,12 +869,10 @@ fn render_host_delivery(
     }))
 }
 
-/// Spool writer admission waits one synchronous budget measured from the lock
-/// attempt, not from hook start. The response lane spends its budget before it
-/// reaches the spool (analytics rows, layout resolution, the daemon admission
-/// window), so a deadline anchored at hook start was already expired on a
-/// loaded runner and refused an uncontended lock: the hook answered `{}` with
-/// exit 0 and the event was never spooled.
+/// Spool writer admission waits for the holder to release, bounded only by a
+/// whole writer lease. No holder keeps the lease across a barrier, so any
+/// shorter wall-clock budget is one a loaded runner misses: the hook answered
+/// `{}` with exit 0 and the event was never spooled.
 fn append_for_replay(
     data_root: &Path,
     host: NativeHostIdentityV1,
@@ -884,12 +882,9 @@ fn append_for_replay(
     now: UtcMicros,
 ) -> SpoolAppendOutcomeV1 {
     let root = tracedecay_hooks::hook_v2_spool_root(data_root, host);
-    let Ok((mut spool, _)) = HookSpoolV1::open_within(
-        root,
-        HookSpoolConfigV1::stock(host),
-        now,
-        tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
-    ) else {
+    let config = HookSpoolConfigV1::stock(host);
+    let Ok((mut spool, _)) = HookSpoolV1::open_within(root, config, now, config.writer_lease())
+    else {
         return SpoolAppendOutcomeV1::Unavailable;
     };
     match spool.append_with_native_lifecycle(envelope.clone(), native_lifecycle, binding, now) {
@@ -921,12 +916,9 @@ fn replay_envelope_if_pending(
     now: UtcMicros,
 ) -> PendingEnvelopeV1 {
     let root = tracedecay_hooks::hook_v2_spool_root(data_root, host);
-    let Ok((mut spool, _)) = HookSpoolV1::open_within(
-        root,
-        HookSpoolConfigV1::stock(host),
-        now,
-        tracedecay_hooks::HOOK_SYNCHRONOUS_BUDGET,
-    ) else {
+    let config = HookSpoolConfigV1::stock(host);
+    let Ok((mut spool, _)) = HookSpoolV1::open_within(root, config, now, config.writer_lease())
+    else {
         return PendingEnvelopeV1::Unavailable;
     };
     let queued = match spool.pending_envelope(retry.event_id) {

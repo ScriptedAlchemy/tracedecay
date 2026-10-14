@@ -26,8 +26,8 @@ use tracedecay_private_fs::framed_log::{
 };
 
 use crate::{
-    HOOK_SYNCHRONOUS_BUDGET, HookContractError, HookEventEnvelopeV2, HookScopeBindingV1,
-    MAX_HOOK_PAYLOAD_BYTES, MAX_REPLAY_BATCH_BYTES, MAX_REPLAY_BATCH_RECORDS, MAX_SPOOL_AGE_MICROS,
+    HookContractError, HookEventEnvelopeV2, HookScopeBindingV1, MAX_HOOK_PAYLOAD_BYTES,
+    MAX_REPLAY_BATCH_BYTES, MAX_REPLAY_BATCH_RECORDS, MAX_SPOOL_AGE_MICROS,
     NativeContextScoutLifecycleV1,
 };
 
@@ -46,7 +46,10 @@ use checkpoint::{
     RecordsFileRevisionV1, RecordsPrefixDigestV1, read_checkpoint, read_frame_at, read_transition,
     records_file_revision, write_checkpoint, write_transition,
 };
-use types::{AcknowledgedSequenceV1, HookSpoolMetaV1, PendingRecordV1, SpoolIntegrityV1};
+use types::{
+    AcknowledgedSequenceV1, HookSpoolMetaV1, PendingRecordV1, STOCK_WRITER_LEASE_MICROS,
+    SpoolIntegrityV1,
+};
 pub use types::{
     HookReplayBatchV1, HookSpoolAckDispositionV1, HookSpoolAckV1, HookSpoolConfigV1,
     HookSpoolError, HookSpoolLimitsV1, HookSpoolOpenReportV1, HookSpoolRecordV1,
@@ -92,9 +95,10 @@ const TRANSITION_FILE: &str = "checkpoint-transition.v1.json";
 const LEASE_FILE: &str = "writer.v1.lease";
 const REPLAY_CURSOR_FILE: &str = "replay-cursor.v1.bin";
 const DIRECTORY_POLICY: DirectorySyncPolicy = DirectorySyncPolicy::Strict;
-// Committers queue behind at most one batch's sync, the same bounded wait a
-// hook spends on writer admission.
-const COMMIT_WAIT: Duration = HOOK_SYNCHRONOUS_BUDGET;
+// The commit lock is held across fsyncs, which a loaded disk does not bound,
+// so a committer waits out the holder's sync instead of a hook's synchronous
+// budget. Only a holder stuck past a whole writer lease times it out.
+const COMMIT_WAIT: Duration = Duration::from_micros(STOCK_WRITER_LEASE_MICROS.unsigned_abs());
 
 /// A host-local transport spool. It owns a short writer lease, performs no
 /// query/model/database work, and has no authority to rebind an event.
