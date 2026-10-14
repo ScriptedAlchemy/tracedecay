@@ -83,7 +83,7 @@ impl DaemonSessionSyncService {
         let task_key = key.clone();
         let task_cancellation = cancellation.clone();
         let key_for_cleanup = key.clone();
-        let task = tokio::spawn(async move {
+        let task = NativeTask::spawn(async move {
             let worker = async {
                 loop {
                     let journal_changed = service.journal_changed.notified();
@@ -219,12 +219,16 @@ impl DaemonSessionSyncService {
                 }
             };
             worker.await;
-            service
-                .active
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .remove(&key_for_cleanup);
+            service.release_active(&key_for_cleanup, None);
         });
+        let task = match task {
+            Ok(task) => task,
+            Err(error) => {
+                tracing::warn!(%error, "coalesced session sync wait did not start");
+                self.release_active(&task_key, None);
+                return;
+            }
+        };
         let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
         tasks.retain(|task| !task.task.is_finished());
         tasks.push(super::project_lifecycle::SessionSyncTaskV1 {
@@ -801,10 +805,8 @@ pub fn coalesced_alias_local_interruption(
     }
 }
 
-pub(super) fn log_session_sync_join(result: Result<(), tokio::task::JoinError>) {
-    if let Err(error) = result
-        && !error.is_cancelled()
-    {
-        tracing::warn!(%error, "session sync worker join failed");
+pub(super) fn log_session_sync_join(outcome: NativeTaskOutcome<()>) {
+    if let NativeTaskOutcome::Panicked(payload) = outcome {
+        tracing::warn!(%payload, "session sync worker panicked");
     }
 }

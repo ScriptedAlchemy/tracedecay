@@ -21,7 +21,7 @@ use crate::session_temporal_refresh_scheduler::wake::HistoricalAdmissionView;
 use tracedecay_global_db::GlobalDbGitCorrelationStore;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
-use tracedecay_runtime_core::native_runtime;
+use tracedecay_runtime_core::native_runtime::{self, NativeTask, NativeTaskOutcome};
 use tracedecay_sessions::admission::{SESSION_INGEST_DISABLED_REASON_V1, session_ingest_disabled};
 
 const MAX_SESSION_SYNC_OPERATIONS: usize = 128;
@@ -446,23 +446,21 @@ impl DaemonSessionSyncService {
         let task_scope = request.scope().clone();
         let task_key = key.clone();
         let task_cancellation = request.cancellation().clone();
-        let task = tokio::spawn(async move {
+        let task_import_scope = import_scope.clone();
+        let task = NativeTask::spawn(async move {
             service
                 .run_operation(context, project_sessions, key.clone(), request)
                 .await;
-            service
-                .active
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .remove(&key);
-            if let Some(import_scope) = import_scope {
-                service
-                    .active_imports
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .remove(&import_scope);
-            }
+            service.release_active(&key, import_scope.as_ref());
         });
+        let task = match task {
+            Ok(task) => task,
+            Err(error) => {
+                tracing::warn!(%error, "session sync operation did not start");
+                self.release_active(&task_key, task_import_scope.as_ref());
+                return false;
+            }
+        };
         let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
         tasks.retain(|task| !task.task.is_finished());
         tasks.push(SessionSyncTaskV1 {
@@ -472,6 +470,19 @@ impl DaemonSessionSyncService {
             task,
         });
         true
+    }
+
+    fn release_active(&self, key: &str, import_scope: Option<&String>) {
+        self.active
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(key);
+        if let Some(import_scope) = import_scope {
+            self.active_imports
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(import_scope);
+        }
     }
 
     async fn run_operation(
@@ -911,11 +922,11 @@ impl SessionSyncServicePort for DaemonSessionSyncService {
         Box::pin(async move {
             self.shutdown.cancel();
             self.shutdown_notify.notify_waiters();
-            let mut tasks = SessionSyncTaskShutdownV1::take(&self.tasks);
+            let tasks = SessionSyncTaskShutdownV1::take(&self.tasks);
             let grace_deadline = Instant::now() + SESSION_SYNC_SHUTDOWN_ABORT_GRACE;
             tokio::select! {
                 results = futures_util::future::join_all(
-                    tasks.tasks.iter_mut().map(|task| &mut task.task)
+                    tasks.tasks.iter().map(|task| task.task.wait())
                 ) => {
                     for result in results {
                         work::log_session_sync_join(result);
@@ -936,7 +947,7 @@ impl SessionSyncServicePort for DaemonSessionSyncService {
                 task.task.abort();
             }
             for result in
-                futures_util::future::join_all(tasks.tasks.iter_mut().map(|task| &mut task.task))
+                futures_util::future::join_all(tasks.tasks.iter().map(|task| task.task.wait()))
                     .await
             {
                 work::log_session_sync_join(result);

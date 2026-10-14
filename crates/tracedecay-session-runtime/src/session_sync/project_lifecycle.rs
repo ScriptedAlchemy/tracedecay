@@ -12,7 +12,7 @@ use tracedecay_domain::{BrainId, ProjectId, UserProfileId, UtcMicros};
 use tracedecay_store::{StoreShardScopeV1, VerifiedStoreLocatorV1};
 
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
-use tracedecay_runtime_core::native_runtime;
+use tracedecay_runtime_core::native_runtime::{self, NativeTask};
 use tracedecay_sessions::admission::SESSION_INGEST_DISABLED_REASON_V1;
 
 use super::{
@@ -41,7 +41,7 @@ pub struct SessionSyncTaskV1 {
     pub scope: SessionSyncScopeV1,
     pub key: String,
     pub cancellation: CancellationSignal,
-    pub task: tokio::task::JoinHandle<()>,
+    pub task: NativeTask<()>,
 }
 
 impl SessionSyncProjectContext {
@@ -562,8 +562,7 @@ impl DaemonSessionSyncService {
             task.cancellation.cancel(cancelled_at);
         }
         let joined = native_runtime::timeout(SESSION_SYNC_SHUTDOWN_DEADLINE, async {
-            futures_util::future::join_all(project_tasks.iter_mut().map(|task| &mut task.task))
-                .await
+            futures_util::future::join_all(project_tasks.iter().map(|task| task.task.wait())).await
         })
         .await;
         let results = match joined {
