@@ -328,7 +328,10 @@ async fn remote_tls_connect(
     roots
         .add(trust_anchor)
         .expect("install TLS trust anchor fixture");
-    let mut client = rustls::ClientConfig::builder()
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut client = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("ring supports the default TLS versions")
         .with_root_certificates(roots)
         .with_no_client_auth();
     client.alpn_protocols = vec![b"http/1.1".to_vec()];
@@ -391,7 +394,10 @@ async fn remote_tls_h2_only_handshake_is_rejected(
     roots
         .add(trust_anchor)
         .expect("install TLS trust anchor fixture");
-    let mut client = rustls::ClientConfig::builder()
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut client = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("ring supports the default TLS versions")
         .with_root_certificates(roots)
         .with_no_client_auth();
     client.alpn_protocols = vec![b"h2".to_vec()];
