@@ -13,6 +13,7 @@ use tracedecay_code_index_runtime::code_index_scheduler::{
     },
 };
 use tracedecay_runtime_core::logging::log_daemon_event;
+use tracedecay_runtime_core::native_runtime;
 use tracedecay_session_temporal_store::SessionTemporalAccess;
 
 /// Inputs the deferred mount closure re-clones on every activation attempt.
@@ -140,7 +141,8 @@ fn spawn_query_authority_when_generation_ready(inputs: QueryAuthorityWaitInputs)
         route_registered,
         cancellation,
     } = inputs;
-    tokio::spawn(tracing::Instrument::instrument(
+    let log_project_root = project_root.clone();
+    let spawned = native_runtime::NativeTask::spawn(tracing::Instrument::instrument(
         async move {
             let schedulers = invocation.code_index_schedulers.clone();
             let mut awaiting_generation_logged = false;
@@ -191,6 +193,12 @@ fn spawn_query_authority_when_generation_ready(inputs: QueryAuthorityWaitInputs)
         },
         tracing::trace_span!("daemon.project.activate.query_authority"),
     ));
+    if let Err(error) = spawned {
+        log_query_authority_activation_outcome(
+            &log_project_root,
+            Err(QueryRuntimeMountErrorV1::Mount(error)),
+        );
+    }
 }
 
 /// Mounts the checked-in core query policy from the project's durable
