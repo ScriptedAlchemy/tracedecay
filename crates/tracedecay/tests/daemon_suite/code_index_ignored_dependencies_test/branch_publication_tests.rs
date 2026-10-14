@@ -4,6 +4,7 @@ use std::sync::atomic::Ordering;
 use tracedecay_domain::{CodeGenerationId, GitOidV1, RefId};
 
 use super::*;
+use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexWorkerPhaseV1;
 use tracedecay_code_index_runtime::code_index_scheduler::branch_generations::{
     BranchGenerationPairV1, BranchGenerationReadControlV1,
 };
@@ -315,6 +316,21 @@ export function GenerationAnchor(value: PublicWidget) { return value; }
     let baseline = latest(&registry, fixture.path()).await;
     let incumbent = baseline.generation().manifest().generation_id.clone();
     let request = request_for(&baseline, "pkg");
+    // The first complete read queued a demand wake. Once the admission owns
+    // the sole permit, a worker still holding that wake queues ahead of the
+    // follow-up hold below.
+    let (idle_registry, idle_root) = (registry.as_ref(), fixture.path());
+    wait_for_owner(idle_registry, idle_root, || async move {
+        idle_registry
+            .subscribe_owner_activity(idle_root)
+            .await
+            .filter(|activity| {
+                activity.worker_phase() == CodeIndexWorkerPhaseV1::Parked
+                    && !activity.refresh_in_flight()
+                    && !activity.wake_pending()
+            })
+    })
+    .await;
     let scheduler = registry
         .scheduler_handle(fixture.path())
         .await
@@ -377,6 +393,15 @@ export function CompetingTrackedEdit(value: PublicWidget) { return value.value; 
         }
         () = tokio::task::yield_now() => {}
     }
+    assert_eq!(
+        registry
+            .subscribe_owner_activity(fixture.path())
+            .await
+            .expect("mounted owner activity")
+            .worker_phase(),
+        CodeIndexWorkerPhaseV1::Parked,
+        "the follow-up hold must be the next waiter for the sole reconcile permit"
+    );
     release_activation_tx
         .send(())
         .expect("release candidate graph activation");
