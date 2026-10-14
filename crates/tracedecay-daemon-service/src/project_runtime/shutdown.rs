@@ -53,8 +53,9 @@ impl ProjectRuntimeRegistryV1 {
     }
 
     async fn drain_roots(&self, roots: &BTreeSet<PathBuf>) -> bool {
-        let retired =
-            tokio::time::timeout(tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE, async {
+        let retired = tracedecay_runtime_core::native_runtime::timeout(
+            tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE,
+            async {
                 loop {
                     let mut changed = self.reservation_changed.subscribe();
                     let retired = {
@@ -82,8 +83,9 @@ impl ProjectRuntimeRegistryV1 {
                         break BTreeMap::new();
                     }
                 }
-            })
-            .await;
+            },
+        )
+        .await;
         match retired {
             Ok(mut runtimes) => {
                 let mut clean = shut_down_advisory(&runtimes).await;

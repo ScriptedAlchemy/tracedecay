@@ -481,11 +481,12 @@ impl BoundedHookOrchestratorV1 {
             }
         }
         let deadline =
-            tokio::time::Instant::now() + tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE;
+            std::time::Instant::now() + tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE;
         for mut task in tasks {
-            match tokio::time::timeout_at(deadline, &mut task).await {
+            match tracedecay_runtime_core::native_runtime::timeout_at(deadline, &mut task).await {
                 Ok(Ok(())) => {}
                 Ok(Err(_)) => clean = false,
+                // An unavailable timer aborts the task as if its deadline passed.
                 Err(_) => {
                     task.abort();
                     let _ = task.await;
@@ -668,7 +669,12 @@ pub(super) async fn run_registered_context_scout_request(
     let outcome = tokio::select! {
         biased;
         () = request_cancellation.cancelled() => Err(ApplicationProblem::cancelled_before_admission()),
-        () = tokio::time::sleep_until(deadline.instant().into()) => Err(ApplicationProblem::timed_out_before_admission()),
+        fired = tracedecay_runtime_core::native_runtime::sleep_until(deadline.instant()) => {
+            if let Err(error) = fired {
+                tracing::error!(%error, "Context Scout admission timer unavailable; timing out");
+            }
+            Err(ApplicationProblem::timed_out_before_admission())
+        }
         () = operation_cancellation.cancelled() => Err(unavailable()),
         completed = completion => completed.map_err(|_| unavailable()),
     };
