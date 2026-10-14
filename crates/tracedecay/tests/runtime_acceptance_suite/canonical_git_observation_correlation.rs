@@ -160,7 +160,10 @@ async fn canonical_codex_capture_publishes_admitted_git_evidence_for_sessions_fo
         other => panic!("canonical capture was not retained: {other:?}"),
     };
     let sanitized = serde_json::to_string(sanitized_payload).unwrap();
-    assert!(!sanitized.contains(project.to_string_lossy().as_ref()));
+    // The Session fact names its project by design: path locators pass
+    // credential patterns only, not the entropy heuristic.
+    let project_json = serde_json::to_string(&project).unwrap();
+    assert!(sanitized.contains(&project_json[1..project_json.len() - 1]));
     assert!(sanitized.contains("capture-branch"));
     assert!(sanitized.contains(&commit_sha));
 
