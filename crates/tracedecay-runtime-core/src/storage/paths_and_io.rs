@@ -12,10 +12,9 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 #[cfg(windows)]
 use super::DURABLE_REMOVAL_TOMBSTONE_PREFIX;
 use super::{
-    ActiveProjectContext, BRANCH_META_FILENAME, DurableAtomicWritePhase, GraphScopeId,
-    PrivateStoreIo, ProjectIdentity, ProjectPath, QueryTarget, RESPONSE_HANDLES_DIRECTORY,
-    SESSIONS_DB_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreArtifactPath, StoreKind,
-    StoreLayout, StoreManifest, inject_durable_atomic_write_fault,
+    BRANCH_META_FILENAME, DurableAtomicWritePhase, PrivateStoreIo, ProjectIdentity, ProjectPath,
+    RESPONSE_HANDLES_DIRECTORY, SESSIONS_DB_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
+    StoreArtifactPath, StoreKind, StoreLayout, StoreManifest, inject_durable_atomic_write_fault,
     inject_durable_namespace_sync_fault,
 };
 
@@ -32,19 +31,6 @@ impl StoreManifest {
             sessions_db_relpath: relative_to_data_root(&layout.sessions_db_path, &layout.data_root),
             branch_meta_relpath: relative_to_data_root(&layout.branch_meta_path, &layout.data_root),
             sessions_schema_digest: None,
-        }
-    }
-}
-
-impl ActiveProjectContext {
-    pub fn new(layout: StoreLayout, scope_id: GraphScopeId) -> Self {
-        let query_target = QueryTarget {
-            graph_db_path: layout.graph_db_path.clone(),
-        };
-        Self {
-            layout,
-            scope_id,
-            query_target,
         }
     }
 }
