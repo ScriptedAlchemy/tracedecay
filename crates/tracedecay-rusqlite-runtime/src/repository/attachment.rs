@@ -1068,27 +1068,6 @@ mod tests {
         attachment.close_and_join().unwrap();
     }
 
-    fn attach_wal_database(directory: &TempDir) -> RepositoryRuntimePhysicalAttachment {
-        let path = directory.path().join("maintenance.sqlite3");
-        let connection = rusqlite::Connection::open(&path).unwrap();
-        let journal_mode: String = connection
-            .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(journal_mode, "wal");
-        drop(connection);
-        let path = path.canonicalize().unwrap();
-        let binding = binding();
-        RepositoryPhysicalAttachmentFactory
-            .attach(
-                &native_runtime(),
-                binding.clone(),
-                locator(&binding),
-                path,
-                AdmissionConfigV1::default(),
-            )
-            .unwrap()
-    }
-
     #[test]
     fn hard_wal_pressure_queues_further_writes_until_the_snapshot_releases() {
         let directory = TempDir::new().unwrap();

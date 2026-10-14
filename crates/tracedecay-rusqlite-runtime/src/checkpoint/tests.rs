@@ -47,8 +47,6 @@ fn report(busy: bool, log_frames: u64, checkpointed_frames: u64) -> CheckpointRe
     }
 }
 
-use tracedecay_domain::test_fixtures::id;
-
 #[test]
 fn below_soft_is_a_noop_and_soft_pressure_is_passive() {
     let config = CheckpointConfig::default();
