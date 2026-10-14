@@ -42,11 +42,6 @@ pub enum HookRuntimeSurfaceRequestV1 {
     },
     /// Cursor `preCompact` pressure evidence.
     CursorCompact { event_json: String },
-    /// Review a finished user session.
-    UserReview {
-        provider: String,
-        session_id: Option<String>,
-    },
     /// Record a Hermes terminal receipt without a project route.
     HermesReceipt { event: Value },
     /// Admit a native event without a project route into the profile's

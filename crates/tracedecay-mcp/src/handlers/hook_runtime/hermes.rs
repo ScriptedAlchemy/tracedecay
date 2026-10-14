@@ -10,14 +10,6 @@ use tracedecay_sessions::admission::HostAdmissionOutcome;
 
 use crate::map_host_admission_outcome;
 
-/// Session review needs automation, which only a pinned project
-/// configuration carries; a projectless route can never run it.
-pub(super) fn user_review_unavailable() -> tracedecay_domain::errors::TraceDecayError {
-    config_error(
-        "projectless Hermes review is unavailable: automation requires a pinned project configuration",
-    )
-}
-
 async fn apply_projectless_hermes_receipt_plan(
     profile_root: &Path,
     plan: crate::hook_events::HookEventPlan,
@@ -213,7 +205,11 @@ async fn continue_projectless_hermes_review(
     {
         return Ok(HermesReceiptStatusV1::AwaitingTranscript);
     }
-    Err(user_review_unavailable())
+    // Session review needs automation, which only a pinned project
+    // configuration carries; a projectless route can never run it.
+    Err(config_error(
+        "projectless Hermes review is unavailable: automation requires a pinned project configuration",
+    ))
 }
 
 #[tracing::instrument(name = "mcp.hook_runtime.hermes", level = "trace", skip_all)]

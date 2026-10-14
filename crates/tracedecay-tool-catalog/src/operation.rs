@@ -421,7 +421,7 @@ impl ApplicationSurfaceOperation {
             },
             // A hook with no project route lands in the profile's stores.
             Self::HookRuntime => match argument("action") {
-                Some("user_review" | "hermes_receipt" | "hook_v2_profile_admit") => true,
+                Some("hermes_receipt" | "hook_v2_profile_admit") => true,
                 Some("ingest_transcript" | "claude_compact") => {
                     arguments.get("user_scope").and_then(Value::as_bool) == Some(true)
                 }
@@ -506,7 +506,6 @@ mod tests {
                 true,
             ),
             (serde_json::json!({"action": "hook_v2_profile_admit"}), true),
-            (serde_json::json!({"action": "user_review"}), true),
             (
                 serde_json::json!({"action": "ingest_transcript", "user_scope": true}),
                 true,

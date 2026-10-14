@@ -8,11 +8,9 @@
 //! call for a process: it hands the client to the project crate, which fills
 //! every slot the extracted crates read. [`hook_runtime`] builds the explicit
 //! [`HookRuntimeV1`] the CLI passes into each
-//! `tracedecay_agent_hosts::hooks::hook_*` entry point, and
-//! [`session_review_port`] the [`SessionReviewPort`] the daemon hands its
-//! profile ingestor. A hook path or user ingest pass cannot run without a
-//! complete handle, and two fixtures can hold two different handles in one
-//! process.
+//! `tracedecay_agent_hosts::hooks::hook_*` entry point. A hook path cannot
+//! run without a complete handle, and two fixtures can hold two different
+//! handles in one process.
 
 use std::future::Future;
 use std::path::Path;
@@ -24,7 +22,6 @@ use serde_json::Value;
 use tracedecay_agent_hosts::ports::hook_runtime::HookRuntimeV1;
 use tracedecay_domain::errors::Result;
 use tracedecay_project::runtime_ports::DaemonClientPortsV1;
-use tracedecay_sessions::host_ports::session_review::SessionReviewPort;
 
 /// Installs every runtime port with this root's daemon client. Idempotent;
 /// first call wins.
@@ -41,46 +38,6 @@ pub fn register_runtime_ports() -> Result<()> {
 #[must_use]
 pub fn hook_runtime(profile: tracedecay_runtime_core::config::ProfileRoot) -> HookRuntimeV1 {
     tracedecay_project::runtime_ports::hook_runtime_with(profile, daemon_client_ports())
-}
-
-/// The root's session review port: the post-ingest review hint routed through
-/// the daemon client. The daemon hands it to the profile ingestor at
-/// construction, so a user pass without one is a typed refusal in
-/// `tracedecay-sessions`, never a silent skip.
-///
-/// The daemon client is Tokio I/O, while the session refresh worker polls the
-/// ingest pass on a native thread with no Tokio runtime entered, so the review
-/// runs on `tokio`.
-#[must_use]
-pub fn session_review_port(tokio: tokio::runtime::Handle) -> SessionReviewPort {
-    SessionReviewPort::new(move |provider, session_id| {
-        // Review runs inside the ingest pass that just wrote the sessions,
-        // which is scoped to the owning transcript source profile. The scope
-        // is task-local, so it is read here, before the hop to `tokio`.
-        let Some(profile) = tracedecay_sessions::runtime::transcript_source_profile() else {
-            tracing::warn!(
-                provider,
-                "session review not scheduled: ingest ran outside a transcript source profile"
-            );
-            return Box::pin(std::future::ready(()));
-        };
-        let provider = provider.to_owned();
-        let session_id = session_id.map(str::to_owned);
-        let review = tokio.spawn(tracing::Instrument::instrument(
-            async move {
-                tracedecay_agent_hosts::hooks::schedule_user_session_review(
-                    &hook_runtime(profile),
-                    &provider,
-                    session_id.as_deref(),
-                )
-                .await;
-            },
-            tracing::trace_span!("runtime_ports.session_review"),
-        ));
-        Box::pin(async move {
-            let _ = review.await;
-        })
-    })
 }
 
 /// The daemon-client adapters only this root composes: one-shot tool calls
