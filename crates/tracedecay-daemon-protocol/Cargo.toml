@@ -16,11 +16,14 @@ doctest = false
 test-helpers = ["tracedecay-framing/test-helpers"]
 
 [dependencies]
+asupersync.workspace = true
 hex = "0.4"
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_path_to_error = "0.1"
+# Non-blocking Unix connect that reports a full listen backlog (see transport.rs).
+socket2 = "0.6"
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 tracedecay-contracts = { path = "../tracedecay-contracts" }

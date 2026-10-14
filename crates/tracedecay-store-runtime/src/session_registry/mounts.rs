@@ -14,8 +14,8 @@ use tracedecay_domain::{BrainId, BrainNodeId, EnrollmentGrantV1};
 use tracedecay_graph_db::{GraphDbRegistry, GraphDbRegistryConfig};
 use tracedecay_runtime_core::RuntimeOperationTaskOwnerV1;
 use tracedecay_runtime_core::storage::{
-    SESSIONS_DB_FILENAME, STORE_MANIFEST_FILENAME, profile_sharded_data_root, read_store_manifest,
-    write_store_manifest_to_path,
+    REMOTE_DB_FILENAME, SESSIONS_DB_FILENAME, STORE_MANIFEST_FILENAME, profile_sharded_data_root,
+    read_store_manifest, write_store_manifest_to_path,
 };
 #[cfg(any(test, feature = "test-helpers"))]
 use tracedecay_rusqlite_runtime::remote::RemoteRecoverySqliteAuthorityV1;
@@ -431,7 +431,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         let mut databases = entries
             .map(|entry| {
                 entry
-                    .map(|entry| entry.path().join("remote.db"))
+                    .map(|entry| entry.path().join(REMOTE_DB_FILENAME))
                     .map_err(|error| {
                         session_registry_error(
                             "discover registered Remote Brain node",

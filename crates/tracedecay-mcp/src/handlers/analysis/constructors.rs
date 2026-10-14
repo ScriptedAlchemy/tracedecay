@@ -110,7 +110,7 @@ pub(super) async fn compute_constructors(
     let scan_ambiguous_definition = ambiguous_definition;
 
     let (sites, touched) = tracing::Instrument::instrument(
-        tokio::task::spawn_blocking(move || -> Result<_> {
+        tracedecay_runtime_core::native_runtime::spawn_blocking(move || -> Result<_> {
             let mut sites: Vec<ConstructorSiteV1> = Vec::new();
             let mut touched: Vec<String> = Vec::new();
             let language = tracedecay_code_extraction::ts_provider::try_language("rust")

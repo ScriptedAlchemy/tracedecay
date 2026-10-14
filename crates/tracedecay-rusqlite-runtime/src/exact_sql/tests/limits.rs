@@ -91,6 +91,62 @@ fn convergence_query_runs_past_the_request_deadline() {
 }
 
 #[test]
+fn until_budget_interrupts_at_its_deadline_not_the_request_limit() {
+    // A doctor audit classifies an interrupt past its deadline as an
+    // exhausted budget, so only that deadline may interrupt its statements.
+    let clock = FakeClock::ticking(EXACT_SQL_EXECUTION_LIMIT / 4);
+    clock.install();
+    let connection = rusqlite::Connection::open_in_memory().unwrap();
+    let deadline = clock::now() + EXACT_SQL_EXECUTION_LIMIT * 3;
+
+    let error = execute_query(
+        &connection,
+        statement(
+            "WITH RECURSIVE n(value) AS (
+                    VALUES(1)
+                    UNION ALL
+                    SELECT value + 1 FROM n WHERE value < 10000
+                )
+                SELECT count(*) FROM n AS left_n CROSS JOIN n AS right_n",
+            vec![],
+        ),
+        ExactSqlStatementBudget::Until(deadline),
+    )
+    .unwrap_err();
+
+    assert!(matches!(error, ExactSqlError::Sqlite { code: Some(9), .. }));
+    assert!(
+        clock.elapsed() >= EXACT_SQL_EXECUTION_LIMIT * 3,
+        "interrupted at {:?}, before its own deadline",
+        clock.elapsed()
+    );
+    assert!(clock.elapsed() < EXACT_SQL_EXECUTION_LIMIT * 4);
+}
+
+#[test]
+fn until_budget_refuses_a_short_statement_past_its_deadline() {
+    // The progress handler first runs after 1000 VM steps, so a statement
+    // shorter than that never sees the deadline. A paged audit made of short
+    // statements ran ~20 s past its budget on a 1.2M-observation store.
+    let clock = FakeClock::ticking(Duration::ZERO);
+    clock.install();
+    let connection = rusqlite::Connection::open_in_memory().unwrap();
+    let deadline = clock::now();
+
+    let error = execute_query(
+        &connection,
+        statement("SELECT 1", vec![]),
+        ExactSqlStatementBudget::Until(deadline),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(error, ExactSqlError::Sqlite { code: Some(9), .. }),
+        "a statement past its deadline is interrupted before it runs: {error}"
+    );
+}
+
+#[test]
 fn invalid_sqlite_text_is_rejected_without_lossy_conversion() {
     let fixture = fixture('a', 'a');
     let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();

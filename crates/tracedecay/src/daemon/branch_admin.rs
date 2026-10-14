@@ -18,6 +18,8 @@ use tracedecay_mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 use tracedecay_runtime_core::branch::BranchAddOutcome;
 #[cfg(unix)]
 use tracedecay_runtime_core::cancellation::CancellationToken;
+#[cfg(unix)]
+use tracedecay_runtime_core::native_runtime;
 
 #[cfg(any(unix, test))]
 use super::ProjectServerKey;
@@ -1295,7 +1297,7 @@ impl StoreAdministration {
         broker: &tracedecay_host_admission::SharedHostAdmissionBroker,
     ) {
         let is_user_sessions = broker_path.file_name().and_then(|name| name.to_str())
-            == Some(tracedecay_sessions::runtime::USER_SESSIONS_DB_FILENAME);
+            == Some(tracedecay_runtime_core::storage::USER_SESSIONS_DB_FILENAME);
         if !is_user_sessions {
             return;
         }
@@ -1587,7 +1589,7 @@ impl StoreAdministration {
         timeout: std::time::Duration,
         stop_accepting: bool,
     ) -> bool {
-        let deadline = tokio::time::Instant::now() + timeout;
+        let deadline = std::time::Instant::now() + timeout;
         loop {
             let changed = self.retirement_reapers.changed.notified();
             let (pending, matching) = {
@@ -1628,13 +1630,13 @@ impl StoreAdministration {
                 task.abort();
             }
             if matching.is_empty() {
-                if tokio::time::timeout_at(deadline, changed).await.is_err() {
+                if native_runtime::timeout_at(deadline, changed).await.is_err() {
                     return false;
                 }
                 continue;
             }
             for (_, termination) in matching {
-                if tokio::time::timeout_at(deadline, termination.wait())
+                if native_runtime::timeout_at(deadline, termination.wait())
                     .await
                     .is_err()
                 {

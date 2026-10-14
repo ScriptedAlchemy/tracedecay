@@ -21,7 +21,7 @@ pub struct BatchExtractor;
 /// `for i in 0..N { parent.child(i) }` loop is O(N²). Materializing once
 /// up front gives O(N) build + O(1) lookups for the rest of the extraction.
 fn collect_children(parent: TsNode<'_>) -> Vec<TsNode<'_>> {
-    let mut out = Vec::with_capacity(parent.child_count());
+    let mut out = Vec::with_capacity(parent.child_count() as usize);
     let mut cursor = parent.walk();
     if cursor.goto_first_child() {
         loop {

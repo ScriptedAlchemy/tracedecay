@@ -260,9 +260,8 @@ impl LineFrame {
 /// MUST use this type (or a transport that owns one).
 ///
 /// The framing itself is I/O-free (`LineFrame::step`). Each front end only
-/// moves buffered chunks into it, so the native ([`Self::read_mcp_line`]),
-/// blocking ([`Self::read_mcp_line_blocking`]), and Tokio
-/// ([`Self::read_mcp_line_tokio`]) readers frame identically.
+/// moves buffered chunks into it, so the native ([`Self::read_mcp_line`]) and
+/// blocking ([`Self::read_mcp_line_blocking`]) readers frame identically.
 pub struct BoundedLineReader<R> {
     inner: R,
     frame: LineFrame,
@@ -350,17 +349,12 @@ where
     }
 }
 
-// Transitional: the daemon and MCP servers still read on Tokio. The server
-// unit of #3736 moves them to `read_mcp_line` and deletes this front end.
+// Only the `read_bounded_line` test helper still reads through Tokio.
+#[cfg(any(test, feature = "test-helpers"))]
 impl<R> BoundedLineReader<R>
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
-    /// Tokio [`Self::read_mcp_line`].
-    pub async fn read_mcp_line_tokio(&mut self) -> io::Result<Option<String>> {
-        mcp_line(self.read_bounded_tokio(MAX_MCP_JSONRPC_FRAME_BYTES).await)
-    }
-
     #[tracing::instrument(name = "sessions.admission.read_line", level = "trace", skip_all)]
     async fn read_bounded_tokio(&mut self, max_bytes: usize) -> FrameOutcome {
         std::future::poll_fn(|cx| {
@@ -747,9 +741,11 @@ mod tests {
         let mut exact = vec![b'a'; MAX_MCP_JSONRPC_FRAME_BYTES];
         exact.push(b'\n');
         let mut exact_reader = BoundedLineReader::new(BufReader::new(Cursor::new(exact)));
-        let line = ready_now(exact_reader.read_mcp_line_tokio())
-            .expect("exact cap accepted")
-            .expect("line");
+        let line = mcp_line(ready_now(
+            exact_reader.read_bounded_tokio(MAX_MCP_JSONRPC_FRAME_BYTES),
+        ))
+        .expect("exact cap accepted")
+        .expect("line");
         assert_eq!(line.len(), MAX_MCP_JSONRPC_FRAME_BYTES);
 
         let stream = AsyncHostileThenSuffix::new(
@@ -759,8 +755,10 @@ mod tests {
             b"\n{\"jsonrpc\":\"2.0\",\"method\":\"ping\"}\n",
         );
         let mut oversized_reader = BoundedLineReader::new(BufReader::new(stream));
-        let error =
-            ready_now(oversized_reader.read_mcp_line_tokio()).expect_err("one over rejected");
+        let error = mcp_line(ready_now(
+            oversized_reader.read_bounded_tokio(MAX_MCP_JSONRPC_FRAME_BYTES),
+        ))
+        .expect_err("one over rejected");
         assert!(is_wire_oversized_io_error(&error));
         assert_eq!(
             wire_oversized_inspect_prefix(&error).len(),
@@ -773,9 +771,11 @@ mod tests {
         );
 
         assert_eq!(
-            ready_now(oversized_reader.read_mcp_line_tokio())
-                .expect("next frame")
-                .as_deref(),
+            mcp_line(ready_now(
+                oversized_reader.read_bounded_tokio(MAX_MCP_JSONRPC_FRAME_BYTES)
+            ))
+            .expect("next frame")
+            .as_deref(),
             Some(r#"{"jsonrpc":"2.0","method":"ping"}"#)
         );
     }
@@ -855,19 +855,6 @@ mod tests {
             ready_line(ready_now(reader.read_bounded(16))).as_deref(),
             Some(r#"{"ok":true}"#)
         );
-    }
-
-    #[test]
-    fn tokio_reader_resumes_a_frame_whose_read_future_was_dropped() {
-        let mut reader = BoundedLineReader::new(half_frame_then_rest());
-        assert!(poll_once(reader.read_mcp_line_tokio()).is_pending());
-        assert!(reader.has_partial_frame());
-        assert_eq!(
-            ready_now(reader.read_mcp_line_tokio()).unwrap().as_deref(),
-            Some("part1part2"),
-            "a dropped read must not truncate the frame"
-        );
-        assert!(!reader.has_partial_frame());
     }
 
     #[test]

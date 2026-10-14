@@ -225,9 +225,9 @@ class SdkPublishWorkflowPolicyTests(unittest.TestCase):
 
     def test_rejects_local_helper_outside_reviewed_actions(self) -> None:
         self.assert_rejected_after(
-            "        run: npm install -g npm@12.0.2\n\n"
+            "        run: npm install -g npm@12.2.0\n\n"
             "      - uses: ./.github/actions/setup-pnpm\n",
-            "        run: npm install -g npm@12.0.2\n\n"
+            "        run: npm install -g npm@12.2.0\n\n"
             "      - uses: ./sdks/typescript\n",
             "'build-typescript' helper './sdks/typescript' must be a directory "
             "under ./.github/actions",
@@ -291,7 +291,7 @@ class SdkPublishWorkflowPolicyTests(unittest.TestCase):
         )
         self.assert_rejected_after(
             marker,
-            "    steps:\n      - run: npm install -g npm@12.0.2\n"
+            "    steps:\n      - run: npm install -g npm@12.2.0\n"
             "      - uses: actions/download-artifact@",
             "'publish-typescript' must not install executable packages with publish authority",
         )

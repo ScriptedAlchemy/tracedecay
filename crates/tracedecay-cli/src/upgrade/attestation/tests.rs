@@ -126,7 +126,7 @@ fn a_tampered_archive_is_refused_even_when_served_the_released_bundle() {
         Err(AttestationRefusal::Rejected {
             digest: tampered,
             rejections: vec![BundleRejection::Unverified {
-                detail: "Verification error: artifact hash does not match any subject in \
+                detail: "artifact mismatch: artifact hash does not match any subject in \
                          attestation"
                     .to_owned(),
             }],
@@ -150,7 +150,7 @@ fn a_bundle_for_a_different_subject_is_refused() {
         Err(AttestationRefusal::Rejected {
             digest: BETA_ARCHIVE.to_owned(),
             rejections: vec![BundleRejection::Unverified {
-                detail: "Verification error: artifact hash does not match any subject in \
+                detail: "artifact mismatch: artifact hash does not match any subject in \
                          attestation"
                     .to_owned(),
             }],
@@ -237,8 +237,8 @@ fn a_bundle_with_a_broken_signature_is_refused() {
         Err(AttestationRefusal::Rejected {
             digest: BETA_ARCHIVE.to_owned(),
             rejections: vec![BundleRejection::Unverified {
-                detail: "Verification error: DSSE signature verification failed: Verification \
-                         error: ECDSA P-256 SHA-256 signature invalid"
+                detail: "invalid signature: DSSE signature verification failed: Verification \
+                         error: ECDSA_P256_SHA256 signature invalid"
                     .to_owned(),
             }],
         })

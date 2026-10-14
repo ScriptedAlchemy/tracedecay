@@ -4273,7 +4273,7 @@ fn changed_paths_between_trees(
                 }
                 _ => {}
             }
-            Ok::<_, std::convert::Infallible>(TreeDiffAction::Continue(()))
+            Ok(TreeDiffAction::Continue(()))
         })
         .ok()?;
     (!invalid_path).then_some(paths)

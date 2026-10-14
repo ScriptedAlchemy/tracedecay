@@ -675,7 +675,7 @@ async fn daemon_project_status(
         // for its first integrity read; a warm steady-state read returns in well
         // under a second. Give it headroom so a contended read reports real
         // status instead of failing the post-update with a spurious timeout.
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(90);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
         let result = crate::daemon::call_default_tool_within(
             profile,
             &handshake,

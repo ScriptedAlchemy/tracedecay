@@ -1,6 +1,7 @@
+use std::hint::black_box;
 use std::time::Duration;
 
-use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 
 #[path = "support/code.rs"]
 mod code_fixture;

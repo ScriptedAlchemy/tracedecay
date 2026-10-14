@@ -5,7 +5,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::PoisonError;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tracedecay_lcm::LcmError;
 use tracedecay_store::{
@@ -30,6 +30,7 @@ use super::wake::{
 };
 use tracedecay_global_db::{RegisteredGlobalDb, RegisteredGlobalDbLeaseV1};
 use tracedecay_runtime_core::db::engine::Error as EngineError;
+use tracedecay_runtime_core::native_runtime::{self, TimeoutError};
 use tracedecay_session_temporal_store::{
     SessionRefreshBeginBatchItemV1, SessionRefreshBeginBatchOutcomeV1, SessionRefreshBeginPlanV1,
     SessionRefreshCompletionStage, SessionRefreshRecoveryV1, SessionRefreshRestartStateV1,
@@ -530,7 +531,11 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 tokio::select! {
                     () = tracing::Instrument::instrument(state.wait_for_cancellation(), tracing::trace_span!("daemon.scheduler.session_temporal.retry_cancel")) => return,
                     () = tracing::Instrument::instrument(state.wake.notified(), tracing::trace_span!("daemon.scheduler.session_temporal.wake_wait")) => {}
-                    () = tracing::Instrument::instrument(tokio::time::sleep(retry_delay), tracing::trace_span!("daemon.scheduler.session_temporal.retry_wait")) => {}
+                    fired = tracing::Instrument::instrument(native_runtime::sleep_until(Instant::now() + retry_delay), tracing::trace_span!("daemon.scheduler.session_temporal.retry_wait")) => {
+                        if stop_without_timer(fired) {
+                            return;
+                        }
+                    }
                 }
             } else if history_needs_another_pass {
                 state.mark_running();
@@ -582,7 +587,11 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                     tokio::select! {
                         () = tracing::Instrument::instrument(state.wait_for_cancellation(), tracing::trace_span!("daemon.scheduler.lcm_summary.retry_cancel")) => return,
                         () = tracing::Instrument::instrument(state.wake.notified(), tracing::trace_span!("daemon.scheduler.lcm_summary.retry_wake")) => {}
-                        () = tracing::Instrument::instrument(tokio::time::sleep(delay), tracing::trace_span!("daemon.scheduler.lcm_summary.retry_wait")) => {}
+                        fired = tracing::Instrument::instrument(native_runtime::sleep_until(Instant::now() + delay), tracing::trace_span!("daemon.scheduler.lcm_summary.retry_wait")) => {
+                            if stop_without_timer(fired) {
+                                return;
+                            }
+                        }
                     }
                 }
             }
@@ -616,7 +625,10 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             // Discovery of new sources, and the retry of a refusal nothing
             // signals (a still-mounting authority, an undecidable source),
             // share this cadence. Unchanged sources cost it no reads.
-            () = tracing::Instrument::instrument(tokio::time::sleep(HISTORY_IDLE_RECHECK_INTERVAL), tracing::trace_span!("daemon.scheduler.session_temporal.history_idle_wait")) => {
+            fired = tracing::Instrument::instrument(native_runtime::sleep_until(Instant::now() + HISTORY_IDLE_RECHECK_INTERVAL), tracing::trace_span!("daemon.scheduler.session_temporal.history_idle_wait")) => {
+                if stop_without_timer(fired) {
+                    return;
+                }
                 state.update_history_retry_state(false);
                 if history
                     .read()
@@ -626,6 +638,36 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                     state.wake_history();
                 }
             }
+        }
+    }
+}
+
+/// Without a timer every retry or idle wait would return at once and the
+/// worker would spin, so an unavailable timer stops it.
+fn stop_without_timer(fired: Result<(), String>) -> bool {
+    let Err(error) = fired else {
+        return false;
+    };
+    tracing::error!(%error, "session temporal refresh worker stopped without a native timer");
+    true
+}
+
+/// Records a deadline wait that ended without its work. An elapsed deadline
+/// retries; an unavailable timer is terminal because the retry needs it too.
+fn record_deadline_failure(
+    report: &mut SessionTemporalRefreshPassReport,
+    stage: &str,
+    error: TimeoutError,
+) {
+    match error {
+        TimeoutError::Elapsed => {
+            report.last_error = Some(format!("{stage}_deadline_exceeded"));
+            report.deadline_errors += 1;
+            report.observe_retry(SessionTemporalRefreshRetryClass::Deadline);
+        }
+        TimeoutError::TimerUnavailable(error) => {
+            report.last_error = Some(format!("{stage}_timer_unavailable: {error}"));
+            report.terminal_errors += 1;
         }
     }
 }
@@ -937,17 +979,13 @@ async fn stage_ready_completion<'a>(
         report.terminal_errors += 1;
         return;
     };
-    match tokio::time::timeout(
+    match native_runtime::timeout(
         policy.operation_deadline,
         access.stage_session_refresh_completion(request, &state.completion_control()),
     )
     .await
     {
-        Err(_) => {
-            report.last_error = Some("completion_deadline_exceeded".to_string());
-            report.deadline_errors += 1;
-            report.observe_retry(SessionTemporalRefreshRetryClass::Deadline);
-        }
+        Err(error) => record_deadline_failure(report, "completion", error),
         Ok(Ok(SessionRefreshCompletionStage::Durable(_))) => {
             report.completed += 1;
         }
@@ -1044,7 +1082,7 @@ where
     Fut: Future<Output = SessionStoreResult<Vec<SessionStoreResult<T>>>>,
 {
     let items = range.len();
-    let result = tokio::time::timeout(
+    let result = native_runtime::timeout(
         deadline,
         tracing::Instrument::instrument(
             commit(range),
@@ -1053,7 +1091,10 @@ where
     )
     .await;
     match result {
-        Err(_) | Ok(Err(SessionStoreError::DeadlineExceeded)) => Ok(None),
+        Err(TimeoutError::Elapsed) | Ok(Err(SessionStoreError::DeadlineExceeded)) => Ok(None),
+        Err(error @ TimeoutError::TimerUnavailable(_)) => {
+            Err(SessionStoreError::storage("time refresh group", error))
+        }
         Ok(Err(error)) => Err(error),
         Ok(Ok(outcomes)) if outcomes.len() == items => Ok(Some(outcomes)),
         Ok(Ok(_)) => Err(SessionStoreError::InvalidStateTransition {
@@ -1198,13 +1239,11 @@ async fn drain_staged_completions<'a>(
         }
     }
     let snapshot =
-        match tokio::time::timeout(policy.operation_deadline, database.as_ref().read_snapshot())
+        match native_runtime::timeout(policy.operation_deadline, database.as_ref().read_snapshot())
             .await
         {
-            Err(_) => {
-                report.last_error = Some("snapshot_deadline_exceeded".to_string());
-                report.deadline_errors += 1;
-                report.observe_retry(SessionTemporalRefreshRetryClass::Deadline);
+            Err(error) => {
+                record_deadline_failure(report, "snapshot", error);
                 return;
             }
             Ok(Ok(snapshot)) => snapshot,
@@ -1217,7 +1256,7 @@ async fn drain_staged_completions<'a>(
         };
     let mut applied = Vec::with_capacity(survivors.len());
     for item in survivors {
-        match tokio::time::timeout(
+        match native_runtime::timeout(
             policy.operation_deadline,
             access.apply_candidate_relation_projection(
                 &snapshot,
@@ -1227,11 +1266,7 @@ async fn drain_staged_completions<'a>(
         )
         .await
         {
-            Err(_) => {
-                report.last_error = Some("apply_deadline_exceeded".to_string());
-                report.deadline_errors += 1;
-                report.observe_retry(SessionTemporalRefreshRetryClass::Deadline);
-            }
+            Err(error) => record_deadline_failure(report, "apply", error),
             Ok(Ok(verified)) => {
                 applied.push((item, verified));
             }
@@ -1558,7 +1593,7 @@ async fn project_running_refresh<'a>(
     let policy = context.policy;
     let state = context.state;
     let store = context.store;
-    let deadline_at = tokio::time::Instant::now() + policy.operation_deadline;
+    let deadline_at = Instant::now() + policy.operation_deadline;
     let projection = tracing::Instrument::instrument(
         context
             .projector
@@ -1567,17 +1602,16 @@ async fn project_running_refresh<'a>(
     );
     tokio::pin!(projection);
     let deadline = tracing::Instrument::instrument(
-        tokio::time::sleep_until(deadline_at),
+        native_runtime::sleep_until(deadline_at),
         tracing::trace_span!("daemon.scheduler.session_temporal.projector_deadline"),
     );
     tokio::pin!(deadline);
     let effect = tokio::select! {
         biased;
         () = tracing::Instrument::instrument(state.wait_for_cancellation(), tracing::trace_span!("daemon.scheduler.session_temporal.projector_cancel")) => return,
-        () = &mut deadline => {
-            report.last_error = Some("projector_deadline_exceeded".to_string());
-            report.deadline_errors += 1;
-            report.observe_retry(SessionTemporalRefreshRetryClass::Deadline);
+        fired = &mut deadline => {
+            let error = fired.map_or_else(TimeoutError::TimerUnavailable, |()| TimeoutError::Elapsed);
+            record_deadline_failure(report, "projector", error);
             return;
         }
         effect = &mut projection => effect,
@@ -1878,12 +1912,14 @@ mod tests {
     use tracedecay_runtime_core::db::engine::params;
     use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
-    const SLOW_ITEM_WORK: Duration = Duration::from_secs(31);
+    /// Wide enough that one item's commit lands inside it on a loaded host.
+    const COMMIT_DEADLINE: Duration = Duration::from_secs(2);
 
-    /// Commits 16 items whose `slow` members exceed the 30-second deadline
-    /// alone and whose others take 3 seconds, so the whole group never fits.
-    /// Returns the simulated time the commit waited.
-    async fn timed_refresh_group_progress(slow: &[usize]) -> Duration {
+    /// Commits `item_count` items. A group of several items never commits
+    /// before the deadline, and neither does a `slow` item alone; every other
+    /// item alone commits at once. Returns how many commits the deadline cut
+    /// short.
+    async fn timed_refresh_group_progress(item_count: usize, slow: &[usize]) -> usize {
         let harness = RegisteredGlobalDbHarness::open("refresh-group-progress").await;
         let database = &harness.registered;
         let transaction = database.begin_write_transaction().await.unwrap();
@@ -1896,16 +1932,9 @@ mod tests {
             .unwrap();
         transaction.commit().await.unwrap();
 
-        tokio::time::pause();
-        // Native database IO must finish on real time; only the simulated
-        // per-item work below may advance the writer's Tokio deadline.
-        let manual_clock = tokio::spawn(async {
-            loop {
-                tokio::task::yield_now().await;
-            }
-        });
-        let started = tokio::time::Instant::now();
-        let outcomes = commit_refresh_groups(16, Duration::from_secs(30), |range| async move {
+        let cut_short = std::sync::atomic::AtomicUsize::new(0);
+        let cut_short = &cut_short;
+        let outcomes = commit_refresh_groups(item_count, COMMIT_DEADLINE, |range| async move {
             let transaction = database
                 .begin_write_transaction()
                 .await
@@ -1918,12 +1947,10 @@ mod tests {
                     )
                     .await
                     .map_err(|error| SessionStoreError::storage("write refresh group", error))?;
-                let work = if slow.contains(&item) {
-                    SLOW_ITEM_WORK
-                } else {
-                    Duration::from_secs(3)
-                };
-                tokio::time::advance(work).await;
+            }
+            if range.len() > 1 || slow.contains(&range.start) {
+                cut_short.fetch_add(1, Ordering::SeqCst);
+                std::future::pending::<()>().await;
             }
             transaction
                 .commit()
@@ -1933,11 +1960,8 @@ mod tests {
         })
         .await
         .unwrap();
-        let waited = started.elapsed();
-        manual_clock.abort();
-        tokio::time::resume();
 
-        assert_eq!(outcomes.len(), 16);
+        assert_eq!(outcomes.len(), item_count);
         for (item, outcome) in outcomes.into_iter().enumerate() {
             if slow.contains(&item) {
                 assert!(matches!(outcome, Err(SessionStoreError::DeadlineExceeded)));
@@ -1956,31 +1980,30 @@ mod tests {
         }
         assert_eq!(
             committed,
-            (0..16)
+            (0..item_count)
                 .filter(|item| !slow.contains(item))
                 .collect::<Vec<_>>(),
             "cancelled groups must roll back before their items are retried"
         );
-        waited
+        cut_short.load(Ordering::SeqCst)
     }
 
     #[tokio::test]
     async fn timed_refresh_groups_commit_individually_affordable_items() {
-        timed_refresh_group_progress(&[]).await;
+        assert_eq!(timed_refresh_group_progress(16, &[]).await, 1);
     }
 
     #[tokio::test]
     async fn timed_refresh_groups_do_not_starve_items_after_a_slow_one() {
-        timed_refresh_group_progress(&[0]).await;
+        assert_eq!(timed_refresh_group_progress(16, &[0]).await, 2);
     }
 
     #[tokio::test]
     async fn timed_refresh_groups_wait_at_most_one_timeout_per_item_beyond_the_group() {
-        let every_item = (0..16).collect::<Vec<_>>();
-        let waited = timed_refresh_group_progress(&every_item).await;
-        assert!(
-            waited <= SLOW_ITEM_WORK * 17,
-            "a pass of 16 slow items must not hold the worker for {waited:?}"
+        assert_eq!(
+            timed_refresh_group_progress(4, &[0, 1, 2, 3]).await,
+            5,
+            "a pass of slow items must wait for the group and then each item once"
         );
     }
 

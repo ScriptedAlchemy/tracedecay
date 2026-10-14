@@ -176,7 +176,7 @@ fn linked_operation_marker_does_not_starve_exact_sibling_frontier() {
             &state,
             8,
             &cancellation,
-            StdInstant::now() + GIT_OBSERVATION_BUDGET,
+            Instant::now() + GIT_OBSERVATION_BUDGET,
             Some(&BTreeSet::from([primary_root])),
         ),
         OperationObservation::State(OperationState::Idle)
@@ -186,7 +186,7 @@ fn linked_operation_marker_does_not_starve_exact_sibling_frontier() {
             &state,
             8,
             &cancellation,
-            StdInstant::now() + GIT_OBSERVATION_BUDGET,
+            Instant::now() + GIT_OBSERVATION_BUDGET,
             Some(&BTreeSet::from([linked_root])),
         ),
         OperationObservation::State(OperationState::InFlight)
@@ -241,28 +241,22 @@ async fn concurrent_spawn_retains_one_backstop_task() {
         ),
         "exactly one concurrent caller must start the backstop: {left:?}, {right:?}"
     );
-    let first_task = watcher
-        .inner
-        .backstop_task
-        .lock()
-        .await
-        .as_ref()
-        .expect("first start must retain its backstop task")
-        .id();
+    assert!(
+        watcher.inner.backstop_task.lock().await.is_some(),
+        "first start must retain its backstop task"
+    );
+    let first_task = watcher.inner.lifecycle_receipts.spawn();
     let (repeated_left, repeated_right) = tokio::join!(watcher.spawn(), watcher.spawn());
     assert_eq!(repeated_left, GitWatcherStart::AlreadyStarted);
     assert_eq!(repeated_right, GitWatcherStart::AlreadyStarted);
-    let repeated_task = watcher
-        .inner
-        .backstop_task
-        .lock()
-        .await
-        .as_ref()
-        .expect("repeated start must retain the backstop task")
-        .id();
+    assert!(
+        watcher.inner.backstop_task.lock().await.is_some(),
+        "repeated start must retain the backstop task"
+    );
 
     assert_eq!(
-        repeated_task, first_task,
+        watcher.inner.lifecycle_receipts.spawn(),
+        first_task,
         "repeated start must not overwrite and detach the retained backstop"
     );
     watcher.shutdown().await;
@@ -465,7 +459,7 @@ async fn concurrent_shutdown_waits_for_retained_join_completion() {
     let task_release = Arc::new(Notify::new());
     let owned_task = {
         let task_release = Arc::clone(&task_release);
-        tokio::spawn(async move {
+        native_task(async move {
             task_release.notified().await;
         })
     };
@@ -494,10 +488,17 @@ async fn concurrent_shutdown_waits_for_retained_join_completion() {
     assert!(!state.has_retained_task());
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn shutdown_bounds_a_stuck_repository_join() {
     let repo = temp_repo();
-    let watcher = GitWatcher::new(fast_watch_config());
+    let join_budget = Duration::from_millis(50);
+    let watcher = with_cadence(
+        GitWatcher::new(fast_watch_config()),
+        WatchCadence {
+            join_budget,
+            ..WatchCadence::default()
+        },
+    );
     let state = Arc::new(WatchState::new(
         tracedecay_runtime_core::worktree::git_common_dir(repo.path())
             .expect("git common directory"),
@@ -505,7 +506,7 @@ async fn shutdown_bounds_a_stuck_repository_join() {
         worktree_git_dir(repo.path()).expect("worktree git directory"),
         MaintenanceCoordinator::default(),
     ));
-    state.retain_task(tokio::spawn(std::future::pending::<()>()));
+    state.retain_task(native_task(std::future::pending::<()>()));
     watcher
         .inner
         .projects
@@ -513,13 +514,15 @@ async fn shutdown_bounds_a_stuck_repository_join() {
         .await
         .insert(state.common_dir.clone(), Arc::clone(&state));
 
-    let outcome = tokio::time::timeout(
-        GIT_OBSERVATION_BUDGET + Duration::from_millis(1),
-        watcher.shutdown(),
-    )
-    .await
-    .expect("shutdown must not wait beyond the watcher observation budget");
+    let started = Instant::now();
+    let outcome = tokio::time::timeout(TEST_READY_TIMEOUT, watcher.shutdown())
+        .await
+        .expect("shutdown must give up on a stuck join at its budget");
 
+    assert!(
+        started.elapsed() >= join_budget,
+        "the stuck join must get its whole budget before it is abandoned"
+    );
     assert_eq!(
         outcome.failures(),
         &[GitWatcherTaskFailure {
@@ -528,6 +531,63 @@ async fn shutdown_bounds_a_stuck_repository_join() {
         }]
     );
     assert!(!state.has_retained_task());
+}
+
+/// The daemon coordinator drops its `git_watcher` join at the phase deadline,
+/// which can come before the join's own budget ends. The task the join was
+/// waiting on must be aborted then. The retained join still finishes, so a
+/// later shutdown reads its outcome.
+#[tokio::test]
+async fn abandoned_shutdown_aborts_the_task_it_was_joining() {
+    let repo = temp_repo();
+    let watcher = with_cadence(
+        GitWatcher::new(fast_watch_config()),
+        WatchCadence {
+            join_budget: Duration::from_secs(600),
+            ..WatchCadence::default()
+        },
+    );
+    let state = Arc::new(WatchState::new(
+        tracedecay_runtime_core::worktree::git_common_dir(repo.path())
+            .expect("git common directory"),
+        repo.path().canonicalize().expect("canonical project root"),
+        worktree_git_dir(repo.path()).expect("worktree git directory"),
+        MaintenanceCoordinator::default(),
+    ));
+    let (alive, task_dropped) = std::sync::mpsc::channel::<()>();
+    state.retain_task(native_task(async move {
+        let _alive = alive;
+        std::future::pending::<()>().await;
+    }));
+    watcher
+        .inner
+        .projects
+        .lock()
+        .await
+        .insert(state.common_dir.clone(), Arc::clone(&state));
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), watcher.shutdown())
+            .await
+            .is_err(),
+        "the join must still be inside its budget when its caller gives up"
+    );
+
+    assert_eq!(
+        task_dropped.recv_timeout(Duration::from_secs(5)),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
+        "an abandoned shutdown must not leave the task it was joining running"
+    );
+    let outcome = tokio::time::timeout(TEST_READY_TIMEOUT, watcher.shutdown())
+        .await
+        .expect("a later shutdown reads the finished join");
+    assert_eq!(
+        outcome.failures(),
+        &[GitWatcherTaskFailure {
+            owner: GitWatcherTaskOwner::Repository(state.common_dir.clone()),
+            kind: GitWatcherTaskFailureKind::TimedOut,
+        }]
+    );
 }
 
 #[tokio::test]
@@ -647,7 +707,7 @@ async fn retired_linked_owner_is_replaced_before_recreated_root_admission() {
     let stale_task_release = Arc::new(Notify::new());
     stale.retain_task({
         let stale_task_release = Arc::clone(&stale_task_release);
-        tokio::spawn(async move { stale_task_release.notified().await })
+        native_task(async move { stale_task_release.notified().await })
     });
     watcher
         .inner
@@ -712,7 +772,7 @@ async fn concurrent_registration_prevents_empty_owner_retirement() {
         common_dir.join("missing-git-dir"),
         MaintenanceCoordinator::default(),
     ));
-    state.retain_task(tokio::spawn(async {}));
+    state.retain_task(native_task(async {}));
     watcher
         .inner
         .projects
@@ -843,7 +903,7 @@ async fn shutdown_reports_cancelled_repository_join() {
         worktree_git_dir(repo.path()).expect("worktree git directory"),
         MaintenanceCoordinator::default(),
     ));
-    let task = tokio::spawn(std::future::pending::<()>());
+    let task = native_task(std::future::pending::<()>());
     task.abort();
     state.retain_task(task);
     watcher

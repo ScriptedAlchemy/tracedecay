@@ -5,7 +5,7 @@
  * the packaged extension server and a live TraceDecay daemon.
  */
 import { AppBridge, PostMessageTransport } from "@modelcontextprotocol/ext-apps/app-bridge";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { CallToolResult } from "@modelcontextprotocol/client";
 
 type HostRecord = {
   readonly modelContext: unknown[];

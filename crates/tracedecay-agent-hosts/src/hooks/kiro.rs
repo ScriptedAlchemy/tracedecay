@@ -85,7 +85,7 @@ pub async fn hook_kiro_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
     if let Some(root) = root.as_deref() {
         super::reset_counter_for_project(runtime, root, Some(&hook_telemetry)).await;
     }
-    let ingest = super::ingest_transcript_for_event(
+    super::ingest_transcript_for_event(
         runtime,
         "kiro",
         &event,
@@ -95,12 +95,6 @@ pub async fn hook_kiro_prompt_submit(runtime: &HookRuntimeV1) -> i32 {
         Some(&hook_telemetry),
     )
     .await;
-    if ingest.should_schedule_user_review() {
-        // User-scope catch-up can ingest several changed Kiro sessions in one
-        // bounded sweep, so let the reflector select all recent Kiro evidence
-        // instead of falsely attributing the batch to the prompt's session id.
-        super::schedule_user_session_review(runtime, "kiro", None).await;
-    }
     let output = dispatch_guidance
         .flatten()
         .unwrap_or_else(|| serde_json::json!({}).to_string());

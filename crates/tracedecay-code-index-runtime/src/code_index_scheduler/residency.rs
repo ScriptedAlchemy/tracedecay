@@ -24,6 +24,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
 use std::time::Instant;
 
+use crate::code_index_task_support::spawn_detached;
+
 use tracedecay_code_index::graph_projection::{
     CodeGraphCatalogReleaseV1, CodeGraphEngineReleaseV1,
 };
@@ -331,8 +333,8 @@ impl WorktreeResidencyV1 {
 
     /// A graph owner a live read holds Busy is freed only when that read
     /// ends, and nothing else would retry the release then. The read's last
-    /// lease drops on whatever thread ends it, possibly off the runtime, so
-    /// the armed retry is spawned rather than run there. With no read live
+    /// lease drops on whatever thread ends it, so the armed retry is spawned
+    /// on the native runtime rather than run there. With no read live
     /// the Busy already drained and the release runs again now; the
     /// `retrying` flag stops a hold that is not a read from recursing.
     fn arm_park_release_after_graph_reads_drain(self: &Arc<Self>, owners: &Arc<ResidentOwnersV1>) {
@@ -340,9 +342,6 @@ impl WorktreeResidencyV1 {
             .serving_text()
             .and_then(|text| text.interactive_graph_store().ok())
         else {
-            return;
-        };
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
         if self
@@ -355,11 +354,11 @@ impl WorktreeResidencyV1 {
         let weak_owners = Arc::downgrade(owners);
         let armed = store.park_release_after_reads_drain(Arc::new(move || {
             let (residency, owners) = (Weak::clone(&residency), Weak::clone(&weak_owners));
-            drop(runtime.spawn(async move {
+            spawn_detached("code_index_park_release_after_reads", async move {
                 if let (Some(residency), Some(owners)) = (residency.upgrade(), owners.upgrade()) {
                     residency.release_decode_when_parked(&owners);
                 }
-            }));
+            });
         }));
         if !armed {
             self.release_decode_when_parked(owners);
@@ -379,7 +378,7 @@ impl WorktreeResidencyV1 {
         let mut passes = self.reconcile_in_progress.subscribe();
         let residency = Arc::downgrade(self);
         let owners = Arc::downgrade(owners);
-        tokio::spawn(async move {
+        spawn_detached("code_index_park_release_after_pass", async move {
             if passes.wait_for(|passes| !passes.running()).await.is_err() {
                 return;
             }
@@ -417,7 +416,7 @@ impl WorktreeResidencyV1 {
         });
         text.bind_parked_graph_release(Arc::clone(&retry));
         let settled = text.catalog_warm_notify();
-        tokio::spawn(async move {
+        spawn_detached("code_index_park_release_after_catalog_warm", async move {
             settled.notified().await;
             retry();
         });

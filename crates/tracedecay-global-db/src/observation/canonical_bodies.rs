@@ -1,12 +1,13 @@
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_runtime_core::db::schema_version;
 use tracedecay_store::{
     CANONICAL_BODIES_TABLE_SQL, CanonicalBodyError, INLINE_BODY_BYTES, LOAD_CANONICAL_BODY_SQL,
     StoredCanonicalBody, UPSERT_CANONICAL_BODY_SQL, collect_body_refs, migrate_stored_json,
     parse_stored_observation, stored_json_needs_hydrate, unpack_body,
 };
 
-use super::super::global_db_operation_error;
+use super::super::{global_db_operation_error, global_db_operation_message};
 use super::codec::storage;
 
 pub(super) const CANONICAL_BODY_MIGRATION: &str = "session-canonical-bodies-root-refs-v1";
@@ -79,16 +80,12 @@ pub(crate) async fn converge_canonical_bodies(
 }
 
 async fn record_migration(
-    conn: &impl Executor,
+    conn: &(impl Executor + ?Sized),
     migration: &str,
 ) -> tracedecay_domain::errors::Result<()> {
-    conn.execute(
-        "INSERT OR IGNORE INTO global_schema_migrations(migration) VALUES (?1)",
-        params![migration],
-    )
-    .await
-    .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    Ok(())
+    schema_version::record_version(conn, migration, 1)
+        .await
+        .map_err(|error| global_db_operation_message(OPERATION, error.to_string()))
 }
 
 async fn compact_observation_page(
@@ -315,20 +312,13 @@ async fn persist_bodies(
 }
 
 async fn migration_recorded(
-    conn: &impl QueryExecutor,
+    conn: &(impl QueryExecutor + ?Sized),
     migration: &str,
 ) -> tracedecay_domain::errors::Result<bool> {
-    let mut rows = conn
-        .query(
-            "SELECT 1 FROM global_schema_migrations WHERE migration = ?1",
-            params![migration],
-        )
+    schema_version::read_version(conn, migration)
         .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    rows.next()
-        .await
-        .map(|row| row.is_some())
-        .map_err(|error| global_db_operation_error(OPERATION, error))
+        .map(|version| version.is_some())
+        .map_err(|error| global_db_operation_message(OPERATION, error.to_string()))
 }
 
 async fn table_exists(

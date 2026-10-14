@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::Duration;
 use tracedecay_maintenance::retention::orphan_stores::dir_size_bytes;
-use tracedecay_runtime_core::config::ProfileRoot;
+use tracedecay_runtime_core::config::{GLOBAL_DB_FILENAME, ProfileRoot};
+use tracedecay_runtime_core::storage::{USER_MEMORY_DB_FILENAME, USER_SESSIONS_DB_FILENAME};
 
 use tracedecay_global_db::profile_registry_maintenance::{
     ProfileRegistryMaintenanceRuntime, remove_store_directory, verify_store_path_absent,
@@ -25,7 +26,11 @@ use super::daemon::{admin_cli_result, admin_cli_result_mismatch, registry_contex
 /// shared holders such as hooks and doctor runs.
 const PROFILE_OFFLINE_LEASE_TIMEOUT: Duration = Duration::from_secs(10);
 
-const PROFILE_SQLITE_DATABASES: [&str; 3] = ["global.db", "user-sessions.db", "user-memory.db"];
+const PROFILE_SQLITE_DATABASES: [&str; 3] = [
+    GLOBAL_DB_FILENAME,
+    USER_SESSIONS_DB_FILENAME,
+    USER_MEMORY_DB_FILENAME,
+];
 const PROFILE_DATABASE_PATHS: [&str; 15] = [
     "projects",
     "stores",
@@ -215,7 +220,7 @@ pub(crate) async fn try_admit_profile_registry(
         }
     })?;
     if !profile_root
-        .join("global.db")
+        .join(GLOBAL_DB_FILENAME)
         .try_exists()
         .map_err(
             |error| tracedecay_domain::errors::TraceDecayError::Database {

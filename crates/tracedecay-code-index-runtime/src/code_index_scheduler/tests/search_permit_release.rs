@@ -17,6 +17,7 @@ use tracedecay_query::code_search::{
     CodeIndexSearchRequestV1, CodeIndexSearchUnavailableReasonV1, CodeIndexSimilarOutcomeV1,
     CodeIndexSimilarRequestV1, CodeIndexSimilarTargetV1,
 };
+use tracedecay_runtime_core::native_runtime;
 
 use crate::code_index_executor::{code_index_search_executor, code_index_similar_executor};
 use crate::mcp_admission::{
@@ -847,4 +848,99 @@ async fn a_family_read_that_loses_the_permit_race_waits_for_the_permit() {
     );
 
     registry.shutdown().await;
+}
+
+/// The executor runs a search's scheduler work on the native runtime, so a
+/// caller with no Tokio runtime still gets a complete result.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_search_off_tokio_completes() {
+    let fixture = GitFixture::new(&[("src/alpha.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_core_query_worktree(&fixture, &store).await;
+    let executor = code_index_search_executor(
+        registry.clone(),
+        test_project_id(),
+        OpenAdmission(CodeIndexSearchAuthorityV1 {
+            principal: PrincipalId::new("principal.native-search.fixture").expect("principal"),
+            authorization_revision: AuthorizationRevision::new(
+                "authorization.native-search.fixture",
+            )
+            .expect("authorization revision"),
+        }),
+        FixedScopeResolver(scope),
+    );
+    let request = search_request(fixture.path(), None);
+    let search = std::thread::spawn(move || native_runtime::block_on(executor(request)));
+    let outcome = tokio::task::spawn_blocking(move || search.join())
+        .await
+        .expect("the joining thread finishes");
+    let outcome = outcome
+        .map_err(|panic| {
+            panic.downcast_ref::<String>().cloned().or_else(|| {
+                panic
+                    .downcast_ref::<&str>()
+                    .map(|message| (*message).to_owned())
+            })
+        })
+        .map(|outcome| outcome.expect("process runtime"));
+    assert!(
+        matches!(outcome, Ok(CodeIndexSearchOutcomeV1::Complete(_))),
+        "a search with no Tokio runtime must complete: {outcome:?}"
+    );
+
+    registry.shutdown().await;
+}
+
+/// A cold search activates its route's index even when it is polled with no
+/// Tokio runtime entered, as the executor's native worker polls it.
+#[test]
+fn a_cold_search_off_tokio_activates_its_index() {
+    let fixture = GitFixture::new(&[("src/alpha.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let (mounted, mount_started) = mpsc::channel();
+    let activation = Arc::new(crate::code_index_scheduler::CodeIndexActivationV1::new(
+        fixture.path(),
+        Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        tracedecay_runtime_core::cancellation::CancellationToken::new(),
+        Arc::new(move || {
+            let _ = mounted.send(());
+            Box::pin(std::future::ready(Ok(())))
+        }),
+        Arc::new(|_| {
+            Box::pin(std::future::ready(
+                crate::code_index_scheduler::CodeIndexDemandAdmissionV1::Queued,
+            ))
+        }),
+    ));
+    let identity = activation.identity().expect("repository identity");
+    let scope = ResolvedScope::new(
+        test_project_id(),
+        identity.repository_id().clone(),
+        identity.worktree_id().clone(),
+        identity.head_ref().cloned(),
+    )
+    .expect("resolved scope");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    assert!(registry.register_activation(&scope, &activation));
+    let executor = code_index_search_executor(
+        registry,
+        test_project_id(),
+        OpenAdmission(CodeIndexSearchAuthorityV1 {
+            principal: PrincipalId::new("principal.cold-search.fixture").expect("principal"),
+            authorization_revision: AuthorizationRevision::new("authorization.cold-search.fixture")
+                .expect("authorization revision"),
+        }),
+        FixedScopeResolver(scope),
+    );
+
+    let outcome = native_runtime::block_on(async {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        executor(search_request(fixture.path(), None)).await
+    })
+    .expect("process runtime");
+
+    assert_eq!(
+        mount_started.recv_timeout(Duration::from_secs(30)),
+        Ok(()),
+        "a cold search must start its index mount; search answered {outcome:?}"
+    );
 }

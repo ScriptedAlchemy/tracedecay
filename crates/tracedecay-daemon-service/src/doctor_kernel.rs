@@ -9,9 +9,7 @@
 //! result, and partial coverage carries its real reason.
 //!
 use std::collections::BTreeSet;
-use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::sync::Arc;
 use tracedecay_application::advisory::github_runtime::github_source_status_v1;
 use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
@@ -90,38 +88,19 @@ pub fn configuration_read_from_pin<E>(
     }
 }
 
-/// Run the exhaustive observation-authority invariant pass over an already
-/// acquired read snapshot of the registered profile authority.
-///
-/// This is the same pass the `tracedecay_runtime` producers run
-/// ([`tracedecay_global_db::schema_stages::validate_observation_authority_connection`]):
-/// read-only, so Doctor observes the invariant without owning any repair of it.
-/// `true` means the audit ran and every invariant held; `false` means it ran and
-/// an invariant failed. "Could not run" is not representable here, the caller
-/// owns that distinction.
-async fn observation_authority_audit_passed(
-    snapshot: &tracedecay_runtime_core::db::DatabaseEngineReadSnapshot,
-) -> bool {
-    tracedecay_global_db::schema_stages::validate_observation_authority_connection(snapshot)
-        .await
-        .is_ok()
-}
-
 /// Observe the storage authority audit signal the daemon-side Doctor reader
 /// reports as [`DaemonRuntimeHealthSignalV1::authority_audit_ok`].
 ///
-/// Tri-state, matching the vocabulary the `tracedecay_runtime` producers already
-/// publish: `Some(true)` only when the audit ran and passed, `Some(false)` when
-/// it ran and an invariant failed, and `None` when it could not run at all
-/// because the registered authority would not yield a read snapshot. A not-run
-/// audit weakens runtime coverage to partial rather than claiming health.
+/// This is the same read-only pass the `tracedecay_runtime` producers run, so
+/// Doctor observes the invariant without owning any repair of it. Tri-state:
+/// `Some(true)` only when the audit ran and passed, `Some(false)` when it ran
+/// and an invariant failed, and `None` when it could not run or did not finish
+/// inside its budget. A not-run audit weakens runtime coverage to partial
+/// rather than claiming health or a stuck runtime.
 async fn observation_authority_audit_ok(
     registry: &tracedecay_global_db::RegisteredGlobalDb,
 ) -> Option<bool> {
-    match registry.health_read_snapshot().await {
-        Ok(snapshot) => Some(observation_authority_audit_passed(&snapshot).await),
-        Err(_) => None,
-    }
+    registry.observation_authority_audit().await.verdict()
 }
 
 // === Host/agent integration conformance (Advisory family) ====================
@@ -645,7 +624,7 @@ pub async fn collect_code_generation_retention_findings(
     // live container until the next publication holds it open.
     let deferred_retirements = deferred_native_retirements(graph).await;
     let graph_container = graph.database_path().with_extension("grafeo");
-    let Ok(census) = tokio::task::spawn_blocking(move || {
+    let Ok(census) = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         let live_container_bytes = live_graph_container_bytes(&graph_container);
         let sealed = head_generations.and_then(|heads| {
             tracedecay_graph_db::census_sealed_store(&graph_container, &heads).ok()
@@ -1087,45 +1066,26 @@ pub fn production_doctor_report_reader(
                 .and_then(|days| days.checked_mul(24 * 60 * 60))
                 .unwrap_or(i64::MAX);
             let now = now_secs();
-            let profile_storage_reads: Pin<
-                Box<
-                    dyn Future<
-                            Output = tracedecay_maintenance::retention::diagnostics::ProfileStorageFindingsV1,
-                        > + Send,
-                >,
-            > = Box::pin(async {
-                let owner_roots_read: Pin<
-                    Box<dyn Future<Output = BTreeSet<PathBuf>> + Send>,
-                > = Box::pin(
-                    tracedecay_maintenance::store_maintenance::scheduler_owner_roots(&schedulers),
-                );
-                let mut owner_roots = owner_roots_read.await;
+            let profile_storage_reads = async {
+                let mut owner_roots =
+                    tracedecay_maintenance::store_maintenance::scheduler_owner_roots(&schedulers)
+                        .await;
                 owner_roots.insert(project_root.clone());
-                let findings: Pin<
-                    Box<
-                        dyn Future<
-                                Output = tracedecay_maintenance::retention::diagnostics::ProfileStorageFindingsV1,
-                            > + Send,
-                    >,
-                > = Box::pin(
-                    tracedecay_maintenance::retention::diagnostics::collect_profile_storage_findings(
-                        registry.as_ref(),
-                        &profile_root,
-                        &owner_roots,
-                        retention_secs,
-                        now,
-                    ),
-                );
-                findings.await
-            });
+                tracedecay_maintenance::retention::diagnostics::collect_profile_storage_findings(
+                    registry.as_ref(),
+                    &profile_root,
+                    &owner_roots,
+                    retention_secs,
+                    now,
+                )
+                .await
+            };
             let code_index_store_root =
                 tracedecay_code_index_runtime::code_index_scheduler::scoped_code_index_store_root(
                     &layout.data_root.join("code-index-v1"),
                     &project_root,
                 );
-            let advisory_feedback_read: Pin<
-                Box<dyn Future<Output = AdvisoryFeedbackReadV1> + Send>,
-            > = Box::pin(async {
+            let advisory_feedback_read = async {
                 // The advertised generation, read without renewing the graph's
                 // residency lease or asking for a decode.
                 let current_generation = schedulers
@@ -1142,7 +1102,7 @@ pub fn production_doctor_report_reader(
                     },
                     None => AdvisoryFeedbackReadV1::Absent,
                 }
-            });
+            };
             let host_project_root = project_root.clone();
             let host_components_root = profile_root.join("host-components");
             // Staleness comparison against the installed plugins' provenance
@@ -1153,7 +1113,7 @@ pub fn production_doctor_report_reader(
                 })?
                 .source()
                 .full_sha;
-            let host_scan = tokio::task::spawn_blocking(move || {
+            let host_scan = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
                 let _span = tracing::trace_span!("daemon.doctor.host_scan").entered();
                 {
                     host_profile
@@ -1183,79 +1143,6 @@ pub fn production_doctor_report_reader(
                 }
             });
             let project_temporal = session_temporal_ok(project_sessions.as_deref());
-            let quick_check_read: Pin<
-                Box<dyn Future<Output = tracedecay_domain::errors::Result<Option<String>>> + Send>,
-            > = Box::pin(graph.quick_check_report());
-            let authority_audit_read: Pin<Box<dyn Future<Output = Option<bool>> + Send>> =
-                Box::pin(observation_authority_audit_ok(registry.as_ref()));
-            let temporal_read: Pin<Box<dyn Future<Output = Option<bool>> + Send>> =
-                Box::pin(project_temporal);
-            let telemetry_read: Pin<Box<dyn Future<Output = CollectedStoreTelemetryV1> + Send>> =
-                Box::pin(collect_over_budget_store_findings(
-                    &context,
-                    &telemetry_ports,
-                    &retention,
-                ));
-            let profile_retention_read: Pin<
-                Box<dyn Future<Output = DoctorStorageFamilyReadV1> + Send>,
-            > = Box::pin(session_retention_read(
-                profile_sessions.as_deref(),
-                &retention,
-                now,
-            ));
-            let project_retention_read: Pin<
-                Box<dyn Future<Output = DoctorStorageFamilyReadV1> + Send>,
-            > = Box::pin(session_retention_read(
-                project_sessions.as_deref(),
-                &retention,
-                now,
-            ));
-            let generation_retention_read: Pin<
-                Box<dyn Future<Output = DoctorStorageFamilyReadV1> + Send>,
-            > = Box::pin(collect_code_generation_retention_findings(
-                &schedulers,
-                registry.as_ref(),
-                &code_index_store_root,
-                &project_root,
-                &graph,
-            ));
-            let language_server_read: Pin<Box<dyn Future<Output = LanguageServerReadV1> + Send>> =
-                Box::pin(language_server_read_from_broker(&diagnostic_broker));
-            let observability_future: Pin<
-                Box<
-                    dyn Future<
-                            Output = std::result::Result<
-                                tracedecay_application::feedback::observations::FeedbackObservationReadModelV1,
-                                tracedecay_application::feedback::concrete::FeedbackRuntimeError,
-                            >,
-                        > + Send,
-                >,
-            > = Box::pin(
-                tracedecay_application::feedback::concrete::feedback_observation_read_model(&graph),
-            );
-            let refusal_read: Pin<
-                Box<
-                    dyn Future<Output = (IngestRefusalCensusReadV1, IngestRefusalCensusReadV1)>
-                        + Send,
-                >,
-            > = Box::pin(async {
-                tokio::join!(
-                    refusal_census_read(profile_sessions.as_deref()),
-                    refusal_census_read(project_sessions.as_deref()),
-                )
-            });
-            let host_read_future: Pin<
-                Box<
-                    dyn Future<
-                            Output = std::result::Result<
-                                HostIntegrationReadV1,
-                                tokio::task::JoinError,
-                            >,
-                        > + Send,
-                >,
-            > = Box::pin(host_scan);
-            let code_index_read: Pin<Box<dyn Future<Output = CodeIndexMountReadV1> + Send>> =
-                Box::pin(code_index_read_from_registry(&schedulers, &project_root));
             let (
                 quick_check,
                 authority_audit_ok,
@@ -1274,20 +1161,33 @@ pub fn production_doctor_report_reader(
             ) = tracing::Instrument::instrument(
                 Box::pin(async {
                     tokio::join!(
-                        quick_check_read,
-                        authority_audit_read,
-                        temporal_read,
+                        graph.quick_check_report(),
+                        observation_authority_audit_ok(registry.as_ref()),
+                        project_temporal,
                         profile_storage_reads,
-                        telemetry_read,
-                        profile_retention_read,
-                        project_retention_read,
-                        generation_retention_read,
-                        language_server_read,
-                        observability_future,
-                        refusal_read,
+                        collect_over_budget_store_findings(&context, &telemetry_ports, &retention),
+                        session_retention_read(profile_sessions.as_deref(), &retention, now),
+                        session_retention_read(project_sessions.as_deref(), &retention, now),
+                        collect_code_generation_retention_findings(
+                            &schedulers,
+                            registry.as_ref(),
+                            &code_index_store_root,
+                            &project_root,
+                            &graph,
+                        ),
+                        language_server_read_from_broker(&diagnostic_broker),
+                        tracedecay_application::feedback::concrete::feedback_observation_read_model(
+                            &graph,
+                        ),
+                        async {
+                            tokio::join!(
+                                refusal_census_read(profile_sessions.as_deref()),
+                                refusal_census_read(project_sessions.as_deref()),
+                            )
+                        },
                         advisory_feedback_read,
-                        host_read_future,
-                        code_index_read,
+                        host_scan,
+                        code_index_read_from_registry(&schedulers, &project_root),
                     )
                 }),
                 tracing::trace_span!("daemon.doctor.collect"),
@@ -1355,10 +1255,7 @@ pub fn production_doctor_report_reader(
                 ingest_refusals,
                 storage,
             };
-            let composed: Pin<
-                Box<dyn Future<Output = Result<DoctorReportV1, ApplicationContractError>> + Send>,
-            > = Box::pin(compose_doctor_report(&context, &inputs));
-            let report = composed.await?;
+            let report = compose_doctor_report(&context, &inputs).await?;
             Ok(
                 tracedecay_dashboard_api::AdmittedDoctorReportV1::new(report)
                     .with_table_growth_evidence(store_telemetry.table_growth_evidence)

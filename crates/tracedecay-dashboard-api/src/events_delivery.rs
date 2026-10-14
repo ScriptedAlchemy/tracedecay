@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::extract::State;
@@ -14,6 +14,7 @@ use tracedecay_domain::{
     DeliverySettlementAttemptV1, DeliverySettlementOutcomeV1, DeliverySettlementV1,
     DeliverySurfaceFamilyV1, UtcMicros, canonical_sha256,
 };
+use tracedecay_runtime_core::native_runtime;
 
 use super::DashboardState;
 use super::events_api::DashboardEventV1;
@@ -87,7 +88,12 @@ impl DashboardDeliverySettlementRegistryV1 {
                 };
                 registry.reap_expired_durable().await;
                 drop(registry);
-                tokio::time::sleep(DELIVERY_DEADLINE_REAPER_INTERVAL).await;
+                let due = Instant::now() + DELIVERY_DEADLINE_REAPER_INTERVAL;
+                if let Err(error) = native_runtime::sleep_until(due).await {
+                    // Without a timer the loop would reap without pause.
+                    tracing::error!(%error, "dashboard delivery deadline reaper timer unavailable");
+                    return;
+                }
             }
         });
     }

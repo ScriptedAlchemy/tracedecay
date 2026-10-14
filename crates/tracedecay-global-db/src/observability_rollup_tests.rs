@@ -625,25 +625,55 @@ async fn rollup_rebuild_is_idempotent_version_monotone_and_late_correctable() {
 }
 
 #[asupersync::test]
-async fn retention_expires_old_daily_fragments() {
+async fn observability_retention_expires_rollups_past_the_horizon_only() {
     let harness = RegisteredGlobalDbHarness::open("observability-rollup-query-cap-retention").await;
     harness
         .registered
         .rebuild_observability_rollup(rebuild(
-            "rebuild:many",
+            "rebuild:expired",
             10,
             "execution-topology-projector.v1",
             vec![cell("bounded", "[]", 5)],
         ))
         .await
-        .expect("bounded rollup");
+        .expect("expired-day rollup");
+    let mut retained = rebuild(
+        "rebuild:retained",
+        10,
+        "execution-topology-projector.v1",
+        vec![cell("bounded", "[]", 5)],
+    );
+    retained.day_start_seconds = 20 * DAY;
+    harness
+        .registered
+        .rebuild_observability_rollup(retained)
+        .await
+        .expect("retained-day rollup");
+    harness
+        .registered
+        .append_observability_event(&topology_event("scope:rollup", "topology:old", 5 * DAY + 1))
+        .await
+        .expect("append expired-day topology source");
 
+    // The rollup horizon is 395 days, so day 11 is the first retained day.
     let receipt = harness
         .registered
-        .prune_observability_rollups(406 * DAY)
+        .prune_observability_events(406 * DAY)
         .await
-        .expect("rollup retention");
-    assert_eq!(receipt.expired_generations, 1);
+        .expect("observability retention");
+    assert_eq!(receipt.expired_rollups.expired_generations, 1);
+    assert_eq!(receipt.expired_rollups.expired_journal_entries, 1);
+    assert_eq!(receipt.expired_rollups.expired_dirty_days, 1);
+    assert_eq!(
+        harness
+            .registered
+            .claim_observability_rollup_dirty_day("scope:rollup", "producer:after", 30)
+            .await
+            .expect("claim after retention"),
+        None,
+        "an expired dirty day must not be rebuilt"
+    );
+
     let empty = harness
         .registered
         .query_observability_rollup_fragments(&ObservabilityRollupFragmentQueryV1 {
@@ -655,4 +685,93 @@ async fn retention_expires_old_daily_fragments() {
         .expect("post-retention query");
     assert!(empty.fragments.is_empty());
     assert_eq!(empty.coverage, CoverageStateV1::Partial);
+    let kept = harness
+        .registered
+        .query_observability_rollup_fragments(&ObservabilityRollupFragmentQueryV1 {
+            authorized_scope_ref: "scope:rollup".to_owned(),
+            since_day_start_seconds: 20 * DAY,
+            until_day_start_seconds: 21 * DAY,
+        })
+        .await
+        .expect("retained-day query");
+    assert_eq!(kept.fragments.len(), 1);
+    assert_eq!(kept.fragments[0].day_start_seconds, 20 * DAY);
+
+    let repeat = harness
+        .registered
+        .prune_observability_events(406 * DAY)
+        .await
+        .expect("repeat observability retention");
+    assert_eq!(repeat.expired_rollups.expired_generations, 0);
+}
+
+/// A scope idle past the horizon must resume at the first retained day rather
+/// than close each expired day as known-empty from already-pruned events.
+#[asupersync::test]
+async fn observability_retention_moves_a_lagging_frontier_to_the_first_retained_day() {
+    let harness = RegisteredGlobalDbHarness::open("observability-rollup-lagging-frontier").await;
+    for scope in ["scope:idle", "scope:current"] {
+        harness
+            .registered
+            .initialize_observability_rollup_frontier(scope)
+            .await
+            .expect("initialize frontier");
+    }
+    let transaction = harness
+        .registered
+        .begin_write_transaction()
+        .await
+        .expect("begin frontier fixture");
+    for (scope, day) in [("scope:idle", 5 * DAY), ("scope:current", 30 * DAY)] {
+        transaction
+            .execute(
+                "UPDATE observability_rollup_frontiers
+                 SET coverage_start_day_seconds = ?2, next_day_start_seconds = ?2
+                 WHERE scope_ref = ?1",
+                tracedecay_runtime_core::db::engine::params![scope, day],
+            )
+            .await
+            .expect("move frontier to fixture day");
+    }
+    transaction.commit().await.expect("commit frontier fixture");
+    let ObservabilityRollupEmptyDayClaimOutcomeV1::Claimed(stale_claim) = harness
+        .registered
+        .claim_observability_rollup_empty_day("scope:idle", "producer:before", 30)
+        .await
+        .expect("claim expired day")
+    else {
+        panic!("the lagging day must be claimable before retention");
+    };
+    assert_eq!(stale_claim.day_start_seconds, 5 * DAY);
+
+    // A cutoff of day 11.5 expires day 11 too, so day 12 is the first retained day.
+    let receipt = harness
+        .registered
+        .prune_observability_events(406 * DAY + DAY / 2)
+        .await
+        .expect("observability retention");
+    assert_eq!(receipt.expired_rollups.advanced_frontiers, 1);
+
+    let ObservabilityRollupEmptyDayClaimOutcomeV1::Claimed(claim) = harness
+        .registered
+        .claim_observability_rollup_empty_day("scope:idle", "producer:after", 30)
+        .await
+        .expect("claim after retention")
+    else {
+        panic!("retention must release the expired-day claim");
+    };
+    assert_eq!(claim.day_start_seconds, 12 * DAY);
+    let idle = harness
+        .registered
+        .initialize_observability_rollup_frontier("scope:idle")
+        .await
+        .expect("read idle frontier");
+    assert_eq!(idle.coverage_start_day_seconds, 5 * DAY);
+    assert_eq!(idle.next_day_start_seconds, 12 * DAY);
+    let current = harness
+        .registered
+        .initialize_observability_rollup_frontier("scope:current")
+        .await
+        .expect("read current frontier");
+    assert_eq!(current.next_day_start_seconds, 30 * DAY);
 }

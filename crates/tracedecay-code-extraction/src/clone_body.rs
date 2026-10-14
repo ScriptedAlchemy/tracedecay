@@ -379,7 +379,7 @@ struct TokenEmitter<'a> {
 }
 
 impl<'a> TokenEmitter<'a> {
-    fn emit(&mut self, node: TreeSitterNode<'_>, in_token_tree: bool) {
+    fn emit(&mut self, node: TreeSitterNode<'a>, in_token_tree: bool) {
         // Asking a node for its kind is a `strlen` over the grammar table plus
         // a UTF-8 check, so the walk reads it once and passes it around.
         let kind = node.kind();
@@ -411,7 +411,7 @@ impl<'a> TokenEmitter<'a> {
         }
     }
 
-    fn emit_leaf(&mut self, node: TreeSitterNode<'_>, kind: &'static str, in_token_tree: bool) {
+    fn emit_leaf(&mut self, node: TreeSitterNode<'a>, kind: &'a str, in_token_tree: bool) {
         let source = self.source;
         let Ok(text) = node.utf8_text(source) else {
             self.issues
@@ -557,7 +557,7 @@ impl<'tree> SyntaxPreorder<'tree> {
     /// The walk already holds this. Recovering it afterwards costs a
     /// `Node::parent`, which tree-sitter answers by re-descending from the
     /// root, and then a scan of that parent's children per field tried.
-    pub(super) fn field_name(&self) -> Option<&'static str> {
+    pub(super) fn field_name(&self) -> Option<&'tree str> {
         self.cursor.field_name()
     }
 }

@@ -115,7 +115,8 @@ pub use output_format::{RequestedOutputFormat, requested_output_format};
 pub use surface::GitReadSurfaceRequest;
 pub use transport::{
     AUTH_PREFACE_PROTOCOL, BrokerListener, BrokerReadHalf, BrokerStream, BrokerWriteHalf,
-    DaemonAuthPreface, DaemonEndpoint, SOCKET_ENV, default_loopback_endpoint,
+    DaemonAuthPreface, DaemonClientReadHalf, DaemonClientStream, DaemonClientWriteHalf,
+    DaemonEndpoint, SOCKET_ENV, default_loopback_endpoint,
 };
 #[cfg(unix)]
 pub use transport::{

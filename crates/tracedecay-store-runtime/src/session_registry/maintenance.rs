@@ -16,10 +16,11 @@ use tracedecay_domain::errors::{
     TraceDecayError,
 };
 use tracedecay_global_db::schema_stages::RegisteredSchemaConvergence;
+use tracedecay_runtime_core::native_runtime::NativeTask;
 use tracedecay_runtime_core::storage::profile_root_of_sharded_data_root;
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardIdV1, StoreShardScopeV1};
 
-use super::retained_hook_tasks::RetainedHookTaskJoin;
+use super::retained_hook_tasks::join_result;
 
 use super::{
     DaemonSessionRuntimeRegistryV1, Database, DatabaseAccessMode, RegisteredGlobalDbLeaseV1,
@@ -69,7 +70,7 @@ pub(super) struct RegisteredSchemaConvergenceMaintenance {
     concurrency: Arc<Semaphore>,
     statuses: Arc<StdMutex<RegisteredSchemaConvergenceStatuses>>,
     metadata: Arc<StdMutex<RegisteredSchemaConvergenceMetadata>>,
-    tasks: StdMutex<BTreeMap<StoreShardIdV1, Arc<RetainedHookTaskJoin>>>,
+    tasks: StdMutex<BTreeMap<StoreShardIdV1, Arc<NativeTask<()>>>>,
     #[cfg(any(test, feature = "test-helpers"))]
     schedule_count: std::sync::atomic::AtomicUsize,
     #[cfg(any(test, feature = "test-helpers"))]
@@ -389,7 +390,7 @@ impl RegisteredSchemaConvergenceMaintenance {
             drop(target);
             lock_registered_schema_convergence_statuses(&statuses).insert(task_shard_id, status);
         });
-        match RetainedHookTaskJoin::spawn(tracing::Instrument::instrument(
+        match NativeTask::spawn(tracing::Instrument::instrument(
             work,
             tracing::trace_span!("daemon.session_registry.schema_converge"),
         )) {
@@ -427,7 +428,7 @@ impl RegisteredSchemaConvergenceMaintenance {
             Arc::clone(task)
         };
         task.abort();
-        task.wait().await.map_err(|error| {
+        join_result(task.wait().await).map_err(|error| {
             format!("registered schema convergence task {shard_id:?} join failed: {error}")
         })?;
         let mut tasks = self
@@ -470,7 +471,7 @@ impl RegisteredSchemaConvergenceMaintenance {
         // Shared joins remain in the owner while any shutdown waiter can be
         // cancelled. Keep failed joins so subsequent shutdown reports them too.
         for (shard_id, task) in tasks {
-            if let Err(error) = task.wait().await {
+            if let Err(error) = join_result(task.wait().await) {
                 failures.push(format!(
                     "registered schema convergence task {shard_id:?} join failed: {error}"
                 ));
@@ -871,7 +872,7 @@ mod tests {
             release,
             dropped: Arc::clone(&dropped),
         };
-        let worker = RetainedHookTaskJoin::spawn({
+        let worker = NativeTask::spawn({
             let started = Arc::clone(&started);
             async move {
                 let _guard = guard;
@@ -887,9 +888,7 @@ mod tests {
             .insert(first.clone(), Arc::new(worker));
         maintenance.tasks.lock().unwrap().insert(
             second.clone(),
-            Arc::new(
-                RetainedHookTaskJoin::spawn(std::future::pending::<()>()).expect("native worker"),
-            ),
+            Arc::new(NativeTask::spawn(std::future::pending::<()>()).expect("native worker")),
         );
         started.notified().await;
         let mut shutdown = Box::pin(maintenance.shutdown());
@@ -932,7 +931,7 @@ mod tests {
             UserProfileId::try_from("profile.failed".to_owned()).unwrap(),
         );
         let started = Arc::new(Notify::new());
-        let worker = RetainedHookTaskJoin::spawn({
+        let worker = NativeTask::spawn({
             let started = Arc::clone(&started);
             async move {
                 started.notify_one();

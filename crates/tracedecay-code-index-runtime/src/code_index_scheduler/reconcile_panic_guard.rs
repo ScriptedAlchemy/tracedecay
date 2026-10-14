@@ -19,7 +19,7 @@
 
 use std::time::Duration;
 
-use tokio::time::Instant;
+use std::time::Instant;
 
 /// Bounded exponential backoff between reconcile retries after a panicking
 /// pass. The floor keeps a transient panic from hot-looping the pool; the

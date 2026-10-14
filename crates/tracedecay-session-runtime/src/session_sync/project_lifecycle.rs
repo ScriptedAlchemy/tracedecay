@@ -14,6 +14,7 @@ use tracedecay_domain::{BrainId, ProjectId, UserProfileId, UtcMicros};
 use tracedecay_store::{StoreShardScopeV1, VerifiedStoreLocatorV1};
 
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
+use tracedecay_runtime_core::native_runtime::{self, NativeTask};
 use tracedecay_sessions::admission::SESSION_INGEST_DISABLED_REASON_V1;
 
 use super::{
@@ -42,7 +43,7 @@ pub struct SessionSyncTaskV1 {
     pub scope: SessionSyncScopeV1,
     pub key: String,
     pub cancellation: CancellationSignal,
-    pub task: tokio::task::JoinHandle<()>,
+    pub task: NativeTask<()>,
 }
 
 impl SessionSyncProjectContext {
@@ -557,21 +558,23 @@ impl DaemonSessionSyncService {
         for task in &project_tasks {
             task.cancellation.cancel(cancelled_at);
         }
-        let joined = tokio::time::timeout(SESSION_SYNC_SHUTDOWN_DEADLINE, async {
-            futures_util::future::join_all(project_tasks.iter_mut().map(|task| &mut task.task))
-                .await
+        let joined = native_runtime::timeout(SESSION_SYNC_SHUTDOWN_DEADLINE, async {
+            futures_util::future::join_all(project_tasks.iter().map(|task| task.task.wait())).await
         })
         .await;
-        let Ok(results) = joined else {
-            project_tasks.retain(|task| !task.task.is_finished());
-            self.tasks
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .extend(project_tasks);
-            return Err(format!(
-                "session sync tasks for project '{}' did not retire before the deadline",
-                scope.project_id().as_str()
-            ));
+        let results = match joined {
+            Ok(results) => results,
+            Err(error) => {
+                project_tasks.retain(|task| !task.task.is_finished());
+                self.tasks
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .extend(project_tasks);
+                return Err(format!(
+                    "session sync tasks for project '{}' did not retire: {error}",
+                    scope.project_id().as_str()
+                ));
+            }
         };
         for result in results {
             work::log_session_sync_join(result);

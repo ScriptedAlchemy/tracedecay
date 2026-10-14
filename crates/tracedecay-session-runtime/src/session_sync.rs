@@ -2,9 +2,8 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tracedecay_contracts::session_sync::{
     SessionGitSyncV1, SessionSyncAdmissionErrorV1, SessionSyncCommandV1,
@@ -22,7 +21,7 @@ use crate::session_temporal_refresh_scheduler::wake::HistoricalAdmissionView;
 use tracedecay_global_db::GlobalDbGitCorrelationStore;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
-use tracedecay_runtime_core::erase_send;
+use tracedecay_runtime_core::native_runtime::{self, NativeTask, NativeTaskOutcome};
 use tracedecay_sessions::admission::{SESSION_INGEST_DISABLED_REASON_V1, session_ingest_disabled};
 
 const MAX_SESSION_SYNC_OPERATIONS: usize = 128;
@@ -50,8 +49,9 @@ struct ActiveSessionImport {
 }
 
 /// Owns the handles while shutdown awaits them. If the daemon-wide deadline
-/// cancels that wait, unfinished handles return to the service so a retry can
-/// join them instead of detaching lease-owning tasks.
+/// cancels that wait, unfinished tasks are aborted and their handles return
+/// to the service, so a retry joins them instead of detaching lease-owning
+/// tasks. A retry only needs the join, not the task still running.
 struct SessionSyncTaskShutdownV1 {
     registry: Arc<Mutex<Vec<SessionSyncTaskV1>>>,
     tasks: Vec<SessionSyncTaskV1>,
@@ -75,6 +75,9 @@ impl Drop for SessionSyncTaskShutdownV1 {
         self.tasks.retain(|task| !task.task.is_finished());
         if self.tasks.is_empty() {
             return;
+        }
+        for task in &self.tasks {
+            task.task.abort();
         }
         self.registry
             .lock()
@@ -162,12 +165,8 @@ impl DaemonSessionSyncService {
         }
         let observed_at = now_micros();
         let key = journal_key(request.scope(), request.idempotency_key());
-        let admission_read = erase_send!(
-            context.registry.read_session_sync_journal(&key),
-            tracedecay_domain::errors::Result<Option<String>>
-        );
         match tracing::Instrument::instrument(
-            admission_read,
+            context.registry.read_session_sync_journal(&key),
             tracing::trace_span!("daemon.session_sync.journal.admission_read"),
         )
         .await
@@ -180,11 +179,10 @@ impl DaemonSessionSyncService {
                             && let Some(primary) = journal.coalesced_primary.clone()
                         {
                             let primary_key = journal_key(request.scope(), &primary);
-                            let mirrored = erase_send!(
-                                self.mirror_primary_terminal(&context, &key, &primary_key),
-                                tracedecay_domain::errors::Result<Option<SessionSyncJournalV1>>
-                            );
-                            match mirrored.await {
+                            match self
+                                .mirror_primary_terminal(&context, &key, &primary_key)
+                                .await
+                            {
                                 Ok(Some(journal)) => return journal.outcome(),
                                 Ok(None) => {}
                                 Err(error) => {
@@ -198,16 +196,15 @@ impl DaemonSessionSyncService {
                                 }
                             }
                             if journal.deadline.is_elapsed_at(observed_at) {
-                                let persisted = erase_send!(
-                                    self.persist_interruption_with_project_sessions(
+                                return match self
+                                    .persist_interruption_with_project_sessions(
                                         &context,
                                         &project_sessions,
                                         &key,
                                         OperationTermination::TimedOut,
-                                    ),
-                                    tracedecay_domain::errors::Result<SessionSyncJournalV1>
-                                );
-                                return match persisted.await {
+                                    )
+                                    .await
+                                {
                                     Ok(journal) => journal.outcome(),
                                     Err(_) => SessionSyncOutcomeV1::Unavailable {
                                         reason_code: "session_sync_journal_write_failed",
@@ -227,16 +224,15 @@ impl DaemonSessionSyncService {
                         } else if journal.status != SessionSyncJournalStatusV1::Complete
                             && journal.deadline.is_elapsed_at(observed_at)
                         {
-                            let persisted = erase_send!(
-                                self.persist_interruption_with_project_sessions(
+                            return match self
+                                .persist_interruption_with_project_sessions(
                                     &context,
                                     &project_sessions,
                                     &key,
                                     OperationTermination::TimedOut,
-                                ),
-                                tracedecay_domain::errors::Result<SessionSyncJournalV1>
-                            );
-                            return match persisted.await {
+                                )
+                                .await
+                            {
                                 Ok(journal) => journal.outcome(),
                                 Err(_) => SessionSyncOutcomeV1::Unavailable {
                                     reason_code: "session_sync_journal_write_failed",
@@ -309,30 +305,24 @@ impl DaemonSessionSyncService {
                     };
                 }
             };
-            let inserted = erase_send!(
-                context.registry.insert_session_sync_journal(&key, &encoded),
-                tracedecay_domain::errors::Result<bool>
-            );
             match tracing::Instrument::instrument(
-                inserted,
+                context.registry.insert_session_sync_journal(&key, &encoded),
                 tracing::trace_span!("daemon.session_sync.journal.coalesced_admission_write"),
             )
             .await
             {
                 Ok(true) => {}
                 Ok(false) => {
-                    let status = erase_send!(
-                        self.status_request_admitted(
+                    return self
+                        .status_request_admitted(
                             &context,
                             Some(&project_sessions),
                             SessionSyncControlV1::new(
                                 request.scope().clone(),
                                 request.idempotency_key().clone(),
                             ),
-                        ),
-                        SessionSyncOutcomeV1
-                    );
-                    return status.await;
+                        )
+                        .await;
                 }
                 Err(error) => {
                     tracing::warn!(%error, "session sync alias journal admission failed");
@@ -373,30 +363,24 @@ impl DaemonSessionSyncService {
                 };
             }
         };
-        let inserted = erase_send!(
-            context.registry.insert_session_sync_journal(&key, &encoded),
-            tracedecay_domain::errors::Result<bool>
-        );
         match tracing::Instrument::instrument(
-            inserted,
+            context.registry.insert_session_sync_journal(&key, &encoded),
             tracing::trace_span!("daemon.session_sync.journal.admission_write"),
         )
         .await
         {
             Ok(true) => {}
             Ok(false) => {
-                let status = erase_send!(
-                    self.status_request_admitted(
+                return self
+                    .status_request_admitted(
                         &context,
                         Some(&project_sessions),
                         SessionSyncControlV1::new(
                             request.scope().clone(),
                             request.idempotency_key().clone(),
                         ),
-                    ),
-                    SessionSyncOutcomeV1
-                );
-                return status.await;
+                    )
+                    .await;
             }
             Err(error) => {
                 tracing::warn!(%error, "session sync journal admission failed");
@@ -466,23 +450,21 @@ impl DaemonSessionSyncService {
         let task_scope = request.scope().clone();
         let task_key = key.clone();
         let task_cancellation = request.cancellation().clone();
-        let task = tokio::spawn(async move {
-            let ran: Pin<Box<dyn Future<Output = ()> + Send>> =
-                Box::pin(service.run_operation(context, project_sessions, key.clone(), request));
-            ran.await;
+        let task_import_scope = import_scope.clone();
+        let task = NativeTask::spawn(async move {
             service
-                .active
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .remove(&key);
-            if let Some(import_scope) = import_scope {
-                service
-                    .active_imports
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .remove(&import_scope);
-            }
+                .run_operation(context, project_sessions, key.clone(), request)
+                .await;
+            service.release_active(&key, import_scope.as_ref());
         });
+        let task = match task {
+            Ok(task) => task,
+            Err(error) => {
+                tracing::warn!(%error, "session sync operation did not start");
+                self.release_active(&task_key, task_import_scope.as_ref());
+                return false;
+            }
+        };
         let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
         tasks.retain(|task| !task.task.is_finished());
         tasks.push(SessionSyncTaskV1 {
@@ -492,6 +474,19 @@ impl DaemonSessionSyncService {
             task,
         });
         true
+    }
+
+    fn release_active(&self, key: &str, import_scope: Option<&String>) {
+        self.active
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(key);
+        if let Some(import_scope) = import_scope {
+            self.active_imports
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(import_scope);
+        }
     }
 
     async fn run_operation(
@@ -561,29 +556,15 @@ impl DaemonSessionSyncService {
         };
         let work = match request.command() {
             SessionSyncCommandV1::ImportTranscripts(_) => {
-                let imported: Pin<Box<dyn Future<Output = SessionSyncWorkResult> + Send + '_>> =
-                    Box::pin(context.import_transcripts(
-                        self,
-                        &key,
-                        &request,
-                        project_sessions.clone(),
-                    ));
                 tracing::Instrument::instrument(
-                    imported,
+                    context.import_transcripts(self, &key, &request, project_sessions.clone()),
                     tracing::trace_span!("daemon.session_sync.import_transcripts"),
                 )
                 .await
             }
             SessionSyncCommandV1::SynchronizeGit(options) => {
-                let synchronized: Pin<Box<dyn Future<Output = SessionSyncWorkResult> + Send + '_>> =
-                    Box::pin(context.synchronize_git(
-                        self,
-                        &request,
-                        options,
-                        project_sessions.clone(),
-                    ));
                 tracing::Instrument::instrument(
-                    synchronized,
+                    context.synchronize_git(self, &request, options, project_sessions.clone()),
                     tracing::trace_span!("daemon.session_sync.synchronize_git"),
                 )
                 .await
@@ -813,11 +794,7 @@ impl DaemonSessionSyncService {
         stats: SessionSyncStatsV1,
         coverage: Vec<SessionSyncSourceCoverageV1>,
     ) -> tracedecay_domain::errors::Result<Vec<SessionSyncSourceFrontierV1>> {
-        let frontiers = erase_send!(
-            context.source_frontiers(project_sessions),
-            tracedecay_domain::errors::Result<Vec<SessionSyncSourceFrontierV1>>
-        );
-        let source_frontiers = frontiers.await?;
+        let source_frontiers = context.source_frontiers(project_sessions).await?;
         self.update_journal(context, key, |journal| {
             if journal.status != SessionSyncJournalStatusV1::Complete {
                 journal.stats = stats.clone();
@@ -846,11 +823,9 @@ impl DaemonSessionSyncService {
             })?;
         let journal: SessionSyncJournalV1 =
             serde_json::from_str(&current).map_err(journal_decode_error)?;
-        let frontiers = erase_send!(
-            context.source_frontiers_for(project_sessions, &journal.source),
-            tracedecay_domain::errors::Result<Vec<SessionSyncSourceFrontierV1>>
-        );
-        let source_frontiers = frontiers.await?;
+        let source_frontiers = context
+            .source_frontiers_for(project_sessions, &journal.source)
+            .await?;
         self.update_journal(context, key, |journal| {
             if journal.status != SessionSyncJournalStatusV1::Complete
                 && journal.source_frontiers != source_frontiers
@@ -869,18 +844,12 @@ impl DaemonSessionSyncService {
         control: SessionSyncControlV1,
     ) -> SessionSyncOutcomeV1 {
         let key = journal_key(control.scope(), control.idempotency_key());
-        if let Some(project_sessions) = project_sessions {
-            let refreshed = erase_send!(
-                self.refresh_source_frontiers_with_project_sessions(
-                    context,
-                    project_sessions,
-                    &key,
-                ),
-                tracedecay_domain::errors::Result<SessionSyncJournalV1>
-            );
-            if let Err(error) = refreshed.await {
-                tracing::warn!(%error, "session sync frontier refresh failed");
-            }
+        if let Some(project_sessions) = project_sessions
+            && let Err(error) = self
+                .refresh_source_frontiers_with_project_sessions(context, project_sessions, &key)
+                .await
+        {
+            tracing::warn!(%error, "session sync frontier refresh failed");
         }
         match context.registry.read_session_sync_journal(&key).await {
             Ok(Some(encoded)) => match serde_json::from_str::<SessionSyncJournalV1>(&encoded) {
@@ -924,41 +893,44 @@ impl DaemonSessionSyncService {
 
 impl SessionSyncServicePort for DaemonSessionSyncService {
     fn execute(&self, request: SessionSyncRequestV1) -> SessionSyncFuture<'_> {
-        let executed: Pin<Box<dyn Future<Output = SessionSyncOutcomeV1> + Send + '_>> =
-            Box::pin(self.execute_request(request));
-        Box::pin(tracing::Instrument::instrument(
-            executed,
-            tracing::trace_span!("daemon.session_sync.execute"),
-        ))
+        Box::pin(async move {
+            tracing::Instrument::instrument(
+                self.execute_request(request),
+                tracing::trace_span!("daemon.session_sync.execute"),
+            )
+            .await
+        })
     }
 
     fn status(&self, control: SessionSyncControlV1) -> SessionSyncFuture<'_> {
-        let read: Pin<Box<dyn Future<Output = SessionSyncOutcomeV1> + Send + '_>> =
-            Box::pin(self.status_request(control));
-        Box::pin(tracing::Instrument::instrument(
-            read,
-            tracing::trace_span!("daemon.session_sync.status"),
-        ))
+        Box::pin(async move {
+            tracing::Instrument::instrument(
+                self.status_request(control),
+                tracing::trace_span!("daemon.session_sync.status"),
+            )
+            .await
+        })
     }
 
     fn cancel(&self, control: SessionSyncControlV1) -> SessionSyncFuture<'_> {
-        let cancelled: Pin<Box<dyn Future<Output = SessionSyncOutcomeV1> + Send + '_>> =
-            Box::pin(self.cancel_request(control));
-        Box::pin(tracing::Instrument::instrument(
-            cancelled,
-            tracing::trace_span!("daemon.session_sync.cancel"),
-        ))
+        Box::pin(async move {
+            tracing::Instrument::instrument(
+                self.cancel_request(control),
+                tracing::trace_span!("daemon.session_sync.cancel"),
+            )
+            .await
+        })
     }
 
     fn shutdown(&self) -> SessionSyncShutdownFuture<'_> {
         Box::pin(async move {
             self.shutdown.cancel();
             self.shutdown_notify.notify_waiters();
-            let mut tasks = SessionSyncTaskShutdownV1::take(&self.tasks);
-            let grace_deadline = tokio::time::Instant::now() + SESSION_SYNC_SHUTDOWN_ABORT_GRACE;
+            let tasks = SessionSyncTaskShutdownV1::take(&self.tasks);
+            let grace_deadline = Instant::now() + SESSION_SYNC_SHUTDOWN_ABORT_GRACE;
             tokio::select! {
                 results = futures_util::future::join_all(
-                    tasks.tasks.iter_mut().map(|task| &mut task.task)
+                    tasks.tasks.iter().map(|task| task.task.wait())
                 ) => {
                     for result in results {
                         work::log_session_sync_join(result);
@@ -969,13 +941,17 @@ impl SessionSyncServicePort for DaemonSessionSyncService {
                         .clear();
                     return;
                 }
-                () = tokio::time::sleep_until(grace_deadline) => {}
+                fired = native_runtime::sleep_until(grace_deadline) => {
+                    if let Err(error) = fired {
+                        tracing::warn!(%error, "session sync shutdown aborts its tasks without a grace period");
+                    }
+                }
             }
             for task in &tasks.tasks {
                 task.task.abort();
             }
             for result in
-                futures_util::future::join_all(tasks.tasks.iter_mut().map(|task| &mut task.task))
+                futures_util::future::join_all(tasks.tasks.iter().map(|task| task.task.wait()))
                     .await
             {
                 work::log_session_sync_join(result);
@@ -994,6 +970,8 @@ pub mod work;
 
 #[cfg(test)]
 mod import_admission_tests;
+#[cfg(test)]
+mod shutdown_tests;
 
 pub use project_lifecycle::{SessionSyncProjectContext, SessionSyncTaskV1};
 
@@ -1176,7 +1154,14 @@ impl DaemonSessionSyncService {
             biased;
             () = &mut shutdown => work::SessionSyncInterruption::Shutdown,
             () = cancellation.cancelled() => work::SessionSyncInterruption::Cancelled,
-            () = sleep_until_deadline(deadline) => work::SessionSyncInterruption::TimedOut,
+            fired = sleep_until_deadline(deadline) => {
+                // Without a timer the deadline cannot be observed, so the
+                // operation ends rather than run unbounded.
+                if let Err(error) = fired {
+                    tracing::error!(%error, "session sync deadline has no native timer");
+                }
+                work::SessionSyncInterruption::TimedOut
+            }
         }
     }
 }
@@ -1194,10 +1179,12 @@ fn transcript_import_requested_coverage() -> Vec<SessionSyncSourceCoverageV1> {
         .collect()
 }
 
-fn sleep_until_deadline(deadline: &tracedecay_contracts::Deadline) -> impl Future<Output = ()> {
+fn sleep_until_deadline(
+    deadline: &tracedecay_contracts::Deadline,
+) -> impl Future<Output = Result<(), String>> {
     let remaining_micros = deadline.expires_at.0.saturating_sub(now_micros().0);
     let remaining = u64::try_from(remaining_micros).unwrap_or(0);
-    tokio::time::sleep(Duration::from_micros(remaining))
+    native_runtime::sleep_until(Instant::now() + Duration::from_micros(remaining))
 }
 
 fn journal_prefix(scope: &SessionSyncScopeV1) -> String {

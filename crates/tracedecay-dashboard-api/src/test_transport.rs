@@ -14,7 +14,7 @@ use crate::{
     DashboardLcmReadPortV1, DashboardProfileCodeIndexWorkerSettingsPort, DashboardProjectContext,
     DashboardSessionAuthoritiesV1, DashboardSessionMountV1, DashboardSessionResolutionV1,
     DashboardStateCompositionV1, PrAutoTrackManagedSummaryReader, bind_dashboard, code_read_api,
-    config_error, router, standalone_dashboard_automation_writer, with_dashboard_http_admission,
+    router, serve_loopback, standalone_dashboard_automation_writer, with_dashboard_http_admission,
 };
 
 /// Test-only lifetime owner for the same registered authorities retained by a
@@ -313,8 +313,6 @@ where
     );
     eprintln!("Code search covers this project only; rebound with --path to serve another.");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await
-        .map_err(|e| config_error(format!("dashboard server error: {e}")))
+    serve_loopback(listener, app, shutdown).await;
+    Ok(())
 }

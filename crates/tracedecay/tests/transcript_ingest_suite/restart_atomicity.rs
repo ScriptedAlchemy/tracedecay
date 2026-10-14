@@ -221,9 +221,8 @@ pub(super) async fn ingest_user_provider(
     let database = runtime
         .registered_database(HostAdmissionScope::Profile)
         .expect("fixture mounts its profile session store");
-    let authority = GlobalDbSessionIngestAuthority::new(database)
-        .with_background_cpu(runtime.background_cpu())
-        .with_session_review(tracedecay::session_review_port());
+    let authority =
+        GlobalDbSessionIngestAuthority::new(database).with_background_cpu(runtime.background_cpu());
     let shard = &database.binding().shard_id;
     let outcome = with_transcript_source_profile(
         ProfileRoot::new(runtime.profile_root_for_test()).with_home(home),

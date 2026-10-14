@@ -33,23 +33,21 @@
 #![cfg(unix)]
 
 use std::collections::{BTreeSet, HashMap};
-use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant as StdInstant};
+use std::time::{Duration, Instant};
 
 use futures_util::FutureExt;
 use futures_util::future::{BoxFuture, Shared};
 use notify::EventKind;
-use tokio::task::JoinHandle;
-use tokio::time::Instant;
+use notify::event::AccessKind;
 use tracedecay_runtime_core::cancellation::MonotonicDeadline;
 use tracedecay_runtime_core::git_discovery::{
     GitDiscoveryUnknown, GitRepositoryIdentityOutcome, discover_repository_identity,
 };
+use tracedecay_runtime_core::native_runtime::{self, NativeTask};
 
 use crate::ports::{
     GitWatchMaintenanceWakeV1 as MaintenanceCoordinator, GitWatchSyncConfigV1 as SyncConfig,
@@ -81,10 +79,28 @@ use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 use watch_plan::{MAX_METADATA_WATCH_DIRECTORIES, observe_watch_plan};
 use watch_plan::{WatchInstallFailure, WatchPlanFailure, install_watches};
 
-/// Degraded watchers fall back to polling git metadata every 5 minutes.
-const DEGRADED_POLL_INTERVAL: Duration = Duration::from_mins(5);
-/// Healthy quiet repositories refresh liveness without submitting freshness.
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+/// Watcher periods and bounds. Production uses the default; tests shorten
+/// them rather than pause a clock the native timers never read.
+#[derive(Clone, Copy, Debug)]
+struct WatchCadence {
+    /// Healthy quiet repositories refresh liveness without submitting freshness.
+    heartbeat: Duration,
+    /// Degraded watchers fall back to polling git metadata on this period.
+    degraded_poll: Duration,
+    /// Bound on joining one watcher-owned task at retirement or shutdown.
+    join_budget: Duration,
+}
+
+impl Default for WatchCadence {
+    fn default() -> Self {
+        Self {
+            heartbeat: Duration::from_secs(30),
+            degraded_poll: Duration::from_mins(5),
+            join_budget: GIT_OBSERVATION_BUDGET,
+        }
+    }
+}
+
 /// Cap on the supervised-restart backoff.
 const RESTART_BACKOFF_MAX: Duration = Duration::from_mins(1);
 /// Hard bound on linked-worktree fanout and git-operation marker enumeration
@@ -142,6 +158,8 @@ pub enum GitWatcherAdmission {
     Capacity,
     NotRepository,
     IdentityUnavailable,
+    /// The native runtime refused the repository supervisor.
+    RuntimeUnavailable,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -151,6 +169,8 @@ pub enum GitWatcherStart {
     AlreadyStarted,
     Disabled,
     ShuttingDown,
+    /// The native runtime refused the backstop task.
+    RuntimeUnavailable,
 }
 
 pub struct GitWatcherInner {
@@ -158,6 +178,7 @@ pub struct GitWatcherInner {
     pub config: SyncConfig,
     maintenance: MaintenanceCoordinator,
     code_index_schedulers: Option<super::code_index_scheduler::CodeIndexSchedulerRegistryV1>,
+    cadence: WatchCadence,
     cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
     /// Whether watching is enabled at all (`auto_watch`). When false every
     /// method is a no-op so the daemon runs exactly as before this feature.
@@ -171,15 +192,19 @@ pub struct GitWatcherInner {
     /// out: a bounded git timeout is uncertainty, not absence, so admission
     /// arms a backoff retry instead of leaving the repository unwatched until
     /// the next handshake. Keyed by requested project root.
-    identity_retries: std::sync::Mutex<HashMap<PathBuf, JoinHandle<()>>>,
+    identity_retries: std::sync::Mutex<HashMap<PathBuf, NativeTask<()>>>,
     /// Bounded roster of capacity-refused repositories kept on the backstop's
     /// scheduler-ingress freshness floor until a watch slot frees.
     overflow: std::sync::Mutex<overflow::OverflowRoster>,
     /// Single backstop scheduler task, owned so shutdown can cancel and join it.
-    backstop_task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
+    backstop_task: tokio::sync::Mutex<Option<NativeTask<()>>>,
     shutting_down: AtomicBool,
     shutdown_completion:
         tokio::sync::Mutex<Option<Shared<BoxFuture<'static, GitWatcherShutdownOutcome>>>>,
+    /// Cancelled when a shutdown caller stops waiting before the join ends.
+    /// The join then aborts every task it still holds instead of spending the
+    /// rest of its budget.
+    join_abandoned: tracedecay_runtime_core::cancellation::CancellationToken,
     #[cfg(test)]
     repository_publication_probe: ownership::PublicationRaceProbe,
     #[cfg(test)]
@@ -222,6 +247,7 @@ impl GitWatcher {
                 config: _config,
                 maintenance,
                 code_index_schedulers,
+                cadence: WatchCadence::default(),
                 cancellation: tracedecay_runtime_core::cancellation::CancellationToken::new(),
                 enabled,
                 ambient_home,
@@ -232,6 +258,7 @@ impl GitWatcher {
                 backstop_task: tokio::sync::Mutex::new(None),
                 shutting_down: AtomicBool::new(false),
                 shutdown_completion: tokio::sync::Mutex::new(None),
+                join_abandoned: tracedecay_runtime_core::cancellation::CancellationToken::new(),
                 #[cfg(test)]
                 repository_publication_probe: ownership::PublicationRaceProbe::default(),
                 #[cfg(test)]
@@ -335,13 +362,19 @@ impl GitWatcher {
         #[cfg(test)]
         self.inner.spawn_publication_probe.block_if_armed();
         let watcher = self.clone();
-        let handle = tokio::spawn(tracing::Instrument::instrument(
+        let task = match NativeTask::spawn(tracing::Instrument::instrument(
             async move {
                 backstop::run(watcher).await;
             },
             tracing::trace_span!("daemon.git.watch.backstop"),
-        ));
-        *retained = Some(handle);
+        )) {
+            Ok(task) => task,
+            Err(error) => {
+                log_daemon_event("git_watch_start_failed", &[("error", error)]);
+                return GitWatcherStart::RuntimeUnavailable;
+            }
+        };
+        *retained = Some(task);
         #[cfg(test)]
         self.inner.lifecycle_receipts.record_spawn();
         GitWatcherStart::Started
@@ -367,7 +400,13 @@ impl GitWatcher {
                 completion
             }
         };
-        completion.await
+        let mut abandoned = AbandonedShutdownJoin {
+            inner: &self.inner,
+            completion: Some(completion.clone()),
+        };
+        let outcome = completion.await;
+        abandoned.completion = None;
+        outcome
     }
 
     /// A doctor-facing health value for one project's watch coverage.
@@ -458,6 +497,29 @@ impl GitWatcher {
     }
 }
 
+/// Finishes a shutdown join whose caller dropped it, for example the daemon
+/// coordinator at its phase deadline. Nothing else polls the retained join, so
+/// this drives it on the native runtime with the abandon signal set, and the
+/// join aborts what it still holds.
+struct AbandonedShutdownJoin<'a> {
+    inner: &'a GitWatcherInner,
+    completion: Option<Shared<BoxFuture<'static, GitWatcherShutdownOutcome>>>,
+}
+
+impl Drop for AbandonedShutdownJoin<'_> {
+    fn drop(&mut self) {
+        let Some(completion) = self.completion.take() else {
+            return;
+        };
+        self.inner.join_abandoned.cancel();
+        if let Err(error) = NativeTask::spawn(async move {
+            completion.await;
+        }) {
+            log_daemon_event("git_watch_abandoned_join_unspawned", &[("error", error)]);
+        }
+    }
+}
+
 /// The typed reason string behind one project's doctor-facing watch health,
 /// or `Null` for a healthy active watch.
 fn watch_status_reason(
@@ -508,15 +570,37 @@ async fn supervise_repository(inner: Arc<GitWatcherInner>, state: Arc<WatchState
                         ("backoff_ms", backoff.as_millis().to_string()),
                     ],
                 );
-                tokio::select! {
-                    biased;
-                    () = cancellation.cancelled() => return,
-                    () = tokio::time::sleep(backoff) => {}
+                if !park(cancellation.cancelled(), backoff, "repository_restart").await {
+                    return;
                 }
                 backoff = (backoff * 2).min(RESTART_BACKOFF_MAX);
             }
         }
     }
+}
+
+/// Parks for `duration` unless `cancelled` completes first. `false` ends the
+/// caller's loop: it was cancelled, or no native timer started, and then every
+/// park would return at once and spin.
+async fn park(cancelled: impl Future<Output = ()>, duration: Duration, owner: &str) -> bool {
+    tokio::select! {
+        biased;
+        () = cancelled => false,
+        tick = native_runtime::sleep_until(Instant::now() + duration) => match tick {
+            Ok(()) => true,
+            Err(error) => {
+                log_timer_unavailable(owner, error);
+                false
+            }
+        }
+    }
+}
+
+fn log_timer_unavailable(owner: &str, error: String) {
+    log_daemon_event(
+        "git_watch_timer_unavailable",
+        &[("owner", owner.to_string()), ("error", error)],
+    );
 }
 
 /// One repository event loop. The watcher is rebuilt when another linked
@@ -583,10 +667,8 @@ async fn repository_task(inner: Arc<GitWatcherInner>, state: Arc<WatchState>) {
         state.health.set_status(ProjectWatchStatus::Active);
         state.health.beat();
 
-        let debounced: Pin<Box<dyn Future<Output = DebounceExit> + Send + '_>> =
-            Box::pin(debounce_loop(&inner, &state, &cancellation));
-        match debounced.await {
-            DebounceExit::Cancelled => return,
+        match debounce_loop(&inner, &state, &cancellation).await {
+            DebounceExit::Cancelled | DebounceExit::TimerUnavailable => return,
             DebounceExit::Reconfigure => {
                 // A canceled debounce future may already have consumed the
                 // event wake. Preserve its dirty evidence across reconfigure.
@@ -603,7 +685,10 @@ async fn repository_task(inner: Arc<GitWatcherInner>, state: Arc<WatchState>) {
 /// state, it only records *what kind of path changed* so the debounce drain
 /// can resolve the actual git state once, after quiescence.
 fn classify_and_mark(state: &Arc<WatchState>, event: &notify::Event) {
-    if state.is_retired() {
+    // notify 7+ reports inotify opens on Linux. Opening a file changes no git
+    // state, and the drain's own reads of HEAD and refs would re-dirty the
+    // watch set after every reconciliation.
+    if state.is_retired() || matches!(event.kind, EventKind::Access(AccessKind::Open(_))) {
         return;
     }
     let event_roots = state.event_roots(&event.paths);
@@ -692,6 +777,9 @@ async fn materialize_pending_reconciliation(state: &WatchState) {
 enum DebounceExit {
     Cancelled,
     Reconfigure,
+    /// No native timer started. The loop ends rather than spin; the heartbeat
+    /// goes stale and the backstop keeps covering the repository.
+    TimerUnavailable,
 }
 
 async fn debounce_loop(
@@ -714,8 +802,14 @@ async fn debounce_loop(
             () = cancellation.cancelled() => return DebounceExit::Cancelled,
             () = state.reconfigure.notified() => return DebounceExit::Reconfigure,
             () = state.wake.notified() => {}
-            () = tokio::time::sleep(HEARTBEAT_INTERVAL) => {
+            tick = native_runtime::sleep_until(Instant::now() + inner.cadence.heartbeat) => {
+                if let Err(error) = tick {
+                    log_timer_unavailable("repository_heartbeat", error);
+                    return DebounceExit::TimerUnavailable;
+                }
                 state.health.beat();
+                #[cfg(test)]
+                state.heartbeat.notify_one();
                 continue;
             }
         }
@@ -740,13 +834,13 @@ async fn debounce_loop(
             let quiet_deadline = last.map(|l| l + quiet);
             let hard_deadline = first.map(|f| f + max_delay);
 
-            let observed: Pin<Box<dyn Future<Output = OperationObservation> + Send + '_>> =
-                Box::pin(observe_operation_state(
-                    Arc::clone(state),
-                    cancellation.clone(),
-                    affected_roots,
-                ));
-            let operation_state = match observed.await {
+            let operation_state = match observe_operation_state(
+                Arc::clone(state),
+                cancellation.clone(),
+                affected_roots,
+            )
+            .await
+            {
                 OperationObservation::State(state) => state,
                 OperationObservation::Cancelled => return DebounceExit::Cancelled,
             };
@@ -760,7 +854,13 @@ async fn debounce_loop(
                     () = cancellation.cancelled() => return DebounceExit::Cancelled,
                     () = state.reconfigure.notified() => return DebounceExit::Reconfigure,
                     () = state.wake.notified() => { state.health.beat(); continue; }
-                    () = tokio::time::sleep(Duration::from_secs(1)) => { continue; }
+                    tick = native_runtime::sleep_until(Instant::now() + Duration::from_secs(1)) => {
+                        if let Err(error) = tick {
+                            log_timer_unavailable("operation_recheck", error);
+                            return DebounceExit::TimerUnavailable;
+                        }
+                        continue;
+                    }
                 }
             }
 
@@ -782,13 +882,17 @@ async fn debounce_loop(
             if now >= fire_at {
                 break;
             }
-            let sleep_for = fire_at - now;
             tokio::select! {
                 biased;
                 () = cancellation.cancelled() => return DebounceExit::Cancelled,
                 () = state.reconfigure.notified() => return DebounceExit::Reconfigure,
                 () = state.wake.notified() => { state.health.beat(); }
-                () = tokio::time::sleep(sleep_for) => {}
+                tick = native_runtime::sleep_until(fire_at) => {
+                    if let Err(error) = tick {
+                        log_timer_unavailable("debounce", error);
+                        return DebounceExit::TimerUnavailable;
+                    }
+                }
             }
         }
 
@@ -828,8 +932,8 @@ enum OperationObservation {
     Cancelled,
 }
 
-fn watch_observation_stopped(cancellation: &WatchCancellation, deadline: StdInstant) -> bool {
-    cancellation.is_cancelled() || StdInstant::now() >= deadline
+fn watch_observation_stopped(cancellation: &WatchCancellation, deadline: Instant) -> bool {
+    cancellation.is_cancelled() || Instant::now() >= deadline
 }
 
 #[tracing::instrument(name = "daemon.git.watch.operation_scan", level = "trace", skip_all)]
@@ -837,7 +941,7 @@ fn operation_state_blocking(
     state: &WatchState,
     max_worktrees: usize,
     cancellation: &WatchCancellation,
-    deadline: StdInstant,
+    deadline: Instant,
     affected_roots: Option<&BTreeSet<PathBuf>>,
 ) -> OperationObservation {
     const OPERATION_MARKERS: &[&str] = &[
@@ -883,7 +987,7 @@ fn operation_state_blocking(
 fn operation_state(state: &WatchState, max_worktrees: usize) -> OperationState {
     let daemon_cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
     let cancellation = state.cancellation(&daemon_cancellation);
-    let Some(deadline) = StdInstant::now().checked_add(GIT_OBSERVATION_BUDGET) else {
+    let Some(deadline) = Instant::now().checked_add(GIT_OBSERVATION_BUDGET) else {
         return OperationState::Incomplete;
     };
     match operation_state_blocking(state, max_worktrees, &cancellation, deadline, None) {
@@ -898,11 +1002,11 @@ async fn observe_operation_state(
     cancellation: WatchCancellation,
     affected_roots: Option<BTreeSet<PathBuf>>,
 ) -> OperationObservation {
-    let Some(deadline) = StdInstant::now().checked_add(GIT_OBSERVATION_BUDGET) else {
+    let Some(deadline) = Instant::now().checked_add(GIT_OBSERVATION_BUDGET) else {
         return OperationObservation::State(OperationState::Incomplete);
     };
     let worker_cancellation = cancellation.clone();
-    let mut handle = tokio::task::spawn_blocking(move || {
+    let mut scan = std::pin::pin!(native_runtime::spawn_blocking(move || {
         operation_state_blocking(
             &state,
             MAX_WORKTREES_PER_REPOSITORY,
@@ -910,17 +1014,17 @@ async fn observe_operation_state(
             deadline,
             affected_roots.as_ref(),
         )
-    });
+    }));
     tokio::select! {
         biased;
         () = cancellation.cancelled() => {
-            // Aborting a spawn_blocking task cannot stop a closure that is
-            // already running. Join the deadline-bounded scan instead so no
+            // Dropping the wait cannot stop a closure that is already
+            // running. Join the deadline-bounded scan instead so no
             // watcher-owned blocking scan survives phase-one cancellation.
-            let _ = (&mut handle).await;
+            let _ = scan.await;
             OperationObservation::Cancelled
         }
-        result = tokio::time::timeout(GIT_OBSERVATION_BUDGET, &mut handle) => match result {
+        result = native_runtime::timeout(GIT_OBSERVATION_BUDGET, scan.as_mut()) => match result {
             Ok(Ok(observation)) => observation,
             Ok(Err(_)) if cancellation.is_cancelled() => OperationObservation::Cancelled,
             Ok(Err(_)) | Err(_) => OperationObservation::State(OperationState::Incomplete),
@@ -934,148 +1038,140 @@ async fn observe_operation_state(
 /// scheduler owns exact source revision resolution, gix status,
 /// changed-candidate evidence, generation assembly, and its short CAS
 /// publication; this watcher owns none of those authorities.
-fn request_freshness_for_repository<'a>(
-    inner: &'a GitWatcherInner,
-    state: &'a Arc<WatchState>,
+#[tracing::instrument(name = "daemon.git.watch.freshness", level = "trace", skip_all)]
+async fn request_freshness_for_repository(
+    inner: &GitWatcherInner,
+    state: &Arc<WatchState>,
     affected_roots: Option<BTreeSet<PathBuf>>,
-) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-    let span = tracing::trace_span!("daemon.git.watch.freshness");
-    Box::pin(tracing::Instrument::instrument(
-        async move {
-            use super::code_index_scheduler::GitStateChangeRequestV1;
+) {
+    use super::code_index_scheduler::GitStateChangeRequestV1;
 
-            let Some(code_index_schedulers) = inner.code_index_schedulers.as_ref() else {
+    let Some(code_index_schedulers) = inner.code_index_schedulers.as_ref() else {
+        return;
+    };
+    let Some(deadline) = Instant::now().checked_add(GIT_OBSERVATION_BUDGET) else {
+        retain_freshness_retry(state, affected_roots);
+        return;
+    };
+    let retry_roots = affected_roots.clone();
+    let worker_state = Arc::clone(state);
+    let cancellation = state.cancellation(&inner.cancellation);
+    let worker_cancellation = cancellation.clone();
+    let blocking = native_runtime::spawn_blocking(move || {
+        if !worker_state
+            .prune_missing_worktrees(|| watch_observation_stopped(&worker_cancellation, deadline))
+        {
+            return None;
+        }
+        Some(
+            worker_state
+                .worktree_roots()
+                .into_iter()
+                .filter(|root| {
+                    affected_roots
+                        .as_ref()
+                        .is_none_or(|roots| roots.contains(root))
+                })
+                .collect::<Vec<_>>(),
+        )
+    });
+    let roots = tokio::select! {
+        biased;
+        // The prune checks cancellation itself, so the dropped wait detaches
+        // a scan that is already stopping.
+        () = cancellation.cancelled() => return,
+        result = native_runtime::timeout(GIT_OBSERVATION_BUDGET, blocking) => match result {
+            Ok(Ok(Some(roots))) => roots,
+            Ok(Ok(None) | Err(_)) | Err(_) => {
+                retain_freshness_retry(state, retry_roots);
                 return;
-            };
-            let Some(deadline) = StdInstant::now().checked_add(GIT_OBSERVATION_BUDGET) else {
-                retain_freshness_retry(state, affected_roots);
-                return;
-            };
-            let retry_roots = affected_roots.clone();
-            let worker_state = Arc::clone(state);
-            let cancellation = state.cancellation(&inner.cancellation);
-            let worker_cancellation = cancellation.clone();
-            let mut blocking = tokio::task::spawn_blocking(move || {
-                if !worker_state.prune_missing_worktrees(|| {
-                    watch_observation_stopped(&worker_cancellation, deadline)
-                }) {
-                    return None;
+            }
+        }
+    };
+
+    let mut accepted = false;
+    let mut retry = BTreeSet::new();
+    for project_root in roots {
+        if cancellation.is_cancelled() {
+            return;
+        }
+        if deadline <= Instant::now() {
+            retry.insert(project_root);
+            continue;
+        }
+        let discovery = discover_repository_identity(
+            &project_root,
+            MonotonicDeadline::at(deadline),
+            &inner.cancellation,
+        );
+        let identity = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return,
+            outcome = discovery => match outcome {
+                GitRepositoryIdentityOutcome::Resolved(identity) => identity,
+                GitRepositoryIdentityOutcome::NotRepository => {
+                    log_daemon_event(
+                        "git_watch_freshness_rejected",
+                        &[
+                            ("project", project_root.display().to_string()),
+                            ("reason", "not_repository".to_string()),
+                        ],
+                    );
+                    continue;
                 }
-                Some(
-                    worker_state
-                        .worktree_roots()
-                        .into_iter()
-                        .filter(|root| {
-                            affected_roots
-                                .as_ref()
-                                .is_none_or(|roots| roots.contains(root))
-                        })
-                        .collect::<Vec<_>>(),
-                )
-            });
-            let roots = tokio::select! {
-                biased;
-                () = cancellation.cancelled() => {
-                    blocking.abort();
+                GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::Cancelled)
+                    if cancellation.is_cancelled() =>
+                {
                     return;
                 }
-                result = tokio::time::timeout(GIT_OBSERVATION_BUDGET, &mut blocking) => match result {
-                    Ok(Ok(Some(roots))) => roots,
-                    Ok(Ok(None) | Err(_)) | Err(_) => {
-                        retain_freshness_retry(state, retry_roots);
-                        return;
-                    }
-                }
-            };
-
-            let mut accepted = false;
-            let mut retry = BTreeSet::new();
-            for project_root in roots {
-                if cancellation.is_cancelled() {
-                    return;
-                }
-                if deadline <= StdInstant::now() {
+                GitRepositoryIdentityOutcome::Unknown(reason) => {
+                    log_daemon_event(
+                        "git_watch_freshness_rejected",
+                        &[
+                            ("project", project_root.display().to_string()),
+                            ("reason", "identity_unknown".to_string()),
+                            ("error", format!("{reason:?}")),
+                        ],
+                    );
                     retry.insert(project_root);
                     continue;
                 }
-                let discovery: Pin<
-                    Box<dyn Future<Output = GitRepositoryIdentityOutcome> + Send + '_>,
-                > = Box::pin(discover_repository_identity(
-                    &project_root,
-                    MonotonicDeadline::at(deadline),
-                    &inner.cancellation,
-                ));
-                let identity = tokio::select! {
-                    biased;
-                    () = cancellation.cancelled() => return,
-                    outcome = discovery => match outcome {
-                        GitRepositoryIdentityOutcome::Resolved(identity) => identity,
-                        GitRepositoryIdentityOutcome::NotRepository => {
-                            log_daemon_event(
-                                "git_watch_freshness_rejected",
-                                &[
-                                    ("project", project_root.display().to_string()),
-                                    ("reason", "not_repository".to_string()),
-                                ],
-                            );
-                            continue;
-                        }
-                        GitRepositoryIdentityOutcome::Unknown(GitDiscoveryUnknown::Cancelled)
-                            if cancellation.is_cancelled() =>
-                        {
-                            return;
-                        }
-                        GitRepositoryIdentityOutcome::Unknown(reason) => {
-                            log_daemon_event(
-                                "git_watch_freshness_rejected",
-                                &[
-                                    ("project", project_root.display().to_string()),
-                                    ("reason", "identity_unknown".to_string()),
-                                    ("error", format!("{reason:?}")),
-                                ],
-                            );
-                            retry.insert(project_root);
-                            continue;
-                        }
-                    }
-                };
-                match code_index_schedulers.request_for_root(&identity).await {
-                    GitStateChangeRequestV1::Accepted => {
-                        accepted = true;
-                        log_daemon_event(
-                            "git_watch_freshness_requested",
-                            &[("project", project_root.display().to_string())],
-                        );
-                    }
-                    GitStateChangeRequestV1::Busy
-                    | GitStateChangeRequestV1::WorkerUnavailable
-                    | GitStateChangeRequestV1::IdentityMismatch => {
-                        retry.insert(project_root);
-                    }
-                    GitStateChangeRequestV1::Unmounted => {
-                        log_daemon_event(
-                            "git_watch_freshness_deferred",
-                            &[
-                                ("project", project_root.display().to_string()),
-                                ("reason", "scheduler_unmounted_terminal".to_string()),
-                            ],
-                        );
-                    }
-                }
             }
+        };
+        match code_index_schedulers.request_for_root(&identity).await {
+            GitStateChangeRequestV1::Accepted => {
+                accepted = true;
+                log_daemon_event(
+                    "git_watch_freshness_requested",
+                    &[("project", project_root.display().to_string())],
+                );
+            }
+            GitStateChangeRequestV1::Busy
+            | GitStateChangeRequestV1::WorkerUnavailable
+            | GitStateChangeRequestV1::IdentityMismatch => {
+                retry.insert(project_root);
+            }
+            GitStateChangeRequestV1::Unmounted => {
+                log_daemon_event(
+                    "git_watch_freshness_deferred",
+                    &[
+                        ("project", project_root.display().to_string()),
+                        ("reason", "scheduler_unmounted_terminal".to_string()),
+                    ],
+                );
+            }
+        }
+    }
 
-            if accepted {
-                #[cfg(test)]
-                state.health.mark_requested();
-            }
-            if !retry.is_empty() {
-                retain_freshness_retry(state, Some(retry));
-            } else {
-                state.clear_retry();
-            }
-        },
-        span,
-    ))
+    if accepted {
+        #[cfg(test)]
+        state.health.mark_requested();
+    }
+    if !retry.is_empty() {
+        retain_freshness_retry(state, Some(retry));
+    } else {
+        state.clear_retry();
+    }
 }
 
 fn retain_freshness_retry(state: &WatchState, affected_roots: Option<BTreeSet<PathBuf>>) {
@@ -1108,12 +1204,13 @@ async fn degraded_poll_loop(
     state: &Arc<WatchState>,
     cancellation: &WatchCancellation,
 ) {
-    loop {
-        tokio::select! {
-            biased;
-            () = cancellation.cancelled() => return,
-            () = tokio::time::sleep(DEGRADED_POLL_INTERVAL) => {}
-        }
+    while park(
+        cancellation.cancelled(),
+        inner.cadence.degraded_poll,
+        "degraded_poll",
+    )
+    .await
+    {
         state.health.beat();
         request_freshness_for_repository(inner, state, None).await;
     }

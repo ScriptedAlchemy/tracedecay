@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
@@ -25,7 +26,9 @@ use crate::daemon::http_application::{
     DaemonHttpApplicationRegistry, DaemonHttpApplicationService,
 };
 use tracedecay_daemon_service::DaemonInvocationService;
-use tracedecay_daemon_service::remote_http_transport::validate_remote_brain_tls_identity_at;
+use tracedecay_daemon_service::remote_http_transport::{
+    RemoteBrainTlsDeadlines, validate_remote_brain_tls_identity_at,
+};
 
 const REMOTE_TLS_CERTIFICATE: &[u8] =
     include_bytes!("../../../../../tests/fixtures/remote_tls/localhost.crt.pem");
@@ -129,9 +132,15 @@ fn large_response_remote_registry(
     (registry, barrier)
 }
 
+/// The `/slow` handler answers only after the test notifies the returned
+/// release, so the test decides how long the handler outlives the request.
 fn delayed_response_remote_registry(
     identity: &str,
-) -> (DaemonHttpApplicationRegistry, Arc<tokio::sync::Notify>) {
+) -> (
+    DaemonHttpApplicationRegistry,
+    Arc<tokio::sync::Notify>,
+    Arc<tokio::sync::Notify>,
+) {
     let credentials = Arc::new(
         tracedecay_store_runtime::DaemonRemoteCredentialAuthorityV1::new(
             BrainId::new(format!("brain.{identity}")).expect("remote brain identity"),
@@ -139,14 +148,17 @@ fn delayed_response_remote_registry(
         ),
     );
     let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
     let handler_started = Arc::clone(&started);
+    let handler_release = Arc::clone(&release);
     let router = Router::new().route(
         "/slow",
         get(move || {
             let handler_started = Arc::clone(&handler_started);
+            let handler_release = Arc::clone(&handler_release);
             async move {
                 handler_started.notify_one();
-                tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+                handler_release.notified().await;
                 "complete"
             }
         }),
@@ -155,7 +167,7 @@ fn delayed_response_remote_registry(
     registry
         .install_remote(router, credentials, None)
         .expect("install delayed-response remote router");
-    (registry, started)
+    (registry, started, release)
 }
 
 fn stalled_response_remote_registry(
@@ -328,7 +340,10 @@ async fn remote_tls_connect(
     roots
         .add(trust_anchor)
         .expect("install TLS trust anchor fixture");
-    let mut client = rustls::ClientConfig::builder()
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut client = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("ring supports the default TLS versions")
         .with_root_certificates(roots)
         .with_no_client_auth();
     client.alpn_protocols = vec![b"http/1.1".to_vec()];
@@ -354,20 +369,24 @@ async fn remote_tls_connect(
 /// Waits until the real TLS reader has consumed exactly `expected` body
 /// bytes, refusing any reading past it.
 async fn wait_for_ingress_body_bytes(service: &DaemonHttpApplicationService, expected: usize) {
-    loop {
-        let observed = service
-            .remote_tls_ingress_snapshot()
-            .expect("TLS ingress observer")
-            .body_bytes_observed;
-        assert!(
-            observed <= expected,
-            "TLS ingress consumed body bytes out of order"
-        );
-        if observed == expected {
-            return;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let observed = service
+                .remote_tls_ingress_snapshot()
+                .expect("TLS ingress observer")
+                .body_bytes_observed;
+            assert!(
+                observed <= expected,
+                "TLS ingress consumed body bytes out of order"
+            );
+            if observed == expected {
+                return;
+            }
+            tokio::task::yield_now().await;
         }
-        tokio::task::yield_now().await;
-    }
+    })
+    .await
+    .expect("the listener must keep reading the request body");
 }
 
 async fn remote_tls_h2_only_handshake_is_rejected(
@@ -391,7 +410,10 @@ async fn remote_tls_h2_only_handshake_is_rejected(
     roots
         .add(trust_anchor)
         .expect("install TLS trust anchor fixture");
-    let mut client = rustls::ClientConfig::builder()
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut client = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("ring supports the default TLS versions")
         .with_root_certificates(roots)
         .with_no_client_auth();
     client.alpn_protocols = vec![b"h2".to_vec()];
@@ -949,10 +971,24 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
         .install_remote(router, credentials, Some(Arc::clone(&runtime)))
         .expect("install provisioned remote protocol router");
     let (tls, certificate) = remote_tls_fixture(&temporary);
-    let service =
-        DaemonHttpApplicationService::bind_with_remote_tls(registry, AUTH_TOKEN, Some(&tls))
-            .await
-            .expect("bind Remote Brain TLS admission service");
+    // Scaled from production (5 s idle, 60 s absolute, 30 s response): a
+    // progressing body outlives the response deadline, and a slowloris that
+    // never idles still reaches the absolute deadline.
+    let deadlines = RemoteBrainTlsDeadlines {
+        read_idle: Duration::from_secs(1),
+        request_read: Duration::from_secs(6),
+        response: Duration::from_secs(2),
+        ..RemoteBrainTlsDeadlines::PRODUCTION
+    };
+    let progress_step = deadlines.read_idle * 3 / 10;
+    // Shorter than the absolute deadline, so only the idle deadline can close
+    // a connection inside it.
+    let idle_closure_bound = deadlines.request_read / 2;
+    let service = DaemonHttpApplicationService::bind_with_remote_tls_deadlines(
+        registry, AUTH_TOKEN, &tls, deadlines,
+    )
+    .await
+    .expect("bind Remote Brain TLS admission service");
     let endpoint = service.remote_tls_endpoint().expect("TLS endpoint");
 
     let mut idle_connections = Vec::with_capacity(128);
@@ -967,13 +1003,14 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
         tokio::task::yield_now().await;
     }
 
-    tokio::time::pause();
-    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
-    while service.remote_tls_available_admissions() != Some(128) {
-        tokio::task::yield_now().await;
-    }
+    tokio::time::timeout(idle_closure_bound, async {
+        while service.remote_tls_available_admissions() != Some(128) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("idle handshakes must expire at the read-idle deadline");
     drop(idle_connections);
-    tokio::time::resume();
 
     let mut partial_headers = remote_tls_connect(endpoint, &certificate).await;
     partial_headers
@@ -984,14 +1021,13 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
         .flush()
         .await
         .expect("flush incomplete HTTP headers");
-    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
     let mut response = Vec::new();
     let _closed = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
+        idle_closure_bound,
         partial_headers.read_to_end(&mut response),
     )
     .await
-    .expect("the incomplete-header connection must be torn down");
+    .expect("the incomplete-header connection must be torn down at the read-idle deadline");
     assert_eq!(response.len(), 0);
 
     let mut partial_body = remote_tls_connect(endpoint, &certificate).await;
@@ -1013,33 +1049,14 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
         .flush()
         .await
         .expect("flush separate incomplete HTTP body chunk");
-    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
     let mut partial_body_response = Vec::new();
     let _closed = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
+        idle_closure_bound,
         partial_body.read_to_end(&mut partial_body_response),
     )
     .await
-    .expect("the incomplete-body connection must be torn down");
+    .expect("the incomplete-body connection must be torn down at the read-idle deadline");
     assert_eq!(partial_body_response.len(), 0);
-
-    // From here the paused clock cannot auto-advance while the test waits on
-    // the listener's ingress observer, so product deadlines age only through
-    // the explicit advances below, never through host scheduling delay.
-    tokio::time::pause();
-    let (inhibitor_ready_tx, inhibitor_ready_rx) = std::sync::mpsc::sync_channel(0);
-    let (inhibitor_release_tx, inhibitor_release_rx) = std::sync::mpsc::sync_channel(0);
-    let auto_advance_inhibitor = tokio::task::spawn_blocking(move || {
-        inhibitor_ready_tx
-            .send(())
-            .expect("announce the auto-advance inhibitor");
-        inhibitor_release_rx
-            .recv()
-            .expect("release the auto-advance inhibitor");
-    });
-    inhibitor_ready_rx
-        .recv()
-        .expect("the auto-advance inhibitor must start");
 
     let mut progressing_body = remote_tls_connect(endpoint, &certificate).await;
     let progressing_body_headers = format!(
@@ -1077,8 +1094,9 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
         .remote_tls_ingress_snapshot()
         .expect("TLS ingress observer")
         .body_bytes_observed;
+    let progressing_started = std::time::Instant::now();
     for (offset, byte) in b"         {}".iter().enumerate() {
-        tokio::time::advance(std::time::Duration::from_secs(3)).await;
+        tokio::time::sleep(progress_step).await;
         progressing_body
             .write_all(std::slice::from_ref(byte))
             .await
@@ -1089,6 +1107,10 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
             .unwrap_or_else(|error| panic!("flush progressing HTTP body byte {offset}: {error}"));
         wait_for_ingress_body_bytes(&service, initial_body_bytes + offset + 1).await;
     }
+    assert!(
+        progressing_started.elapsed() > deadlines.response,
+        "the progressing body must outlive the response deadline"
+    );
     let mut progressing_response = Vec::new();
     progressing_body
         .read_to_end(&mut progressing_response)
@@ -1096,7 +1118,7 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
         .expect("read progressing HTTP body response");
     assert!(
         progressing_response.starts_with(b"HTTP/1.1 400"),
-        "progressing body must reach typed canonical protocol admission after more than 30 seconds"
+        "progressing body must reach typed canonical protocol admission past the idle and response deadlines"
     );
     assert!(
         progressing_response
@@ -1143,37 +1165,18 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
             .body_bytes_observed;
         (stream, body_bytes)
     };
-    let mut slowloris_bytes = b"              {".iter();
-    for (offset, byte) in slowloris_bytes.by_ref().take(14).enumerate() {
-        tokio::time::advance(std::time::Duration::from_secs(4)).await;
-        absolute_slowloris
-            .write_all(std::slice::from_ref(byte))
-            .await
-            .unwrap_or_else(|error| panic!("write absolute slowloris body byte {offset}: {error}"));
-        absolute_slowloris
-            .flush()
-            .await
-            .unwrap_or_else(|error| panic!("flush absolute slowloris body byte {offset}: {error}"));
-        wait_for_ingress_body_bytes(&service, initial_absolute_body_bytes + offset + 1).await;
+    // The full 32-byte body takes longer than the absolute deadline to
+    // trickle in, one byte per progress step, so the idle deadline never
+    // fires. Without the absolute deadline the body completes and the
+    // listener answers it.
+    for _ in 0..32 {
+        tokio::time::sleep(progress_step).await;
+        if absolute_slowloris.write_all(b" ").await.is_err()
+            || absolute_slowloris.flush().await.is_err()
+        {
+            break;
+        }
     }
-    tokio::time::advance(std::time::Duration::from_secs(2)).await;
-    let final_offset = 14;
-    let final_byte = slowloris_bytes
-        .next()
-        .expect("slowloris fixture extends past the absolute deadline probe");
-    absolute_slowloris
-        .write_all(std::slice::from_ref(final_byte))
-        .await
-        .expect("write absolute slowloris body byte at 58 seconds");
-    absolute_slowloris
-        .flush()
-        .await
-        .expect("flush absolute slowloris body byte at 58 seconds");
-    wait_for_ingress_body_bytes(&service, initial_absolute_body_bytes + final_offset + 1).await;
-    // 61 s: past the 60 s absolute request deadline, but 3 s into the 5 s
-    // idle deadline the last byte reset, so only the absolute deadline can
-    // close this connection before the clock moves again.
-    tokio::time::advance(std::time::Duration::from_secs(3)).await;
     let mut absolute_slowloris_response = Vec::new();
     let _closed = absolute_slowloris
         .read_to_end(&mut absolute_slowloris_response)
@@ -1181,6 +1184,15 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
     assert!(
         absolute_slowloris_response.is_empty(),
         "a progressing slowloris must hit the absolute admission deadline"
+    );
+    let absolute_body_bytes = service
+        .remote_tls_ingress_snapshot()
+        .expect("TLS ingress observer")
+        .body_bytes_observed
+        - initial_absolute_body_bytes;
+    assert!(
+        absolute_body_bytes < 32,
+        "the absolute deadline must close the slowloris before its body completes, read {absolute_body_bytes} bytes"
     );
     while service.remote_tls_available_admissions() != Some(128) {
         tokio::task::yield_now().await;
@@ -1212,14 +1224,6 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
         tokio::task::yield_now().await;
     }
 
-    inhibitor_release_tx
-        .send(())
-        .expect("release the auto-advance inhibitor");
-    auto_advance_inhibitor
-        .await
-        .expect("join the auto-advance inhibitor");
-    tokio::time::resume();
-
     service
         .shutdown()
         .await
@@ -1230,11 +1234,18 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
 async fn remote_tls_listener_does_not_apply_ingress_timeout_to_a_slow_handler() {
     let temporary = tempfile::tempdir().expect("remote TLS slow-handler fixture");
     let (tls, certificate) = remote_tls_fixture(&temporary);
-    let (registry, handler_started) = delayed_response_remote_registry("remote-tls-slow-handler");
-    let service =
-        DaemonHttpApplicationService::bind_with_remote_tls(registry, AUTH_TOKEN, Some(&tls))
-            .await
-            .expect("bind Remote Brain TLS slow-handler service");
+    let (registry, handler_started, handler_release) =
+        delayed_response_remote_registry("remote-tls-slow-handler");
+    let deadlines = RemoteBrainTlsDeadlines {
+        read_idle: Duration::from_millis(200),
+        request_read: Duration::from_millis(400),
+        ..RemoteBrainTlsDeadlines::PRODUCTION
+    };
+    let service = DaemonHttpApplicationService::bind_with_remote_tls_deadlines(
+        registry, AUTH_TOKEN, &tls, deadlines,
+    )
+    .await
+    .expect("bind Remote Brain TLS slow-handler service");
     let endpoint = service.remote_tls_endpoint().expect("TLS endpoint");
     let mut peer = remote_tls_connect(endpoint, &certificate).await;
 
@@ -1242,14 +1253,14 @@ async fn remote_tls_listener_does_not_apply_ingress_timeout_to_a_slow_handler() 
         .await
         .expect("write complete slow-handler request");
     tokio::time::timeout(
-        std::time::Duration::from_secs(1),
+        std::time::Duration::from_secs(5),
         handler_started.notified(),
     )
     .await
-    .expect("slow handler must start before the test clock is paused");
-    tokio::time::pause();
-    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
-    tokio::task::yield_now().await;
+    .expect("slow handler must start");
+    // The handler outlives both ingress deadlines several times over.
+    tokio::time::sleep(deadlines.request_read * 3).await;
+    handler_release.notify_one();
     let mut response = Vec::new();
     tokio::time::timeout(
         std::time::Duration::from_secs(2),
@@ -1265,8 +1276,13 @@ async fn remote_tls_listener_does_not_apply_ingress_timeout_to_a_slow_handler() 
             .any(|body| body == b"complete"),
         "the handler response must survive beyond the ingress idle deadline"
     );
-    assert_eq!(service.remote_tls_available_admissions(), Some(128));
-    tokio::time::resume();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while service.remote_tls_available_admissions() != Some(128) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the completed connection must release its admission permit");
 
     service
         .shutdown()
@@ -1280,10 +1296,15 @@ async fn remote_tls_shutdown_bounds_a_fully_read_request_with_a_stalled_handler(
     let (tls, certificate) = remote_tls_fixture(&temporary);
     let (registry, handler_started) =
         stalled_response_remote_registry("remote-tls-stalled-handler");
-    let service =
-        DaemonHttpApplicationService::bind_with_remote_tls(registry, AUTH_TOKEN, Some(&tls))
-            .await
-            .expect("bind Remote Brain TLS stalled-handler service");
+    let deadlines = RemoteBrainTlsDeadlines {
+        shutdown_drain: Duration::from_secs(1),
+        ..RemoteBrainTlsDeadlines::PRODUCTION
+    };
+    let service = DaemonHttpApplicationService::bind_with_remote_tls_deadlines(
+        registry, AUTH_TOKEN, &tls, deadlines,
+    )
+    .await
+    .expect("bind Remote Brain TLS stalled-handler service");
     let endpoint = service.remote_tls_endpoint().expect("TLS endpoint");
     let admission = service
         .remote_tls_admission()
@@ -1294,29 +1315,21 @@ async fn remote_tls_shutdown_bounds_a_fully_read_request_with_a_stalled_handler(
         .await
         .expect("write complete stalled-handler request");
     tokio::time::timeout(
-        std::time::Duration::from_secs(1),
+        std::time::Duration::from_secs(5),
         handler_started.notified(),
     )
     .await
-    .expect("stalled handler must start before the test clock is paused");
+    .expect("stalled handler must start");
     assert_eq!(admission.available_permits(), 127);
-    tokio::time::pause();
-    let shutdown = tokio::spawn(service.shutdown());
-    tokio::task::yield_now().await;
-    assert!(
-        !shutdown.is_finished(),
-        "graceful shutdown should first offer active work its drain window"
-    );
-    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
-    assert!(
-        shutdown.is_finished(),
-        "stalled-handler shutdown must finish within its bounded drain window"
-    );
-    shutdown
+    let shutdown_started = std::time::Instant::now();
+    tokio::time::timeout(deadlines.shutdown_drain * 10, service.shutdown())
         .await
-        .expect("join bounded stalled-handler shutdown")
+        .expect("stalled-handler shutdown must finish after its bounded drain window")
         .expect("shutdown stalled-handler TLS service");
-    tokio::time::resume();
+    assert!(
+        shutdown_started.elapsed() >= deadlines.shutdown_drain,
+        "graceful shutdown should first offer active work its whole drain window"
+    );
 
     let mut response = Vec::new();
     let closure = tokio::time::timeout(
@@ -1351,10 +1364,17 @@ async fn remote_tls_shutdown_bounds_a_fully_read_request_with_a_stalled_handler(
 async fn remote_tls_shutdown_wins_while_saturated_admission_rejects_a_ready_backlog() {
     let temporary = tempfile::tempdir().expect("remote TLS saturated-shutdown fixture");
     let (tls, _certificate) = remote_tls_fixture(&temporary);
-    let service = DaemonHttpApplicationService::bind_with_remote_tls(
+    // The admitted handshakes outlive the test, so only shutdown ends them.
+    let deadlines = RemoteBrainTlsDeadlines {
+        read_idle: Duration::from_mins(1),
+        shutdown_drain: Duration::from_secs(1),
+        ..RemoteBrainTlsDeadlines::PRODUCTION
+    };
+    let service = DaemonHttpApplicationService::bind_with_remote_tls_deadlines(
         unprovisioned_remote_registry("remote-tls-saturated-shutdown"),
         AUTH_TOKEN,
-        Some(&tls),
+        &tls,
+        deadlines,
     )
     .await
     .expect("bind Remote Brain TLS saturated-shutdown service");
@@ -1408,24 +1428,9 @@ async fn remote_tls_shutdown_wins_while_saturated_admission_rejects_a_ready_back
     .await
     .expect("listener must reject a replenished saturated backlog");
 
-    tokio::time::pause();
-    let shutdown = tokio::spawn(service.shutdown());
-    for _ in 0..12 {
-        if shutdown.is_finished() {
-            break;
-        }
-        tokio::time::advance(std::time::Duration::from_secs(1)).await;
-        tokio::task::yield_now().await;
-    }
-    assert!(
-        shutdown.is_finished(),
-        "saturated shutdown must finish within its bounded drain window"
-    );
-    tokio::time::resume();
-    tokio::time::timeout(std::time::Duration::from_secs(1), shutdown)
+    tokio::time::timeout(deadlines.shutdown_drain * 3, service.shutdown())
         .await
-        .expect("ready saturated accepts must not starve shutdown")
-        .expect("join saturated-shutdown service")
+        .expect("ready saturated accepts must not starve shutdown past its bounded drain window")
         .expect("shutdown saturated-shutdown service");
     for task in pressure {
         task.abort();
@@ -1462,10 +1467,10 @@ async fn remote_tls_listener_expires_saturated_non_reading_responses() {
         peer.flush().await.expect("flush large TLS request");
         non_reading_peers.push(peer);
     }
-    // Egress starts when this test joins the handler barrier. Pausing at the
-    // release leaves the 5 s write-idle deadlines to the sleeps below.
+    // Egress starts when this test joins the handler barrier. Every response
+    // reaches backpressure well before its 5 s write-idle deadline.
+    let write_idle = RemoteBrainTlsDeadlines::PRODUCTION.write_idle;
     handler_barrier.wait().await;
-    tokio::time::pause();
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         loop {
             let snapshot = service
@@ -1486,22 +1491,22 @@ async fn remote_tls_listener_expires_saturated_non_reading_responses() {
     .expect("every large response must reach real TLS backpressure");
     assert_eq!(service.remote_tls_available_admissions(), Some(0));
 
-    for _ in 0..4 {
-        if service
+    tokio::time::timeout(write_idle * 2, async {
+        while service
             .remote_tls_egress_snapshot()
-            .is_some_and(|snapshot| snapshot.idle_expirations == 128)
+            .is_some_and(|snapshot| snapshot.idle_expirations != 128)
         {
-            break;
+            tokio::task::yield_now().await;
         }
-        tokio::time::sleep(std::time::Duration::from_secs(6)).await;
-    }
+    })
+    .await
+    .expect("every stalled response must expire at its write-idle deadline");
     let expired = service
         .remote_tls_egress_snapshot()
         .expect("TLS egress observer after idle expiry");
     assert_eq!(expired.idle_expirations, 128);
     assert_eq!(expired.idle_deadline_contract_violations, 0);
     assert_eq!(expired.response_expirations, 0);
-    tokio::time::resume();
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         while service.remote_tls_available_admissions() != Some(128)
             || service

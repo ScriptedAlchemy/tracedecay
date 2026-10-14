@@ -2765,7 +2765,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         let graph_registry = self.graph_registry.clone();
         let graph_lifecycle_cancelled = Arc::clone(&self.graph_lifecycle_cancelled);
         let cancellation = cancellation.clone();
-        tokio::task::spawn_blocking(move || {
+        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             let deadline_at = Instant::now() + GRAPH_OPERATION_DEADLINE;
             let request_cancellation: Arc<dyn GraphCancellation> =
                 Arc::new(MaintenanceGraphCancellationV1(cancellation));
@@ -2915,7 +2915,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         let graph_lifecycle_cancelled = Arc::clone(&self.graph_lifecycle_cancelled);
         let cancellation = cancellation.clone();
         let generation = generation.clone();
-        tokio::task::spawn_blocking(move || {
+        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             let pool_deadline = Instant::now() + GRAPH_OPERATION_DEADLINE;
             let pool_check = || {
                 if cancellation.is_cancelled() {

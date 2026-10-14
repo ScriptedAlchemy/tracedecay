@@ -1358,7 +1358,7 @@ fn task_disabled(config: &AutomationConfig, task: AgentTaskKind) -> bool {
 
 pub(crate) fn generated_run_id(prefix: &str) -> String {
     let mut random = [0u8; 8];
-    let entropy = match getrandom::getrandom(&mut random) {
+    let entropy = match getrandom::fill(&mut random) {
         Ok(()) => hex::encode(random),
         Err(_) => std::process::id().to_string(),
     };

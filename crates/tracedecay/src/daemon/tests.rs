@@ -361,12 +361,26 @@ async fn serve_authenticated_test_client(
     engine: DaemonEngine,
 ) -> tracedecay_domain::errors::Result<()> {
     Box::pin(super::serve_authenticated_socket_client_with_class(
-        tracedecay_daemon_protocol::BrokerStream::Unix(stream),
+        tracedecay_daemon_protocol::BrokerStream::from_tokio_unix(stream)
+            .expect("daemon end of the test socket"),
         engine,
         TEST_AUTH_TOKEN.to_owned(),
         super::DaemonClientAdmissionClass::General,
     ))
     .await
+}
+
+/// Dials a portable server fixture. Like the Unix fixtures' socket pairs, these
+/// server tests drive the daemon from a plain Tokio peer.
+pub(super) async fn connect_loopback_test_peer(
+    endpoint: &tracedecay_daemon_protocol::DaemonEndpoint,
+) -> tokio::net::TcpStream {
+    let tracedecay_daemon_protocol::DaemonEndpoint::Loopback(address) = endpoint else {
+        panic!("portable server fixtures bind loopback, got {endpoint}");
+    };
+    tokio::net::TcpStream::connect(address)
+        .await
+        .expect("connect loopback test peer")
 }
 
 /// Writes the auth preface an authenticated client sends before its handshake.

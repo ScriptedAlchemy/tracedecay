@@ -14,8 +14,8 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 mod final_shape;
 
 pub use final_shape::{
-    expected_final_schema_fingerprint, fingerprint_schema_objects,
-    render_expected_final_schema_markdown,
+    expected_final_schema_fingerprint, render_expected_final_schema_markdown,
+    schema_fingerprint_rusqlite,
 };
 
 const ROOT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS metadata (
@@ -131,43 +131,45 @@ pub fn verify_admissible_final_shape_rusqlite(conn: &rusqlite::Connection) -> Re
     final_shape::require_admissible_final_shape_rusqlite(conn)
 }
 
-/// Reads the current schema version from `PRAGMA user_version`.
-async fn get_version(conn: &impl QueryExecutor) -> Result<u32> {
-    let mut rows =
-        conn.query("PRAGMA user_version", ())
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to read user_version: {e}"),
-                operation: "get_version".to_string(),
-            })?;
-    let row = rows.next().await.map_err(|e| TraceDecayError::Database {
-        message: format!("failed to read user_version row: {e}"),
-        operation: "get_version".to_string(),
-    })?;
-    match row {
-        Some(r) => {
-            let v: i64 = r.get(0).map_err(|e| TraceDecayError::Database {
-                message: format!("failed to read user_version value: {e}"),
-                operation: "get_version".to_string(),
-            })?;
-            Ok(v as u32)
-        }
-        None => Ok(0),
+fn schema_stamp_error(error: crate::db::schema_version::SchemaVersionError) -> TraceDecayError {
+    TraceDecayError::Database {
+        message: error.to_string(),
+        operation: "schema_version".to_owned(),
     }
 }
 
-/// Sets the schema version via `PRAGMA user_version`.
-///
-/// PRAGMA statements cannot be parameterised, so we format the value
-/// directly. This is safe because `version` is a u32.
-async fn set_version(conn: &impl Executor, version: u32) -> Result<()> {
-    conn.execute(&format!("PRAGMA user_version = {version}"), ())
+/// Recorded graph version. An unstamped file is 0, and a legacy pragma is
+/// visible until [`adopt_graph_stamp`] moves it.
+async fn get_version(conn: &(impl QueryExecutor + Sync)) -> Result<u32> {
+    let version =
+        crate::db::schema_version::read_version(conn, crate::db::schema_version::GRAPH_COMPONENT)
+            .await
+            .map_err(schema_stamp_error)?;
+    match version {
+        None => Ok(0),
+        Some(version) => u32::try_from(version).map_err(|_| {
+            schema_stamp_error(crate::db::schema_version::SchemaVersionError::Unreadable {
+                component: crate::db::schema_version::GRAPH_COMPONENT.to_owned(),
+                message: format!("version {version} is outside the graph stamp range"),
+            })
+        }),
+    }
+}
+
+async fn record_graph_version(conn: &(impl Executor + Sync), version: u32) -> Result<()> {
+    crate::db::schema_version::record_version(
+        conn,
+        crate::db::schema_version::GRAPH_COMPONENT,
+        i64::from(version),
+    )
+    .await
+    .map_err(schema_stamp_error)
+}
+
+async fn adopt_graph_stamp(conn: &(impl Executor + Sync)) -> Result<()> {
+    crate::db::schema_version::retire_user_version(conn)
         .await
-        .map_err(|e| TraceDecayError::Database {
-            message: format!("failed to set user_version: {e}"),
-            operation: "set_version".to_string(),
-        })?;
-    Ok(())
+        .map_err(schema_stamp_error)
 }
 /// Configures incremental auto-vacuum for a brand-new database before any
 /// schema-shaping pragmas or tables are created.
@@ -284,7 +286,7 @@ async fn create_schema_transaction(conn: &(impl Executor + Sync)) -> Result<()> 
             operation: "create_schema".to_string(),
         })?;
     final_shape::require_exact_final_shape(conn).await?;
-    set_version(conn, SCHEMA_VERSION).await?;
+    record_graph_version(conn, SCHEMA_VERSION).await?;
     Ok(())
 }
 
@@ -387,7 +389,9 @@ async fn retired_sqlite_projection_object(conn: &impl QueryExecutor) -> Result<O
 
 /// Refuses a store that still carries an object of a retired `SQLite`
 /// projection, whatever its stamp, naming the retired object in the refusal.
-async fn require_no_retired_sqlite_projection_object(conn: &impl QueryExecutor) -> Result<()> {
+async fn require_no_retired_sqlite_projection_object(
+    conn: &(impl QueryExecutor + Sync),
+) -> Result<()> {
     let Some(object) = retired_sqlite_projection_object(conn).await? else {
         return Ok(());
     };
@@ -436,13 +440,16 @@ async fn ensure_schema_current_engine_connection(
     if current == 0 && !store_has_objects(conn).await? {
         return create_schema_engine_connection(conn).await;
     }
-    verify_final_schema_connection(conn).await
+    verify_final_schema_connection(conn).await?;
+    adopt_graph_stamp(conn).await
 }
 
 /// Verifies that an already-existing store has the one exact final shape this
 /// binary accepts. This query-only authority intentionally cannot initialize a
 /// fresh file, so read-only mounts cannot change persisted state.
-pub(crate) async fn verify_final_schema_connection(conn: &impl QueryExecutor) -> Result<()> {
+pub(crate) async fn verify_final_schema_connection(
+    conn: &(impl QueryExecutor + Sync),
+) -> Result<()> {
     require_no_retired_sqlite_projection_object(conn).await?;
     let current = get_version(conn).await?;
     if current != SCHEMA_VERSION {
@@ -458,7 +465,8 @@ pub(crate) async fn ensure_schema_current_connection(conn: &Connection) -> Resul
     if current == 0 && !store_has_objects(conn).await? {
         return create_schema_connection(conn).await;
     }
-    verify_final_schema_connection(conn).await
+    verify_final_schema_connection(conn).await?;
+    adopt_graph_stamp(conn).await
 }
 
 #[cfg(test)]

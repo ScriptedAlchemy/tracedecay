@@ -798,7 +798,7 @@ mod tests {
 
     async fn corrupt_schema_version(conn: &Connection) {
         conn.execute(
-            "UPDATE session_schema_migrations SET version = 'unreadable' WHERE name = 'lcm'",
+            "UPDATE tracedecay_schema_version SET version = 'unreadable' WHERE component = 'lcm'",
             (),
         )
         .await
@@ -807,7 +807,7 @@ mod tests {
 
     async fn drop_schema_version(conn: &Connection) {
         conn.execute(
-            "DELETE FROM session_schema_migrations WHERE name = 'lcm'",
+            "DELETE FROM tracedecay_schema_version WHERE component = 'lcm'",
             (),
         )
         .await
@@ -877,7 +877,7 @@ mod tests {
         let storage = TempDir::new().expect("storage tempdir");
         let gc_config = LcmGcConfig::default();
         conn.execute(
-            "UPDATE session_schema_migrations SET version = 'unreadable' WHERE name = 'lcm'",
+            "UPDATE tracedecay_schema_version SET version = 'unreadable' WHERE component = 'lcm'",
             (),
         )
         .await
@@ -891,7 +891,7 @@ mod tests {
         }
 
         conn.execute(
-            "DELETE FROM session_schema_migrations WHERE name = 'lcm'",
+            "DELETE FROM tracedecay_schema_version WHERE component = 'lcm'",
             (),
         )
         .await

@@ -1,6 +1,5 @@
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { McpError, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
+import { Client, ProtocolError, SdkError, type CallToolResult } from "@modelcontextprotocol/client";
 import { z } from "zod";
 import type { Failure, FailureKind } from "../shared/view.js";
 
@@ -20,22 +19,22 @@ export class DaemonFailure extends Error {
 
 export function toFailure(error: unknown): Failure {
   if (error instanceof DaemonFailure) return error.failure;
-  if (error instanceof McpError) {
+  if (error instanceof ProtocolError) {
     const data = error.data;
     const code =
       typeof data === "object" && data !== null && "code" in data && typeof data.code === "string"
         ? data.code
         : `jsonrpc_${error.code}`;
-    return { kind: classifyCode(code), code, message: stripMcpPrefix(error.message) };
+    return { kind: classifyCode(code), code, message: error.message };
+  }
+  if (error instanceof SdkError) {
+    const code = `sdk_${error.code.toLowerCase()}`;
+    return { kind: classifyCode(code), code, message: error.message };
   }
   if (error instanceof Error) {
     return { kind: "protocol", code: error.name, message: error.message };
   }
   return { kind: "protocol", code: "unknown", message: String(error) };
-}
-
-function stripMcpPrefix(message: string): string {
-  return message.replace(/^MCP error -?\d+: /u, "");
 }
 
 export function classifyCode(code: string): FailureKind {
@@ -186,10 +185,10 @@ export class ServeSession {
     if (this.#closed) {
       throw new DaemonFailure({ kind: "disconnected", code: "serve_closed", message: "tracedecay serve exited" });
     }
-    const result = await this.#client.callTool({ name: toolName, arguments: { ...args, format: "json" } }, undefined, {
+    const result = await this.#client.callTool({ name: toolName, arguments: { ...args, format: "json" } }, {
       ...(signal === undefined ? {} : { signal }),
     });
-    let payload = payloadOf(result as CallToolResult, toolName);
+    let payload = payloadOf(result, toolName);
     const handle = ResponseHandleSchema.safeParse(payload);
     if (handle.success) {
       payload = parseJson(await this.#retrieveAll(handle.data.handle, signal), toolName);
@@ -203,10 +202,9 @@ export class ServeSession {
     for (;;) {
       const result = await this.#client.callTool(
         { name: "tracedecay_retrieve", arguments: { handle, offset, format: "json" } },
-        undefined,
         { ...(signal === undefined ? {} : { signal }) },
       );
-      const page = payloadOf(result as CallToolResult, "tracedecay_retrieve");
+      const page = payloadOf(result, "tracedecay_retrieve");
       const parsed = RetrievePageSchema.safeParse(page);
       if (!parsed.success) {
         const missing = RetrieveMissingSchema.safeParse(page);

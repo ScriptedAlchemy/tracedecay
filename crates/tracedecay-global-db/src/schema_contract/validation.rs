@@ -398,8 +398,9 @@ async fn validate_observation_autoincrement(
     let mut rows = conn
         .query(
             "SELECT EXISTS(
-                SELECT 1 FROM global_schema_migrations
-                WHERE migration = 'observations-v2-canonical-autoincrement'
+                SELECT 1 FROM tracedecay_schema_version
+                WHERE component = 'observations-v2-canonical-autoincrement'
+                  AND version = 1
              ),
              COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'observations'), 0),
              COALESCE((SELECT MAX(sequence) FROM observations), 0)",

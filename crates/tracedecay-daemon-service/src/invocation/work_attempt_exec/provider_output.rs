@@ -3,8 +3,9 @@
 //! Output content remains opaque except for the one protocol-defined session
 //! start frame needed to bind a durable Work attempt to its owning transcript.
 
+use std::io::{ErrorKind, Read};
+
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncRead, AsyncReadExt};
 use tracedecay_contracts::{
     WorkAttemptProviderOutcomeV1, WorkAttemptStreamChannelV1, WorkAttemptStreamSummaryV1,
 };
@@ -12,16 +13,14 @@ use tracedecay_domain::{
     ManifestDigest, ObservationSourceIdentityV1, ProviderId, SessionId, WorkProviderProtocol,
 };
 
-pub(super) async fn read_capped(
-    stream: Option<impl AsyncRead + Unpin>,
-    cap: u64,
-) -> Option<(Vec<u8>, u64)> {
+pub(super) fn read_capped(stream: Option<impl Read>, cap: u64) -> Option<(Vec<u8>, u64)> {
     let mut stream = stream?;
     let mut retained: Vec<u8> = Vec::new();
     let mut total: u64 = 0;
     let mut buffer = [0_u8; 16 * 1024];
     loop {
-        match stream.read(&mut buffer).await {
+        match stream.read(&mut buffer) {
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
             Ok(0) | Err(_) => break,
             Ok(read) => {
                 total = total.saturating_add(read as u64);

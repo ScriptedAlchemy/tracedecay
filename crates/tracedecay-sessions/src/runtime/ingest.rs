@@ -26,8 +26,8 @@ pub use user::{
     CodexHookIngestOutcome,
     ingest_user_global_sources_for_provider_with_authorities_and_cancellation,
     registered_project_roots_from, try_ingest_user_codex_sessions_with_db_and_admission,
+    user_sessions_db_path,
 };
-pub use user::{USER_SESSIONS_DB_FILENAME, user_sessions_db_path};
 
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]

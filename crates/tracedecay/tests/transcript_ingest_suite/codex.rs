@@ -305,8 +305,9 @@ async fn user_scope_ingests_codex_turns_after_leaving_a_registered_project() {
     );
 }
 
-/// Writes a Codex rollout JSONL whose `session_meta.cwd` is `project`. Includes a
-/// `response_item` line that must be ignored (it duplicates the agent_message).
+/// Writes a Codex rollout JSONL whose `session_meta.cwd` is `project`. Includes
+/// the `event_msg` assistant reply and the `response_item` message that records
+/// the same turn.
 pub(crate) fn write_codex_rollout(
     home: &std::path::Path,
     project: &std::path::Path,

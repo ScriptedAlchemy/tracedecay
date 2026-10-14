@@ -447,9 +447,9 @@ async fn temporal_schema_concurrent_cursor_rotations_serialize_safely(cx: &asupe
         // Prove the reserved lock is live with a no-op write under the txn.
         transaction
             .execute(
-                "UPDATE session_temporal_schema_migrations
+                "UPDATE tracedecay_schema_version
                  SET version = version
-                 WHERE name = 'session-temporal'",
+                 WHERE component = 'session-temporal'",
                 (),
             )
             .await

@@ -236,7 +236,7 @@ pub(super) async fn execute_git_read(
             ApplicationProblem::timed_out_before_admission(),
         );
     }
-    let initial = match owner.current_read_authority(&request.request) {
+    let initial = match current_read_authority(&owner, &request.request).await {
         Ok(authority) => authority,
         Err(error) => return application_problem(wire_request_id, map_git_port_problem(error)),
     };
@@ -290,7 +290,7 @@ pub(super) async fn execute_git_read(
             max_stdout_bytes: 64 * 1024 * 1024,
             max_stderr_bytes: 64 * 1024,
         };
-        let mut worker = tokio::task::spawn_blocking(move || {
+        let worker = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             capture_exact_snapshot(
                 &root,
                 project_id,
@@ -301,7 +301,7 @@ pub(super) async fn execute_git_read(
             )
         });
         let snapshot = match settle_blocking_git_worker(
-            &mut worker,
+            worker,
             &request_cancellation,
             &deadline,
             &cancellation,
@@ -336,7 +336,7 @@ pub(super) async fn execute_git_read(
         project_root,
         selected_scope.clone(),
     );
-    let mut worker = tokio::task::spawn_blocking(move || {
+    let worker = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         tracedecay_application::git_reads::execute_git_read(
             Some(&authority),
             &selected_scope,
@@ -344,18 +344,14 @@ pub(super) async fn execute_git_read(
             &bounds,
         )
     });
-    let outcome = match settle_blocking_git_worker(
-        &mut worker,
-        &request_cancellation,
-        &deadline,
-        &cancellation,
-    )
-    .await
-    {
-        Ok(outcome) => outcome,
-        Err(problem) => return application_problem(wire_request_id, problem),
-    };
-    let terminal = match owner.current_read_authority(&request.request) {
+    let outcome =
+        match settle_blocking_git_worker(worker, &request_cancellation, &deadline, &cancellation)
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(problem) => return application_problem(wire_request_id, problem),
+        };
+    let terminal = match current_read_authority(&owner, &request.request).await {
         Ok(authority) => authority,
         Err(error) => return application_problem(wire_request_id, map_git_port_problem(error)),
     };
@@ -418,7 +414,11 @@ pub(super) async fn execute_git_read(
                     }
                 };
                 let service = Arc::clone(&owner.service);
-                match tokio::task::spawn_blocking(move || service.save_preview_input(input)).await {
+                match tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+                    service.save_preview_input(input)
+                })
+                .await
+                {
                     Ok(Ok(())) => {}
                     Ok(Err(error)) => {
                         return application_problem(wire_request_id, map_git_port_problem(error));
@@ -474,6 +474,21 @@ pub(super) async fn execute_git_read(
     }
 }
 
+/// The authority blocks its caller on the configuration store, so it runs on
+/// the blocking pool rather than on the worker polling this request.
+async fn current_read_authority(
+    owner: &DaemonGitInvocationOwner,
+    request: &tracedecay_contracts::git::GitReadRequestV1,
+) -> Result<DaemonGitAuthorityStateV1, GitIndexTransactionPortError> {
+    let owner = owner.clone();
+    let request = request.clone();
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        owner.current_read_authority(&request)
+    })
+    .await
+    .unwrap_or(Err(GitIndexTransactionPortError::DaemonUnavailable))
+}
+
 pub(super) fn git_read_output_limit_problem() -> ApplicationProblem {
     ApplicationProblem::Saturated {
         diagnostic: SafeDiagnostic {
@@ -504,7 +519,7 @@ pub(super) async fn execute_git_preview(
     // this async state machine: constructing that future on the socket poll
     // stack overflows. Keep every payload on a blocking thread or the heap.
     let join_id = wire_request_id.clone();
-    let prepared = match tokio::task::spawn_blocking(move || {
+    let prepared = match tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         prepare_git_preview(wire_request_id, owner, request, deadline, cancellation)
     })
     .await
@@ -536,7 +551,7 @@ pub(super) async fn execute_git_apply(
         return missing_registered_owner_problem(publication, wire_request_id);
     };
     let join_id = wire_request_id.clone();
-    let prepared = match tokio::task::spawn_blocking(move || {
+    let prepared = match tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         prepare_git_apply(wire_request_id, owner, request, deadline, cancellation)
     })
     .await
@@ -688,7 +703,7 @@ async fn settle_prepared_git_preview(
     let started_at = prepared.request.observed_at;
     let effective_deadline = prepared.request.context.deadline().clone();
     let wire_request_id = prepared.wire_request_id.clone();
-    let result = tokio::task::spawn_blocking(move || {
+    let result = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         GitIndexTransactionService::new(SharedGitTransactionPort {
             service: prepared.service,
             cancellation: None,
@@ -740,7 +755,7 @@ async fn settle_prepared_git_apply(
     let effective_deadline = prepared.request.context.deadline().clone();
     let wire_request_id = prepared.wire_request_id.clone();
     let cancellation = emitter.clone();
-    let result = tokio::task::spawn_blocking(move || {
+    let result = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         GitIndexTransactionService::new(SharedGitTransactionPort {
             service: prepared.service,
             cancellation: Some(cancellation),
@@ -1019,14 +1034,15 @@ fn invalid_git_request() -> ApplicationProblem {
 }
 
 async fn settle_blocking_git_worker<T>(
-    worker: &mut tokio::task::JoinHandle<T>,
+    worker: impl Future<Output = Result<T, String>>,
     request_cancellation: &tracedecay_runtime_core::cancellation::CancellationToken,
     deadline: &Deadline,
     cancellation: &CancellationContext,
 ) -> Result<T, ApplicationProblem> {
+    tokio::pin!(worker);
     let joined = tokio::select! {
         biased;
-        joined = &mut *worker => joined,
+        joined = &mut worker => joined,
         () = request_cancellation.cancelled() => {
             let _ = worker.await;
             return Err(ApplicationProblem::cancelled_before_admission());
@@ -1056,7 +1072,13 @@ async fn settle_blocking_git_worker<T>(
 
 async fn sleep_until_deadline(deadline: &Deadline) {
     if let Some(remaining) = tracedecay_daemon_protocol::deadline_remaining(deadline) {
-        tokio::time::sleep(remaining).await;
+        // A deadline past the clock's range never fires; an unavailable timer
+        // reads as elapsed.
+        let _ = tracedecay_runtime_core::native_runtime::timeout(
+            remaining,
+            std::future::pending::<()>(),
+        )
+        .await;
     }
 }
 
@@ -1114,5 +1136,27 @@ fn map_git_port_problem(error: GitIndexTransactionPortError) -> ApplicationProbl
                 message: "The Git index transaction owner is not ready".to_owned(),
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn panicking_git_worker_settles_as_unavailable() {
+        let settled = settle_blocking_git_worker(
+            tracedecay_runtime_core::native_runtime::spawn_blocking(|| -> u8 {
+                panic!("git worker panicked");
+            }),
+            &tracedecay_runtime_core::cancellation::CancellationToken::new(),
+            &Deadline::new(UtcMicros(now_micros().0.saturating_add(60_000_000))).expect("deadline"),
+            &CancellationContext::active("git-worker-panic").expect("cancellation"),
+        )
+        .await;
+        let Err(ApplicationProblem::Unavailable { diagnostic, .. }) = settled else {
+            panic!("a panicking Git worker must settle as unavailable");
+        };
+        assert_eq!(diagnostic.code, "git_index.unavailable");
     }
 }

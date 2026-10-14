@@ -490,3 +490,46 @@ fn admitted_execute_returning_completes_after_reply_waiter_is_abandoned() {
         );
     });
 }
+
+/// Serializes the tests that read the process-wide wait counter.
+static NATIVE_WAIT_COUNTER: Mutex<()> = Mutex::new(());
+
+#[test]
+fn a_writer_wait_on_a_native_worker_is_counted() {
+    let _serial = NATIVE_WAIT_COUNTER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fixture = fixture('a', 'a');
+    let handle = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let before = native_thread_writer_waits();
+    let task = crate::native_runtime::NativeTask::spawn(async move {
+        handle
+            .execute_batch("CREATE TABLE native_worker (value INTEGER)".to_owned())
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    })
+    .unwrap();
+    let outcome = crate::native_runtime::block_on(task.wait()).unwrap();
+    assert_eq!(
+        outcome,
+        crate::native_runtime::NativeTaskOutcome::Completed(Ok(()))
+    );
+    assert_eq!(native_thread_writer_waits() - before, 1);
+}
+
+#[test]
+fn a_writer_wait_on_the_native_blocking_pool_is_not_counted() {
+    let _serial = NATIVE_WAIT_COUNTER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fixture = fixture('a', 'a');
+    let handle = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let before = native_thread_writer_waits();
+    crate::native_runtime::block_on(crate::native_runtime::spawn_blocking(move || {
+        handle.execute_batch("CREATE TABLE blocking_pool (value INTEGER)".to_owned())
+    }))
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    assert_eq!(native_thread_writer_waits() - before, 0);
+}

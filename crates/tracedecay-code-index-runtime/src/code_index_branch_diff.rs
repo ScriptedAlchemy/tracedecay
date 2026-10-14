@@ -255,23 +255,24 @@ pub async fn revision_pair_layout_inputs(
     request: CodeIndexRevisionPairRequestV1,
 ) -> Result<CodeIndexRevisionPairV1, code_search::CodeIndexSearchUnavailableReasonV1> {
     request.control.termination().map_or(Ok(()), Err)?;
-    let generations = schedulers
-        .bounded_generations_for_revisions(
-            scope,
-            &request.base_reference,
-            &request.base_revision,
-            &request.base_tree,
-            &request.head_reference,
-            &request.head_revision,
-            &request.head_tree,
-            code_index_scheduler::branch_generations::BranchGenerationCardinalityBoundsV1 {
-                maximum_files: MAX_BRANCH_DIFF_FILES_PER_GENERATION,
-                maximum_chunks: MAX_BRANCH_DIFF_CHUNKS_PER_GENERATION,
-                maximum_symbols: MAX_BRANCH_DIFF_SYMBOLS_PER_GENERATION,
-            },
-            request.control.clone(),
-        )
-        .await?;
+    // Boxed: the pair future holds its blocking read and settle timer inline,
+    // which pushes every handler awaiting this past the large-future bound.
+    let generations = Box::pin(schedulers.bounded_generations_for_revisions(
+        scope,
+        &request.base_reference,
+        &request.base_revision,
+        &request.base_tree,
+        &request.head_reference,
+        &request.head_revision,
+        &request.head_tree,
+        code_index_scheduler::branch_generations::BranchGenerationCardinalityBoundsV1 {
+            maximum_files: MAX_BRANCH_DIFF_FILES_PER_GENERATION,
+            maximum_chunks: MAX_BRANCH_DIFF_CHUNKS_PER_GENERATION,
+            maximum_symbols: MAX_BRANCH_DIFF_SYMBOLS_PER_GENERATION,
+        },
+        request.control.clone(),
+    ))
+    .await?;
     if generation_exceeds_bound(generation_counts(generations.base.generation()))
         || generation_exceeds_bound(generation_counts(generations.head.generation()))
     {

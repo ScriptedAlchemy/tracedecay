@@ -40,8 +40,10 @@ use tracedecay_daemon_service::logging::unavailable_error;
 use tracedecay_daemon_service::remote_http_transport::RemoteBrainTlsListener;
 #[cfg(test)]
 use tracedecay_daemon_service::remote_http_transport::{
-    RemoteBrainTlsEgressObserver, RemoteBrainTlsEgressSnapshot, RemoteBrainTlsIngressSnapshot,
+    RemoteBrainTlsDeadlines, RemoteBrainTlsEgressObserver, RemoteBrainTlsEgressSnapshot,
+    RemoteBrainTlsIngressSnapshot,
 };
+use tracedecay_dashboard_api::serve_loopback;
 use tracedecay_domain::{BrainNodeId, EnrollmentGrantV1, ProjectId};
 use tracedecay_rusqlite_runtime::remote::RemoteWriterPublicationErrorV1;
 use tracedecay_store_runtime::RemoteNodeOperatorErrorV1;
@@ -149,6 +151,7 @@ pub(super) struct DaemonHttpApplicationRegistry {
     routers: Arc<Mutex<ProjectRouterCache>>,
     resolver: Arc<SyncRwLock<Option<ProjectRouterResolver>>>,
     resolver_admission: Arc<Semaphore>,
+    cold_resolution_deadline: Duration,
     remote: Arc<SyncRwLock<Option<RemoteHttpApplicationMount>>>,
     active: Arc<AtomicBool>,
     remote_deletion_runtime_owners:
@@ -161,6 +164,7 @@ impl Default for DaemonHttpApplicationRegistry {
             routers: Arc::new(Mutex::new(ProjectRouterCache::default())),
             resolver: Arc::new(SyncRwLock::new(None)),
             resolver_admission: Arc::new(Semaphore::new(MAX_HTTP_APPLICATION_COLD_RESOLUTIONS)),
+            cold_resolution_deadline: HTTP_APPLICATION_COLD_RESOLUTION_DEADLINE,
             remote: Arc::new(SyncRwLock::new(None)),
             active: Arc::new(AtomicBool::new(false)),
             remote_deletion_runtime_owners: Arc::new(SyncRwLock::new(None)),
@@ -169,6 +173,12 @@ impl Default for DaemonHttpApplicationRegistry {
 }
 
 impl DaemonHttpApplicationRegistry {
+    #[cfg(test)]
+    pub(super) fn with_cold_resolution_deadline(mut self, deadline: Duration) -> Self {
+        self.cold_resolution_deadline = deadline;
+        self
+    }
+
     pub(super) async fn mount(&self, project_id: &str, router: Router) -> Result<()> {
         let project_id =
             ProjectId::new(project_id.to_owned()).map_err(|error| TraceDecayError::Config {
@@ -280,8 +290,8 @@ impl DaemonHttpApplicationRegistry {
         // A cold project route resolution can park on daemon project-open
         // work; bound it so an HTTP caller never waits unboundedly.
         let resolved = tracing::Instrument::instrument(
-            tokio::time::timeout(
-                HTTP_APPLICATION_COLD_RESOLUTION_DEADLINE,
+            tracedecay_runtime_core::native_runtime::timeout(
+                self.cold_resolution_deadline,
                 resolver(project_id.clone()),
             ),
             tracing::trace_span!("daemon.http.application.router_resolve"),
@@ -769,7 +779,7 @@ pub(super) struct DaemonHttpApplicationService {
     active: Arc<AtomicBool>,
     remote_credentials: Option<Arc<tracedecay_store_runtime::DaemonRemoteCredentialAuthorityV1>>,
     shutdown: Option<oneshot::Sender<()>>,
-    task: Option<JoinHandle<Result<()>>>,
+    task: Option<JoinHandle<()>>,
     remote_tls_shutdown: Option<oneshot::Sender<()>>,
     remote_tls_task: Option<JoinHandle<Result<()>>>,
     #[cfg(test)]
@@ -838,7 +848,27 @@ impl DaemonHttpApplicationService {
             Some(config) => Some(bind_remote_brain_tls_server(&registry, config).await?),
             None => None,
         };
-        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        Self::bind_serving_remote_tls(registry, auth_token, remote_tls_server).await
+    }
+
+    #[cfg(test)]
+    pub(super) async fn bind_with_remote_tls_deadlines(
+        registry: DaemonHttpApplicationRegistry,
+        auth_token: &str,
+        remote_tls: &RemoteBrainTlsConfig,
+        deadlines: RemoteBrainTlsDeadlines,
+    ) -> Result<Self> {
+        let mut server = bind_remote_brain_tls_server(&registry, remote_tls).await?;
+        server.listener = server.listener.with_deadlines(deadlines);
+        Self::bind_serving_remote_tls(registry, auth_token, Some(server)).await
+    }
+
+    async fn bind_serving_remote_tls(
+        registry: DaemonHttpApplicationRegistry,
+        auth_token: &str,
+        remote_tls_server: Option<RemoteBrainTlsServer>,
+    ) -> Result<Self> {
+        let listener = asupersync::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .map_err(|error| TraceDecayError::Config {
                 message: format!("failed to bind daemon HTTP loopback listener: {error}"),
@@ -863,16 +893,11 @@ impl DaemonHttpApplicationService {
         let task_active = Arc::clone(&active);
         let task = tokio::spawn(tracing::Instrument::instrument(
             async move {
-                let result = axum::serve(listener, app)
-                    .with_graceful_shutdown(async {
-                        let _ = shutdown_requested.await;
-                    })
-                    .await
-                    .map_err(|error| TraceDecayError::Config {
-                        message: format!("daemon HTTP application service failed: {error}"),
-                    });
+                serve_loopback(listener, app, async {
+                    let _ = shutdown_requested.await;
+                })
+                .await;
                 task_active.store(false, Ordering::Release);
-                result
             },
             tracing::trace_span!("daemon.http.application.listener"),
         ));
@@ -976,13 +1001,13 @@ impl DaemonHttpApplicationService {
         if let Some(shutdown) = self.remote_tls_shutdown.take() {
             let _ = shutdown.send(());
         }
-        let Some(task) = self.task.take() else {
+        let Some(task) = self.task.as_mut() else {
             return Ok(());
         };
         task.await.map_err(|error| TraceDecayError::Config {
             message: format!("daemon HTTP application service task failed: {error}"),
-        })??;
-        let Some(task) = self.remote_tls_task.take() else {
+        })?;
+        let Some(task) = self.remote_tls_task.as_mut() else {
             return Ok(());
         };
         task.await.map_err(|error| TraceDecayError::Config {

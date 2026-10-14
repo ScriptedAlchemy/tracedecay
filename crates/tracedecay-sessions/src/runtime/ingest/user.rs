@@ -1,8 +1,6 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use tracedecay_runtime_core::erase_send;
-
 use super::authority::{IngestAdmissionBinding, SessionIngestAuthority};
 use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
@@ -12,6 +10,7 @@ use crate::runtime::{
     SessionProvider, hosts::claude_observation, hosts::codex, hosts::cursor, hosts::cursor_composer,
 };
 use tracedecay_domain::{BrainId, ObservationScopeV1, UserProfileId};
+use tracedecay_runtime_core::storage::USER_SESSIONS_DB_FILENAME;
 use tracedecay_store::StoreShardScopeV1;
 
 use super::failure::{
@@ -26,8 +25,6 @@ use super::scheduler::{
 };
 use super::startup::TranscriptIngestOutcome;
 use super::user_provider::UserProviderUnit;
-
-pub const USER_SESSIONS_DB_FILENAME: &str = "user-sessions.db";
 
 pub fn user_sessions_db_path(profile_root: &Path) -> PathBuf {
     profile_root.join(USER_SESSIONS_DB_FILENAME)
@@ -538,6 +535,7 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots_bounded_a
     .await
 }
 
+#[tracing::instrument(name = "sessions.ingest.user", level = "trace", skip_all)]
 async fn ingest_user_global_sources_for_provider_with_roots_bounded_inner<
     A: SessionIngestAuthority,
 >(
@@ -562,20 +560,15 @@ async fn ingest_user_global_sources_for_provider_with_roots_bounded_inner<
             false,
         ));
     }
-    let Some(session_review) = registered.session_review() else {
-        return IngestPassOutcome::failed(TranscriptCatchUpFailure::session_review_unwired());
-    };
     let selected: Vec<SessionProvider> = USER_CATCH_UP_PROVIDERS
         .iter()
         .copied()
         .filter(|candidate| provider_selected(provider, *candidate))
         .collect();
     let transcript_store = registered.transcript_store();
-    let frontier = erase_send!(
-        read_ingest_frontier(&transcript_store, USER_INGEST_PROVIDER_FRONTIER_KEY),
-        Option<u64>
-    );
-    let Some(frontier) = frontier.await else {
+    let Some(frontier) =
+        read_ingest_frontier(&transcript_store, USER_INGEST_PROVIDER_FRONTIER_KEY).await
+    else {
         return IngestPassOutcome::failed(TranscriptCatchUpFailure::pass_frontier_unavailable());
     };
     let plan = plan_provider_rotation_admission(selected.len(), frontier, bounds);
@@ -664,18 +657,13 @@ async fn ingest_user_global_sources_for_provider_with_roots_bounded_inner<
     }
 
     if !cancelled {
-        let drained = erase_send!(
-            claude_observation::drain_projection_queue(
-                facade,
-                &ObservationScopeV1::Profile,
-                cancellation,
-            ),
-            Result<
-                claude_observation::ClaudeObservationIngestStats,
-                claude_observation::ClaudeObservationIngestError,
-            >
-        );
-        match drained.await {
+        match claude_observation::drain_projection_queue(
+            facade,
+            &ObservationScopeV1::Profile,
+            cancellation,
+        )
+        .await
+        {
             Ok(projection_stats) => {
                 provider_runs.stats = provider_runs.stats.merge(
                     projection_stats
@@ -721,14 +709,6 @@ async fn ingest_user_global_sources_for_provider_with_roots_bounded_inner<
             usize::try_from(provider_runs.deferred_units).unwrap_or(usize::MAX),
         );
     }
-    if provider_runs.stats.messages_upserted > 0 {
-        let review = erase_send!(
-            session_review.schedule(provider.map_or("all", SessionProvider::id), None),
-            ()
-        );
-        review.await;
-    }
-
     if matches!(coverage, IngestPassCoverage::Backpressured { .. })
         && !provider_runs
             .failures
@@ -742,14 +722,11 @@ async fn ingest_user_global_sources_for_provider_with_roots_bounded_inner<
 
     let write = scheduling_write_required(coverage, attempted, cancelled);
     let scheduling_state_written = if write {
-        erase_send!(
-            write_ingest_frontier(
-                &transcript_store,
-                USER_INGEST_PROVIDER_FRONTIER_KEY,
-                frontier,
-                attempted,
-            ),
-            bool
+        write_ingest_frontier(
+            &transcript_store,
+            USER_INGEST_PROVIDER_FRONTIER_KEY,
+            frontier,
+            attempted,
         )
         .await
     } else {

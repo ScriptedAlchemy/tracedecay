@@ -9,8 +9,9 @@ use super::{
     AnalyticsEventInsert, AnalyticsEventQuery, AnalyticsEventRecord, AnalyticsHintCounts,
     AnalyticsToolCounts, ObservabilityEmissionClaimV1, ObservabilityEmissionOutboxRecordV1,
     ObservabilityOwnerEmissionWriteOutcomeV1, ObservabilityOwnerEmissionWriteV1,
-    PreparedObservabilityEmissionV1, RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction,
-    analytics_scope_query, row_to_analytics_event,
+    ObservabilityRollupRetentionReceiptV1, PreparedObservabilityEmissionV1, RegisteredGlobalDb,
+    RegisteredGlobalDbWriteTransaction, analytics_scope_query,
+    observability_rollup::expire_observability_rollups, row_to_analytics_event,
 };
 
 const OBSERVABILITY_DETAIL_RETENTION_SECONDS: i64 = 30 * 86_400;
@@ -52,6 +53,7 @@ pub struct ObservabilityRetentionReceiptV1 {
     pub expired_detail: u64,
     pub expired_rollup: u64,
     pub expired_settled_outbox: u64,
+    pub expired_rollups: ObservabilityRollupRetentionReceiptV1,
     /// A bounded page remains and maintenance should use its retry cadence.
     pub has_more: bool,
 }
@@ -613,8 +615,9 @@ impl RegisteredGlobalDb {
         Ok(pending)
     }
 
-    /// Expires only optional observability detail and rollup rows through the
-    /// registered writer. Product receipts retain their owning lifecycle.
+    /// Expires only optional observability detail and rollup rows, plus the
+    /// daily rollup generations past the same horizon, through the registered
+    /// writer. Product receipts retain their owning lifecycle.
     #[tracing::instrument(
         name = "global_db.registered.analytics.prune",
         level = "trace",
@@ -631,6 +634,10 @@ impl RegisteredGlobalDb {
             .begin_write_transaction()
             .await
             .map_err(|error| format!("failed to begin observability retention: {error}"))?;
+        // Expired dirty-day markers go first: they protect their source rows
+        // from the analytics pass below, and a day past the horizon has no
+        // generation left to rebuild.
+        let expired_rollups = expire_observability_rollups(&transaction, now_seconds).await?;
         let (expired_detail_outbox, expired_detail) = prune_observability_retention_class(
             &transaction,
             now_seconds.saturating_sub(OBSERVABILITY_DETAIL_RETENTION_SECONDS),
@@ -657,6 +664,7 @@ impl RegisteredGlobalDb {
             expired_detail,
             expired_rollup,
             expired_settled_outbox: expired_detail_outbox.saturating_add(expired_rollup_outbox),
+            expired_rollups,
             has_more,
         })
     }

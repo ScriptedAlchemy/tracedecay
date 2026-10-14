@@ -13,6 +13,7 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tracedecay_contracts::{ApplicationOperation, CancellationSignal, Deadline, RequestId};
 use tracedecay_domain::{ManifestDigest, canonical_sha256};
+use tracedecay_runtime_core::native_runtime::{self, NativeTask};
 
 use tracedecay_code_index::graph_projection::CodeGraphInteractiveReader;
 use tracedecay_domain::errors::{Result, TraceDecayError};
@@ -362,7 +363,8 @@ impl DashboardDiagnosticsAuthorityV1 {
             .broker
             .lock()
             .await
-            .prepare_refresh(language, documents);
+            .prepare_refresh(language, documents)
+            .await;
         match prepared {
             Ok(Some(prepared)) => {
                 let authority = self.clone();
@@ -370,7 +372,7 @@ impl DashboardDiagnosticsAuthorityV1 {
                 let cancellation = Arc::clone(&cancellation);
                 let task_language = language.to_owned();
                 let (tx, rx) = tokio::sync::oneshot::channel::<Result<()>>();
-                tokio::spawn(async move {
+                NativeTask::spawn(async move {
                     let completed = prepared.collect_diagnostics(Duration::from_secs(5)).await;
                     let refresh_result = {
                         let mut broker = authority.inner.broker.lock().await;
@@ -414,7 +416,12 @@ impl DashboardDiagnosticsAuthorityV1 {
                         refresh_result
                     };
                     let _ = tx.send(refresh_result);
-                });
+                })
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!(
+                        "code diagnostics refresh did not start for '{language}': {error}"
+                    ),
+                })?;
                 rx.await.map_err(|error| TraceDecayError::Config {
                     message: format!(
                         "code diagnostics refresh task failed for '{language}': {error}"
@@ -477,13 +484,18 @@ impl DashboardDiagnosticsAuthorityV1 {
             return;
         }
         let authority = self.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(750)).await;
+        let started = NativeTask::spawn(async move {
+            // Without a timer the backfill starts at once rather than never.
+            let _ =
+                native_runtime::sleep_until(std::time::Instant::now() + Duration::from_millis(750))
+                    .await;
             for language in languages {
                 let _ = authority.refresh_language(&request, &language).await;
-                tokio::task::yield_now().await;
             }
         });
+        if let Err(error) = started {
+            tracing::warn!(%error, "code diagnostics idle backfill did not start");
+        }
     }
 }
 
@@ -569,6 +581,11 @@ fn byte_line(source: &[u8], offset: u64) -> Option<u32> {
         .unwrap_or(u32::MAX)
     })
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+#[path = "dashboard_diagnostics_native_tests.rs"]
+mod native_tests;
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]

@@ -128,7 +128,7 @@ fn session_activity_reads(criterion: &mut Criterion) {
                         .session_messages_after(PROVIDER, TARGET_SESSION, *since_ts, PAGE_SIZE)
                         .await
                         .expect("query production session activity");
-                    criterion::black_box(rows)
+                    std::hint::black_box(rows)
                 });
             },
         );

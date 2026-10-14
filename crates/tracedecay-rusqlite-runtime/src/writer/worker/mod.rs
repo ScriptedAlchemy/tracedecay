@@ -34,7 +34,7 @@ use crate::{
     checkpoint::{
         CheckpointBlockerSource, CheckpointConfig, CheckpointDecision, CheckpointInterruption,
         CheckpointOutcome, CheckpointPressure, CheckpointResult, CheckpointStatus, CheckpointWal,
-        MaintenanceCheckpointMode, RusqliteCheckpointDriver, WriterCheckpointController,
+        RusqliteCheckpointDriver, WriterCheckpointController,
     },
     connection::{self, OpenedDatabaseFile},
     exact_sql::{
@@ -49,8 +49,7 @@ use crate::{
 use super::{
     WriterActorError, WriterStartError, WriterState,
     request::{
-        AcceptedRequest, CheckpointCommand, CheckpointCommandKind, ExecutionBatch,
-        IncrementalVacuumCommand, SharedReply,
+        AcceptedRequest, CheckpointCommand, ExecutionBatch, IncrementalVacuumCommand, SharedReply,
     },
     transaction::{BatchTiming, WriterReporting, process_batch},
 };
@@ -558,10 +557,7 @@ impl Worker {
                 );
                 continue;
             }
-            let requested_checkpoint_ready = checkpoint_queue.front().is_some_and(|command| {
-                queue.is_empty() || matches!(&command.kind, CheckpointCommandKind::Passive { .. })
-            });
-            if requested_checkpoint_ready && let Some(command) = checkpoint_queue.pop_front() {
+            if let Some(command) = checkpoint_queue.pop_front() {
                 self.run_requested_checkpoint(&mut checkpoint, command);
                 hard_checkpoint_retry_due = checkpoint
                     .hard_drain_required()
@@ -891,30 +887,16 @@ impl Worker {
             return;
         }
         self.checkpoint_blockers.await_released_snapshots();
-        let (snapshot_blockers, kind, authority, reply) = command.into_parts();
-        let result = match kind {
-            CheckpointCommandKind::Passive { probe } => {
-                checkpoint.evaluate_interruptible(snapshot_blockers, move || {
-                    match probe.interruption() {
-                        Some(RuntimeInterruptionV1::Cancelled) => {
-                            Some(CheckpointInterruption::Cancelled)
-                        }
-                        Some(RuntimeInterruptionV1::DeadlineExceeded) => {
-                            Some(CheckpointInterruption::DeadlineExceeded)
-                        }
-                        None => None,
-                    }
-                })
+        let (snapshot_blockers, probe, authority, reply) = command.into_parts();
+        let result = checkpoint.evaluate_interruptible(snapshot_blockers, move || {
+            match probe.interruption() {
+                Some(RuntimeInterruptionV1::Cancelled) => Some(CheckpointInterruption::Cancelled),
+                Some(RuntimeInterruptionV1::DeadlineExceeded) => {
+                    Some(CheckpointInterruption::DeadlineExceeded)
+                }
+                None => None,
             }
-            CheckpointCommandKind::Maintenance { mode, permit } => match mode {
-                MaintenanceCheckpointMode::Restart => {
-                    checkpoint.restart_scheduled(&permit, snapshot_blockers)
-                }
-                MaintenanceCheckpointMode::Truncate => {
-                    checkpoint.truncate_scheduled(&permit, snapshot_blockers)
-                }
-            },
-        };
+        });
         match result {
             Ok(result) => {
                 if authority
@@ -1194,8 +1176,7 @@ fn scheduled_checkpoint_error_is_transient(
     error: &crate::checkpoint::CheckpointError<crate::checkpoint::RusqliteCheckpointError>,
 ) -> bool {
     match error {
-        crate::checkpoint::CheckpointError::MaintenanceStillDraining(_)
-        | crate::checkpoint::CheckpointError::AuthorityDenied(_) => true,
+        crate::checkpoint::CheckpointError::AuthorityDenied(_) => true,
         crate::checkpoint::CheckpointError::Driver(
             crate::checkpoint::RusqliteCheckpointError::Sqlite(rusqlite::Error::SqliteFailure(
                 failure,

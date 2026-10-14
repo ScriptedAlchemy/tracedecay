@@ -134,7 +134,7 @@ jobs:
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24
+          node-version: 26
 
       - uses: ./.github/actions/setup-pnpm
 
@@ -660,7 +660,7 @@ jobs:
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "24"
+          node-version: "26"
 
       - uses: ./.github/actions/setup-pnpm
 
@@ -764,8 +764,8 @@ jobs:
       # exact host releases. Bump deliberately after rerunning
       # scripts/claude_stock_integration.sh and
       # scripts/opencode_stock_integration.sh against the new versions locally.
-      CLAUDE_CODE_VERSION: 2.1.224
-      OPENCODE_VERSION: 1.18.4
+      CLAUDE_CODE_VERSION: 2.1.296
+      OPENCODE_VERSION: 2.0.28
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -779,7 +779,7 @@ jobs:
 
       - name: Install stock Claude Code and OpenCode at pinned versions
         run: |
-          npm install --global "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "opencode-ai@${OPENCODE_VERSION}"
+          npm install --global "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "@opencode/cli@${OPENCODE_VERSION}"
           claude --version
           opencode --version
 

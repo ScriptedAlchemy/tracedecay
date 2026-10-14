@@ -139,7 +139,7 @@ impl NativeIntegrationStoreRegistry {
                 .map_err(tracedecay_store::NativeIntegrationStoreError::unavailable)?;
             retained.drain().map(|(_, store)| store).collect::<Vec<_>>()
         };
-        tokio::task::spawn_blocking(move || {
+        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             let mut joined = 0usize;
             for store in stores {
                 joined = joined.saturating_add(usize::from(store.shutdown()?));
@@ -243,7 +243,7 @@ impl DaemonNativeIntegrationOwner {
             .ok_or(NativeIntegrationPortError::Unavailable)?;
         let store = self.store.clone();
         let repository_id = self.repository_id.clone();
-        tokio::task::spawn_blocking(move || {
+        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             let pending = store
                 .pending_worktree_cleanups(&repository_id, MAX_PENDING_WORKTREE_CLEANUPS)
                 .map_err(|_| NativeIntegrationPortError::Unavailable)?;
@@ -522,7 +522,7 @@ impl DaemonNativeIntegrationServiceRegistry {
         let owner_project_id = project_id.clone();
         let owner_repository_id = repository_id.clone();
         let (owner_project_id, owner_repository_id, service, snapshots, worktrees) =
-            tokio::task::spawn_blocking(move || {
+            tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
                 let topology = Arc::new(match (topology_shard, topology_runtime) {
                     (Some(expected_shard), Some(runtime)) => {
                         ExactPairNativeIntegrationTopology::open_with_graph_runtime_provider(

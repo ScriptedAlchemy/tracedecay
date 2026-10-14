@@ -3,12 +3,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
-use tokio::task::JoinHandle;
-use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 use tracedecay_contracts::{
     ApplicationContractError, EXECUTION_TOPOLOGY_EVENT_KINDS_V1, now_micros,
 };
@@ -20,6 +18,9 @@ use tracedecay_global_db::{
     AnalyticsEventInsert, ObservabilityEmissionClaimV1, ObservabilityEmissionOutboxRecordV1,
     ObservabilityOwnerEmissionWriteOutcomeV1, ObservabilityOwnerEmissionWriteV1,
     PreparedObservabilityEmissionV1, RegisteredGlobalDb, RegisteredGlobalDbLeaseV1,
+};
+use tracedecay_runtime_core::native_runtime::{
+    NativeTask, NativeTaskOutcome, sleep_until, timeout, timeout_at,
 };
 
 use tracedecay_session_memory::observability_store::record_observability_batch;
@@ -211,7 +212,10 @@ struct ObservabilityProducerCoreV1 {
     durable_emission_lock: Arc<AsyncMutex<()>>,
     deadlines: ObservabilityProducerDeadlinesV1,
     emission_lock: Mutex<()>,
-    worker: Mutex<Option<JoinHandle<()>>>,
+    /// Abort drops the worker at its next poll. A rollup compaction parked in
+    /// native `spawn_blocking` abandons only its wait: the pure retention
+    /// check finishes on the blocking pool and its result is discarded.
+    worker: Mutex<Option<NativeTask<()>>>,
 }
 
 // Proving these fields `Send + Sync` walks the registered database lease past
@@ -293,9 +297,7 @@ impl BoundedObservabilityProducerV1 {
         let state = Arc::new(AtomicU8::new(PRODUCER_RUNNING));
         let final_coverage_persisted = Arc::new(AtomicBool::new(false));
         let durable_emission_lock = Arc::new(AsyncMutex::new(()));
-        let runtime = tokio::runtime::Handle::try_current()
-            .map_err(|_| "observability_producer_runtime_unavailable")?;
-        let worker = runtime.spawn(run_worker(
+        let worker = NativeTask::spawn(run_worker(
             db.clone(),
             identity.clone(),
             data_rx,
@@ -309,7 +311,8 @@ impl BoundedObservabilityProducerV1 {
                 durable_emission_lock: Arc::clone(&durable_emission_lock),
                 deadlines,
             },
-        ));
+        ))
+        .map_err(|_| "observability_producer_worker_unavailable")?;
         let core = Arc::new(ObservabilityProducerCoreV1 {
             db,
             identity: identity.clone(),
@@ -541,7 +544,7 @@ impl ObservabilityProducerCoreV1 {
         if worker_lock_poisoned {
             if let Some(worker) = worker.take() {
                 worker.abort();
-                let _ = worker.await;
+                worker.wait().await;
             }
             self.state.store(PRODUCER_STOPPED, Ordering::Release);
             return Err(ApplicationContractError::Domain(
@@ -565,7 +568,7 @@ impl ObservabilityProducerCoreV1 {
                 Err(()) => {
                     if let Some(worker) = worker.take() {
                         worker.abort();
-                        let _ = worker.await;
+                        worker.wait().await;
                     }
                     self.state.store(PRODUCER_STOPPED, Ordering::Release);
                     return Err(ApplicationContractError::Domain(
@@ -577,14 +580,15 @@ impl ObservabilityProducerCoreV1 {
                     if now >= shutdown_deadline {
                         if let Some(worker) = worker.take() {
                             worker.abort();
-                            let _ = worker.await;
+                            worker.wait().await;
                         }
                         self.state.store(PRODUCER_STOPPED, Ordering::Release);
                         return Err(ApplicationContractError::Domain(
                             "observability_shutdown_deadline".to_owned(),
                         ));
                     }
-                    sleep_until((now + Duration::from_millis(1)).min(shutdown_deadline)).await;
+                    let _ =
+                        sleep_until((now + Duration::from_millis(1)).min(shutdown_deadline)).await;
                 }
             }
         }
@@ -597,7 +601,7 @@ impl ObservabilityProducerCoreV1 {
                 Err(_) => {
                     if let Some(worker) = worker.take() {
                         worker.abort();
-                        let _ = worker.await;
+                        worker.wait().await;
                     }
                     self.state.store(PRODUCER_STOPPED, Ordering::Release);
                     return Err(ApplicationContractError::Domain(
@@ -614,7 +618,7 @@ impl ObservabilityProducerCoreV1 {
         {
             if let Some(worker) = worker.take() {
                 worker.abort();
-                let _ = worker.await;
+                worker.wait().await;
             }
             self.state.store(PRODUCER_STOPPED, Ordering::Release);
             return Err(ApplicationContractError::Domain(
@@ -625,7 +629,7 @@ impl ObservabilityProducerCoreV1 {
             Ok(Ok(outcome)) => outcome,
             Ok(Err(_)) => {
                 if let Some(worker) = worker.take() {
-                    let _ = worker.await;
+                    worker.wait().await;
                 }
                 self.state.store(PRODUCER_STOPPED, Ordering::Release);
                 return Err(ApplicationContractError::Domain(
@@ -635,10 +639,7 @@ impl ObservabilityProducerCoreV1 {
             Err(_) => {
                 let joined = if let Some(worker) = worker.take() {
                     worker.abort();
-                    match worker.await {
-                        Ok(()) => true,
-                        Err(error) => error.is_cancelled(),
-                    }
+                    !matches!(worker.wait().await, NativeTaskOutcome::Panicked(_))
                 } else {
                     false
                 };
@@ -660,11 +661,19 @@ impl ObservabilityProducerCoreV1 {
             }
         };
         if let Some(worker) = worker.take() {
-            worker.await.map_err(|error| {
-                ApplicationContractError::Domain(format!(
-                    "observability worker join failed: {error}"
-                ))
-            })?;
+            match worker.wait().await {
+                NativeTaskOutcome::Completed(()) => {}
+                NativeTaskOutcome::Cancelled => {
+                    return Err(ApplicationContractError::Domain(
+                        "observability worker join failed: cancelled".to_owned(),
+                    ));
+                }
+                NativeTaskOutcome::Panicked(payload) => {
+                    return Err(ApplicationContractError::Domain(format!(
+                        "observability worker join failed: {payload}"
+                    )));
+                }
+            }
             if writer_settled {
                 self.state.store(PRODUCER_SETTLED, Ordering::Release);
                 return outcome;
@@ -732,8 +741,8 @@ async fn run_worker(
     // first tick is due immediately so an idle producer still initializes
     // the frontier and closes proved-quiet days promptly; a busy startup
     // drains control and observations first because the select is biased.
-    let rollup_tick = sleep_until(Instant::now());
-    tokio::pin!(rollup_tick);
+    // A native timer that cannot start disables only this pass's rollup arm.
+    let mut rollup_due = Instant::now();
     let mut rollup_source_persisted = false;
     let command = loop {
         tokio::select! {
@@ -781,10 +790,10 @@ async fn run_worker(
                     // only after frontier init so persist does not pay the
                     // write-lock fight again.
                     rollup_source_persisted = false;
-                    rollup_tick.as_mut().reset(Instant::now());
+                    rollup_due = Instant::now();
                 }
             }
-            () = &mut rollup_tick => {
+            Ok(()) = sleep_until(rollup_due) => {
                 // Advance one dirty day at a bounded idle cadence. Control and
                 // ordinary observations remain prioritized above maintenance.
                 // Control also preempts a pass in flight: each of its steps
@@ -801,9 +810,7 @@ async fn run_worker(
                     biased;
                     command = control.recv() => break command,
                     outcome = maintenance => {
-                        rollup_tick
-                            .as_mut()
-                            .reset(Instant::now() + rollup_rebuild_delay(outcome));
+                        rollup_due = Instant::now() + rollup_rebuild_delay(outcome);
                     }
                 }
             }
@@ -1396,6 +1403,7 @@ mod shutdown_settlement_tests {
     use std::time::Duration;
     use tokio::sync::{mpsc, oneshot};
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
+    use tracedecay_runtime_core::native_runtime::{NativeTask, NativeTaskOutcome};
 
     async fn fixture() -> (
         tempfile::TempDir,
@@ -1450,24 +1458,27 @@ mod shutdown_settlement_tests {
         let (blocker_ready, blocker_handle) = oneshot::channel();
         // Keep the real worker and its terminal write, but make its join
         // observe another writer already owning the database afterward.
-        *producer.core.worker.lock().unwrap() = Some(tokio::spawn(async move {
-            worker.await.unwrap();
+        let wrapped = NativeTask::spawn(async move {
+            assert_eq!(worker.wait().await, NativeTaskOutcome::Completed(()));
             let (acquired, acquired_rx) = oneshot::channel();
-            let blocker = tokio::spawn(async move {
+            let blocker = NativeTask::spawn(async move {
                 let transaction = db.begin_write_transaction().await.unwrap();
                 acquired.send(()).unwrap();
                 released.await.unwrap();
                 transaction.rollback().await.unwrap();
-            });
+            })
+            .unwrap();
             acquired_rx.await.unwrap();
-            blocker_ready.send(blocker).unwrap();
-        }));
+            assert!(blocker_ready.send(blocker).is_ok());
+        })
+        .unwrap();
+        *producer.core.worker.lock().unwrap() = Some(wrapped);
         let stopping = Arc::clone(&producer);
         let shutdown = tokio::spawn(async move { stopping.shutdown().await });
         let blocker = blocker_handle.await.unwrap();
         let outcome = shutdown.await.unwrap();
         release.send(()).unwrap();
-        blocker.await.unwrap();
+        assert_eq!(blocker.wait().await, NativeTaskOutcome::Completed(()));
         let summary = outcome.expect("completed producer never waits on the unrelated writer");
         assert_eq!(summary.persisted, 1);
         assert!(producer.shutdown_settled());

@@ -2137,14 +2137,12 @@ async fn dropping_retained_waiter_does_not_abort_blocking_owner() {
     let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
     let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
     let (finished_tx, finished_rx) = std::sync::mpsc::sync_channel(0);
-    let waiter = super::RetainedSettlementWaiter {
-        task: tokio::task::spawn_blocking(move || {
-            started_tx.send(()).expect("signal blocking owner");
-            release_rx.recv().expect("release blocking owner");
-            finished_tx.send(()).expect("signal owner completion");
-            tracedecay_domain::errors::Result::Ok(())
-        }),
-    };
+    let waiter = super::RetainedSettlementWaiter::start(move || {
+        started_tx.send(()).expect("signal blocking owner");
+        release_rx.recv().expect("release blocking owner");
+        finished_tx.send(()).expect("signal owner completion");
+        tracedecay_domain::errors::Result::Ok(())
+    });
 
     started_rx
         .recv_timeout(std::time::Duration::from_secs(5))
@@ -2740,12 +2738,10 @@ async fn retained_settlement_exceeds_retry_budget_instead_of_hanging_forever() {
         prepared_write_hook: Some(always_fails_write_hook),
     };
 
-    let waiter = super::RetainedSettlementWaiter {
-        task: tokio::task::spawn_blocking(move || {
-            super::settle_bound_owner_with_budget(state, Duration::from_millis(200))
-                .map(|owned| owned.value)
-        }),
-    };
+    let waiter = super::RetainedSettlementWaiter::start(move || {
+        super::settle_bound_owner_with_budget(state, Duration::from_millis(200))
+            .map(|owned| owned.value)
+    });
     let error = waiter.wait().await.expect_err(
         "settlement must resolve with an error, not hang, once its retry budget is exhausted",
     );

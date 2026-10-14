@@ -247,3 +247,77 @@ async fn federated_workspace_authority_pairs_by_scope_digest_not_list_position()
         "a root missing from the authorized scope set must refuse the workspace"
     );
 }
+
+/// Issue #3934. A root's deferred advisory mount republishes its LSP owner,
+/// with a provider-backed factory and the same authority, once its first
+/// code-index generation seals. A multi-folder initialize authorized just
+/// before that republication must still open, on the live factory.
+#[tokio::test]
+async fn federated_workspace_survives_a_same_authority_owner_republication() {
+    let service = DaemonInvocationService::default();
+    let (left_scope, right_scope) = disagreeing_scope_pair();
+    let left = install_root(&service, &left_scope, "left").await;
+    let right = install_root(&service, &right_scope, "right").await;
+    let workspace = service
+        .authorize_lsp_workspace(vec![left.clone(), right.clone()], UtcMicros(10))
+        .await
+        .expect("two registered roots under one profile store are a federated workspace");
+
+    let republished = unavailable_lsp_session_factory();
+    service
+        .install_lsp_owner(
+            right.0.clone(),
+            DaemonLspInvocationOwner::for_test_project(
+                republished.clone(),
+                UserProfileId::new(PROFILE).expect("profile id"),
+                right_scope.project_id.clone(),
+                right.0.clone(),
+            )
+            .with_scope_grant(grant(&right_scope, "right")),
+        )
+        .await
+        .expect("republish the right root's LSP owner");
+
+    let active = service
+        .lsp_owner(Some(&left.0))
+        .await
+        .expect("the left root's owner");
+    let Some(CurrentLspWorkspaceAuthorityV1::Federated(current)) = service
+        .current_lsp_workspace_authority(&workspace, Some(&active))
+        .await
+    else {
+        panic!("a same-authority owner republication must not revoke the workspace");
+    };
+    let right_digest = &right_scope.scope_digest;
+    let (_, right_factory) = current
+        .factories
+        .iter()
+        .find(|(root, _)| root.scope_digest() == Some(right_digest))
+        .expect("the right root stays in the workspace");
+    assert!(
+        std::sync::Arc::ptr_eq(right_factory, &republished),
+        "the session must open on the republished owner's factory"
+    );
+
+    // A republication under another scope is a different authority.
+    service
+        .install_lsp_owner(
+            right.0.clone(),
+            DaemonLspInvocationOwner::for_test_project(
+                unavailable_lsp_session_factory(),
+                UserProfileId::new(PROFILE).expect("profile id"),
+                right_scope.project_id.clone(),
+                right.0.clone(),
+            )
+            .with_scope_grant(grant(&scope_for(999), "right")),
+        )
+        .await
+        .expect("republish the right root under another scope");
+    assert!(
+        service
+            .current_lsp_workspace_authority(&workspace, Some(&active))
+            .await
+            .is_none(),
+        "an owner republished under another scope must refuse the workspace"
+    );
+}

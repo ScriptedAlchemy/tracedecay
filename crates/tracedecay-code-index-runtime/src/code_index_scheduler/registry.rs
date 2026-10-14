@@ -47,6 +47,7 @@ use super::{
     LatestCompleteCodeIndexV1, PendingHintsV1, ServingReadLeaseV1, SharedCodeIndexBytePoolV1,
     newly_eligible_percentile, now_micros,
 };
+use tracedecay_runtime_core::native_runtime;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
 #[cfg(test)]
@@ -873,7 +874,7 @@ pub struct MountedCodeIndexWorktreeV1 {
     /// Live handle to the publication's encoded-byte counter; observed only by
     /// test memory accounting today.
     _active_generation_encoded_bytes: Arc<AtomicU64>,
-    pub task: tokio::task::JoinHandle<()>,
+    pub task: native_runtime::NativeTask<()>,
 }
 
 // The scheduler registry stores these worktrees in a `BTreeMap`. One `Send`
@@ -2846,10 +2847,12 @@ impl CodeIndexSchedulerRegistryV1 {
     /// pointer. A publication's owner is not installed until it reopens, so
     /// that caller passes `None`.
     async fn join_retained_text_projection_on_worker_exit(
-        projection: &mut Option<tokio::task::JoinHandle<PublishedTextProjectionOutcomeV1>>,
+        projection: &mut Option<
+            Result<native_runtime::NativeTask<PublishedTextProjectionOutcomeV1>, String>,
+        >,
     ) {
         if let Some(projection) = projection.take() {
-            let _ = projection.await;
+            let _ = crate::code_index_task_support::join_native(&projection).await;
         }
     }
 
@@ -2896,7 +2899,9 @@ impl CodeIndexSchedulerRegistryV1 {
                 TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1
             };
             let advance = tracing::Instrument::instrument(
-                tokio::task::spawn_blocking(move || advancing.advance_text_serving(maximum_work)),
+                native_runtime::spawn_blocking(move || {
+                    advancing.advance_text_serving(maximum_work)
+                }),
                 tracing::trace_span!("daemon.code_index.text_projection"),
             )
             .await;
@@ -3680,7 +3685,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     ],
                 );
                 let _ = tracing::Instrument::instrument(
-                    &mut worktree.task,
+                    worktree.task.wait(),
                     tracing::trace_span!("daemon.code_index.shutdown.worker_join"),
                 )
                 .await;
@@ -3701,7 +3706,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 // long and hide it inside the owner's join budget, so the
                 // release runs on the blocking pool. Shutdown still joins it
                 // below: ownership must be gone when this returns.
-                owner_releases.push(tokio::task::spawn_blocking(move || {
+                owner_releases.extend(crate::code_index_task_support::start_blocking(move || {
                     let _span =
                         tracing::trace_span!("daemon.code_index.shutdown.owner_release").entered();
                     drop(worktree);
@@ -3717,7 +3722,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let release_count = owner_releases.len();
         for release in owner_releases {
             let _ = tracing::Instrument::instrument(
-                release,
+                release.wait(),
                 tracing::trace_span!("daemon.code_index.shutdown.owner_release_join"),
             )
             .await;
@@ -3780,14 +3785,14 @@ impl CodeIndexSchedulerRegistryV1 {
             worktree.wake.notify_one();
             retiring.insert(root, worktree);
         }
-        let deadline = tokio::time::Instant::now() + timeout;
+        let deadline = std::time::Instant::now() + timeout;
         let mut drained = true;
         // A cold owner needs `retiring` for its final cancellation fence before
         // it can drop the reservation that this wait observes. The retired
         // reservation itself blocks remounts while this guard is released.
         drop(retiring);
         for (root, mut completion) in cold_mount_waiting {
-            match tokio::time::timeout_at(deadline, completion.changed()).await {
+            match native_runtime::timeout_at(deadline, completion.changed()).await {
                 Ok(_) => {
                     completed_cold_mounts.insert(root);
                 }
@@ -3802,7 +3807,7 @@ impl CodeIndexSchedulerRegistryV1 {
             let Some(worktree) = retiring.get_mut(root) else {
                 continue;
             };
-            match tokio::time::timeout_at(deadline, &mut worktree.task).await {
+            match native_runtime::timeout_at(deadline, worktree.task.wait()).await {
                 Ok(_) => {
                     joined.insert(root.clone());
                 }
@@ -4108,7 +4113,7 @@ impl CodeIndexSchedulerRegistryV1 {
             )
         };
         let known = known.cloned();
-        let metadata = tokio::task::spawn_blocking(move || {
+        let metadata = native_runtime::spawn_blocking(move || {
             owner.active_publication_text_metadata(known.as_ref())
         })
         .await

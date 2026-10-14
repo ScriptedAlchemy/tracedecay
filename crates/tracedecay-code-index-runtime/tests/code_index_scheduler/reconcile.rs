@@ -4509,7 +4509,7 @@ async fn ignored_dependency_waits_for_global_admission_before_publication_gate()
                 &project_root,
                 request,
                 Arc::new(ActiveControl),
-                tokio::time::Instant::now() + Duration::from_mins(1),
+                std::time::Instant::now() + Duration::from_mins(1),
             )
             .await
     });
@@ -11885,7 +11885,7 @@ async fn pinned_configuration_refuses_native_graph_before_text_serving_swap() {
             Duration::from_secs(1),
             registry.latest_complete_fresh_for_scope_awaiting_seat(
                 &scope,
-                tokio::time::Instant::now() + SERVING_SEAT_FAILURE_CEILING,
+                std::time::Instant::now() + SERVING_SEAT_FAILURE_CEILING,
             ),
         )
         .await

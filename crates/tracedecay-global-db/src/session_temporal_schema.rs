@@ -1,4 +1,5 @@
 use tracedecay_runtime_core::db::engine::{Executor, params};
+use tracedecay_runtime_core::db::schema_version::{self, SESSION_TEMPORAL_COMPONENT};
 
 use crate::schema_contract::validate_session_graph_publication_schema_contract;
 use crate::{global_db_operation_error, global_db_operation_message};
@@ -14,7 +15,6 @@ use admission::{
 };
 
 const OPERATION: &str = "initialize session temporal schema";
-const MIGRATION_NAME: &str = "session-temporal";
 const SESSION_TEMPORAL_AUTHORITY: &str = "session temporal";
 pub(crate) use tracedecay_session_temporal_store::SESSION_TEMPORAL_SCHEMA_VERSION;
 
@@ -30,11 +30,6 @@ const TEMPORAL_FTS_CONTRACTS: &[(&str, &str)] = &[
 ];
 
 const TEMPORAL_SCHEMA_DDL: &str = r"
-    CREATE TABLE IF NOT EXISTS session_temporal_schema_migrations (
-        name TEXT PRIMARY KEY,
-        version INTEGER NOT NULL CHECK(version > 0),
-        applied_at INTEGER NOT NULL
-    );
     -- The one summary authority. LCM reads (grep, describe, expand, replay,
     -- status, DAG) and temporal retrieval share these rows; a summary is
     -- visible to LCM reads only while its availability in the session's
@@ -688,7 +683,7 @@ pub(crate) async fn drop_empty_session_temporal_schema(
 /// Installs the final schema into a store already proven fresh by admission.
 #[tracing::instrument(name = "session_temporal.schema.install", level = "trace", skip_all)]
 pub(crate) async fn install_session_temporal_schema(
-    conn: &impl Executor,
+    conn: &(impl Executor + Sync),
 ) -> tracedecay_domain::errors::Result<()> {
     conn.execute_batch(TEMPORAL_SCHEMA_DDL)
         .await
@@ -700,13 +695,13 @@ pub(crate) async fn install_session_temporal_schema(
     validate_temporal_table_shapes(conn).await?;
     validate_temporal_fts_contracts(conn).await?;
     validate_temporal_fts_match(conn).await?;
-    conn.execute(
-        "INSERT INTO session_temporal_schema_migrations(name, version, applied_at)
-         VALUES (?1, ?2, unixepoch())",
-        params![MIGRATION_NAME, SESSION_TEMPORAL_SCHEMA_VERSION],
+    schema_version::record_version(
+        conn,
+        SESSION_TEMPORAL_COMPONENT,
+        SESSION_TEMPORAL_SCHEMA_VERSION,
     )
     .await
-    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    .map_err(|error| global_db_operation_message(OPERATION, error.to_string()))?;
     Ok(())
 }
 

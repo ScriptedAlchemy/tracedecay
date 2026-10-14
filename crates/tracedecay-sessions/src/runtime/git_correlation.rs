@@ -16,13 +16,12 @@ use tracedecay_domain::{
     CanonicalGitEvidenceKindV1, CanonicalObservationEnvelopeV1, CanonicalObservationFactV1,
 };
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
+use tracedecay_runtime_core::db::schema_version::{self, GIT_CORRELATION_COMPONENT};
 
 mod error;
 pub use error::GitCorrelationError;
 mod history_changes;
 pub use history_changes::install_history_change_schema;
-
-const MIGRATION_NAME: &str = "git_correlation";
 
 /// Schema version of the Git evidence rows, convergence receipts and
 /// watermarks. A store recorded at any other version is refused with a typed
@@ -964,15 +963,10 @@ pub fn canonical_observation_git_evidence(
     skip_all
 )]
 pub async fn ensure_git_correlation_receipt_schema_in_transaction(
-    conn: &(impl Executor + ?Sized),
+    conn: &(impl Executor + Sync),
 ) -> Result<(), GitCorrelationError> {
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS session_schema_migrations (
-            name TEXT PRIMARY KEY,
-            version INTEGER NOT NULL,
-            applied_at INTEGER NOT NULL DEFAULT (unixepoch())
-        );
-        CREATE TABLE IF NOT EXISTS git_correlation_meta (
+        "CREATE TABLE IF NOT EXISTS git_correlation_meta (
             key TEXT PRIMARY KEY,
             value INTEGER NOT NULL,
             updated_at INTEGER NOT NULL DEFAULT (unixepoch())
@@ -983,13 +977,13 @@ pub async fn ensure_git_correlation_receipt_schema_in_transaction(
     backfill::history_progress::install_final_schema(conn).await?;
     backfill::history_failures::install_final_schema(conn).await?;
     migrate_activity_frontier(conn).await?;
-    conn.execute(
-        "INSERT INTO session_schema_migrations(name, version)
-         VALUES (?1, ?2)
-         ON CONFLICT(name) DO UPDATE SET version = excluded.version",
-        params![MIGRATION_NAME, GIT_CORRELATION_SCHEMA_VERSION],
+    schema_version::record_version(
+        conn,
+        GIT_CORRELATION_COMPONENT,
+        GIT_CORRELATION_SCHEMA_VERSION,
     )
-    .await?;
+    .await
+    .map_err(|error| GitCorrelationError::Db(error.to_string()))?;
     Ok(())
 }
 
@@ -1057,27 +1051,11 @@ pub async fn read_history_frontier(
 /// The Git correlation schema version an existing store recorded, `None` for
 /// a store that never installed it.
 pub async fn recorded_git_correlation_schema_version(
-    conn: &(impl QueryExecutor + ?Sized),
+    conn: &(impl QueryExecutor + Sync),
 ) -> Result<Option<i64>, GitCorrelationError> {
-    let mut tables = conn
-        .query(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_schema_migrations'",
-            (),
-        )
-        .await?;
-    if tables.next().await?.is_none() {
-        return Ok(None);
-    }
-    let mut rows = conn
-        .query(
-            "SELECT version FROM session_schema_migrations WHERE name = ?1",
-            params![MIGRATION_NAME],
-        )
-        .await?;
-    rows.next()
-        .await?
-        .map(|row| row.get(0).map_err(GitCorrelationError::from))
-        .transpose()
+    schema_version::read_version(conn, GIT_CORRELATION_COMPONENT)
+        .await
+        .map_err(|error| GitCorrelationError::Db(error.to_string()))
 }
 
 #[tracing::instrument(name = "sessions.git_correlation.read_meta", level = "trace", skip_all)]

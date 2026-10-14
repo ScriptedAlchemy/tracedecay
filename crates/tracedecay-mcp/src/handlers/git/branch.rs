@@ -54,7 +54,7 @@ where
         deadline: deadline.clone(),
         cancellation: cancellation.clone(),
     };
-    let task = tokio::task::spawn_blocking(move || {
+    let task = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
         let _permit = permit;
         operation(
             &project_root,

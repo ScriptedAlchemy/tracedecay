@@ -1,6 +1,6 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use tokio::time::Instant;
+use std::time::Instant;
 use tracedecay_contracts::graph_tool::GraphToolResultV1;
 use tracedecay_contracts::retrieval::{
     AdminCliRegistryContextV1, AdminCliResultV1, AdminCliScopeV1, AdminCliSurfaceRequestV1,

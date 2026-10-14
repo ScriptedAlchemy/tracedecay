@@ -109,7 +109,7 @@ impl RemoteRecoveryProjectLifecycleV1 {
     }
 
     async fn settle_retained_runtime_retirement(&self, project_id: &ProjectId) -> Result<()> {
-        let deadline = tokio::time::Instant::now() + DAEMON_TASK_ABORT_DEADLINE;
+        let deadline = std::time::Instant::now() + DAEMON_TASK_ABORT_DEADLINE;
         let receipt = super::project_retirement::settle_project_retirements(
             &self.project_server_retirements,
             &self.profile_root,
@@ -272,7 +272,7 @@ pub(super) async fn retire_runtime_work(
         });
         super::project_retirement::track_retirement_task(tracked_retirements, owner, task).await;
     }
-    let deadline = tokio::time::Instant::now() + DAEMON_TASK_ABORT_DEADLINE;
+    let deadline = std::time::Instant::now() + DAEMON_TASK_ABORT_DEADLINE;
     let receipt = super::project_retirement::settle_project_retirements(
         tracked_retirements,
         profile_root,

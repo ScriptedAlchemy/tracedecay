@@ -31,22 +31,17 @@
 //!   replacement history and an encrypted compaction body, so `TraceDecay` records
 //!   the boundary/provenance as a summary record without claiming plaintext
 //!   access to Codex's private summary.
-//! * `response_item` goal context. Codex replays active thread goals as
-//!   synthetic user context. `TraceDecay` indexes those as compact goal-context
-//!   records so LCM can catalog the objective and budget without treating the
-//!   instruction boilerplate as normal conversation.
+//! * `response_item` with `payload.type == "message"` and role `user` or
+//!   `assistant`, a conversational turn. Goal-context user messages are still
+//!   cataloged as compact goal-context rows from that message text, because
+//!   real rollouts often record the active goal only in this form. Other
+//!   roles stay unsupported injected context.
 //! * subagent rollouts, separate `rollout-*.jsonl` files whose leading
 //!   `session_meta` has `thread_source == "subagent"` and parent ids in
 //!   `forked_from_id` / `source.subagent.thread_spawn.parent_thread_id`.
 //!
-//! Conversational `response_item` entries are intentionally skipped except for
-//! Codex goal context blocks: they usually carry auto-injected synthetic
-//! context and duplicate the `item_completed`/legacy message turns, so
-//! ingesting them would double-count the conversation. Goal context blocks are
-//! cataloged as compact `goal_context` rows because real rollouts often record
-//! them only in `response_item` form. This append-only JSONL is admitted as
-//! canonical observations by [`observation`], scoped per turn by the latest
-//! Codex cwd context.
+//! This append-only JSONL is admitted as canonical observations by
+//! [`observation`], scoped per turn by the latest Codex cwd context.
 
 mod context;
 mod meta;

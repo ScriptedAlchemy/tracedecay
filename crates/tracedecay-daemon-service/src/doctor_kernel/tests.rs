@@ -113,6 +113,15 @@ fn configuration_finding_reports_a_stored_pattern_the_pin_leaves_unapplied() {
     );
 }
 
+async fn audit_verdict(database: &tracedecay_runtime_core::db::Database) -> Option<bool> {
+    tracedecay_global_db::schema_stages::audit_observation_authority(
+        database,
+        tracedecay_global_db::schema_stages::OBSERVATION_AUTHORITY_AUDIT_BUDGET,
+    )
+    .await
+    .verdict()
+}
+
 /// The daemon-side Doctor reader must observe the exhaustive
 /// observation-authority invariant pass itself. Without a producer the signal
 /// is permanently not-run, which downgrades every `StorageRuntime` finding to
@@ -137,16 +146,10 @@ async fn observation_authority_audit_observes_the_real_invariant_pass() {
     .await
     .expect("open uninitialized doctor audit fixture");
 
-    let uninitialized_snapshot = uninitialized
-        .read_connection()
-        .read_snapshot()
-        .await
-        .expect("snapshot the uninitialized doctor audit fixture");
     assert!(
-        !observation_authority_audit_passed(&uninitialized_snapshot).await,
+        audit_verdict(&uninitialized).await == Some(false),
         "a store without the registered authority schema must fail the audit it ran"
     );
-    drop(uninitialized_snapshot);
     drop(uninitialized);
 
     let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
@@ -163,13 +166,8 @@ async fn observation_authority_audit_observes_the_real_invariant_pass() {
     .await
     .expect("install the registered authority schema");
 
-    let snapshot = database
-        .read_connection()
-        .read_snapshot()
-        .await
-        .expect("snapshot the registered doctor audit fixture");
     assert!(
-        observation_authority_audit_passed(&snapshot).await,
+        audit_verdict(&database).await == Some(true),
         "a converged registered authority must report a passing audit rather than \
          unavailable audit data"
     );

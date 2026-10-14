@@ -43,6 +43,7 @@ use tracedecay_mcp::handlers::{
 use tracedecay_mcp::server::join_hook_ingest_refresh;
 use tracedecay_mcp::tools::dispatch_ceiling::{tool_dispatch_budget, tool_dispatch_deadline_error};
 use tracedecay_runtime_core::cancellation::CancellationToken;
+use tracedecay_runtime_core::native_runtime::{self, TimeoutError};
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 use super::StoreAdministration;
@@ -270,9 +271,12 @@ where
     };
     let computed = compute(arguments);
     let bounded = async {
-        match tokio::time::timeout(budget, computed).await {
+        match native_runtime::timeout(budget, computed).await {
             Ok(result) => result,
-            Err(_elapsed) => Err(tool_dispatch_deadline_error(tool_name, budget)),
+            Err(TimeoutError::Elapsed) => Err(tool_dispatch_deadline_error(tool_name, budget)),
+            Err(error @ TimeoutError::TimerUnavailable(_)) => Err(TraceDecayError::Config {
+                message: error.to_string(),
+            }),
         }
     };
     // A read observes cancellation until it answers; an owner side effect,

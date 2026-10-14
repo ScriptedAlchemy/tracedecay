@@ -1,6 +1,6 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tracedecay_contracts::session_sync::{
     SessionSyncCommandV1, SessionSyncControlV1, SessionSyncOutcomeV1, SessionSyncRequestV1,
@@ -13,6 +13,7 @@ use tracedecay_domain::{ProjectId, UtcMicros};
 use tracedecay_global_db::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1;
 use tracedecay_runtime_core::config::ProfileRoot;
+use tracedecay_runtime_core::native_runtime;
 use tracedecay_sessions::serving::{
     SessionProjectionServingState, SessionProjectionServingStatusPort, SessionProjectionStaleReason,
 };
@@ -118,7 +119,9 @@ async fn import_receipt(
         match SessionSyncServicePort::status(&service, control.clone()).await {
             SessionSyncOutcomeV1::Complete { receipt, .. } => return (receipt, project_state),
             SessionSyncOutcomeV1::Accepted(_) | SessionSyncOutcomeV1::Joined(_) => {
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                native_runtime::sleep_until(Instant::now() + Duration::from_millis(10))
+                    .await
+                    .expect("native timer");
             }
             other => panic!("import ended without a coverage receipt: {other:?}"),
         }
@@ -135,44 +138,53 @@ fn remaining_work(
         .fold(0, u64::saturating_add)
 }
 
-#[tokio::test]
-async fn import_reports_deferred_progress_while_historical_catch_up_is_still_pending() {
-    let (receipt, state) = import_receipt(CatchUp::Pending, "import-pending").await;
+#[test]
+fn import_reports_deferred_progress_while_historical_catch_up_is_still_pending() {
+    native_runtime::block_on(async {
+        let (receipt, state) = import_receipt(CatchUp::Pending, "import-pending").await;
 
-    assert_eq!(receipt.termination, OperationTermination::Partial);
-    assert!(receipt.failure_codes.is_empty());
-    assert_eq!(remaining_work(&receipt), 2);
-    assert!(state.take_historical_dirty());
+        assert_eq!(receipt.termination, OperationTermination::Partial);
+        assert!(receipt.failure_codes.is_empty());
+        assert_eq!(remaining_work(&receipt), 2);
+        assert!(state.take_historical_dirty());
+    })
+    .expect("native runtime");
 }
 
-#[tokio::test]
-async fn import_after_current_catch_up_defers_until_the_scheduled_pass_runs() {
-    let (receipt, state) = import_receipt(CatchUp::Current, "import-current").await;
+#[test]
+fn import_after_current_catch_up_defers_until_the_scheduled_pass_runs() {
+    native_runtime::block_on(async {
+        let (receipt, state) = import_receipt(CatchUp::Current, "import-current").await;
 
-    // History was current before the request, but the pass it scheduled has
-    // not run: sources written since the last pass are not admitted yet.
-    assert_eq!(receipt.termination, OperationTermination::Partial);
-    assert!(receipt.failure_codes.is_empty());
-    assert_eq!(remaining_work(&receipt), 2);
-    assert_eq!(
-        bound_wake(&state).serving_status().state,
-        SessionProjectionServingState::Stale {
-            reason: SessionProjectionStaleReason::HistoricalConvergence,
-        }
-    );
-    assert!(state.take_historical_dirty());
+        // History was current before the request, but the pass it scheduled has
+        // not run: sources written since the last pass are not admitted yet.
+        assert_eq!(receipt.termination, OperationTermination::Partial);
+        assert!(receipt.failure_codes.is_empty());
+        assert_eq!(remaining_work(&receipt), 2);
+        assert_eq!(
+            bound_wake(&state).serving_status().state,
+            SessionProjectionServingState::Stale {
+                reason: SessionProjectionStaleReason::HistoricalConvergence,
+            }
+        );
+        assert!(state.take_historical_dirty());
+    })
+    .expect("native runtime");
 }
 
-#[tokio::test]
-async fn import_keeps_a_blocked_catch_up_as_a_failure() {
-    let (receipt, state) = import_receipt(CatchUp::Blocked, "import-blocked").await;
-    assert!(!state.take_historical_dirty());
+#[test]
+fn import_keeps_a_blocked_catch_up_as_a_failure() {
+    native_runtime::block_on(async {
+        let (receipt, state) = import_receipt(CatchUp::Blocked, "import-blocked").await;
+        assert!(!state.take_historical_dirty());
 
-    assert_eq!(receipt.termination, OperationTermination::Failed);
-    assert!(
-        receipt
-            .failure_codes
-            .iter()
-            .any(|code| code == "invalid_observation_contract")
-    );
+        assert_eq!(receipt.termination, OperationTermination::Failed);
+        assert!(
+            receipt
+                .failure_codes
+                .iter()
+                .any(|code| code == "invalid_observation_contract")
+        );
+    })
+    .expect("native runtime");
 }

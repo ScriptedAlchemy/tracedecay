@@ -29,6 +29,7 @@ use tracedecay_graph_query::{
 };
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::db::engine::params;
+use tracedecay_runtime_core::native_runtime;
 
 const ANCHOR_KEY_PREFIX_V1: &str = "feedback.github-review.anchor.v1.";
 const ANCHOR_ID_DOMAIN_V1: &str = "tracedecay.advisory.github.code-anchor.v1";
@@ -219,7 +220,7 @@ impl ProjectGitHubAnchorAuthorityV1 {
             let blob_key = key.clone();
             let project_root = Arc::clone(&self.project_root);
             let scope = self.scope.clone();
-            let bytes = tokio::task::spawn_blocking(move || {
+            let bytes = native_runtime::spawn_blocking(move || {
                 let commit = CommitId::new(blob_key.0).ok()?;
                 git_historical_blob(&project_root, &scope, &commit, &blob_key.1)
             })

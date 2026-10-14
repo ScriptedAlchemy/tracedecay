@@ -58,6 +58,7 @@ use tracedecay_global_db::tests::harness::HostAdmissionTestRuntimeV1;
 use tracedecay_global_db::{GitHubStackDeliveryStateV1, RegisteredGlobalDbLeaseV1};
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::git::try_git_program;
+use tracedecay_runtime_core::native_runtime;
 use tracedecay_sessions::admission::HostAdmissionScope;
 use tracedecay_store::NativeIntegrationStore;
 
@@ -508,7 +509,6 @@ async fn mount(
     let analysis = Arc::new(DaemonNativeIntegrationAnalysisV1::new(
         schedulers,
         analysis_scope,
-        tokio::runtime::Handle::current(),
     ));
     let registry = DaemonNativeIntegrationServiceRegistry::default();
     let owner = registry
@@ -533,14 +533,36 @@ async fn preflight(
     request: NativeIntegrationPreflightRequestV1,
 ) -> tracedecay_domain::NativeIntegrationPreviewV1 {
     let signal = CancellationSignal::active("cancel.native.journey.preflight").expect("signal");
-    let outcome = tokio::task::spawn_blocking(move || owner.service().preflight(request, &signal))
-        .await
-        .expect("preflight join")
-        .expect("preflight result");
+    let outcome =
+        native_runtime::spawn_blocking(move || owner.service().preflight(request, &signal))
+            .await
+            .expect("preflight join")
+            .expect("preflight result");
     let NativeIntegrationPreflightOutcomeV1::Preview(preview) = outcome else {
         panic!("fixture must produce an eligible native preview: {outcome:?}");
     };
     preview.as_ref().clone()
+}
+
+/// Mounts from a thread with no Tokio runtime entered, so the stack runtime's
+/// drain loop cannot borrow the test's Tokio runtime.
+async fn mount_stack_runtime_off_tokio(
+    owner: super::registry::DaemonNativeIntegrationOwner,
+    database: RegisteredGlobalDbLeaseV1,
+    scope: ResolvedScope,
+    access: ProjectSourceAccessSnapshot,
+) -> Arc<super::stack_runtime::DaemonGitHubStackRuntimeV1> {
+    native_runtime::spawn_blocking(move || {
+        owner.mount_github_stack_runtime(
+            database,
+            scope,
+            access,
+            Arc::new(DaemonGitHubStackCoordinatorV1::default()),
+        )
+    })
+    .await
+    .expect("native blocking pool")
+    .expect("stack runtime")
 }
 
 async fn stack_snapshot(
@@ -548,7 +570,7 @@ async fn stack_snapshot(
     request: NativeIntegrationStackResolutionRequestV1,
 ) -> tracedecay_domain::NativeIntegrationSelectionV1 {
     let signal = CancellationSignal::active("cancel.native.journey.snapshot").expect("signal");
-    let outcome = tokio::task::spawn_blocking(move || owner.stack_snapshot(request, &signal))
+    let outcome = native_runtime::spawn_blocking(move || owner.stack_snapshot(request, &signal))
         .await
         .expect("stack snapshot join")
         .expect("stack snapshot result");
@@ -801,14 +823,13 @@ async fn checked_out_declared_stack_conflict_enqueues_without_moving_refs() {
         .store()
         .save_preview(occupied_preview.clone())
         .expect("save canonical occupied preview");
-    let stack_runtime = owner
-        .mount_github_stack_runtime(
-            database.clone(),
-            destination_scope.clone(),
-            access,
-            Arc::new(DaemonGitHubStackCoordinatorV1::default()),
-        )
-        .expect("stack runtime");
+    let stack_runtime = mount_stack_runtime_off_tokio(
+        owner.clone(),
+        database.clone(),
+        destination_scope.clone(),
+        access,
+    )
+    .await;
     let other_recipient = ActorId::new("actor.native.other").expect("other recipient");
     let other_context = RequestContext::new(
         other_recipient.clone(),
@@ -1035,7 +1056,7 @@ async fn independent_pair_applies_supported_modes_and_survives_daemon_restart() 
             .expect("native adapter");
             let preflight_selection = selection.clone();
             let preflight_request = request.clone();
-            let preview = tokio::task::spawn_blocking(move || {
+            let preview = native_runtime::spawn_blocking(move || {
                 adapter.preflight(
                     &preflight_selection,
                     &preflight_request,
@@ -1106,7 +1127,7 @@ async fn independent_pair_applies_supported_modes_and_survives_daemon_restart() 
             )
             .expect("native adapter");
             let refusal_preview = preview.clone();
-            let refused = tokio::task::spawn_blocking(move || {
+            let refused = native_runtime::spawn_blocking(move || {
                 adapter.apply(
                     &refusal_preview,
                     &CancellationToken::for_application_request("late-destination-refusal"),
@@ -1145,7 +1166,7 @@ async fn independent_pair_applies_supported_modes_and_survives_daemon_restart() 
         let apply_owner = owner.clone();
         let apply_signal =
             CancellationSignal::active("cancel.native.journey.apply").expect("signal");
-        let receipt = tokio::task::spawn_blocking(move || {
+        let receipt = native_runtime::spawn_blocking(move || {
             apply_owner.service().apply(
                 NativeIntegrationApplyRequestV1 {
                     context,
@@ -1264,14 +1285,13 @@ async fn independent_pair_applies_supported_modes_and_survives_daemon_restart() 
                 effective_capabilities: BTreeSet::from([expand_operation.capability_id().clone()]),
                 grant_expires_at: expires_at,
             };
-            let stack_runtime = owner
-                .mount_github_stack_runtime(
-                    database.clone(),
-                    destination_scope.clone(),
-                    access,
-                    Arc::new(DaemonGitHubStackCoordinatorV1::default()),
-                )
-                .expect("stack runtime");
+            let stack_runtime = mount_stack_runtime_off_tokio(
+                owner.clone(),
+                database.clone(),
+                destination_scope.clone(),
+                access,
+            )
+            .await;
             stack_runtime
                 .enqueue_from_preflight(stack_signal.clone(), &live_context)
                 .expect("enqueue terminal signal");
@@ -1335,7 +1355,7 @@ async fn independent_pair_applies_supported_modes_and_survives_daemon_restart() 
         registry.shutdown().await.expect("shutdown owner registry");
         let (restarted_registry, restarted_owner, _analysis) =
             mount(database, repository_root).await;
-        let durable = tokio::task::spawn_blocking(move || {
+        let durable = native_runtime::spawn_blocking(move || {
             restarted_owner.service().status(
                 tracedecay_contracts::NativeIntegrationStatusRequestV1 {
                     transaction_id: status_transaction_id,
@@ -1448,7 +1468,7 @@ async fn foreign_destination_ref_drift_terminates_without_mutating_the_foreign_t
 
     let apply_owner = owner.clone();
     let signal = CancellationSignal::active("cancel.native.journey.drift").expect("signal");
-    let receipt = tokio::task::spawn_blocking(move || {
+    let receipt = native_runtime::spawn_blocking(move || {
         apply_owner.service().apply(
             NativeIntegrationApplyRequestV1 {
                 context,

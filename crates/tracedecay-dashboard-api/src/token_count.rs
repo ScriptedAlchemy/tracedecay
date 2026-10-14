@@ -31,6 +31,7 @@ use sha2::{Digest, Sha256};
 
 use super::DashboardState;
 use super::util::{query_rows, str_field};
+use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_runtime_core::db::build_qmark_placeholders;
 use tracedecay_runtime_core::db::engine::{QueryExecutor, Value as DbValue, params_from_iter};
 
@@ -268,19 +269,21 @@ pub struct MessageTokens {
 /// `(COUNT(*), MAX(rowid))` fingerprint of `lcm_raw_messages`; the cache
 /// lock is held across a rebuild so the three savings endpoints firing
 /// concurrently share one scan instead of racing three.
-pub async fn non_usage_message_tokens(state: &DashboardState) -> Option<Arc<Vec<MessageTokens>>> {
-    let db = state.lcm_db.as_deref()?;
-    let conn = db.read_connection();
+pub async fn non_usage_message_tokens(
+    cache: &TokenCountCache,
+    lcm_db: Option<&RegisteredGlobalDbLeaseV1>,
+) -> Option<Arc<Vec<MessageTokens>>> {
+    let conn = lcm_db?.read_connection();
 
     let fingerprint = overlay_fingerprint(&conn).await?;
-    let mut cached = state.token_counts.overlay.lock().await;
+    let mut cached = cache.overlay.lock().await;
     if let Some(existing) = cached.as_ref()
         && existing.fingerprint == fingerprint
     {
         return Some(existing.overlay.clone());
     }
 
-    let overlay = Arc::new(build_overlay(state, &conn).await?);
+    let overlay = Arc::new(build_overlay(cache, &conn).await?);
     *cached = Some(OverlayCache {
         fingerprint,
         overlay: overlay.clone(),
@@ -306,7 +309,7 @@ async fn overlay_fingerprint(conn: &(impl QueryExecutor + ?Sized)) -> Option<Ove
 }
 
 async fn build_overlay(
-    state: &DashboardState,
+    cache: &TokenCountCache,
     conn: &(impl QueryExecutor + ?Sized),
 ) -> Option<Vec<MessageTokens>> {
     // Metadata only, text never leaves SQLite unless a count is missing.
@@ -320,8 +323,7 @@ async fn build_overlay(
     // across any await point.
     let mut misses: Vec<(String, String, i64)> = Vec::new();
     {
-        let map = state
-            .token_counts
+        let map = cache
             .map
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -338,11 +340,10 @@ async fn build_overlay(
     }
 
     if !misses.is_empty() {
-        count_and_store(state, conn, misses).await;
+        count_and_store(cache, conn, misses).await;
     }
 
-    let map = state
-        .token_counts
+    let map = cache
         .map
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -375,7 +376,7 @@ async fn build_overlay(
 /// and full-scanned the text-heavy table once per 200-row chunk (a 15k-message
 /// first warm paid ~75 full scans).
 async fn count_and_store(
-    state: &DashboardState,
+    cache: &TokenCountCache,
     conn: &(impl QueryExecutor + ?Sized),
     mut misses: Vec<(String, String, i64)>,
 ) {
@@ -425,7 +426,7 @@ async fn count_and_store(
             .collect();
 
         // BPE encoding is CPU-bound; keep it off the async worker threads.
-        let counted = tokio::task::spawn_blocking(move || {
+        let counted = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
             batch
                 .into_iter()
                 .filter_map(|(provider, message_id, len, text)| {
@@ -446,8 +447,7 @@ async fn count_and_store(
     if computed.is_empty() {
         return;
     }
-    let mut map = state
-        .token_counts
+    let mut map = cache
         .map
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -463,13 +463,19 @@ async fn count_and_store(
 }
 
 /// Detached warm-up so the first Savings-tab request finds a hot cache.
-pub fn spawn_warm(state: DashboardState) {
+pub fn spawn_warm(state: &DashboardState) {
     if !counting_available() {
         return;
     }
-    tokio::spawn(async move {
-        let _ = non_usage_message_tokens(&state).await;
-    });
+    // Only the cache and store: the last `DashboardState` clone must not drop
+    // on a native worker, where daemon-owned ports may expect Tokio.
+    let cache = Arc::clone(&state.token_counts);
+    let lcm_db = state.lcm_db.clone();
+    if let Err(error) = tracedecay_runtime_core::native_runtime::NativeTask::spawn(async move {
+        let _ = non_usage_message_tokens(&cache, lcm_db.as_ref()).await;
+    }) {
+        tracing::warn!(%error, "dashboard token-count warm-up not admitted");
+    }
 }
 
 #[cfg(test)]

@@ -51,4 +51,11 @@ cargo:
 # Use the manifest chunk's ESM exports: Bazel may resolve its shared runtime
 # through a different symlink path than the importing Rsbuild module.
 patchedDependencies:
-  '@rsbuild/core@2.2.12': patches/@rsbuild__core@2.2.12.patch
+  '@rsbuild/core@2.2.13': patches/@rsbuild__core@2.2.13.patch
+
+# @openai/mcp-extensions 0.2.0 peers ext-apps ^1.7.5 only for its `./app`
+# helpers. The extension imports `./server`, which binds to the SDK 2.x
+# `@modelcontextprotocol/server` that ext-apps 2.x also uses.
+peerDependencyRules:
+  allowedVersions:
+    "@openai/mcp-extensions>@modelcontextprotocol/ext-apps": "2"

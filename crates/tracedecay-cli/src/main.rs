@@ -556,6 +556,23 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
         AsyncRuntimeFlavor::MultiThread => async_worker_threads(),
     };
     let blocking_threads = tokio_blocking_thread_limit();
+    {
+        use tracedecay_runtime_core::native_runtime;
+        let _span = tracing::trace_span!("native_runtime_install").entered();
+        native_runtime::install(
+            native_runtime::RuntimeBuilder::multi_thread()
+                .thread_name_prefix("tracedecay-native")
+                .worker_threads(worker_threads)
+                .thread_stack_size(ASYNC_STACK_BYTES)
+                .blocking_threads(
+                    1,
+                    blocking_threads.max(native_runtime::MAX_BLOCKING_THREADS),
+                ),
+        )
+        .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+            message: error.to_string(),
+        })?;
+    }
     let runtime = {
         let _span = tracing::trace_span!("tokio_runtime_build").entered();
         {
@@ -1261,13 +1278,15 @@ async fn dispatch_runtime_command(
             let profile = profile.clone();
             tracing::Instrument::instrument(
                 async {
-                    tokio::task::spawn_blocking(move || {
+                    // The remote client blocks on reqwest's own runtime, so it
+                    // runs on a blocking-pool thread, never a native worker.
+                    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
                         crate::remote_command::run(&profile, action)
                     })
                     .await
-                    .map_err(|error| {
+                    .map_err(|message| {
                         tracedecay_domain::errors::TraceDecayError::Config {
-                            message: format!("remote command task failed to join: {error}"),
+                            message: format!("remote command task failed: {message}"),
                         }
                     })?
                 },
