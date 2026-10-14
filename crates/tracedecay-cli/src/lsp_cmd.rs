@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use tracedecay_runtime_core::config::ProfileRoot;
 
 use serde_json::Value;
-use tokio::time::{Duration, interval};
 use tokio_util::bytes::BytesMut;
 use tokio_util::codec::Decoder;
 use tracedecay_contracts::{CancellationSignal, Deadline, InvocationError};
@@ -147,7 +146,6 @@ async fn pump_stdio_bridge(
     session: &mut DaemonLspSessionClient,
     mut pending_client_frame: Option<String>,
 ) -> tracedecay_domain::errors::Result<()> {
-    let mut poll_timer = interval(Duration::from_millis(25));
     loop {
         // Keep each pump fair: a queued daemon burst must not starve host input.
         if flush_daemon_frame(session, stdout).await? {
@@ -181,7 +179,10 @@ async fn pump_stdio_bridge(
                     bridge_config_error("LSP bridge received a non-UTF-8 JSON-RPC payload")
                 })?);
             }
-            _ = poll_timer.tick() => {}
+            () = asupersync::time::sleep(
+                asupersync::time::wall_now(),
+                std::time::Duration::from_millis(25),
+            ) => {}
         }
     }
 }
@@ -945,11 +946,8 @@ mod tests {
             listener: BrokerListener,
             stdout: TrickleStdout,
         ) -> (Option<Vec<u8>>, Vec<String>) {
-            let (reader, mut writer) = listener
-                .accept()
-                .await
-                .expect("accept bridge connection")
-                .into_split();
+            let (reader, mut writer) =
+                tokio::io::split(listener.accept().await.expect("accept bridge connection"));
             let mut lines = BufReader::new(reader).lines();
             let preface = lines.next_line().await.expect("read preface");
             let preface = preface.expect("auth preface");

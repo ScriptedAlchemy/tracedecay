@@ -1,4 +1,4 @@
-//! Production connection context the `rmcp` adapter dispatches through.
+//! Production connection context the MCP session dispatches through.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -25,7 +25,7 @@ pub trait McpConnectionState: Send + Sync + 'static {
     fn take_selected_response_lease(&mut self) -> Option<Self::ResponseLease>;
 }
 
-/// The one production context the `rmcp` connection adapter requires.
+/// The one production context the MCP connection adapter requires.
 pub trait McpConnectionContext: Send + Sync + 'static {
     type Connection: McpConnectionState;
 
@@ -65,13 +65,6 @@ pub trait McpConnectionContext: Send + Sync + 'static {
     ) -> Pin<Box<dyn Future<Output = Option<JsonRpcResponse>> + Send + 'a>>;
     fn cancel_request(&self, id: &Value, connection_scope: &str) -> bool;
     fn cancellation_registered(&self) -> &tokio::sync::Notify;
-    fn run_in_connection_admission<'a, T, F>(
-        &'a self,
-        future: F,
-    ) -> Pin<Box<dyn Future<Output = T> + Send + 'a>>
-    where
-        T: Send + 'a,
-        F: Future<Output = T> + Send + 'a;
 }
 
 /// Races asynchronous route resolution against the request's own cancellation.

@@ -542,7 +542,8 @@ async fn dispatch_profile_scoped(
     let Some((_, timeout)) = admission_window_after_elapsed(elapsed_us(started)) else {
         return unavailable();
     };
-    let response = tokio::time::timeout(
+    let response = asupersync::time::timeout(
+        asupersync::time::wall_now(),
         timeout,
         super::daemon_hook_action(
             runtime,
@@ -723,7 +724,8 @@ async fn dispatch_decoded(
     } = prepared;
     let binding = &snapshot.binding;
     let immediate = match admission_window_after_elapsed(elapsed_us(started)) {
-        Some((deadline, timeout)) => match tokio::time::timeout(
+        Some((deadline, timeout)) => match asupersync::time::timeout(
+            asupersync::time::wall_now(),
             timeout,
             admit_async_exact_scope(&envelope, binding, deadline, admission),
         )

@@ -73,13 +73,12 @@ mod wire_bound_tests {
         BrokerStreamTransport, RoutedRmcpReplay, read_line_handling_wire_oversized,
         serve_routed_rmcp_connection,
     };
-    use rmcp::transport::Transport;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
     use tracedecay_daemon_service::shutdown::DaemonLifecycle;
     use tracedecay_framing::{WIRE_RECORD_TOO_LARGE, is_wire_oversized_io_error};
     use tracedecay_mcp::McpTransport;
 
-    use tracedecay_daemon_protocol::{BrokerListener, BrokerStream, default_loopback_endpoint};
+    use tracedecay_daemon_protocol::{BrokerListener, default_loopback_endpoint};
 
     #[tokio::test]
     async fn broker_transport_streams_hostile_frame_and_typed_rejection_has_no_payload() {
@@ -87,7 +86,7 @@ mod wire_bound_tests {
             .await
             .expect("bind");
 
-        let client = BrokerStream::connect(&bound).await.expect("connect");
+        let client = crate::daemon::tests::connect_loopback_test_peer(&bound).await;
         let server = listener.accept().await.expect("accept");
         let mut server_transport = BrokerStreamTransport::new(server);
 
@@ -120,7 +119,7 @@ mod wire_bound_tests {
         let (listener, bound) = BrokerListener::bind(&default_loopback_endpoint())
             .await
             .expect("bind");
-        let mut client = BrokerStream::connect(&bound).await.expect("connect");
+        let mut client = crate::daemon::tests::connect_loopback_test_peer(&bound).await;
         let server = listener.accept().await.expect("accept");
         let mut transport = BrokerStreamTransport::new(server);
 
@@ -137,9 +136,7 @@ mod wire_bound_tests {
         });
 
         assert!(
-            Transport::<rmcp::RoleServer>::receive(&mut transport)
-                .await
-                .is_none(),
+            transport.receive().await.is_none(),
             "rmcp must receive the same bounded rejection as the daemon transport"
         );
         writer.await.expect("oversized frame writer");
@@ -150,7 +147,7 @@ mod wire_bound_tests {
         let (listener, bound) = BrokerListener::bind(&default_loopback_endpoint())
             .await
             .expect("bind");
-        let mut client = BrokerStream::connect(&bound).await.expect("connect");
+        let mut client = crate::daemon::tests::connect_loopback_test_peer(&bound).await;
         let server = listener.accept().await.expect("accept");
         let mut transport = BrokerStreamTransport::new(server);
 
@@ -161,7 +158,8 @@ mod wire_bound_tests {
             .expect("valid frame");
         client.flush().await.expect("flush");
 
-        let recovered = Transport::<rmcp::RoleServer>::receive(&mut transport)
+        let recovered = transport
+            .receive()
             .await
             .expect("valid frame after parse error");
         let recovered = serde_json::to_value(recovered).expect("serialize received message");
@@ -180,7 +178,7 @@ mod wire_bound_tests {
         let (listener, bound) = BrokerListener::bind(&default_loopback_endpoint())
             .await
             .expect("bind");
-        let mut client = BrokerStream::connect(&bound).await.expect("connect");
+        let mut client = crate::daemon::tests::connect_loopback_test_peer(&bound).await;
         let server = listener.accept().await.expect("accept");
         let mut transport = BrokerStreamTransport::new(server);
 
@@ -194,7 +192,8 @@ mod wire_bound_tests {
             .expect("valid frame");
         client.flush().await.expect("flush");
 
-        let recovered = Transport::<rmcp::RoleServer>::receive(&mut transport)
+        let recovered = transport
+            .receive()
             .await
             .expect("valid frame after invalid envelope");
         let recovered = serde_json::to_value(recovered).expect("serialize received message");
@@ -220,7 +219,7 @@ mod wire_bound_tests {
         let (listener, bound) = BrokerListener::bind(&default_loopback_endpoint())
             .await
             .expect("bind");
-        let client = BrokerStream::connect(&bound).await.expect("connect");
+        let client = crate::daemon::tests::connect_loopback_test_peer(&bound).await;
         let server = listener.accept().await.expect("accept");
         let initialize = serde_json::json!({
             "jsonrpc": "2.0",
@@ -323,7 +322,7 @@ mod wire_bound_tests {
             .await
             .expect("bind");
 
-        let client = BrokerStream::connect(&bound).await.expect("connect");
+        let client = crate::daemon::tests::connect_loopback_test_peer(&bound).await;
         let server = listener.accept().await.expect("accept");
         let mut server_transport = BrokerStreamTransport::new(server);
 
@@ -387,7 +386,7 @@ mod wire_bound_tests {
             .await
             .expect("bind");
 
-        let mut client = BrokerStream::connect(&bound).await.expect("connect");
+        let mut client = crate::daemon::tests::connect_loopback_test_peer(&bound).await;
         let server = listener.accept().await.expect("accept");
         let mut server_transport = BrokerStreamTransport::new(server);
 

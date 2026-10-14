@@ -38,6 +38,7 @@ shell-words = "1.1"
 thiserror = "2"
 flate2 = "1"
 tracedecay-tokenizer = { path = "../tracedecay-tokenizer", optional = true }
+asupersync.workspace = true
 tokio = { version = "1", features = ["full"] }
 gix = { version = "=0.89.0", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
 toml = "1"

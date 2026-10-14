@@ -1,10 +1,9 @@
 //! One transport-neutral daemon shutdown sequence.
 
 use std::future::Future;
-use std::pin::Pin;
+use std::pin::{Pin, pin};
 use std::sync::Arc;
-
-use tokio::task::JoinSet;
+use std::time::{Duration, Instant};
 
 use super::lifecycle::{
     DAEMON_BACKGROUND_DRAIN_DEADLINE, DAEMON_CLIENT_DRAIN_DEADLINE,
@@ -15,8 +14,8 @@ use super::owners::{
     ShutdownOwner, ShutdownOwnerReceipt, ShutdownReceipt, ShutdownStatus,
     prepare_shutdown_owner_phases,
 };
-use tracedecay_domain::errors::Result;
 use tracedecay_runtime_core::logging::log_daemon_event;
+use tracedecay_runtime_core::native_runtime::{self, TimeoutError};
 use tracedecay_store_runtime::{ShutdownTaskOutcome, ShutdownTaskReceipt};
 
 type ProjectServerShutdownFuture =
@@ -26,10 +25,25 @@ type ProjectServerShutdownFuture =
 /// global deadline instead let it spend every remaining second and starve the
 /// store-close phase behind it.
 type ProjectServerShutdown =
-    Box<dyn FnOnce(tokio::time::Instant) -> ProjectServerShutdownFuture + Send + 'static>;
+    Box<dyn FnOnce(Instant) -> ProjectServerShutdownFuture + Send + 'static>;
 
-const SHUTDOWN_COORDINATOR_RECEIPT_GRACE: tokio::time::Duration =
-    tokio::time::Duration::from_millis(100);
+const SHUTDOWN_COORDINATOR_RECEIPT_GRACE: Duration = Duration::from_millis(100);
+
+/// Maximum length of each serial shutdown phase.
+#[derive(Clone, Copy)]
+struct DaemonShutdownPhases {
+    client_drain: Duration,
+    background_drain: Duration,
+    project_servers: Duration,
+    store_close: Duration,
+}
+
+const DAEMON_SHUTDOWN_PHASES: DaemonShutdownPhases = DaemonShutdownPhases {
+    client_drain: DAEMON_CLIENT_DRAIN_DEADLINE,
+    background_drain: DAEMON_BACKGROUND_DRAIN_DEADLINE,
+    project_servers: DAEMON_PROJECT_SERVER_DRAIN_DEADLINE,
+    store_close: DAEMON_STORE_CLOSE_RESERVE,
+};
 
 /// Splits one shutdown deadline into per-phase budgets.
 ///
@@ -38,26 +52,22 @@ const SHUTDOWN_COORDINATOR_RECEIPT_GRACE: tokio::time::Duration =
 /// eat the reserve belonging to the phases behind it.
 #[derive(Clone, Copy)]
 struct DaemonShutdownBudget {
-    overall: tokio::time::Instant,
+    overall: Instant,
+    phases: DaemonShutdownPhases,
 }
 
 impl DaemonShutdownBudget {
-    fn new(overall: tokio::time::Instant) -> Self {
-        Self { overall }
+    fn new(overall: Instant, phases: DaemonShutdownPhases) -> Self {
+        Self { overall, phases }
     }
 
-    /// Deadline for a phase capped at `phase_max` that leaves
-    /// `downstream_reserve` untouched for the phases that follow it.
+    /// Deadline for a phase starting at `now`, capped at `phase_max`, that
+    /// leaves `downstream_reserve` untouched for the phases that follow it.
     ///
     /// Never returns a deadline before `now`: an overrunning predecessor
     /// degrades a later phase to an immediate, *named* timeout rather than
     /// deleting it from the sequence entirely.
-    fn phase(
-        self,
-        phase_max: tokio::time::Duration,
-        downstream_reserve: tokio::time::Duration,
-    ) -> tokio::time::Instant {
-        let now = tokio::time::Instant::now();
+    fn phase(self, now: Instant, phase_max: Duration, downstream_reserve: Duration) -> Instant {
         let reserved_floor = self
             .overall
             .checked_sub(downstream_reserve)
@@ -66,44 +76,48 @@ impl DaemonShutdownBudget {
         std::cmp::max(now, std::cmp::min(capped, reserved_floor))
     }
 
-    fn client_drain(self) -> tokio::time::Instant {
+    fn client_drain(self, now: Instant) -> Instant {
+        let phases = self.phases;
         self.phase(
-            DAEMON_CLIENT_DRAIN_DEADLINE,
-            DAEMON_BACKGROUND_DRAIN_DEADLINE
-                + DAEMON_PROJECT_SERVER_DRAIN_DEADLINE
-                + DAEMON_STORE_CLOSE_RESERVE,
+            now,
+            phases.client_drain,
+            phases.background_drain + phases.project_servers + phases.store_close,
         )
     }
 
-    fn background_drain(self) -> tokio::time::Instant {
+    fn background_drain(self, now: Instant) -> Instant {
+        let phases = self.phases;
         self.phase(
-            DAEMON_BACKGROUND_DRAIN_DEADLINE,
-            DAEMON_PROJECT_SERVER_DRAIN_DEADLINE + DAEMON_STORE_CLOSE_RESERVE,
+            now,
+            phases.background_drain,
+            phases.project_servers + phases.store_close,
         )
     }
 
-    fn project_servers(self) -> tokio::time::Instant {
-        self.phase(
-            DAEMON_PROJECT_SERVER_DRAIN_DEADLINE,
-            DAEMON_STORE_CLOSE_RESERVE,
-        )
+    fn project_servers(self, now: Instant) -> Instant {
+        let phases = self.phases;
+        self.phase(now, phases.project_servers, phases.store_close)
     }
 
-    fn store_close(self) -> tokio::time::Instant {
-        self.phase(DAEMON_STORE_CLOSE_RESERVE, tokio::time::Duration::ZERO)
+    fn store_close(self, now: Instant) -> Instant {
+        self.phase(now, self.phases.store_close, Duration::ZERO)
+    }
+}
+
+/// `Elapsed` is the phase's own timeout; a timer that cannot start fails the
+/// phase closed with its reason.
+fn deadline_status(error: TimeoutError) -> ShutdownStatus {
+    match error {
+        TimeoutError::Elapsed => ShutdownStatus::TimedOut,
+        TimeoutError::TimerUnavailable(_) => ShutdownStatus::Failed(error.to_string()),
     }
 }
 
 /// Operator receipts for one serial shutdown phase. Spans already measure
 /// these windows (`daemon.shutdown.project_servers` / `store_close`; inner
 /// work includes `mcp.server.shutdown` and `graph_db.runtime.close.engine`).
-fn log_shutdown_phase(
-    phase: &str,
-    boundary: &str,
-    started: tokio::time::Instant,
-    deadline: tokio::time::Instant,
-) {
-    let now = tokio::time::Instant::now();
+fn log_shutdown_phase(phase: &str, boundary: &str, started: Instant, deadline: Instant) {
+    let now = Instant::now();
     log_daemon_event(
         "daemon_shutdown",
         &[
@@ -126,30 +140,40 @@ fn log_shutdown_phase(
 }
 
 pub struct DaemonShutdownPlan {
-    clients: JoinSet<Result<()>>,
+    clients: Option<ShutdownOwner>,
     owner_phases: Vec<Vec<ShutdownOwner>>,
     terminal_owner_phases: Vec<Vec<ShutdownOwner>>,
     project_server_shutdown: ProjectServerShutdown,
+    phases: DaemonShutdownPhases,
 }
 
 impl DaemonShutdownPlan {
     pub fn new<ProjectServers, ProjectServersFuture>(
-        clients: JoinSet<Result<()>>,
         owner_phases: Vec<Vec<ShutdownOwner>>,
         project_server_shutdown: ProjectServers,
     ) -> Self
     where
-        ProjectServers: FnOnce(tokio::time::Instant) -> ProjectServersFuture + Send + 'static,
+        ProjectServers: FnOnce(Instant) -> ProjectServersFuture + Send + 'static,
         ProjectServersFuture: Future<Output = ShutdownTaskReceipt> + Send + 'static,
     {
         Self {
-            clients,
+            clients: None,
             owner_phases,
             terminal_owner_phases: Vec::new(),
             project_server_shutdown: Box::new(move |deadline| {
                 Box::pin(project_server_shutdown(deadline))
             }),
+            phases: DAEMON_SHUTDOWN_PHASES,
         }
+    }
+
+    /// The accepted client connections, cancelled and joined once in-flight
+    /// client work has drained or its drain window has closed. Its join
+    /// status is the receipt's `clients` status.
+    #[must_use]
+    pub fn with_clients(mut self, clients: ShutdownOwner) -> Self {
+        self.clients = Some(clients);
+        self
     }
 
     #[must_use]
@@ -171,7 +195,7 @@ pub struct DaemonShutdownReceipt {
 }
 
 impl DaemonShutdownReceipt {
-    fn coordinator_failed(deadline: tokio::time::Instant, error: String) -> Self {
+    fn coordinator_failed(deadline: Instant, error: String) -> Self {
         Self {
             in_flight: ShutdownStatus::Failed(error.clone()),
             clients: ShutdownStatus::Failed(error.clone()),
@@ -180,12 +204,22 @@ impl DaemonShutdownReceipt {
         }
     }
 
-    fn coordinator_timed_out(deadline: tokio::time::Instant) -> Self {
+    fn coordinator_timed_out(deadline: Instant) -> Self {
         Self {
             in_flight: ShutdownStatus::TimedOut,
             clients: ShutdownStatus::TimedOut,
             background: ShutdownReceipt::timed_out(deadline, "shutdown_coordinator"),
             project_servers: ShutdownTaskReceipt::timed_out("shutdown_coordinator"),
+        }
+    }
+
+    fn coordinator_deadline(deadline: Instant, error: &TimeoutError) -> Self {
+        match error {
+            TimeoutError::Elapsed => Self::coordinator_timed_out(deadline),
+            TimeoutError::TimerUnavailable(_) => Self::coordinator_failed(
+                deadline,
+                format!("daemon shutdown deadline failed: {error}"),
+            ),
         }
     }
 
@@ -266,21 +300,21 @@ fn retain_status_failures(status: &mut ShutdownStatus, failures: &[String]) {
 )]
 pub async fn coordinate_daemon_shutdown<Prepare>(
     lifecycle: &DaemonLifecycle,
-    shutdown_deadline: tokio::time::Instant,
+    shutdown_deadline: Instant,
     prepare: Prepare,
 ) -> Arc<DaemonShutdownReceipt>
 where
     Prepare: Future<Output = DaemonShutdownPlan> + Send + 'static,
 {
-    if tokio::time::timeout_at(
+    if let Err(error) = native_runtime::timeout_at(
         shutdown_deadline,
         lifecycle.wait_for_finished_shutdown_coordinator(),
     )
     .await
-    .is_err()
     {
-        return Arc::new(DaemonShutdownReceipt::coordinator_timed_out(
+        return Arc::new(DaemonShutdownReceipt::coordinator_deadline(
             shutdown_deadline,
+            &error,
         ));
     }
     lifecycle.join_finished_shutdown_coordinator().await;
@@ -301,7 +335,7 @@ where
             let mut coordinator_failures = failures.clone();
             let coordinator = async move {
                 let mut runner = tokio::spawn(async move {
-                    let prepare_started = tokio::time::Instant::now();
+                    let prepare_started = Instant::now();
                     let plan = prepare.await;
                     log_shutdown_phase(
                         "plan_prepare",
@@ -323,10 +357,11 @@ where
                         };
                         (receipt, false)
                     }
-                    () = tokio::time::sleep_until(shutdown_deadline) => {
+                    fired = native_runtime::sleep_until(shutdown_deadline) => {
                         runner.abort();
+                        let error = fired.err().map_or(TimeoutError::Elapsed, TimeoutError::TimerUnavailable);
                         (
-                            DaemonShutdownReceipt::coordinator_timed_out(shutdown_deadline),
+                            DaemonShutdownReceipt::coordinator_deadline(shutdown_deadline, &error),
                             true,
                         )
                     }
@@ -381,13 +416,15 @@ where
                 error,
             )),
         },
-        () = tokio::time::sleep_until(receipt_deadline) => {
-            Arc::new(DaemonShutdownReceipt::coordinator_timed_out(
+        fired = native_runtime::sleep_until(receipt_deadline) => {
+            let error = fired.err().map_or(TimeoutError::Elapsed, TimeoutError::TimerUnavailable);
+            Arc::new(DaemonShutdownReceipt::coordinator_deadline(
                 shutdown_deadline,
+                &error,
             ))
         }
     };
-    let _ = tokio::time::timeout_at(
+    let _ = native_runtime::timeout_at(
         receipt_deadline,
         lifecycle.wait_for_finished_shutdown_coordinator(),
     )
@@ -403,22 +440,24 @@ where
 )]
 async fn run_daemon_shutdown(
     lifecycle: DaemonLifecycle,
-    mut plan: DaemonShutdownPlan,
-    shutdown_deadline: tokio::time::Instant,
+    plan: DaemonShutdownPlan,
+    shutdown_deadline: Instant,
 ) -> DaemonShutdownReceipt {
-    let budget = DaemonShutdownBudget::new(shutdown_deadline);
+    let budget = DaemonShutdownBudget::new(shutdown_deadline, plan.phases);
     let prepared = prepare_shutdown_owner_phases(plan.owner_phases);
-    let mut background_shutdown = Box::pin(prepared.join(budget.background_drain()));
+    let mut background_shutdown = Box::pin(prepared.join(budget.background_drain(Instant::now())));
     let mut background_receipt = None;
-    let client_drain_deadline = budget.client_drain();
-    let in_flight = tokio::time::timeout_at(client_drain_deadline, lifecycle.wait_for_idle());
-    tokio::pin!(in_flight);
+    let client_drain_started = Instant::now();
+    let client_drain_deadline = budget.client_drain(client_drain_started);
+    let mut in_flight = pin!(native_runtime::timeout_at(
+        client_drain_deadline,
+        lifecycle.wait_for_idle()
+    ));
     // Client drain: wait for in-flight client work to idle out cooperatively,
-    // then abort and join whatever remains. One span covers both the
-    // cooperative wait and the forced abort/join so its duration reads as a
+    // then cancel and join whatever remains. One span covers both the
+    // cooperative wait and the forced cancel/join so its duration reads as a
     // single number against DAEMON_CLIENT_DRAIN_DEADLINE /
     // DAEMON_TASK_ABORT_DEADLINE instead of only surfacing as a bare timeout.
-    let client_drain_started = tokio::time::Instant::now();
     log_shutdown_phase(
         "client_drain",
         "start",
@@ -434,28 +473,29 @@ async fn run_daemon_shutdown(
                         background_receipt = Some(receipt);
                     }
                     drained = &mut in_flight => {
-                        break match drained {
-                            Ok(()) => ShutdownStatus::Clean,
-                            Err(_) => ShutdownStatus::TimedOut,
-                        };
+                        break drained.map_or_else(deadline_status, |()| ShutdownStatus::Clean);
                     }
                 }
             };
 
-            plan.clients.abort_all();
-            let client_join_deadline = std::cmp::min(
-                tokio::time::Instant::now() + DAEMON_TASK_ABORT_DEADLINE,
-                budget.client_drain(),
-            );
-            let clients = join_aborted_clients_until(&mut plan.clients, client_join_deadline).await;
-            let clients =
-                if tokio::time::timeout_at(client_join_deadline, lifecycle.wait_for_idle())
+            let now = Instant::now();
+            let client_join_deadline =
+                std::cmp::min(now + DAEMON_TASK_ABORT_DEADLINE, budget.client_drain(now));
+            let clients = match plan.clients {
+                Some(clients) => prepare_shutdown_owner_phases(vec![vec![clients]])
+                    .join(client_join_deadline)
                     .await
-                    .is_err()
+                    .owners
+                    .pop()
+                    .map_or(ShutdownStatus::Clean, |receipt| receipt.status),
+                None => ShutdownStatus::Clean,
+            };
+            let clients =
+                match native_runtime::timeout_at(client_join_deadline, lifecycle.wait_for_idle())
+                    .await
                 {
-                    ShutdownStatus::TimedOut
-                } else {
-                    clients
+                    Ok(()) => clients,
+                    Err(error) => deadline_status(error),
                 };
             (in_flight, clients)
         }
@@ -472,7 +512,7 @@ async fn run_daemon_shutdown(
     // (maintenance, session sync, invocation, ...).
     // Often already resolved inside the client-drain select loop above; this
     // span only measures the residual wait when it was not.
-    let background_drain_started = tokio::time::Instant::now();
+    let background_drain_started = Instant::now();
     let mut background = {
         use tracing::Instrument as _;
         async {
@@ -494,8 +534,8 @@ async fn run_daemon_shutdown(
     // the session relation graph owners leased. The terminal owner drains and
     // closes those graph runtimes, so it must run only after every server has
     // dropped its leases.
-    let project_server_deadline = budget.project_servers();
-    let project_servers_started = tokio::time::Instant::now();
+    let project_servers_started = Instant::now();
+    let project_server_deadline = budget.project_servers(project_servers_started);
     log_shutdown_phase(
         "project_servers",
         "start",
@@ -506,16 +546,23 @@ async fn run_daemon_shutdown(
         use tracing::Instrument as _;
         async {
             // The drain gets its phase deadline, so it reaches its own bounded
-            // join and reports one outcome *per named server*. The outer sleep is
+            // join and reports one outcome *per named server*. The outer timer is
             // only the backstop for a drain that ignores its deadline; it fires
             // late enough that the named receipt normally wins the race.
-            let mut drain = (plan.project_server_shutdown)(project_server_deadline);
-            tokio::select! {
-                biased;
-                receipt = &mut drain => receipt,
-                () = tokio::time::sleep_until(
-                    project_server_deadline + DAEMON_TASK_ABORT_DEADLINE,
-                ) => ShutdownTaskReceipt::timed_out("project_server_shutdown"),
+            let drain = (plan.project_server_shutdown)(project_server_deadline);
+            match native_runtime::timeout_at(
+                project_server_deadline + DAEMON_TASK_ABORT_DEADLINE,
+                drain,
+            )
+            .await
+            {
+                Ok(receipt) => receipt,
+                Err(TimeoutError::Elapsed) => {
+                    ShutdownTaskReceipt::timed_out("project_server_shutdown")
+                }
+                Err(error) => {
+                    ShutdownTaskReceipt::failed("project_server_shutdown", error.to_string())
+                }
             }
         }
         .instrument(tracing::trace_span!("daemon.shutdown.project_servers"))
@@ -531,8 +578,8 @@ async fn run_daemon_shutdown(
     // drains retained graph owners and closes their Grafeo runtimes. This is
     // the outer view of the close; daemon.branch_admin.close_graph_runtimes
     // and graph_db.registry.close_retained measure the work underneath it.
-    let store_close_deadline = budget.store_close();
-    let store_close_started = tokio::time::Instant::now();
+    let store_close_started = Instant::now();
+    let store_close_deadline = budget.store_close(store_close_started);
     let terminal = if project_servers.timed_out_count() == 0 {
         log_shutdown_phase(
             "store_close",
@@ -574,35 +621,6 @@ async fn run_daemon_shutdown(
     }
 }
 
-#[tracing::instrument(
-    name = "daemon.shutdown.join_aborted_clients",
-    level = "trace",
-    skip_all
-)]
-async fn join_aborted_clients_until(
-    clients: &mut JoinSet<Result<()>>,
-    deadline: tokio::time::Instant,
-) -> ShutdownStatus {
-    match tokio::time::timeout_at(deadline, async {
-        let mut failures = Vec::new();
-        while let Some(completed) = clients.join_next().await {
-            match completed {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => failures.push(error.to_string()),
-                Err(error) if error.is_cancelled() => {}
-                Err(error) => failures.push(error.to_string()),
-            }
-        }
-        failures
-    })
-    .await
-    {
-        Err(_) => ShutdownStatus::TimedOut,
-        Ok(failures) if failures.is_empty() => ShutdownStatus::Clean,
-        Ok(failures) => ShutdownStatus::Failed(failures.join("; ")),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -611,6 +629,14 @@ mod tests {
     use tracedecay_domain::errors::TraceDecayError;
     use tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
 
+    /// Phase caps short enough for a stuck phase to time out in real time.
+    const TEST_PHASES: DaemonShutdownPhases = DaemonShutdownPhases {
+        client_drain: Duration::from_millis(50),
+        background_drain: Duration::from_millis(200),
+        project_servers: Duration::from_millis(300),
+        store_close: Duration::from_millis(300),
+    };
+
     /// A phase that never finishes used to spend the whole global deadline,
     /// so the phases behind it never ran: the project-server drain reported an
     /// instant timeout, store-close was skipped on the back of that timeout,
@@ -618,18 +644,17 @@ mod tests {
     /// with an anonymous `shutdown_coordinator` entry. With per-phase budgets
     /// the stuck owner is bounded, is named in its own receipt, and the phases
     /// behind it still get their reserved budget.
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn a_stuck_background_owner_cannot_starve_project_servers_or_store_close() {
         let lifecycle = DaemonLifecycle::default();
-        let overall = tokio::time::Instant::now() + DAEMON_SHUTDOWN_DEADLINE;
+        let overall = Instant::now() + Duration::from_secs(2);
         let observed_deadline = Arc::new(std::sync::Mutex::new(None));
         let project_server_deadline = Arc::clone(&observed_deadline);
         let store_closed = Arc::new(AtomicBool::new(false));
         let store_closed_by_owner = Arc::clone(&store_closed);
 
         let receipt = coordinate_daemon_shutdown(&lifecycle, overall, async move {
-            DaemonShutdownPlan::new(
-                JoinSet::new(),
+            let mut plan = DaemonShutdownPlan::new(
                 vec![vec![ShutdownOwner::new(
                     "stuck_owner",
                     || {},
@@ -646,7 +671,9 @@ mod tests {
                 "memory_graph_reconciliation",
                 move || store_closed_by_owner.store(true, Ordering::Release),
                 async {},
-            )]])
+            )]]);
+            plan.phases = TEST_PHASES;
+            plan
         })
         .await;
 
@@ -668,7 +695,7 @@ mod tests {
             .expect("project server deadline")
             .expect("project server drain ran");
         assert!(
-            project_server_deadline <= overall - DAEMON_STORE_CLOSE_RESERVE,
+            project_server_deadline + TEST_PHASES.store_close <= overall,
             "project-server phase must not encroach on the store-close reserve"
         );
         assert!(receipt.project_servers.is_clean());
@@ -679,36 +706,93 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn phase_budgets_flow_forward_but_reserve_the_phases_behind_them() {
-        let overall = tokio::time::Instant::now() + DAEMON_SHUTDOWN_DEADLINE;
-        let budget = DaemonShutdownBudget::new(overall);
+    #[test]
+    fn phase_budgets_flow_forward_but_reserve_the_phases_behind_them() {
+        let start = Instant::now();
+        let overall = start + DAEMON_SHUTDOWN_DEADLINE;
+        let budget = DaemonShutdownBudget::new(overall, DAEMON_SHUTDOWN_PHASES);
 
         // A phase is capped at its own maximum, not the global deadline.
         assert_eq!(
-            budget.background_drain(),
-            tokio::time::Instant::now() + DAEMON_BACKGROUND_DRAIN_DEADLINE
+            budget.background_drain(start),
+            start + DAEMON_BACKGROUND_DRAIN_DEADLINE
         );
         // Unspent budget flows forward: recomputed from the clock, a phase
         // that starts later still gets its full cap while it fits.
-        tokio::time::advance(tokio::time::Duration::from_secs(5)).await;
+        let now = start + Duration::from_secs(5);
         assert_eq!(
-            budget.project_servers(),
-            tokio::time::Instant::now() + DAEMON_PROJECT_SERVER_DRAIN_DEADLINE
+            budget.project_servers(now),
+            now + DAEMON_PROJECT_SERVER_DRAIN_DEADLINE
         );
         // Late in the budget the reserve floor wins over the phase cap, so the
         // store-close phase keeps its slice instead of being consumed.
-        tokio::time::advance(tokio::time::Duration::from_secs(20)).await;
+        let now = start + Duration::from_secs(25);
         assert_eq!(
-            budget.project_servers(),
-            overall - DAEMON_STORE_CLOSE_RESERVE
+            budget.project_servers(now) + DAEMON_STORE_CLOSE_RESERVE,
+            overall
         );
         // Past the reserve boundary an overrun phase still gets a deadline it
         // can report a named timeout against, rather than being dropped from
         // the sequence, and store close still gets the rest.
-        tokio::time::advance(tokio::time::Duration::from_secs(15)).await;
-        assert_eq!(budget.project_servers(), tokio::time::Instant::now());
-        assert_eq!(budget.store_close(), overall);
+        let now = start + Duration::from_secs(40);
+        assert_eq!(budget.project_servers(now), now);
+        assert_eq!(budget.store_close(now), overall);
+    }
+
+    #[tokio::test]
+    async fn stuck_in_flight_work_times_out_at_the_client_drain_deadline() {
+        let lifecycle = DaemonLifecycle::default();
+        let _stuck = lifecycle.try_enter().expect("in-flight client work");
+
+        let receipt = coordinate_daemon_shutdown(
+            &lifecycle,
+            Instant::now() + Duration::from_secs(2),
+            async {
+                let mut plan = DaemonShutdownPlan::new(Vec::new(), |_| async {
+                    ShutdownTaskReceipt::default()
+                });
+                plan.phases = TEST_PHASES;
+                plan
+            },
+        )
+        .await;
+
+        assert_eq!(receipt.in_flight, ShutdownStatus::TimedOut);
+        assert_eq!(receipt.clients, ShutdownStatus::TimedOut);
+        assert!(
+            receipt.background.owners.is_empty(),
+            "the client phase times out on its own deadline, not the coordinator's: {:?}",
+            receipt.background
+        );
+        assert!(receipt.project_servers.is_clean());
+    }
+
+    #[tokio::test]
+    async fn a_project_server_drain_that_ignores_its_deadline_hits_the_backstop() {
+        let lifecycle = DaemonLifecycle::default();
+
+        let receipt = coordinate_daemon_shutdown(
+            &lifecycle,
+            Instant::now() + Duration::from_secs(4),
+            async {
+                let mut plan = DaemonShutdownPlan::new(Vec::new(), |_| {
+                    std::future::pending::<ShutdownTaskReceipt>()
+                });
+                plan.phases = TEST_PHASES;
+                plan
+            },
+        )
+        .await;
+
+        assert_eq!(
+            receipt.project_servers,
+            ShutdownTaskReceipt::timed_out("project_server_shutdown")
+        );
+        assert!(matches!(
+            receipt.background.owners.as_slice(),
+            [owner] if owner.name == "memory_graph_reconciliation"
+                && owner.status == ShutdownStatus::TimedOut
+        ));
     }
 
     #[tokio::test]
@@ -719,10 +803,10 @@ mod tests {
             let closed = Arc::new(AtomicBool::new(false));
             let terminal_closed = Arc::clone(&closed);
             let lifecycle = DaemonLifecycle::default();
-            let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+            let deadline = Instant::now() + Duration::from_secs(5);
             let receipt =
                 coordinate_daemon_shutdown(&lifecycle, deadline, async move {
-                    DaemonShutdownPlan::new(JoinSet::new(), Vec::new(), move |_| async move {
+                    DaemonShutdownPlan::new(Vec::new(), move |_| async move {
                         if timed_out {
                             ShutdownTaskReceipt::timed_out("project_server")
                         } else {
@@ -804,20 +888,18 @@ mod tests {
         lifecycle.begin_draining();
         let terminal_cancelled = Arc::new(AtomicBool::new(false));
         let task_cancelled = Arc::clone(&terminal_cancelled);
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(5);
         let shutdown_lifecycle = lifecycle.clone();
         let shutdown = tokio::spawn(async move {
             coordinate_daemon_shutdown(&shutdown_lifecycle, deadline, async move {
-                DaemonShutdownPlan::new(JoinSet::new(), Vec::new(), |_| async {
-                    ShutdownTaskReceipt::default()
-                })
-                .with_terminal_owner_phases(vec![vec![ShutdownOwner::new(
-                    "memory_graph_reconciliation",
-                    move || {
-                        task_cancelled.store(true, Ordering::Release);
-                    },
-                    async {},
-                )]])
+                DaemonShutdownPlan::new(Vec::new(), |_| async { ShutdownTaskReceipt::default() })
+                    .with_terminal_owner_phases(vec![vec![ShutdownOwner::new(
+                        "memory_graph_reconciliation",
+                        move || {
+                            task_cancelled.store(true, Ordering::Release);
+                        },
+                        async {},
+                    )]])
             })
             .await
         });
@@ -835,9 +917,9 @@ mod tests {
         let lifecycle = DaemonLifecycle::default();
         let terminal_started = Arc::new(AtomicBool::new(false));
         let terminal_started_by_owner = Arc::clone(&terminal_started);
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+        let deadline = Instant::now() + Duration::from_secs(1);
         let receipt = coordinate_daemon_shutdown(&lifecycle, deadline, async move {
-            DaemonShutdownPlan::new(JoinSet::new(), Vec::new(), |_| async {
+            DaemonShutdownPlan::new(Vec::new(), |_| async {
                 ShutdownTaskReceipt::timed_out("project_server[0]")
             })
             .with_terminal_owner_phases(vec![vec![ShutdownOwner::new(
@@ -873,7 +955,7 @@ mod tests {
         // reports `TimedOut` whenever its first poll precedes the release by a
         // timer tick. That makes the receipt retryable, which legitimately
         // re-prepares shutdown and hides the ownership contract under test.
-        let deadline = tokio::time::Instant::now() + DAEMON_SHUTDOWN_DEADLINE;
+        let deadline = Instant::now() + DAEMON_SHUTDOWN_DEADLINE;
 
         let first_lifecycle = lifecycle.clone();
         let first_cancellations = Arc::clone(&cancellations);
@@ -883,7 +965,6 @@ mod tests {
         let first = tokio::spawn(async move {
             coordinate_daemon_shutdown(&first_lifecycle, deadline, async move {
                 DaemonShutdownPlan::new(
-                    JoinSet::new(),
                     vec![vec![ShutdownOwner::new(
                         "owner",
                         move || {
@@ -940,19 +1021,19 @@ mod tests {
     #[tokio::test]
     async fn client_error_is_preserved_in_terminal_receipt() {
         let lifecycle = DaemonLifecycle::default();
-        let mut clients = JoinSet::new();
-        clients.spawn(async {
-            Err(TraceDecayError::Config {
-                message: "client failed during shutdown".to_owned(),
-            })
-        });
-        tokio::task::yield_now().await;
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(5);
 
         let receipt = coordinate_daemon_shutdown(&lifecycle, deadline, async move {
-            DaemonShutdownPlan::new(clients, Vec::new(), |_| async {
-                ShutdownTaskReceipt::default()
-            })
+            DaemonShutdownPlan::new(Vec::new(), |_| async { ShutdownTaskReceipt::default() })
+                .with_clients(ShutdownOwner::with_deadline_result(
+                    "clients",
+                    || {},
+                    |_| async {
+                        Err::<(), _>(TraceDecayError::Config {
+                            message: "client failed during shutdown".to_owned(),
+                        })
+                    },
+                ))
         })
         .await;
 
@@ -966,9 +1047,9 @@ mod tests {
     #[tokio::test]
     async fn coordinator_panic_becomes_shared_terminal_failure() {
         let lifecycle = DaemonLifecycle::default();
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(5);
         let receipt = coordinate_daemon_shutdown(&lifecycle, deadline, async {
-            DaemonShutdownPlan::new(JoinSet::new(), Vec::new(), |_| async {
+            DaemonShutdownPlan::new(Vec::new(), |_| async {
                 panic!("server shutdown panic");
             })
         })
@@ -988,21 +1069,20 @@ mod tests {
         assert!(!receipt.project_servers.is_clean());
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn timed_out_shutdown_receipt_allows_one_non_overlapping_retry() {
         let lifecycle = DaemonLifecycle::default();
         let attempts = Arc::new(AtomicUsize::new(0));
         let cancellations = Arc::new(AtomicUsize::new(0));
         let first_attempts = Arc::clone(&attempts);
         let first_cancellations = Arc::clone(&cancellations);
-        let first_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+        let first_deadline = Instant::now() + Duration::from_secs(1);
         let first = tokio::spawn({
             let lifecycle = lifecycle.clone();
             async move {
                 coordinate_daemon_shutdown(&lifecycle, first_deadline, async move {
                     first_attempts.fetch_add(1, Ordering::AcqRel);
                     DaemonShutdownPlan::new(
-                        JoinSet::new(),
                         vec![vec![ShutdownOwner::new(
                             "uncooperative_owner",
                             move || {
@@ -1016,18 +1096,19 @@ mod tests {
                 .await
             }
         });
-        tokio::task::yield_now().await;
-        tokio::time::advance(tokio::time::Duration::from_secs(1)).await;
         let first = first.await.expect("timed-out shutdown attempt");
-        assert_eq!(first.background.owners[0].status, ShutdownStatus::TimedOut);
+        assert!(matches!(
+            first.background.owners.as_slice(),
+            [owner] if owner.name == "uncooperative_owner"
+                && owner.status == ShutdownStatus::TimedOut
+        ));
 
         let retry_attempts = Arc::clone(&attempts);
         let retry_cancellations = Arc::clone(&cancellations);
-        let retry_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+        let retry_deadline = Instant::now() + Duration::from_secs(1);
         let retry = coordinate_daemon_shutdown(&lifecycle, retry_deadline, async move {
             retry_attempts.fetch_add(1, Ordering::AcqRel);
             DaemonShutdownPlan::new(
-                JoinSet::new(),
                 vec![vec![ShutdownOwner::new(
                     "cooperative_owner",
                     move || {
@@ -1054,16 +1135,15 @@ mod tests {
         assert!(retry.project_servers.is_clean());
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn retry_preserves_a_typed_failure_from_an_earlier_timed_out_attempt() {
         let lifecycle = DaemonLifecycle::default();
-        let first_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+        let first_deadline = Instant::now() + Duration::from_secs(1);
         let first = tokio::spawn({
             let lifecycle = lifecycle.clone();
             async move {
                 coordinate_daemon_shutdown(&lifecycle, first_deadline, async {
                     DaemonShutdownPlan::new(
-                        JoinSet::new(),
                         vec![vec![
                             ShutdownOwner::with_deadline_result(
                                 "failed_owner",
@@ -1078,8 +1158,6 @@ mod tests {
                 .await
             }
         });
-        tokio::task::yield_now().await;
-        tokio::time::advance(tokio::time::Duration::from_secs(1)).await;
         let first = first.await.expect("first shutdown attempt");
 
         assert!(first.is_retryable());
@@ -1095,11 +1173,9 @@ mod tests {
 
         let retry = coordinate_daemon_shutdown(
             &lifecycle,
-            tokio::time::Instant::now() + tokio::time::Duration::from_secs(1),
+            Instant::now() + Duration::from_secs(1),
             async {
-                DaemonShutdownPlan::new(JoinSet::new(), Vec::new(), |_| async {
-                    ShutdownTaskReceipt::default()
-                })
+                DaemonShutdownPlan::new(Vec::new(), |_| async { ShutdownTaskReceipt::default() })
             },
         )
         .await;
@@ -1123,11 +1199,9 @@ mod tests {
         first_project_servers.extend(ShutdownTaskReceipt::timed_out("timed_out_server"));
         let first = coordinate_daemon_shutdown(
             &lifecycle,
-            tokio::time::Instant::now() + tokio::time::Duration::from_secs(1),
+            Instant::now() + Duration::from_secs(1),
             async move {
-                DaemonShutdownPlan::new(JoinSet::new(), Vec::new(), move |_| async move {
-                    first_project_servers
-                })
+                DaemonShutdownPlan::new(Vec::new(), move |_| async move { first_project_servers })
             },
         )
         .await;
@@ -1135,11 +1209,9 @@ mod tests {
         assert!(first.is_retryable());
         let retry = coordinate_daemon_shutdown(
             &lifecycle,
-            tokio::time::Instant::now() + tokio::time::Duration::from_secs(1),
+            Instant::now() + Duration::from_secs(1),
             async {
-                DaemonShutdownPlan::new(JoinSet::new(), Vec::new(), |_| async {
-                    ShutdownTaskReceipt::default()
-                })
+                DaemonShutdownPlan::new(Vec::new(), |_| async { ShutdownTaskReceipt::default() })
             },
         )
         .await;
@@ -1158,7 +1230,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn contended_prepare_lock_times_out_with_retryable_receipt() {
         struct Dropped(Arc<std::sync::atomic::AtomicBool>);
 
@@ -1173,7 +1245,7 @@ mod tests {
         let held_lock = prepare_lock.lock().await;
         let prepare_started = Arc::new(tokio::sync::Notify::new());
         let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+        let deadline = Instant::now() + Duration::from_millis(200);
 
         let first_lifecycle = lifecycle.clone();
         let first_lock = Arc::clone(&prepare_lock);
@@ -1184,16 +1256,20 @@ mod tests {
                 let _dropped = Dropped(first_dropped);
                 first_started.notify_one();
                 let _lock = first_lock.lock().await;
-                DaemonShutdownPlan::new(JoinSet::new(), Vec::new(), |_| async {
-                    ShutdownTaskReceipt::default()
-                })
+                DaemonShutdownPlan::new(Vec::new(), |_| async { ShutdownTaskReceipt::default() })
             })
             .await
         });
         prepare_started.notified().await;
 
-        tokio::time::advance(tokio::time::Duration::from_secs(1)).await;
-        let receipt = first.await.expect("shutdown prepare timeout receipt");
+        let receipt = tokio::time::timeout(Duration::from_secs(10), first)
+            .await
+            .expect("the shutdown deadline bounds a contended prepare")
+            .expect("shutdown prepare timeout receipt");
+        assert!(
+            Instant::now() >= deadline,
+            "the prepare is cut off at the shutdown deadline, not before it"
+        );
 
         assert!(receipt.is_retryable());
         assert_eq!(receipt.in_flight, ShutdownStatus::TimedOut);
@@ -1207,11 +1283,9 @@ mod tests {
         assert!(dropped.load(Ordering::Acquire));
 
         drop(held_lock);
-        let retry_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+        let retry_deadline = Instant::now() + Duration::from_secs(1);
         let retry = coordinate_daemon_shutdown(&lifecycle, retry_deadline, async {
-            DaemonShutdownPlan::new(JoinSet::new(), Vec::new(), |_| async {
-                ShutdownTaskReceipt::default()
-            })
+            DaemonShutdownPlan::new(Vec::new(), |_| async { ShutdownTaskReceipt::default() })
         })
         .await;
 
@@ -1234,7 +1308,7 @@ mod tests {
         }
 
         let lifecycle = DaemonLifecycle::default();
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+        let deadline = Instant::now() + Duration::from_secs(1);
         let shutdown_lifecycle = lifecycle.clone();
         let receipt = tokio::spawn(async move {
             coordinate_daemon_shutdown(&shutdown_lifecycle, deadline, PanickingPrepare).await
@@ -1305,43 +1379,38 @@ mod tests {
         let prepares = Arc::new(AtomicUsize::new(0));
         let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-        let first_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(500);
+        let first_deadline = Instant::now() + Duration::from_millis(500);
         let first_lifecycle = lifecycle.clone();
         let first_prepares = Arc::clone(&prepares);
         let first_release = Arc::clone(&release);
         let mut first = tokio::spawn(async move {
             coordinate_daemon_shutdown(&first_lifecycle, first_deadline, async move {
                 first_prepares.fetch_add(1, Ordering::AcqRel);
-                DaemonShutdownPlan::new(JoinSet::new(), Vec::new(), move |_| {
-                    BlockingProjectServers {
-                        entered: Some(entered_tx),
-                        release: first_release,
-                    }
+                DaemonShutdownPlan::new(Vec::new(), move |_| BlockingProjectServers {
+                    entered: Some(entered_tx),
+                    release: first_release,
                 })
             })
             .await
         });
         entered_rx.await.expect("shutdown runner entered");
 
-        let first_receipt =
-            match tokio::time::timeout(tokio::time::Duration::from_secs(2), &mut first).await {
-                Ok(joined) => joined.expect("first shutdown coordinator"),
-                Err(_) => {
-                    release_runner(&release);
-                    let _ = first.await;
-                    panic!("timed-out shutdown did not publish before runner release");
-                }
-            };
+        let first_receipt = match tokio::time::timeout(Duration::from_secs(2), &mut first).await {
+            Ok(joined) => joined.expect("first shutdown coordinator"),
+            Err(_) => {
+                release_runner(&release);
+                let _ = first.await;
+                panic!("timed-out shutdown did not publish before runner release");
+            }
+        };
         assert!(first_receipt.is_retryable());
         assert_eq!(first_receipt.in_flight, ShutdownStatus::TimedOut);
 
         let second_prepares = Arc::clone(&prepares);
-        let second_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(100);
+        let second_deadline = Instant::now() + Duration::from_millis(100);
         let second = coordinate_daemon_shutdown(&lifecycle, second_deadline, async move {
             second_prepares.fetch_add(1, Ordering::AcqRel);
-            DaemonShutdownPlan::new(JoinSet::new(), Vec::new(), |_| async {
-                ShutdownTaskReceipt::default()
-            })
+            DaemonShutdownPlan::new(Vec::new(), |_| async { ShutdownTaskReceipt::default() })
         })
         .await;
         assert!(second.is_retryable());
@@ -1350,7 +1419,7 @@ mod tests {
 
         release_runner(&release);
         tokio::time::timeout(
-            tokio::time::Duration::from_secs(2),
+            Duration::from_secs(2),
             lifecycle.wait_for_finished_shutdown_coordinator(),
         )
         .await
@@ -1360,12 +1429,10 @@ mod tests {
         let retry_prepares = Arc::clone(&prepares);
         let retry = coordinate_daemon_shutdown(
             &lifecycle,
-            tokio::time::Instant::now() + tokio::time::Duration::from_secs(1),
+            Instant::now() + Duration::from_secs(1),
             async move {
                 retry_prepares.fetch_add(1, Ordering::AcqRel);
-                DaemonShutdownPlan::new(JoinSet::new(), Vec::new(), |_| async {
-                    ShutdownTaskReceipt::default()
-                })
+                DaemonShutdownPlan::new(Vec::new(), |_| async { ShutdownTaskReceipt::default() })
             },
         )
         .await;

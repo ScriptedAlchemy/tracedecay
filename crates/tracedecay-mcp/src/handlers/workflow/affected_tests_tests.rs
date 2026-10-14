@@ -1148,6 +1148,54 @@ fn scoped_file_symbol_page_needs_only_a_file_scale_budget() {
     );
 }
 
+#[tokio::test]
+async fn request_cancellation_cancels_the_waiting_managed_run() {
+    let root = tempfile::tempdir().unwrap();
+    let emitter = operation_event_authority()
+        .begin_managed_test_run(
+            Url::from_directory_path(root.path()).unwrap().to_string(),
+            mint_global_request_id(GlobalRequestSurface::ManagedTestRun).unwrap(),
+            Deadline::new(UtcMicros(i64::MAX)).unwrap(),
+        )
+        .await
+        .unwrap();
+    let signal = CancellationSignal::active("cancel.managed-test-run").unwrap();
+    let waiter = tokio::spawn(wait_for_test_run_cancellation(
+        emitter.clone(),
+        Some(signal.clone()),
+    ));
+    tokio::task::yield_now().await;
+    assert!(!emitter.is_cancelled(), "nothing cancelled the run yet");
+
+    signal.cancel(UtcMicros(1));
+    tokio::time::timeout(Duration::from_secs(5), waiter)
+        .await
+        .expect("the cancelled request wakes the waiter")
+        .unwrap();
+    assert!(emitter.is_cancelled());
+}
+
+#[test]
+fn changed_file_digests_read_sources_without_a_tokio_runtime() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("lib.rs"), "pub fn util() {}\n").unwrap();
+    let digests =
+        tracedecay_runtime_core::native_runtime::block_on(managed_test_document_content_digests(
+            root.path(),
+            &["lib.rs".to_owned(), "missing.rs".to_owned()],
+        ))
+        .expect("the native runtime drives the reads")
+        .expect("an existing and a missing source both digest");
+
+    let uri = Url::from_file_path(root.path().join("lib.rs"))
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        digests,
+        BTreeMap::from([(uri, content_digest(b"pub fn util() {}\n"))])
+    );
+}
+
 fn tool_result_body(result: &ToolResult) -> Value {
     let text = result.value["content"][0]["text"]
         .as_str()

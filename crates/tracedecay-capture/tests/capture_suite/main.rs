@@ -9,3 +9,4 @@
 mod kiro;
 mod provider_identity;
 mod provider_usage_capture;
+mod session_import_counts;

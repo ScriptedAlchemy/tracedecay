@@ -241,13 +241,14 @@ impl WorkflowFanOutRecoveryOwnerV1 {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .clone();
-                    let mut resume = tokio::task::spawn_blocking(move || {
-                        recover_workflow_fan_out_startup(&resume_registered)
-                    });
+                    let resume =
+                        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+                            recover_workflow_fan_out_startup(&resume_registered)
+                        });
+                    tokio::pin!(resume);
                     let resumed = tokio::select! {
                         biased;
                         () = worker_cancellation.cancelled() => {
-                            resume.abort();
                             return;
                         }
                         result = &mut resume => result,
@@ -289,7 +290,7 @@ impl WorkflowFanOutRecoveryOwnerV1 {
                 let page_project_root = project_root.clone();
                 let page_producer = observability_producer.clone();
                 let page_cursor = cursor.clone();
-                let mut page = tokio::task::spawn_blocking(move || {
+                let page = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
                     reconcile_active_workflow_fan_out_page(
                         &page_registered,
                         page_attempt_processes,
@@ -298,10 +299,10 @@ impl WorkflowFanOutRecoveryOwnerV1 {
                         page_cursor.as_ref(),
                     )
                 });
+                tokio::pin!(page);
                 let delay = tokio::select! {
                     biased;
                     () = worker_cancellation.cancelled() => {
-                        page.abort();
                         return;
                     }
                     result = &mut page => match result {

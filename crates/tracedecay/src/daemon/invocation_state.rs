@@ -1087,7 +1087,7 @@ impl DaemonInvocationState {
         // The bounded wait may expire while a blocking reconcile is still
         // unwinding. The registry retains its worker until a retry joins it;
         // an incomplete sweep must keep the outer shutdown receipt unclean.
-        let schedulers_timed_out = tokio::time::timeout(
+        let schedulers_timed_out = tracedecay_runtime_core::native_runtime::timeout(
             DAEMON_TASK_ABORT_DEADLINE,
             self.code_index_schedulers.shutdown(),
         )
@@ -1254,7 +1254,7 @@ mod shutdown_tests {
             .expect("admit lease worker");
         observed.await.expect("lease worker was polled");
         let receipt = tracedecay_daemon_service::shutdown::join_shutdown_owners(
-            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
             vec![
                 tracedecay_daemon_service::shutdown::ShutdownOwner::with_deadline_status(
                     "invocation",
@@ -1271,20 +1271,18 @@ mod shutdown_tests {
         assert_eq!(receipt.unfinished(), &["invocation"]);
     }
 
-    /// Paused time advances only through timers, so the bound below measures
-    /// grace the shutdown waited out, not host scheduling.
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn cancel_admissions_then_empty_shutdown_is_prompt() {
         let state = DaemonInvocationState::default();
         state.cancel_admissions();
         state.cancel_admissions();
-        let started = tokio::time::Instant::now();
+        let started = std::time::Instant::now();
         assert!(
             state.shutdown().await.is_clean(),
             "empty invocation shutdown must expire cleanly"
         );
         assert!(
-            started.elapsed() < std::time::Duration::from_millis(500),
+            started.elapsed() < DAEMON_TASK_ABORT_DEADLINE,
             "empty code-index join must not spend the TERM grace"
         );
     }

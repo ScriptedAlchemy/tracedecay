@@ -19,6 +19,7 @@ test-transport = []
 test-helpers = ["tracedecay-project/test-helpers"]
 
 [dependencies]
+asupersync.workspace = true
 futures-util = "0.3.33"
 shell-words = "1.1"
 gix.workspace = true
