@@ -1,4 +1,4 @@
-//! Connection context for the `rmcp` adapter, server shutdown, and
+//! Connection context for the MCP session, server shutdown, and
 //! daemon-owned host-admission replay driving.
 
 use super::*;
@@ -19,22 +19,19 @@ pub(super) const MAX_CONCURRENT_CONNECTION_READS: usize =
 /// registry, route cache, or cancellation table of its own.
 pub(crate) struct ProductionMcpConnectionContext {
     server: Arc<McpServer>,
-    admission: Option<Arc<crate::daemon::ParkableConnectionAdmission>>,
     _activity: Option<DaemonActivity>,
 }
 
 impl ProductionMcpConnectionContext {
-    /// rmcp retains this context in its serve loop and in every spawned
-    /// request handler, and neither ends when the connection task is aborted.
-    /// Holding the daemon activity here keeps shutdown's client drain waiting
-    /// until the last of them releases the server and its store leases.
+    /// Holding the daemon activity for the session's lifetime keeps
+    /// shutdown's client drain waiting until the session releases the server
+    /// and its store leases.
     pub(crate) fn with_activity(
         server: Arc<McpServer>,
         activity: Option<DaemonActivity>,
     ) -> Arc<Self> {
         Arc::new(Self {
             server,
-            admission: crate::daemon::current_connection_admission(),
             _activity: activity,
         })
     }
@@ -87,20 +84,6 @@ impl tracedecay_mcp::server::McpConnectionContext for ProductionMcpConnectionCon
 
     fn cancellation_registered(&self) -> &tokio::sync::Notify {
         self.server.dispatch_authority.cancellation_registered()
-    }
-
-    fn run_in_connection_admission<'a, T, F>(
-        &'a self,
-        future: F,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>
-    where
-        T: Send + 'a,
-        F: std::future::Future<Output = T> + Send + 'a,
-    {
-        Box::pin(crate::daemon::in_connection_admission(
-            self.admission.clone(),
-            future,
-        ))
     }
 }
 

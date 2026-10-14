@@ -151,20 +151,16 @@ async fn rmcp_receive_waits_for_full_close_after_request_half_close() {
         .expect("request");
     client_writer.flush().await.expect("flush request");
     assert!(
-        <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::receive(
-            &mut transport
-        )
-        .await
-        .is_some(),
+        BrokerStreamTransport::receive(&mut transport)
+            .await
+            .is_some(),
         "the transport must accept the request"
     );
     client_writer
         .shutdown()
         .await
         .expect("half-close client request side");
-    let mut receive = Box::pin(<BrokerStreamTransport as rmcp::transport::Transport<
-        rmcp::RoleServer,
-    >>::receive(&mut transport));
+    let mut receive = Box::pin(BrokerStreamTransport::receive(&mut transport));
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(250), &mut receive)
             .await
@@ -199,11 +195,9 @@ async fn rmcp_receive_closes_after_half_close_once_accepted_requests_settle() {
         .expect("request");
     client_writer.flush().await.expect("flush request");
     assert!(
-        <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::receive(
-            &mut transport
-        )
-        .await
-        .is_some(),
+        BrokerStreamTransport::receive(&mut transport)
+            .await
+            .is_some(),
         "the transport must accept the request"
     );
     let response = serde_json::from_value(serde_json::json!({
@@ -212,12 +206,9 @@ async fn rmcp_receive_closes_after_half_close_once_accepted_requests_settle() {
         "result": {"content": [{"type": "text", "text": "settled"}]}
     }))
     .expect("typed response");
-    <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::send(
-        &mut transport,
-        response,
-    )
-    .await
-    .expect("response write");
+    BrokerStreamTransport::send(&transport, response)
+        .await
+        .expect("response write");
 
     client_writer
         .shutdown()
@@ -226,9 +217,7 @@ async fn rmcp_receive_closes_after_half_close_once_accepted_requests_settle() {
     assert!(
         tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::receive(
-                &mut transport,
-            ),
+            BrokerStreamTransport::receive(&mut transport,),
         )
         .await
         .expect("settled connection must close after request half-close")
@@ -258,19 +247,15 @@ async fn rmcp_receive_closes_a_request_less_connection_on_half_close() {
         .await
         .expect("half-close client request side");
     assert!(
-        <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::receive(
-            &mut transport
-        )
-        .await
-        .is_some(),
+        BrokerStreamTransport::receive(&mut transport)
+            .await
+            .is_some(),
         "the transport must forward the notification"
     );
     assert!(
         tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::receive(
-                &mut transport,
-            ),
+            BrokerStreamTransport::receive(&mut transport,),
         )
         .await
         .expect("a request-less connection must close after request half-close")
@@ -302,11 +287,9 @@ async fn rmcp_selected_target_retirement_between_handler_and_send_suppresses_res
         .await
         .expect("flush selected-target request");
     assert!(
-        <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::receive(
-            &mut transport
-        )
-        .await
-        .is_some(),
+        BrokerStreamTransport::receive(&mut transport)
+            .await
+            .is_some(),
         "RMCP transport must retain the selected-target response slot"
     );
 
@@ -343,12 +326,9 @@ async fn rmcp_selected_target_retirement_between_handler_and_send_suppresses_res
         "result": {"content": [{"type": "text", "text": "must-not-leak"}]}
     }))
     .expect("typed selected-target response");
-    let error = <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::send(
-        &mut transport,
-        response,
-    )
-    .await
-    .expect_err("retired selected target must suppress its response");
+    let error = BrokerStreamTransport::send(&transport, response)
+        .await
+        .expect_err("retired selected target must suppress its response");
     assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
     tokio::time::timeout(std::time::Duration::from_secs(1), target_drain)
         .await
@@ -391,11 +371,9 @@ async fn rmcp_selected_target_response_does_not_fall_back_to_retired_active_serv
         .await
         .expect("flush selected-target request");
     assert!(
-        <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::receive(
-            &mut transport
-        )
-        .await
-        .is_some(),
+        BrokerStreamTransport::receive(&mut transport)
+            .await
+            .is_some(),
         "RMCP transport must retain the selected-target response slot"
     );
 
@@ -424,12 +402,9 @@ async fn rmcp_selected_target_response_does_not_fall_back_to_retired_active_serv
         "result": {"content": [{"type": "text", "text": "target-owned"}]}
     }))
     .expect("typed selected-target response");
-    <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::send(
-        &mut transport,
-        response,
-    )
-    .await
-    .expect("live selected target must retain response authority");
+    BrokerStreamTransport::send(&transport, response)
+        .await
+        .expect("live selected target must retain response authority");
 
     let mut client_reader = tokio::io::BufReader::new(client_reader);
     let mut line = String::new();
@@ -466,11 +441,9 @@ async fn rmcp_initialize_then_work_response_settles_after_transport_flush() {
         .await
         .expect("flush initialize request");
     assert!(
-        <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::receive(
-            &mut transport
-        )
-        .await
-        .is_some(),
+        BrokerStreamTransport::receive(&mut transport)
+            .await
+            .is_some(),
         "RMCP transport must accept initialize before Work"
     );
 
@@ -483,11 +456,9 @@ async fn rmcp_initialize_then_work_response_settles_after_transport_flush() {
         .expect("Work request");
     client_writer.flush().await.expect("flush Work request");
     assert!(
-        <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::receive(
-            &mut transport
-        )
-        .await
-        .is_some(),
+        BrokerStreamTransport::receive(&mut transport)
+            .await
+            .is_some(),
         "RMCP transport must retain the pending Work response"
     );
 
@@ -497,12 +468,9 @@ async fn rmcp_initialize_then_work_response_settles_after_transport_flush() {
         "result": {"content": [{"type": "text", "text": "delivered"}]}
     }))
     .expect("typed RMCP Work response");
-    <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::send(
-        &mut transport,
-        response,
-    )
-    .await
-    .expect("transport response write and flush");
+    BrokerStreamTransport::send(&transport, response)
+        .await
+        .expect("transport response write and flush");
 
     let mut client_reader = tokio::io::BufReader::new(client_reader);
     let mut line = String::new();
@@ -546,11 +514,9 @@ async fn rmcp_peer_disconnect_mid_delivery_settles_dropped_rather_than_unknown()
         .expect("Work request");
     client_writer.flush().await.expect("flush Work request");
     assert!(
-        <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::receive(
-            &mut transport
-        )
-        .await
-        .is_some(),
+        BrokerStreamTransport::receive(&mut transport)
+            .await
+            .is_some(),
         "RMCP transport must retain the pending Work response"
     );
 
@@ -563,11 +529,7 @@ async fn rmcp_peer_disconnect_mid_delivery_settles_dropped_rather_than_unknown()
         "result": {"content": [{"type": "text", "text": "never observed"}]}
     }))
     .expect("typed RMCP Work response");
-    let write = <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::send(
-        &mut transport,
-        response,
-    )
-    .await;
+    let write = BrokerStreamTransport::send(&transport, response).await;
     assert_eq!(
         write.map_err(|error| error.kind()),
         Ok(()),
@@ -580,11 +542,7 @@ async fn rmcp_peer_disconnect_mid_delivery_settles_dropped_rather_than_unknown()
         "params": {"level": "info", "data": "never observed"}
     }))
     .expect("typed RMCP server notification");
-    let notify = <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::send(
-        &mut transport,
-        notification,
-    )
-    .await;
+    let notify = BrokerStreamTransport::send(&transport, notification).await;
     assert_eq!(
         notify.map_err(|error| error.kind()),
         Err(std::io::ErrorKind::BrokenPipe),
@@ -630,11 +588,9 @@ async fn rmcp_client_cancellation_settles_dropped_without_stranding_the_attempt(
         .expect("Work request");
     client_writer.flush().await.expect("flush Work request");
     assert!(
-        <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::receive(
-            &mut transport
-        )
-        .await
-        .is_some(),
+        BrokerStreamTransport::receive(&mut transport)
+            .await
+            .is_some(),
         "RMCP transport must retain the pending Work response"
     );
 
@@ -649,9 +605,7 @@ async fn rmcp_client_cancellation_settles_dropped_without_stranding_the_attempt(
 
     let notification = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::receive(
-            &mut transport,
-        ),
+        BrokerStreamTransport::receive(&mut transport),
     )
     .await
     .expect("receive cancellation")
@@ -678,12 +632,9 @@ async fn rmcp_client_cancellation_settles_dropped_without_stranding_the_attempt(
         "result": {"content": [{"type": "text", "text": "late success"}]}
     }))
     .expect("typed late response");
-    <BrokerStreamTransport as rmcp::transport::Transport<rmcp::RoleServer>>::send(
-        &mut transport,
-        late_response,
-    )
-    .await
-    .expect("settled cancellation response");
+    BrokerStreamTransport::send(&transport, late_response)
+        .await
+        .expect("settled cancellation response");
     client_reader
         .read_line(&mut line)
         .await
