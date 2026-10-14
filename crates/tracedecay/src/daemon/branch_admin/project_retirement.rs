@@ -97,7 +97,7 @@ impl ProjectServerRetirementAdmission<'_> {
         track_project_server_retirement_after_admission(
             &mut self.retirements,
             owner,
-            tokio_retirement_status(task, false),
+            tokio_retirement_status(task),
         );
     }
 
@@ -203,13 +203,9 @@ async fn wait_for_project_server_retirement(
 
 async fn tokio_retirement_status(
     task: tokio::task::JoinHandle<()>,
-    cancelled_is_clean: bool,
 ) -> ProjectServerRetirementStatus {
     match task.await {
         Ok(()) => ProjectServerRetirementStatus::Clean,
-        Err(error) if cancelled_is_clean && error.is_cancelled() => {
-            ProjectServerRetirementStatus::Clean
-        }
         Err(error) => ProjectServerRetirementStatus::Failed(error.to_string()),
     }
 }
@@ -268,15 +264,7 @@ pub(super) async fn track_retirement_task(
     owner: StoreOwnerKey,
     task: tokio::task::JoinHandle<()>,
 ) {
-    track_project_server_retirement(retirements, owner, tokio_retirement_status(task, false)).await;
-}
-
-pub(super) async fn track_aborted_retirement_task(
-    retirements: &tokio::sync::Mutex<Vec<ProjectServerRetirement>>,
-    owner: StoreOwnerKey,
-    task: tokio::task::JoinHandle<()>,
-) {
-    track_project_server_retirement(retirements, owner, tokio_retirement_status(task, true)).await;
+    track_project_server_retirement(retirements, owner, tokio_retirement_status(task)).await;
 }
 
 pub(super) async fn track_aborted_native_retirement_task(
@@ -373,7 +361,7 @@ impl StoreAdministration {
         track_project_server_retirement(
             &self.project_server_retirements,
             owner,
-            tokio_retirement_status(task, false),
+            tokio_retirement_status(task),
         )
         .await;
     }

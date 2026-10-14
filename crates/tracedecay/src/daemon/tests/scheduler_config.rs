@@ -1071,7 +1071,16 @@ fn the_automation_loop_starts_and_exits_without_a_tokio_runtime() {
     let key = ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
     let barrier = Arc::new(AutomationSchedulerExitBarrier::new());
     let _barrier_release = AutomationExitBarrierRelease(Arc::clone(&barrier));
+    // Project open started its own loop; retire it so the reconcile below
+    // starts the one under test.
     tokio.block_on(async {
+        if let Some(retirement) = engine.retire_automation_scheduler_locked(&key).await {
+            retirement.wait().await;
+        }
+        engine
+            .store_administration
+            .wait_for_retirement_reaper_count_for_test(0)
+            .await;
         *engine.automation_scheduler_exit_barrier.lock().await = Some(Arc::clone(&barrier));
     });
     engine
@@ -1079,11 +1088,15 @@ fn the_automation_loop_starts_and_exits_without_a_tokio_runtime() {
         .store(true, std::sync::atomic::Ordering::Relaxed);
 
     let hazards = crate::test_support::native_runtime_hazards();
-    let (outcome, decision) = tracedecay_runtime_core::native_runtime::block_on(async {
+    let decision = tracedecay_runtime_core::native_runtime::block_on(async {
         assert!(tokio::runtime::Handle::try_current().is_err());
         let outcome = engine
             .ensure_automation_scheduler(key.clone(), project.clone(), handshake.clone())
             .await;
+        assert_eq!(
+            outcome,
+            tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::Started
+        );
         tracedecay_runtime_core::native_runtime::timeout(
             std::time::Duration::from_secs(20),
             barrier.wait_until_reached(),
@@ -1091,20 +1104,15 @@ fn the_automation_loop_starts_and_exits_without_a_tokio_runtime() {
         .await
         .expect("the loop read its disabled configuration");
         barrier.release();
-        let decision = tracedecay_runtime_core::native_runtime::timeout(
+        tracedecay_runtime_core::native_runtime::timeout(
             std::time::Duration::from_secs(20),
             barrier.wait_for_decision(),
         )
         .await
-        .expect("the loop decided whether to exit");
-        (outcome, decision)
+        .expect("the loop decided whether to exit")
     })
     .expect("native runtime");
     assert_eq!(crate::test_support::native_runtime_hazards(), hazards);
-    assert_eq!(
-        outcome,
-        tracedecay_contracts::retrieval::AutomationSchedulerReconcileOutcome::Started
-    );
     assert_eq!(decision, AutomationSchedulerExitBarrier::EXIT);
     tokio.block_on(engine.shutdown_all());
 }

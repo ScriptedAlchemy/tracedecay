@@ -542,8 +542,8 @@ fn probed_native_test_task(
     let alive = Arc::new(());
     let probe = NativeTaskProbe(Arc::downgrade(&alive));
     let task = NativeTask::spawn(async move {
-        let _alive = alive;
         work.await;
+        drop(alive);
     })
     .expect("native test task");
     (task, probe)

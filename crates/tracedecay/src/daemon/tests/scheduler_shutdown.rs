@@ -966,10 +966,10 @@ async fn dropping_the_administration_aborts_an_owned_manual_branch_publication()
     let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
     administration
         .admit_manual_branch_publication(|_, admitted| async move {
-            let _alive = alive;
             let _ = admitted.send(());
             let _ = started_sender.send(());
             std::future::pending::<()>().await;
+            drop(alive);
             Ok(tracedecay_runtime_core::branch::BranchAddOutcome::Added)
         })
         .await
