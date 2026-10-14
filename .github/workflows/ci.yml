@@ -221,6 +221,13 @@ jobs:
           python3 scripts/test-check-dev-skill-mirrors.py
           python3 scripts/check-dev-skill-mirrors.py check
 
+      # Every SQLite connection plans with SQLITE_DBCONFIG_ENABLE_QPSG, so a
+      # bound partial-index predicate or LIKE pattern silently scans.
+      - name: Test and check SQL plans stay index-backed under QPSG
+        run: |
+          python3 scripts/test-check-sqlite-plan-stability.py
+          python3 scripts/check-sqlite-plan-stability.py
+
       # Lint proposed commits without rejudging already-published history.
       - name: Validate commit messages
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'

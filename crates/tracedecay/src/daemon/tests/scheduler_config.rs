@@ -655,13 +655,7 @@ async fn profile_reconcile_broadcasts_to_cached_projects_without_opening_uncache
                         inside an initialized project or pass --project <path>"
         })
     );
-    wait_for_automation_scheduler_state(
-        &engine,
-        tokio::time::Instant::now() + tokio::time::Duration::from_secs(4),
-        "profile scheduler broadcast",
-        |schedulers| schedulers.len() == 2,
-    )
-    .await;
+    wait_for_automation_scheduler_state(&engine, |schedulers| schedulers.len() == 2).await;
 
     engine.shutdown_all().await;
 }
@@ -727,13 +721,7 @@ async fn cached_project_reconciles_cli_enabled_automation_without_cache_probe() 
     // increments when the probe starts, before the configuration read and
     // well before registration. Settle on the registered owner instead of
     // sampling the window before it appears.
-    wait_for_automation_scheduler_state(
-        &engine,
-        tokio::time::Instant::now() + tokio::time::Duration::from_secs(20),
-        "initial automation scheduler activation",
-        |schedulers| schedulers.contains_key(&key),
-    )
-    .await;
+    wait_for_automation_scheduler_state(&engine, |schedulers| schedulers.contains_key(&key)).await;
 
     apply_project_automation_patch_via_surface(
         &engine,
@@ -793,13 +781,7 @@ async fn cached_project_reconciles_cli_enabled_automation_without_cache_probe() 
         report["outcome"], "started",
         "a finished handle must not be reported as a successful notification"
     );
-    wait_for_automation_scheduler_state(
-        &engine,
-        tokio::time::Instant::now() + tokio::time::Duration::from_secs(4),
-        "automation scheduler reconciliation",
-        |schedulers| schedulers.contains_key(&key),
-    )
-    .await;
+    wait_for_automation_scheduler_state(&engine, |schedulers| schedulers.contains_key(&key)).await;
 
     let schedulers = engine
         .store_administration

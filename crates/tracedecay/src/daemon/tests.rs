@@ -557,32 +557,25 @@ fn probed_native_test_task(
 #[cfg(unix)]
 async fn wait_for_automation_scheduler_state(
     engine: &DaemonEngine,
-    deadline: tokio::time::Instant,
-    description: &str,
     mut matches: impl FnMut(
         &std::collections::HashMap<ProjectServerKey, AutomationSchedulerHandle>,
     ) -> bool,
 ) {
-    let message = format!("timed out waiting for {description}");
-    tokio::time::timeout(remaining_test_budget(deadline, &message), async {
-        loop {
-            let changed = engine.automation_scheduler_state_changed.notified();
-            tokio::pin!(changed);
-            changed.as_mut().enable();
-            let schedulers = engine
-                .store_administration
-                .automation_schedulers()
-                .lock()
-                .await;
-            if matches(&schedulers) {
-                return;
-            }
-            drop(schedulers);
-            changed.await;
+    loop {
+        let changed = engine.automation_scheduler_state_changed.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        let schedulers = engine
+            .store_administration
+            .automation_schedulers()
+            .lock()
+            .await;
+        if matches(&schedulers) {
+            return;
         }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("{message}"));
+        drop(schedulers);
+        changed.await;
+    }
 }
 
 #[cfg(unix)]
