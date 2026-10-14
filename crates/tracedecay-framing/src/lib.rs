@@ -42,6 +42,8 @@ use std::io::{self, Read};
 use std::pin::Pin;
 use std::task::{Poll, ready};
 
+pub mod pump;
+
 /// Wire frame/record ceiling (1 MiB).
 ///
 /// This is the authority for host-event stdin, hook payloads, and other
