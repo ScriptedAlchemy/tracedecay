@@ -123,3 +123,25 @@ pub(crate) fn execute<E: StorageOperationExecutor>(
     validation::validate(request).map_err(StorageOperationError::Contract)?;
     executor.execute_closed(savepoint, &request.envelope().payload)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_sql_only_executor_rejects_product_domain_writes() {
+        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        let mut transaction = connection.transaction().unwrap();
+        let savepoint = transaction.savepoint().unwrap();
+        let request = crate::test_support::request(crate::test_support::metadata(
+            "operation.exact-sql-only",
+            "idempotency.exact-sql-only",
+            'e',
+        ));
+
+        let result =
+            ExactSqlOnlyStorageOperationV1.execute(&savepoint, &request.envelope().payload);
+
+        assert!(matches!(result, Err(rusqlite::Error::InvalidQuery)));
+    }
+}

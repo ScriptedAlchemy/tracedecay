@@ -42,17 +42,13 @@ pub fn inspect_graph_store_schema(path: &Path) -> Result<GraphStoreSchemaAdmissi
     })?;
     if !has_header {
         return Err(TraceDecayError::Config {
-            message: format!(
-                "{} is not a SQLite database; the scoped reset covers only stores refused \
-                 for an incompatible schema version",
-                path.display()
-            ),
+            message: format!("{} is not a SQLite database", path.display()),
         });
     }
     let connection =
         rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|error| TraceDecayError::Database {
-                operation: "open project graph store for reset verification".to_owned(),
+                operation: "open project graph store for schema inspection".to_owned(),
                 message: error.to_string(),
             })?;
     let schema_version = crate::db::schema_version::read_version_sync(
@@ -60,7 +56,7 @@ pub fn inspect_graph_store_schema(path: &Path) -> Result<GraphStoreSchemaAdmissi
         crate::db::schema_version::GRAPH_COMPONENT,
     )
     .map_err(|error| TraceDecayError::Database {
-        operation: "read project graph store schema version".to_owned(),
+        operation: "inspect project graph store schema version".to_owned(),
         message: error.to_string(),
     })?
     .unwrap_or(0);
