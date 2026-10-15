@@ -641,10 +641,14 @@ async fn unchanged_codex_contract_failure_is_quarantined_without_reopening() {
         let hub = hub.clone();
         let path = path.clone();
         async move {
-            crate::runtime::hosts::codex::PendingTranscript::observe(Some((&hub, consumer)), &path)
-                .await
-                .unwrap()
-                .is_some()
+            super::quarantine::SourceClaim::observe_file(
+                "codex",
+                hub.source_ledger(consumer),
+                &path,
+            )
+            .await
+            .unwrap()
+            .is_some()
         }
     };
     assert!(

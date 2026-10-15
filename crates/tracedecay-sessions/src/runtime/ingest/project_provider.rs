@@ -25,6 +25,7 @@ use super::failure::{
     cancelled_provider_outcome, classify_transcript_ingest_failure, claude_catch_up_failure,
     failed_observation_run, warn_transcript_catch_up_failure,
 };
+use super::quarantine::SourceClaim;
 
 pub(super) const PROJECT_CATCH_UP_PROVIDERS: &[SessionProvider] = &[
     SessionProvider::Codex,
@@ -280,6 +281,9 @@ impl<'a> ProjectProviderRun<'a> {
         // session stays active and never reach an older in-scope day.
         let mut persisted_day: Option<&Path> = None;
         let mut outcome = ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);
+        let ledger = self
+            .codex_discovery
+            .and_then(|(hub, consumer)| hub.source_ledger(consumer));
         for path in &discovery.paths {
             if remaining == 0 {
                 deferred = true;
@@ -291,7 +295,7 @@ impl<'a> ProjectProviderRun<'a> {
                 frontier_committable = false;
                 break;
             }
-            let Some(pending) = codex::PendingTranscript::observe(self.codex_discovery, path)
+            let Some(pending) = SourceClaim::observe_file("codex", ledger.clone(), path)
                 .await
                 .transpose()
             else {
@@ -364,7 +368,7 @@ impl<'a> ProjectProviderRun<'a> {
             {
                 Ok(progress) => {
                     if let Err(error) =
-                        pending.admitted(path, progress.source_deferred, progress.covered_through)
+                        pending.admitted(progress.source_deferred, progress.covered_through)
                     {
                         outcome.add_failure(warn_transcript_catch_up_failure(
                             "codex",
@@ -408,8 +412,7 @@ impl<'a> ProjectProviderRun<'a> {
                         outcome.failures.len().saturating_add(1),
                         failure.retryable,
                     );
-                    if let Err(record_error) = pending.record_source_failure(path, &error, failure)
-                    {
+                    if let Err(record_error) = pending.record_source_failure(&error) {
                         outcome.add_failure(warn_transcript_catch_up_failure(
                             "codex",
                             "discovery",

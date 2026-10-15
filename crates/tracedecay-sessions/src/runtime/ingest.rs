@@ -2,6 +2,7 @@ pub mod authority;
 mod failure;
 mod project;
 pub(in crate::runtime) mod project_provider;
+pub(crate) mod quarantine;
 mod scheduler;
 mod startup;
 mod user;

@@ -18,7 +18,8 @@ use tracedecay_store::{ParseOffset, observation::ObservationCoverageReason};
 use crate::admission::{HostAdmission, HostDiscoveryQueueEntry};
 use crate::observation::ObservationCancellation;
 use crate::runtime::host_scan::{HOST_SCAN_WINDOW, HostScanBudget, isolatable_source_error};
-use crate::runtime::hosts::codex::{CodexDiscoveryHub, PendingTranscript};
+use crate::runtime::hosts::codex::CodexDiscoveryHub;
+use crate::runtime::ingest::quarantine::{SourceClaim, SourceLedger};
 use crate::runtime::jsonl_observation_admission::{
     JsonlFrameAdmission, JsonlObservationAdmissionRequest, admit_jsonl_observations,
 };
@@ -98,7 +99,7 @@ impl KimiSource {
         bounds: TranscriptDiscoveryBounds,
         frontier_path: Option<PathBuf>,
         mut budget: HostScanBudget,
-        convergence: Option<(&CodexDiscoveryHub, &str)>,
+        ledger: Option<&SourceLedger>,
     ) -> TranscriptIngestResult<(KimiDiscoveryReport, HostScanBudget)> {
         {
             {
@@ -160,12 +161,8 @@ impl KimiSource {
                             break 'session_dirs;
                         }
                         let state_path = session_dir.join("state.json");
-                        let CandidateConvergence::Pending(state_pending) = converging_candidate(
-                            convergence,
-                            &state_path,
-                            &mut discovery,
-                            &mut budget,
-                        )?
+                        let CandidateConvergence::Pending(state_pending) =
+                            converging_candidate(ledger, &state_path, &mut discovery, &mut budget)?
                         else {
                             continue;
                         };
@@ -181,7 +178,7 @@ impl KimiSource {
                             if matcher.membership(state.working_directory())
                                 == ProjectMembership::NoMatch
                             {
-                                state_pending.finished(&state_path)?;
+                                state_pending.finished()?;
                             }
                             continue;
                         }
@@ -253,7 +250,7 @@ impl KimiSource {
                                 .is_some_and(|frontier| candidate <= *frontier)
                             {
                                 match converging_candidate(
-                                    convergence,
+                                    ledger,
                                     &candidate,
                                     &mut discovery,
                                     &mut budget,
@@ -267,7 +264,7 @@ impl KimiSource {
                                 continue;
                             }
                             match converging_candidate(
-                                convergence,
+                                ledger,
                                 &candidate,
                                 &mut discovery,
                                 &mut budget,
@@ -296,13 +293,12 @@ impl KimiSource {
                             }
                         }
                         if agents > 0 && converged_agents == agents {
-                            state_pending.finished(&state_path)?;
+                            state_pending.finished()?;
                         } else if agents > 0
                             && converged_agents.saturating_add(queued_wires.len()) == agents
                             && let Some(settled) = state_pending.settled()
                         {
                             discovery.state_gates.push(KimiStateGate {
-                                path: state_path,
                                 settled,
                                 pending_wires: queued_wires,
                             });
@@ -335,16 +331,16 @@ enum CandidateConvergence {
     Finished,
     /// Its identity could not be read; the failure is recorded.
     Unreadable,
-    Pending(PendingTranscript),
+    Pending(SourceClaim),
 }
 
 fn converging_candidate(
-    convergence: Option<(&CodexDiscoveryHub, &str)>,
+    ledger: Option<&SourceLedger>,
     path: &Path,
     discovery: &mut KimiDiscoveryReport,
     budget: &mut HostScanBudget,
 ) -> TranscriptIngestResult<CandidateConvergence> {
-    match PendingTranscript::observe_blocking(convergence, path) {
+    match SourceClaim::observe_file_blocking(ledger, path) {
         Ok(Some(pending)) => Ok(CandidateConvergence::Pending(pending)),
         Ok(None) => Ok(CandidateConvergence::Finished),
         Err(TranscriptIngestError::ScanIo { source, .. }) => {
@@ -545,8 +541,8 @@ pub async fn capture_kimi_observations(
             );
             let owned_source = source.clone();
             let owned_project_root = project_root.to_path_buf();
-            let owned_convergence =
-                convergence.map(|(hub, consumer)| (hub.clone(), consumer.to_owned()));
+            let ledger = convergence.and_then(|(hub, consumer)| hub.source_ledger(consumer));
+            let owned_ledger = ledger.clone();
             let discovered = tracing::Instrument::instrument(
                 tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
                     owned_source.discover(
@@ -554,9 +550,7 @@ pub async fn capture_kimi_observations(
                         TranscriptDiscoveryBounds::from_discovered_units(MAX_DISCOVERY_CANDIDATES),
                         frontier_path,
                         scan_budget,
-                        owned_convergence
-                            .as_ref()
-                            .map(|(hub, consumer)| (hub, consumer.as_str())),
+                        owned_ledger.as_ref(),
                     )
                 }),
                 tracing::trace_span!("sessions.hosts.kimi.discover_task"),
@@ -666,17 +660,11 @@ pub async fn capture_kimi_observations(
                 // One blocking round per source: convergence observation and
                 // the identity read both touch the same file, and a fused
                 // dispatch halves the executor round-trips every path pays.
-                let owned_convergence =
-                    convergence.map(|(hub, consumer)| (hub.clone(), consumer.to_owned()));
                 let (pending, file_identity) = match run_blocking_transcript_section("kimi", {
                     let path = path.clone();
+                    let ledger = ledger.clone();
                     move || {
-                        let observed = PendingTranscript::observe_blocking(
-                            owned_convergence
-                                .as_ref()
-                                .map(|(hub, consumer)| (hub, consumer.as_str())),
-                            &path,
-                        )?;
+                        let observed = SourceClaim::observe_file_blocking(ledger.as_ref(), &path)?;
                         Ok::<_, TranscriptIngestError>(
                             observed.map(|pending| (pending, jsonl_file_identity(&path))),
                         )
@@ -803,7 +791,7 @@ pub async fn capture_kimi_observations(
                 };
                 let settles =
                     pending.admission_settles(progress.source_deferred, progress.covered_through);
-                pending.admitted(&path, progress.source_deferred, progress.covered_through)?;
+                pending.admitted(progress.source_deferred, progress.covered_through)?;
                 if settles {
                     covered_wires.insert(path);
                 }
@@ -821,7 +809,7 @@ pub async fn capture_kimi_observations(
                         .iter()
                         .all(|wire| covered_wires.contains(wire))
                     {
-                        gate.settled.finished(&gate.path)?;
+                        gate.settled.finished()?;
                     }
                 }
             }
