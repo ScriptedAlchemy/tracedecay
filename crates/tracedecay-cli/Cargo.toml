@@ -138,7 +138,6 @@ clap = { version = "4.6", features = ["derive"] }
 flate2 = "1"
 hex = "0.4"
 rayon = "1"
-rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 self-replace = "1"
 semver = "1"
 serde = { version = "1", features = ["derive"] }
@@ -174,6 +173,7 @@ tracedecay-maintenance = { path = "../tracedecay-maintenance" }
 tracedecay-mcp = { path = "../tracedecay-mcp" }
 tracedecay-private-fs = { path = "../tracedecay-private-fs" }
 tracedecay-project = { path = "../tracedecay-project" }
+tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime" }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
 tracedecay-sdk = { path = "../tracedecay-sdk" }
 tracedecay-session-memory = { path = "../tracedecay-session-memory" }
@@ -221,6 +221,7 @@ libc = "0.2"
 axum = "0.8"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
 dirs = "7"
+rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 socket2 = "0.6"
 tokio = { version = "1", features = ["full", "test-util"] }
 toml = "1"

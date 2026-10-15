@@ -20,7 +20,7 @@ futures-util = "0.3.33"
 gix = { version = "=0.89.0", default-features = false, features = ["revision", "blob-diff", "parallel", "sha1", "sha256", "status"] }
 hex = "0.4"
 rayon = "1"
-rusqlite = { version = "0.40.1", default-features = false, features = ["backup", "cache"] }
+rusqlite = { version = "0.40.1", default-features = false, features = ["cache"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"

@@ -7,8 +7,9 @@ use tracedecay_domain::{ObservationScopeV1, ObservationSourceGenerationV1, Proje
 
 use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
+use crate::runtime::host_sqlite::SqliteReadConn;
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
-use crate::runtime::shared::{SqliteReadConn, StoredCursor, TranscriptIngestStats};
+use crate::runtime::shared::{StoredCursor, TranscriptIngestStats};
 use crate::runtime::source::run_blocking_transcript_section;
 
 use super::coverage::{admit_rows_with_admission_and_cancellation, sqlite_incarnation};
