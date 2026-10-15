@@ -1,0 +1,133 @@
+diff --git a/src/runtime/io_driver.rs b/src/runtime/io_driver.rs
+index 58f70151..41fab0fa 100644
+--- a/src/runtime/io_driver.rs
++++ b/src/runtime/io_driver.rs
+@@ -692,6 +692,11 @@ impl std::fmt::Debug for IoDriverHandle {
+ }
+ 
+ impl IoDriverHandle {
++    /// Whether some thread is inside [`try_turn_with`](Self::try_turn_with).
++    pub(crate) fn is_polling(&self) -> bool {
++        self.is_polling.load(Ordering::Acquire)
++    }
++
+     /// Creates a handle, reusing the dispatcher of this reactor allocation
+     /// when another handle already exists. A fresh dispatcher uses the default
+     /// events capacity; sharing never resizes an active poll buffer.
+diff --git a/src/runtime/scheduler/three_lane.rs b/src/runtime/scheduler/three_lane.rs
+index 05ceca79..c9058b0b 100644
+--- a/src/runtime/scheduler/three_lane.rs
++++ b/src/runtime/scheduler/three_lane.rs
+@@ -1084,6 +1084,31 @@ impl WorkerCoordinator {
+         }
+     }
+ 
++    /// Unparks one worker that is parked right now, and no other. A reactor
++    /// leader calls this before it runs a task from its own turn, so a parked
++    /// follower takes the reactor and the shared deadlines while that task
++    /// runs (Leader/Followers promotion). With every worker busy there is
++    /// nobody to promote: the first worker to go idle leads.
++    #[inline]
++    pub(crate) fn promote_follower(&self) {
++        let count = self.parkers.len();
++        if count < 2 {
++            return;
++        }
++        // Pairs with the fence in `Parker::park_unless`: the reactor was
++        // released before this call, so a parking follower either sees it
++        // free or counts as waiting below.
++        std::sync::atomic::fence(Ordering::SeqCst);
++        let start = self.next_wake.fetch_add(1, Ordering::AcqRel);
++        for offset in 0..count {
++            let index = start.wrapping_add(offset);
++            let slot = self.mask.map_or_else(|| index % count, |mask| index & mask);
++            if self.parkers[slot].unpark_if_waiting() {
++                return;
++            }
++        }
++    }
++
+     #[inline]
+     fn wake_one_parker_prefer_waiter(&self) -> bool {
+         let count = self.parkers.len();
+@@ -5611,6 +5636,10 @@ impl ThreeLaneWorker {
+         self.scheduler_ticks.resolve(&self.state);
+         let lifo_was_enabled = std::mem::replace(&mut self.lifo_enabled, true);
+ 
++        // Set when this worker's reactor turn made progress: it was the
++        // leader, and every other idle worker parked as a follower that
++        // ignores shared deadlines.
++        let mut left_reactor = false;
+         'dispatch: loop {
+             if self.shutdown.load(Ordering::Relaxed) {
+                 break;
+@@ -5626,6 +5655,9 @@ impl ThreeLaneWorker {
+                 break;
+             }
+             if let Some(task) = self.next_task() {
++                if std::mem::take(&mut left_reactor) {
++                    self.coordinator.promote_follower();
++                }
+                 self.reset_empty_backoff();
+                 self.execute(task);
+                 self.publish_preemption_fairness_certificate_if_due();
+@@ -5642,6 +5674,7 @@ impl ThreeLaneWorker {
+             // PHASE 5: Drive I/O (Leader/Follower pattern).
+             self.busy_turns_since_io = 0;
+             let io_phase = self.drive_io_phase(return_when_idle);
++            left_reactor = matches!(io_phase, IoPhaseOutcome::Progress);
+             if matches!(io_phase, IoPhaseOutcome::Progress) {
+                 // We polled I/O, so we might have woken tasks. Continue loop.
+                 continue;
+@@ -5822,8 +5855,18 @@ impl ThreeLaneWorker {
+                                     }
+                                 }
+                             }
++                        } else if let (IoPhaseOutcome::Follower, Some(io)) =
++                            (io_phase, &self.io_driver)
++                        {
++                            // A follower sleeps only while another thread
++                            // holds the reactor, and contests it again when
++                            // woken: a leader that leaves to run work
++                            // promotes it.
++                            record_backoff_indefinite_park(&mut self.preemption_metrics, io_phase);
++                            self.parker.park_unless(|| !io.is_polling());
++                            self.reset_empty_backoff();
++                            break;
+                         } else {
+-                            // Followers park indefinitely.
+                             record_backoff_indefinite_park(&mut self.preemption_metrics, io_phase);
+                             self.parker.park();
+                         }
+diff --git a/src/runtime/scheduler/worker.rs b/src/runtime/scheduler/worker.rs
+index 747c7baa..6727dfd1 100644
+--- a/src/runtime/scheduler/worker.rs
++++ b/src/runtime/scheduler/worker.rs
+@@ -1049,6 +1049,16 @@ impl Parker {
+     /// Parks the current thread until notified.
+     #[inline]
+     pub fn park(&self) {
++        self.park_unless(|| false);
++    }
++
++    /// [`park`](Self::park), except it returns without sleeping when `ready()`
++    /// holds once this thread counts as waiting. A thread that makes `ready()`
++    /// true, fences SeqCst, then scans with `unpark_if_waiting` cannot miss
++    /// this parker: the fences order the `waiting` store against the
++    /// condition load, as for br-asupersync-re7cz3 below.
++    #[inline]
++    pub(crate) fn park_unless(&self, ready: impl Fn() -> bool) {
+         if self
+             .inner
+             .notified
+@@ -1070,6 +1080,10 @@ impl Parker {
+         // sees waiting >= 1 and signals the condvar, OR park's CAS check
+         // below sees notified == true and returns without sleeping.
+         std::sync::atomic::fence(Ordering::SeqCst);
++        if ready() {
++            self.inner.waiting.fetch_sub(1, Ordering::Release);
++            return;
++        }
+         let mut guard = self.lock_unpoisoned();
+         while self
+             .inner

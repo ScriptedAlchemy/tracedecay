@@ -247,11 +247,11 @@ impl<F: Future> Future for Timeout<F> {
 
 /// The most CPU time one poll of a [`NativeTask`] may take in a debug build.
 ///
-/// While a native worker is inside a poll, no other thread may be turning the
-/// runtime's reactor: on asupersync 0.6.0 a reactor leader that leaves to run
-/// a task promotes no parked follower. Every socket wake and timer on the
-/// runtime then waits for that poll to return (#3994, upstream
-/// Dicklesworthstone/asupersync#83).
+/// A one-worker runtime has no follower to take the reactor while its worker
+/// is inside a poll, and a `block_on` root never turns the reactor. Every
+/// socket wake and timer on that runtime waits for the poll to return (#3994,
+/// upstream Dicklesworthstone/asupersync#83, whose multi-worker half Bazel
+/// patches in).
 pub const LONG_POLL_CPU: Duration = Duration::from_millis(250);
 
 /// Fails a debug build's native task when one poll exceeds [`LONG_POLL_CPU`]
@@ -912,8 +912,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "asupersync 0.6.0 promotes no parked follower when its reactor leader runs a \
-                task (#3994); un-ignore on the rev that fixes asupersync#83"]
     fn a_long_poll_does_not_delay_another_tasks_socket_wake() {
         let latency = socket_wake_behind_a_spinning_task(false);
         assert!(
