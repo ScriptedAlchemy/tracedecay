@@ -14,8 +14,8 @@ use tracedecay_domain::errors::{Result, TraceDecayError};
 mod final_shape;
 
 pub use final_shape::{
-    expected_final_schema_fingerprint, render_expected_final_schema_markdown,
-    schema_fingerprint_rusqlite,
+    GraphStoreSchemaAdmissionV1, expected_final_schema_fingerprint, inspect_graph_store_schema,
+    render_expected_final_schema_markdown, schema_fingerprint,
 };
 
 const ROOT_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS metadata (
@@ -123,13 +123,6 @@ ON td_runtime_writer_inbox_v1 (
 CREATE UNIQUE INDEX IF NOT EXISTS td_runtime_writer_inbox_effect_v1
 ON td_runtime_writer_inbox_v1 (target_shard_json, effect_id);
 ";
-
-/// Verifies that a rusqlite connection sees the exact final relational shape
-/// this binary creates. This is query-only and shares the daemon's schema
-/// authority.
-pub fn verify_admissible_final_shape_rusqlite(conn: &rusqlite::Connection) -> Result<()> {
-    final_shape::require_admissible_final_shape_rusqlite(conn)
-}
 
 fn schema_stamp_error(error: crate::db::schema_version::SchemaVersionError) -> TraceDecayError {
     TraceDecayError::Database {

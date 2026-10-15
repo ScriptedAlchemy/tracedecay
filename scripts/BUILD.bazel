@@ -7,6 +7,22 @@ py_binary(
     main = "measure-unused-tool-context.py",
 )
 
+py_binary(
+    name = "check_rusqlite_storage_boundary",
+    srcs = ["check-rusqlite-storage-boundary.py"],
+    main = "check-rusqlite-storage-boundary.py",
+)
+
+py_test(
+    name = "rusqlite_storage_boundary_test",
+    size = "small",
+    srcs = [
+        "check-rusqlite-storage-boundary.py",
+        "test-check-rusqlite-storage-boundary.py",
+    ],
+    main = "test-check-rusqlite-storage-boundary.py",
+)
+
 py_test(
     name = "unused_tool_context_measure_test",
     size = "small",

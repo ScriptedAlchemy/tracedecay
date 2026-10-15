@@ -1389,7 +1389,6 @@ mod dependency_batch_tests {
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use rusqlite::Savepoint;
     use tempfile::TempDir;
     use tracedecay_domain::{BrainId, LocatorDigest, ProjectId, UserProfileId, UtcMicros};
     use tracedecay_store::{
@@ -1398,29 +1397,16 @@ mod dependency_batch_tests {
         GraphPublicationReplayRetirementV1, GraphPublicationReplayV1, GraphPublicationStoreV1,
         GraphRecoveredGenerationDigestV1, GraphReplayAppendOutcomeV1,
         GraphReplayRetirementOutcomeV1, GraphVerifiedHeadCasOutcomeV1,
-        GraphVerifiedHeadCompareAndSwapV1, RepositoryWritePayloadV1, RuntimeCancellationIdV1,
-        RuntimeCancellationIdentityV1, RuntimeDeadlineIdV1, RuntimeDeadlineV1,
-        RuntimeInterruptionV1, RuntimeRequestControlV1, RuntimeRequestProbeV1, StoreIncarnationV1,
-        StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
+        GraphVerifiedHeadCompareAndSwapV1, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
+        RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeRequestControlV1,
+        RuntimeRequestProbeV1, StoreIncarnationV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
     };
 
     use super::*;
     use crate::exact_sql::ExactSqlRows;
     use crate::reader::{ExactSqlOnlyReaderV1, ExistingReaderLocator, ReaderPool};
     use crate::repository::{GRAPH_PUBLICATION_SCHEMA_V1, GraphPublicationExactSqlStorage};
-    use crate::{ExistingWriterLocator, PersistentWriter, StorageOperationExecutor};
-
-    struct NoWrites;
-
-    impl StorageOperationExecutor for NoWrites {
-        fn execute(
-            &mut self,
-            _savepoint: &Savepoint<'_>,
-            _payload: &RepositoryWritePayloadV1,
-        ) -> rusqlite::Result<()> {
-            Ok(())
-        }
-    }
+    use crate::{ExactSqlOnlyStorageOperationV1, ExistingWriterLocator, PersistentWriter};
 
     struct Fixture {
         _directory: TempDir,
@@ -1456,7 +1442,7 @@ mod dependency_batch_tests {
                 &crate::native_runtime::handle().expect("native runtime"),
                 ExistingWriterLocator::new(binding.clone(), locator.clone(), path.clone()).unwrap(),
                 AdmissionConfigV1::default(),
-                NoWrites,
+                ExactSqlOnlyStorageOperationV1,
             )
             .unwrap();
             let readers = ReaderPool::start(

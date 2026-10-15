@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use rusqlite::Savepoint;
 use serde_json::json;
 use tempfile::TempDir;
 use tracedecay_contracts::remote::{
@@ -53,46 +52,20 @@ use tracedecay_domain::{
     canonical_sha256,
 };
 use tracedecay_store::{
-    AdmissionConfigV1, RepositoryWritePayloadV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1,
-    StorageRuntimeErrorV1, StoreAuthorityEpochV1, StoreIncarnationV1, VerifiedStoreLocatorV1,
+    AdmissionConfigV1, StoreAuthorityEpochV1, StoreIncarnationV1, VerifiedStoreLocatorV1,
 };
 
 mod membership;
 mod transfer;
 
 use crate::{
-    ExistingWriterLocator, PersistentWriter, StorageOperationExecutor,
+    ExactSqlOnlyStorageOperationV1, ExistingWriterLocator, PersistentWriter,
     exact_sql::{ExactSqlWriteAuthority, ExactSqlWriteIntent},
-    reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor},
+    reader::{ExactSqlOnlyReaderV1, ExistingReaderLocator, ReaderPool},
     repository::RetainedExactSqlCapability,
 };
 
 use super::*;
-
-struct NoWrites;
-
-impl StorageOperationExecutor for NoWrites {
-    fn execute(
-        &mut self,
-        _savepoint: &Savepoint<'_>,
-        _payload: &RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()> {
-        Ok(())
-    }
-}
-
-#[derive(Clone)]
-struct NoReads;
-
-impl ReaderQueryExecutor for NoReads {
-    fn execute_read(
-        &mut self,
-        _snapshot: &rusqlite::Transaction<'_>,
-        _request: &RuntimeReadRequestV1,
-    ) -> Result<RuntimeReadOutcomeV1, StorageRuntimeErrorV1> {
-        unreachable!("migration SQL queries bypass the product read executor")
-    }
-}
 
 struct AllowSchema;
 
@@ -105,7 +78,7 @@ impl ExactSqlWriteAuthority for AllowSchema {
 struct Fixture {
     _directory: TempDir,
     _writer: PersistentWriter,
-    _readers: ReaderPool<NoReads>,
+    _readers: ReaderPool<ExactSqlOnlyReaderV1>,
     handle: ExactSqlHandle,
 }
 
@@ -159,13 +132,13 @@ fn attach_fixture(directory: TempDir, binding: StoreRuntimeBindingV1) -> Fixture
         &crate::native_runtime::handle().expect("native runtime"),
         ExistingWriterLocator::new(binding.clone(), locator.clone(), path.clone()).unwrap(),
         AdmissionConfigV1::default(),
-        NoWrites,
+        ExactSqlOnlyStorageOperationV1,
     )
     .unwrap();
     let readers = ReaderPool::start(
         ExistingReaderLocator::new(binding.clone(), locator, path).unwrap(),
         AdmissionConfigV1::default().readers,
-        NoReads,
+        ExactSqlOnlyReaderV1,
     )
     .unwrap();
     let handle = ExactSqlHandle::attach(&writer, &readers)

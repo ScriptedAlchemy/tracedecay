@@ -3,17 +3,15 @@ use std::{
     time::Duration,
 };
 
-use rusqlite::Savepoint;
 use tempfile::TempDir;
 use tracedecay_domain::LocatorDigest;
 use tracedecay_store::{
-    AdmissionConfigV1, RepositoryWritePayloadV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1,
-    StoreIncarnationV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
+    AdmissionConfigV1, StoreIncarnationV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
 };
 
 use crate::{
-    ExistingWriterLocator, PersistentWriter, StorageOperationExecutor,
-    reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor},
+    ExactSqlOnlyStorageOperationV1, ExistingWriterLocator, PersistentWriter,
+    reader::{ExactSqlOnlyReaderV1, ExistingReaderLocator, ReaderPool},
 };
 
 use super::{clock::fake::FakeClock, *};
@@ -101,35 +99,10 @@ impl ExactSqlWriteAuthority for RevokeDuringSchemaStep {
     }
 }
 
-struct NoWrites;
-
-impl StorageOperationExecutor for NoWrites {
-    fn execute(
-        &mut self,
-        _savepoint: &Savepoint<'_>,
-        _payload: &RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()> {
-        Ok(())
-    }
-}
-
-#[derive(Clone)]
-struct NoReads;
-
-impl ReaderQueryExecutor for NoReads {
-    fn execute_read(
-        &mut self,
-        _snapshot: &rusqlite::Transaction<'_>,
-        _request: &RuntimeReadRequestV1,
-    ) -> Result<RuntimeReadOutcomeV1, tracedecay_store::StorageRuntimeErrorV1> {
-        unreachable!("exact SQL queries bypass the closed product read executor")
-    }
-}
-
 struct Fixture {
     _directory: TempDir,
     writer: PersistentWriter,
-    readers: ReaderPool<NoReads>,
+    readers: ReaderPool<ExactSqlOnlyReaderV1>,
 }
 
 fn binding() -> StoreRuntimeBindingV1 {
@@ -168,14 +141,14 @@ fn fixture(writer_digest: char, reader_digest: char) -> Fixture {
         )
         .unwrap(),
         AdmissionConfigV1::default(),
-        NoWrites,
+        ExactSqlOnlyStorageOperationV1,
     )
     .unwrap();
     let readers = ReaderPool::start(
         ExistingReaderLocator::new(binding.clone(), locator(&binding, reader_digest), path)
             .unwrap(),
         AdmissionConfigV1::default().readers,
-        NoReads,
+        ExactSqlOnlyReaderV1,
     )
     .unwrap();
     Fixture {

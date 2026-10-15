@@ -488,6 +488,14 @@ pub struct VerifiedReader {
     file_identity: u64,
 }
 
+pub fn default_vfs_max_pathname() -> Option<usize> {
+    // SAFETY: SQLite owns registered VFS values for process lifetime; this
+    // reads the immutable pathname limit from the default VFS.
+    let vfs = unsafe { rusqlite::ffi::sqlite3_vfs_find(std::ptr::null()) };
+    let max_pathname = unsafe { vfs.as_ref() }?.mxPathname;
+    usize::try_from(max_pathname).ok()
+}
+
 impl VerifiedReader {
     pub fn connection(&self) -> &Connection {
         &self.connection
