@@ -645,7 +645,11 @@ impl RemoteBrainTlsIo {
         if !write_idle_expired && !response_expired {
             return Ok(());
         }
-        self.transport = RemoteBrainTlsTransport::Failed;
+        // A listener polled after both deadlines passed counts the earlier.
+        #[cfg(any(test, feature = "test-helpers"))]
+        let write_idle_expired = write_idle_expired
+            && !(response_expired
+                && self.response_deadline.deadline() < self.write_idle_deadline.deadline());
         #[cfg(any(test, feature = "test-helpers"))]
         if write_idle_expired && !self.egress_idle_expired {
             self.egress_idle_expired = true;
@@ -664,7 +668,7 @@ impl RemoteBrainTlsIo {
             }
         }
         #[cfg(any(test, feature = "test-helpers"))]
-        if response_expired && !self.egress_response_expired {
+        if !write_idle_expired && !self.egress_response_expired {
             self.egress_response_expired = true;
             self.egress
                 .response_expirations
@@ -672,6 +676,7 @@ impl RemoteBrainTlsIo {
         }
         #[cfg(any(test, feature = "test-helpers"))]
         self.clear_egress_backpressure();
+        self.transport = RemoteBrainTlsTransport::Failed;
         Err(io::Error::new(
             io::ErrorKind::TimedOut,
             "Remote Brain TLS response write timed out",
