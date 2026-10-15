@@ -46,6 +46,9 @@ struct InjectedActivationFaultsV1 {
     publication_deadlines: std::collections::BTreeSet<String>,
     terminal_failures: std::collections::BTreeSet<String>,
     gates: std::collections::BTreeMap<String, Arc<InjectedActivationGateStateV1>>,
+    /// CPU time the memory activation spends beside its prewarm, standing in
+    /// for a prewarm that runs long on a loaded host.
+    prewarm_cpu: std::collections::BTreeMap<String, std::time::Duration>,
     catalog_warm_gates: std::collections::BTreeMap<String, Arc<InjectedActivationGateStateV1>>,
 }
 
@@ -173,6 +176,13 @@ pub fn injected_activation_attempt_count(worktree_id: &WorktreeId) -> usize {
         .get(worktree_id.as_str())
         .copied()
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+pub fn set_injected_activation_prewarm_cpu(worktree_id: &WorktreeId, cpu: std::time::Duration) {
+    injected_faults()
+        .prewarm_cpu
+        .insert(worktree_id.as_str().to_owned(), cpu);
 }
 
 #[cfg(test)]
@@ -633,7 +643,22 @@ impl CodeGraphActivationAuthorityV1 {
                         ),
                     ));
                 }
-                latest.prewarm_serving_derivations();
+                let prewarm_cpu = injected_faults().prewarm_cpu.remove(worktree_id.as_str());
+                native_runtime::spawn_blocking(move || {
+                    if let Some(cpu) = prewarm_cpu {
+                        let spun = std::time::Instant::now();
+                        while spun.elapsed() < cpu {
+                            std::hint::spin_loop();
+                        }
+                    }
+                    latest.prewarm_serving_derivations();
+                })
+                .await
+                .map_err(|error| {
+                    CodeIndexSchedulerErrorV1::GraphActivation(format!(
+                        "code graph activation task failed: {error}"
+                    ))
+                })?;
                 Ok(None)
             }
         }

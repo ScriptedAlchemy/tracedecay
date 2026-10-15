@@ -2093,3 +2093,38 @@ async fn readers_of_a_build_waiting_for_memory_do_not_spin_the_worker() {
 
     registry.shutdown().await;
 }
+
+/// A memory activation whose prewarm outlasts the CPU one native poll may
+/// spend still seats the generation a reader demanded. The prewarm is
+/// synchronous: run inside the worker's poll, the debug long-poll guard fails
+/// the worker and the seat never arrives (#4016).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_memory_activation_longer_than_one_native_poll_still_seats() {
+    let fixture = GitFixture::new(ALPHA_LIB_V1);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1);
+    let first_pass = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold the worker before its first activation");
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+        )
+        .await
+        .expect("mount");
+    let scope = registry
+        .serving_code_scope(fixture.path())
+        .await
+        .expect("mounted scope");
+    super::super::graph_activation::set_injected_activation_prewarm_cpu(
+        &scope.worktree_id,
+        tracedecay_runtime_core::native_runtime::LONG_POLL_CPU * 4,
+    );
+    drop(first_pass);
+    wait_for_live_complete_generation(&registry, fixture.path()).await;
+    registry.shutdown().await;
+}
