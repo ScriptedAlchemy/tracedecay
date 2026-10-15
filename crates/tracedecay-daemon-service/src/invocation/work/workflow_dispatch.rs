@@ -30,8 +30,41 @@ use super::workflow_run_control::{
 use super::{RegisteredWorkRuntime, work_request_context, workflow_census};
 
 #[allow(clippy::too_many_arguments)]
-#[tracing::instrument(name = "daemon.service.workflow.execute", level = "trace", skip_all)]
 pub(crate) async fn execute_workflow_application(
+    registered: RegisteredWorkRuntime,
+    attempt_processes: Arc<WorkAttemptProcessRegistryV1>,
+    observability_producer: Option<
+        Arc<tracedecay_application::observability::BoundedObservabilityProducerV1>,
+    >,
+    project_root: PathBuf,
+    request_id: String,
+    request: WorkflowApplicationInvocation,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+    worktree_holder_admission: tracedecay_agent_hosts::native_integration::WorktreeHolderAdmissionFenceV1,
+) -> DaemonInvocationResponse {
+    super::off_native_worker(
+        request_id.clone(),
+        workflow_application(
+            registered,
+            attempt_processes,
+            observability_producer,
+            project_root,
+            request_id,
+            request,
+            observed_at,
+            deadline,
+            cancellation,
+            worktree_holder_admission,
+        ),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tracing::instrument(name = "daemon.service.workflow.execute", level = "trace", skip_all)]
+async fn workflow_application(
     registered: RegisteredWorkRuntime,
     attempt_processes: Arc<WorkAttemptProcessRegistryV1>,
     observability_producer: Option<

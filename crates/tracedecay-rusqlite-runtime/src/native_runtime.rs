@@ -91,6 +91,44 @@ where
     })
 }
 
+/// Runs `future` where a thread may park: from a native runtime thread it
+/// moves the whole future to one blocking-pool thread and polls it there;
+/// anywhere else it polls in place.
+///
+/// For request handlers that call synchronous storage ports, which wait on
+/// the writer by parking their thread. Native wakes reach the pool thread
+/// through an ordinary `Waker`, so the handler's awaits still work. As with
+/// [`spawn_blocking`], dropping the returned future abandons only the wait:
+/// a moved future runs to completion.
+pub fn off_native_thread<F>(future: F) -> BoxFuture<'static, Result<F::Output, String>>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    if Runtime::current_handle().is_none() {
+        return Box::pin(future.map(Ok));
+    }
+    spawn_blocking(move || poll_on_current_thread(future))
+}
+
+fn poll_on_current_thread<F: Future>(future: F) -> F::Output {
+    struct Unpark(std::thread::Thread);
+    impl std::task::Wake for Unpark {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let waker = std::task::Waker::from(std::sync::Arc::new(Unpark(std::thread::current())));
+    let mut context = Context::from_waker(&waker);
+    let mut future = std::pin::pin!(future);
+    loop {
+        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
+            return output;
+        }
+        std::thread::park();
+    }
+}
+
 fn queue_blocking<T, F>(work: F) -> Result<(Cx, asupersync::channel::oneshot::Receiver<T>), String>
 where
     T: Send + 'static,
@@ -771,6 +809,36 @@ mod tests {
         assert_eq!(
             outcome,
             NativeTaskOutcome::Completed((Ok(7), Err(TimeoutError::Elapsed), true))
+        );
+    }
+
+    #[test]
+    fn off_native_thread_moves_a_native_caller_and_keeps_its_awaits_working() {
+        let off_native = || async {
+            let parked_thread = Runtime::current_handle().is_none();
+            let slept = sleep_until(Instant::now() + Duration::from_millis(5)).await;
+            let blocking = spawn_blocking(|| 7).await;
+            (parked_thread, slept, blocking)
+        };
+        let task = NativeTask::spawn(async move {
+            let caller_was_native = Runtime::current_handle().is_some();
+            (caller_was_native, off_native_thread(off_native()).await)
+        })
+        .expect("native task");
+        assert_eq!(
+            block_on(task.wait()).expect("process runtime"),
+            NativeTaskOutcome::Completed((true, Ok((true, Ok(()), Ok(7)))))
+        );
+        let in_place = std::thread::spawn(move || {
+            let thread = std::thread::current().id();
+            off_native_thread(async move { std::thread::current().id() == thread }).now_or_never()
+        })
+        .join()
+        .expect("plain thread");
+        assert_eq!(
+            in_place,
+            Some(Ok(true)),
+            "a non-native caller polls in place"
         );
     }
 
