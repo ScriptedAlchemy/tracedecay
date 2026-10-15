@@ -403,6 +403,78 @@ async fn wait_for_ingress_body_bytes(service: &DaemonHttpApplicationService, exp
     .expect("the listener must keep reading the request body");
 }
 
+/// Trickles an 11-byte body one byte per `progress_step` after headers that
+/// leave with the TLS handshake, and returns the listener's response.
+///
+/// Returns `None` when the test thread stalled long enough that the listener
+/// may rightly have closed the connection: two writes spanned the read-idle
+/// deadline, or the body spanned the absolute request deadline. The listener
+/// reads each byte no earlier than the client starts writing it, and no
+/// earlier than the connect starts, so these client-side spans bound the
+/// listener's own.
+async fn remote_tls_progressing_body(
+    service: &DaemonHttpApplicationService,
+    endpoint: std::net::SocketAddr,
+    certificate: &Path,
+    headers: &[u8],
+    deadlines: RemoteBrainTlsDeadlines,
+    progress_step: Duration,
+) -> Option<Vec<u8>> {
+    let initial_ingress = service
+        .remote_tls_ingress_snapshot()
+        .expect("TLS ingress observer");
+    let connect_started = std::time::Instant::now();
+    let mut stream = remote_tls_connect_sending(endpoint, certificate, headers).await;
+    loop {
+        let observed = service
+            .remote_tls_ingress_snapshot()
+            .expect("TLS ingress observer")
+            .headers_complete;
+        assert!(
+            observed <= initial_ingress.headers_complete + 1,
+            "TLS ingress observed unexpected request headers"
+        );
+        if observed == initial_ingress.headers_complete + 1 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let initial_body_bytes = service
+        .remote_tls_ingress_snapshot()
+        .expect("TLS ingress observer")
+        .body_bytes_observed;
+    let progressing_started = std::time::Instant::now();
+    let mut previous_write = connect_started;
+    for (offset, byte) in b"         {}".iter().enumerate() {
+        tokio::time::sleep(progress_step).await;
+        let write_started = std::time::Instant::now();
+        let mut written = stream.write_all(std::slice::from_ref(byte)).await;
+        if written.is_ok() {
+            written = stream.flush().await;
+        }
+        let sent = std::time::Instant::now();
+        if sent - previous_write >= deadlines.read_idle
+            || sent - connect_started >= deadlines.request_read
+        {
+            return None;
+        }
+        written
+            .unwrap_or_else(|error| panic!("write progressing HTTP body byte {offset}: {error}"));
+        wait_for_ingress_body_bytes(service, initial_body_bytes + offset + 1).await;
+        previous_write = write_started;
+    }
+    assert!(
+        progressing_started.elapsed() > deadlines.response,
+        "the progressing body must outlive the response deadline"
+    );
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .await
+        .expect("read progressing HTTP body response");
+    Some(response)
+}
+
 async fn remote_tls_h2_only_handshake_is_rejected(
     endpoint: std::net::SocketAddr,
     certificate: &Path,
@@ -1026,15 +1098,15 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
     .expect("idle handshakes must expire at the read-idle deadline");
     drop(idle_connections);
 
-    let mut partial_headers = remote_tls_connect(endpoint, &certificate).await;
-    partial_headers
-        .write_all(b"POST /remote/enrollment HTTP/1.1\r\nHost: localhost\r\n")
-        .await
-        .expect("write incomplete HTTP headers");
-    partial_headers
-        .flush()
-        .await
-        .expect("flush incomplete HTTP headers");
+    // Each request below leaves with the TLS handshake. Written after it, a
+    // test thread stalled past the read-idle deadline would find the
+    // connection closed as idle before its request arrived.
+    let mut partial_headers = remote_tls_connect_sending(
+        endpoint,
+        &certificate,
+        b"POST /remote/enrollment HTTP/1.1\r\nHost: localhost\r\n",
+    )
+    .await;
     let mut response = Vec::new();
     let _closed = tokio::time::timeout(
         idle_closure_bound,
@@ -1044,25 +1116,14 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
     .expect("the incomplete-header connection must be torn down at the read-idle deadline");
     assert_eq!(response.len(), 0);
 
-    let mut partial_body = remote_tls_connect(endpoint, &certificate).await;
-    let partial_body_headers = format!(
-        "POST /remote/enrollment HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nx-tracedecay-enrollment-credential: {}\r\nContent-Type: application/json\r\nContent-Length: 32\r\n\r\n",
+    let partial_body_request = format!(
+        "POST /remote/enrollment HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nx-tracedecay-enrollment-credential: {}\r\nContent-Type: application/json\r\nContent-Length: 32\r\n\r\n{{",
         String::from_utf8_lossy(&credential),
         "0123456789abcdef0123456789abcdef",
     )
     .into_bytes();
-    partial_body
-        .write_all(&partial_body_headers)
-        .await
-        .expect("write complete HTTP headers");
-    partial_body
-        .write_all(b"{")
-        .await
-        .expect("write separate incomplete HTTP body chunk");
-    partial_body
-        .flush()
-        .await
-        .expect("flush separate incomplete HTTP body chunk");
+    let mut partial_body =
+        remote_tls_connect_sending(endpoint, &certificate, &partial_body_request).await;
     let mut partial_body_response = Vec::new();
     let _closed = tokio::time::timeout(
         idle_closure_bound,
@@ -1072,64 +1133,32 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
     .expect("the incomplete-body connection must be torn down at the read-idle deadline");
     assert_eq!(partial_body_response.len(), 0);
 
-    let mut progressing_body = remote_tls_connect(endpoint, &certificate).await;
     let progressing_body_headers = format!(
         "POST /remote/enrollment HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nx-tracedecay-enrollment-credential: {}\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n",
         String::from_utf8_lossy(&credential),
         "0123456789abcdef0123456789abcdef",
     )
     .into_bytes();
-    let initial_ingress = service
-        .remote_tls_ingress_snapshot()
-        .expect("TLS ingress observer");
-    progressing_body
-        .write_all(&progressing_body_headers)
+    let mut stalled_attempts = 0;
+    let progressing_response = loop {
+        if let Some(response) = remote_tls_progressing_body(
+            &service,
+            endpoint,
+            &certificate,
+            &progressing_body_headers,
+            deadlines,
+            progress_step,
+        )
         .await
-        .expect("write progressing HTTP body headers");
-    progressing_body
-        .flush()
-        .await
-        .expect("flush progressing HTTP body headers");
-    loop {
-        let observed = service
-            .remote_tls_ingress_snapshot()
-            .expect("TLS ingress observer")
-            .headers_complete;
-        assert!(
-            observed <= initial_ingress.headers_complete + 1,
-            "TLS ingress observed unexpected request headers"
-        );
-        if observed == initial_ingress.headers_complete + 1 {
-            break;
+        {
+            break response;
         }
-        tokio::task::yield_now().await;
-    }
-    let initial_body_bytes = service
-        .remote_tls_ingress_snapshot()
-        .expect("TLS ingress observer")
-        .body_bytes_observed;
-    let progressing_started = std::time::Instant::now();
-    for (offset, byte) in b"         {}".iter().enumerate() {
-        tokio::time::sleep(progress_step).await;
-        progressing_body
-            .write_all(std::slice::from_ref(byte))
-            .await
-            .unwrap_or_else(|error| panic!("write progressing HTTP body byte {offset}: {error}"));
-        progressing_body
-            .flush()
-            .await
-            .unwrap_or_else(|error| panic!("flush progressing HTTP body byte {offset}: {error}"));
-        wait_for_ingress_body_bytes(&service, initial_body_bytes + offset + 1).await;
-    }
-    assert!(
-        progressing_started.elapsed() > deadlines.response,
-        "the progressing body must outlive the response deadline"
-    );
-    let mut progressing_response = Vec::new();
-    progressing_body
-        .read_to_end(&mut progressing_response)
-        .await
-        .expect("read progressing HTTP body response");
+        stalled_attempts += 1;
+        assert!(
+            stalled_attempts < 3,
+            "the test thread stalled past a listener deadline in every progressing-body attempt"
+        );
+    };
     assert!(
         progressing_response.starts_with(b"HTTP/1.1 400"),
         "progressing body must reach typed canonical protocol admission past the idle and response deadlines"
@@ -1144,21 +1173,13 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
         let initial_absolute_ingress = service
             .remote_tls_ingress_snapshot()
             .expect("TLS ingress observer");
-        let mut stream = remote_tls_connect(endpoint, &certificate).await;
         let headers = format!(
                 "POST /remote/enrollment HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nx-tracedecay-enrollment-credential: {}\r\nContent-Type: application/json\r\nContent-Length: 32\r\n\r\n",
                 String::from_utf8_lossy(&credential),
                 "0123456789abcdef0123456789abcdef",
             )
             .into_bytes();
-        stream
-            .write_all(&headers)
-            .await
-            .expect("write absolute slowloris HTTP body headers");
-        stream
-            .flush()
-            .await
-            .expect("flush absolute slowloris HTTP body headers");
+        let stream = remote_tls_connect_sending(endpoint, &certificate, &headers).await;
         loop {
             let observed = service
                 .remote_tls_ingress_snapshot()
