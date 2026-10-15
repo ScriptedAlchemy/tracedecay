@@ -327,13 +327,6 @@ async fn remote_tls_request(
     .await
 }
 
-async fn remote_tls_connect(
-    endpoint: std::net::SocketAddr,
-    certificate: &Path,
-) -> tokio_rustls::client::TlsStream<tokio::net::TcpStream> {
-    remote_tls_connect_sending(endpoint, certificate, b"").await
-}
-
 /// Connects with `request` queued before the handshake, so it leaves in the
 /// client's final handshake flight and no client scheduling delay can let the
 /// listener's read-idle deadline expire before the request arrives. Nagle is
@@ -1507,17 +1500,19 @@ async fn remote_tls_listener_expires_saturated_non_reading_responses() {
             .expect("bind Remote Brain TLS egress service");
     let endpoint = service.remote_tls_endpoint().expect("TLS endpoint");
 
-    // One peer at a time finishes its handshake and request right after its
-    // accept, so no connection waits out the 5 s request-read deadlines
-    // behind the other 127 handshakes on a loaded host.
+    // One peer at a time sends its request with its handshake, so no
+    // connection waits out its read-idle deadline behind the other 127
+    // handshakes on a loaded host.
     let mut non_reading_peers = Vec::with_capacity(128);
     for _ in 0..128 {
-        let mut peer = remote_tls_connect(endpoint, &certificate).await;
-        peer.write_all(b"GET /remote/egress HTTP/1.1\r\nHost: localhost\r\n\r\n")
-            .await
-            .expect("request large TLS response");
-        peer.flush().await.expect("flush large TLS request");
-        non_reading_peers.push(peer);
+        non_reading_peers.push(
+            remote_tls_connect_sending(
+                endpoint,
+                &certificate,
+                b"GET /remote/egress HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            )
+            .await,
+        );
     }
     // Every connection holds its admission once its request is read, and none
     // can expire before egress starts at the handler barrier.
