@@ -296,11 +296,22 @@ impl McpServer {
                                 .to_owned(),
                         ),
                         (Ok(upload_enabled), Some(profile)) => {
-                            if let Err(error) = super::ledger::persist_worldwide_delta(
-                                profile.data_dir(),
-                                delta,
-                                upload_enabled,
-                            ) {
+                            // The upload is a blocking HTTP call; it stays off
+                            // the native worker that runs shutdown.
+                            let profile_root = profile.data_dir().to_path_buf();
+                            let saved = tracedecay_runtime_core::native_runtime::spawn_blocking(
+                                move || {
+                                    super::ledger::persist_worldwide_delta(
+                                        &profile_root,
+                                        delta,
+                                        upload_enabled,
+                                    )
+                                    .map_err(|error| error.to_string())
+                                },
+                            )
+                            .await
+                            .and_then(std::convert::identity);
+                            if let Err(error) = saved {
                                 failures
                                     .push(format!("worldwide counter delta not saved: {error}"));
                             }
