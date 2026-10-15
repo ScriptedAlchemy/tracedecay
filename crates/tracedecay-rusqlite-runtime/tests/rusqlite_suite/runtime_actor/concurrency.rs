@@ -1,3 +1,7 @@
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 
 use tracedecay_rusqlite_runtime::native_runtime;

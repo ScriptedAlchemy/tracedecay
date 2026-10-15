@@ -1,3 +1,7 @@
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 use std::{

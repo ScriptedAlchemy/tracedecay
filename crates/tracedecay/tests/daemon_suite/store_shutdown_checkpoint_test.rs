@@ -5,6 +5,10 @@
 //! daemon-lifetime owner that keeps a lease past terminal close, or a project
 //! open that registers owners after they were drained, leaves the store's WAL
 //! behind on disk.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 
 use std::fs;
 use std::os::unix::net::UnixStream;

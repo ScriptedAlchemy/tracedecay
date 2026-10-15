@@ -2001,6 +2001,10 @@ mod git_read_control_tests {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 mod activity_dispatch_tests {
     use super::*;
 

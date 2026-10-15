@@ -1,4 +1,8 @@
 //! Strict advisory runtime acceptance over authentic provider response captures.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 
 use std::collections::{BTreeSet, VecDeque};
 use std::process::{Command, Stdio};

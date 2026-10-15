@@ -4,6 +4,10 @@
 //! published finding's retained diagnostic anchor. Callers never send the
 //! finding or the anchor: the daemon minted the handle, and the tool either
 //! returns that finding plus the anchor, or a typed refusal.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 
 use std::fs;
 use std::path::Path;

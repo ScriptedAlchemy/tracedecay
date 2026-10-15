@@ -800,6 +800,10 @@ fn dispatch_saturated_error() -> TraceDecayError {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::Ordering;

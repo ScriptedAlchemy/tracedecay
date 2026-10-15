@@ -534,6 +534,10 @@ pub fn default_loopback_endpoint() -> DaemonEndpoint {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 mod tests {
     use super::*;
     use tokio::io::{AsyncBufReadExt, BufReader};

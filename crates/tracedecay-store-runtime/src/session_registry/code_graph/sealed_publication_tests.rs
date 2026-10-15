@@ -8,6 +8,10 @@
 //! after its own journal append, the retained-seat and reconcile retries
 //! looped on the same conflict, and the served census stayed
 //! `exact_scope_generation_not_ready` until the store was reset.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;

@@ -6,6 +6,10 @@
 //! keeps that terminal receipt. A refresh the worker has not finished is
 //! cancelled in the store. Missing, unknown, and stale handles, and an
 //! unmounted profile refresh authority, are typed refusals.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 
 #[cfg(feature = "test-transport")]
 use crate::common::fixture::git_run as git;

@@ -8,6 +8,10 @@
 //! service, the server's retained surface ports, and the project retained
 //! grant, behind an in-process executor, so retained recall behavior stays
 //! testable against the real owner rather than a stub.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 
 use std::path::PathBuf;
 use std::sync::Arc;

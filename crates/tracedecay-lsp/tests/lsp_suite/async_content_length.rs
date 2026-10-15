@@ -1,3 +1,7 @@
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncWriteExt, duplex};
 use tokio_util::codec::{FramedRead, FramedWrite};

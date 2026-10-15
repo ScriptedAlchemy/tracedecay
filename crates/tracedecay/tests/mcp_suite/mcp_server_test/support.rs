@@ -1,5 +1,9 @@
 //! Shared helpers for the MCP server test domains, split mechanically
 //! from `mcp_server_test.rs`.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 
 use serde_json::{Value, json};
 use std::fmt::Write as _;

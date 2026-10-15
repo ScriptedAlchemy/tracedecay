@@ -5,6 +5,10 @@
 //! retained generation store, and physical daemon restart in their user-visible
 //! order. Every indexing wait is bounded by a typed status/search/cadence
 //! receipt; no elapsed-time sleep stands in for readiness.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 
 use std::fmt::Write as _;
 use std::fs;

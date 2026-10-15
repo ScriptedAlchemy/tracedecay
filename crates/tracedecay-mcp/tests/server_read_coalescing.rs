@@ -1,3 +1,7 @@
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 use serde_json::json;
 use tracedecay_mcp::ToolResult;
 use tracedecay_mcp::server::{IdenticalReadCoalescer, ReadFlightClaim};

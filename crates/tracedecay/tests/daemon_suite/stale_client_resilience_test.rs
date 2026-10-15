@@ -8,6 +8,10 @@
 //! that overflowed the worker stack before any handler ran and aborted the
 //! whole daemon (`thread 'tokio-rt-worker' has overflowed its stack`),
 //! turning any one stale client into a daemon denial of service.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

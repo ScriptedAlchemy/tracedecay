@@ -5,6 +5,10 @@
 //! Expected values are the symbols and typed refusals a caller observes.
 
 #![cfg(unix)]
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 
 use serde_json::{Value, json};
 use tempfile::TempDir;

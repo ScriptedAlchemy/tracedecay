@@ -4,6 +4,10 @@
 //! waited for it: cancelling a requester must never orphan an `in_flight`
 //! claim, and every waiter on the same key must either receive the settled
 //! result or elect a replacement fill.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};

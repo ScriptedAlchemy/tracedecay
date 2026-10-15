@@ -66,6 +66,10 @@ fn read_line_handling_wire_oversized_inner<T: McpTransport + std::marker::Send>(
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 mod wire_bound_tests {
     use std::sync::Arc;
 

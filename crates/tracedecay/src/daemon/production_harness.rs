@@ -4,6 +4,10 @@
 //! daemon runs, against one isolated profile-and-projects root. The parent
 //! module mounts it behind that gate, so a default or `production` build
 //! compiles none of it.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 
 use std::future::Future;
 use std::pin::Pin;

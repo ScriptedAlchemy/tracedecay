@@ -12,6 +12,10 @@
 //!
 //! Plus the invariant none of the above may weaken: a corrupt sealed store
 //! still fails every request, with no memoized verdict.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 
 use std::collections::BTreeSet;
 use std::fs;

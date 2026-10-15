@@ -346,6 +346,10 @@ pub async fn connect_with_restart_grace(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 mod tests {
     use super::*;
 

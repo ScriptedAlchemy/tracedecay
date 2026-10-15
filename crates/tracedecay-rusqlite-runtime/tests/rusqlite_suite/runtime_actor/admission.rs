@@ -1,3 +1,7 @@
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 use std::pin::pin;
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::task::{Context, Poll, Waker};

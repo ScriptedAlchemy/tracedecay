@@ -1,5 +1,9 @@
 //! Raw worktree writes and renames reach daemon-routed CLI reads without a
 //! hook hint, a Git metadata move, or an explicit `sync`.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 
 use std::fs;
 use std::path::Path;

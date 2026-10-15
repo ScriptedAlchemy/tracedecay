@@ -1,3 +1,7 @@
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 use tracedecay_session_runtime::StoreOwnerKey;
 use tracedecay_session_runtime::session_sync::test_harness::{
     SessionTemporalRefreshPassReport, SessionTemporalRefreshWakeState,

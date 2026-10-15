@@ -5,6 +5,10 @@
 //! the apply consumes it and must succeed only while that evidence still
 //! matches the live tree: staleness refuses, invalid targets are denied, and a
 //! publication failure leaves every file byte-identical to its preimage.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 
 use crate::support::{
     ProductionSourceEditFixture, extract_first_json_content,

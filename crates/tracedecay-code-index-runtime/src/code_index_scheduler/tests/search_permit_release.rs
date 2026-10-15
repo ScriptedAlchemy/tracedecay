@@ -4,6 +4,10 @@
 //! Independent searches on one project run together. A request the caller has
 //! already abandoned must stop at the candidate-scan checkpoint that observes
 //! the request control, instead of hydrating the rest of its corpus.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 
 use super::*;
 use std::sync::Mutex as StdMutex;

@@ -5,6 +5,10 @@
 //! clean page: callers have to see the producer state and the route that
 //! changes it. A TypeScript project with its own compiler gets that producer
 //! automatically at admission.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 
 use std::time::Duration;
 

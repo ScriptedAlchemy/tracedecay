@@ -507,6 +507,10 @@ fn status_branch_info(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 mod tests {
     use super::{
         await_daemon_tool_result, project_open_line, reject_truncation_envelope,

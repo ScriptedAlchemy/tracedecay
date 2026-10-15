@@ -4,6 +4,10 @@
 //! primitive through the shipped MCP, HTTP, and CLI surfaces. They fail when
 //! the path stops executing; source text and catalog declarations are not
 //! accepted as reachability evidence.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 
 use crate::common;
 

@@ -1,4 +1,8 @@
 #![cfg(unix)]
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 
 use std::path::Path;
 use std::sync::Arc;

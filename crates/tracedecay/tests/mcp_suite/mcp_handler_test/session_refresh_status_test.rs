@@ -2,6 +2,10 @@
 //!
 //! Every call is a production-composition JSON-RPC `tools/call`. The
 //! assertions name the envelope a host reads, not scheduler or store calls.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 
 use std::path::Path;
 use std::time::Duration;

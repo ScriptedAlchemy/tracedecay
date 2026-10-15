@@ -6,6 +6,10 @@
 //! maps still hold their standing owner attachments) fails the close below
 //! with `graph database conflict (operation: close graph runtime for
 //! shutdown)`, the exact receipt detail this contract forbids.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 
 use std::path::{Path, PathBuf};
 use std::sync::{

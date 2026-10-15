@@ -4499,6 +4499,10 @@ mod text_slice_fairness_tests {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 mod notify_rendezvous_tests {
     use super::wait_notified_if_unset;
     use std::sync::atomic::{AtomicBool, Ordering};

@@ -3,6 +3,10 @@
 //! Each row proves typed failure dispositions do not corrupt the durable
 //! `reconcile_sink` frontier (pending watermark / replay backlog) and do not invent a
 //! default-success commit.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

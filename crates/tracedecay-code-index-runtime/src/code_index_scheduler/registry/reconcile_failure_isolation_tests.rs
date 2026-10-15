@@ -5,6 +5,10 @@
 //! object can behave perfectly while nothing consults it. Every assertion here
 //! counts reconcile passes the worker actually dispatched, never elapsed time,
 //! which swings run to run on a shared machine.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 
 use std::fs;
 #[cfg(unix)]

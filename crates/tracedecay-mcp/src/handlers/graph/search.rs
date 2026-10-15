@@ -559,6 +559,10 @@ fn render_search_md(response_handle_root: Option<&Path>, query: &str, value: &Va
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 mod tests {
     use serde_json::json;
     use tracedecay_contracts::retrieval::{PrimitiveFreshnessStateV1, SearchRouteMatchV1};

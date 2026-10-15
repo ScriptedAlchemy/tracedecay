@@ -5,6 +5,10 @@
 //! that call returns for one sealed fixture, not which helpers ran.
 
 #![cfg(feature = "test-transport")]
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

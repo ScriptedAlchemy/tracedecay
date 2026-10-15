@@ -6,6 +6,10 @@
 //! stops before the next candidate batch and the single search permit is free
 //! for the next call. It runs on a corpus larger than one candidate batch and
 //! checks the result the caller sees.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 
 use std::collections::BTreeMap;
 use std::path::Path;

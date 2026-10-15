@@ -14,6 +14,10 @@
 //! typed `parked` freshness state whose reason names the violation and is
 //! never rewritten in place, while removing the violation lets the ordinary
 //! wake cadence resume without a remount.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;

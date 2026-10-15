@@ -1,6 +1,10 @@
 //! The trailers and footer a typed result carries beside its body, as an MCP
 //! client receives them from the production server for `search`, `context`,
 //! `callers` and `callees`, in both output formats.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 
 use super::{
     GraphQueryFixture, call_production_tool, graph_query_fixture_with_sources,

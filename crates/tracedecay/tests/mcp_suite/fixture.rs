@@ -18,6 +18,10 @@
 //! Seeding is the only bootstrap. A template that cannot be built or a copy
 //! that cannot be opened is a typed error; tests do not silently pay a second
 //! full init.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 
 use std::fs;
 use std::io;

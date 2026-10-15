@@ -3,6 +3,10 @@
 //! The call goes through the production MCP `tools/call` path and the real
 //! `cargo test` runner. Assertions are the JSON the caller reads, not which
 //! helper the handler invoked.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 
 use std::fs;
 use std::path::Path;

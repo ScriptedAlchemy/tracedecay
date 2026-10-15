@@ -719,6 +719,10 @@ pub fn snapshot_cursor_covers_range(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;

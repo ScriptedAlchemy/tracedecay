@@ -1,4 +1,8 @@
 #![allow(dead_code)] // shared test support: each suite binary compiles this module and uses a subset
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 
 pub mod fixture;
 #[cfg(feature = "test-transport")]

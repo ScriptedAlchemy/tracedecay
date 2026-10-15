@@ -956,6 +956,10 @@ pub async fn restore_managed_skill(profile_root: &Path, id: &str) -> Result<Mana
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 mod transaction_tests {
     use super::*;
     use std::sync::{Arc, Barrier};

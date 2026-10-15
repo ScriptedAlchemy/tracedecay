@@ -3,6 +3,10 @@
 //! These tests reach `remote_protocol_tests` and `tracedecay_project::config`, which compose
 //! root daemon fixtures and therefore cannot live in
 //! `tracedecay-store-runtime` itself.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 
 use std::future::Future;
 use std::path::PathBuf;

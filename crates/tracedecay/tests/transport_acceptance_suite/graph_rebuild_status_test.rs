@@ -1,3 +1,7 @@
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 // Deeply nested async fixture bodies exceed rustc's default layout query
 // depth under the perf profile; match the workspace-standard limit used by
 // the tracedecay lib and CLI crate roots.

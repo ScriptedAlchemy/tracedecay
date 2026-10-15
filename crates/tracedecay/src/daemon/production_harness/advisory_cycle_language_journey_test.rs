@@ -2,6 +2,10 @@
 //! a checkout indexes. A TypeScript-only repository has a sealed generation
 //! like any other, so the explicit cycle must run over it instead of staying
 //! "not mounted yet" for the daemon's whole life.
+#![allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 
 use std::path::Path;
 use std::time::{Duration, Instant};

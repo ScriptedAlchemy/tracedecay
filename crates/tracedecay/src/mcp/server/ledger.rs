@@ -627,6 +627,10 @@ fn claim_worldwide_flush(last_flush_at: &AtomicI64, expected: i64, now: i64) -> 
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 mod tests {
     use std::sync::atomic::AtomicU64;
 
