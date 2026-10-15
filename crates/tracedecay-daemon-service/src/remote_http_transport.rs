@@ -84,6 +84,8 @@ pub struct RemoteBrainTlsEgressSnapshot {
 pub struct RemoteBrainTlsIngressSnapshot {
     pub headers_complete: usize,
     pub body_bytes_observed: usize,
+    pub read_idle_expirations: usize,
+    pub request_read_expirations: usize,
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -96,6 +98,8 @@ pub struct RemoteBrainTlsEgressObserver {
     response_expirations: AtomicUsize,
     headers_complete: AtomicUsize,
     body_bytes_observed: AtomicUsize,
+    read_idle_expirations: AtomicUsize,
+    request_read_expirations: AtomicUsize,
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -116,6 +120,8 @@ impl RemoteBrainTlsEgressObserver {
         RemoteBrainTlsIngressSnapshot {
             headers_complete: self.headers_complete.load(Ordering::SeqCst),
             body_bytes_observed: self.body_bytes_observed.load(Ordering::SeqCst),
+            read_idle_expirations: self.read_idle_expirations.load(Ordering::SeqCst),
+            request_read_expirations: self.request_read_expirations.load(Ordering::SeqCst),
         }
     }
 }
@@ -427,6 +433,10 @@ impl IoDeadline {
         self.expired = false;
     }
 
+    fn deadline(&self) -> Time {
+        self.sleep.deadline()
+    }
+
     fn poll_expired(&mut self, context: &mut Context<'_>) -> bool {
         if !self.expired {
             self.expired = Pin::new(&mut self.sleep).poll(context).is_ready();
@@ -572,31 +582,42 @@ impl RemoteBrainTlsIo {
         }
     }
 
-    fn poll_request_absolute_deadline(&mut self, context: &mut Context<'_>) -> io::Result<()> {
+    /// Checks both request read deadlines. Called only when a read would wait
+    /// on the peer, so bytes the peer sent in time are read first however late
+    /// the listener polls. When both deadlines have passed, the earlier one
+    /// names the timeout.
+    fn poll_request_read_deadlines(&mut self, context: &mut Context<'_>) -> io::Result<()> {
         if self.request_read_complete {
             return Ok(());
         }
-        if self.request_read_deadline.poll_expired(context) {
-            self.transport = RemoteBrainTlsTransport::Failed;
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Remote Brain TLS request admission timed out",
-            ));
-        }
-        Ok(())
-    }
-
-    fn poll_read_idle_deadline(&mut self, context: &mut Context<'_>) -> io::Result<()> {
-        if self.request_read_complete {
+        let idle_expired = self.read_idle_deadline.poll_expired(context);
+        let request_expired = self.request_read_deadline.poll_expired(context);
+        let idle_first = idle_expired
+            && !(request_expired
+                && self.request_read_deadline.deadline() < self.read_idle_deadline.deadline());
+        if !idle_first && !request_expired {
             return Ok(());
         }
-        if !self.read_idle_deadline.poll_expired(context) {
-            return Ok(());
+        // Counted before the transport drops the socket, so a peer that sees
+        // the close also sees the count.
+        #[cfg(any(test, feature = "test-helpers"))]
+        if idle_first {
+            self.egress
+                .read_idle_expirations
+                .fetch_add(1, Ordering::SeqCst);
+        } else {
+            self.egress
+                .request_read_expirations
+                .fetch_add(1, Ordering::SeqCst);
         }
         self.transport = RemoteBrainTlsTransport::Failed;
         Err(io::Error::new(
             io::ErrorKind::TimedOut,
-            "Remote Brain TLS request read timed out",
+            if idle_first {
+                "Remote Brain TLS request read timed out"
+            } else {
+                "Remote Brain TLS request admission timed out"
+            },
         ))
     }
 
@@ -820,19 +841,13 @@ impl AsyncRead for RemoteBrainTlsIo {
         // the request deadline, so it must not fail on the expired one.
         match self.poll_handshake(context) {
             Poll::Pending => {
-                return match self
-                    .poll_request_absolute_deadline(context)
-                    .and_then(|()| self.poll_read_idle_deadline(context))
-                {
+                return match self.poll_request_read_deadlines(context) {
                     Ok(()) => Poll::Pending,
                     Err(error) => Poll::Ready(Err(error)),
                 };
             }
             Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
             Poll::Ready(Ok(())) => {}
-        }
-        if let Err(error) = self.poll_request_absolute_deadline(context) {
-            return Poll::Ready(Err(error));
         }
         let before = buffer.filled().len();
         let result = match &mut self.transport {
@@ -852,7 +867,7 @@ impl AsyncRead for RemoteBrainTlsIo {
             }
         }
         if result.is_pending()
-            && let Err(error) = self.poll_read_idle_deadline(context)
+            && let Err(error) = self.poll_request_read_deadlines(context)
         {
             return Poll::Ready(Err(error));
         }
