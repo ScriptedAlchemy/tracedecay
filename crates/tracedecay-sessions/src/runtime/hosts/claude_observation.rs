@@ -32,6 +32,7 @@ use crate::runtime::hosts::claude::{
     ClaudeSourceFrame, identify_claude_source, is_claude_session_transcript,
     try_scan_claude_source_frames_with_resume,
 };
+use crate::runtime::ingest::quarantine::SourceSweep;
 use crate::runtime::observation::jsonl_observation_admission::is_deterministic_content_refusal;
 use crate::runtime::shared::{StoredCursor, TranscriptIngestStats};
 use crate::runtime::snapshot_observation::host_admission_error;
@@ -1344,12 +1345,30 @@ async fn advance_source_frontier<A: HostAdmission + ?Sized>(
         .map_err(|error| frontier_store_error("advance Claude source frontier", error))
 }
 
+/// Folds one source failure the sweep did not absorb into the pass summary:
+/// failed source count, first reason code, and whether every failure was
+/// retryable.
+fn note_source_failure(
+    summary: &mut Option<(u64, &'static str, bool)>,
+    path: &Path,
+    error: &ClaudeObservationIngestError,
+) {
+    let failure = crate::runtime::classify_claude_observation_failure(error);
+    let summary = summary.get_or_insert((0, failure.reason_code, failure.retryable));
+    summary.0 = summary.0.saturating_add(1);
+    summary.2 &= failure.retryable;
+    tracing::warn!(
+        source = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("unknown"),
+        reason_code = failure.reason_code,
+        retryable = failure.retryable,
+        "Claude observation source ingest failed"
+    );
+}
+
 /// Ingest one Claude source through caller-prepared project admission authority.
-#[tracing::instrument(
-    name = "sessions.hosts.claude.ingest_source",
-    level = "trace",
-    skip_all
-)]
 pub async fn ingest_source_with_observations_with_admission<A>(
     source: &ClaudeSource,
     project_root: &Path,
@@ -1357,6 +1376,35 @@ pub async fn ingest_source_with_observations_with_admission<A>(
     admission: &A,
     max_new_bytes: Option<u64>,
     cancellation: ObservationCancellation,
+) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError>
+where
+    A: HostAdmission + ?Sized,
+{
+    ingest_source_with_sweep(
+        source,
+        project_root,
+        scope,
+        admission,
+        max_new_bytes,
+        cancellation,
+        &mut SourceSweep::new("claude", None),
+    )
+    .await
+}
+
+#[tracing::instrument(
+    name = "sessions.hosts.claude.ingest_source",
+    level = "trace",
+    skip_all
+)]
+pub(crate) async fn ingest_source_with_sweep<A>(
+    source: &ClaudeSource,
+    project_root: &Path,
+    scope: ObservationScopeV1,
+    admission: &A,
+    max_new_bytes: Option<u64>,
+    cancellation: ObservationCancellation,
+    sweep: &mut SourceSweep,
 ) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError>
 where
     A: HostAdmission + ?Sized,
@@ -1386,6 +1434,14 @@ where
             continue;
         }
         attempted_sources = attempted_sources.saturating_add(1);
+        let claim = match sweep.observe_file(&path).await {
+            Ok(Some(claim)) => claim,
+            Ok(None) => continue,
+            Err(error) => {
+                note_source_failure(&mut source_failures, &path, &error.into());
+                continue;
+            }
+        };
         let source_budget = remaining_bytes.min(STRICT_JSONL_BATCH_BYTES);
         remaining_bytes = remaining_bytes.saturating_sub(source_budget);
         let outcome = match process_source(&processing_context, &path, Some(source_budget)).await {
@@ -1394,27 +1450,9 @@ where
                 if let Some(progress) = error.accumulated_stats() {
                     stats = stats.merge(progress.clone());
                 }
-                let failure = crate::runtime::classify_claude_observation_failure(&error);
-                // One source whose ledger cannot prove an advance is not a
-                // reason to freeze every later history pass. The source stays
-                // failed; the pass stays retryable so the others keep moving.
-                let retryable = failure.retryable
-                    || failure.reason_code == "observation_cursor_advance_collision";
-                let summary =
-                    source_failures.get_or_insert((0_u64, failure.reason_code, retryable));
-                summary.0 = summary.0.saturating_add(1);
-                if !retryable {
-                    summary.2 = false;
+                if let Err(error) = sweep.refused(claim, error) {
+                    note_source_failure(&mut source_failures, &path, &error);
                 }
-                tracing::warn!(
-                    source = path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or("unknown"),
-                    reason_code = failure.reason_code,
-                    retryable,
-                    "Claude observation source ingest failed"
-                );
                 continue;
             }
         };
@@ -1488,17 +1526,42 @@ pub async fn ingest_user_sessions_with_admission<A>(
 where
     A: HostAdmission + ?Sized,
 {
+    ingest_user_sessions_with_sweep(
+        profile_root,
+        session_id,
+        registered_roots,
+        admission,
+        max_new_bytes,
+        cancellation,
+        &mut SourceSweep::new("claude", None),
+    )
+    .await
+}
+
+pub(crate) async fn ingest_user_sessions_with_sweep<A>(
+    profile_root: &Path,
+    session_id: Option<String>,
+    registered_roots: Vec<PathBuf>,
+    admission: &A,
+    max_new_bytes: Option<u64>,
+    cancellation: ObservationCancellation,
+    sweep: &mut SourceSweep,
+) -> Result<ClaudeObservationIngestStats, ClaudeObservationIngestError>
+where
+    A: HostAdmission + ?Sized,
+{
     let Some(source) = ClaudeSource::new() else {
         return Ok(ClaudeObservationIngestStats::default());
     };
     let source = source.for_user_scope(session_id, registered_roots);
-    ingest_source_with_observations_with_admission(
+    ingest_source_with_sweep(
         &source,
         profile_root,
         ObservationScopeV1::Profile,
         admission,
         max_new_bytes,
         cancellation,
+        sweep,
     )
     .await
 }

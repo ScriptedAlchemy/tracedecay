@@ -15,8 +15,10 @@ use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursor
 
 use crate::admission::{HostAdmission, HostAdmissionOutcome};
 use crate::observation::{CaptureObservationOutcome, ObservationCancellation};
+use crate::runtime::ingest::quarantine::{SourceClaim, SourceSweep};
 use crate::runtime::jsonl_observation_admission::is_deterministic_content_refusal;
 use crate::runtime::shared::TranscriptIngestStats;
+use crate::runtime::snapshot_observation::host_admission_error as admission_error;
 use tracedecay_runtime_core::db::{SqliteFileIdentityOperation, sqlite_generation_identity};
 
 use super::observation::{
@@ -143,9 +145,37 @@ pub(super) async fn drain_hermes_projections_with_admission_and_cancellation(
     }
 }
 
+/// Claims the row's session stream at this row, its first one the cursor does
+/// not cover. `None` when the session is quarantined at this exact row or was
+/// refused earlier in the pass.
+fn observe_row(sweep: &mut SourceSweep, state_db: &Path, row: &HermesRow) -> Option<SourceClaim> {
+    fn text(value: &Option<String>) -> &[u8] {
+        value.as_deref().unwrap_or_default().as_bytes()
+    }
+    let timestamp = row
+        .timestamp
+        .map_or([0; 8], |value| value.to_bits().to_le_bytes());
+    sweep.observe_stream(
+        state_db,
+        &row.session_id,
+        &[
+            &row.id.to_le_bytes(),
+            &row.active.to_le_bytes(),
+            &timestamp,
+            row.role.as_bytes(),
+            text(&row.content),
+            text(&row.reasoning),
+            text(&row.tool_name),
+            text(&row.tool_calls),
+        ],
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn admit_rows_with_admission_and_cancellation(
     facade: &dyn HostAdmission,
+    sweep: &mut SourceSweep,
+    state_db: &Path,
     rows: &[HermesRow],
     scope: ObservationScopeV1,
     generation: ObservationSourceGenerationV1,
@@ -175,6 +205,9 @@ pub(super) async fn admit_rows_with_admission_and_cancellation(
         {
             continue;
         }
+        let Some(claim) = observe_row(sweep, state_db, row) else {
+            continue;
+        };
         let admission = prepare_observation_row_with_cancellation(
             row,
             route(row).as_ref(),
@@ -245,7 +278,13 @@ pub(super) async fn admit_rows_with_admission_and_cancellation(
                         .await?;
                         continue;
                     }
-                    Err(outcome) => return Err(host_admission_error(outcome)),
+                    Err(outcome) => {
+                        let message = host_admission_error(outcome.clone());
+                        match sweep.refused(claim, admission_error(PROVIDER, outcome)) {
+                            Ok(()) => continue,
+                            Err(_) => return Err(message),
+                        }
+                    }
                 };
                 match captured {
                     CaptureObservationOutcome::Persisted { outcome, .. }
