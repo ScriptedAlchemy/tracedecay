@@ -829,6 +829,7 @@ impl<'a> ProjectProviderRun<'a> {
 
     #[tracing::instrument(name = "sessions.ingest.project.cursor", level = "trace", skip_all)]
     async fn run_cursor(self) -> ProviderRunOutcome {
+        let mut sweep = SourceSweep::new("cursor", self.codex_discovery);
         let (composer, composer_error) =
             if let Some(source) = cursor_composer::CursorComposerSource::new() {
                 match source
@@ -839,6 +840,7 @@ impl<'a> ProjectProviderRun<'a> {
                         cursor_composer::DEFAULT_COMPOSER_ENVELOPE_CAP,
                         Some(self.max_new_bytes),
                         self.cancellation,
+                        &mut sweep,
                     )
                     .await
                 {
@@ -849,16 +851,13 @@ impl<'a> ProjectProviderRun<'a> {
                 (cursor_composer::CursorComposerSweepOutcome::default(), None)
             };
         let mut outcome = cursor_composer_run_outcome(&composer, composer_error.as_ref());
-        if composer_error.is_some() {
-            return outcome;
-        }
-        if self.cancellation.is_cancelled() {
+        if composer_error.is_some() || self.cancellation.is_cancelled() {
+            sweep.report_into(&mut outcome);
             return outcome;
         }
         let mut session_ids = composer.projected_session_ids();
         let jsonl_skip_session_ids = composer.jsonl_skip_session_ids();
         let remaining = self.max_new_bytes.saturating_sub(composer.bytes_consumed);
-        let mut sweep = SourceSweep::new("cursor", self.codex_discovery);
         match cursor::try_ingest_cursor_project_sweep_capped_with_session_ids(
             self.project_root,
             self.project_id.clone(),
