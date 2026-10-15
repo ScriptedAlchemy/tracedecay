@@ -137,7 +137,12 @@ def _isolated_rust_test_impl(ctx):
         runfiles = runfiles.merge(target[DefaultInfo].default_runfiles)
     test_environment = ctx.attr.test_binary[RunEnvironmentInfo]
     environment = dict(test_environment.environment)
-    environment["RUSTUP_TOOLCHAIN"] = toolchain.version
+    # rustup names a dated nightly or beta `<channel>-<date>`. `version` alone
+    # is the compiler's semver (1.100.0 for nightly-2026-09-27), which rustup
+    # treats as an uninstalled stable toolchain, so rust-analyzer never starts.
+    environment["RUSTUP_TOOLCHAIN"] = (
+        "{}-{}".format(toolchain.channel, toolchain.iso_date) if toolchain.iso_date else toolchain.version
+    )
     environment["RUSTC_WRAPPER"] = ""
     environment["RUSTC_WORKSPACE_WRAPPER"] = ""
     return [
