@@ -22,6 +22,10 @@ SHIPPED_ROOTS = {
 }
 
 
+class StorageBoundaryViolation(ValueError):
+    pass
+
+
 def run(repo: Path, arguments: list[str]) -> str:
     return subprocess.run(
         arguments,
@@ -40,7 +44,7 @@ def production_feature_closure(metadata: dict) -> dict[str, set[str]]:
     }
     missing_roots = SHIPPED_ROOTS.keys() - packages.keys()
     if missing_roots:
-        raise SystemExit(
+        raise StorageBoundaryViolation(
             "production root is absent from cargo metadata: "
             + ", ".join(sorted(missing_roots))
         )
@@ -121,21 +125,7 @@ def production_feature_closure(metadata: dict) -> dict[str, set[str]]:
     return active_features
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--repo",
-        type=Path,
-        default=Path(__file__).resolve().parent.parent,
-    )
-    arguments = parser.parse_args()
-    repo = arguments.repo.resolve()
-    metadata = json.loads(
-        run(
-            repo,
-            ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
-        )
-    )
+def evaluate_storage_boundary(metadata: dict) -> set[str]:
     production_features = production_feature_closure(metadata)
     test_helper_packages = {
         package
@@ -143,7 +133,7 @@ def main() -> int:
         if "test-helpers" in features
     }
     if test_helper_packages:
-        raise SystemExit(
+        raise StorageBoundaryViolation(
             "production features reach test-only helper surfaces: "
             + ", ".join(sorted(test_helper_packages))
         )
@@ -168,17 +158,39 @@ def main() -> int:
             if package["name"] not in STORAGE_OWNERS:
                 manifest_violations.add(package["name"])
     if manifest_violations:
-        raise SystemExit(
+        raise StorageBoundaryViolation(
             "workspace package declares production rusqlite outside storage: "
             + ", ".join(sorted(manifest_violations))
         )
 
     missing_owners = STORAGE_OWNERS - declared_owners
     if missing_owners:
-        raise SystemExit(
+        raise StorageBoundaryViolation(
             "storage owner allowlist contains packages without production rusqlite: "
             + ", ".join(sorted(missing_owners))
         )
+    return declared_owners
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--repo",
+        type=Path,
+        default=Path(__file__).resolve().parent.parent,
+    )
+    arguments = parser.parse_args()
+    repo = arguments.repo.resolve()
+    metadata = json.loads(
+        run(
+            repo,
+            ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
+        )
+    )
+    try:
+        declared_owners = evaluate_storage_boundary(metadata)
+    except StorageBoundaryViolation as error:
+        raise SystemExit(str(error)) from error
     print(
         "production rusqlite dependency owners: "
         + ", ".join(sorted(declared_owners))

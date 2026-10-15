@@ -14,6 +14,16 @@ py_binary(
 )
 
 py_test(
+    name = "rusqlite_storage_boundary_test",
+    size = "small",
+    srcs = [
+        "check-rusqlite-storage-boundary.py",
+        "test-check-rusqlite-storage-boundary.py",
+    ],
+    main = "test-check-rusqlite-storage-boundary.py",
+)
+
+py_test(
     name = "unused_tool_context_measure_test",
     size = "small",
     srcs = [
