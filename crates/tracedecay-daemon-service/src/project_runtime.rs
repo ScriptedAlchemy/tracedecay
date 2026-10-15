@@ -32,6 +32,7 @@ pub use observability::{
     StoreObservabilityRegistryV1,
 };
 pub use shutdown::ProjectRuntimeRootQuiescenceV1;
+pub(crate) use shutdown::ProjectRuntimesStop;
 use shutdown::ShutdownState;
 
 #[cfg(test)]

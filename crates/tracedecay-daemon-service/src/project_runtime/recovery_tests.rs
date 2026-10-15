@@ -362,7 +362,10 @@ async fn a_retried_shutdown_cannot_readmit_a_cancelled_recovery_owner() {
     // A retried attempt re-enters the sweep; it must stay a no-op.
     registry.begin_shutdown();
     assert!(probe.is_cancelled());
-    assert!(registry.shut_down_all().await);
+    assert_eq!(
+        registry.shut_down_all().await,
+        super::ProjectRuntimesStop::Stopped
+    );
     assert_eq!(
         registry
             .publish(project, RecoveryCancelProbe::default())

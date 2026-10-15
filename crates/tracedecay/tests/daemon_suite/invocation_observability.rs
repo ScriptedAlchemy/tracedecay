@@ -1023,15 +1023,7 @@ async fn daemon_shutdown_stays_clean_after_a_producer_write_missed_its_deadline(
                 tracedecay_daemon_service::shutdown::ShutdownOwner::with_deadline_status(
                     "invocation",
                     || {},
-                    move |_| async move {
-                        if service.expire_all().await {
-                            tracedecay_daemon_service::shutdown::ShutdownStatus::Clean
-                        } else {
-                            tracedecay_daemon_service::shutdown::ShutdownStatus::Failed(
-                                "invocation runtime shutdown was incomplete".to_owned(),
-                            )
-                        }
-                    },
+                    move |_| async move { service.expire_all().await },
                 ),
             ],
         )
@@ -1053,6 +1045,19 @@ async fn daemon_shutdown_stays_clean_after_a_producer_write_missed_its_deadline(
         "a missed persistence deadline must not make daemon shutdown unclean"
     );
     assert!(receipt.unfinished().is_empty());
+    let [lost] = receipt.lost_work.as_slice() else {
+        panic!(
+            "the missed write is reported exactly once: {:?}",
+            receipt.lost_work
+        );
+    };
+    assert_eq!(lost.owner, "invocation");
+    assert!(
+        lost.work.contains("observability-shutdown-missed-write")
+            && lost.work.contains("observability_persistence_deadline"),
+        "lost work names the project and the missed deadline: {}",
+        lost.work
+    );
 }
 
 #[tokio::test]

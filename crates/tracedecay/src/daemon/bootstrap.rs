@@ -449,6 +449,16 @@ fn log_client_drain_shutdown_receipt(
 }
 
 fn log_background_shutdown_receipt(receipt: &tracedecay_daemon_service::shutdown::ShutdownReceipt) {
+    for lost in &receipt.lost_work {
+        log_daemon_event(
+            "daemon_shutdown",
+            &[
+                ("outcome", "background_task_lost_work".to_string()),
+                ("owner", lost.owner.to_string()),
+                ("detail", lost.work.clone()),
+            ],
+        );
+    }
     for owner in receipt.unfinished() {
         // The receipt keeps each owner's typed status; the log must carry it
         // too, or every unfinished owner reads as the same anonymous hang.
