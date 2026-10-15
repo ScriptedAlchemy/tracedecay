@@ -1501,7 +1501,17 @@ async fn automation_retirement_timeout_retains_owner_tombstone_until_join_finish
         .lock()
         .await
         .len();
-    let reapers_after_join = engine.store_administration.retirement_reaper_count();
+    // The reaper may clear the tombstone before the join looks for it; the
+    // join then has nothing to wait on and the reaper releases its record
+    // right after.
+    let reapers_released = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        engine
+            .store_administration
+            .wait_for_retirement_reaper_count_for_test(0),
+    )
+    .await
+    .is_ok();
     engine.shutdown_all().await;
 
     assert_eq!(
@@ -1533,8 +1543,8 @@ async fn automation_retirement_timeout_retains_owner_tombstone_until_join_finish
         "stale owner task must be terminated"
     );
     assert_eq!(owners_after_join, 0, "the reaper must clear its tombstone");
-    assert_eq!(
-        reapers_after_join, 0,
+    assert!(
+        reapers_released,
         "normal automation reaper completion must release daemon ownership"
     );
 }
