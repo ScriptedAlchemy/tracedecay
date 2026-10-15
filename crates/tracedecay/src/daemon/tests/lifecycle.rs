@@ -1139,9 +1139,12 @@ async fn shutdown_with_clients(
     lifecycle: &DaemonLifecycle,
     clients: crate::daemon::bootstrap::ClientTasks,
 ) -> Arc<tracedecay_daemon_service::shutdown::DaemonShutdownReceipt> {
+    // The daemon's own deadline. A shorter one leaves nothing for the client
+    // phase once the later phases' reserves are set aside, so any unwind at
+    // all would read as TimedOut.
     tracedecay_daemon_service::shutdown::coordinate_daemon_shutdown(
         lifecycle,
-        std::time::Instant::now() + std::time::Duration::from_secs(5),
+        std::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE,
         async move {
             tracedecay_daemon_service::shutdown::DaemonShutdownPlan::new(Vec::new(), |_| async {
                 tracedecay_store_runtime::ShutdownTaskReceipt::default()
