@@ -1780,16 +1780,33 @@ mod tests {
         assert_eq!(generation_files(), 1);
     }
 
+    /// Tick state released 200 ms after its tick drops, past the abort
+    /// deadline, as when a loaded host runs an aborted tick's unwind late. The
+    /// release runs on its own thread so no shared runtime worker blocks.
+    struct LateUnwind<T: Send + 'static>(Option<T>);
+
+    impl<T: Send + 'static> Drop for LateUnwind<T> {
+        fn drop(&mut self) {
+            let state = self.0.take();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(200));
+                drop(state);
+            });
+        }
+    }
+
+    /// The join may abandon an aborted tick whose unwind outlasts the abort
+    /// deadline, so the test waits for the tick's state to drop rather than
+    /// expecting the join to have seen it.
     #[tokio::test]
     async fn shutdown_aborts_a_stuck_tick_at_the_abort_deadline() {
-        let tick_state = Arc::new(());
-        let held_state = Arc::clone(&tick_state);
+        let (held_state, released) = tokio::sync::oneshot::channel::<()>();
         let started = Arc::new(Notify::new());
         let task_started = Arc::clone(&started);
         let handle = NativeTask::spawn(async move {
+            let _held_state = LateUnwind(Some(held_state));
             task_started.notify_one();
             std::future::pending::<()>().await;
-            drop(held_state);
         })
         .expect("native task");
         started.notified().await;
@@ -1801,11 +1818,10 @@ mod tests {
         )
         .await;
 
-        assert_eq!(
-            Arc::strong_count(&tick_state),
-            1,
-            "a tick stuck past the abort deadline must be aborted and joined"
-        );
+        let released = tokio::time::timeout(Duration::from_secs(30), released)
+            .await
+            .expect("a tick stuck past the abort deadline must be aborted");
+        assert!(released.is_err(), "the aborted tick dropped its state");
     }
 
     /// A tick cancelled while it awaits blocking store work must not leave
