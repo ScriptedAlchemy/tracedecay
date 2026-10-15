@@ -66,6 +66,7 @@ async fn cancelled_startup_sweep_stops_before_admitting_cursor_jsonl() {
             project_id: project_id.clone(),
         },
         &cancellation,
+        &mut SourceSweep::new("cursor", None),
     )
     .await
     .expect_err("pre-cancelled Cursor sweep must stop before persistence");
@@ -85,6 +86,7 @@ async fn cancelled_startup_sweep_stops_before_admitting_cursor_jsonl() {
             project_id: project_id.clone(),
         },
         &ObservationCancellation::default(),
+        &mut SourceSweep::new("cursor", None),
     )
     .await
     .expect("uncancelled Cursor retry must admit the untouched source");
@@ -98,6 +100,7 @@ async fn cancelled_startup_sweep_stops_before_admitting_cursor_jsonl() {
         None,
         ObservationScopeV1::Project { project_id },
         &ObservationCancellation::default(),
+        &mut SourceSweep::new("cursor", None),
     )
     .await
     .expect("completed Cursor retry must be deduplicated");
@@ -120,6 +123,7 @@ async fn mid_admission_cancellation_stops_cursor_before_projection() {
             project_id: project_id.clone(),
         },
         &cancellation,
+        &mut SourceSweep::new("cursor", None),
     )
     .await
     .expect_err("mid-admission cancellation must stop before projection");
@@ -137,6 +141,7 @@ async fn mid_admission_cancellation_stops_cursor_before_projection() {
         None,
         ObservationScopeV1::Project { project_id },
         &ObservationCancellation::default(),
+        &mut SourceSweep::new("cursor", None),
     )
     .await
     .expect("uncancelled Cursor retry must admit the untouched source");
@@ -159,6 +164,7 @@ async fn projection_backlog_over_pass_limit_converges_in_two_passes() {
         None,
         scope.clone(),
         &ObservationCancellation::default(),
+        &mut SourceSweep::new("cursor", None),
     )
     .await
     .expect("first bounded projection pass");
@@ -177,6 +183,7 @@ async fn projection_backlog_over_pass_limit_converges_in_two_passes() {
         None,
         scope,
         &ObservationCancellation::default(),
+        &mut SourceSweep::new("cursor", None),
     )
     .await
     .expect("second bounded projection pass");

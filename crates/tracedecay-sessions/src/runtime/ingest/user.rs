@@ -339,6 +339,7 @@ pub(super) async fn try_ingest_user_cursor_sessions_with_db_bounded(
     admission: &dyn HostAdmission,
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
+    sweep: &mut SourceSweep,
 ) -> Result<BoundedProviderOutcome, BoundedProviderFailure> {
     if cancellation.is_cancelled() {
         return Ok(BoundedProviderOutcome {
@@ -355,6 +356,7 @@ pub(super) async fn try_ingest_user_cursor_sessions_with_db_bounded(
                 cursor_composer::DEFAULT_COMPOSER_ENVELOPE_CAP,
                 max_new_bytes,
                 cancellation,
+                sweep,
             )
             .await
         {
@@ -376,12 +378,13 @@ pub(super) async fn try_ingest_user_cursor_sessions_with_db_bounded(
     let jsonl_skip_session_ids = composer.jsonl_skip_session_ids();
     let remaining = max_new_bytes.map(|limit| limit.saturating_sub(composer.bytes_consumed));
     let composer_outcome = BoundedProviderOutcome::from_composer(&composer);
-    let sweep = cursor::try_ingest_cursor_user_sweep_capped_with_session_ids(
+    let jsonl = cursor::try_ingest_cursor_user_sweep_capped_with_session_ids(
         &registered_roots,
         admission,
         remaining,
         jsonl_skip_session_ids,
         cancellation,
+        sweep,
     )
     .await
     .map_err(|error| BoundedProviderFailure {
@@ -391,7 +394,7 @@ pub(super) async fn try_ingest_user_cursor_sessions_with_db_bounded(
     Ok(merge_user_cursor_sweep(
         &composer,
         projected_session_ids,
-        sweep,
+        jsonl,
     ))
 }
 

@@ -136,14 +136,12 @@ impl HostScanBudget {
     }
 }
 
-/// Per-source failures a snapshot host isolates to that source instead of
-/// failing the whole sweep.
+/// Per-source read failures a host isolates to that source instead of
+/// failing the whole sweep. A refusal of the source's own records is the
+/// source sweep's to quarantine instead.
 pub(super) fn isolatable_source_error(error: &TranscriptIngestError) -> bool {
     matches!(
         error,
-        TranscriptIngestError::ScanIo { .. }
-            | TranscriptIngestError::ScanGenerationChanged { .. }
-            | TranscriptIngestError::NonDurableRecord { .. }
-            | TranscriptIngestError::InvalidSourceIdentity { .. }
+        TranscriptIngestError::ScanIo { .. } | TranscriptIngestError::ScanGenerationChanged { .. }
     )
 }

@@ -99,6 +99,7 @@ impl CursorComposerSource {
             envelope_cap,
             max_new_bytes,
             &crate::observation::ObservationCancellation::default(),
+            &mut crate::runtime::ingest::quarantine::SourceSweep::new(PROVIDER, None),
         )
         .await
     }
