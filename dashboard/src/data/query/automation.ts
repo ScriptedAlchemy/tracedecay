@@ -722,7 +722,7 @@ export function automationRunsReading(
 }
 
 /**
- * The same check for the automatic receipt list, which additionally has a cap.
+ * The same check for the automatic receipt list, which also has a cap.
  *
  * `automation_automatic_fact_receipts_api::list` runs its query under
  * `coerce_limit(params.limit, 50, 200)`, and this page sends no `limit`, so it

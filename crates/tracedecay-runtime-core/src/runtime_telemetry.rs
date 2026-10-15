@@ -778,7 +778,7 @@ fn sample_process_with_window(cpu_sample_window: Duration) -> Result<ProcessSnap
     // host with a large process table). The primary fix for that crash is the
     // explicit-stack entrypoint in `main.rs` (`ASYNC_STACK_BYTES`: Windows
     // gives the main thread only 1 MiB); scoping the refresh to our PID
-    // additionally bounds this handler's work and memory regardless of host
+    // also bounds this handler's work and memory regardless of host
     // process count. `sample_process_fits_in_a_small_stack` guards the stack
     // footprint of this path.
     let refresh = ProcessRefreshKind::nothing().with_cpu().with_memory();

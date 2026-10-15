@@ -1,15 +1,14 @@
 //! `TraceDecay` runtime kernel.
 //!
-//! This crate owns the load-bearing runtime substrate that every other
-//! `TraceDecay` subsystem sits on: cancellation and task ownership, process
-//! and profile leases, resource accounting (resident memory, background CPU),
+//! This crate provides shared runtime services: cancellation and task ownership,
+//! process and profile leases, resource accounting (resident memory, background CPU),
 //! the storage layout and store-identity resolver with the repository and
 //! worktree reads it depends on, the `SQLite` database facade with its
 //! migrations and read snapshots, and the per-shard runtime registry.
 //!
-//! ## What sits above this kernel
+//! ## Dependent crates
 //!
-//! Product runtimes live with their vertical owners, not here: the fact store
+//! Other crates own the product runtimes: the fact store
 //! and memory model in `tracedecay-session-memory`, privacy detection and
 //! sanitization in `tracedecay-privacy`, Work/Workflow topology projections in
 //! `tracedecay-application`, and the token-savings monitor ring in
@@ -21,9 +20,9 @@
 //! [`shard_runtime`] is the per-shard runtime and registry that `db::Database`
 //! is built on. The store runtime that decides which shards a daemon opens and
 //! how they converge, retire, and shut down is `tracedecay-store-runtime`; it
-//! stores `RegisteredGlobalDbLeaseV1` in its public surface, and
+//! stores `RegisteredGlobalDbLeaseV1` in its public API, and
 //! `tracedecay-global-db` depends on this kernel, so the kernel taking that
-//! edge back would be a Cargo cycle. `global_db`, sessions, and semantic
+//! dependency would create a Cargo cycle. `global_db`, sessions, and semantic
 //! projection are above this crate for the same reason.
 //!
 //! [`ports::registered_schema`] is the port a freshly opened profile- or
@@ -83,7 +82,7 @@
 // The kernel was extracted from a single crate where every intra-crate item
 // was reachable through crate-restricted visibility. Crossing the crate
 // boundary promoted those to `pub`; the root shims re-export them, so this
-// public surface is an artifact of the split, not new API.
+// public API is an artifact of the split, not new API.
 #![allow(unreachable_pub)]
 #![allow(rustdoc::broken_intra_doc_links)]
 #![allow(rustdoc::private_intra_doc_links)]

@@ -131,7 +131,7 @@ pub(crate) fn open_direct_sealed_generation(
             "sealed generation store receipt does not bind this generation".to_owned(),
         ));
     }
-    // Lazily, for the same reason as `open_sealed_store`, and additionally so
+    // Lazily, for the same reason as `open_sealed_store`, and also so
     // the owner's lease-drop hibernation applies: an eagerly opened handle
     // has no lazy store state, so `hibernate_if_lazy` was a no-op and this
     // direct sealed serving path retained its whole graph past its last

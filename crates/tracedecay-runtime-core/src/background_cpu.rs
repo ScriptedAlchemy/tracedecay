@@ -2,7 +2,7 @@
 //!
 //! The authority counts active CPU units rather than owning an executor. Code
 //! indexing, semantic native threads, and session preparation can therefore
-//! use their existing execution substrates while sharing one hard process
+//! use their existing executors while sharing one hard process
 //! ceiling. FIFO waiter order prevents a continuously busy class from starving
 //! another class, and RAII releases capacity on success, cancellation, or
 //! unwind.

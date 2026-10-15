@@ -99,7 +99,7 @@ impl SchemaBodyAuthorityV1 {
 /// application module.
 ///
 /// Most catalog entries need only stable schema references. Public SDK
-/// generation additionally needs the Rust-owned bodies, so capabilities opt in
+/// generation also needs the Rust-owned bodies, so capabilities opt in
 /// beside their manifest instead of being copied into an SDK-only inventory.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ExecutableSchemaAuthority {

@@ -45,7 +45,7 @@ TraceDecay standalone automation is time-scheduled by the daemon, not by Codex n
 Scheduling is activity-coupled, not purely wall-clock. The scheduler reads the newest LCM session-message timestamp for the project store as its session-activity signal on every tick:
 
 - `min_idle_secs` is a true idle window: the task only runs after the project has been quiet (no LCM session ingest) for at least that long. A missing session store counts as idle.
-- `session_reflector` and `skill_writer` additionally require new session activity since their last successful run; when nothing new landed they skip with `no_new_session_activity` instead of re-reviewing the same transcripts. Because skips do not consume the interval clock, the task fires on the first tick after fresh activity lands (once the idle window is satisfied).
+- `session_reflector` and `skill_writer` also require new session activity since their last successful run; when nothing new landed they skip with `no_new_session_activity` instead of re-reviewing the same transcripts. Because skips do not consume the interval clock, the task fires on the first tick after fresh activity lands (once the idle window is satisfied).
 - `memory_curator` reviews the fact store rather than session transcripts, so it keeps the plain interval/cooldown cadence.
 
 The daemon loop is the host for these jobs. It should not create Codex top-level chats for scheduler work, and it should not rely on Codex native recurring automations for liveness. Host backends provide the model call; TraceDecay owns evidence collection, validation, ledgers, apply policy, and scheduler state.

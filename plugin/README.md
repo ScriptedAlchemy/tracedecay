@@ -1,4 +1,4 @@
-# TraceDecay Plugin Bundle
+# TraceDecay plugin bundle
 
 This source tree builds the TraceDecay integrations for Claude Code, Codex,
 Cursor, Kimi Code, OpenCode, Pi, and ChatGPT. The Claude, Codex, Cursor, Kimi Code, and
@@ -30,7 +30,7 @@ The plugin is named `tracedecay`, and hosts namespace a plugin's MCP tools by
 the plugin name plus the **server key**. Claude and Codex keep the MCP server
 key as `graph` (see `.mcp.json`) so those hosts render `plugin tracedecay graph`
 / `graph:…` instead of the redundant `tracedecay tracedecay`. Cursor uses the
-server key `tracedecay` in `mcp-cursor.json` because Cursor Settings surfaces
+server key `tracedecay` in `mcp-cursor.json` because Cursor Settings displays
 that key literally (`plugin-tracedecay-graph` looked like a bare "graph"
 entry). Kimi Code also uses `tracedecay`, registered in session/user
 `mcp.json` (not the plugin manifest). The individual tool names keep their

@@ -6,7 +6,7 @@
 //! * `analytics_events`, hook/tool/skill telemetry. Derived, reconstructable
 //!   signal, so it carries a **safe default retention of 180 days**.
 //! * `lcm_raw_messages`, the stored session messages, retained for a
-//!   six-month recovery horizon. Current session stores additionally use
+//!   six-month recovery horizon. Current session stores also use
 //!   projection-durability-aware retention in `tracedecay_lcm::retention`.
 //!
 //! Every window is expressed in whole days. Rows are pruned only when their

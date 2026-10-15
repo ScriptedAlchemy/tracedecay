@@ -17,7 +17,7 @@ The plugin registers the TraceDecay MCP server under the `tracedecay` key as:
 tracedecay serve
 ```
 
-Cursor Settings surfaces that MCP server key literally, so the Cursor bundle
+Cursor Settings displays that MCP server key literally, so the Cursor bundle
 uses `tracedecay` (not the Claude/Codex `graph` key). Each Cursor workspace
 gets its own project store.
 
