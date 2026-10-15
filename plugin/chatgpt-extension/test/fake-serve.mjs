@@ -28,4 +28,17 @@ server.registerTool("node_not_found", {}, async () => ({
   ],
 }));
 
+server.registerTool("hinted_read", {}, async () => ({
+  content: [
+    { type: "text", text: JSON.stringify({ ok: true }) },
+    { type: "text", text: "\ntracedecay_metrics: response_tokens=4" },
+    {
+      type: "text",
+      text: "tracedecay_repeated_query: this tracedecay_search call shares 100% of its query words with the tracedecay_search call 2 calls earlier in this session",
+    },
+  ],
+}));
+
+server.registerTool("plain_read", {}, async () => ({ content: [{ type: "text", text: JSON.stringify({ ok: true }) }] }));
+
 await server.connect(new StdioServerTransport());

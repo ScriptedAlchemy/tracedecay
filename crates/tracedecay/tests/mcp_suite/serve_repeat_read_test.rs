@@ -416,6 +416,22 @@ async fn serve_points_and_hints_identical_json_reads() {
     let pointers = [(REPEAT_READ_POINTERS_ENV, "1")];
     let mut client = hinted_client(home.path(), project.path(), &pointers, "json_repeat_marker");
 
+    // The explorer's search over its serve session.
+    let search = json!({
+        "query": "json_repeat_marker",
+        "limit": 20,
+        "prefer_symbol": true,
+        "format": "json",
+    });
+    let searched = client.request(call(90, "tracedecay_search", &search));
+    assert!(!text(&searched).contains(QUERY_HINT), "{searched}");
+    let searched_again = client.request(call(91, "tracedecay_search", &search));
+    assert!(
+        text(&searched_again).contains("tracedecay_search call 1 call earlier"),
+        "an identical JSON search with the same answer is hinted: first {searched}\n\
+         again {searched_again}"
+    );
+
     let outline = json!({ "file": "src/lib.rs", "format": "json" });
     let first = client.request(call(100, "tracedecay_source_outline", &outline));
     assert!(

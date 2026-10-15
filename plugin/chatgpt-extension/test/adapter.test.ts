@@ -75,6 +75,40 @@ describe("serve session", () => {
   });
 });
 
+describe("repeated-query hints", () => {
+  it("relays the hint serve attached to a read into that explorer call's result only", async () => {
+    const session = fakeSession();
+    const project = { project_id: "proj_a", label: "billing", project_root: PACKAGE_ROOT, head_branch: null, default_branch: null };
+    const bridge = {
+      resolveProject: async () => project,
+      status: async () => {
+        throw new DaemonFailure({ kind: "unavailable", code: "status_skipped", message: "not under test" });
+      },
+      search: async (_projectId: string, query: string) => {
+        await session.callJson(query === "again" ? "hinted_read" : "plain_read", {});
+        return { coverage: { recall: "complete" }, results: [] };
+      },
+    } as unknown as DaemonBridge;
+    const server = createExtensionServer({ bridge, assets: ASSETS });
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverSide);
+    const client = new Client({ name: "hints-test", version: "0.0.0" });
+    await client.connect(clientSide);
+    cleanups.push(async () => {
+      await client.close();
+      await server.close();
+    });
+    const search = (query: string) =>
+      client.callTool({ name: "tracedecay_search_code", arguments: { project_id: "proj_a", query } }) as Promise<CallToolResult>;
+
+    const [repeated, fresh] = await Promise.all([search("again"), search("first")]);
+    const texts = (result: CallToolResult) => result.content.flatMap((item) => (item.type === "text" ? [item.text] : []));
+    expect(texts(repeated)).toHaveLength(2);
+    expect(texts(repeated)[1]).toMatch(/^tracedecay_repeated_query: this tracedecay_search call shares 100%/u);
+    expect(texts(fresh)).toHaveLength(1);
+  }, 15_000);
+});
+
 describe("composer mentions", () => {
   const projects = [
     { project_id: "proj_a", label: "billing" },
