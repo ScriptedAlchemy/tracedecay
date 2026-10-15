@@ -268,15 +268,15 @@ async fn run_recorder(
                 drain_once(authority.as_ref(), spool.as_ref(), &mut summary).await;
                 retry_due = Instant::now() + RECORDER_RETRY_INTERVAL;
             }
-            Some(RecorderControl::Shutdown { reply }) = control.recv() => {
-                while wake.try_recv().is_ok() {}
-                while drain_once(authority.as_ref(), spool.as_ref(), &mut summary).await > 0 {}
-                summary.retained = pending_count(spool.as_ref());
-                state.store(RECORDER_STOPPED, Ordering::Release);
-                let _ = reply.send(summary);
-                return;
-            }
-            else => {
+            control = control.recv() => {
+                // A closed lane means every frontend dropped without a
+                // shutdown: stop, leaving pending receipts for restart replay.
+                if let Some(RecorderControl::Shutdown { reply }) = control {
+                    while wake.try_recv().is_ok() {}
+                    while drain_once(authority.as_ref(), spool.as_ref(), &mut summary).await > 0 {}
+                    summary.retained = pending_count(spool.as_ref());
+                    let _ = reply.send(summary);
+                }
                 state.store(RECORDER_STOPPED, Ordering::Release);
                 return;
             }
