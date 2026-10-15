@@ -947,6 +947,13 @@ pub(crate) mod test_support {
         cancel_on_discovery_queue_read: Arc<Mutex<Option<ObservationCancellation>>>,
         session_backfill_page_pause: Arc<Mutex<Option<SessionBackfillPagePause>>>,
         deterministic_capture_refusal: Arc<Mutex<Option<&'static str>>>,
+        session_capture_failure: Arc<Mutex<Option<SessionCaptureFailure>>>,
+    }
+
+    struct SessionCaptureFailure {
+        session_id: &'static str,
+        outcome: HostAdmissionOutcome,
+        attempts: usize,
     }
 
     impl MemoryHostAdmission {
@@ -971,6 +978,51 @@ pub(crate) mod test_support {
                 .deterministic_capture_refusal
                 .lock()
                 .unwrap_or_else(|error| error.into_inner()) = Some(reason);
+        }
+
+        /// Fail every capture for `session_id` with `outcome`, the way a store
+        /// that keeps disagreeing with one source does.
+        pub(crate) fn fail_captures_for_session(
+            &self,
+            session_id: &'static str,
+            outcome: HostAdmissionOutcome,
+        ) {
+            *self
+                .session_capture_failure
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some(SessionCaptureFailure {
+                session_id,
+                outcome,
+                attempts: 0,
+            });
+        }
+
+        /// Captures refused by [`Self::fail_captures_for_session`].
+        pub(crate) fn failed_session_capture_attempts(&self) -> usize {
+            self.session_capture_failure
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_ref()
+                .map_or(0, |failure| failure.attempts)
+        }
+
+        fn session_capture_failure<'r>(
+            &self,
+            mut requests: impl Iterator<Item = &'r CaptureObservationRequest>,
+        ) -> Option<HostAdmissionOutcome> {
+            let mut guard = self
+                .session_capture_failure
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let failure = guard.as_mut()?;
+            requests
+                .any(|request| {
+                    request.identity().source().session_id().as_str() == failure.session_id
+                })
+                .then(|| {
+                    failure.attempts += 1;
+                    failure.outcome.clone()
+                })
         }
 
         /// Make the next `count` session-message lookups report the store as
@@ -1080,6 +1132,9 @@ pub(crate) mod test_support {
                 {
                     return Err(HostAdmissionOutcome::deterministic_content_refusal(reason));
                 }
+                if let Some(outcome) = self.session_capture_failure(std::iter::once(&request)) {
+                    return Err(outcome);
+                }
                 {
                     let mut state = self.store.state();
                     state.scalar_capture_calls = state.scalar_capture_calls.saturating_add(1);
@@ -1100,6 +1155,9 @@ pub(crate) mod test_support {
             requests: Vec<CaptureObservationRequest>,
         ) -> AdmissionFuture<'a, Vec<CaptureObservationOutcome>> {
             Box::pin(async move {
+                if let Some(outcome) = self.session_capture_failure(requests.iter()) {
+                    return Err(outcome);
+                }
                 {
                     let mut state = self.store.state();
                     state.batch_capture_calls = state.batch_capture_calls.saturating_add(1);
