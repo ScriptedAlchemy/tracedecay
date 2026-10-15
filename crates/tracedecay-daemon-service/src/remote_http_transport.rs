@@ -1236,4 +1236,91 @@ mod tests {
         drop(release);
         client.join().unwrap();
     }
+
+    /// The client sends its headers with the handshake and its body as soon as
+    /// the listener has read them, so the whole request is waiting well before
+    /// the absolute request deadline. A listener that polls only once that
+    /// deadline has passed must read the waiting body rather than time the
+    /// client out.
+    #[test]
+    fn a_late_listener_poll_reads_a_body_that_arrived_in_time() {
+        const HEADERS: &[u8] =
+            b"POST /remote/authority HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 2\r\n\r\n";
+        const BODY: &[u8] = b"{}";
+        let deadlines = RemoteBrainTlsDeadlines {
+            read_idle: Duration::from_millis(200),
+            request_read: Duration::from_millis(400),
+            ..RemoteBrainTlsDeadlines::PRODUCTION
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let listener = tls_listener(directory.path()).with_deadlines(deadlines);
+        let address = listener.bound_addr().unwrap();
+        let (sent, body_sent) = mpsc::channel();
+        let (headers_read, send_body) = mpsc::channel::<()>();
+        let client = std::thread::spawn(move || {
+            let mut roots = rustls::RootCertStore::empty();
+            roots
+                .add(CertificateDer::from_pem_slice(TRUST_ROOT).unwrap())
+                .unwrap();
+            let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+            let mut tls = rustls::ClientConnection::new(
+                Arc::new(config),
+                ServerName::IpAddress(address.ip().into()),
+            )
+            .unwrap();
+            let mut socket = std::net::TcpStream::connect(address).unwrap();
+            tls.writer().write_all(HEADERS).unwrap();
+            while tls.is_handshaking() || tls.wants_write() {
+                tls.complete_io(&mut socket).unwrap();
+            }
+            send_body.recv().expect("the listener reads the headers");
+            tls.writer().write_all(BODY).unwrap();
+            while tls.wants_write() {
+                tls.write_tls(&mut socket).unwrap();
+            }
+            let _ = sent.send(());
+            let _ = send_body.recv();
+        });
+        let (mut io, _) = native_runtime::block_on(listener.accept())
+            .unwrap()
+            .expect("accepted connection");
+
+        let waker = Arc::new(CountingWaker::default());
+        let task_waker = Waker::from(Arc::clone(&waker));
+        let mut context = Context::from_waker(&task_waker);
+        let mut storage = [0_u8; 4096];
+        let mut buffer = ReadBuf::new(&mut storage);
+        let mut seen = 0;
+        while Pin::new(&mut io)
+            .poll_read(&mut context, &mut buffer)
+            .is_pending()
+        {
+            seen = waker.wait_past(seen);
+        }
+        assert_eq!(buffer.filled(), HEADERS);
+        let headers_read_at = std::time::Instant::now();
+        headers_read.send(()).unwrap();
+
+        body_sent.recv().expect("client sends its body");
+        std::thread::sleep(
+            (deadlines.request_read * 3 / 2).saturating_sub(headers_read_at.elapsed()),
+        );
+        let mut storage = [0_u8; 4096];
+        let mut buffer = ReadBuf::new(&mut storage);
+        let read = Pin::new(&mut io).poll_read(&mut context, &mut buffer);
+        assert!(
+            matches!(read, Poll::Ready(Ok(()))),
+            "a body waiting before the request deadline is read on a late poll: {read:?}"
+        );
+        assert_eq!(buffer.filled(), BODY);
+
+        drop(headers_read);
+        client.join().unwrap();
+    }
 }
