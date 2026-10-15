@@ -1522,6 +1522,195 @@ async fn archived_branch_is_limited_coverage_without_losing_observed_span() {
     assert_eq!(spans[0].branch.as_deref(), Some("codex/archived"));
 }
 
+/// Counts span-target scans that reach Git. `unreadable_log` fails every
+/// `git log` the way a transient subprocess failure does.
+struct CountingGit {
+    scans: AtomicUsize,
+    unreadable_log: bool,
+}
+
+impl CountingGit {
+    fn new(unreadable_log: bool) -> Self {
+        Self {
+            scans: AtomicUsize::new(0),
+            unreadable_log,
+        }
+    }
+
+    fn scans(&self) -> usize {
+        self.scans.load(Ordering::SeqCst)
+    }
+}
+
+impl GitReflogSource for CountingGit {
+    fn reflog(&self, worktree: &Path) -> Option<String> {
+        SystemGit.reflog(worktree)
+    }
+
+    fn current_branch(&self, worktree: &Path) -> Option<String> {
+        SystemGit.current_branch(worktree)
+    }
+
+    fn commit_reference_exists(
+        &self,
+        worktree: &Path,
+        reference: &str,
+    ) -> Result<bool, GitCorrelationError> {
+        self.scans.fetch_add(1, Ordering::SeqCst);
+        SystemGit.commit_reference_exists(worktree, reference)
+    }
+
+    fn commit_log(&self, worktree: &Path, branch: &str, since: i64) -> Option<String> {
+        if self.unreadable_log {
+            None
+        } else {
+            SystemGit.commit_log(worktree, branch, since)
+        }
+    }
+}
+
+/// A closed `main` span over the commits [`append_linear_history`] dates
+/// 1..=3.
+fn retained_span(
+    session_id: &str,
+    worktree: &Path,
+) -> crate::runtime::git_correlation::SessionGitSpan {
+    crate::runtime::git_correlation::SessionGitSpan {
+        span_id: format!("span-{session_id}"),
+        provider: "codex".to_owned(),
+        session_id: session_id.to_owned(),
+        thread_id: None,
+        branch: Some("main".to_owned()),
+        worktree: normalize_worktree(&worktree.to_string_lossy()),
+        first_ts: 1,
+        last_ts: 3,
+        event_count: 2,
+        source: crate::runtime::git_correlation::SpanSource::Ingest,
+        branch_provenance: crate::runtime::git_correlation::BranchProvenance::Captured,
+        capture_window: None,
+    }
+}
+
+/// A store that retains `spans` no attribution has covered yet, and no
+/// session rows for the backfill to scan.
+async fn store_retaining(
+    database: &Path,
+    spans: Vec<crate::runtime::git_correlation::SessionGitSpan>,
+) -> TestStore {
+    let unrelated = tempfile::tempdir().unwrap();
+    let store = prepare_store(database, unrelated.path()).await;
+    store
+        .connection
+        .execute_batch("DELETE FROM sessions")
+        .await
+        .unwrap();
+    let transaction = store.open_write_transaction().await.unwrap();
+    let mut writer = GitEvidenceWriter::open(&transaction).await.unwrap();
+    writer
+        .apply(GitEvidenceBatch {
+            spans,
+            merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
+            ..GitEvidenceBatch::default()
+        })
+        .await
+        .unwrap();
+    writer.finish().await.unwrap();
+    transaction.commit().await.unwrap();
+    store
+}
+
+/// #3984: a retained span target whose Codex worktree was deleted failed
+/// attribution on every drain, so the whole pending set retried forever and
+/// the live targets beside it never attributed. A target that is gone or no
+/// longer a repository settles on the next pass, durably, and later passes
+/// scan nothing.
+#[tokio::test]
+async fn missing_span_worktrees_settle_attribution_without_rescans() {
+    let live = repository_fixture();
+    append_linear_history(live.path(), 3);
+    let deleted_parent = tempfile::tempdir().unwrap();
+    let deleted = deleted_parent.path().join("worktree");
+    std::fs::create_dir(&deleted).unwrap();
+    initialize_repository(&deleted);
+    let not_a_repository = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("sessions.db");
+    let store = store_retaining(
+        &database,
+        vec![
+            retained_span("live", live.path()),
+            retained_span("deleted", &deleted),
+            retained_span("plain", not_a_repository.path()),
+        ],
+    )
+    .await;
+    std::fs::remove_dir_all(&deleted).unwrap();
+    let git = CountingGit::new(false);
+
+    let first = converge_git_evidence_pass(&store, &git, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        first.later_failure, None,
+        "a missing worktree must not keep attribution retrying"
+    );
+    assert_eq!(first.pass.backfill.skipped_git_error, 0);
+    assert_eq!(first.pass.backfill.unavailable_attributions, 2);
+    assert_eq!(
+        first.pass.backfill.commits_attributed, 3,
+        "the live target attributes beside the missing ones"
+    );
+
+    drop(store);
+    let reopened = TestStore::open(&database);
+    let settled_scans = git.scans();
+    for tick in 1..=5 {
+        let outcome = converge_git_evidence_pass(&reopened, &git, None)
+            .await
+            .unwrap();
+        assert_eq!(outcome.later_failure, None, "tick {tick}");
+        assert_eq!(outcome.pass.generation, None, "tick {tick}");
+    }
+    assert_eq!(
+        git.scans(),
+        settled_scans,
+        "settled targets must not be rescanned after a restart"
+    );
+}
+
+/// A Git failure in a worktree that still exists may clear, so it retries,
+/// but a bounded number of passes: a failure that never clears must not pin
+/// the drain the way #3984's deleted worktree did.
+#[tokio::test]
+async fn transient_span_scan_failure_retries_a_bounded_number_of_passes() {
+    let live = repository_fixture();
+    append_linear_history(live.path(), 3);
+    let directory = tempfile::tempdir().unwrap();
+    let store = store_retaining(
+        &directory.path().join("sessions.db"),
+        vec![retained_span("live", live.path())],
+    )
+    .await;
+    let git = CountingGit::new(true);
+
+    let mut outcomes = Vec::new();
+    for _ in 0..10 {
+        outcomes.push(
+            converge_git_evidence_pass(&store, &git, None)
+                .await
+                .unwrap(),
+        );
+    }
+    let retrying = outcomes
+        .iter()
+        .filter(|outcome| outcome.later_failure.is_some())
+        .count();
+    assert_eq!(retrying, 4, "{outcomes:#?}");
+    assert_eq!(outcomes[4].later_failure, None);
+    assert_eq!(outcomes[4].pass.backfill.unavailable_attributions, 1);
+    assert_eq!(git.scans(), 5, "no scan after the retry budget is spent");
+}
+
 #[tokio::test]
 async fn convergence_permanent_exclusion_advances_frontier() {
     let plain_directory = tempfile::tempdir().unwrap();
