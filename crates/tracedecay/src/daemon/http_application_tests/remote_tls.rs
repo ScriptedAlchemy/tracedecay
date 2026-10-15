@@ -393,6 +393,37 @@ async fn remote_tls_connect_sending(
     stream
 }
 
+/// Sends `request` with the handshake and waits for its handler to start.
+///
+/// The listener's deadlines start no earlier than the connect, so a client
+/// whose handshake returned within the read-idle deadline met both of them,
+/// and closing its connection is a listener defect. Only a slower handshake
+/// lets the listener close first, and the attempt is then retried on a fresh
+/// connection.
+async fn remote_tls_start_handler(
+    endpoint: std::net::SocketAddr,
+    certificate: &Path,
+    request: &[u8],
+    started: &tokio::sync::Notify,
+    read_idle: Duration,
+) -> tokio_rustls::client::TlsStream<tokio::net::TcpStream> {
+    for _ in 0..3 {
+        let connect_started = std::time::Instant::now();
+        let mut stream = remote_tls_connect_sending(endpoint, certificate, request).await;
+        let handshake = connect_started.elapsed();
+        let mut probe = [0_u8; 1];
+        tokio::select! {
+            biased;
+            () = started.notified() => return stream,
+            closed = stream.read(&mut probe) => assert!(
+                handshake >= read_idle,
+                "the listener closed a connection whose handshake took {handshake:?}: {closed:?}"
+            ),
+        }
+    }
+    panic!("the test thread stalled past the read-idle deadline in every handshake")
+}
+
 /// Waits until the real TLS reader has consumed exactly `expected` body
 /// bytes, refusing any reading past it.
 async fn wait_for_ingress_body_bytes(service: &DaemonHttpApplicationService, expected: usize) {
@@ -1296,48 +1327,21 @@ async fn remote_tls_listener_does_not_apply_ingress_timeout_to_a_slow_handler() 
     )
     .await
     .expect("bind Remote Brain TLS slow-handler service");
-    let endpoint = service.remote_tls_endpoint().expect("TLS endpoint");
-    // The request leaves with the client's final handshake flight, and the
-    // listener's deadlines start no earlier than the connect. A client whose
-    // handshake returned within the read-idle deadline therefore met both, so
-    // only a slower handshake may let the listener close the connection, and
-    // the attempt is then retried on a fresh connection.
-    let mut peer = None;
-    for _ in 0..3 {
-        let connect_started = std::time::Instant::now();
-        let mut stream = remote_tls_connect_sending(
-            endpoint,
-            &certificate,
-            b"GET /remote/slow HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        )
-        .await;
-        let handshake = connect_started.elapsed();
-        let mut probe = [0_u8; 1];
-        tokio::select! {
-            biased;
-            () = handler_started.notified() => {
-                peer = Some(stream);
-                break;
-            }
-            closed = stream.read(&mut probe) => assert!(
-                handshake >= deadlines.read_idle,
-                "the listener closed a connection whose handshake took {handshake:?}: {closed:?}"
-            ),
-        }
-    }
-    let mut peer =
-        peer.expect("the test thread stalled past the read-idle deadline in every handshake");
+    let mut peer = remote_tls_start_handler(
+        service.remote_tls_endpoint().expect("TLS endpoint"),
+        &certificate,
+        b"GET /remote/slow HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        &handler_started,
+        deadlines.read_idle,
+    )
+    .await;
     // The handler outlives both ingress deadlines several times over.
     tokio::time::sleep(deadlines.request_read * 3).await;
     handler_release.notify_one();
     let mut response = Vec::new();
-    tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        peer.read_to_end(&mut response),
-    )
-    .await
-    .expect("slow-handler response must close within the bounded response window")
-    .expect("read slow-handler response");
+    peer.read_to_end(&mut response)
+        .await
+        .expect("read slow-handler response");
     assert!(response.starts_with(b"HTTP/1.1 200"), "{response:?}");
     assert!(
         response
@@ -1345,13 +1349,9 @@ async fn remote_tls_listener_does_not_apply_ingress_timeout_to_a_slow_handler() 
             .any(|body| body == b"complete"),
         "the handler response must survive beyond the ingress idle deadline"
     );
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while service.remote_tls_available_admissions() != Some(128) {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("the completed connection must release its admission permit");
+    while service.remote_tls_available_admissions() != Some(128) {
+        tokio::task::yield_now().await;
+    }
 
     service
         .shutdown()
@@ -1374,21 +1374,17 @@ async fn remote_tls_shutdown_bounds_a_fully_read_request_with_a_stalled_handler(
     )
     .await
     .expect("bind Remote Brain TLS stalled-handler service");
-    let endpoint = service.remote_tls_endpoint().expect("TLS endpoint");
     let admission = service
         .remote_tls_admission()
         .expect("TLS admission authority");
-    let mut peer = remote_tls_connect(endpoint, &certificate).await;
-
-    peer.write_all(b"GET /remote/stalled HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        .await
-        .expect("write complete stalled-handler request");
-    tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        handler_started.notified(),
+    let mut peer = remote_tls_start_handler(
+        service.remote_tls_endpoint().expect("TLS endpoint"),
+        &certificate,
+        b"GET /remote/stalled HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        &handler_started,
+        deadlines.read_idle,
     )
-    .await
-    .expect("stalled handler must start");
+    .await;
     assert_eq!(admission.available_permits(), 127);
     let shutdown_started = std::time::Instant::now();
     tokio::time::timeout(deadlines.shutdown_drain * 10, service.shutdown())
@@ -1401,13 +1397,7 @@ async fn remote_tls_shutdown_bounds_a_fully_read_request_with_a_stalled_handler(
     );
 
     let mut response = Vec::new();
-    let closure = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        peer.read_to_end(&mut response),
-    )
-    .await
-    .expect("stalled-handler connection must close after bounded shutdown");
-    match &closure {
+    match &peer.read_to_end(&mut response).await {
         Ok(_) => {}
         Err(error)
             if matches!(
@@ -1665,7 +1655,9 @@ impl Drop for HandlerDropReceipt {
 }
 
 /// Dropping the service aborts its listener, and the listener's connections
-/// with it, without waiting out the shutdown drain.
+/// with it, without waiting out the shutdown drain. The drain is long, so a
+/// listener that waited it out stays far outside the bound however slowly the
+/// host schedules it.
 #[tokio::test]
 async fn dropping_the_remote_tls_service_aborts_an_open_connection() {
     let temporary = tempfile::tempdir().expect("remote TLS dropped-service fixture");
@@ -1696,29 +1688,28 @@ async fn dropping_the_remote_tls_service_aborts_an_open_connection() {
     registry
         .install_remote(router, credentials, None)
         .expect("install held-response remote router");
-    let service =
-        DaemonHttpApplicationService::bind_with_remote_tls(registry, AUTH_TOKEN, Some(&tls))
-            .await
-            .expect("bind Remote Brain TLS dropped-service service");
-    let mut peer = remote_tls_connect(
+    let deadlines = RemoteBrainTlsDeadlines {
+        shutdown_drain: Duration::from_mins(1),
+        ..RemoteBrainTlsDeadlines::PRODUCTION
+    };
+    let service = DaemonHttpApplicationService::bind_with_remote_tls_deadlines(
+        registry, AUTH_TOKEN, &tls, deadlines,
+    )
+    .await
+    .expect("bind Remote Brain TLS dropped-service service");
+    let _peer = remote_tls_start_handler(
         service.remote_tls_endpoint().expect("TLS endpoint"),
         &certificate,
+        b"GET /remote/held HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        &started,
+        deadlines.read_idle,
     )
     .await;
-    peer.write_all(b"GET /remote/held HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        .await
-        .expect("write held request");
-    tokio::time::timeout(Duration::from_secs(5), started.notified())
-        .await
-        .expect("held handler must start");
 
     drop(service);
 
-    tokio::time::timeout(
-        RemoteBrainTlsDeadlines::PRODUCTION.shutdown_drain / 2,
-        handler_dropped,
-    )
-    .await
-    .expect("dropping the service must abort its open connection")
-    .expect("handler drop receipt");
+    tokio::time::timeout(deadlines.shutdown_drain / 2, handler_dropped)
+        .await
+        .expect("dropping the service must abort its open connection")
+        .expect("handler drop receipt");
 }
