@@ -887,14 +887,21 @@ impl DaemonHttpApplicationService {
             .map_err(|_| TraceDecayError::Config {
                 message: "daemon HTTP loopback origin is not text".to_owned(),
             })?;
+        // `/remote-deletions` reaches `project_server_lifecycle` inside its
+        // connection task, so the listener serves from Tokio.
+        let runtime = native_runtime::tokio_handle("daemon.http_application.loopback_listener")
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "daemon HTTP loopback listener found no Tokio runtime".to_owned(),
+            })?;
         let active = Arc::clone(&registry.active);
         let (app, remote_credentials) = registry.router(admission.clone())?;
         active.store(true, Ordering::Release);
         let (shutdown, shutdown_requested) = oneshot::channel();
         let task_active = Arc::clone(&active);
-        let task = tokio::spawn(tracing::Instrument::instrument(
+        let serve_runtime = runtime.clone();
+        let task = runtime.spawn(tracing::Instrument::instrument(
             async move {
-                serve_loopback(listener, app, async {
+                serve_loopback(serve_runtime, listener, app, async {
                     let _ = shutdown_requested.await;
                 })
                 .await;

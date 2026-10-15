@@ -50,7 +50,10 @@ pub fn validate_dashboard_host(host: &str) -> Result<&str> {
 /// Matches `axum::serve(..).with_graceful_shutdown(..)` on an Asupersync
 /// socket. The drain has no deadline because callers own one. Accept errors
 /// never end the loop. Dropping the future aborts every connection.
+/// Connections run on `runtime`, because daemon routes served here still
+/// reach Tokio.
 pub async fn serve_loopback(
+    runtime: tokio::runtime::Handle,
     listener: TcpListener,
     router: Router,
     shutdown: impl Future<Output = ()>,
@@ -69,11 +72,11 @@ pub async fn serve_loopback(
                 Ok((stream, address)) => {
                     let router = router.clone();
                     let graceful = graceful.clone();
-                    connections.spawn(async move {
+                    connections.spawn_on(async move {
                         if let Err(error) = serve_http_connection(stream, router, true, graceful).await {
                             tracing::trace!(%error, %address, "loopback HTTP connection stopped");
                         }
-                    });
+                    }, &runtime);
                 }
                 Err(error) => wait_after_accept_error(&error).await,
             },

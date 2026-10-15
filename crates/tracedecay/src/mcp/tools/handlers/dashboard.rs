@@ -1096,6 +1096,13 @@ pub(super) async fn compute_dashboard(
                 tracedecay_api::static_dashboard_router(product_runtime.dashboard()),
             )
             .await?;
+            // Dashboard routes still reach Tokio, so the server runs there.
+            let runtime = tracedecay_runtime_core::native_runtime::tokio_handle(
+                "mcp.dashboard.hosted_server",
+            )
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "the hosted dashboard found no Tokio runtime".to_owned(),
+            })?;
             let (listener, addr) = bind_dashboard(&host, port).await?;
             let access = tracedecay_dashboard_api::DashboardAccessToken::mint()?;
             let url = access.launch_url(addr);
@@ -1104,9 +1111,10 @@ pub(super) async fn compute_dashboard(
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
             let completed = Arc::new(tokio::sync::Semaphore::new(0));
             let task_completion = DashboardTaskCompletion(Arc::clone(&completed));
-            let task = tokio::spawn(async move {
+            let serve_runtime = runtime.clone();
+            let task = runtime.spawn(async move {
                 let _completion = task_completion;
-                serve_loopback(listener, app, async move {
+                serve_loopback(serve_runtime, listener, app, async move {
                     let _ = shutdown_rx.await;
                 })
                 .await;

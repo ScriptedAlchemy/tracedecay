@@ -632,13 +632,21 @@ impl ProjectOpenTasks {
         if registry.active_task_count() >= MAX_TRACKED_PROJECT_OPEN_TASKS {
             return ProjectOpenTaskClaim::Saturated;
         }
+        // The open reaches `project_server_lifecycle`, whose timers are Tokio's.
+        let Some(runtime) =
+            tracedecay_runtime_core::native_runtime::tokio_handle("daemon.project_open.task")
+        else {
+            return ProjectOpenTaskClaim::Failed(ProjectOpenFailure::untyped(
+                "project open refused: the daemon has no Tokio runtime".to_owned(),
+            ));
+        };
 
         let (updates, state) = tokio::sync::watch::channel(ProjectOpenTaskState::Opening);
         let cancellation = CancellationToken::new();
         let task_cancellation = cancellation.clone();
         let (task_completion, completion) = tokio::sync::watch::channel(false);
         let failure_route = route.clone();
-        let task = tokio::spawn(tracing::Instrument::instrument(
+        let task = runtime.spawn(tracing::Instrument::instrument(
             async move {
                 let _completion = ProjectOpenTaskCompletionFinalizer(task_completion);
                 let state = match open(task_cancellation).await {

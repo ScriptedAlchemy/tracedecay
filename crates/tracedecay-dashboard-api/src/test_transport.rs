@@ -313,6 +313,11 @@ where
     );
     eprintln!("Code search covers this project only; rebound with --path to serve another.");
 
-    serve_loopback(listener, app, shutdown).await;
+    let runtime =
+        tracedecay_runtime_core::native_runtime::tokio_handle("dashboard_api.test_transport")
+            .ok_or_else(|| {
+                crate::state::config_error("the test dashboard found no Tokio runtime")
+            })?;
+    serve_loopback(runtime, listener, app, shutdown).await;
     Ok(())
 }

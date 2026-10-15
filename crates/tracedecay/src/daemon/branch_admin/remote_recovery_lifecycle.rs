@@ -263,7 +263,7 @@ pub(super) async fn retire_runtime_work(
     #[cfg(unix)]
     retire_maintenance_tasks(automation, tracked_retirements, profile_root, project_id).await;
     for (owner, servers) in server_retirements {
-        let task = tokio::spawn(async move {
+        let retirement = async move {
             // Replay is a data-root owner outside the MCP server task set and
             // retains the exact ProjectSessions client used for native lifecycle
             // delivery. Join it inside the tracked retirement deadline before
@@ -277,8 +277,9 @@ pub(super) async fn retire_runtime_work(
                 .await;
             }
             super::super::project_server_lifecycle::retire_project_servers_now(servers).await;
-        });
-        super::project_retirement::track_retirement_task(tracked_retirements, owner, task).await;
+        };
+        super::project_retirement::track_tokio_retirement(tracked_retirements, owner, retirement)
+            .await;
     }
     let deadline = std::time::Instant::now() + DAEMON_TASK_ABORT_DEADLINE;
     let receipt = super::project_retirement::settle_project_retirements(

@@ -1059,11 +1059,13 @@ async fn accept_liveness_probes_until(
 async fn persistent_idle_client_closes_on_draining_without_timeout() {
     let lifecycle = DaemonLifecycle::default();
     let idle_lifecycle = lifecycle.clone();
-    let mut clients = tokio::task::JoinSet::new();
-    clients.spawn(async move {
-        idle_lifecycle.wait_for_draining().await;
-        Ok(())
-    });
+    let mut clients = crate::daemon::bootstrap::ClientTasks::default();
+    clients
+        .spawn(async move {
+            idle_lifecycle.wait_for_draining().await;
+            Ok(())
+        })
+        .expect("native client task");
 
     let receipt = shutdown_with_clients(&lifecycle, clients).await;
 
@@ -1077,15 +1079,30 @@ async fn persistent_idle_client_closes_on_draining_without_timeout() {
 #[tokio::test]
 async fn client_errors_and_panics_are_named_while_aborted_clients_are_clean() {
     let lifecycle = DaemonLifecycle::default();
-    let mut clients = tokio::task::JoinSet::new();
-    clients.spawn(async {
-        Err(tracedecay_domain::errors::TraceDecayError::Config {
-            message: "client failed during shutdown".to_owned(),
+    let mut clients = crate::daemon::bootstrap::ClientTasks::default();
+    let (failed, failure_settled) = tokio::sync::oneshot::channel::<()>();
+    let (panicking, panic_started) = tokio::sync::oneshot::channel();
+    clients
+        .spawn(async move {
+            let _settled = failed;
+            Err(tracedecay_domain::errors::TraceDecayError::Config {
+                message: "client failed during shutdown".to_owned(),
+            }
+            .to_string())
         })
-    });
-    clients.spawn(async { panic!("client panicked during shutdown") });
-    clients.spawn(std::future::pending());
-    tokio::task::yield_now().await;
+        .expect("failing client task");
+    clients
+        .spawn(async move {
+            let _ = panicking.send(());
+            panicking_client()
+        })
+        .expect("panicking client task");
+    clients
+        .spawn(std::future::pending())
+        .expect("pending client task");
+    // Both have run before the shutdown aborts the set.
+    let _ = failure_settled.await;
+    let _ = panic_started.await;
 
     let receipt = shutdown_with_clients(&lifecycle, clients).await;
 
@@ -1101,9 +1118,13 @@ async fn client_errors_and_panics_are_named_while_aborted_clients_are_clean() {
     );
 }
 
+fn panicking_client() -> std::result::Result<(), String> {
+    panic!("client panicked during shutdown")
+}
+
 async fn shutdown_with_clients(
     lifecycle: &DaemonLifecycle,
-    clients: tokio::task::JoinSet<tracedecay_domain::errors::Result<()>>,
+    clients: crate::daemon::bootstrap::ClientTasks,
 ) -> Arc<tracedecay_daemon_service::shutdown::DaemonShutdownReceipt> {
     tracedecay_daemon_service::shutdown::coordinate_daemon_shutdown(
         lifecycle,
@@ -1137,9 +1158,9 @@ async fn draining_waits_for_one_bounded_in_flight_request() {
 /// A panicking connection must not take down the daemon, wedge its peers, or
 /// strand the admission slot it was holding.
 ///
-/// Both accept loops serve every client from a `JoinSet` and keep draining
-/// `join_next`, so one connection unwinding has to be contained at that task
-/// boundary. Two failure shapes are covered, because they unwind through
+/// Both accept loops serve every client as a native task in `ClientTasks` and
+/// keep draining `join_next`, so one connection unwinding has to be contained
+/// at that task boundary. Two failure shapes are covered, because they unwind through
 /// different admission states:
 ///
 /// * a connection that panics while it still holds its slot, and
@@ -1162,7 +1183,7 @@ async fn a_panicking_connection_isolates_from_its_peers_and_returns_its_permit()
     assert_eq!(baseline, GENERAL_CAPACITY);
 
     let (barrier, _) = tokio::sync::watch::channel(false);
-    let mut clients: tokio::task::JoinSet<&'static str> = tokio::task::JoinSet::new();
+    let mut clients = crate::daemon::bootstrap::ClientTasks::default();
 
     for index in 0..GENERAL_CAPACITY {
         let permit = match admission.try_admit() {
@@ -1173,7 +1194,7 @@ async fn a_panicking_connection_isolates_from_its_peers_and_returns_its_permit()
         };
         assert_eq!(permit.class(), DaemonClientAdmissionClass::General);
         let mut lifted = barrier.subscribe();
-        clients.spawn(super::super::with_connection_admission(
+        let spawned = clients.spawn(super::super::with_connection_admission(
             permit,
             async move {
                 // Client 0 unwinds immediately, still holding its slot.
@@ -1187,9 +1208,10 @@ async fn a_panicking_connection_isolates_from_its_peers_and_returns_its_permit()
                     assert!(index != 1, "connection task panicked while parked");
                 })
                 .await;
-                "connection completed"
+                Ok(())
             },
         ));
+        spawned.expect("native connection task");
     }
 
     // Every slot comes back while the peers are still parked: the panicking
@@ -1212,16 +1234,14 @@ async fn a_panicking_connection_isolates_from_its_peers_and_returns_its_permit()
     let mut panicked = 0usize;
     while let Some(joined) = clients.join_next().await {
         match joined {
-            Ok(outcome) => {
-                assert_eq!(outcome, "connection completed");
+            tracedecay_runtime_core::native_runtime::NativeTaskOutcome::Completed(Ok(())) => {
                 completed += 1;
             }
-            Err(error) => {
-                assert!(
-                    error.is_panic(),
-                    "a connection task ended for a reason other than its own panic: {error}"
-                );
+            tracedecay_runtime_core::native_runtime::NativeTaskOutcome::Panicked(_) => {
                 panicked += 1;
+            }
+            other => {
+                panic!("a connection task ended for a reason other than its own panic: {other:?}")
             }
         }
     }
@@ -1230,7 +1250,7 @@ async fn a_panicking_connection_isolates_from_its_peers_and_returns_its_permit()
     // peers of a panicking connection still ran to completion.
     assert_eq!(
         panicked, PANICKING_CLIENTS,
-        "the JoinSet must surface every panic as a contained task result"
+        "the client set must surface every panic as a contained task result"
     );
     assert_eq!(
         completed,
@@ -1255,4 +1275,76 @@ async fn a_panicking_connection_isolates_from_its_peers_and_returns_its_permit()
         DaemonClientAdmissionClass::General,
         "recovered capacity must be general, not the reserved control lane"
     );
+}
+
+/// A client dropped mid-hop drops the hop's work with it, so the admission
+/// slot and anything the hop holds are free when the clients owner reports.
+#[tokio::test]
+async fn a_client_dropped_mid_tokio_hop_releases_the_hop_before_the_drain_receipt() {
+    use super::super::{DaemonClientAdmission, DaemonClientAdmissionOutcome};
+
+    struct HopResource(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for HopResource {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    let hop_runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_time()
+        .build()
+        .expect("hop runtime");
+    let hop_handle = hop_runtime.handle().clone();
+    let lifecycle = DaemonLifecycle::default();
+    let admission = DaemonClientAdmission::with_reserved_capacity(2, 1);
+    let DaemonClientAdmissionOutcome::Admitted(permit) = admission.try_admit() else {
+        panic!("client rejected below capacity");
+    };
+    let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let resource = HopResource(Arc::clone(&released));
+    let (started, hop_started) = tokio::sync::oneshot::channel();
+    let mut clients = crate::daemon::bootstrap::ClientTasks::default();
+    clients
+        .spawn(super::super::with_connection_admission(
+            permit,
+            async move {
+                tracedecay_runtime_core::native_runtime::in_tokio_context(hop_handle, async move {
+                    let _resource = resource;
+                    let _ = started.send(());
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                })
+                .await;
+                Ok(())
+            },
+        ))
+        .expect("native client task");
+    hop_started.await.expect("the hop started");
+    assert_eq!(admission.available_general_permits(), 0);
+    // Tokio's only worker is busy, as under load, when the client is dropped.
+    let (unblock, blocked) = std::sync::mpsc::channel::<()>();
+    let (busy, worker_busy) = std::sync::mpsc::channel();
+    hop_runtime.spawn(async move {
+        let _ = busy.send(());
+        let _ = blocked.recv();
+    });
+    worker_busy.recv().expect("the Tokio worker is busy");
+
+    let receipt = shutdown_with_clients(&lifecycle, clients).await;
+
+    assert_eq!(
+        receipt.clients,
+        tracedecay_daemon_service::shutdown::ShutdownStatus::Clean
+    );
+    assert!(
+        released.load(std::sync::atomic::Ordering::SeqCst),
+        "the hop's work outlived the clients owner's receipt"
+    );
+    assert_eq!(
+        admission.available_general_permits(),
+        1,
+        "the hop kept the client's admission slot past the drain receipt"
+    );
+    drop(unblock);
+    hop_runtime.shutdown_background();
 }

@@ -239,6 +239,10 @@ impl RetainedDispatchRegistry {
         T: Send + 'static,
         F: Future<Output = Result<T>> + Send + 'static,
     {
+        // Tool dispatches still reach Tokio, so they settle there.
+        let runtime =
+            tracedecay_runtime_core::native_runtime::tokio_handle("mcp.dispatch.settlement")
+                .ok_or_else(dispatch_runtime_unavailable_error)?;
         let capacity_lease = self.acquire_capacity()?;
         let mut state = self.state.lock().await;
         Self::reap_finished(&mut state);
@@ -252,14 +256,17 @@ impl RetainedDispatchRegistry {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         #[cfg(any(test, feature = "test-transport"))]
         self.retained_spawn_count.fetch_add(1, Ordering::AcqRel);
-        let task = state.tasks.spawn(async move {
-            let _capacity_lease = capacity_lease;
-            worker_settlement.mark_settling();
-            let output = future.await;
-            drop(settlement_lease);
-            let _ = sender.send(output);
-            worker_settlement
-        });
+        let task = state.tasks.spawn_on(
+            async move {
+                let _capacity_lease = capacity_lease;
+                worker_settlement.mark_settling();
+                let output = future.await;
+                drop(settlement_lease);
+                let _ = sender.send(output);
+                worker_settlement
+            },
+            &runtime,
+        );
         state.active.insert(
             task.id(),
             ActiveDispatch {
@@ -773,6 +780,14 @@ fn dispatch_shutdown_error() -> TraceDecayError {
         "tool_dispatch_shutdown",
         true,
         "MCP server is shutting down and cannot admit another tool dispatch",
+    )
+}
+
+fn dispatch_runtime_unavailable_error() -> TraceDecayError {
+    TraceDecayError::project_route(
+        "tool_dispatch_runtime_unavailable",
+        true,
+        "MCP tool dispatch found no Tokio runtime",
     )
 }
 

@@ -45,11 +45,13 @@ impl ProjectHostAdmissionReplayTask {
         let worker = Arc::new(ProjectHostAdmissionReplayWorker::new(broker, pass));
         worker.kick();
         let task_worker = Arc::clone(&worker);
-        let task = tokio::spawn(task_worker.run());
-        Self {
-            worker,
-            task: Some(task),
-        }
+        // The replay pass is not traced Tokio-free, so it runs on Tokio. A
+        // miss leaves no worker running; shutdown then has nothing to join.
+        let task = tracedecay_runtime_core::native_runtime::tokio_handle(
+            "mcp.project_host_admission_replay",
+        )
+        .map(|runtime| runtime.spawn(task_worker.run()));
+        Self { worker, task }
     }
 
     #[cfg(any(test, feature = "test-transport"))]

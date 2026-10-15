@@ -231,6 +231,13 @@ jobs:
           python3 scripts/test-check-sqlite-plan-stability.py
           python3 scripts/check-sqlite-plan-stability.py
 
+      # `daemon run` drives its futures on native workers, which have no
+      # ambient Tokio runtime; production code names its Tokio handle.
+      - name: Test and check production code has no ambient Tokio call
+        run: |
+          python3 scripts/test-check-ambient-tokio.py
+          python3 scripts/check-ambient-tokio.py
+
       # Lint proposed commits without rejudging already-published history.
       - name: Validate commit messages
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'

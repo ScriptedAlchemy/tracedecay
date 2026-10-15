@@ -27,6 +27,16 @@ py_test(
     main = "test-check-sqlite-plan-stability.py",
 )
 
+py_test(
+    name = "ambient_tokio_check_test",
+    size = "small",
+    srcs = [
+        "check-ambient-tokio.py",
+        "test-check-ambient-tokio.py",
+    ],
+    main = "test-check-ambient-tokio.py",
+)
+
 exports_files(
     [
         "bazel/rust_test.bzl",

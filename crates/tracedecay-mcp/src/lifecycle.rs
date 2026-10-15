@@ -56,6 +56,13 @@ impl McpBackgroundTaskOwner {
     where
         Task: std::future::Future<Output = ()> + Send + 'static,
     {
+        // Background work is not traced Tokio-free, so it runs on Tokio. A
+        // miss refuses the task, as a closed owner does.
+        let Some(runtime) =
+            tracedecay_runtime_core::native_runtime::tokio_handle("mcp.background_task")
+        else {
+            return false;
+        };
         let mut admission = self
             .admission
             .lock()
@@ -64,7 +71,7 @@ impl McpBackgroundTaskOwner {
             return false;
         }
         admission.reap_finished();
-        admission.tasks.spawn(task);
+        admission.tasks.spawn_on(task, &runtime);
         true
     }
 
