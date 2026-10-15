@@ -761,12 +761,14 @@ impl<'a> ProjectProviderRun<'a> {
 
     #[tracing::instrument(name = "sessions.ingest.project.claude", level = "trace", skip_all)]
     async fn run_claude(self) -> ProjectProviderRunResult {
-        match ingest_project_claude_observations(
+        let mut sweep = SourceSweep::new("claude", self.codex_discovery);
+        let mut run = match ingest_project_claude_observations(
             self.project_root,
             self.project_id.clone(),
             self.facade,
             self.max_new_bytes,
             self.cancellation,
+            &mut sweep,
         )
         .await
         {
@@ -797,23 +799,25 @@ impl<'a> ProjectProviderRun<'a> {
             }
             Err(error) => {
                 if let Some(stats) = error.accumulated_stats() {
-                    return ProjectProviderRunResult::claude(
+                    ProjectProviderRunResult::claude(
                         claude_provider_run_outcome(stats, Some(&error), self.max_new_bytes),
                         stats.projected_session_ids().clone(),
+                    )
+                } else if let Some(cancelled) = cancelled_claude_provider_outcome(&error) {
+                    ProjectProviderRunResult::provider(cancelled)
+                } else {
+                    let failure = claude_catch_up_failure("observation", &error);
+                    tracing::warn!(
+                        reason_code = failure.reason_code,
+                        retryable = failure.retryable,
+                        "project Claude observation catch-up failed"
                     );
+                    ProjectProviderRunResult::provider(ProviderRunOutcome::failed(failure, 0))
                 }
-                if let Some(cancelled) = cancelled_claude_provider_outcome(&error) {
-                    return ProjectProviderRunResult::provider(cancelled);
-                }
-                let failure = claude_catch_up_failure("observation", &error);
-                tracing::warn!(
-                    reason_code = failure.reason_code,
-                    retryable = failure.retryable,
-                    "project Claude observation catch-up failed"
-                );
-                ProjectProviderRunResult::provider(ProviderRunOutcome::failed(failure, 0))
             }
-        }
+        };
+        sweep.report_into(&mut run.outcome);
+        run
     }
 
     #[tracing::instrument(name = "sessions.ingest.project.cursor", level = "trace", skip_all)]
@@ -941,6 +945,7 @@ async fn ingest_project_claude_observations(
     admission: &dyn HostAdmission,
     max_new_bytes: u64,
     cancellation: &ObservationCancellation,
+    sweep: &mut SourceSweep,
 ) -> std::result::Result<
     claude_observation::ClaudeObservationIngestStats,
     claude_observation::ClaudeObservationIngestError,
@@ -948,13 +953,14 @@ async fn ingest_project_claude_observations(
     let Some(source) = claude::ClaudeSource::new() else {
         return Ok(claude_observation::ClaudeObservationIngestStats::default());
     };
-    claude_observation::ingest_source_with_observations_with_admission(
+    claude_observation::ingest_source_with_sweep(
         &source,
         project_root,
         ObservationScopeV1::Project { project_id },
         admission,
         Some(max_new_bytes),
         cancellation.clone(),
+        sweep,
     )
     .await
 }

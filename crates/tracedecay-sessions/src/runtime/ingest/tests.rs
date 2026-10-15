@@ -153,6 +153,37 @@ fn cursor_advance_receipt_collisions_are_permanent() {
 }
 
 #[test]
+fn a_claude_sanitizer_fault_quarantines_no_source() {
+    use crate::observation::ObservationApplicationError as Application;
+    use claude_observation::ClaudeObservationIngestError as Ingest;
+    use tracedecay_privacy::PrivacySanitizerError as Privacy;
+
+    use super::quarantine::SourceFailure as _;
+
+    for (index, (error, quarantined)) in [
+        (Ingest::Privacy(Privacy::InvalidPolicy), false),
+        (
+            Ingest::Application(Application::Privacy(Privacy::DetectorUnavailable)),
+            false,
+        ),
+        (Ingest::Privacy(Privacy::SourceRangeMismatch), true),
+        (
+            Ingest::Application(Application::Privacy(Privacy::CanonicalProviderMismatch)),
+            true,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            error.catch_up_failure("claude").1,
+            quarantined,
+            "case {index}: only a refusal of the record itself quarantines its source"
+        );
+    }
+}
+
+#[test]
 fn immutable_cursor_ledger_disagreements_are_permanent_and_bounded() {
     let source = ObservationSourceIdentityV1::for_provider(
         ProviderId::new("cursor").unwrap(),
