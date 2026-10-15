@@ -1148,9 +1148,12 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     const SPIN: Duration = Duration::from_millis(150);
+    #[cfg(unix)]
     const WAKE_BOUND: Duration = Duration::from_millis(40);
 
+    #[cfg(unix)]
     fn spin(duration: Duration) {
         let spun = Instant::now();
         while spun.elapsed() < duration {
@@ -1162,6 +1165,7 @@ mod tests {
     /// leader runs it, then spins for [`SPIN`], inline in that poll or on the
     /// blocking pool. Task B's socket becomes readable 10 ms into the spin.
     /// Returns how long after that B woke.
+    #[cfg(unix)]
     fn socket_wake_behind_a_spinning_task(spin_on_blocking_pool: bool) -> Duration {
         use asupersync::io::AsyncReadExt;
         use asupersync::net::unix::UnixStream;
@@ -1207,6 +1211,7 @@ mod tests {
         woke_at.duration_since(readable)
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_long_poll_does_not_delay_another_tasks_socket_wake() {
         let latency = socket_wake_behind_a_spinning_task(false);
@@ -1216,6 +1221,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn work_on_the_blocking_pool_does_not_delay_another_tasks_socket_wake() {
         let latency = socket_wake_behind_a_spinning_task(true);
@@ -1233,10 +1239,19 @@ mod tests {
             .build()
             .expect("test runtime");
         let outcome = runtime.block_on(async {
-            NativeTask::spawn(async { spin(LONG_POLL_CPU + Duration::from_millis(50)) })
-                .expect("native task")
-                .wait()
-                .await
+            // Spins on the thread's CPU clock, the one the guard reads, so a
+            // descheduled worker on a loaded host still crosses the bound.
+            NativeTask::spawn(async {
+                let started = thread_cpu_time().expect("thread CPU clock");
+                while thread_cpu_time().expect("thread CPU clock") - started
+                    <= LONG_POLL_CPU + Duration::from_millis(50)
+                {
+                    std::hint::spin_loop();
+                }
+            })
+            .expect("native task")
+            .wait()
+            .await
         });
         let NativeTaskOutcome::Panicked(payload) = outcome else {
             panic!("a {LONG_POLL_CPU:?} poll must fail the task, got {outcome:?}");
