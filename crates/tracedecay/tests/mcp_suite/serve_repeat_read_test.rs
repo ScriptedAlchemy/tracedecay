@@ -234,24 +234,26 @@ async fn serve_query_hints_follow_profile_configuration_on_new_connections() {
     }
 }
 
-#[tokio::test]
-async fn serve_pointer_and_query_hint_name_an_identical_repeat_once() {
-    let home = TempDir::new().unwrap();
-    let project = init_project_with_file(home.path(), &source("pointer_hint_marker")).await;
-    let _daemon = common::spawn_tracedecay_daemon(home.path());
-    let pointers = [(REPEAT_READ_POINTERS_ENV, "1")];
-    let mut setup = start_client(home.path(), project.path(), &pointers);
+/// A session with query hints on, opened after the profile setting turned
+/// them on and once it has observed the setting.
+fn hinted_client(
+    home: &std::path::Path,
+    project: &std::path::Path,
+    env: &[(&str, &str)],
+    marker: &str,
+) -> ServeSession {
+    let mut setup = start_client(home, project, env);
     start(&mut setup);
     wait_ready(&mut setup, 2);
-    set_query_hints(&mut setup, home.path(), true);
+    set_query_hints(&mut setup, home, true);
 
-    let mut client = start_client(home.path(), project.path(), &pointers);
+    let mut client = start_client(home, project, env);
     start(&mut client);
     wait_ready(&mut client, 2);
     // Exact-symbol calls are not repeatable reads, so they observe the hint
     // setting reaching serve without seeding the pointer ledger.
     let deadline = Instant::now() + Duration::from_secs(15);
-    let probe = json!({ "name": "pointer_hint_marker", "format": "json" });
+    let probe = json!({ "name": marker, "format": "json" });
     for id in 3.. {
         let response = client.request(call(id, "tracedecay_find_exact_symbol", &probe));
         if text(&response).contains(QUERY_HINT) {
@@ -263,6 +265,21 @@ async fn serve_pointer_and_query_hint_name_an_identical_repeat_once() {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
+    client
+}
+
+#[tokio::test]
+async fn serve_pointer_and_query_hint_name_an_identical_repeat_once() {
+    let home = TempDir::new().unwrap();
+    let project = init_project_with_file(home.path(), &source("pointer_hint_marker")).await;
+    let _daemon = common::spawn_tracedecay_daemon(home.path());
+    let pointers = [(REPEAT_READ_POINTERS_ENV, "1")];
+    let mut client = hinted_client(
+        home.path(),
+        project.path(),
+        &pointers,
+        "pointer_hint_marker",
+    );
 
     let outline = json!({ "file": "src/lib.rs" });
     let first = client.request(call(100, "tracedecay_source_outline", &outline));
@@ -388,5 +405,81 @@ async fn serve_without_the_pointer_env_answers_every_repeat_in_full() {
         !is_pointer(&repeat),
         "a host that did not mark its connection as one agent's must always get full answers, \
          since it may share the connection across agents: {repeat}"
+    );
+}
+
+#[tokio::test]
+async fn serve_points_and_hints_identical_json_reads() {
+    let home = TempDir::new().unwrap();
+    let project = init_project_with_file(home.path(), &source("json_repeat_marker")).await;
+    let _daemon = common::spawn_tracedecay_daemon(home.path());
+    let pointers = [(REPEAT_READ_POINTERS_ENV, "1")];
+    let mut client = hinted_client(home.path(), project.path(), &pointers, "json_repeat_marker");
+
+    // The explorer's search over its serve session.
+    let search = json!({
+        "query": "json_repeat_marker",
+        "limit": 20,
+        "prefer_symbol": true,
+        "format": "json",
+    });
+    let searched = client.request(call(90, "tracedecay_search", &search));
+    assert!(!text(&searched).contains(QUERY_HINT), "{searched}");
+    let searched_again = client.request(call(91, "tracedecay_search", &search));
+    assert!(
+        text(&searched_again).contains("tracedecay_search call 1 call earlier"),
+        "an identical JSON search with the same answer is hinted: first {searched}\n\
+         again {searched_again}"
+    );
+
+    let outline = json!({ "file": "src/lib.rs", "format": "json" });
+    let first = client.request(call(100, "tracedecay_source_outline", &outline));
+    assert!(
+        !is_pointer(&first) && json_body(&first).to_string().contains("json_repeat_marker"),
+        "{first}"
+    );
+    let identical = client.request(call(101, "tracedecay_source_outline", &outline));
+    assert!(
+        is_pointer(&identical),
+        "an identical JSON read must answer with a pointer although its request id and \
+         timestamps differ: first {first}\nidentical {identical}"
+    );
+    let after_pointer = client.request(call(102, "tracedecay_source_outline", &outline));
+    assert!(!is_pointer(&after_pointer), "{after_pointer}");
+    assert!(
+        text(&after_pointer).contains("tracedecay_source_outline call 2 calls earlier"),
+        "the full JSON answer after a pointer is hinted about the earlier one: {after_pointer}"
+    );
+}
+
+#[tokio::test]
+async fn serve_does_not_hint_a_call_correcting_a_refused_request() {
+    let home = TempDir::new().unwrap();
+    let project = init_project_with_file(home.path(), &source("refused_call_marker")).await;
+    let _daemon = common::spawn_tracedecay_daemon(home.path());
+    let mut client = hinted_client(home.path(), project.path(), &[], "refused_call_marker");
+
+    let misnamed = client.request(call(
+        100,
+        "tracedecay_source_outline",
+        &json!({ "path": "src/lib.rs", "format": "json" }),
+    ));
+    assert!(
+        text(&misnamed).contains("invalid_request"),
+        "a misnamed parameter is refused as an invalid request: {misnamed}"
+    );
+    let corrected = client.request(call(
+        101,
+        "tracedecay_source_outline",
+        &json!({ "file": "src/lib.rs", "format": "json" }),
+    ));
+    assert!(
+        text(&corrected).contains("refused_call_marker"),
+        "{corrected}"
+    );
+    assert!(
+        !text(&corrected).contains(QUERY_HINT),
+        "a call correcting a refused request does not repeat it: refused {misnamed}\n\
+         corrected {corrected}"
     );
 }

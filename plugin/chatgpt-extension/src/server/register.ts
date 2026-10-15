@@ -4,7 +4,7 @@ import { OpenAIExtensions, type OpenAIMentionItem } from "@openai/mcp-extensions
 import { z } from "zod";
 import { deepLinkPath, type ViewState } from "../shared/view.js";
 import type { DaemonBridge } from "./bridge.js";
-import { toFailure } from "./serve-client.js";
+import { relayedHints, toFailure } from "./serve-client.js";
 import { failureView, projectsView, searchView, symbolView, viewText } from "./view-model.js";
 
 export const UI_RESOURCE_URI = "ui://tracedecay/code-explorer";
@@ -21,8 +21,17 @@ export type RegisterOptions = {
   readonly html: string;
 };
 
-function toolResult(view: ViewState): CallToolResult {
-  return { content: [{ type: "text", text: viewText(view) }], structuredContent: view };
+function toolResult(view: ViewState, hints: readonly string[] = []): CallToolResult {
+  return {
+    content: [{ type: "text", text: viewText(view) }, ...hints.map((text) => ({ type: "text" as const, text }))],
+    structuredContent: view,
+  };
+}
+
+async function hintedResult(load: () => Promise<ViewState>): Promise<CallToolResult> {
+  const hints: string[] = [];
+  const view = await relayedHints.run(hints, load);
+  return toolResult(view, hints);
 }
 
 export function registerTraceDecayExtension({ server, bridge, html }: RegisterOptions): void {
@@ -81,13 +90,14 @@ export function registerTraceDecayExtension({ server, bridge, html }: RegisterOp
       annotations: readOnly,
       _meta: ui(),
     },
-    async ({ project_id, query }, extra) => {
-      try {
-        return toolResult(await searchView(bridge, project_id, query, extra.mcpReq.signal));
-      } catch (error) {
-        return toolResult(await failureView(bridge, project_id, error));
-      }
-    },
+    async ({ project_id, query }, extra) =>
+      hintedResult(async () => {
+        try {
+          return await searchView(bridge, project_id, query, extra.mcpReq.signal);
+        } catch (error) {
+          return await failureView(bridge, project_id, error);
+        }
+      }),
   );
 
   registerAppTool(server,
@@ -100,13 +110,14 @@ export function registerTraceDecayExtension({ server, bridge, html }: RegisterOp
       annotations: readOnly,
       _meta: ui(),
     },
-    async ({ project_id, node_id }, extra) => {
-      try {
-        return toolResult(await symbolView(bridge, project_id, node_id, extra.mcpReq.signal));
-      } catch (error) {
-        return toolResult(await failureView(bridge, project_id, error));
-      }
-    },
+    async ({ project_id, node_id }, extra) =>
+      hintedResult(async () => {
+        try {
+          return await symbolView(bridge, project_id, node_id, extra.mcpReq.signal);
+        } catch (error) {
+          return await failureView(bridge, project_id, error);
+        }
+      }),
   );
 
   const extensions = new OpenAIExtensions(server);

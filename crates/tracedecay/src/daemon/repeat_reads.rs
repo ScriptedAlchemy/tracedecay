@@ -3,12 +3,12 @@
 //! The serve proxy lives exactly as long as one host MCP connection, so this
 //! ledger is per session without any daemon state. It digests the content
 //! blocks the daemon actually returned, skipping trailer blocks and the
-//! renderer's per-call lines (request ids, timings) but including whether a
-//! stale code-graph seat was served. A pointer is sent only when this session
-//! already received those same bytes for the same tool and canonical
-//! arguments, so an edited file, a re-index, a fresh/stale seat transition, or
-//! output rendered differently from the same typed answer always arrives in
-//! full. The call after a pointer is always served in full, which is how an
+//! per-call values (request ids, timestamps, cost) of either output format,
+//! but including whether a stale code-graph seat was served. A pointer is sent
+//! only when this session already received that same answer for the same tool
+//! and canonical arguments, so an edited file, a re-index, a fresh/stale seat
+//! transition, or output rendered differently from the same typed answer
+//! always arrives in full. The call after a pointer is always served in full, which is how an
 //! agent that lost the earlier result gets it back, and a pointer keeps the
 //! stale-seat trailer so the warning is never hidden.
 //!
@@ -25,7 +25,7 @@ use tracedecay_domain::canonical_json_value;
 use tracedecay_domain::canonical_text::canonical_framed_sha256;
 use tracedecay_domain::errors::Result;
 use tracedecay_mcp::JsonRpcRequest;
-use tracedecay_mcp::application_output::markdown::without_per_call_lines;
+use tracedecay_mcp::application_output::without_per_call_fields;
 use tracedecay_mcp::tools::response_trailers::{
     CODE_GRAPH_FRESHNESS_TRAILER_PREFIX, is_beside_result_block, is_code_graph_freshness_block,
 };
@@ -143,7 +143,7 @@ fn call_key(request: &JsonRpcRequest) -> Option<(&Value, (String, String))> {
 }
 
 /// The digest of a successful all-text answer without its trailer blocks and
-/// per-call lines, and the content text bytes a pointer would replace.
+/// per-call values, and the content text bytes a pointer would replace.
 pub(super) fn answer_digest(result: &Value) -> Option<(String, usize)> {
     if result.get("isError").and_then(Value::as_bool) == Some(true) {
         return None;
@@ -158,7 +158,7 @@ pub(super) fn answer_digest(result: &Value) -> Option<(String, usize)> {
     let mut answer = texts
         .iter()
         .filter(|text| !is_beside_result_block(text))
-        .map(|text| without_per_call_lines(text))
+        .map(|text| without_per_call_fields(text))
         .collect::<Vec<_>>();
     // A stale-seat trailer is part of what was served, not per-call noise: its
     // presence joins the digest so a fresh/stale transition is served in full,
@@ -310,6 +310,84 @@ mod tests {
                 .as_str()
                 .is_some_and(|text| text.contains(&big('x'))),
             "{third}"
+        );
+    }
+
+    /// One canonical JSON evidence envelope for `payload` whose request id,
+    /// timestamps, elapsed time, and cost differ with `id`, as a daemon
+    /// renders two identical calls.
+    fn json_answer(id: i64, payload: &str) -> Vec<String> {
+        let at = 1_792_079_618_000_000 + id * 1_000;
+        let envelope = json!({
+            "contract": {"schema_id": "schema.application.primitive.source-outline.result", "schema_revision": 1},
+            "request_id": format!("request.mcp.{id:032x}"),
+            "scope": {"project_id": "proj_1", "worktree_id": "worktree.1", "scope_digest": "sha256:1"},
+            "cost": {"wall_micros": id * 31, "adjacency_queries": 1},
+            "outcome": {"outcome": "evidence", "value": {
+                "authority": {"grant_id": "grant.1", "grant_revision": 1, "revalidated_at": at},
+                "coverage": {"completeness": "complete", "returned": 1},
+                "execution": {
+                    "budget": {"bytes_consumed": 0, "elapsed_micros": id * 7, "units_consumed": 0},
+                    "cancellation": null,
+                    "effective_deadline": {"expires_at": at + 10_000_000},
+                    "ended_at": at + 500,
+                    "started_at": at,
+                    "termination": "completed",
+                },
+                "page": {"cursor": null, "returned": 1, "total": 1},
+                "payload": {"file": "src/lib.rs", "symbols": [{"name": payload}]},
+                "temporal": {
+                    "freshness": "current",
+                    "requested_at": at,
+                    "requested_mode": {"kind": "current"},
+                    "resolved_at": at,
+                },
+            }},
+        });
+        let result = json!({
+            "content": [{"type": "text", "text": envelope.to_string()}],
+            "_meta": {"duration_us": id * 7},
+        });
+        vec![format!(
+            "{}\n",
+            json!({"jsonrpc": "2.0", "id": id, "result": result})
+        )]
+    }
+
+    #[test]
+    fn identical_json_reads_point_and_changed_json_reads_are_full() {
+        let mut reads = RepeatReads::default();
+        let args = json!({"file": "src/lib.rs", "format": "json"});
+        let tool = "tracedecay_source_outline";
+        let first = served(&mut reads, &call(1, tool, &args), json_answer(1, &big('x')));
+        let second = served(&mut reads, &call(2, tool, &args), json_answer(2, &big('x')));
+        assert!(!is_pointer(&first), "{first}");
+        assert!(
+            is_pointer(&second),
+            "only per-call fields differ, so the repeat is a pointer: {second}"
+        );
+        served(&mut reads, &call(3, tool, &args), json_answer(3, &big('x')));
+        let changed = served(&mut reads, &call(4, tool, &args), json_answer(4, &big('y')));
+        assert!(
+            !is_pointer(&changed),
+            "a different result is served in full: {changed}"
+        );
+    }
+
+    #[test]
+    fn a_result_payload_keeps_fields_named_like_per_call_ones() {
+        let result = |execution: i64| {
+            let envelope = json!({
+                "contract": {"schema_id": "schema.test.result", "schema_revision": 1},
+                "request_id": "request.mcp.1",
+                "outcome": {"outcome": "result", "value": {"execution": execution}},
+            });
+            json!({"content": [{"type": "text", "text": envelope.to_string()}]})
+        };
+        assert_ne!(
+            answer_digest(&result(1)),
+            answer_digest(&result(2)),
+            "a plain result's value is its payload, not an evidence packet"
         );
     }
 

@@ -16,7 +16,8 @@
 //! when both calls returned the same successful answer, so a re-run after an
 //! edit, a re-index, or a failure is verification rather than a loop; a call
 //! answered with a repeat-read pointer already names its identical earlier
-//! call there.
+//! call there. A call refused as an invalid request is not recorded, so its
+//! corrected retry is not flagged.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::fmt;
@@ -26,6 +27,7 @@ use tokio::sync::watch;
 use tracedecay_domain::canonical_json_value;
 use tracedecay_domain::configuration::USER_REPEATED_QUERY_HINTS_SETTING_KEY;
 use tracedecay_mcp::JsonRpcRequest;
+use tracedecay_mcp::tool_errors::tool_result_problem;
 
 use super::repeat_reads::answer_digest;
 
@@ -167,6 +169,17 @@ impl RepeatedQueries {
             let message = serde_json::from_str::<Value>(line).ok()?;
             (message.get("id") == Some(id)).then_some((line, message))
         });
+        // A request refused as invalid asked nothing, so the corrected call
+        // that follows it does not repeat it.
+        if response.as_ref().is_some_and(|(_, message)| {
+            message
+                .get("result")
+                .and_then(tool_result_problem)
+                .and_then(|problem| problem.get("kind"))
+                == Some(&Value::from("invalid_request"))
+        }) {
+            return;
+        }
         let answer = response
             .as_ref()
             .and_then(|(_, message)| answer_digest(message.get("result")?))
@@ -638,6 +651,48 @@ mod tests {
             hints(&answered)[0].contains(r#"(arguments {"query":"failing search"})"#),
             "a failed call still counts as a recent call: {answered:?}"
         );
+    }
+
+    #[test]
+    fn a_call_refused_as_invalid_is_not_a_call_a_corrected_one_repeats() {
+        for is_error in [Some(true), None] {
+            let mut queries = enabled();
+            let mut result = json!({
+                "content": [{"type": "text", "text": "unknown field `path`, expected `file`"}],
+                "structuredContent": {"problem": {"kind": "invalid_request"}},
+            });
+            if let Some(is_error) = is_error {
+                result["isError"] = json!(is_error);
+            }
+            let mut refused = vec![format!(
+                "{}\n",
+                json!({"jsonrpc": "2.0", "id": 1, "result": result})
+            )];
+            let before = refused.clone();
+            queries.rewrite(
+                Some(&call(
+                    1,
+                    "tracedecay_source_outline",
+                    &json!({"path": "src/lib.rs"}),
+                )),
+                &mut refused,
+                false,
+            );
+            assert_eq!(refused, before, "isError {is_error:?}");
+            let corrected = served(
+                &mut queries,
+                &call(
+                    2,
+                    "tracedecay_source_outline",
+                    &json!({"file": "src/lib.rs", "format": "json"}),
+                ),
+                2,
+            );
+            assert!(
+                hints(&corrected).is_empty(),
+                "isError {is_error:?}: {corrected:?}"
+            );
+        }
     }
 
     #[test]

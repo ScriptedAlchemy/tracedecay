@@ -71,7 +71,7 @@ pub fn render(view: CanonicalHumanView) -> MarkdownView {
 /// renderers that emit `## ` heading lines; in any other text the same line
 /// shape is payload and every byte is kept. Lines inside fenced code are
 /// payload too, such as a source body that itself holds a `- Request: ` line.
-pub fn without_per_call_lines(text: &str) -> String {
+pub(crate) fn without_per_call_lines(text: &str) -> String {
     if !text.starts_with("## ") && !text.contains("\n## ") {
         return text.to_owned();
     }
