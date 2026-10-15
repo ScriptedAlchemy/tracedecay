@@ -924,14 +924,18 @@ impl RegisteredWorkFixture {
             grant_digest.clone(),
             actor.clone(),
             UtcMicros(1),
-            UtcMicros(10_000),
+            // Workflow dispatch admits at the wall clock, not the request's
+            // observed time.
+            UtcMicros(tracedecay_contracts::now_micros().0 + 3_600_000_000),
             scope.clone(),
             tracedecay_contracts::WORK_APPLICATION_OPERATION_IDS_V1
                 .iter()
+                .chain(&tracedecay_contracts::WORKFLOW_APPLICATION_OPERATION_IDS)
                 .map(|(_, capability, _)| CapabilityId::new(*capability).expect("capability"))
                 .collect(),
             tracedecay_contracts::WORK_APPLICATION_OPERATION_IDS_V1
                 .iter()
+                .chain(&tracedecay_contracts::WORKFLOW_APPLICATION_OPERATION_IDS)
                 .map(|(_, _, use_case)| UseCaseId::new(*use_case).expect("use case"))
                 .collect(),
             DisclosureClass::Sensitive,
@@ -987,23 +991,165 @@ impl RegisteredWorkFixture {
         request_id: &'static str,
         request: WorkApplicationInvocationV1,
     ) -> DaemonInvocationOutcome {
-        self.service
-            .invoke(
-                &self.registry,
-                Some(self.project.path()),
-                None,
-                None,
-                None,
-                DaemonInvocationRequest::work_application(
-                    request_id,
-                    request,
-                    UtcMicros(100),
-                    Deadline::new(UtcMicros(1_000)).expect("deadline"),
-                    CancellationContext::active(format!("cancel.{request_id}"))
-                        .expect("cancellation"),
-                ),
-            )
-            .await
-            .outcome
+        invoke_registered(
+            self.service.clone(),
+            Arc::clone(&self.registry),
+            self.project.path().to_path_buf(),
+            DaemonInvocationRequest::work_application(
+                request_id,
+                request,
+                UtcMicros(100),
+                Deadline::new(UtcMicros(1_000)).expect("deadline"),
+                CancellationContext::active(format!("cancel.{request_id}")).expect("cancellation"),
+            ),
+        )
+        .await
     }
+}
+
+async fn invoke_registered(
+    service: DaemonInvocationService,
+    registry: Arc<Mutex<LspSessionRegistry>>,
+    project_root: std::path::PathBuf,
+    request: DaemonInvocationRequest,
+) -> DaemonInvocationOutcome {
+    service
+        .invoke(&registry, Some(&project_root), None, None, None, request)
+        .await
+        .outcome
+}
+
+/// Broker-socket connections run on native runtime workers. Work and Workflow
+/// storage ports are synchronous and wait on the `SQLite` writer, so dispatch
+/// must run them off those workers: a parked worker drives no other task.
+#[tokio::test]
+async fn work_and_workflow_dispatch_never_park_a_native_worker_on_the_writer() {
+    let fixture = RegisteredWorkFixture::start("native-writer-waits").await;
+    let wall_clock = tracedecay_contracts::now_micros();
+    let workflow = |request_id: &str, request| {
+        DaemonInvocationRequest::workflow_application(
+            request_id,
+            request,
+            wall_clock,
+            Deadline::new(UtcMicros(wall_clock.0 + 600_000_000)).expect("deadline"),
+            CancellationContext::active(format!("cancel.{request_id}")).expect("cancellation"),
+        )
+    };
+    let digest = |byte: char| {
+        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).expect("digest")
+    };
+    let definition = tracedecay_domain::WorkflowDefinition::new(
+        tracedecay_domain::WorkflowDefinitionId::new("workflow.native-writer-waits")
+            .expect("definition id"),
+        1,
+        fixture.scope.project_id.clone(),
+        vec![tracedecay_domain::WorkflowStep {
+            step_id: tracedecay_domain::WorkflowStepId::new("prepare").expect("step id"),
+            operation: tracedecay_domain::WorkflowOperationRef::new("operation.work.start_attempt")
+                .expect("operation"),
+            predecessors: BTreeSet::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            fan_out: None,
+        }],
+        digest('a'),
+        digest('b'),
+        digest('c'),
+    )
+    .expect("workflow definition");
+    let requests = vec![
+        workflow(
+            "request.workflow.native-writer-waits.register",
+            tracedecay_daemon_protocol::WorkflowApplicationInvocation::RegisterDefinition(
+                tracedecay_contracts::WorkflowDefinitionRegisterRequest { definition },
+            ),
+        ),
+        workflow(
+            "request.workflow.native-writer-waits.get-run",
+            tracedecay_daemon_protocol::WorkflowApplicationInvocation::GetRun(
+                tracedecay_contracts::WorkflowRunGetRequest {
+                    run_id: tracedecay_domain::RunId::new("run.native-writer-waits")
+                        .expect("run id"),
+                },
+            ),
+        ),
+        DaemonInvocationRequest::work_application(
+            "request.work.native-writer-waits.list",
+            WorkApplicationInvocationV1::ListAttempts(
+                tracedecay_contracts::WorkAttemptListRequestV1 {
+                    page_size: 10,
+                    cursor: None,
+                },
+            ),
+            UtcMicros(100),
+            Deadline::new(UtcMicros(1_000)).expect("deadline"),
+            CancellationContext::active("cancel.request.work.native-writer-waits.list")
+                .expect("cancellation"),
+        ),
+    ];
+    let service = fixture.service.clone();
+    let registry = Arc::clone(&fixture.registry);
+    let project_root = fixture.project.path().to_path_buf();
+
+    let writer_waits = tracedecay_runtime_core::native_runtime::native_thread_writer_waits();
+    let served = tracedecay_runtime_core::native_runtime::NativeTask::spawn(async move {
+        let mut outcomes = Vec::new();
+        for request in requests {
+            outcomes.push(
+                invoke_registered(
+                    service.clone(),
+                    Arc::clone(&registry),
+                    project_root.clone(),
+                    request,
+                )
+                .await,
+            );
+        }
+        let binding = service
+            .work_fan_out_binding(
+                Some(&project_root),
+                &tracedecay_domain::WorkAttemptIdentityV1::new(
+                    TaskId::new("task.native-writer-waits").expect("task id"),
+                    tracedecay_domain::RunId::new("run.native-writer-waits").expect("run id"),
+                    tracedecay_domain::AttemptId::new("attempt.native-writer-waits")
+                        .expect("attempt id"),
+                )
+                .expect("attempt identity"),
+            )
+            .await;
+        (outcomes, binding)
+    })
+    .expect("native worker task")
+    .wait()
+    .await;
+    let tracedecay_runtime_core::native_runtime::NativeTaskOutcome::Completed((outcomes, binding)) =
+        served
+    else {
+        panic!("the native worker must serve every request: {served:?}");
+    };
+    assert_eq!(
+        tracedecay_runtime_core::native_runtime::native_thread_writer_waits(),
+        writer_waits,
+        "Work and Workflow dispatch must not park a native worker on the writer"
+    );
+
+    let [register, get_run, list] = outcomes.as_slice() else {
+        panic!("three outcomes: {outcomes:?}");
+    };
+    assert!(
+        matches!(
+            register,
+            DaemonInvocationOutcome::WorkflowApplication { .. }
+        ),
+        "registration must reach the workflow effect journal: {register:?}"
+    );
+    assert!(
+        matches!(get_run, DaemonInvocationOutcome::ApplicationProblem { .. }),
+        "an unknown run must be read from storage and refused: {get_run:?}"
+    );
+    assert!(
+        matches!(list, DaemonInvocationOutcome::WorkApplication { .. }),
+        "the attempt list must be answered: {list:?}"
+    );
+    assert_eq!(binding, None, "no workflow owns an unknown attempt");
 }
