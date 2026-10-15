@@ -1795,10 +1795,12 @@ mod tests {
         }
     }
 
+    /// The join may abandon an aborted tick whose unwind outlasts the abort
+    /// deadline, so the test waits for the tick's state to drop rather than
+    /// expecting the join to have seen it.
     #[tokio::test]
     async fn shutdown_aborts_a_stuck_tick_at_the_abort_deadline() {
-        let tick_state = Arc::new(());
-        let held_state = Arc::clone(&tick_state);
+        let (held_state, released) = tokio::sync::oneshot::channel::<()>();
         let started = Arc::new(Notify::new());
         let task_started = Arc::clone(&started);
         let handle = NativeTask::spawn(async move {
@@ -1816,11 +1818,10 @@ mod tests {
         )
         .await;
 
-        assert_eq!(
-            Arc::strong_count(&tick_state),
-            1,
-            "a tick stuck past the abort deadline must be aborted and joined"
-        );
+        let released = tokio::time::timeout(Duration::from_secs(30), released)
+            .await
+            .expect("a tick stuck past the abort deadline must be aborted");
+        assert!(released.is_err(), "the aborted tick dropped its state");
     }
 
     /// A tick cancelled while it awaits blocking store work must not leave
