@@ -1462,10 +1462,28 @@ async fn never_recorded_evidence_converges_as_a_typed_no_op() {
 }
 
 #[test]
-fn unavailable_attribution_target_is_a_retryable_error() {
-    let span = stable_backfill_span("codex", "session-1", Some("main"), "/repo", 1, 2);
-    let error = attribute_commits(&[span], 0, |_| TargetScan::Unavailable).unwrap_err();
-    assert!(matches!(error, GitCorrelationError::Unavailable(_)));
+fn unscannable_targets_do_not_hold_back_the_rest() {
+    let spans = [
+        stable_backfill_span("codex", "gone", Some("main"), "/gone", 1, 2),
+        stable_backfill_span("codex", "flaky", Some("main"), "/flaky", 1, 2),
+        stable_backfill_span("codex", "live", Some("main"), "/live", 1, 2),
+    ];
+    let attribution = attribute_commits(&spans, 0, |target| match target.worktree.as_str() {
+        "/gone" => TargetScan::MissingWorktree,
+        "/flaky" => TargetScan::Unavailable,
+        _ => TargetScan::Scanned(vec![ScannedCommit {
+            sha: "c1".to_owned(),
+            committed_at: 1,
+        }]),
+    });
+    assert_eq!(attribution.unavailable_references, 1);
+    assert_eq!(attribution.retryable_targets, vec!["/flaky".to_owned()]);
+    let sessions: Vec<_> = attribution
+        .records
+        .iter()
+        .map(|record| record.session_id.as_str())
+        .collect();
+    assert_eq!(sessions, vec!["live"]);
 }
 
 #[tokio::test]
@@ -1514,8 +1532,7 @@ async fn archived_branch_is_limited_coverage_without_losing_observed_span() {
         .unwrap();
     let attribution = attribute_commits(&spans, DEFAULT_SPAN_MERGE_GAP_SECS, |target| {
         scan_span_target(&SystemGit, target, DEFAULT_SPAN_MERGE_GAP_SECS, usize::MAX)
-    })
-    .unwrap();
+    });
     assert_eq!(attribution.records, Vec::new());
     assert_eq!(attribution.unavailable_references, 1);
     assert_eq!(spans.len(), 1);
