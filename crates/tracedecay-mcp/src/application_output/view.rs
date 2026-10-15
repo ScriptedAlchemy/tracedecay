@@ -14,10 +14,29 @@ pub(crate) const PROVENANCE_FIELD: &str = "Provenance";
 pub(crate) const RECEIPT_FIELD: &str = "Receipt";
 pub(crate) const REQUEST_FIELD: &str = "Request";
 pub(crate) const TRACE_FIELD: &str = "Trace";
-/// Fields whose value differs on every call for the same answer: request and
-/// trace ids, timestamps, and elapsed time.
+/// The per-call values of a canonical answer, which differ on every call for
+/// the same answer: request and trace ids, timestamps, elapsed time, and cost.
+/// A human view renders the ones it shows as these fields.
 pub(crate) const PER_CALL_FIELDS: [&str; 4] =
     [PROVENANCE_FIELD, RECEIPT_FIELD, REQUEST_FIELD, TRACE_FIELD];
+/// Where the canonical JSON envelope carries the same per-call values, as
+/// JSON pointers. Paths under `/outcome/value/` name an evidence, preview, or
+/// effect packet; a plain result's value is its payload and keeps them.
+pub(crate) const PER_CALL_POINTERS: [&str; 13] = [
+    "/request_id",
+    "/cost",
+    "/analytics",
+    "/problem/request_id",
+    "/problem/trace_id",
+    "/outcome/value/authority/revalidated_at",
+    "/outcome/value/temporal/requested_at",
+    "/outcome/value/temporal/resolved_at",
+    "/outcome/value/execution/started_at",
+    "/outcome/value/execution/ended_at",
+    "/outcome/value/execution/effective_deadline",
+    "/outcome/value/execution/budget",
+    "/outcome/value/execution/cancellation/observed_at",
+];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum HumanFieldValue {
