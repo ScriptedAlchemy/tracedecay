@@ -1,14 +1,11 @@
 //! Foreground daemon bootstrap: `run_foreground` entry points, the Unix
 //! accept/serve loop, socket preparation, and client-task draining.
 
-use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 use std::time::Instant;
 
-use futures_util::stream::{FuturesUnordered, StreamExt};
+use futures_util::TryFutureExt;
 
 #[cfg(unix)]
 use tracedecay_code_index_runtime::{GitWatchMaintenanceWakeV1, git_watch};
@@ -16,7 +13,7 @@ use tracedecay_daemon_control::RemoteBrainTlsConfig;
 use tracedecay_daemon_identity::authority;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
-use tracedecay_runtime_core::native_runtime::{self, NativeTask, NativeTaskOutcome};
+use tracedecay_runtime_core::native_runtime::{self, NativeTaskOutcome};
 
 use super::*;
 #[cfg(unix)]
@@ -36,57 +33,9 @@ const DAEMON_SHUTDOWN_COORDINATION_DEADLINE: std::time::Duration =
 /// native task's outcome must be `Clone`.
 pub(super) type ClientOutcome = NativeTaskOutcome<std::result::Result<(), String>>;
 
-/// The accepted client connections, each a native task. Dropping the set
-/// aborts every connection still running.
-#[derive(Default)]
-pub(super) struct ClientTasks(FuturesUnordered<ClientTask>);
-
-struct ClientTask {
-    task: NativeTask<std::result::Result<(), String>>,
-    outcome: Pin<Box<dyn Future<Output = ClientOutcome> + Send>>,
-}
-
-impl Future for ClientTask {
-    type Output = ClientOutcome;
-
-    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<ClientOutcome> {
-        self.outcome.as_mut().poll(context)
-    }
-}
-
-impl ClientTasks {
-    pub(super) fn spawn(
-        &mut self,
-        client: impl Future<Output = Result<()>> + Send + 'static,
-    ) -> std::result::Result<(), String> {
-        let task =
-            NativeTask::spawn(async move { client.await.map_err(|error| error.to_string()) })?;
-        let outcome = Box::pin(task.wait());
-        self.0.push(ClientTask { task, outcome });
-        Ok(())
-    }
-
-    fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    /// The next connection to end. Cancel-safe.
-    pub(super) async fn join_next(&mut self) -> Option<ClientOutcome> {
-        self.0.next().await
-    }
-
-    fn abort_all(&self) {
-        for client in &self.0 {
-            client.task.abort();
-        }
-    }
-}
-
-impl Drop for ClientTasks {
-    fn drop(&mut self) {
-        self.abort_all();
-    }
-}
+/// The accepted client connections. Dropping the set aborts every connection
+/// still running.
+pub(super) type ClientTasks = native_runtime::NativeTaskSet<std::result::Result<(), String>>;
 
 #[tracing::instrument(name = "daemon.bootstrap.catalog_prewarm", level = "trace", skip_all)]
 fn prewarm_static_daemon_bootstrap_catalog() {
@@ -298,25 +247,28 @@ async fn run_foreground_loopback(
         let invocation = invocation.clone();
         let http_application_registry = http_application_registry.clone();
         let per_client_admission = per_client_admission.clone();
-        let spawned = clients.spawn(tracing::Instrument::instrument(
-            with_connection_admission(permit, async move {
-                Box::pin(serve_windows_broker_client_with_class_and_invocation(
-                    stream,
-                    &auth_token,
-                    &client_lifecycle,
-                    store_administration,
-                    project_open_gates,
-                    invocation,
-                    http_application_registry,
-                    per_client_admission,
-                    admission_class,
-                    #[cfg(test)]
-                    None,
-                ))
-                .await
-            }),
-            tracing::trace_span!("daemon.bootstrap.broker_connection"),
-        ));
+        let spawned = clients.spawn(
+            tracing::Instrument::instrument(
+                with_connection_admission(permit, async move {
+                    Box::pin(serve_windows_broker_client_with_class_and_invocation(
+                        stream,
+                        &auth_token,
+                        &client_lifecycle,
+                        store_administration,
+                        project_open_gates,
+                        invocation,
+                        http_application_registry,
+                        per_client_admission,
+                        admission_class,
+                        #[cfg(test)]
+                        None,
+                    ))
+                    .await
+                }),
+                tracing::trace_span!("daemon.bootstrap.broker_connection"),
+            )
+            .map_err(|error| error.to_string()),
+        );
         if let Err(error) = spawned {
             log_client_spawn_refusal(error);
         }
@@ -871,10 +823,13 @@ async fn run_foreground_unix(
             auth_token,
             admission_class,
         ));
-        if let Err(error) = client_tasks.spawn(tracing::Instrument::instrument(
-            with_connection_admission(permit, client),
-            tracing::trace_span!("daemon.bootstrap.socket_connection"),
-        )) {
+        if let Err(error) = client_tasks.spawn(
+            tracing::Instrument::instrument(
+                with_connection_admission(permit, client),
+                tracing::trace_span!("daemon.bootstrap.socket_connection"),
+            )
+            .map_err(|error| error.to_string()),
+        ) {
             log_client_spawn_refusal(error);
         }
     }

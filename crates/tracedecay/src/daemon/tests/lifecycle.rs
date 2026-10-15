@@ -1087,7 +1087,8 @@ async fn client_errors_and_panics_are_named_while_aborted_clients_are_clean() {
             let _settled = failed;
             Err(tracedecay_domain::errors::TraceDecayError::Config {
                 message: "client failed during shutdown".to_owned(),
-            })
+            }
+            .to_string())
         })
         .expect("failing client task");
     clients
@@ -1117,7 +1118,7 @@ async fn client_errors_and_panics_are_named_while_aborted_clients_are_clean() {
     );
 }
 
-fn panicking_client() -> tracedecay_domain::errors::Result<()> {
+fn panicking_client() -> std::result::Result<(), String> {
     panic!("client panicked during shutdown")
 }
 

@@ -305,10 +305,8 @@ impl<T: Clone + Send + Sync + 'static> NativeTask<T> {
         self.abort.abort();
     }
 
-    /// The task's outcome. The returned future borrows nothing, so an owner
-    /// can keep it beside the handle it aborts through.
-    pub fn wait(&self) -> impl Future<Output = NativeTaskOutcome<T>> + Send + 'static {
-        self.outcome.clone()
+    pub async fn wait(&self) -> NativeTaskOutcome<T> {
+        self.outcome.clone().await
     }
 
     #[must_use]
@@ -319,6 +317,60 @@ impl<T: Clone + Send + Sync + 'static> NativeTask<T> {
     #[must_use]
     pub fn is_finished(&self) -> bool {
         self.try_finished().is_some()
+    }
+}
+
+/// Awaiting the handle itself yields the outcome once; it must not be polled
+/// again after that.
+impl<T: Clone> Future for NativeTask<T> {
+    type Output = NativeTaskOutcome<T>;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        self.outcome.poll_unpin(context)
+    }
+}
+
+/// Native tasks joined in completion order, like Tokio's `JoinSet`. Dropping
+/// the set aborts every task still running.
+pub struct NativeTaskSet<T: Clone>(futures_util::stream::FuturesUnordered<NativeTask<T>>);
+
+impl<T: Clone> Default for NativeTaskSet<T> {
+    fn default() -> Self {
+        Self(futures_util::stream::FuturesUnordered::new())
+    }
+}
+
+impl<T: Clone + Send + Sync + 'static> NativeTaskSet<T> {
+    pub fn spawn<F>(&mut self, work: F) -> Result<(), String>
+    where
+        F: Future<Output = T> + Send + 'static,
+    {
+        self.0.push(NativeTask::spawn(work)?);
+        Ok(())
+    }
+
+    /// The next task to end, or `None` when the set is empty. Cancel-safe.
+    pub async fn join_next(&mut self) -> Option<NativeTaskOutcome<T>> {
+        futures_util::StreamExt::next(&mut self.0).await
+    }
+}
+
+impl<T: Clone> NativeTaskSet<T> {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn abort_all(&self) {
+        for task in &self.0 {
+            task.abort.abort();
+        }
+    }
+}
+
+impl<T: Clone> Drop for NativeTaskSet<T> {
+    fn drop(&mut self) {
+        self.abort_all();
     }
 }
 
@@ -545,6 +597,30 @@ mod tests {
             dropped_signal.try_recv(),
             Ok(()),
             "the work must be dropped by the time the hop's drop returns"
+        );
+    }
+
+    #[test]
+    fn dropping_a_native_task_set_aborts_its_running_tasks() {
+        let (started, task_started) = std::sync::mpsc::channel();
+        let (ended, task_ended) = std::sync::mpsc::channel::<()>();
+        let mut set = NativeTaskSet::default();
+        set.spawn(async move {
+            let _ended = ended;
+            let _ = started.send(());
+            std::future::pending::<()>().await;
+        })
+        .expect("native task");
+        task_started
+            .recv_timeout(HANG_GUARD)
+            .expect("the task runs");
+
+        drop(set);
+
+        assert_eq!(
+            task_ended.recv_timeout(HANG_GUARD),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
+            "the dropped set must abort its task"
         );
     }
 
