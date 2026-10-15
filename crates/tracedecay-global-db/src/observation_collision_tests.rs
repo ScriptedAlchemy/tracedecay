@@ -3360,7 +3360,7 @@ async fn rewind_source_cursor(
 /// what wedges retained ingest. The durable cursor already sits exactly at
 /// `next_cursor`, so the coverage is applied and the replay is a duplicate.
 /// A conflict whose ledger already records this coverage restores the cursor.
-/// A missing ledger row stays a collision.
+/// A pruned ledger row is recorded again from the durable cursor.
 #[asupersync::test]
 async fn already_positioned_cursor_replay_with_new_command_bytes_is_a_duplicate() {
     const FILE_IDENTITY: u64 = 41;
