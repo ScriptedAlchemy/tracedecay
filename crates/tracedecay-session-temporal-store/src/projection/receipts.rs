@@ -384,6 +384,40 @@ pub async fn request_session_temporal_reset(
     Ok(())
 }
 
+/// [`request_session_temporal_reset`] for an observation whose output was
+/// retired, limited to a session where a live or pending generation already
+/// covers it. A refresh past that frontier skips the retired effect on its
+/// own, so a session that never covered it needs no rebuild.
+#[tracing::instrument(
+    name = "session_temporal.persist.reset_request_if_materialized",
+    level = "trace",
+    skip_all
+)]
+pub async fn request_session_temporal_reset_if_materialized(
+    conn: &impl Executor,
+    observation_id: &str,
+) -> ProjectionStoreResult<()> {
+    conn.execute(
+        "INSERT INTO session_temporal_resets (session_id, requested_at)
+         SELECT effect.session_id, unixepoch() * 1000000
+         FROM session_temporal_observation_effects AS effect
+         WHERE effect.observation_id = ?1 AND effect.output_count > 0
+           AND EXISTS (
+               SELECT 1 FROM session_temporal_generations AS covering
+               WHERE covering.session_id = effect.session_id
+                 AND covering.state IN ('building', 'ready', 'active')
+                 AND CAST(json_extract(
+                         covering.frozen_watermarks_json, '$.projection_frontier'
+                     ) AS INTEGER) >= effect.observation_sequence
+           )
+         ON CONFLICT(session_id) DO UPDATE SET requested_at = excluded.requested_at",
+        params![observation_id],
+    )
+    .await
+    .map_err(|error| ProjectionStoreError::storage("request session temporal reset", error))?;
+    Ok(())
+}
+
 #[tracing::instrument(
     name = "session_temporal.persist.observation_effect",
     level = "trace",

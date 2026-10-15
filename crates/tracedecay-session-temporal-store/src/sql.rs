@@ -111,19 +111,21 @@ pub(crate) fn retire_superseded_versions_sql(table: &SharedGenerationTable) -> S
 /// Predicate over a `session_temporal_observation_effects` row aliased
 /// `effect`: whether its output is still canonical through the source
 /// frontier bound at `frontier`. A source rewrite may have retired the
-/// observation, or a later observation through the frontier may own its
-/// message. The owner follows the projection's rule: the newest owner when
-/// the projector created the message, the oldest otherwise. An effect without
+/// observation, another record of the same message may have replaced its
+/// output, or a later observation through the frontier may own its message.
+/// The owner follows the projection's rule: the newest owner when the
+/// projector created the message, the oldest otherwise. An effect without
 /// projection provenance is canonical.
 pub(crate) fn live_effect_predicate(frontier: &str) -> String {
     let version = tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION;
     let retired_reason = tracedecay_store::ProjectionSkipReason::SourceRecordRetired.as_str();
+    let replaced_reason = tracedecay_store::ProjectionSkipReason::OutputCollision.as_str();
     format!(
         "NOT EXISTS (
              SELECT 1 FROM observation_projection_dispositions AS retired
              WHERE retired.projector_version = '{version}'
                AND retired.observation_id = effect.observation_id
-               AND retired.reason = '{retired_reason}'
+               AND retired.reason IN ('{retired_reason}', '{replaced_reason}')
          )
          AND NOT EXISTS (
              SELECT 1 FROM observation_projection_provenance AS own

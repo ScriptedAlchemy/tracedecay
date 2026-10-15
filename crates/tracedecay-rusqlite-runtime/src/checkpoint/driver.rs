@@ -122,11 +122,16 @@ impl RusqliteCheckpointDriver {
             .map_err(RusqliteCheckpointError::Sqlite)?
             .ok_or(rusqlite::Error::QueryReturnedNoRows)
             .map_err(RusqliteCheckpointError::Sqlite)?;
-        Ok((
-            row.0,
-            nonnegative_integer(row.1, 1).map_err(RusqliteCheckpointError::Sqlite)?,
-            nonnegative_integer(row.2, 2).map_err(RusqliteCheckpointError::Sqlite)?,
-        ))
+        // A checkpoint that cannot take the checkpoint lock because another
+        // connection is checkpointing answers `(1, -1, -1)`: it ran nothing.
+        let frames = |value: i64, column| {
+            if row.0 != 0 && value == -1 {
+                Ok(0)
+            } else {
+                nonnegative_integer(value, column).map_err(RusqliteCheckpointError::Sqlite)
+            }
+        };
+        Ok((row.0, frames(row.1, 1)?, frames(row.2, 2)?))
     }
 }
 

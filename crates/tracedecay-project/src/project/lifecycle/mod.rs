@@ -387,7 +387,7 @@ impl TraceDecay {
             let _ = branch_meta::save_branch_meta(&store_layout.data_root, &meta);
         }
 
-        let ts = Self {
+        let mut ts = Self {
             db,
             profile_database,
             store_runtime_registry: runtime_registry,
@@ -403,6 +403,7 @@ impl TraceDecay {
             #[cfg(any(test, feature = "test-helpers"))]
             test_runtime_guard: None,
             _standalone_maintenance_scope: None,
+            _context_scout_owner: None,
         };
         // First-touch parity with the registered open path: daemon warm-up
         // refuses to advertise an identity-bearing project whose Context
@@ -418,7 +419,7 @@ impl TraceDecay {
         if let Some(project_id) =
             tracedecay_agent_hosts::hooks::hook_project_id_for_layout(&ts.store_layout)
         {
-            let _ = tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1::startup(
+            ts._context_scout_owner = tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1::startup(
                 ts.db.clone(),
                 project_id,
                 tracedecay_runtime_core::tracedecay::utc_now_or_one(),
@@ -594,7 +595,7 @@ impl TraceDecay {
         .into_parts();
         let (configuration_runtime, _) = ProjectConfigurationRuntime::open(opened)?;
         let configuration_runtime = Arc::new(configuration_runtime);
-        let ts = Self {
+        let mut ts = Self {
             db,
             profile_database,
             store_runtime_registry: runtime_registry,
@@ -610,6 +611,7 @@ impl TraceDecay {
             #[cfg(any(test, feature = "test-helpers"))]
             test_runtime_guard: None,
             _standalone_maintenance_scope: None,
+            _context_scout_owner: None,
         };
 
         tracedecay_agent_hosts::hooks::publish_hook_bindings(
@@ -623,7 +625,7 @@ impl TraceDecay {
         if let Some(project_id) =
             tracedecay_agent_hosts::hooks::hook_project_id_for_layout(&ts.store_layout)
         {
-            let _ = tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1::startup(
+            ts._context_scout_owner = tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1::startup(
                 ts.db.clone(),
                 project_id,
                 tracedecay_runtime_core::tracedecay::utc_now_or_one(),
@@ -807,6 +809,7 @@ impl TraceDecay {
             #[cfg(any(test, feature = "test-helpers"))]
             test_runtime_guard: None,
             _standalone_maintenance_scope: None,
+            _context_scout_owner: None,
         })
     }
 }
@@ -1069,6 +1072,58 @@ mod tests {
             "one project identity has one Context Scout owner"
         );
         assert!(Arc::ptr_eq(&owner, &registered[0]));
+    }
+
+    #[asupersync::test]
+    async fn dropping_the_graph_releases_its_context_scout_owner_and_store() {
+        let root = tempfile::TempDir::new().expect("fixture root");
+        let project = root.path().join("project");
+        let profile = root.path().join("profile");
+        std::fs::create_dir_all(&project).expect("create project root");
+        let options = TraceDecayOpenOptions {
+            profile_root: Some(profile.clone()),
+            global_db_path: Some(profile.join("registry.db")),
+        };
+        let opened = TraceDecay::init_with_options(&project, options)
+            .await
+            .expect("initialize project graph");
+        let project_id =
+            tracedecay_agent_hosts::hooks::hook_project_id_for_layout(opened.hook_store_layout())
+                .expect("initialized project has hook identity");
+        let owner = Arc::downgrade(
+            &opened
+                .context_scout_owner()
+                .expect("Context Scout owner starts with the project"),
+        );
+        let graph_db = opened.db_path().to_string_lossy().into_owned();
+
+        drop(opened);
+
+        assert!(
+            tracedecay_agent_hosts::agents::context_scout::owner::lookup_registered_context_scout_owners(
+                project_id,
+            )
+            .is_empty(),
+            "a dropped graph must not leave its Context Scout owner registered"
+        );
+        assert_eq!(
+            owner.strong_count(),
+            0,
+            "the owner of a dropped graph must release its graph store"
+        );
+        #[cfg(target_os = "linux")]
+        {
+            let open_graph_files = std::fs::read_dir("/proc/self/fd")
+                .expect("open file descriptors")
+                .flatten()
+                .filter_map(|fd| std::fs::read_link(fd.path()).ok())
+                .filter(|target| target.to_string_lossy().starts_with(&graph_db))
+                .collect::<Vec<_>>();
+            assert!(
+                open_graph_files.is_empty(),
+                "a dropped graph's store must close its files: {open_graph_files:?}"
+            );
+        }
     }
 
     #[asupersync::test]
