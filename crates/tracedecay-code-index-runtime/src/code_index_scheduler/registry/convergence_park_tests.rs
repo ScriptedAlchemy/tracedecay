@@ -948,6 +948,57 @@ async fn a_seat_wait_answers_a_parked_worker_with_its_park() {
     fixture.registry.shutdown().await;
 }
 
+/// A worker that panics outside its per-step guard is gone, so no pass will
+/// install the seat a read waits for. The worktree reports the panic as a
+/// terminal park on its freshness, and a readiness wait answers with that
+/// park instead of waiting out its budget (#4023).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_panicked_worker_parks_its_worktree_and_ends_seat_waits() {
+    let (fixture, held) =
+        Fixture::mount_with_poisoned_artifacts_root_held("project.worker-panic", |_| {}).await;
+    CodeIndexSchedulerRegistryV1::panic_next_worker_pass(&fixture.project);
+    drop(held);
+
+    let waited = tokio::time::timeout(
+        CONVERGENCE_DEADLINE,
+        fixture.registry.wait_for_readiness(
+            &fixture.project,
+            CodeIndexReadinessTargetV1::Ready,
+            CONVERGENCE_DEADLINE * 2,
+        ),
+    )
+    .await
+    .expect("a dead worker ends the wait before its budget")
+    .expect("freshness read");
+    let CodeIndexReadinessWaitReadV1::Unreachable { reason } = waited else {
+        panic!("the wait must answer with the dead worker's park: {waited:?}");
+    };
+    assert_eq!(reason, "code_index_convergence_parked");
+    let park = fixture
+        .registry
+        .dashboard_freshness(&fixture.project)
+        .await
+        .expect("mounted freshness")
+        .parked
+        .expect("status reports the dead worker");
+    assert!(
+        park.reason.contains("injected code-index worker panic"),
+        "{}",
+        park.reason
+    );
+    assert!(!park.retries_on_wake, "no wake reaches a dead worker");
+    assert!(
+        fixture
+            .registry
+            .subscribe_owner_activity(&fixture.project)
+            .await
+            .expect("mounted activity")
+            .pass_finished(),
+        "a dead worker runs no pass"
+    );
+    fixture.registry.shutdown().await;
+}
+
 /// A readiness wait (`status` `wait_for`) ends as soon as the registry is
 /// cancelled: a worktree shutting down installs nothing more, so the wait
 /// reports the closed registry instead of spending its budget.

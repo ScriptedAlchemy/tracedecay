@@ -111,6 +111,25 @@ impl CodeIndexSchedulerRegistryV1 {
         Self::pass_worker_step_gate(gate).await;
     }
 
+    /// Panic the worker for `project_root` on its next admitted pass, outside
+    /// the per-step guard that catches a reconcile step's panic.
+    #[cfg(test)]
+    pub fn panic_next_worker_pass(project_root: &Path) {
+        armed_worker_panics()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(test_gate_root(project_root));
+    }
+
+    #[cfg(test)]
+    pub(super) fn panic_worker_pass_if_armed(project_root: &Path) {
+        let armed = armed_worker_panics()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&test_gate_root(project_root));
+        assert!(!armed, "injected code-index worker panic");
+    }
+
     /// Hold the next graph tail of the worker for `project_root` right before
     /// it seats the decoded generation. The first receiver resolves once the
     /// worker waits there; sending on the returned sender releases it.
@@ -827,4 +846,11 @@ impl CodeIndexSchedulerRegistryV1 {
     pub async fn retiring_owner_count(&self) -> usize {
         self.retiring.lock().await.len()
     }
+}
+
+#[cfg(test)]
+fn armed_worker_panics() -> &'static std::sync::Mutex<std::collections::BTreeSet<PathBuf>> {
+    static ARMED: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    ARMED.get_or_init(Default::default)
 }

@@ -1080,6 +1080,8 @@ impl CodeIndexSchedulerRegistryV1 {
                     &worker_phase_signal,
                     super::CodeIndexWorkerPhaseV1::Working,
                 );
+                #[cfg(test)]
+                Self::panic_worker_pass_if_armed(&worker_project_root);
                 let wake_to_gates_held_micros =
                     u64::try_from(pass_wake_observed_at.elapsed().as_micros()).unwrap_or(u64::MAX);
                 let scheduler = Arc::clone(&worker_scheduler);
