@@ -231,11 +231,15 @@ async fn hook_orchestration_coalesces_duplicate_work_and_completes_every_admissi
     let work_release = Arc::clone(&release);
     let work_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed_work_calls = Arc::clone(&work_calls);
+    let work_started = Arc::new(tokio::sync::Notify::new());
+    let observed_work_started = Arc::clone(&work_started);
     let runtime = BoundedHookOrchestratorV1::new(1, move |_, _| {
         let release = Arc::clone(&work_release);
         let work_calls = Arc::clone(&observed_work_calls);
+        let work_started = Arc::clone(&observed_work_started);
         async move {
             work_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            work_started.notify_one();
             release.notified().await;
         }
     })
@@ -261,7 +265,7 @@ async fn hook_orchestration_coalesces_duplicate_work_and_completes_every_admissi
         runtime.admit(request),
         HookOrchestrationAdmissionV1::Enqueued
     );
-    tokio::task::yield_now().await;
+    work_started.notified().await;
     assert_eq!(
         runtime.admit(duplicate),
         HookOrchestrationAdmissionV1::Enqueued,
@@ -470,7 +474,9 @@ async fn retryable_hook_work_does_not_acknowledge_the_durable_admission() {
         HookOrchestrationAdmissionV1::Enqueued
     );
     attempted.notified().await;
-    tokio::task::yield_now().await;
+    while runtime.active_tasks() != 0 {
+        tokio::task::yield_now().await;
+    }
     assert_eq!(
         completions.load(std::sync::atomic::Ordering::Relaxed),
         0,
@@ -532,7 +538,9 @@ async fn replayed_admission_after_retryable_failure_completes_a_fresh_cycle() {
         HookOrchestrationAdmissionV1::Enqueued
     );
     first_attempted.notified().await;
-    tokio::task::yield_now().await;
+    while runtime.active_tasks() != 0 {
+        tokio::task::yield_now().await;
+    }
     assert_eq!(
         acknowledged.load(std::sync::atomic::Ordering::Relaxed),
         0,
@@ -589,7 +597,7 @@ async fn superseded_blocking_work_is_joined_before_its_receipt_terminal() {
         let successor_release = Arc::clone(&work_successor_release);
         async move {
             if request.hook.envelope().event_id == [1; 16] {
-                let task = tokio::task::spawn_blocking(move || {
+                let task = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
                     if let Some(started) = started
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -774,8 +782,13 @@ async fn hook_orchestration_bounds_coalesced_completion_waiters() {
 async fn dropping_hook_orchestrator_cancels_daemon_owned_work_without_false_completion() {
     let work_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let observed_work_drop = Arc::clone(&work_dropped);
-    let runtime = BoundedHookOrchestratorV1::new(1, move |_, _| PendingWork {
-        dropped: Arc::clone(&observed_work_drop),
+    let work_started = Arc::new(tokio::sync::Notify::new());
+    let observed_work_started = Arc::clone(&work_started);
+    let runtime = BoundedHookOrchestratorV1::new(1, move |_, _| {
+        observed_work_started.notify_one();
+        PendingWork {
+            dropped: Arc::clone(&observed_work_drop),
+        }
     })
     .unwrap();
     let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -788,7 +801,7 @@ async fn dropping_hook_orchestrator_cancels_daemon_owned_work_without_false_comp
         runtime.admit(request),
         HookOrchestrationAdmissionV1::Enqueued
     );
-    tokio::task::yield_now().await;
+    work_started.notified().await;
     drop(runtime);
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         while !work_dropped.load(std::sync::atomic::Ordering::Acquire) {
@@ -808,8 +821,13 @@ async fn dropping_hook_orchestrator_cancels_daemon_owned_work_without_false_comp
 async fn hook_orchestrator_shutdown_fences_and_joins_pending_work() {
     let work_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let observed_work_drop = Arc::clone(&work_dropped);
-    let runtime = BoundedHookOrchestratorV1::new(1, move |_, _| PendingWork {
-        dropped: Arc::clone(&observed_work_drop),
+    let work_started = Arc::new(tokio::sync::Notify::new());
+    let observed_work_started = Arc::clone(&work_started);
+    let runtime = BoundedHookOrchestratorV1::new(1, move |_, _| {
+        observed_work_started.notify_one();
+        PendingWork {
+            dropped: Arc::clone(&observed_work_drop),
+        }
     })
     .unwrap();
     let request = saved_edit_request(Some(hook_lifecycle()));
@@ -817,7 +835,7 @@ async fn hook_orchestrator_shutdown_fences_and_joins_pending_work() {
         runtime.admit(request.clone()),
         HookOrchestrationAdmissionV1::Enqueued
     );
-    tokio::task::yield_now().await;
+    work_started.notified().await;
 
     assert!(
         runtime.shutdown().await,

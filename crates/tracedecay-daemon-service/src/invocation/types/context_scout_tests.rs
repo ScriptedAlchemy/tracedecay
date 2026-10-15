@@ -379,24 +379,30 @@ async fn lifecycle_less_boundary_settles_and_resumes_on_its_sessions_lifecycle()
 }
 
 #[test]
-fn admission_without_a_tokio_runtime_is_unavailable_logged_and_counted() {
+fn admission_without_a_tokio_runtime_runs_the_cycle_natively() {
     use tracedecay_runtime_core::native_runtime;
-    const SITE: &str = "daemon-service.hook_orchestration.admit";
-    let runtime = BoundedHookOrchestratorV1::new(1, |_, _| async {
-        HookOrchestrationWorkOutcomeV1::RetryableFailure
+    let (ran, mut runs) = tokio::sync::mpsc::unbounded_channel();
+    let runtime = BoundedHookOrchestratorV1::new(1, move |_, _| {
+        let ran = ran.clone();
+        async move {
+            ran.send(tokio::runtime::Handle::try_current().is_ok())
+                .unwrap();
+            HookOrchestrationWorkOutcomeV1::Completed
+        }
     })
     .unwrap();
     native_runtime::block_on(async {
         assert!(tokio::runtime::Handle::try_current().is_err());
-        let before = native_runtime::tokio_runtime_missing_count(SITE);
         assert_eq!(
             runtime.admit(native_request(191)),
-            HookOrchestrationAdmissionV1::Unavailable
+            HookOrchestrationAdmissionV1::Enqueued
         );
-        assert_eq!(
-            native_runtime::tokio_runtime_missing_count(SITE) - before,
-            1
-        );
+        let entered_tokio = native_runtime::timeout(std::time::Duration::from_secs(5), runs.recv())
+            .await
+            .expect("the cycle runs without a Tokio runtime")
+            .expect("the cycle reports its context");
+        assert!(!entered_tokio, "the cycle must run on the native runtime");
+        assert!(runtime.shutdown().await);
     })
     .expect("native runtime");
 }
