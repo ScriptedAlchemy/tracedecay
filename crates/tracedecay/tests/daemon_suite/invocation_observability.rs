@@ -989,6 +989,77 @@ async fn quiescence_survives_a_producer_write_that_missed_its_deadline() {
     service.expire_all().await;
 }
 
+/// A daemon shutdown after a producer missed a write deadline joins every
+/// owner. The missed write is lost work to report, not an owner that failed
+/// to stop, so the shutdown receipt stays clean.
+#[tokio::test]
+async fn daemon_shutdown_stays_clean_after_a_producer_write_missed_its_deadline() {
+    let (_project, project_id, database, _runtime) =
+        runtime("observability-shutdown-missed-write").await;
+    let root = PathBuf::from("/project/observability-shutdown-missed-write");
+    let service = DaemonInvocationService::default();
+    let producer = service
+        .mount_observability_producer(
+            root,
+            database.clone(),
+            project_id.clone(),
+            digest('3'),
+            digest('4'),
+        )
+        .await
+        .expect("producer");
+    let blocker = database
+        .begin_write_transaction()
+        .await
+        .expect("hold registered writer");
+    producer
+        .try_emit(envelope(&project_id, "shutdown:missed-write"))
+        .expect("enqueue the event whose write misses its deadline");
+
+    let shutdown = tokio::spawn(async move {
+        tracedecay_daemon_service::shutdown::join_shutdown_owners(
+            std::time::Instant::now() + Duration::from_secs(30),
+            vec![
+                tracedecay_daemon_service::shutdown::ShutdownOwner::with_deadline_status(
+                    "invocation",
+                    || {},
+                    move |_| async move { service.expire_all().await },
+                ),
+            ],
+        )
+        .await
+    });
+    while !producer.shutdown_joined() && !shutdown.is_finished() {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    blocker.commit().await.expect("release registered writer");
+
+    let receipt = shutdown.await.expect("shutdown task");
+    assert!(
+        producer.shutdown_joined(),
+        "the producer worker joined despite the missed write"
+    );
+    assert_eq!(
+        receipt.owners[0].status,
+        tracedecay_daemon_service::shutdown::ShutdownStatus::Clean,
+        "a missed persistence deadline must not make daemon shutdown unclean"
+    );
+    assert!(receipt.unfinished().is_empty());
+    let [lost] = receipt.lost_work.as_slice() else {
+        panic!(
+            "the missed write is reported exactly once: {:?}",
+            receipt.lost_work
+        );
+    };
+    assert_eq!(lost.owner, "invocation");
+    assert!(
+        lost.work.contains("observability-shutdown-missed-write")
+            && lost.work.contains("observability_persistence_deadline"),
+        "lost work names the project and the missed deadline: {}",
+        lost.work
+    );
+}
+
 #[tokio::test]
 async fn concurrent_two_alias_release_keeps_the_store_retiring_until_drain_finishes() {
     let (_project, project_id, database, _runtime) =

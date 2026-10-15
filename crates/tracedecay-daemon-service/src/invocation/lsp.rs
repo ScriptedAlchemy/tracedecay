@@ -1,6 +1,8 @@
 //! LSP session lifecycle: registered-owner lookup, session admission, frame relay, and expiry.
 
 use super::*;
+use crate::project_runtime::ProjectRuntimesStop;
+use crate::shutdown::{ShutdownJoined, ShutdownStatus};
 use tracedecay_lsp::LspRuntimeFailure;
 use tracedecay_runtime_core::cancellation::CancellationToken;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
@@ -391,7 +393,7 @@ impl DaemonInvocationService {
     }
 
     #[tracing::instrument(name = "daemon.service.lsp.expire_all", level = "trace", skip_all)]
-    pub async fn expire_all(&self) -> bool {
+    pub async fn expire_all(&self) -> ShutdownJoined {
         let started = std::time::Instant::now();
         let step = |outcome: &str| {
             tracedecay_runtime_core::logging::log_daemon_event(
@@ -412,7 +414,7 @@ impl DaemonInvocationService {
         self.authorized_lsp_workspaces.lock().await.clear();
         self.context_scout_registries.lock().await.clear();
         step("lsp_registries_cleared");
-        let project_runtimes_clean = self.project_runtimes.shut_down_all().await;
+        let project_runtimes = self.project_runtimes.shut_down_all().await;
         step("project_runtimes_shut_down");
         // A project open that lost its registration to this shutdown dropped
         // its observability owner, whose drain still holds the store lease.
@@ -433,7 +435,17 @@ impl DaemonInvocationService {
         if !work_attempts_clean {
             tracing::error!("active Work attempt process failed while shutdown joined it");
         }
-        project_runtimes_clean && lease_shutdown_clean && work_attempts_clean
+        let (project_runtimes_stopped, lost_work) = match project_runtimes {
+            ProjectRuntimesStop::Stopped => (true, Vec::new()),
+            ProjectRuntimesStop::StoppedWithLostWork(lost_work) => (true, lost_work),
+            ProjectRuntimesStop::DidNotStop => (false, Vec::new()),
+        };
+        let status = if project_runtimes_stopped && lease_shutdown_clean && work_attempts_clean {
+            ShutdownStatus::Clean
+        } else {
+            ShutdownStatus::Failed("invocation runtime shutdown was incomplete".to_owned())
+        };
+        ShutdownJoined { status, lost_work }
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
