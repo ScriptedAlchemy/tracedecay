@@ -356,6 +356,7 @@ pub(super) async fn try_ingest_user_cursor_sessions_with_db_bounded(
                 cursor_composer::DEFAULT_COMPOSER_ENVELOPE_CAP,
                 max_new_bytes,
                 cancellation,
+                sweep,
             )
             .await
         {

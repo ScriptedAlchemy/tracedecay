@@ -113,13 +113,29 @@ impl Witness {
             len: metadata.len(),
         }))
     }
+
+    fn content(parts: &[&[u8]]) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(b"tracedecay-source-content-witness-v1");
+        let mut len = 0u64;
+        for part in parts {
+            let part_len = u64::try_from(part.len()).unwrap_or(u64::MAX);
+            hasher.update(part_len.to_le_bytes());
+            hasher.update(part);
+            len = len.saturating_add(part_len);
+        }
+        Self {
+            identity: hasher.finalize().into(),
+            len,
+        }
+    }
 }
 
 #[cfg_attr(
     not(test),
     expect(
         dead_code,
-        reason = "the snapshot and row-stream providers adopt multi-file and content witnesses"
+        reason = "the snapshot providers adopt multi-file witnesses"
     )
 )]
 impl Witness {
@@ -149,22 +165,6 @@ impl Witness {
             identity: hasher.finalize().into(),
             len,
         }))
-    }
-
-    fn content(parts: &[&[u8]]) -> Self {
-        let mut hasher = Sha256::new();
-        hasher.update(b"tracedecay-source-content-witness-v1");
-        let mut len = 0u64;
-        for part in parts {
-            let part_len = u64::try_from(part.len()).unwrap_or(u64::MAX);
-            hasher.update(part_len.to_le_bytes());
-            hasher.update(part);
-            len = len.saturating_add(part_len);
-        }
-        Self {
-            identity: hasher.finalize().into(),
-            len,
-        }
     }
 }
 
@@ -312,6 +312,34 @@ impl SourceSweep {
         SourceClaim::observe_file(self.provider, self.ledger.clone(), path).await
     }
 
+    pub(crate) fn observe_stream(
+        &mut self,
+        container: &Path,
+        stream: &str,
+        content: &[&[u8]],
+    ) -> Option<SourceClaim> {
+        let key = SourceKey {
+            origin: container.to_path_buf(),
+            stream: Some(stream.into()),
+        };
+        if self.blocked.contains(&key) {
+            return None;
+        }
+        let witness = Witness::content(content);
+        if self
+            .ledger
+            .as_ref()
+            .is_some_and(|ledger| ledger.holds(&key, witness))
+        {
+            self.blocked.insert(key);
+            return None;
+        }
+        Some(SourceClaim {
+            settled: self.ledger.clone().map(|ledger| (ledger, witness)),
+            key,
+        })
+    }
+
     pub(crate) fn refused<E: SourceFailure>(
         &mut self,
         claim: SourceClaim,
@@ -351,7 +379,7 @@ impl SourceSweep {
     not(test),
     expect(
         dead_code,
-        reason = "the snapshot and row-stream providers adopt these observations"
+        reason = "the snapshot providers adopt multi-file observations"
     )
 )]
 impl SourceSweep {
@@ -376,34 +404,6 @@ impl SourceSweep {
             Ok(SourceClaim::unless_recorded(Some(&ledger), key, witness))
         })
         .await?
-    }
-
-    pub(crate) fn observe_stream(
-        &mut self,
-        container: &Path,
-        stream: &str,
-        content: &[&[u8]],
-    ) -> Option<SourceClaim> {
-        let key = SourceKey {
-            origin: container.to_path_buf(),
-            stream: Some(stream.into()),
-        };
-        if self.blocked.contains(&key) {
-            return None;
-        }
-        let witness = Witness::content(content);
-        if self
-            .ledger
-            .as_ref()
-            .is_some_and(|ledger| ledger.holds(&key, witness))
-        {
-            self.blocked.insert(key);
-            return None;
-        }
-        Some(SourceClaim {
-            settled: self.ledger.clone().map(|ledger| (ledger, witness)),
-            key,
-        })
     }
 }
 
