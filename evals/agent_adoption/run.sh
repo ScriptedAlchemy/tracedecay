@@ -131,7 +131,6 @@ if [[ -z "$TD" || ! -x "$TD" ]]; then
   exit 2
 fi
 TD="$(cd "$(dirname "$TD")" && pwd)/$(basename "$TD")"
-EVAL_PATH="$(dirname "$TD"):$PATH"
 
 # Neutrality lint (USER DOCTRINE): fail fast, before building fixtures or
 # spending a single token, if any scenario prompt names tracedecay/MCP/a
@@ -212,6 +211,11 @@ fi
 work="$(mktemp -d "${AGENT_EVAL_ARTIFACT_TMP:-${TMPDIR:-/tmp}}/agent-evals.XXXXXX")"
 run_dir="$work/run"
 mkdir -p "$run_dir"
+# Host installers and agent shells find `tracedecay` by name, and a candidate
+# binary named otherwise would lose to the operator's installed one.
+mkdir -p "$work/bin"
+ln -s "$TD" "$work/bin/tracedecay"
+EVAL_PATH="$work/bin:$PATH"
 
 REAL_HOME="${HOME:?HOME must be set}"
 REAL_CODEX_HOME="${AGENT_EVAL_CODEX_AUTH_SOURCE:-${CODEX_HOME:-$REAL_HOME/.codex}}"
@@ -295,6 +299,13 @@ for path in sys.argv[1:]:
     for server in config["mcpServers"].values():
         server["env_vars"] = names
     json.dump(config, open(path, "w"), indent=2)' "$CODEX_EVAL_CONFIG"/plugins/cache/*/tracedecay/*/.mcp.json
+    python3 -c 'import os, re, sys
+candidate = os.path.realpath(sys.argv[1])
+launched = {path for config in sys.argv[2:]
+            for path in re.findall(r"/[^\s\x27\"]*/tracedecay(?=[\s\x27\"])", open(config).read())}
+stray = sorted(path for path in launched if os.path.realpath(path) != candidate)
+sys.exit(f"abort: the Codex plugin launches {stray}, not the candidate {candidate}" if stray or not launched else 0)' \
+      "$TD" "$CODEX_EVAL_CONFIG"/plugins/cache/*/tracedecay/*/{.mcp.json,hooks/hooks.json}
     copy_auth_readonly "$REAL_CODEX_HOME/auth.json" "$CODEX_EVAL_CONFIG/auth.json"
   fi
   if [[ " $HOSTS " == *" claude "* ]]; then
