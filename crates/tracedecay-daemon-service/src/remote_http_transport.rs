@@ -8,7 +8,8 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 #[cfg(any(test, feature = "test-helpers"))]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -268,11 +269,17 @@ impl RemoteBrainTlsListener {
             }
         };
         let acceptor = self.acceptor.clone();
+        let handshake_read = Arc::new(AtomicBool::new(false));
+        let stream = RemoteBrainTcpStream {
+            stream,
+            read: Arc::clone(&handshake_read),
+        };
         let handshake =
             Box::pin(async move { acceptor.accept(stream).await.map_err(io::Error::other) });
         Some((
             RemoteBrainTlsIo::new(
                 handshake,
+                handshake_read,
                 permit,
                 self.deadlines,
                 #[cfg(any(test, feature = "test-helpers"))]
@@ -428,17 +435,71 @@ impl IoDeadline {
     }
 }
 
+/// The accepted TCP stream. It flags every read that returns bytes, so a
+/// handshake flight the listener reads late restarts the read-idle deadline,
+/// which measures the peer's silence rather than the listener's own latency.
+struct RemoteBrainTcpStream {
+    stream: TcpStream,
+    read: Arc<AtomicBool>,
+}
+
+impl AsyncRead for RemoteBrainTcpStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let before = buffer.filled().len();
+        let result = Pin::new(&mut self.stream).poll_read(context, buffer);
+        if buffer.filled().len() > before {
+            self.read.store(true, Ordering::Relaxed);
+        }
+        result
+    }
+}
+
+impl AsyncWrite for RemoteBrainTcpStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write(context, buffer)
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffers: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write_vectored(context, buffers)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.stream.is_write_vectored()
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(context)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(context)
+    }
+}
+
 type RemoteBrainTlsHandshake =
-    Pin<Box<dyn Future<Output = io::Result<TlsStream<TcpStream>>> + Send>>;
+    Pin<Box<dyn Future<Output = io::Result<TlsStream<RemoteBrainTcpStream>>> + Send>>;
 
 enum RemoteBrainTlsTransport {
     Handshaking(RemoteBrainTlsHandshake),
-    Streaming(Box<TlsStream<TcpStream>>),
+    Streaming(Box<TlsStream<RemoteBrainTcpStream>>),
     Failed,
 }
 
 struct RemoteBrainTlsIo {
     transport: RemoteBrainTlsTransport,
+    handshake_read: Arc<AtomicBool>,
     deadlines: RemoteBrainTlsDeadlines,
     read_idle_deadline: IoDeadline,
     request_read_deadline: IoDeadline,
@@ -472,12 +533,14 @@ struct RemoteBrainTlsIo {
 impl RemoteBrainTlsIo {
     fn new(
         handshake: RemoteBrainTlsHandshake,
+        handshake_read: Arc<AtomicBool>,
         permit: OwnedSemaphorePermit,
         deadlines: RemoteBrainTlsDeadlines,
         #[cfg(any(test, feature = "test-helpers"))] egress: Arc<RemoteBrainTlsEgressObserver>,
     ) -> Self {
         Self {
             transport: RemoteBrainTlsTransport::Handshaking(handshake),
+            handshake_read,
             deadlines,
             read_idle_deadline: IoDeadline::after(deadlines.read_idle),
             request_read_deadline: IoDeadline::after(deadlines.request_read),
@@ -623,7 +686,13 @@ impl RemoteBrainTlsIo {
             return Poll::Ready(Ok(()));
         };
         match handshake.as_mut().poll(context) {
-            Poll::Pending => Poll::Pending,
+            Poll::Pending => {
+                if self.handshake_read.swap(false, Ordering::Relaxed) {
+                    self.read_idle_deadline
+                        .reset_after(wall_now(), self.deadlines.read_idle);
+                }
+                Poll::Pending
+            }
             Poll::Ready(Ok(stream)) => {
                 // A write-side poll can finish the handshake after the reader
                 // parked on it. Its final read may already hold the request,
@@ -747,18 +816,23 @@ impl AsyncRead for RemoteBrainTlsIo {
         context: &mut Context<'_>,
         buffer: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        if let Err(error) = self.poll_request_absolute_deadline(context) {
-            return Poll::Ready(Err(error));
-        }
+        // The handshake goes first: one that completes on this poll restarts
+        // the request deadline, so it must not fail on the expired one.
         match self.poll_handshake(context) {
             Poll::Pending => {
-                return match self.poll_read_idle_deadline(context) {
+                return match self
+                    .poll_request_absolute_deadline(context)
+                    .and_then(|()| self.poll_read_idle_deadline(context))
+                {
                     Ok(()) => Poll::Pending,
                     Err(error) => Poll::Ready(Err(error)),
                 };
             }
             Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
             Poll::Ready(Ok(())) => {}
+        }
+        if let Err(error) = self.poll_request_absolute_deadline(context) {
+            return Poll::Ready(Err(error));
         }
         let before = buffer.filled().len();
         let result = match &mut self.transport {
@@ -1038,7 +1112,7 @@ mod tests {
     /// Completes the handshake, sends `REQUEST` in the same flight as the
     /// client Finished, then holds the connection open until released, so the
     /// server sees no readiness edge after that flight. Reports on `sent` once
-    /// the ClientHello and once the final flight are on the wire.
+    /// the `ClientHello` and once the final flight are on the wire.
     fn hold_open_client(address: SocketAddr, sent: mpsc::Sender<()>, release: mpsc::Receiver<()>) {
         let mut roots = rustls::RootCertStore::empty();
         roots
