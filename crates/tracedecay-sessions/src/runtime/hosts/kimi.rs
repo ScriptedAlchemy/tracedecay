@@ -18,8 +18,7 @@ use tracedecay_store::{ParseOffset, observation::ObservationCoverageReason};
 use crate::admission::{HostAdmission, HostDiscoveryQueueEntry};
 use crate::observation::ObservationCancellation;
 use crate::runtime::host_scan::{HOST_SCAN_WINDOW, HostScanBudget, isolatable_source_error};
-use crate::runtime::hosts::codex::CodexDiscoveryHub;
-use crate::runtime::ingest::quarantine::{SourceClaim, SourceLedger};
+use crate::runtime::ingest::quarantine::{SourceClaim, SourceLedger, SourceSweep};
 use crate::runtime::jsonl_observation_admission::{
     JsonlFrameAdmission, JsonlObservationAdmissionRequest, admit_jsonl_observations,
 };
@@ -499,6 +498,8 @@ fn read_session_state(
     }
 }
 
+/// A capture pass for a caller outside a provider run. It returns a permanent
+/// source refusal as its error instead of quarantining the source.
 pub async fn capture_kimi_observations(
     facade: &dyn HostAdmission,
     source: &KimiSource,
@@ -506,7 +507,27 @@ pub async fn capture_kimi_observations(
     scope: ObservationScopeV1,
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
-    convergence: Option<(&CodexDiscoveryHub, &str)>,
+) -> TranscriptIngestResult<KimiCaptureOutcome> {
+    capture_kimi_sweep(
+        facade,
+        source,
+        project_root,
+        scope,
+        max_new_bytes,
+        cancellation,
+        &mut SourceSweep::new(PROVIDER, None),
+    )
+    .await
+}
+
+pub(crate) async fn capture_kimi_sweep(
+    facade: &dyn HostAdmission,
+    source: &KimiSource,
+    project_root: &Path,
+    scope: ObservationScopeV1,
+    max_new_bytes: Option<u64>,
+    cancellation: &ObservationCancellation,
+    sweep: &mut SourceSweep,
 ) -> TranscriptIngestResult<KimiCaptureOutcome> {
     tracing::Instrument::instrument(
         async {
@@ -541,7 +562,7 @@ pub async fn capture_kimi_observations(
             );
             let owned_source = source.clone();
             let owned_project_root = project_root.to_path_buf();
-            let ledger = convergence.and_then(|(hub, consumer)| hub.source_ledger(consumer));
+            let ledger = sweep.ledger();
             let owned_ledger = ledger.clone();
             let discovered = tracing::Instrument::instrument(
                 tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
@@ -780,14 +801,25 @@ pub async fn capture_kimi_observations(
                 .await;
                 let progress = match progress {
                     Ok(progress) => progress,
-                    Err(error) if isolatable_source_error(&error) => {
-                        warn_isolated_source(&path, "source_unavailable");
-                        outcome.discovery_failures = outcome.discovery_failures.saturating_add(1);
-                        outcome.deferred = true;
-                        processed_sequence = Some(sequence);
-                        continue;
-                    }
-                    Err(error) => return Err(error),
+                    // A quarantined wire is not covered, so its state.json
+                    // stays pending this pass; a later pass counts the skipped
+                    // wire as finished. The durable queue, not state.json,
+                    // brings the wire back once it changes.
+                    Err(error) => match sweep.refused(pending, error) {
+                        Ok(()) => {
+                            processed_sequence = Some(sequence);
+                            continue;
+                        }
+                        Err(error) if isolatable_source_error(&error) => {
+                            warn_isolated_source(&path, "source_unavailable");
+                            outcome.discovery_failures =
+                                outcome.discovery_failures.saturating_add(1);
+                            outcome.deferred = true;
+                            processed_sequence = Some(sequence);
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    },
                 };
                 let settles =
                     pending.admission_settles(progress.source_deferred, progress.covered_through);
@@ -1010,7 +1042,7 @@ mod tests {
     use crate::runtime::host_scan::{HOST_SCAN_WINDOW, HostScanBudget};
     use crate::runtime::source::TranscriptDiscoveryBounds;
 
-    use super::{KimiSource, capture_kimi_observations};
+    use super::{KimiSource, PROVIDER, SourceSweep, capture_kimi_observations, capture_kimi_sweep};
 
     fn discovery_budget() -> HostScanBudget {
         HostScanBudget::new(
@@ -1098,7 +1130,6 @@ mod tests {
             ObservationScopeV1::Profile,
             Some(first.len() as u64),
             &ObservationCancellation::default(),
-            None,
         )
         .await
         .unwrap();
@@ -1112,7 +1143,6 @@ mod tests {
             ObservationScopeV1::Profile,
             None,
             &ObservationCancellation::default(),
-            None,
         )
         .await
         .unwrap();
@@ -1172,7 +1202,6 @@ mod tests {
             ObservationScopeV1::Profile,
             None,
             &ObservationCancellation::default(),
-            None,
         )
         .await
         .unwrap();
@@ -1379,7 +1408,6 @@ mod tests {
                 ObservationScopeV1::Profile,
                 None,
                 &ObservationCancellation::default(),
-                None,
             )
             .await
             .unwrap();
@@ -1406,7 +1434,6 @@ mod tests {
             ObservationScopeV1::Profile,
             None,
             &ObservationCancellation::default(),
-            None,
         )
         .await
         .unwrap();
@@ -1446,7 +1473,6 @@ mod tests {
             ObservationScopeV1::Profile,
             None,
             &ObservationCancellation::default(),
-            None,
         )
         .await
         .unwrap();
@@ -1477,14 +1503,14 @@ mod tests {
         let admission = MemoryHostAdmission::default();
 
         let before = super::kimi_state_read_count_for_test(&state);
-        let first = capture_kimi_observations(
+        let first = capture_kimi_sweep(
             &admission,
             &source,
             &project,
             ObservationScopeV1::Profile,
             None,
             &ObservationCancellation::default(),
-            Some((&hub, "kimi-project")),
+            &mut SourceSweep::new(PROVIDER, Some((&hub, "kimi-project"))),
         )
         .await
         .unwrap();
@@ -1495,14 +1521,14 @@ mod tests {
             "the admitting pass reads session state to find its agents"
         );
 
-        let second = capture_kimi_observations(
+        let second = capture_kimi_sweep(
             &admission,
             &source,
             &project,
             ObservationScopeV1::Profile,
             None,
             &ObservationCancellation::default(),
-            Some((&hub, "kimi-project")),
+            &mut SourceSweep::new(PROVIDER, Some((&hub, "kimi-project"))),
         )
         .await
         .unwrap();
