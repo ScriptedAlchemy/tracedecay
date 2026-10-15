@@ -794,6 +794,10 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
     outcome
 }
 
+/// Current Codex writes every prompt twice: a `response_item` message and an
+/// `item_completed/UserMessage` event of the same turn. Replies are written as
+/// an `item_completed/AgentMessage` event and a `response_item` message. Each
+/// is one logical turn in projection and search.
 #[tokio::test]
 async fn current_codex_user_pair_projects_once_and_rejects_malformed_items() {
     let tmp = TempDir::new().unwrap();
@@ -825,6 +829,7 @@ async fn current_codex_user_pair_projects_once_and_rejects_malformed_items() {
     let facade = runtime.facade();
     let transcript = tmp.path().join("codex-current-user-pair.jsonl");
     let prompt = "Find the callers of publish_generation.";
+    let reply = "publish_generation is called from the sealing worker.";
     let lines = [
         json!({
             "timestamp": "2026-09-04T12:00:00.000Z",
@@ -838,7 +843,8 @@ async fn current_codex_user_pair_projects_once_and_rejects_malformed_items() {
                 "type": "message",
                 "id": "msg-user-1",
                 "role": "user",
-                "content": [{"type": "input_text", "text": prompt}]
+                "content": [{"type": "input_text", "text": prompt}],
+                "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"}
             }
         }),
         json!({
@@ -853,6 +859,31 @@ async fn current_codex_user_pair_projects_once_and_rejects_malformed_items() {
                     "id": "user-item-1",
                     "content": [{"type": "text", "text": prompt}]
                 }
+            }
+        }),
+        json!({
+            "timestamp": "2026-09-04T12:00:01.500Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": "thread-1",
+                "turn_id": "turn-1",
+                "item": {
+                    "type": "AgentMessage",
+                    "id": "msg-assistant-1",
+                    "content": [{"type": "Text", "text": reply}]
+                }
+            }
+        }),
+        json!({
+            "timestamp": "2026-09-04T12:00:01.501Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "msg-assistant-1",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": reply}],
+                "internal_chat_message_metadata_passthrough": {"turn_id": "turn-1"}
             }
         }),
         json!({
@@ -904,23 +935,15 @@ async fn current_codex_user_pair_projects_once_and_rejects_malformed_items() {
             .project_observation_table_count_for_test("observations")
             .await
             .unwrap(),
-        3,
+        5,
         "every valid native record stays durable until transactional projection"
     );
     let scope = ObservationScopeV1::Project { project_id };
-    let projection = facade
+    facade
         .drain_projection_queue("codex", &scope, &ObservationCancellation::default(), 16)
         .await
         .unwrap();
 
-    assert_eq!(projection.projected_outputs, 1);
-    assert_eq!(
-        runtime
-            .session_message_count_for_test(HostAdmissionScope::Project, None)
-            .await
-            .unwrap(),
-        1
-    );
     let messages = runtime
         .search_session_messages_for_test(
             HostAdmissionScope::Project,
@@ -931,8 +954,26 @@ async fn current_codex_user_pair_projects_once_and_rejects_malformed_items() {
         )
         .await
         .unwrap();
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].message.message_id, "user-item-1");
+    let mut turns = messages
+        .iter()
+        .map(|hit| hit.message.role.as_str())
+        .collect::<Vec<_>>();
+    turns.sort_unstable();
+    assert_eq!(turns, ["assistant", "user"], "{messages:?}");
+    assert!(
+        messages
+            .iter()
+            .any(|hit| hit.message.role == "user" && hit.message.message_id == "user-item-1"),
+        "the prompt keeps its native item identity: {messages:?}"
+    );
+    assert_eq!(
+        runtime
+            .session_message_count_for_test(HostAdmissionScope::Project, None)
+            .await
+            .unwrap(),
+        2,
+        "one prompt and one reply are two turns"
+    );
 }
 
 #[tokio::test]
