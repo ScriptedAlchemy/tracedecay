@@ -703,6 +703,33 @@ fn claude_and_kiro_hooks_skip_startup_maintenance() {
     ));
 }
 
+#[test]
+fn every_hook_subcommand_skips_startup_maintenance() {
+    // Hooks run on the host's hot path and their stderr reaches the host. A
+    // hook outside the native-capture table (the PostCompact pressure probes)
+    // must still skip the counter flush, first-run note and install check.
+    let hooks: Vec<String> = Cli::command()
+        .get_subcommands()
+        .map(|subcommand| subcommand.get_name().to_owned())
+        .filter(|name| name.starts_with("hook-"))
+        .collect();
+    assert!(
+        hooks.len() > 30,
+        "hook subcommands were not enumerated: {hooks:?}"
+    );
+    for hook in &hooks {
+        let command = parse_command(&[hook.as_str()]);
+        assert!(
+            should_skip_startup_maintenance(&command),
+            "{hook} runs startup maintenance"
+        );
+        assert!(
+            should_skip_agent_install_check(&command),
+            "{hook} runs the agent install check"
+        );
+    }
+}
+
 // These tests intentionally stay on pure parse/dispatch guard seams. Direct
 // invocation of blocking or destructive run arms (serve/dashboard/upgrade,
 // install mutations, status network paths, and hook process outcomes) is
