@@ -448,6 +448,8 @@ use project_open_handshake::{
 };
 mod project_open_orchestration;
 mod project_routing;
+// ambient-tokio: its Tokio timers run on Tokio tasks or inside the
+// native_runtime::on_tokio hops in project_server_lifecycle_hops.
 mod project_server_lifecycle;
 #[cfg(unix)]
 use project_open_orchestration::{
