@@ -52,23 +52,6 @@ fn decode_feedback_proximity_payload(
     serde_json::from_value(payload.clone()).map_err(DaemonFeedbackProximityPayloadError::Invalid)
 }
 
-#[cfg(test)]
-mod payload_decode_tests {
-    use super::{DaemonFeedbackProximityPayloadError, decode_feedback_proximity_payload};
-
-    #[test]
-    fn missing_or_invalid_proximity_payload_is_a_typed_failure() {
-        assert!(matches!(
-            decode_feedback_proximity_payload(None),
-            Err(DaemonFeedbackProximityPayloadError::Missing)
-        ));
-        assert!(matches!(
-            decode_feedback_proximity_payload(Some(&serde_json::json!({"unexpected": true}))),
-            Err(DaemonFeedbackProximityPayloadError::Invalid(_))
-        ));
-    }
-}
-
 pub(crate) type DaemonFeedbackInvocationFuture<'a> = Pin<
     Box<
         dyn Future<Output = Result<DaemonFeedbackInvocationResult, ApplicationProblem>> + Send + 'a,
@@ -1015,5 +998,22 @@ impl DaemonInvocationService {
             .get::<Arc<SwitchableFeedbackCycleRuntimeV1>>(project_root?)
             .await
             .map(|input| -> Arc<dyn FeedbackCycleRuntimePort> { input })
+    }
+}
+
+#[cfg(test)]
+mod payload_decode_tests {
+    use super::{DaemonFeedbackProximityPayloadError, decode_feedback_proximity_payload};
+
+    #[test]
+    fn missing_or_invalid_proximity_payload_is_a_typed_failure() {
+        assert!(matches!(
+            decode_feedback_proximity_payload(None),
+            Err(DaemonFeedbackProximityPayloadError::Missing)
+        ));
+        assert!(matches!(
+            decode_feedback_proximity_payload(Some(&serde_json::json!({"unexpected": true}))),
+            Err(DaemonFeedbackProximityPayloadError::Invalid(_))
+        ));
     }
 }

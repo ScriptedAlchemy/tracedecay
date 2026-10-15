@@ -52,14 +52,6 @@ macro_rules! canonical_id {
             }
         }
 
-        impl TryFrom<&str> for $name {
-            type Error = StorageRuntimeContractErrorV1;
-
-            fn try_from(value: &str) -> Result<Self, Self::Error> {
-                Self::new(value)
-            }
-        }
-
         impl From<$name> for String {
             fn from(value: $name) -> Self {
                 value.0

@@ -15,7 +15,7 @@ common --repo_env=CARGO_NET_GIT_FETCH_WITH_CLI=true
 # host cargo would download another 418 MB toolchain on every CI job.
 common --repo_env=CARGO_UNSTABLE_GIT=shallow-deps
 common --repo_env=RUSTC_BOOTSTRAP=1
-# MODULE.bazel registers only nightly/2026-09-27. Without this, rules_rust
+# MODULE.bazel registers only nightly/2026-10-14. Without this, rules_rust
 # resolves the stable channel and the build fails closed.
 build --@rules_rust//rust/toolchain/channel=nightly
 build --incompatible_enable_cc_toolchain_resolution
