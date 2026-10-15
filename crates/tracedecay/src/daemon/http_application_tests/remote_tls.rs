@@ -260,6 +260,38 @@ fn live_remote_admission(grant: &EnrollmentGrantV1) -> RemoteEnrollmentAdmission
     .expect("remote enrollment admission")
 }
 
+/// Sends `request` with the handshake and reads the response until the
+/// listener closes the connection.
+///
+/// The listener's deadlines start no earlier than the connect, so a client
+/// whose handshake returned within the read-idle deadline met both of them,
+/// and closing its connection without a response is a listener defect. Only
+/// a slower handshake lets the listener close first, and the attempt is then
+/// retried on a fresh connection.
+async fn remote_tls_exchange(
+    endpoint: std::net::SocketAddr,
+    certificate: &Path,
+    request: &[u8],
+    read_idle: Duration,
+) -> String {
+    for _ in 0..3 {
+        let connect_started = std::time::Instant::now();
+        let mut stream = remote_tls_connect_sending(endpoint, certificate, request).await;
+        let handshake = connect_started.elapsed();
+        let mut response = Vec::new();
+        let closed = stream.read_to_end(&mut response).await;
+        if !response.is_empty() {
+            closed.expect("read TLS response");
+            return String::from_utf8(response).expect("HTTP response text");
+        }
+        assert!(
+            handshake >= read_idle,
+            "the listener closed a connection whose handshake took {handshake:?} without a response: {closed:?}"
+        );
+    }
+    panic!("the test thread stalled past the read-idle deadline in every handshake")
+}
+
 async fn remote_tls_request(
     endpoint: std::net::SocketAddr,
     certificate: &Path,
@@ -268,7 +300,6 @@ async fn remote_tls_request(
     enrollment_credential: Option<&[u8]>,
     body: &[u8],
 ) -> String {
-    let mut stream = remote_tls_connect(endpoint, certificate).await;
     let mut request = format!(
         "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
         body.len()
@@ -287,36 +318,13 @@ async fn remote_tls_request(
     }
     request.extend_from_slice(b"\r\n");
     request.extend_from_slice(body);
-    stream.write_all(&request).await.expect("write TLS request");
-    let mut response = Vec::new();
-    tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        stream.read_to_end(&mut response),
+    remote_tls_exchange(
+        endpoint,
+        certificate,
+        &request,
+        RemoteBrainTlsDeadlines::PRODUCTION.read_idle,
     )
     .await
-    .expect("TLS response must close within the bounded response window")
-    .expect("read TLS response");
-    String::from_utf8(response).expect("HTTP response text")
-}
-
-async fn remote_tls_request_without_connection_close(
-    endpoint: std::net::SocketAddr,
-    certificate: &Path,
-) -> String {
-    let mut stream = remote_tls_connect(endpoint, certificate).await;
-    stream
-        .write_all(b"GET /unknown HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        .await
-        .expect("write keep-alive-shaped TLS request");
-    let mut response = Vec::new();
-    tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        stream.read_to_end(&mut response),
-    )
-    .await
-    .expect("external response must close the TLS connection")
-    .expect("read force-closed TLS response");
-    String::from_utf8(response).expect("HTTP response text")
 }
 
 async fn remote_tls_connect(
@@ -963,11 +971,7 @@ async fn remote_tls_listener_serves_only_remote_routes_and_isolates_credential_a
         .await
         .expect("write plaintext probe");
     let mut plaintext_response = Vec::new();
-    let _ = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        plaintext.read_to_end(&mut plaintext_response),
-    )
-    .await;
+    let _closed = plaintext.read_to_end(&mut plaintext_response).await;
     assert!(
         !plaintext_response.starts_with(b"HTTP/1.1"),
         "the external listener must never serve plaintext HTTP"
@@ -1238,7 +1242,15 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
         tokio::task::yield_now().await;
     }
 
-    let force_closed = remote_tls_request_without_connection_close(endpoint, &certificate).await;
+    // The response to a keep-alive-shaped request must still close the
+    // connection, so reading to its end returns.
+    let force_closed = remote_tls_exchange(
+        endpoint,
+        &certificate,
+        b"GET /unknown HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        deadlines.read_idle,
+    )
+    .await;
     assert!(force_closed.starts_with("HTTP/1.1 404"), "{force_closed}");
     assert!(
         force_closed
@@ -1249,11 +1261,9 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
 
     remote_tls_h2_only_handshake_is_rejected(endpoint, &certificate).await;
 
-    let mut http2 = remote_tls_connect(endpoint, &certificate).await;
-    http2
-        .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
-        .await
-        .expect("write HTTP/2 prior-knowledge preface");
+    let mut http2 =
+        remote_tls_connect_sending(endpoint, &certificate, b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+            .await;
     let mut http2_response = Vec::new();
     let _closed = http2.read_to_end(&mut http2_response).await;
     assert!(
