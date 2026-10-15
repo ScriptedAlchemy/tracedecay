@@ -782,7 +782,7 @@ pub(super) struct DaemonHttpApplicationService {
     shutdown: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<()>>,
     remote_tls_shutdown: Option<oneshot::Sender<()>>,
-    remote_tls_task: Option<JoinHandle<Result<()>>>,
+    remote_tls_task: Option<native_runtime::NativeTask<std::result::Result<(), String>>>,
     #[cfg(test)]
     remote_tls_admission: Option<Arc<Semaphore>>,
     #[cfg(test)]
@@ -919,7 +919,8 @@ impl DaemonHttpApplicationService {
                 remote_tls_egress = Some(server.egress);
             }
             let listener_state = server.credentials;
-            remote_tls_task = Some(tokio::spawn(tracing::Instrument::instrument(
+            // A `NativeTask` output must be `Clone`, so the error travels as text.
+            let task = native_runtime::NativeTask::spawn(tracing::Instrument::instrument(
                 async move {
                     let result = server
                         .listener
@@ -929,10 +930,14 @@ impl DaemonHttpApplicationService {
                         Ok(()) => listener_state.publish_listener_stopped(),
                         Err(_) => listener_state.publish_listener_degraded(),
                     }
-                    result
+                    result.map_err(|error| error.to_string())
                 },
                 tracing::trace_span!("daemon.http.application.remote_tls_listener"),
-            )));
+            ))
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("Remote Brain TLS listener task could not start: {error}"),
+            })?;
+            remote_tls_task = Some(task);
         }
         Ok(Self {
             endpoint,
@@ -1008,12 +1013,21 @@ impl DaemonHttpApplicationService {
         task.await.map_err(|error| TraceDecayError::Config {
             message: format!("daemon HTTP application service task failed: {error}"),
         })?;
-        let Some(task) = self.remote_tls_task.as_mut() else {
+        let Some(task) = self.remote_tls_task.as_ref() else {
             return Ok(());
         };
-        task.await.map_err(|error| TraceDecayError::Config {
-            message: format!("Remote Brain TLS application service task failed: {error}"),
-        })?
+        let failure = match task.wait().await {
+            native_runtime::NativeTaskOutcome::Completed(result) => result.err(),
+            native_runtime::NativeTaskOutcome::Cancelled => Some("task cancelled".to_owned()),
+            native_runtime::NativeTaskOutcome::Panicked(panic) => {
+                Some(format!("task panicked: {panic}"))
+            }
+        };
+        failure.map_or(Ok(()), |failure| {
+            Err(TraceDecayError::Config {
+                message: format!("Remote Brain TLS application service task failed: {failure}"),
+            })
+        })
     }
 }
 

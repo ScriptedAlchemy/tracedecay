@@ -28,7 +28,6 @@ use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::server::ParsedCertificate;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
-use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracedecay_daemon_control::RemoteBrainTlsConfig;
 use tracedecay_dashboard_api::serve_http_connection;
@@ -162,44 +161,38 @@ impl RemoteBrainTlsListener {
     ) -> Result<()> {
         let router = router.layer(middleware::from_fn(force_remote_connection_close));
         let graceful = CancellationToken::new();
-        let mut connections = JoinSet::new();
+        let mut connections = RemoteBrainTlsConnections::default();
         loop {
             tokio::select! {
                 biased;
                 _ = &mut shutdown_requested => break,
-                joined = connections.join_next(), if !connections.is_empty() => {
-                    if let Some(joined) = joined {
-                        observe_remote_brain_connection_join(joined);
-                    }
-                }
                 accepted = self.accept() => {
                     if let Some((io, address)) = accepted {
+                        connections.reap_finished();
                         let router = router.clone();
                         let graceful = graceful.clone();
-                        connections.spawn(tracing::Instrument::instrument(async move {
+                        let connection = native_runtime::NativeTask::spawn(tracing::Instrument::instrument(async move {
                                 if let Err(error) = serve_http_connection(io, router, false, graceful).await {
                                     tracing::debug!(%error, %address, "Remote Brain TLS connection stopped");
                                 }
                             }, tracing::trace_span!("daemon.http.application.remote_tls_connection")));
+                        match connection {
+                            Ok(connection) => connections.0.push(connection),
+                            // The refused connection's IO drops here, closing it.
+                            Err(error) => tracing::warn!(%error, %address, "Remote Brain TLS connection could not start"),
+                        }
                     }
                 }
             }
         }
 
         graceful.cancel();
-        let drain = async {
-            while let Some(joined) = connections.join_next().await {
-                observe_remote_brain_connection_join(joined);
-            }
-        };
-        if native_runtime::timeout(self.deadlines.shutdown_drain, drain)
+        if native_runtime::timeout(self.deadlines.shutdown_drain, connections.join_all())
             .await
             .is_err()
         {
             connections.abort_all();
-            while let Some(joined) = connections.join_next().await {
-                observe_remote_brain_connection_join(joined);
-            }
+            connections.join_all().await;
         }
         Ok(())
     }
@@ -358,21 +351,56 @@ pub fn validate_remote_brain_tls_identity_at(
     )
 }
 
-fn observe_remote_brain_connection_join(joined: std::result::Result<(), tokio::task::JoinError>) {
-    if let Err(error) = joined
-        && !error.is_cancelled()
-    {
-        tracing::warn!(%error, "Remote Brain TLS connection task failed");
+/// The listener's open connections. Dropping the set aborts them.
+#[derive(Default)]
+struct RemoteBrainTlsConnections(Vec<native_runtime::NativeTask<()>>);
+
+impl RemoteBrainTlsConnections {
+    fn reap_finished(&mut self) {
+        self.0.retain(|connection| match connection.try_finished() {
+            Some(outcome) => {
+                observe_remote_brain_connection_end(outcome);
+                false
+            }
+            None => true,
+        });
+    }
+
+    /// Keeps every connection in the set until all have ended, so a cancelled
+    /// join leaves them for [`Self::abort_all`].
+    async fn join_all(&mut self) {
+        for connection in &self.0 {
+            observe_remote_brain_connection_end(connection.wait().await);
+        }
+        self.0.clear();
+    }
+
+    fn abort_all(&self) {
+        for connection in &self.0 {
+            connection.abort();
+        }
+    }
+}
+
+impl Drop for RemoteBrainTlsConnections {
+    fn drop(&mut self) {
+        self.abort_all();
+    }
+}
+
+fn observe_remote_brain_connection_end(outcome: native_runtime::NativeTaskOutcome<()>) {
+    if let native_runtime::NativeTaskOutcome::Panicked(panic) = outcome {
+        tracing::warn!(%panic, "Remote Brain TLS connection task failed");
     }
 }
 
 /// A resettable connection deadline that reports expiry on every poll.
 ///
-/// The connection task runs on Tokio, so this polls an Asupersync `Sleep`
-/// through Asupersync's process-global fallback timer. It is a documented
-/// exception to `native_runtime::sleep_until`: the read and write deadlines
-/// reset on every transferred chunk, and a native task per reset would cost
-/// tens of microseconds each. `Sleep` panics when polled after it completes,
+/// The connection task runs on the native runtime and polls an Asupersync
+/// `Sleep` directly. It is a documented exception to
+/// `native_runtime::sleep_until`: the read and write deadlines reset on every
+/// transferred chunk, and a native task per reset would cost tens of
+/// microseconds each. `Sleep` panics when polled after it completes,
 /// so expiry is latched here until the next reset.
 struct IoDeadline {
     sleep: Sleep,

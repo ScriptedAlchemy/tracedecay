@@ -1096,3 +1096,97 @@ fn the_automation_loop_starts_and_exits_without_a_tokio_runtime() {
     assert_eq!(decision, AutomationSchedulerExitBarrier::EXIT);
     tokio.block_on(engine.shutdown_all());
 }
+
+/// Project-open activation runs on the native runtime: with no Tokio runtime
+/// it reconciles reserved automation effects, probes the project's automation
+/// configuration and starts its loop.
+#[cfg(unix)]
+#[test]
+fn project_open_activation_starts_the_automation_loop_without_a_tokio_runtime() {
+    let tokio = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let dir = TempDir::new().expect("temp dir");
+    let project = dir.path().join("project");
+    let client_identity = test_client_identity_for(dir.path().join("profile"));
+    std::fs::create_dir_all(project.join("src")).expect("src dir");
+    std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("source file");
+    tokio.block_on(initialize_test_project(&project, &client_identity));
+    let handshake = DaemonHandshake {
+        project_path: Some(project.clone()),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    let engine = test_daemon_engine_for_profile(&handshake.client_identity.profile_root);
+    let _database_scope = enter_test_daemon_database_scope(
+        &handshake.client_identity.profile_root,
+        "activation-off-tokio-test",
+    );
+    let server = tokio
+        .block_on(engine.project_server(&handshake))
+        .expect("open project");
+    let cg = tokio.block_on(server.cg());
+    let key = ProjectServerKey::from_open_project(&cg, &handshake).expect("owner key");
+    // Project open activated its own loop; retire it so the activation below
+    // starts the one under test.
+    tokio.block_on(async {
+        wait_for_automation_scheduler_state(&engine, |schedulers| schedulers.contains_key(&key))
+            .await;
+        if let Some(retirement) = engine.retire_automation_scheduler_locked(&key).await {
+            retirement.wait().await;
+        }
+        engine
+            .store_administration
+            .wait_for_retirement_reaper_count_for_test(0)
+            .await;
+    });
+    let probes = engine
+        .automation_config_probe_attempts
+        .load(std::sync::atomic::Ordering::Relaxed);
+
+    let hazards = crate::test_support::native_runtime_hazards();
+    tracedecay_runtime_core::native_runtime::block_on(async {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        super::super::project_open_orchestration::spawn_lifecycle_automation_scheduler_activation(
+            engine.lifecycle.clone(),
+            crate::daemon::project_open_owners::reconcile_project_open_automation_effects(
+                Arc::clone(&cg),
+            ),
+        );
+        let activation_engine = engine.clone();
+        let activation_key = key.clone();
+        let activation_cg = Arc::clone(&cg);
+        super::super::project_open_orchestration::spawn_lifecycle_automation_scheduler_activation(
+            engine.lifecycle.clone(),
+            async move {
+                activation_engine
+                    .activate_automation_scheduler_for_open_project(
+                        activation_key,
+                        project,
+                        handshake,
+                        activation_cg,
+                    )
+                    .await;
+            },
+        );
+        tracedecay_runtime_core::native_runtime::timeout(
+            std::time::Duration::from_secs(20),
+            wait_for_automation_scheduler_state(&engine, |schedulers| {
+                schedulers.contains_key(&key)
+            }),
+        )
+        .await
+        .expect("the activation starts the project's automation loop");
+    })
+    .expect("native runtime");
+    assert_eq!(crate::test_support::native_runtime_hazards(), hazards);
+    assert!(
+        engine
+            .automation_config_probe_attempts
+            .load(std::sync::atomic::Ordering::Relaxed)
+            > probes,
+        "the activation probed the automation configuration"
+    );
+    tokio.block_on(engine.shutdown_all());
+}

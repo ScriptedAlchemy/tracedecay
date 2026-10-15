@@ -270,28 +270,35 @@ fn profile_identity_warming_error() -> TraceDecayError {
 /// dropping the initializer future would abandon the partially finished open
 /// and make the next client start over. Detaching it instead lets this client's
 /// retry, or the next one, find the registry already warm.
-async fn bind_authenticated_profile_identity_within_deadline(
+pub(super) async fn bind_authenticated_profile_identity_within_deadline(
     handshake: &mut DaemonHandshake,
     store_administration: &StoreAdministration,
 ) -> Result<StoreAdministration> {
     let mut binding_handshake = handshake.clone();
     let binding_administration = store_administration.clone();
-    let binding = tokio::spawn(async move {
-        Box::pin(bind_authenticated_profile_identity(
-            &mut binding_handshake,
-            &binding_administration,
-        ))
-        .await
-        .map(|administration| (binding_handshake, administration))
-    });
+    // A `NativeTask` output must be `Clone`; the binding's error is not.
+    let (bound, binding) = tokio::sync::oneshot::channel();
+    native_runtime::NativeTask::spawn(async move {
+        let _ = bound.send(
+            Box::pin(bind_authenticated_profile_identity(
+                &mut binding_handshake,
+                &binding_administration,
+            ))
+            .await
+            .map(|administration| (binding_handshake, administration)),
+        );
+    })
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("daemon profile identity binding could not start: {error}"),
+    })?;
     match native_runtime::timeout(PROFILE_IDENTITY_BIND_DEADLINE, binding).await {
         Ok(Ok(Ok((bound_handshake, administration)))) => {
             *handshake = bound_handshake;
             Ok(administration)
         }
         Ok(Ok(Err(error))) => Err(error),
-        Ok(Err(join)) => Err(TraceDecayError::Config {
-            message: format!("daemon profile identity binding failed to join: {join}"),
+        Ok(Err(_)) => Err(TraceDecayError::Config {
+            message: "daemon profile identity binding ended without a result".to_owned(),
         }),
         Err(TimeoutError::Elapsed) => Err(profile_identity_warming_error()),
         Err(error @ TimeoutError::TimerUnavailable(_)) => Err(TraceDecayError::Config {

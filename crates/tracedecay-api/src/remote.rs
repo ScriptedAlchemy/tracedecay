@@ -450,19 +450,24 @@ where
             request
         }
     };
-    let match_result = {
-        let _span = tracing::trace_span!("api.http.handler").entered();
-        {
-            state.service.execute_enrollment(
+    // The enrollment commit waits on the store writer; a native worker must
+    // not park on it, so it runs on the blocking pool as `protocol_route` does.
+    let service = Arc::clone(&state.service);
+    let execution = tracing::Instrument::instrument(
+        tracedecay_rusqlite_runtime::native_runtime::spawn_blocking(move || {
+            service.execute_enrollment(
                 request.request,
                 admission.grant_credential,
                 admission.enrollment_credential,
             )
-        }
-    };
-    match match_result {
-        Ok(response) => Ok(remote_protocol_response(response.into())),
-        Err(error) => Err(RemoteHttpRejection::Contract(error)),
+        }),
+        tracing::trace_span!("api.http.handler"),
+    )
+    .await;
+    match execution {
+        Ok(Ok(response)) => Ok(remote_protocol_response(response.into())),
+        Ok(Err(error)) => Err(RemoteHttpRejection::Contract(error)),
+        Err(_) => invalid_remote_request_response().map_err(RemoteHttpRejection::Contract),
     }
 }
 
