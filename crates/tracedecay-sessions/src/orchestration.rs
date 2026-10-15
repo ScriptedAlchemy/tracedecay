@@ -103,12 +103,23 @@ impl<F> Default for ProviderRunFold<F> {
     }
 }
 
-impl<F> ProviderRunFold<F> {
+impl<F: ProviderRunFailure + Clone> ProviderRunFold<F> {
+    /// Accounts an attempt the caller abandons to retry, keeping its
+    /// non-retryable failures.
     pub fn record_retry(&mut self, outcome: &ProviderRunOutcome<F>) {
         self.deferred_units = self.deferred_units.saturating_add(outcome.deferred_units);
         self.byte_bounds_enforced &= outcome.byte_bounds_enforced;
+        self.failures.extend(
+            outcome
+                .failures
+                .iter()
+                .filter(|failure| !failure.retryable())
+                .cloned(),
+        );
     }
+}
 
+impl<F> ProviderRunFold<F> {
     pub fn record(&mut self, outcome: ProviderRunOutcome<F>) {
         if !outcome.admitted {
             return;
@@ -203,5 +214,26 @@ mod tests {
         assert_eq!(fold.units_failed, 1);
         assert_eq!(fold.failures, vec![failure]);
         assert_eq!(fold.deferred_units, 4);
+    }
+
+    #[test]
+    fn a_retried_attempt_keeps_its_permanent_failures() {
+        let permanent = Failure { retryable: false };
+        let mut abandoned = ProviderRunOutcome::failed(permanent.clone(), 5);
+        abandoned.add_failure(Failure { retryable: true });
+
+        let mut fold = ProviderRunFold::default();
+        fold.record_retry(&abandoned);
+        fold.record(ProviderRunOutcome::bounded(
+            TranscriptIngestStats::default(),
+            3,
+            false,
+        ));
+
+        assert_eq!(
+            fold.failures,
+            vec![permanent],
+            "the retry skips a quarantined source, so only the abandoned attempt reports it"
+        );
     }
 }

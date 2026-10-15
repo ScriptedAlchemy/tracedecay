@@ -2,6 +2,7 @@ pub mod authority;
 mod failure;
 mod project;
 pub(in crate::runtime) mod project_provider;
+pub(crate) mod quarantine;
 mod scheduler;
 mod startup;
 mod user;
@@ -41,5 +42,13 @@ pub mod test_support {
     pub use super::user::ingest_user_global_sources_for_provider_with_roots_bounded;
 }
 
+#[cfg(test)]
+mod quarantine_claude_tests;
+#[cfg(test)]
+mod quarantine_codex_tests;
+#[cfg(test)]
+mod quarantine_contract;
+#[cfg(test)]
+mod quarantine_hermes_tests;
 #[cfg(test)]
 mod tests;

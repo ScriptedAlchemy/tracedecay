@@ -25,6 +25,7 @@ use super::failure::{
     failed_observation_run, warn_transcript_catch_up_failure,
 };
 use super::project_provider::hermes_run_outcome;
+use super::quarantine::SourceSweep;
 use super::scheduler::{read_codex_discovery_frontier, write_codex_discovery_frontier};
 use super::user::{
     BoundedProviderFailure, BoundedProviderOutcome, try_ingest_user_codex_sessions_rotated,
@@ -210,6 +211,7 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
             stored_coverage,
             Some(HostProviderCoverage::Complete)
         ));
+        let mut sweep = SourceSweep::new("codex", self.codex_discovery);
         let ingested = erase_send!(
             try_ingest_user_codex_sessions_rotated(
                 self.profile_root,
@@ -220,10 +222,11 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
                 self.cancellation,
                 frontier,
                 self.codex_discovery,
+                &mut sweep,
             ),
             crate::runtime::source::TranscriptIngestResult<super::user::CodexUserIngestOutcome>
         );
-        match ingested.await {
+        let mut run = match ingested.await {
             Ok(result) => {
                 let outcome = result.outcome;
                 let mut run = ProviderRunOutcome::bounded(
@@ -288,7 +291,9 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
                 "Codex transcript catch-up failed",
                 self.max_new_bytes,
             ),
-        }
+        };
+        sweep.report_into(&mut run);
+        run
     }
 
     #[tracing::instrument(name = "sessions.ingest.user.cursor", level = "trace", skip_all)]
@@ -306,8 +311,10 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
 
     #[tracing::instrument(name = "sessions.ingest.user.hermes", level = "trace", skip_all)]
     async fn run_hermes(self) -> ProviderRunOutcome {
-        let Some(outcome) = hermes::ingest_user_sessions_capped_with_admission(
+        let mut sweep = SourceSweep::new("hermes", self.codex_discovery);
+        let Some(outcome) = hermes::ingest_user_with_sweep(
             self.facade,
+            &mut sweep,
             self.roots,
             Some(self.max_new_bytes),
             self.cancellation,
@@ -316,18 +323,22 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
         else {
             return ProviderRunOutcome::skipped();
         };
-        hermes_run_outcome(outcome, false)
+        let mut run = hermes_run_outcome(outcome, false);
+        sweep.report_into(&mut run);
+        run
     }
 
     #[tracing::instrument(name = "sessions.ingest.user.claude", level = "trace", skip_all)]
     async fn run_claude(self) -> UserProviderRunResult {
-        match claude_observation::ingest_user_sessions_with_admission(
+        let mut sweep = SourceSweep::new("claude", self.codex_discovery);
+        let mut run = match claude_observation::ingest_user_sessions_with_sweep(
             self.profile_root,
             None,
             self.roots.to_vec(),
             self.facade,
             Some(self.max_new_bytes),
             self.cancellation.clone(),
+            &mut sweep,
         )
         .await
         {
@@ -337,26 +348,28 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
             ),
             Err(error) => {
                 if let Some(stats) = error.accumulated_stats() {
-                    return UserProviderRunResult::claude(
+                    UserProviderRunResult::claude(
                         claude_provider_run_outcome(stats, Some(&error), self.max_new_bytes),
                         stats.projected_session_ids().clone(),
+                    )
+                } else if let Some(cancelled) = cancelled_claude_provider_outcome(&error) {
+                    UserProviderRunResult::provider(cancelled)
+                } else {
+                    let failure = claude_catch_up_failure("observation", &error);
+                    tracing::warn!(
+                        reason_code = failure.reason_code,
+                        retryable = failure.retryable,
+                        "Claude observation catch-up failed"
                     );
+                    UserProviderRunResult::provider(ProviderRunOutcome::failed(
+                        failure,
+                        self.max_new_bytes,
+                    ))
                 }
-                if let Some(cancelled) = cancelled_claude_provider_outcome(&error) {
-                    return UserProviderRunResult::provider(cancelled);
-                }
-                let failure = claude_catch_up_failure("observation", &error);
-                tracing::warn!(
-                    reason_code = failure.reason_code,
-                    retryable = failure.retryable,
-                    "Claude observation catch-up failed"
-                );
-                UserProviderRunResult::provider(ProviderRunOutcome::failed(
-                    failure,
-                    self.max_new_bytes,
-                ))
             }
-        }
+        };
+        sweep.report_into(&mut run.outcome);
+        run
     }
 
     #[tracing::instrument(name = "sessions.ingest.user.kiro", level = "trace", skip_all)]

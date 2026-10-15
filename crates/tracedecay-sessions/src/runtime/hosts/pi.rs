@@ -28,7 +28,8 @@ use tracedecay_store::{ParseOffset, observation::ObservationCoverageReason};
 use crate::admission::{HostAdmission, HostDiscoveryQueueEntry};
 use crate::observation::ObservationCancellation;
 use crate::runtime::host_scan::{HOST_SCAN_WINDOW, HostScanBudget, isolatable_source_error};
-use crate::runtime::hosts::codex::{CodexDiscoveryHub, PendingTranscript};
+use crate::runtime::hosts::codex::CodexDiscoveryHub;
+use crate::runtime::ingest::quarantine::{SourceClaim, SourceLedger};
 use crate::runtime::jsonl_observation_admission::{
     JsonlFrameAdmission, JsonlObservationAdmissionProgress, JsonlObservationAdmissionRequest,
     admit_jsonl_observations,
@@ -213,7 +214,7 @@ impl PiSource {
         bounds: TranscriptDiscoveryBounds,
         frontier_path: Option<PathBuf>,
         mut budget: HostScanBudget,
-        convergence: Option<(&CodexDiscoveryHub, &str)>,
+        ledger: Option<&SourceLedger>,
     ) -> TranscriptIngestResult<(PiDiscoveryReport, HostScanBudget)> {
         {
             {
@@ -255,21 +256,20 @@ impl PiSource {
                         {
                             continue;
                         }
-                        let pending =
-                            match PendingTranscript::observe_blocking(convergence, &candidate) {
-                                Ok(Some(pending)) => pending,
-                                Ok(None) => continue,
-                                Err(TranscriptIngestError::ScanIo { source, .. }) => {
-                                    discovery.record_failure(
-                                        PiDiscoveryFailureKind::SessionHeaderUnavailable,
-                                        &candidate,
-                                        &source,
-                                        &mut budget,
-                                    );
-                                    continue;
-                                }
-                                Err(error) => return Err(error),
-                            };
+                        let pending = match SourceClaim::observe_file_blocking(ledger, &candidate) {
+                            Ok(Some(pending)) => pending,
+                            Ok(None) => continue,
+                            Err(TranscriptIngestError::ScanIo { source, .. }) => {
+                                discovery.record_failure(
+                                    PiDiscoveryFailureKind::SessionHeaderUnavailable,
+                                    &candidate,
+                                    &source,
+                                    &mut budget,
+                                );
+                                continue;
+                            }
+                            Err(error) => return Err(error),
+                        };
                         let header = match read_session_header(&candidate) {
                             Ok(HeaderRead::Header(header)) => header,
                             Ok(HeaderRead::Incomplete) => {
@@ -289,7 +289,7 @@ impl PiSource {
                         let cwd = Some(Path::new(&header.cwd));
                         if !matcher.accepts(cwd) {
                             if matcher.membership(cwd) == ProjectMembership::NoMatch {
-                                pending.finished(&candidate)?;
+                                pending.finished()?;
                             }
                             continue;
                         }
@@ -524,8 +524,8 @@ pub async fn capture_pi_observations(
             );
             let owned_source = source.clone();
             let owned_project_root = project_root.to_path_buf();
-            let owned_convergence =
-                convergence.map(|(hub, consumer)| (hub.clone(), consumer.to_owned()));
+            let ledger = convergence.and_then(|(hub, consumer)| hub.source_ledger(consumer));
+            let owned_ledger = ledger.clone();
             let (discovery, scan_budget) = tracing::Instrument::instrument(
                 tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
                     owned_source.discover(
@@ -533,9 +533,7 @@ pub async fn capture_pi_observations(
                         TranscriptDiscoveryBounds::from_discovered_units(MAX_DISCOVERY_CANDIDATES),
                         frontier_path,
                         scan_budget,
-                        owned_convergence
-                            .as_ref()
-                            .map(|(hub, consumer)| (hub, consumer.as_str())),
+                        owned_ledger.as_ref(),
                     )
                 }),
                 tracing::trace_span!("sessions.hosts.pi.discover_task"),
@@ -601,7 +599,8 @@ pub async fn capture_pi_observations(
                     break;
                 }
                 processed_sequence = Some(sequence);
-                let pending = match PendingTranscript::observe(convergence, &path).await {
+                let pending = match SourceClaim::observe_file(PROVIDER, ledger.clone(), &path).await
+                {
                     Ok(Some(pending)) => pending,
                     Ok(None) => continue,
                     Err(error) => {
@@ -620,7 +619,7 @@ pub async fn capture_pi_observations(
                 )
                 .await?
                 {
-                    pending.admitted(&path, progress.source_deferred, progress.covered_through)?;
+                    pending.admitted(progress.source_deferred, progress.covered_through)?;
                 }
                 remaining = max_new_bytes.map_or(u64::MAX, |budget| {
                     budget.saturating_sub(outcome.bytes_consumed)

@@ -25,6 +25,7 @@ use super::failure::{
     cancelled_provider_outcome, classify_transcript_ingest_failure, claude_catch_up_failure,
     failed_observation_run, warn_transcript_catch_up_failure,
 };
+use super::quarantine::SourceSweep;
 
 pub(super) const PROJECT_CATCH_UP_PROVIDERS: &[SessionProvider] = &[
     SessionProvider::Codex,
@@ -280,6 +281,7 @@ impl<'a> ProjectProviderRun<'a> {
         // session stays active and never reach an older in-scope day.
         let mut persisted_day: Option<&Path> = None;
         let mut outcome = ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);
+        let mut sweep = SourceSweep::new("codex", self.codex_discovery);
         for path in &discovery.paths {
             if remaining == 0 {
                 deferred = true;
@@ -291,10 +293,7 @@ impl<'a> ProjectProviderRun<'a> {
                 frontier_committable = false;
                 break;
             }
-            let Some(pending) = codex::PendingTranscript::observe(self.codex_discovery, path)
-                .await
-                .transpose()
-            else {
+            let Some(pending) = sweep.observe_file(path).await.transpose() else {
                 continue;
             };
             if persisted_day.is_some_and(|day| path.parent() != Some(day)) {
@@ -364,7 +363,7 @@ impl<'a> ProjectProviderRun<'a> {
             {
                 Ok(progress) => {
                     if let Err(error) =
-                        pending.admitted(path, progress.source_deferred, progress.covered_through)
+                        pending.admitted(progress.source_deferred, progress.covered_through)
                     {
                         outcome.add_failure(warn_transcript_catch_up_failure(
                             "codex",
@@ -398,6 +397,10 @@ impl<'a> ProjectProviderRun<'a> {
                     if let Some(cancelled) = cancelled_provider_outcome(&error) {
                         return cancelled;
                     }
+                    frontier_committable = false;
+                    let Err(error) = sweep.refused(pending, error) else {
+                        continue;
+                    };
                     let failure = warn_transcript_catch_up_failure(
                         "codex",
                         "observation",
@@ -408,17 +411,7 @@ impl<'a> ProjectProviderRun<'a> {
                         outcome.failures.len().saturating_add(1),
                         failure.retryable,
                     );
-                    if let Err(record_error) = pending.record_source_failure(path, &error, failure)
-                    {
-                        outcome.add_failure(warn_transcript_catch_up_failure(
-                            "codex",
-                            "discovery",
-                            &record_error,
-                            "project Codex source failure retention failed",
-                        ));
-                    }
                     outcome.add_failure(failure);
-                    frontier_committable = false;
                     if stop {
                         deferred = true;
                         break;
@@ -426,6 +419,7 @@ impl<'a> ProjectProviderRun<'a> {
                 }
             }
         }
+        sweep.report_into(&mut outcome);
         outcome.bytes_consumed = self.max_new_bytes.saturating_sub(remaining);
         outcome.add_deferred_units(u64::from(deferred));
         let mut frontier_persisted = frontier_committable;
@@ -767,12 +761,14 @@ impl<'a> ProjectProviderRun<'a> {
 
     #[tracing::instrument(name = "sessions.ingest.project.claude", level = "trace", skip_all)]
     async fn run_claude(self) -> ProjectProviderRunResult {
-        match ingest_project_claude_observations(
+        let mut sweep = SourceSweep::new("claude", self.codex_discovery);
+        let mut run = match ingest_project_claude_observations(
             self.project_root,
             self.project_id.clone(),
             self.facade,
             self.max_new_bytes,
             self.cancellation,
+            &mut sweep,
         )
         .await
         {
@@ -803,23 +799,25 @@ impl<'a> ProjectProviderRun<'a> {
             }
             Err(error) => {
                 if let Some(stats) = error.accumulated_stats() {
-                    return ProjectProviderRunResult::claude(
+                    ProjectProviderRunResult::claude(
                         claude_provider_run_outcome(stats, Some(&error), self.max_new_bytes),
                         stats.projected_session_ids().clone(),
+                    )
+                } else if let Some(cancelled) = cancelled_claude_provider_outcome(&error) {
+                    ProjectProviderRunResult::provider(cancelled)
+                } else {
+                    let failure = claude_catch_up_failure("observation", &error);
+                    tracing::warn!(
+                        reason_code = failure.reason_code,
+                        retryable = failure.retryable,
+                        "project Claude observation catch-up failed"
                     );
+                    ProjectProviderRunResult::provider(ProviderRunOutcome::failed(failure, 0))
                 }
-                if let Some(cancelled) = cancelled_claude_provider_outcome(&error) {
-                    return ProjectProviderRunResult::provider(cancelled);
-                }
-                let failure = claude_catch_up_failure("observation", &error);
-                tracing::warn!(
-                    reason_code = failure.reason_code,
-                    retryable = failure.retryable,
-                    "project Claude observation catch-up failed"
-                );
-                ProjectProviderRunResult::provider(ProviderRunOutcome::failed(failure, 0))
             }
-        }
+        };
+        sweep.report_into(&mut run.outcome);
+        run
     }
 
     #[tracing::instrument(name = "sessions.ingest.project.cursor", level = "trace", skip_all)]
@@ -904,10 +902,12 @@ impl<'a> ProjectProviderRun<'a> {
 
     #[tracing::instrument(name = "sessions.ingest.project.hermes", level = "trace", skip_all)]
     async fn run_hermes(self) -> ProviderRunOutcome {
-        let Some(outcome) = hermes::ingest_for_project_capped_with_admission_and_cancellation(
+        let mut sweep = SourceSweep::new("hermes", self.codex_discovery);
+        let Some(outcome) = hermes::ingest_project_with_sweep(
             self.project_root,
             self.project_id.clone(),
             self.facade,
+            &mut sweep,
             Some(self.max_new_bytes),
             self.cancellation,
         )
@@ -916,13 +916,17 @@ impl<'a> ProjectProviderRun<'a> {
             return ProviderRunOutcome::skipped();
         };
         let byte_cap_exceeded = outcome.bytes_consumed > self.max_new_bytes;
-        hermes_run_outcome(outcome, byte_cap_exceeded)
+        let mut run = hermes_run_outcome(outcome, byte_cap_exceeded);
+        sweep.report_into(&mut run);
+        run
     }
 }
 
-/// A failed Hermes source remains a retryable partial scan: destination
+/// A failed Hermes `state.db` remains a retryable partial scan: destination
 /// admission and SQLite availability can recover without changing the source
-/// file. An incomplete projection drain is a deferred unit.
+/// file. A session the store permanently refuses is not a failed `state.db`;
+/// the run's sweep reports it. An incomplete projection drain is a deferred
+/// unit.
 pub(super) fn hermes_run_outcome(
     outcome: hermes::HermesSweepOutcome,
     byte_cap_exceeded: bool,
@@ -947,6 +951,7 @@ async fn ingest_project_claude_observations(
     admission: &dyn HostAdmission,
     max_new_bytes: u64,
     cancellation: &ObservationCancellation,
+    sweep: &mut SourceSweep,
 ) -> std::result::Result<
     claude_observation::ClaudeObservationIngestStats,
     claude_observation::ClaudeObservationIngestError,
@@ -954,13 +959,14 @@ async fn ingest_project_claude_observations(
     let Some(source) = claude::ClaudeSource::new() else {
         return Ok(claude_observation::ClaudeObservationIngestStats::default());
     };
-    claude_observation::ingest_source_with_observations_with_admission(
+    claude_observation::ingest_source_with_sweep(
         &source,
         project_root,
         ObservationScopeV1::Project { project_id },
         admission,
         Some(max_new_bytes),
         cancellation.clone(),
+        sweep,
     )
     .await
 }

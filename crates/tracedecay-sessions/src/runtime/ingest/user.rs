@@ -18,6 +18,7 @@ use super::failure::{
     TranscriptCatchUpFailure, allocate_pass_byte_budgets, observation_catch_up_failure,
     scheduling_write_required, warn_transcript_catch_up_failure,
 };
+use super::quarantine::SourceSweep;
 use super::scheduler::{
     USER_CATCH_UP_PROVIDERS, USER_INGEST_PROVIDER_FRONTIER_KEY, default_ingest_pass_bounds,
     finish_user_provider_coverage, plan_provider_rotation_admission, read_ingest_frontier,
@@ -138,6 +139,7 @@ pub(super) async fn try_ingest_user_codex_sessions_with_db_bounded(
         cancellation,
         codex::CodexDiscoveryFrontier::initial(),
         None,
+        &mut SourceSweep::new("codex", None),
     )
     .await
     .map(|result| result.outcome)
@@ -158,6 +160,7 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
     cancellation: &ObservationCancellation,
     frontier: codex::CodexDiscoveryFrontier,
     discovery_state: Option<(&codex::CodexDiscoveryHub, &str)>,
+    sweep: &mut SourceSweep,
 ) -> source::TranscriptIngestResult<CodexUserIngestOutcome> {
     let Some(source) = codex::CodexSource::new() else {
         return Ok(CodexUserIngestOutcome {
@@ -222,7 +225,7 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
         if cancellation.is_cancelled() {
             return Err(source::TranscriptIngestError::Cancelled { provider: "codex" });
         }
-        let Some(pending) = codex::PendingTranscript::observe(discovery_state, path).await? else {
+        let Some(pending) = sweep.observe_file(path).await? else {
             continue;
         };
         let progress = match codex::try_admit_codex_jsonl_observations_for_profile_with_admission_and_cancellation(
@@ -238,6 +241,10 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
             Ok(progress) => progress,
             Err(error) if error.is_cancelled() => return Err(error),
             Err(error) => {
+                frontier_committable = false;
+                let Err(error) = sweep.refused(pending, error) else {
+                    continue;
+                };
                 let failure = warn_transcript_catch_up_failure(
                     "codex",
                     "observation",
@@ -247,13 +254,11 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
                 if failure.retryable {
                     return Err(error);
                 }
-                pending.record_source_failure(path, &error, failure)?;
                 failures.push(failure);
-                frontier_committable = false;
                 continue;
             }
         };
-        pending.admitted(path, progress.source_deferred, progress.covered_through)?;
+        pending.admitted(progress.source_deferred, progress.covered_through)?;
         deferred_by_byte_cap |= progress.source_deferred;
         frontier_committable &= !progress.source_deferred;
         bytes_consumed = bytes_consumed.saturating_add(progress.bytes_consumed);
