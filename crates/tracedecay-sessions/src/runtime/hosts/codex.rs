@@ -188,23 +188,24 @@ struct CodexDiscoveryConsumerState {
     awaiting_ack: Option<CodexQueuedDiscoveryPass>,
     _memory: Option<ProcessSharedMemoryReservationV1>,
     /// Per-consumer outcomes tied to the settled identity observed before
-    /// reading. A retained source-contract failure avoids rereading bytes but
-    /// continues to block coverage; it never proves admission or convergence.
-    /// Reservations and records are released when the consumer deregisters.
+    /// reading. A file is either converged or quarantined by the permanent
+    /// failure it reported once; either way later passes skip it until its
+    /// identity changes. Reservations and records are released when the
+    /// consumer deregisters.
     read_outcomes: HashMap<PathBuf, TranscriptReadRecord>,
 }
 
 struct TranscriptReadRecord {
     witness: SettledFileWitness,
-    failure: Option<TranscriptCatchUpFailure>,
+    quarantine: Option<TranscriptCatchUpFailure>,
     _memory: ProcessSharedMemoryReservationV1,
 }
 
 impl CodexDiscoveryConsumerState {
-    fn holds_converged(&self, path: &Path, witness: SettledFileWitness) -> bool {
+    fn holds_dispositioned(&self, path: &Path, witness: SettledFileWitness) -> bool {
         self.read_outcomes
             .get(path)
-            .is_some_and(|recorded| recorded.witness == witness && recorded.failure.is_none())
+            .is_some_and(|recorded| recorded.witness == witness)
     }
 }
 
@@ -250,8 +251,8 @@ pub(crate) struct PendingTranscript {
 }
 
 impl PendingTranscript {
-    /// `None` when the consumer already finished this exact file, or the file
-    /// is gone, so the pass skips it without opening it.
+    /// `None` when the consumer already finished or quarantined this exact
+    /// file, or the file is gone, so the pass skips it without opening it.
     pub(crate) async fn observe(
         discovery: Option<(&CodexDiscoveryHub, &str)>,
         path: &Path,
@@ -287,7 +288,7 @@ impl PendingTranscript {
         };
         let witness = SettledFileWitness::of(path, &metadata)?;
         if let Some(witness) = witness
-            && hub.file_converged(consumer, path, witness)
+            && hub.file_dispositioned(consumer, path, witness)
         {
             return Ok(None);
         }
@@ -299,29 +300,19 @@ impl PendingTranscript {
         }))
     }
 
-    pub(crate) fn cached_source_failure(&self, path: &Path) -> Option<TranscriptCatchUpFailure> {
-        let (hub, consumer, witness) = self.convergence.as_ref()?;
-        let inner = hub.inner.lock().unwrap_or_else(PoisonError::into_inner);
-        let recorded = inner.consumers.get(consumer)?.read_outcomes.get(path)?;
-        (recorded.witness == *witness)
-            .then_some(recorded.failure)
-            .flatten()
-    }
-
-    /// Only source-contract failures depend solely on the witnessed bytes.
-    /// Admission, privacy, and storage failures can recover independently.
+    /// Quarantines the file when the failure is a permanent refusal of its
+    /// own bytes, so it is reported once and skipped until its identity
+    /// changes. A failure of the authority (storage, a missing sanitizer, a
+    /// corrupt projection store) can recover without the file changing, so
+    /// the next pass reads it again.
     pub(crate) fn record_source_failure(
         self,
         path: &Path,
         error: &TranscriptIngestError,
         failure: TranscriptCatchUpFailure,
     ) -> TranscriptIngestResult<()> {
-        if matches!(
-            error,
-            TranscriptIngestError::Domain(_)
-                | TranscriptIngestError::ObservationContract(_)
-                | TranscriptIngestError::InvalidSourceIdentity { .. }
-        ) && let Some((hub, consumer, witness)) = self.convergence
+        if crate::runtime::classify_transcript_ingest_disposition(error).quarantines_source()
+            && let Some((hub, consumer, witness)) = self.convergence
         {
             hub.record_file_result(&consumer, path, witness, Some(failure))?;
         }
@@ -1119,19 +1110,19 @@ impl CodexDiscoveryHub {
                 state
                     .read_outcomes
                     .get(path)
-                    .is_some_and(|recorded| recorded.failure.is_none())
+                    .is_some_and(|recorded| recorded.quarantine.is_none())
             })
     }
 
-    /// Whether `consumer` already finished `path` while it had exactly
-    /// `witness`.
-    fn file_converged(&self, consumer: &str, path: &Path, witness: SettledFileWitness) -> bool {
+    /// Whether `consumer` already finished or quarantined `path` while it had
+    /// exactly `witness`.
+    fn file_dispositioned(&self, consumer: &str, path: &Path, witness: SettledFileWitness) -> bool {
         let inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
 
         inner
             .consumers
             .get(consumer)
-            .is_some_and(|state| state.holds_converged(path, witness))
+            .is_some_and(|state| state.holds_dispositioned(path, witness))
     }
 
     /// The delivered paths `consumer` would still read, in delivery order, so
@@ -1181,7 +1172,7 @@ impl CodexDiscoveryHub {
         consumer: &str,
         path: &Path,
         witness: SettledFileWitness,
-        failure: Option<TranscriptCatchUpFailure>,
+        quarantine: Option<TranscriptCatchUpFailure>,
     ) -> TranscriptIngestResult<()> {
         let mut inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(state) = inner.consumers.get_mut(consumer) else {
@@ -1189,7 +1180,7 @@ impl CodexDiscoveryHub {
         };
         if let Some(recorded) = state.read_outcomes.get_mut(path) {
             recorded.witness = witness;
-            recorded.failure = failure;
+            recorded.quarantine = quarantine;
             return Ok(());
         }
         let charge = candidate_charge(
@@ -1206,7 +1197,7 @@ impl CodexDiscoveryHub {
             path.to_path_buf(),
             TranscriptReadRecord {
                 witness,
-                failure,
+                quarantine,
                 _memory: reservation,
             },
         );

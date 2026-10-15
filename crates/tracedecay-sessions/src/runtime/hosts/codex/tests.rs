@@ -2906,4 +2906,133 @@ mod recent_first_discovery_tests {
             "the returned rollout must be admitted"
         );
     }
+
+    /// #4012: the store kept answering one rollout with a permanent
+    /// `CursorAdvanceLedgerDisagreement`, and every catch-up pass re-read and
+    /// re-reported it while the unacknowledged pass held back every rollout
+    /// written after it.
+    #[tokio::test]
+    async fn a_permanently_refused_rollout_is_reported_once_and_does_not_stall_catch_up() {
+        install_test_shared_jsonl_preparation_authority();
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let project = home.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let stuck = write_project_rollout(&home, &project, "stuck");
+        let healthy = write_project_rollout(&home, &project, "healthy");
+        spin_until_jsonl_change_settled(&stuck);
+        spin_until_jsonl_change_settled(&healthy);
+
+        let hub = CodexDiscoveryHub::default();
+        hub.register("project", Some(&home));
+        let project_id = ProjectId::new("project-quarantined-rollout").unwrap();
+        let scope = tracedecay_domain::ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        };
+        let admission = MemoryHostAdmission::default();
+        admission.fail_captures_for_session(
+            "stuck",
+            crate::admission::HostAdmissionOutcome {
+                status: crate::admission::HostAdmissionStatus::Degraded,
+                retryable: false,
+                reason_code: Some("observation_cursor_advance_ledger_disagreement"),
+                recovery: None,
+                cause: None,
+            },
+        );
+        let cancellation = ObservationCancellation::default();
+        let run = || {
+            crate::runtime::with_transcript_source_profile(
+                tracedecay_runtime_core::config::ProfileRoot::under_home(home.clone()),
+                crate::runtime::ingest::project_provider::ProjectProviderRun {
+                    project_root: &project,
+                    project_id: &project_id,
+                    facade: &admission,
+                    scope: &scope,
+                    candidate: crate::runtime::SessionProvider::Codex,
+                    max_new_bytes: u64::MAX,
+                    cancellation: &cancellation,
+                    codex_discovery: Some((&hub, "project")),
+                }
+                .run_codex(),
+            )
+        };
+        let admitted = |session: &str| {
+            admission.observations().iter().any(|stored| {
+                let envelope: tracedecay_domain::CanonicalObservationEnvelopeV1 =
+                    serde_json::from_value(stored.observation().payload().clone()).unwrap();
+                envelope.relations().session_id().as_str() == session
+            })
+        };
+
+        let first = run().await;
+        let reasons = first
+            .failures
+            .iter()
+            .map(|failure| (failure.reason_code, failure.retryable))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reasons,
+            [("observation_cursor_advance_ledger_disagreement", false)]
+        );
+        assert!(admitted("healthy"), "the healthy rollout must be admitted");
+        assert_eq!(admission.failed_session_capture_attempts(), 1);
+
+        let late = write_project_rollout(&home, &project, "late");
+        spin_until_jsonl_change_settled(&late);
+        for pass in 0..8 {
+            let outcome = run().await;
+            assert!(
+                outcome.failures.is_empty(),
+                "pass {pass} re-reported the refused rollout: {:?}",
+                outcome.failures
+            );
+            assert_eq!(
+                admission.failed_session_capture_attempts(),
+                1,
+                "pass {pass} re-read the unchanged refused rollout"
+            );
+            if admitted("late") {
+                break;
+            }
+        }
+        assert!(
+            admitted("late"),
+            "a rollout written after the refusal must still be admitted"
+        );
+
+        let mut appended = std::fs::read(&stuck).unwrap();
+        appended.extend_from_slice(
+            format!(
+                "{}\n",
+                json!({
+                    "timestamp": "2026-09-28T00:00:02.000Z",
+                    "type": "event_msg",
+                    "payload": {"type": "agent_message", "message": "after the refusal"}
+                })
+            )
+            .as_bytes(),
+        );
+        let replacement = stuck.with_extension("tmp");
+        std::fs::write(&replacement, appended).unwrap();
+        std::fs::rename(&replacement, &stuck).unwrap();
+        spin_until_jsonl_change_settled(&stuck);
+        let mut reports = Vec::new();
+        for _ in 0..8 {
+            reports.extend(run().await.failures);
+            if admission.failed_session_capture_attempts() > 1 {
+                break;
+            }
+        }
+        assert_eq!(
+            admission.failed_session_capture_attempts(),
+            2,
+            "a changed rollout must leave quarantine and be read again"
+        );
+        assert_eq!(
+            reports.len(),
+            1,
+            "the changed rollout is reported once: {reports:?}"
+        );
+    }
 }

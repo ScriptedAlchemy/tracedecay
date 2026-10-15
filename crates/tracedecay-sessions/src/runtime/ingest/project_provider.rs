@@ -352,15 +352,6 @@ impl<'a> ProjectProviderRun<'a> {
                     continue;
                 }
             };
-            if let Some(failure) = pending.cached_source_failure(path) {
-                outcome.add_failure(failure);
-                frontier_committable = false;
-                if codex_source_failure_saturates_pass(outcome.failures.len(), failure.retryable) {
-                    deferred = true;
-                    break;
-                }
-                continue;
-            }
             match codex::try_admit_codex_jsonl_observations_for_project_window(
                 path,
                 self.project_root,

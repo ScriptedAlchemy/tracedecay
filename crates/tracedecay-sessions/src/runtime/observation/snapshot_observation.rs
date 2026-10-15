@@ -154,6 +154,7 @@ pub fn host_admission_error(
         provider,
         reason,
         retryable: outcome.retryable,
+        status: outcome.status,
         detail: outcome.cause,
     }
 }

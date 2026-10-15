@@ -159,6 +159,7 @@ fn admission_failure(outcome: HostAdmissionOutcome) -> TranscriptIngestError {
         provider: PROVIDER,
         reason: outcome.reason_code.unwrap_or("host_admission_refused"),
         retryable: outcome.retryable,
+        status: outcome.status,
         detail: outcome.cause,
     }
 }

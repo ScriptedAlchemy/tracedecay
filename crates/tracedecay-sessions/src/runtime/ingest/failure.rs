@@ -289,6 +289,14 @@ pub struct TranscriptIngestDisposition {
     pub source_locator: Option<ObservationSourceRangeV1>,
 }
 
+impl TranscriptIngestDisposition {
+    /// A permanent refusal of the source's own records by a healthy
+    /// authority: reading the same bytes again fails the same way.
+    pub const fn quarantines_source(&self) -> bool {
+        !self.retryable && matches!(self.status, HostAdmissionStatus::Degraded)
+    }
+}
+
 pub fn classify_transcript_ingest_disposition(
     error: &source::TranscriptIngestError,
 ) -> TranscriptIngestDisposition {
@@ -320,8 +328,11 @@ pub fn classify_transcript_ingest_disposition(
         // retryability verdict; hard-coding either answer here launders a
         // transient still-mounting authority into a terminal Blocked state.
         source::TranscriptIngestError::HostAdmission {
-            reason, retryable, ..
-        } => (*reason, *retryable, Unavailable),
+            reason,
+            retryable,
+            status,
+            ..
+        } => (*reason, *retryable, *status),
         source::TranscriptIngestError::Cancelled { .. } => {
             ("ingest_pass_cancelled", true, Backpressured)
         }
@@ -351,6 +362,12 @@ pub fn classify_transcript_ingest_disposition(
         source::TranscriptIngestError::InvalidCodexDiscoveryFrontier { .. } => {
             ("codex_discovery_frontier_invalid", false, Degraded)
         }
+        // A policy or detector fault rejects every record alike until the
+        // sanitizer is repaired; only the remaining refusals name the record.
+        source::TranscriptIngestError::Privacy(
+            tracedecay_privacy::PrivacySanitizerError::InvalidPolicy
+            | tracedecay_privacy::PrivacySanitizerError::DetectorUnavailable,
+        ) => ("transcript_privacy_rejected", false, Unavailable),
         source::TranscriptIngestError::Privacy(_) => {
             ("transcript_privacy_rejected", false, Degraded)
         }
@@ -650,6 +667,7 @@ mod cancellation_tests {
             provider: "cursor",
             reason: "cursor_conflict",
             retryable: true,
+            status: HostAdmissionStatus::Backpressured,
             detail: None,
         };
         let disposition = classify_transcript_ingest_disposition(&conflict);
@@ -658,6 +676,7 @@ mod cancellation_tests {
             disposition.retryable,
             "a cursor CAS lost to a peer ingestor is converging, not terminal"
         );
+        assert_eq!(disposition.status, HostAdmissionStatus::Backpressured);
 
         let malformed = source::TranscriptIngestError::NonDurableRecord {
             provider: "cursor",
