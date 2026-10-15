@@ -44,7 +44,7 @@ impl StorageOperationExecutor for ExactSqlOnlyStorageOperationV1 {
         _savepoint: &Savepoint<'_>,
         _payload: &RepositoryWritePayloadV1,
     ) -> rusqlite::Result<()> {
-        Ok(())
+        Err(rusqlite::Error::InvalidQuery)
     }
 }
 
