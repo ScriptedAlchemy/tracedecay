@@ -529,15 +529,17 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
         let Some(source) = opencode::OpenCodeSource::new_for_user(self.roots.to_vec()) else {
             return ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);
         };
-        match opencode::capture_opencode_observations(
+        let mut sweep = SourceSweep::new("opencode", self.codex_discovery);
+        let captured = opencode::capture_opencode_observations_with_sweep(
             self.facade,
             &source,
             ObservationScopeV1::Profile,
             Some(self.max_new_bytes),
             self.cancellation,
+            &mut sweep,
         )
-        .await
-        {
+        .await;
+        let mut run = match captured {
             Ok(outcome) => {
                 let mut run = ProviderRunOutcome::bounded(
                     outcome.stats,
@@ -554,39 +556,41 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
                 }
                 run
             }
-            Err(error) => {
-                if let Some(cancelled) = cancelled_provider_outcome(&error) {
-                    return cancelled;
-                }
-                let mut run = ProviderRunOutcome::failed(
-                    warn_transcript_catch_up_failure(
+            Err(error) => match cancelled_provider_outcome(&error) {
+                Some(cancelled) => cancelled,
+                None => {
+                    let mut run = ProviderRunOutcome::failed(
+                        warn_transcript_catch_up_failure(
+                            "opencode",
+                            "observation",
+                            &error,
+                            "user OpenCode observation catch-up failed",
+                        ),
+                        self.max_new_bytes,
+                    );
+                    if let Err(coverage_error) = persist_host_provider_coverage(
+                        self.facade,
+                        &ObservationScopeV1::Profile,
                         "opencode",
-                        "observation",
-                        &error,
-                        "user OpenCode observation catch-up failed",
-                    ),
-                    self.max_new_bytes,
-                );
-                if let Err(coverage_error) = persist_host_provider_coverage(
-                    self.facade,
-                    &ObservationScopeV1::Profile,
-                    "opencode",
-                    HostProviderCoverage::Unavailable,
-                    1,
-                    Some(HostCoverageReason::DatabaseUnreadable),
-                )
-                .await
-                {
-                    run.add_failure(warn_transcript_catch_up_failure(
-                        "opencode",
-                        "coverage",
-                        &coverage_error,
-                        "user OpenCode coverage persistence failed",
-                    ));
+                        HostProviderCoverage::Unavailable,
+                        1,
+                        Some(HostCoverageReason::DatabaseUnreadable),
+                    )
+                    .await
+                    {
+                        run.add_failure(warn_transcript_catch_up_failure(
+                            "opencode",
+                            "coverage",
+                            &coverage_error,
+                            "user OpenCode coverage persistence failed",
+                        ));
+                    }
+                    run
                 }
-                run
-            }
-        }
+            },
+        };
+        sweep.report_into(&mut run);
+        run
     }
 
     #[tracing::instrument(name = "sessions.ingest.user.cline_like", level = "trace", skip_all)]

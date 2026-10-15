@@ -141,13 +141,7 @@ impl Witness {
             len,
         }))
     }
-}
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the row-stream providers adopt content witnesses")
-)]
-impl Witness {
     fn content(parts: &[&[u8]]) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(b"tracedecay-source-content-witness-v1");
@@ -361,16 +355,7 @@ impl SourceSweep {
         })
         .await?
     }
-}
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the row-stream providers adopt stream observations"
-    )
-)]
-impl SourceSweep {
     #[expect(
         dead_code,
         reason = "the JSONL providers observe through it on their blocking threads"

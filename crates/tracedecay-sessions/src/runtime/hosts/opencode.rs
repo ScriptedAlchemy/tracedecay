@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -21,6 +22,7 @@ use crate::runtime::hosts::opencode_frontier::{
     REWRITE_KEY as OPENCODE_REWRITE_FRONTIER_KEY, prepare_generation_rewrite,
     read as read_frontier, write as write_frontier,
 };
+use crate::runtime::ingest::quarantine::{SourceClaim, SourceSweep};
 use crate::runtime::shared::TranscriptScopeMatcher;
 use crate::runtime::snapshot_observation::{
     MAX_SNAPSHOT_CAPTURE_UNIT_BYTES, SnapshotAdmissionBatch, SnapshotAdmissionRecord,
@@ -250,12 +252,35 @@ impl OpenCodeScanSource {
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn capture_opencode_observations(
     facade: &dyn HostAdmission,
     source: &OpenCodeSource,
     scope: ObservationScopeV1,
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
+) -> TranscriptIngestResult<OpenCodeCaptureOutcome> {
+    capture_opencode_observations_with_sweep(
+        facade,
+        source,
+        scope,
+        max_new_bytes,
+        cancellation,
+        &mut SourceSweep::new(PROVIDER, None),
+    )
+    .await
+}
+
+/// A message the store permanently refuses is reported in `sweep` and its
+/// session is skipped from that message on until the message changes, while
+/// its siblings keep being admitted and the page frontier keeps advancing.
+pub(crate) async fn capture_opencode_observations_with_sweep(
+    facade: &dyn HostAdmission,
+    source: &OpenCodeSource,
+    scope: ObservationScopeV1,
+    max_new_bytes: Option<u64>,
+    cancellation: &ObservationCancellation,
+    sweep: &mut SourceSweep,
 ) -> TranscriptIngestResult<OpenCodeCaptureOutcome> {
     let open_budget = HostScanBudget::new(
         0,
@@ -378,19 +403,44 @@ pub(crate) async fn capture_opencode_observations(
             let mut page_fully_processed = returned_budget.checkpoint();
             if let Some(materialized) = materialized {
                 page_fully_processed = materialized.fully_processed;
+                let mut claims: HashMap<(String, String), SourceClaim> = HashMap::new();
                 let refusals = runner
-                    .admit_batch(facade, materialized.input_bytes, &scope, cancellation, {
-                        let generation = database.generation;
-                        move || {
-                            Ok(Some(vec![SnapshotAdmissionBatch::new(
-                                generation,
-                                materialized.records,
-                            )]))
-                        }
-                    })
+                    .admit_batch_gated(
+                        facade,
+                        materialized.input_bytes,
+                        &scope,
+                        cancellation,
+                        {
+                            let generation = database.generation;
+                            move || {
+                                Ok(Some(vec![SnapshotAdmissionBatch::new(
+                                    generation,
+                                    materialized.records,
+                                )]))
+                            }
+                        },
+                        |record: &OpenCodeRecord| {
+                            let Some(claim) = sweep.observe_stream(
+                                &source.database_path,
+                                &record.session_id,
+                                &[record.native_record_id.as_bytes()],
+                            ) else {
+                                return false;
+                            };
+                            claims.insert(
+                                (record.session_id.clone(), record.native_record_id.clone()),
+                                claim,
+                            );
+                            true
+                        },
+                    )
                     .await?;
-                if let Some(refusal) = refusals.into_iter().next() {
-                    return Err(refusal.error);
+                for refusal in refusals {
+                    let key = (refusal.session_id, refusal.native_record_id);
+                    let Some(claim) = claims.remove(&key) else {
+                        return Err(refusal.error);
+                    };
+                    sweep.refused(claim, refusal.error)?;
                 }
             }
             if page_fully_processed && cursor != previous_cursor {
@@ -1010,7 +1060,7 @@ fn outcome_for_scan_evidence(evidence: HostScanEvidence) -> OpenCodeCaptureOutco
     }
 }
 
-fn opencode_data_dir(home: &Path) -> PathBuf {
+pub(in crate::runtime) fn opencode_data_dir(home: &Path) -> PathBuf {
     if cfg!(target_os = "macos") {
         home.join("Library/Application Support/opencode")
     } else if cfg!(target_os = "windows") {
