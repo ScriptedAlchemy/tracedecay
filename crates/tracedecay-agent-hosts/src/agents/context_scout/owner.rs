@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{Mutex, RwLock};
@@ -71,7 +71,10 @@ struct MountedContextScoutClaimV1 {
 pub(crate) type ProjectScoutRuntime =
     ContextScoutDurableRuntimeV1<Arc<dyn ContextScoutModelAssistantV1>>;
 
-type ProjectContextScoutOwnerRegistry = BTreeMap<[u8; 16], Arc<ProjectContextScoutOwnerV1>>;
+/// Routes a project identity to its live owner. The graphs that started or
+/// joined an owner hold it; the registry never keeps an owner, and with it the
+/// graph store, alive after the last of them drops.
+type ProjectContextScoutOwnerRegistry = BTreeMap<[u8; 16], Weak<ProjectContextScoutOwnerV1>>;
 
 pub struct ProjectContextScoutOwnerV1 {
     store: Arc<ProjectContextScoutDurableStoreV1>,
@@ -96,7 +99,7 @@ pub fn lookup_registered_context_scout_owners(
     };
     owners
         .get(&project_id)
-        .cloned()
+        .and_then(Weak::upgrade)
         .map_or_default(|owner| vec![owner])
 }
 
@@ -112,7 +115,7 @@ pub enum ContextScoutOwnerUnregisterOutcomeV1 {
     StaleIdentity,
 }
 
-/// Drops the process-global owner for one project identity, but only when the
+/// Removes the process-global route to one project's owner, but only when the
 /// registered owner still binds `database_path`. Retirement of a runtime whose
 /// owner was already replaced by a newer database identity is a typed no-op
 /// rather than a removal of the live replacement. Project close and isolated
@@ -124,7 +127,8 @@ pub fn unregister_registered_context_scout_owner(
     let Ok(mut owners) = registered_context_scout_owners().lock() else {
         return ContextScoutOwnerUnregisterOutcomeV1::Vacant;
     };
-    let Some(existing) = owners.get(&project_id) else {
+    let Some(existing) = owners.get(&project_id).and_then(Weak::upgrade) else {
+        owners.remove(&project_id);
         return ContextScoutOwnerUnregisterOutcomeV1::Vacant;
     };
     if !tracedecay_runtime_core::path_safety::same_canonical_path(
@@ -173,12 +177,13 @@ impl ProjectContextScoutOwnerV1 {
             claim_authorities: RwLock::new(Vec::new()),
         });
         let mut owners = registered_context_scout_owners().lock().ok()?;
-        if let Some(existing) = owners.get(&project_id)
+        if let Some(existing) = owners.get(&project_id).and_then(Weak::upgrade)
             && existing.binds_database(owner.store.database())
         {
-            return Some(Arc::clone(existing));
+            return Some(existing);
         }
-        owners.insert(project_id, Arc::clone(&owner));
+        owners.retain(|_, registered| registered.strong_count() > 0);
+        owners.insert(project_id, Arc::downgrade(&owner));
         Some(owner)
     }
 

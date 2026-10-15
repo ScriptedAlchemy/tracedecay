@@ -3360,7 +3360,7 @@ async fn rewind_source_cursor(
 /// what wedges retained ingest. The durable cursor already sits exactly at
 /// `next_cursor`, so the coverage is applied and the replay is a duplicate.
 /// A conflict whose ledger already records this coverage restores the cursor.
-/// A missing ledger row stays a collision.
+/// A pruned ledger row is recorded again from the durable cursor.
 #[asupersync::test]
 async fn already_positioned_cursor_replay_with_new_command_bytes_is_a_duplicate() {
     const FILE_IDENTITY: u64 = 41;
@@ -3873,4 +3873,172 @@ async fn drain_keeps_divergent_workflow_fact_state_a_hard_error() {
         store.projection_checkpoint().await.unwrap().last_sequence(),
         0
     );
+}
+
+fn file_bytes_advance(
+    observation: &DurableObservationV1,
+    expected: Option<&ObservationCursorAdvance>,
+    range: (u64, u64),
+    reason: ObservationCoverageReason,
+) -> ObservationCursorAdvance {
+    ObservationCursorAdvance::for_ordering(
+        observation.source().clone(),
+        observation.scope().clone(),
+        observation.identity().generation(),
+        ObservationOrderingDomainV1::FileBytes,
+        expected.map(|advance| advance.next_cursor().clone()),
+        ObservationSourceRangeV1::new(range.0, range.1).unwrap(),
+        reason,
+    )
+    .unwrap()
+}
+
+/// Admits `[0, 5)`, `[5, 10)` and `[10, 20)`, so the durable cursor sits two
+/// advances past `[5, 10)` and that range's ledger row is already pruned.
+async fn admitted_three_ranges(
+    name: &str,
+) -> (
+    TempDir,
+    HostAdmissionTestRuntimeV1,
+    DurableObservationV1,
+    [ObservationCursorAdvance; 3],
+) {
+    let tmp = TempDir::new().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
+        .await
+        .unwrap();
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let session_id = SessionId::new(format!("session.{name}")).unwrap();
+    let (observation, _) = collision_candidate(
+        &session_id,
+        &format!("record.{name}"),
+        1,
+        "admitted ranges fixture",
+        &format!("receipt.{name}"),
+        None,
+    );
+    let first = file_bytes_advance(
+        &observation,
+        None,
+        (0, 5),
+        ObservationCoverageReason::BlankFrame,
+    );
+    let second = file_bytes_advance(
+        &observation,
+        Some(&first),
+        (5, 10),
+        ObservationCoverageReason::OutOfScope,
+    );
+    let third = file_bytes_advance(
+        &observation,
+        Some(&second),
+        (10, 20),
+        ObservationCoverageReason::BlankFrame,
+    );
+    for advance in [&first, &second, &third] {
+        assert_eq!(
+            store.advance_source_cursor(advance.clone()).await.unwrap(),
+            CursorAdvanceOutcome::Committed
+        );
+    }
+    (tmp, runtime, observation, [first, second, third])
+}
+
+/// Issue #4012: a rescan that resumes more than one advance behind the
+/// admitted frontier replays a coverage whose runtime receipt is committed
+/// and whose ledger row was pruned. That failed every pass with a
+/// non-retryable `observation_cursor_advance_collision`, and the cursor never
+/// moved again.
+#[asupersync::test]
+async fn rescan_behind_a_pruned_ledger_row_reconciles_from_the_durable_cursor() {
+    let (_tmp, runtime, observation, [first, second, _]) =
+        admitted_three_ranges("rescan-pruned-row").await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    rewind_source_cursor(&runtime, first.next_cursor()).await;
+    let rescan = file_bytes_advance(
+        &observation,
+        Some(&first),
+        (5, 10),
+        ObservationCoverageReason::BlankFrame,
+    );
+    assert_eq!(rescan.coverage(), second.coverage());
+
+    assert_eq!(
+        store.advance_source_cursor(rescan.clone()).await.unwrap(),
+        CursorAdvanceOutcome::Committed,
+        "the rescan must advance from the durable cursor"
+    );
+    assert_eq!(
+        store.advance_source_cursor(rescan.clone()).await.unwrap(),
+        CursorAdvanceOutcome::ExactDuplicate,
+        "the next pass finds the range owned"
+    );
+    assert_eq!(
+        store
+            .get_source_cursor(observation.source(), observation.scope())
+            .await
+            .unwrap()
+            .as_ref(),
+        Some(rescan.next_cursor())
+    );
+}
+
+/// The same rescan with the original command bytes is an exact runtime
+/// replay. Reporting it as a duplicate left the cursor behind, so the next
+/// advance lost its compare-and-swap on every pass.
+#[asupersync::test]
+async fn exact_replay_behind_the_frontier_moves_the_cursor() {
+    let (_tmp, runtime, observation, [first, second, _]) =
+        admitted_three_ranges("rescan-exact-replay").await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    rewind_source_cursor(&runtime, first.next_cursor()).await;
+
+    store.advance_source_cursor(second.clone()).await.unwrap();
+    assert_eq!(
+        store
+            .get_source_cursor(observation.source(), observation.scope())
+            .await
+            .unwrap()
+            .as_ref(),
+        Some(second.next_cursor())
+    );
+}
+
+/// A rescan behind a retained ledger row that names another reason is the
+/// runtime write path's typed ledger disagreement, not an anonymous
+/// collision.
+#[asupersync::test]
+async fn rescan_behind_a_retained_row_reports_the_ledger_disagreement() {
+    let (_tmp, runtime, observation, [_, second, third]) =
+        admitted_three_ranges("rescan-retained-row").await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    rewind_source_cursor(&runtime, second.next_cursor()).await;
+    let rescan = file_bytes_advance(
+        &observation,
+        Some(&second),
+        (10, 20),
+        ObservationCoverageReason::OutOfScope,
+    );
+    assert_eq!(rescan.coverage(), third.coverage());
+
+    let error = store.advance_source_cursor(rescan).await.unwrap_err();
+    let ObservationStoreError::CursorAdvanceLedgerDisagreement { disagreement } = error else {
+        panic!("a retained row with another reason is a ledger disagreement, got {error:?}");
+    };
+    assert!(matches!(
+        disagreement.stored().reason(),
+        CursorAdvanceLedgerReasonV1::Known(ObservationCoverageReason::BlankFrame)
+    ));
+    assert!(matches!(
+        disagreement.candidate().reason(),
+        CursorAdvanceLedgerReasonV1::Known(ObservationCoverageReason::OutOfScope)
+    ));
 }
