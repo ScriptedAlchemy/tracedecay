@@ -952,6 +952,7 @@ pub(crate) mod test_support {
 
     struct SessionCaptureFailure {
         session_id: &'static str,
+        from_position: u64,
         outcome: HostAdmissionOutcome,
         attempts: usize,
     }
@@ -987,11 +988,23 @@ pub(crate) mod test_support {
             session_id: &'static str,
             outcome: HostAdmissionOutcome,
         ) {
+            self.fail_captures_for_session_from(session_id, 0, outcome);
+        }
+
+        /// [`Self::fail_captures_for_session`] for the session's records at
+        /// source position `from_position` and later.
+        pub(crate) fn fail_captures_for_session_from(
+            &self,
+            session_id: &'static str,
+            from_position: u64,
+            outcome: HostAdmissionOutcome,
+        ) {
             *self
                 .session_capture_failure
                 .lock()
                 .unwrap_or_else(|error| error.into_inner()) = Some(SessionCaptureFailure {
                 session_id,
+                from_position,
                 outcome,
                 attempts: 0,
             });
@@ -1017,7 +1030,9 @@ pub(crate) mod test_support {
             let failure = guard.as_mut()?;
             requests
                 .any(|request| {
-                    request.identity().source().session_id().as_str() == failure.session_id
+                    let identity = request.identity();
+                    identity.source().session_id().as_str() == failure.session_id
+                        && identity.position().start() >= failure.from_position
                 })
                 .then(|| {
                     failure.attempts += 1;

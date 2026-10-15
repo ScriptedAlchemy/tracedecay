@@ -24,8 +24,7 @@ use tracedecay_store::observation::ObservationCoverageReason;
 
 use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
-use crate::runtime::hosts::codex::CodexDiscoveryHub;
-use crate::runtime::ingest::quarantine::{SourceClaim, SourceLedger};
+use crate::runtime::ingest::quarantine::{SourceClaim, SourceLedger, SourceSweep};
 use crate::runtime::jsonl_observation_admission::{
     JsonlFrameAdmission, JsonlObservationAdmissionProgress, JsonlObservationAdmissionRequest,
     admit_jsonl_observations,
@@ -189,7 +188,8 @@ fn pending_session(
     }
 }
 
-#[tracing::instrument(name = "sessions.hosts.vibe.capture", level = "trace", skip_all)]
+/// A capture pass for a caller outside a provider run. It returns a permanent
+/// source refusal as its error instead of quarantining the source.
 pub async fn capture_vibe_observations(
     facade: &dyn HostAdmission,
     source: &VibeSource,
@@ -197,7 +197,28 @@ pub async fn capture_vibe_observations(
     scope: ObservationScopeV1,
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
-    convergence: Option<(&CodexDiscoveryHub, &str)>,
+) -> TranscriptIngestResult<VibeCaptureOutcome> {
+    capture_vibe_sweep(
+        facade,
+        source,
+        project_root,
+        scope,
+        max_new_bytes,
+        cancellation,
+        &mut SourceSweep::new(PROVIDER, None),
+    )
+    .await
+}
+
+#[tracing::instrument(name = "sessions.hosts.vibe.capture", level = "trace", skip_all)]
+pub(crate) async fn capture_vibe_sweep(
+    facade: &dyn HostAdmission,
+    source: &VibeSource,
+    project_root: &Path,
+    scope: ObservationScopeV1,
+    max_new_bytes: Option<u64>,
+    cancellation: &ObservationCancellation,
+    sweep: &mut SourceSweep,
 ) -> TranscriptIngestResult<VibeCaptureOutcome> {
     let discovery = {
         let source = source.clone();
@@ -210,7 +231,7 @@ pub async fn capture_vibe_observations(
         })
         .await?
     };
-    let ledger = convergence.and_then(|(hub, consumer)| hub.source_ledger(consumer));
+    let ledger = sweep.ledger();
     let mut outcome = VibeCaptureOutcome {
         deferred: discovery.is_truncated(),
         ..VibeCaptureOutcome::default()
@@ -238,7 +259,7 @@ pub async fn capture_vibe_observations(
         else {
             continue;
         };
-        let progress = capture_vibe_path(
+        let progress = match capture_vibe_path(
             facade,
             &path,
             meta,
@@ -246,7 +267,14 @@ pub async fn capture_vibe_observations(
             max_new_bytes.map(|_| remaining),
             cancellation,
         )
-        .await?;
+        .await
+        {
+            Ok(progress) => progress,
+            Err(error) => {
+                sweep.refused(pending, error)?;
+                continue;
+            }
+        };
         pending.admitted(progress.source_deferred, progress.covered_through)?;
         outcome.bytes_consumed = outcome
             .bytes_consumed

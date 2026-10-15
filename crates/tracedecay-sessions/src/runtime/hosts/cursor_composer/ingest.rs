@@ -15,8 +15,10 @@ use tracedecay_store::observation::ObservationCoverageReason;
 
 use crate::admission::HostAdmission;
 use crate::observation::{CaptureObservationOutcome, ObservationCancellation};
+use crate::runtime::ingest::quarantine::SourceSweep;
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
 use crate::runtime::shared::{ProjectMembership, ProjectRootMatcherCache, TranscriptScopeMatcher};
+use crate::runtime::snapshot_observation::host_admission_error;
 use crate::runtime::source::{
     TranscriptIngestError, TranscriptIngestResult, canonical_framed_sha256,
     run_blocking_transcript_section,
@@ -471,7 +473,8 @@ impl CursorComposerSource {
         }
     }
 
-    pub async fn ingest_capped_with_cancellation(
+    #[expect(clippy::too_many_arguments)]
+    pub(crate) async fn ingest_capped_with_cancellation(
         &self,
         admission: &dyn HostAdmission,
         project_root: &Path,
@@ -479,6 +482,7 @@ impl CursorComposerSource {
         envelope_cap: usize,
         max_new_bytes: Option<u64>,
         cancellation: &ObservationCancellation,
+        sweep: &mut SourceSweep,
     ) -> CursorComposerSweepResult {
         let context = ComposerIngestContext {
             facade: admission,
@@ -488,17 +492,18 @@ impl CursorComposerSource {
             cancellation,
             matchers: &self.project_matchers,
         };
-        self.ingest_with_context(&context, envelope_cap, max_new_bytes)
+        self.ingest_with_context(&context, envelope_cap, max_new_bytes, sweep)
             .await
     }
 
-    pub async fn ingest_user_capped_with_cancellation(
+    pub(crate) async fn ingest_user_capped_with_cancellation(
         &self,
         admission: &dyn HostAdmission,
         registered_roots: &[PathBuf],
         envelope_cap: usize,
         max_new_bytes: Option<u64>,
         cancellation: &ObservationCancellation,
+        sweep: &mut SourceSweep,
     ) -> CursorComposerSweepResult {
         let context = ComposerIngestContext {
             facade: admission,
@@ -508,7 +513,7 @@ impl CursorComposerSource {
             cancellation,
             matchers: &self.project_matchers,
         };
-        self.ingest_with_context(&context, envelope_cap, max_new_bytes)
+        self.ingest_with_context(&context, envelope_cap, max_new_bytes, sweep)
             .await
     }
 
@@ -517,6 +522,7 @@ impl CursorComposerSource {
         context: &ComposerIngestContext<'_, '_>,
         envelope_cap: usize,
         max_new_bytes: Option<u64>,
+        sweep: &mut SourceSweep,
     ) -> CursorComposerSweepResult {
         let mut outcome = CursorComposerSweepOutcome::default();
         let mut byte_budget =
@@ -544,6 +550,7 @@ impl CursorComposerSource {
                 &mut byte_budget,
                 &mut outcome,
                 &mut workspace_paths,
+                sweep,
             )
             .await
         {
@@ -557,7 +564,13 @@ impl CursorComposerSource {
             ));
         }
         if let Err(error) = self
-            .ingest_chat_store_dbs(context, &workspace_paths, &mut byte_budget, &mut outcome)
+            .ingest_chat_store_dbs(
+                context,
+                &workspace_paths,
+                &mut byte_budget,
+                &mut outcome,
+                sweep,
+            )
             .await
         {
             return Err(outcome.terminated(error, byte_budget.consumed(), byte_budget.deferred()));
@@ -601,6 +614,7 @@ impl CursorComposerSource {
         byte_budget: &mut IngestByteBudget,
         outcome: &mut CursorComposerSweepOutcome,
         workspace_paths: &mut HashMap<String, String>,
+        sweep: &mut SourceSweep,
     ) -> TranscriptIngestResult<()> {
         if context.cancellation.is_cancelled() {
             return Ok(());
@@ -1098,6 +1112,31 @@ impl CursorComposerSource {
                 } else {
                     byte_budget.defer();
                 }
+                // Observed after ownership, so JSONL still stands down for a
+                // quarantined composer.
+                let Some(claim) =
+                    sweep.observe_stream(&ro.canonical_path, &key, &[value.as_bytes()])
+                else {
+                    match complete_retry_entry(
+                        context,
+                        &retry_journal,
+                        &ro.canonical_path,
+                        state_generation,
+                    )
+                    .await
+                    {
+                        Ok(Some(completed)) => last_retry_key = Some(completed),
+                        Ok(None) => {}
+                        Err(_) => {
+                            byte_budget.defer();
+                            break 'scan;
+                        }
+                    }
+                    if !retrying_unresolved {
+                        last_scanned_key = Some(key);
+                    }
+                    continue;
+                };
 
                 let headers = envelope
                     .get("fullConversationHeadersOnly")
@@ -1146,6 +1185,7 @@ impl CursorComposerSource {
                 let generation = state_generation;
                 let mut session_accepted = false;
                 let mut composer_unresolved = false;
+                let mut capture_failure = None;
                 if let Some(todo_checkpoint) = composer_envelope_todo_checkpoint(&envelope)
                     && let Ok(envelope_source) = cursor_composer_envelope_source(&composer_id)
                 {
@@ -1186,16 +1226,13 @@ impl CursorComposerSource {
                             | Ok(CaptureObservationOutcome::AcceptedForReplay { .. }) => {
                                 session_accepted = true;
                             }
-                            Err(_) => {
-                                byte_budget.defer();
-                                break 'scan;
-                            }
+                            Err(outcome) => capture_failure = Some(outcome),
                             _ => {}
                         }
                     }
                 }
                 for (position, header) in headers.iter().enumerate() {
-                    if context.cancellation.is_cancelled() {
+                    if capture_failure.is_some() || context.cancellation.is_cancelled() {
                         break;
                     }
                     let Some(bubble_id) = header.get("bubbleId").and_then(Value::as_str) else {
@@ -1381,13 +1418,22 @@ impl CursorComposerSource {
                                         break 'scan;
                                     }
                                 }
-                                Err(_) => {
-                                    byte_budget.defer();
-                                    break 'scan;
+                                Err(outcome) => {
+                                    capture_failure = Some(outcome);
+                                    break;
                                 }
                             }
                         }
                     }
+                }
+                // A quarantined composer settles below like a skipped one.
+                if let Some(capture_failure) = capture_failure
+                    && sweep
+                        .refused(claim, host_admission_error(PROVIDER, capture_failure))
+                        .is_err()
+                {
+                    byte_budget.defer();
+                    break 'scan;
                 }
                 if session_accepted {
                     ingested_this_pass += 1;
@@ -1498,6 +1544,7 @@ impl CursorComposerSource {
         workspace_paths: &HashMap<String, String>,
         byte_budget: &mut IngestByteBudget,
         outcome: &mut CursorComposerSweepOutcome,
+        sweep: &mut SourceSweep,
     ) -> TranscriptIngestResult<()> {
         let stores = {
             run_blocking_transcript_section("cursor", {
@@ -1521,8 +1568,15 @@ impl CursorComposerSource {
             if context.cancellation.is_cancelled() {
                 return Ok(());
             }
-            self.ingest_one_store_db(context, &store_path, &project_path, byte_budget, outcome)
-                .await;
+            self.ingest_one_store_db(
+                context,
+                &store_path,
+                &project_path,
+                byte_budget,
+                outcome,
+                sweep,
+            )
+            .await;
         }
         Ok(())
     }
@@ -1534,10 +1588,19 @@ impl CursorComposerSource {
         project_path: &str,
         byte_budget: &mut IngestByteBudget,
         outcome: &mut CursorComposerSweepOutcome,
+        sweep: &mut SourceSweep,
     ) {
         if context.cancellation.is_cancelled() {
             return;
         }
+        let claim = match sweep.observe_file(store_path).await {
+            Ok(Some(claim)) => claim,
+            Ok(None) => return,
+            Err(_) => {
+                byte_budget.defer();
+                return;
+            }
+        };
         let ro = match open_readonly_immutable(store_path).await {
             Ok(ro) => ro,
             Err(error) => {
@@ -1713,8 +1776,13 @@ impl CursorComposerSource {
                         return;
                     }
                 }
-                Err(_) => {
-                    byte_budget.defer();
+                Err(failure) => {
+                    if sweep
+                        .refused(claim, host_admission_error(PROVIDER, failure))
+                        .is_err()
+                    {
+                        byte_budget.defer();
+                    }
                     return;
                 }
             }

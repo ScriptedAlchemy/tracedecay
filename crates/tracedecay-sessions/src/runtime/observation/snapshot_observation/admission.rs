@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tracedecay_domain::{
@@ -14,6 +14,8 @@ use crate::admission::{HostAdmission, HostAdmissionRecovery, is_admission_cancel
 use crate::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
+use crate::runtime::classify_transcript_ingest_disposition;
+use crate::runtime::ingest::quarantine::SourceSweep;
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
 use crate::runtime::observation::jsonl_observation_admission::is_lost_cursor_cas;
 use crate::runtime::shared::TranscriptIngestStats;
@@ -31,6 +33,71 @@ pub struct SnapshotCaptureOutcome {
     pub stats: TranscriptIngestStats,
     pub bytes_consumed: u64,
     pub deferred_by_byte_cap: bool,
+}
+
+/// A record the store permanently refused. The runner skipped that record's
+/// source for the rest of the call.
+#[derive(Debug)]
+pub struct SnapshotSourceRefusal {
+    pub session_id: String,
+    pub native_record_id: String,
+    pub error: TranscriptIngestError,
+}
+
+fn quarantines_source(error: &TranscriptIngestError) -> bool {
+    classify_transcript_ingest_disposition(error).quarantines_source()
+}
+
+/// The sources one `admit_batch` call stopped admitting, and why.
+#[derive(Default)]
+struct Refused {
+    /// Sources with a record the caller declined. Records of theirs already
+    /// pending stay admitted, so only later ones stop.
+    declined: BTreeSet<ObservationSourceIdentityV1>,
+    sources: BTreeSet<ObservationSourceIdentityV1>,
+    refusals: Vec<SnapshotSourceRefusal>,
+}
+
+impl Refused {
+    fn contains(&self, source: &ObservationSourceIdentityV1) -> bool {
+        self.sources.contains(source)
+    }
+
+    fn admits<R>(
+        &mut self,
+        source: &ObservationSourceIdentityV1,
+        record: &R,
+        admit_record: &mut impl FnMut(&R) -> bool,
+    ) -> bool {
+        if self.declined.contains(source) {
+            return false;
+        }
+        if admit_record(record) {
+            return true;
+        }
+        self.declined.insert(source.clone());
+        false
+    }
+
+    /// Keeps a permanent refusal of `record`; anything else comes back for
+    /// the caller to fail on.
+    fn absorb<R: SnapshotAdmissionRecord>(
+        &mut self,
+        source: &ObservationSourceIdentityV1,
+        record: &R,
+        error: TranscriptIngestError,
+    ) -> TranscriptIngestResult<()> {
+        if !quarantines_source(&error) {
+            return Err(error);
+        }
+        self.sources.insert(source.clone());
+        self.refusals.push(SnapshotSourceRefusal {
+            session_id: record.session_id().to_owned(),
+            native_record_id: record.native_record_id().to_owned(),
+            error,
+        });
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -150,32 +217,37 @@ where
 /// Every snapshot provider drives the same loop: bound discovery, defer when
 /// discovery truncated, then charge each discovered path against the sweep
 /// budget before loading and admitting its records. Providers supply only what
-/// actually differs, how paths are discovered, how a path's input bytes are
-/// charged, and how a path becomes complete source-generation batches.
+/// actually differs, how paths are discovered, which files make up a path's
+/// source, how a path's input bytes are charged, and how a path becomes
+/// complete source-generation batches.
 ///
 /// This deliberately re-reads complete snapshots and derives a new source
 /// generation from their content; it neither consults nor advances legacy parse
 /// offsets. `max_new_bytes` is one logical source-byte budget for the complete
-/// sweep.
+/// sweep. A source the store permanently refuses is quarantined in `sweep`
+/// and the sweep moves on to the next one.
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(
     name = "sessions.observation.capture_snapshot",
     level = "trace",
     skip_all
 )]
-pub async fn capture_snapshot_observations<R, D, B, L>(
+pub(crate) async fn capture_snapshot_observations<R, D, M, B, L>(
     facade: &dyn HostAdmission,
     provider: &'static str,
     scope: ObservationScopeV1,
     cancellation: &ObservationCancellation,
     max_new_bytes: Option<u64>,
+    sweep: &mut SourceSweep,
     discover: D,
+    source_members: M,
     input_bytes_fn: B,
     load_fn: L,
 ) -> TranscriptIngestResult<SnapshotCaptureOutcome>
 where
     R: SnapshotAdmissionRecord + Send + 'static,
     D: FnOnce() -> FileDiscoveryReport + Send + 'static,
+    M: Fn(&Path) -> (PathBuf, Vec<PathBuf>),
     B: Fn(&Path) -> TranscriptIngestResult<u64> + Send + Sync + 'static,
     L: Fn(&Path) -> TranscriptIngestResult<Option<Vec<SnapshotAdmissionBatch<R>>>>
         + Send
@@ -193,19 +265,38 @@ where
     let load_fn = Arc::new(load_fn);
     for path in discovery.paths {
         ensure_snapshot_admission_active(provider, cancellation)?;
+        let (key, members) = source_members(&path);
+        let Some(claim) = sweep.observe_files(&key, members).await? else {
+            continue;
+        };
         let input_bytes = {
             let input_bytes_fn = Arc::clone(&input_bytes_fn);
             let path = path.clone();
             run_blocking_transcript_section(provider, move || input_bytes_fn(&path)).await?
-        }?;
+        };
+        let input_bytes = match input_bytes {
+            Ok(input_bytes) => input_bytes,
+            Err(error) => {
+                sweep.refused(claim, error)?;
+                continue;
+            }
+        };
         ensure_snapshot_admission_active(provider, cancellation)?;
         let load_fn = Arc::clone(&load_fn);
-        let path = path.clone();
-        runner
+        let admitted = runner
             .admit_batch(facade, input_bytes, &scope, cancellation, move || {
                 load_fn(&path)
             })
-            .await?;
+            .await;
+        // One path is one source, so its first refusal quarantines it whole.
+        match admitted {
+            Ok(refusals) => {
+                if let Some(refusal) = refusals.into_iter().next() {
+                    sweep.refused(claim, refusal.error)?;
+                }
+            }
+            Err(error) => sweep.refused(claim, error)?,
+        }
     }
     Ok(runner.finish())
 }
@@ -234,6 +325,8 @@ impl SnapshotAdmissionRunner {
         self.budget.defer();
     }
 
+    /// Admits every loaded batch. A permanent refusal of one source's record
+    /// does not stop the others; it comes back as a [`SnapshotSourceRefusal`].
     pub async fn admit_batch<R, F>(
         &mut self,
         facade: &dyn HostAdmission,
@@ -241,7 +334,29 @@ impl SnapshotAdmissionRunner {
         scope: &ObservationScopeV1,
         cancellation: &ObservationCancellation,
         load: F,
-    ) -> TranscriptIngestResult<()>
+    ) -> TranscriptIngestResult<Vec<SnapshotSourceRefusal>>
+    where
+        R: SnapshotAdmissionRecord + Send + 'static,
+        F: FnOnce() -> TranscriptIngestResult<Option<Vec<SnapshotAdmissionBatch<R>>>>
+            + Send
+            + 'static,
+    {
+        self.admit_batch_gated(facade, input_bytes, scope, cancellation, load, |_| true)
+            .await
+    }
+
+    /// [`Self::admit_batch`] that first shows `admit_record` each record its
+    /// cursor does not cover yet, and admits nothing from a record it
+    /// declines onwards in that record's source.
+    pub async fn admit_batch_gated<R, F>(
+        &mut self,
+        facade: &dyn HostAdmission,
+        input_bytes: u64,
+        scope: &ObservationScopeV1,
+        cancellation: &ObservationCancellation,
+        load: F,
+        mut admit_record: impl FnMut(&R) -> bool + Send,
+    ) -> TranscriptIngestResult<Vec<SnapshotSourceRefusal>>
     where
         R: SnapshotAdmissionRecord + Send + 'static,
         F: FnOnce() -> TranscriptIngestResult<Option<Vec<SnapshotAdmissionBatch<R>>>>
@@ -250,13 +365,13 @@ impl SnapshotAdmissionRunner {
     {
         ensure_snapshot_admission_active(self.provider, cancellation)?;
         if !self.budget.try_consume(input_bytes) {
-            return Ok(());
+            return Ok(Vec::new());
         }
         ensure_snapshot_admission_active(self.provider, cancellation)?;
         let loaded = { run_blocking_transcript_section(self.provider, load).await? }?;
         ensure_snapshot_admission_active(self.provider, cancellation)?;
         let Some(batches) = loaded else {
-            return Ok(());
+            return Ok(Vec::new());
         };
         // Validate the complete loaded input before the first durable capture.
         // An empty batch can retain source authority without inventing coverage.
@@ -273,14 +388,24 @@ impl SnapshotAdmissionRunner {
                 }
             }
         }
+        let mut refused = Refused::default();
         for batch in batches {
             ensure_snapshot_admission_active(self.provider, cancellation)?;
-            self.admit_records(facade, scope, cancellation, batch.generation, batch.records)
-                .await?;
+            self.admit_records(
+                facade,
+                scope,
+                cancellation,
+                batch.generation,
+                batch.records,
+                &mut refused,
+                &mut admit_record,
+            )
+            .await?;
         }
-        Ok(())
+        Ok(refused.refusals)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn admit_records<R: SnapshotAdmissionRecord>(
         &mut self,
         facade: &dyn HostAdmission,
@@ -288,6 +413,8 @@ impl SnapshotAdmissionRunner {
         cancellation: &ObservationCancellation,
         generation: ObservationSourceGenerationV1,
         records: Vec<R>,
+        refused: &mut Refused,
+        admit_record: &mut impl FnMut(&R) -> bool,
     ) -> TranscriptIngestResult<()> {
         let mut cursors: BTreeMap<ObservationSourceIdentityV1, Option<ObservationSourceCursorV1>> =
             BTreeMap::new();
@@ -297,6 +424,9 @@ impl SnapshotAdmissionRunner {
             let provider = record.provider();
             ensure_snapshot_admission_active(provider, cancellation)?;
             let source_identity = record.source_identity()?;
+            if refused.contains(&source_identity) {
+                continue;
+            }
             let range = ObservationSourceRangeV1::new(record.order(), record.order() + 1)?;
             ensure_snapshot_admission_active(provider, cancellation)?;
             let expected_cursor = source_cursor(
@@ -309,17 +439,24 @@ impl SnapshotAdmissionRunner {
             )
             .await?;
             ensure_snapshot_admission_active(provider, cancellation)?;
-            if snapshot_cursor_covers_range(expected_cursor.as_ref(), generation, range) {
+            if snapshot_cursor_covers_range(expected_cursor.as_ref(), generation, range)
+                || !refused.admits(&source_identity, &record, admit_record)
+            {
                 continue;
             }
             pending.push((record, source_identity, range, generation));
         }
 
-        for window in pending.chunks(SNAPSHOT_CAPTURE_WINDOW_RECORDS) {
+        for chunk in pending.chunks(SNAPSHOT_CAPTURE_WINDOW_RECORDS) {
             ensure_snapshot_admission_active(self.provider, cancellation)?;
             let mut chained_cursors = cursors.clone();
-            let mut requests = Vec::with_capacity(window.len());
-            for (record, source_identity, range, generation) in window {
+            let mut window = Vec::with_capacity(chunk.len());
+            let mut requests = Vec::with_capacity(chunk.len());
+            for entry in chunk {
+                let (record, source_identity, range, generation) = entry;
+                if refused.contains(source_identity) {
+                    continue;
+                }
                 let provider = record.provider();
                 let expected_cursor = source_cursor(
                     facade,
@@ -330,12 +467,19 @@ impl SnapshotAdmissionRunner {
                     cancellation,
                 )
                 .await?;
-                requests.push(record.capture_request(
+                match record.capture_request(
                     scope.clone(),
                     *generation,
                     expected_cursor,
                     cancellation.clone(),
-                )?);
+                ) {
+                    Ok(request) => requests.push(request),
+                    Err(error) => {
+                        refused.absorb(source_identity, record, error)?;
+                        continue;
+                    }
+                }
+                window.push(entry);
                 chained_cursors.insert(
                     source_identity.clone(),
                     Some(ObservationSourceCursorV1::for_ordering(
@@ -346,6 +490,9 @@ impl SnapshotAdmissionRunner {
                         range.end(),
                     )?),
                 );
+            }
+            if window.is_empty() {
+                continue;
             }
             let outcomes = facade.capture_observations(requests).await;
             ensure_snapshot_admission_active(self.provider, cancellation)?;
@@ -367,7 +514,9 @@ impl SnapshotAdmissionRunner {
                     true
                 }
                 Ok(outcomes) => {
-                    for ((record, source_identity, _, _), outcome) in window.iter().zip(outcomes) {
+                    for ((record, source_identity, _, _), outcome) in
+                        window.iter().copied().zip(outcomes)
+                    {
                         let outcome = match outcome {
                             CaptureObservationOutcome::Persisted { outcome, .. }
                             | CaptureObservationOutcome::AcceptedForReplay { outcome, .. } => {
@@ -398,28 +547,43 @@ impl SnapshotAdmissionRunner {
                 // moves no cursor, so a record chained behind it in the same
                 // window loses its compare-and-swap. Scalar replay re-reads.
                 Err(error) if error.recovery.is_some() || is_lost_cursor_cas(&error) => true,
-                Err(error) => return Err(host_admission_error(self.provider, error)),
+                // One source's permanent refusal fails the whole window;
+                // scalar replay finds it and admits its healthy neighbours.
+                Err(error) => {
+                    let error = host_admission_error(self.provider, error);
+                    if !quarantines_source(&error) {
+                        return Err(error);
+                    }
+                    true
+                }
             };
             if scalar_replay {
                 // The default trait implementation can commit a prefix before
                 // surfacing a non-durable record. Re-read every affected
                 // source cursor before scalar replay so that prefix is
                 // classified as duplicate instead of violating the chain.
-                for (_, source_identity, _, _) in window {
+                for (_, source_identity, _, _) in window.iter().copied() {
                     cursors.remove(source_identity);
                 }
-                for (record, source_identity, range, generation) in window {
-                    self.capture_scalar_record(
-                        facade,
-                        record,
-                        source_identity,
-                        *range,
-                        &mut cursors,
-                        scope,
-                        *generation,
-                        cancellation,
-                    )
-                    .await?;
+                for (record, source_identity, range, generation) in window.iter().copied() {
+                    if refused.contains(source_identity) {
+                        continue;
+                    }
+                    if let Err(error) = self
+                        .capture_scalar_record(
+                            facade,
+                            record,
+                            source_identity,
+                            *range,
+                            &mut cursors,
+                            scope,
+                            *generation,
+                            cancellation,
+                        )
+                        .await
+                    {
+                        refused.absorb(source_identity, record, error)?;
+                    }
                 }
             }
         }
@@ -724,8 +888,8 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use crate::admission::HostAdmission;
     use crate::admission::test_support::{MemoryHostAdmission, PanicHostAdmission};
+    use crate::admission::{HostAdmission, HostAdmissionOutcome, HostAdmissionStatus};
 
     use super::*;
 
@@ -1012,18 +1176,25 @@ mod tests {
         }
     }
 
+    fn single_file_source(path: &Path) -> (PathBuf, Vec<PathBuf>) {
+        (path.to_path_buf(), vec![path.to_path_buf()])
+    }
+
     #[test]
     fn snapshot_adapter_metadata_read_leaves_the_polling_thread() {
         let caller = std::thread::current().id();
         let admission = MemoryHostAdmission::default();
         let cancellation = ObservationCancellation::default();
-        let capture = capture_snapshot_observations::<TestSnapshotRecord, _, _, _>(
+        let mut sweep = SourceSweep::new("test", None);
+        let capture = capture_snapshot_observations::<TestSnapshotRecord, _, _, _, _>(
             &admission,
             "test",
             ObservationScopeV1::Profile,
             &cancellation,
             None,
+            &mut sweep,
             || discovery(vec![PathBuf::from("session.snapshot")]),
+            single_file_source,
             move |_| {
                 crate::runtime::source::require_blocking_section_releases_worker(caller);
                 Ok(0)
@@ -1040,13 +1211,16 @@ mod tests {
         let caller = std::thread::current().id();
         let admission = MemoryHostAdmission::default();
         let cancellation = ObservationCancellation::default();
-        let capture = capture_snapshot_observations::<TestSnapshotRecord, _, _, _>(
+        let mut sweep = SourceSweep::new("test", None);
+        let capture = capture_snapshot_observations::<TestSnapshotRecord, _, _, _, _>(
             &admission,
             "test",
             ObservationScopeV1::Profile,
             &cancellation,
             None,
+            &mut sweep,
             || discovery(vec![PathBuf::from("session.snapshot")]),
+            single_file_source,
             |_| Ok(0),
             move |_| {
                 crate::runtime::source::require_blocking_section_releases_worker(caller);
@@ -1065,12 +1239,13 @@ mod tests {
         let (heartbeat_tx, heartbeat_rx) = std::sync::mpsc::channel();
         let (sleep_end_tx, sleep_end_rx) = std::sync::mpsc::channel();
         tokio::spawn(async move {
-            capture_snapshot_observations::<TestSnapshotRecord, _, _, _>(
+            capture_snapshot_observations::<TestSnapshotRecord, _, _, _, _>(
                 &MemoryHostAdmission::default(),
                 "test",
                 ObservationScopeV1::Profile,
                 &ObservationCancellation::default(),
                 None,
+                &mut SourceSweep::new("test", None),
                 move || {
                     handle.spawn(async move {
                         let _ = heartbeat_tx.send(std::time::Instant::now());
@@ -1082,6 +1257,7 @@ mod tests {
                     let _ = sleep_end_tx.send(std::time::Instant::now());
                     discovery(Vec::new())
                 },
+                single_file_source,
                 |_| Ok(0),
                 |_| Ok(None),
             )
@@ -1127,7 +1303,9 @@ mod tests {
             ObservationScopeV1::Profile,
             &ObservationCancellation::default(),
             None,
+            &mut SourceSweep::new("test", None),
             || discovery(vec![PathBuf::from("session.snapshot")]),
+            single_file_source,
             |_| Ok(1),
             {
                 let record = record.clone();
@@ -1165,7 +1343,9 @@ mod tests {
             ObservationScopeV1::Profile,
             &ObservationCancellation::default(),
             None,
+            &mut SourceSweep::new("test", None),
             || discovery(vec![PathBuf::from("session-window.snapshot")]),
+            single_file_source,
             |_| Ok(1),
             move |_| {
                 Ok(Some(vec![SnapshotAdmissionBatch::new(
@@ -1195,13 +1375,15 @@ mod tests {
         let cancellation = ObservationCancellation::default();
         cancellation.cancel();
 
-        let error = capture_snapshot_observations::<TestSnapshotRecord, _, _, _>(
+        let error = capture_snapshot_observations::<TestSnapshotRecord, _, _, _, _>(
             &PanicHostAdmission,
             "test",
             ObservationScopeV1::Profile,
             &cancellation,
             None,
+            &mut SourceSweep::new("test", None),
             || discovery(Vec::new()),
+            single_file_source,
             |_| Ok(0),
             |_| Ok(None),
         )
@@ -1228,10 +1410,12 @@ mod tests {
             ObservationScopeV1::Profile,
             &cancellation,
             None,
+            &mut SourceSweep::new("test", None),
             {
                 let path = path.clone();
                 move || discovery(vec![path])
             },
+            single_file_source,
             |_| Ok(1),
             move |_| {
                 Ok(Some(vec![SnapshotAdmissionBatch::new(
@@ -1272,7 +1456,9 @@ mod tests {
             ObservationScopeV1::Profile,
             &ObservationCancellation::default(),
             None,
+            &mut SourceSweep::new("test", None),
             move || discovery(vec![path]),
+            single_file_source,
             |_| Ok(1),
             move |_| {
                 Ok(Some(vec![SnapshotAdmissionBatch::new(
@@ -1286,5 +1472,97 @@ mod tests {
 
         assert_eq!(retry.stats.messages_upserted, 1);
         assert_eq!(admission.observations().len(), 1);
+    }
+
+    fn session_record(session_id: &str, order: u64) -> TestSnapshotRecord {
+        let native_record_id = format!("{session_id}-{order}");
+        TestSnapshotRecord {
+            source_key: None,
+            session_id: session_id.to_owned(),
+            native_record_id: native_record_id.clone(),
+            order,
+            payload: serde_json::to_vec(&serde_json::json!({
+                "provider": "test",
+                "session_id": session_id,
+                "message_id": native_record_id,
+                "role": "user",
+                "ordinal": order,
+                "text": format!("record {order}")
+            }))
+            .unwrap(),
+        }
+    }
+
+    fn refusal(status: HostAdmissionStatus, retryable: bool) -> HostAdmissionOutcome {
+        HostAdmissionOutcome {
+            status,
+            retryable,
+            reason_code: Some("observation_cursor_advance_ledger_disagreement"),
+            recovery: None,
+            cause: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_permanently_refused_session_does_not_stop_its_window() {
+        let admission = MemoryHostAdmission::default();
+        let scope = ObservationScopeV1::Profile;
+        let cancellation = ObservationCancellation::default();
+        let generation = ObservationSourceGenerationV1::new(1).unwrap();
+        let load = move || {
+            Ok(Some(vec![SnapshotAdmissionBatch::new(
+                generation,
+                vec![
+                    session_record("refused", 0),
+                    session_record("healthy", 0),
+                    session_record("refused", 1),
+                ],
+            )]))
+        };
+        admission
+            .fail_captures_for_session("refused", refusal(HostAdmissionStatus::Degraded, false));
+        let mut runner = SnapshotAdmissionRunner::new("test", None);
+
+        let refusals = runner
+            .admit_batch(&admission, 1, &scope, &cancellation, load)
+            .await
+            .expect("a permanent refusal is handed back, not raised");
+
+        assert_eq!(
+            refusals
+                .iter()
+                .map(|refusal| refusal.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["refused"]
+        );
+        let admitted = admission
+            .observations()
+            .iter()
+            .map(|stored| {
+                stored
+                    .observation()
+                    .source()
+                    .session_id()
+                    .as_str()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(admitted, ["healthy"], "the healthy neighbour is admitted");
+        assert_eq!(
+            admission.failed_session_capture_attempts(),
+            2,
+            "the window and the first refused record are attempted; the refused \
+             source's later record is not"
+        );
+
+        admission.fail_captures_for_session(
+            "refused",
+            refusal(HostAdmissionStatus::Backpressured, true),
+        );
+        let error = runner
+            .admit_batch(&admission, 1, &scope, &cancellation, load)
+            .await
+            .expect_err("a retryable refusal still fails the batch");
+        assert!(classify_transcript_ingest_disposition(&error).retryable);
     }
 }

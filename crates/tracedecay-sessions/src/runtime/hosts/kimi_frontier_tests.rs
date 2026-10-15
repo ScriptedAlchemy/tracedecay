@@ -6,7 +6,8 @@ use crate::observation::ObservationCancellation;
 use crate::runtime::hosts::codex::CodexDiscoveryHub;
 
 use super::{
-    KIMI_DISCOVERY_FRONTIER_KEY, KimiSource, MAX_SESSION_FILES, capture_kimi_observations,
+    KIMI_DISCOVERY_FRONTIER_KEY, KimiSource, MAX_SESSION_FILES, PROVIDER, SourceSweep,
+    capture_kimi_observations, capture_kimi_sweep,
 };
 
 fn populated_source(
@@ -80,7 +81,6 @@ async fn empty_host_is_observed_once_without_revising_unchanged_frontier() {
             scope.clone(),
             None,
             &ObservationCancellation::default(),
-            None,
         )
         .await
         .unwrap();
@@ -119,14 +119,14 @@ async fn durable_queue_revisits_a_recreated_entry() {
     // the coverage receipt, rather than on two wakes fitting a busy host.
     loop {
         let before = admission.observations().len();
-        let outcome = capture_kimi_observations(
+        let outcome = capture_kimi_sweep(
             &admission,
             &source,
             &project,
             ObservationScopeV1::Profile,
             None,
             &ObservationCancellation::default(),
-            Some((&hub, "kimi-frontier")),
+            &mut SourceSweep::new(PROVIDER, Some((&hub, "kimi-frontier"))),
         )
         .await
         .unwrap();
@@ -154,14 +154,14 @@ async fn durable_queue_revisits_a_recreated_entry() {
     .unwrap();
 
     loop {
-        let outcome = capture_kimi_observations(
+        let outcome = capture_kimi_sweep(
             &admission,
             &KimiSource::with_share_dir(&source.share_dir),
             &project,
             ObservationScopeV1::Profile,
             None,
             &ObservationCancellation::default(),
-            Some((&hub, "kimi-frontier")),
+            &mut SourceSweep::new(PROVIDER, Some((&hub, "kimi-frontier"))),
         )
         .await
         .unwrap();
@@ -192,7 +192,6 @@ async fn cancelled_discovery_does_not_advance_the_durable_frontier() {
         ObservationScopeV1::Profile,
         None,
         &cancellation,
-        None,
     )
     .await
     .unwrap();
@@ -241,7 +240,6 @@ async fn cancellation_after_discovery_preserves_the_exact_frontier() {
         scope.clone(),
         None,
         &cancellation,
-        None,
     )
     .await
     .unwrap();

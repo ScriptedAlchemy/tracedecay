@@ -49,6 +49,14 @@ mod quarantine_codex_tests;
 #[cfg(test)]
 mod quarantine_contract;
 #[cfg(test)]
+mod quarantine_cursor_tests;
+#[cfg(test)]
 mod quarantine_hermes_tests;
+#[cfg(test)]
+mod quarantine_jsonl_tests;
+#[cfg(test)]
+mod quarantine_opencode_tests;
+#[cfg(test)]
+mod quarantine_snapshot_tests;
 #[cfg(test)]
 mod tests;

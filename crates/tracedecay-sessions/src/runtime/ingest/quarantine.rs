@@ -134,16 +134,7 @@ impl Witness {
             len,
         }
     }
-}
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the snapshot providers adopt multi-file witnesses"
-    )
-)]
-impl Witness {
     fn settled_files(members: &[PathBuf]) -> TranscriptIngestResult<Option<Self>> {
         let mut hasher = Sha256::new();
         hasher.update(b"tracedecay-source-member-files-witness-v1");
@@ -332,6 +323,34 @@ impl SourceSweep {
         SourceClaim::observe_file(self.provider, self.ledger.clone(), path).await
     }
 
+    pub(crate) fn observe_stream(
+        &mut self,
+        container: &Path,
+        stream: &str,
+        content: &[&[u8]],
+    ) -> Option<SourceClaim> {
+        let key = SourceKey {
+            origin: container.to_path_buf(),
+            stream: Some(stream.into()),
+        };
+        if self.blocked.contains(&key) {
+            return None;
+        }
+        let witness = Witness::content(content);
+        if self
+            .ledger
+            .as_ref()
+            .is_some_and(|ledger| ledger.holds(&key, witness))
+        {
+            self.blocked.insert(key);
+            return None;
+        }
+        Some(SourceClaim {
+            settled: self.ledger.clone().map(|ledger| (ledger, witness)),
+            key,
+        })
+    }
+
     pub(crate) fn refused<E: SourceFailure>(
         &mut self,
         claim: SourceClaim,
@@ -366,44 +385,6 @@ impl SourceSweep {
         outcome.failures.splice(0..0, self.failures);
     }
 
-    pub(crate) fn observe_stream(
-        &mut self,
-        container: &Path,
-        stream: &str,
-        content: &[&[u8]],
-    ) -> Option<SourceClaim> {
-        let key = SourceKey {
-            origin: container.to_path_buf(),
-            stream: Some(stream.into()),
-        };
-        if self.blocked.contains(&key) {
-            return None;
-        }
-        let witness = Witness::content(content);
-        if self
-            .ledger
-            .as_ref()
-            .is_some_and(|ledger| ledger.holds(&key, witness))
-        {
-            self.blocked.insert(key);
-            return None;
-        }
-        Some(SourceClaim {
-            settled: self.ledger.clone().map(|ledger| (ledger, witness)),
-            key,
-        })
-    }
-}
-
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the snapshot providers adopt these observations")
-)]
-impl SourceSweep {
-    #[expect(
-        dead_code,
-        reason = "the JSONL providers observe through it on their blocking threads"
-    )]
     pub(crate) fn ledger(&self) -> Option<SourceLedger> {
         self.ledger.clone()
     }
