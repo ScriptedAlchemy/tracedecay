@@ -333,8 +333,11 @@ impl SessionHistoricalIngestor for BlockThirdHistoricalIngestor {
                     }
                 }
                 _ => {
+                    // notify_waiters reaches only futures that already exist,
+                    // and the test releases as soon as it sees third_entered.
+                    let released = self.release_third.notified();
                     self.third_entered.send_replace(true);
-                    self.release_third.notified().await;
+                    released.await;
                     SessionHistoricalIngestOutcome::Blocked {
                         reason_code: "fixture_complete".to_owned(),
                         made_progress: false,

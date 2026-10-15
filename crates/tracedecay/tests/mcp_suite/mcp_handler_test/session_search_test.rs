@@ -1392,3 +1392,224 @@ fn refusal_problem(error: &str) -> Value {
         .or_else(|| envelope.get("problem").cloned())
         .unwrap_or_else(|| panic!("retained refusal has no problem record: {envelope}"))
 }
+
+const CURRENT_CODEX_PROMPT: &str = "Find the cobalt orchard scheduler migration";
+const CURRENT_CODEX_REPLY: &str = "The cobalt orchard scheduler migration is ready for review";
+const CURRENT_CODEX_SESSION: &str = "production-codex-current-pair";
+
+/// One turn as current Codex writes it: the prompt as a `response_item`
+/// message and then an `item_completed/UserMessage` event, the reply as an
+/// `item_completed/AgentMessage` event and then a `response_item` message.
+#[cfg(feature = "test-transport")]
+fn current_codex_rollout(project: &Path) -> [Value; 5] {
+    let passthrough = json!({"turn_id": "turn-current-1"});
+    [
+        json!({
+            "timestamp": "2026-08-02T00:00:00.000Z",
+            "type": "session_meta",
+            "payload": {"id": CURRENT_CODEX_SESSION, "cwd": project},
+        }),
+        json!({
+            "timestamp": "2026-08-02T00:00:01.000Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "msg-user-current-1",
+                "role": "user",
+                "content": [{"type": "input_text", "text": CURRENT_CODEX_PROMPT}],
+                "internal_chat_message_metadata_passthrough": passthrough,
+            },
+        }),
+        json!({
+            "timestamp": "2026-08-02T00:00:01.004Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": CURRENT_CODEX_SESSION,
+                "turn_id": "turn-current-1",
+                "item": {
+                    "type": "UserMessage",
+                    "id": "user-item-current-1",
+                    "content": [{"type": "text", "text": CURRENT_CODEX_PROMPT}],
+                },
+            },
+        }),
+        json!({
+            "timestamp": "2026-08-02T00:00:02.000Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": CURRENT_CODEX_SESSION,
+                "turn_id": "turn-current-1",
+                "item": {
+                    "type": "AgentMessage",
+                    "id": "msg-assistant-current-1",
+                    "content": [{"type": "Text", "text": CURRENT_CODEX_REPLY}],
+                },
+            },
+        }),
+        json!({
+            "timestamp": "2026-08-02T00:00:02.001Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "msg-assistant-current-1",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": CURRENT_CODEX_REPLY}],
+                "internal_chat_message_metadata_passthrough": passthrough,
+            },
+        }),
+    ]
+}
+
+#[cfg(feature = "test-transport")]
+fn write_current_codex_rollout(transcripts: &Path, records: &[Value]) {
+    let sessions = transcripts.join(".codex/sessions/2026/08/02");
+    std::fs::create_dir_all(&sessions).expect("create isolated Codex sessions directory");
+    std::fs::write(
+        sessions.join("rollout-production-codex-current-pair.jsonl"),
+        records
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .expect("write current Codex rollout");
+}
+
+#[cfg(feature = "test-transport")]
+async fn ingest_codex(harness: &ProductionProjectCompositionHarnessV1, project: &Path) {
+    call_tool_when_ready(
+        harness,
+        project,
+        "tracedecay_hook_runtime",
+        json!({"action": "ingest_transcript", "provider": "codex", "user_scope": false, "format": "json"}),
+    )
+    .await;
+}
+
+/// `message_search`, `lcm_grep` and `lcm_load_session` each answer the
+/// current Codex prompt and reply once.
+#[cfg(feature = "test-transport")]
+async fn assert_current_codex_turns_once(
+    harness: &ProductionProjectCompositionHarnessV1,
+    project: &Path,
+) {
+    let payload = production_codex_message_search(harness, project).await;
+    let texts = payload["results"]
+        .as_array()
+        .expect("message search results")
+        .iter()
+        .filter_map(|result| result["message"]["text"].as_str())
+        .collect::<Vec<_>>();
+    for turn in [CURRENT_CODEX_PROMPT, CURRENT_CODEX_REPLY] {
+        assert_eq!(
+            texts.iter().filter(|text| **text == turn).count(),
+            1,
+            "message_search answers {turn:?} once: {payload}"
+        );
+    }
+    let grep = call_production_tool(
+        harness,
+        project,
+        "tracedecay_lcm_grep",
+        json!({"query": "cobalt orchard", "provider": "codex", "limit": 10, "format": "json"}),
+    )
+    .await;
+    assert_eq!(
+        grep["count"], 2,
+        "lcm_grep answers one hit per turn: {grep}"
+    );
+    let loaded = call_production_tool(
+        harness,
+        project,
+        "tracedecay_lcm_load_session",
+        json!({
+            "provider": "codex",
+            "session_id": CURRENT_CODEX_SESSION,
+            "limit": 10,
+            "format": "json"
+        }),
+    )
+    .await;
+    let contents = loaded["messages"]
+        .as_array()
+        .expect("loaded session messages")
+        .iter()
+        .filter_map(|message| message["content"].as_str())
+        .collect::<Vec<_>>();
+    for turn in [CURRENT_CODEX_PROMPT, CURRENT_CODEX_REPLY] {
+        assert_eq!(
+            contents.iter().filter(|content| **content == turn).count(),
+            1,
+            "the loaded session holds {turn:?} once: {loaded}"
+        );
+    }
+}
+
+#[cfg(feature = "test-transport")]
+async fn current_codex_harness(
+    isolation: &Path,
+    project: &Path,
+) -> ProductionProjectCompositionHarnessV1 {
+    std::fs::create_dir_all(project).expect("production composition project");
+    fixture::write_indexed_fixture_sources(project);
+    commit_worktree(project, "production Codex transcript fixture");
+    crate::support::seeded_composition::open_for_session_retrieval(
+        isolation,
+        [project.to_path_buf()],
+    )
+    .await
+    .expect("production composition harness")
+}
+
+#[cfg(feature = "test-transport")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_codex_current_rollout_searches_each_turn_once() {
+    let root = test_temp_dir();
+    let isolation = root.path().join("composition");
+    let transcripts = composed_transcript_home(&isolation);
+    let project = isolation.join("project");
+    write_current_codex_rollout(&transcripts, &current_codex_rollout(&project));
+    let harness = current_codex_harness(&isolation, &project).await;
+    ingest_codex(&harness, &project).await;
+
+    assert_current_codex_turns_once(&harness, &project).await;
+    harness.shutdown().await;
+}
+
+/// The prompt's `response_item` can be read, projected and served before
+/// Codex appends its `item_completed` event. The event still leaves one turn.
+#[cfg(feature = "test-transport")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_codex_appended_prompt_event_replaces_the_served_echo() {
+    let root = test_temp_dir();
+    let isolation = root.path().join("composition");
+    let transcripts = composed_transcript_home(&isolation);
+    let project = isolation.join("project");
+    let records = current_codex_rollout(&project);
+    write_current_codex_rollout(&transcripts, &records[..2]);
+    let harness = current_codex_harness(&isolation, &project).await;
+    ingest_codex(&harness, &project).await;
+    let served = loop {
+        let payload = production_codex_message_search_once(&harness, &project).await;
+        if !matches!(payload["outcome"].as_str(), Some("partial" | "stale"))
+            && payload["results"]
+                .as_array()
+                .is_some_and(|results| !results.is_empty())
+        {
+            break payload;
+        }
+        tokio::task::yield_now().await;
+    };
+    assert_eq!(
+        served["results"][0]["message"]["text"], CURRENT_CODEX_PROMPT,
+        "the echo is served before its event exists: {served}"
+    );
+
+    write_current_codex_rollout(&transcripts, &records);
+    ingest_codex(&harness, &project).await;
+    assert_current_codex_turns_once(&harness, &project).await;
+    harness.shutdown().await;
+}

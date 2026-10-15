@@ -245,6 +245,61 @@ impl<F: Future> Future for Timeout<F> {
     }
 }
 
+/// The most CPU time one poll of a [`NativeTask`] may take in a debug build.
+///
+/// A one-worker runtime has no follower to take the reactor while its worker
+/// is inside a poll, and a `block_on` root never turns the reactor. Every
+/// socket wake and timer on that runtime waits for the poll to return (#3994,
+/// upstream Dicklesworthstone/asupersync#83, whose multi-worker half Bazel
+/// patches in).
+pub const LONG_POLL_CPU: Duration = Duration::from_millis(250);
+
+/// Fails a debug build's native task when one poll exceeds [`LONG_POLL_CPU`]
+/// of thread CPU time. CPU time, not wall time, so a worker descheduled on a
+/// loaded host does not trip it.
+#[cfg(all(debug_assertions, unix))]
+struct LongPollGuard<F> {
+    work: F,
+    site: &'static std::panic::Location<'static>,
+}
+
+#[cfg(all(debug_assertions, unix))]
+impl<F: Future + Unpin> Future for LongPollGuard<F> {
+    type Output = F::Output;
+
+    fn poll(mut self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<F::Output> {
+        let started = thread_cpu_time();
+        let poll = Pin::new(&mut self.work).poll(task);
+        if let (Some(started), Some(ended)) = (started, thread_cpu_time()) {
+            let spent = ended.saturating_sub(started);
+            assert!(
+                spent <= LONG_POLL_CPU,
+                "native task spawned at {} spent {spent:?} of CPU in one poll, past \
+                 {LONG_POLL_CPU:?}; move its synchronous work to native_runtime::spawn_blocking \
+                 (#3994)",
+                self.site,
+            );
+        }
+        poll
+    }
+}
+
+#[cfg(all(debug_assertions, unix))]
+fn thread_cpu_time() -> Option<Duration> {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `now` is a valid, exclusively borrowed `timespec` for the call.
+    let status = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &raw mut now) };
+    (status == 0).then(|| {
+        Duration::new(
+            u64::try_from(now.tv_sec).unwrap_or(0),
+            u32::try_from(now.tv_nsec).unwrap_or(0),
+        )
+    })
+}
+
 /// How a [`NativeTask`] ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NativeTaskOutcome<T> {
@@ -270,6 +325,10 @@ impl<T: Clone + Send + Sync + 'static> NativeTask<T> {
     /// Spawns `work` on the runtime the caller runs on, or the process
     /// runtime. The runtime owns it, not the caller's region, so it outlives
     /// the request that started it.
+    ///
+    /// `work` must not run CPU-heavy synchronous code inside one poll; see
+    /// [`LONG_POLL_CPU`]. Queue that part with [`spawn_blocking`].
+    #[track_caller]
     pub fn spawn<F>(work: F) -> Result<Self, String>
     where
         F: Future<Output = T> + Send + 'static,
@@ -278,6 +337,11 @@ impl<T: Clone + Send + Sync + 'static> NativeTask<T> {
         // Boxed so the runtime's own spawn wrappers do not nest `work` in
         // their `Send` proof (rust-lang/rust#159228).
         let work: BoxFuture<'static, T> = Box::pin(work);
+        #[cfg(all(debug_assertions, unix))]
+        let work = LongPollGuard {
+            work,
+            site: std::panic::Location::caller(),
+        };
         let (work, abort) = abortable(work);
         let join = runtime
             .try_spawn_checked(work)
@@ -1002,6 +1066,105 @@ mod tests {
         assert_eq!(
             install(RuntimeBuilder::multi_thread()).err(),
             Some(InstallError::AlreadyStarted)
+        );
+    }
+
+    const SPIN: Duration = Duration::from_millis(150);
+    const WAKE_BOUND: Duration = Duration::from_millis(40);
+
+    fn spin(duration: Duration) {
+        let spun = Instant::now();
+        while spun.elapsed() < duration {
+            std::hint::spin_loop();
+        }
+    }
+
+    /// #3994: on two workers, task A wakes on its socket, so the idle reactor
+    /// leader runs it, then spins for [`SPIN`], inline in that poll or on the
+    /// blocking pool. Task B's socket becomes readable 10 ms into the spin.
+    /// Returns how long after that B woke.
+    fn socket_wake_behind_a_spinning_task(spin_on_blocking_pool: bool) -> Duration {
+        use asupersync::io::AsyncReadExt;
+        use asupersync::net::unix::UnixStream;
+        use std::io::Write;
+
+        let runtime = RuntimeBuilder::multi_thread()
+            .worker_threads(2)
+            .blocking_threads(1, 1)
+            .build()
+            .expect("test runtime");
+        let (mut a_tx, a_rx) = std::os::unix::net::UnixStream::pair().expect("socket a");
+        let (mut b_tx, b_rx) = std::os::unix::net::UnixStream::pair().expect("socket b");
+        let (woke, wakes) = std::sync::mpsc::channel::<(char, Instant)>();
+        let spawn_reader = |name: char, rx: std::os::unix::net::UnixStream, then: Duration| {
+            let woke = woke.clone();
+            runtime
+                .handle()
+                .try_spawn(async move {
+                    rx.set_nonblocking(true).expect("nonblocking");
+                    let mut rx = UnixStream::from_std(rx).expect("native socket");
+                    rx.read_exact(&mut [0_u8; 1]).await.expect("read");
+                    let _ = woke.send((name, Instant::now()));
+                    if spin_on_blocking_pool {
+                        spawn_blocking(move || spin(then)).await.expect("pool spin");
+                    } else {
+                        spin(then);
+                    }
+                })
+                .expect("spawn reader")
+        };
+        let _a = spawn_reader('a', a_rx, SPIN);
+        let _b = spawn_reader('b', b_rx, Duration::ZERO);
+        // Both readers park on the reactor and both workers go idle.
+        std::thread::sleep(Duration::from_millis(100));
+
+        a_tx.write_all(b"a").expect("wake a");
+        assert_eq!(wakes.recv_timeout(HANG_GUARD).expect("a wakes").0, 'a');
+        std::thread::sleep(Duration::from_millis(10));
+        let readable = Instant::now();
+        b_tx.write_all(b"b").expect("wake b");
+        let (name, woke_at) = wakes.recv_timeout(HANG_GUARD).expect("b wakes");
+        assert_eq!(name, 'b');
+        woke_at.duration_since(readable)
+    }
+
+    #[test]
+    fn a_long_poll_does_not_delay_another_tasks_socket_wake() {
+        let latency = socket_wake_behind_a_spinning_task(false);
+        assert!(
+            latency < WAKE_BOUND,
+            "b woke {latency:?} after its socket became readable, behind a's {SPIN:?} poll"
+        );
+    }
+
+    #[test]
+    fn work_on_the_blocking_pool_does_not_delay_another_tasks_socket_wake() {
+        let latency = socket_wake_behind_a_spinning_task(true);
+        assert!(
+            latency < WAKE_BOUND,
+            "b woke {latency:?} after its socket became readable, behind a's {SPIN:?} pool spin"
+        );
+    }
+
+    #[cfg(all(debug_assertions, unix))]
+    #[test]
+    fn a_native_task_poll_past_the_cpu_bound_fails_in_debug_builds() {
+        let runtime = RuntimeBuilder::multi_thread()
+            .worker_threads(1)
+            .build()
+            .expect("test runtime");
+        let outcome = runtime.block_on(async {
+            NativeTask::spawn(async { spin(LONG_POLL_CPU + Duration::from_millis(50)) })
+                .expect("native task")
+                .wait()
+                .await
+        });
+        let NativeTaskOutcome::Panicked(payload) = outcome else {
+            panic!("a {LONG_POLL_CPU:?} poll must fail the task, got {outcome:?}");
+        };
+        assert!(
+            payload.to_string().contains("spawn_blocking"),
+            "the failure names the remedy: {payload}"
         );
     }
 
