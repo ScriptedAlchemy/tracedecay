@@ -27,7 +27,10 @@ pub(super) use persist::persist_session_temporal_projection_batch_in_transaction
 use receipts::full_projection_coverage;
 pub(super) use receipts::validate_final_projection_receipt;
 pub(crate) use receipts::{base_source_frontier, digest_bytes};
-pub use receipts::{record_canonical_observation_effect, request_session_temporal_reset};
+pub use receipts::{
+    record_canonical_observation_effect, request_session_temporal_reset,
+    request_session_temporal_reset_if_materialized,
+};
 
 const DISCOVER_REFRESH: &str = "discover session temporal refresh";
 const MATERIALIZE_REFRESH: &str = "materialize session temporal refresh";

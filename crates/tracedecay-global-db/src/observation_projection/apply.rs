@@ -32,7 +32,9 @@ use super::transition::{
     MessageTransition, MessageTransitionState, WorkflowFactTarget, WorkflowFactTransition,
     message_transition, write_workflow_fact_transition,
 };
-use tracedecay_session_temporal_store::request_session_temporal_reset;
+use tracedecay_session_temporal_store::{
+    request_session_temporal_reset, request_session_temporal_reset_if_materialized,
+};
 
 fn decode_canonical_envelope(
     payload: &serde_json::Value,
@@ -1088,51 +1090,51 @@ async fn reconcile_projected_codex_goal_response(
     else {
         return Ok(());
     };
+    retire_replaced_codex_output(conn, current.provider.as_str(), &response_message_id).await
+}
+
+/// Retires the output `message_id` that another Codex record of the same
+/// message replaces. Its row, provenance and output state go, each owning
+/// observation settles as an `output_collision` skip, and a session temporal
+/// generation that already holds it is rebuilt.
+pub(super) async fn retire_replaced_codex_output(
+    conn: &impl Executor,
+    provider: &str,
+    message_id: &str,
+) -> ProjectionStoreResult<()> {
     let mut provenance_rows = conn
         .query(
             "SELECT observation_id, receipt_id
              FROM observation_projection_provenance
              WHERE projector_version = ?1 AND output_provider = ?2 AND output_message_id = ?3",
-            params![
-                SESSION_MESSAGE_PROJECTOR_VERSION,
-                current.provider.as_str(),
-                response_message_id.as_str(),
-            ],
+            params![SESSION_MESSAGE_PROJECTOR_VERSION, provider, message_id],
         )
         .await
-        .map_err(|error| storage("read paired Codex goal provenance", error))?;
+        .map_err(|error| storage("read replaced Codex provenance", error))?;
     let mut replaced_observations = Vec::new();
     while let Some(row) = provenance_rows
         .next()
         .await
-        .map_err(|error| storage("read paired Codex goal provenance", error))?
+        .map_err(|error| storage("read replaced Codex provenance", error))?
     {
         replaced_observations.push((
             row.get::<String>(0)
-                .map_err(|error| storage("read paired Codex goal provenance", error))?,
+                .map_err(|error| storage("read replaced Codex provenance", error))?,
             row.get::<String>(1)
-                .map_err(|error| storage("read paired Codex goal provenance", error))?,
+                .map_err(|error| storage("read replaced Codex provenance", error))?,
         ));
     }
     drop(provenance_rows);
-    delete_projected_output(
-        conn,
-        current.provider.as_str(),
-        response_message_id.as_str(),
-    )
-    .await?;
+    delete_projected_output(conn, provider, message_id).await?;
     conn.execute(
         "DELETE FROM observation_projection_provenance
          WHERE projector_version = ?1 AND output_provider = ?2 AND output_message_id = ?3",
-        params![
-            SESSION_MESSAGE_PROJECTOR_VERSION,
-            current.provider.as_str(),
-            response_message_id.as_str(),
-        ],
+        params![SESSION_MESSAGE_PROJECTOR_VERSION, provider, message_id],
     )
     .await
-    .map_err(|error| storage("remove paired Codex goal provenance", error))?;
+    .map_err(|error| storage("remove replaced Codex provenance", error))?;
     for (observation_id, receipt_id) in replaced_observations {
+        request_session_temporal_reset_if_materialized(conn, &observation_id).await?;
         conn.execute(
             "INSERT INTO observation_projection_dispositions
                 (projector_version, observation_id, receipt_id, reason)
@@ -1146,20 +1148,16 @@ async fn reconcile_projected_codex_goal_response(
             ],
         )
         .await
-        .map_err(|error| storage("retire paired Codex goal observation", error))?;
+        .map_err(|error| storage("retire replaced Codex observation", error))?;
     }
     conn.execute(
         "DELETE FROM temp.observation_projection_output_state
          WHERE projector_version = ?1 AND output_provider = ?2 AND output_message_id = ?3",
-        params![
-            SESSION_MESSAGE_PROJECTOR_VERSION,
-            current.provider.as_str(),
-            response_message_id.as_str(),
-        ],
+        params![SESSION_MESSAGE_PROJECTOR_VERSION, provider, message_id],
     )
     .await
     .map(|_| ())
-    .map_err(|error| storage("remove paired Codex goal output state", error))
+    .map_err(|error| storage("remove replaced Codex output state", error))
 }
 
 /// Replaces the stored output row with the one this binary derives.
@@ -1433,6 +1431,7 @@ async fn apply_rows(
         MessageTransition::Supersede => supersede_projected_message(conn, message).await?,
         MessageTransition::Retain => {}
     }
+    super::codex_echo::retire_codex_response_echo(conn, observation, message).await?;
     Ok(transition == MessageTransition::Insert)
 }
 
