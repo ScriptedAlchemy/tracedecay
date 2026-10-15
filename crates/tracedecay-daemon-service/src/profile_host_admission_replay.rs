@@ -14,7 +14,6 @@ use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 #[cfg(test)]
 use tokio::task::JoinSet;
-use tokio_util::task::AbortOnDropHandle;
 
 use tracedecay_daemon_identity::authority;
 use tracedecay_host_admission::{
@@ -23,6 +22,7 @@ use tracedecay_host_admission::{
 };
 use tracedecay_runtime_core::native_runtime::{self, NativeTask};
 use tracedecay_sessions::admission::HostAdmissionOutcome;
+use tracing::instrument::WithSubscriber as _;
 
 const IDLE_EVICTION_AFTER: Duration = Duration::from_secs(30);
 const BOOTSTRAP_RUNNING: u8 = 0;
@@ -125,7 +125,13 @@ impl Drop for ReplayWorkerEntry {
 
 struct ProfileHostAdmissionBootstrapEntry {
     worker: Arc<ProfileHostAdmissionBootstrapWorker>,
-    task: AbortOnDropHandle<()>,
+    task: NativeTask<()>,
+}
+
+impl Drop for ProfileHostAdmissionBootstrapEntry {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 struct ProfileHostAdmissionBootstrapWorker {
@@ -234,19 +240,22 @@ impl ProfileHostAdmissionReplayRegistry {
             Arc::clone(&self.cancellation),
             self.bootstrap_retry_budget,
         ));
-        // The production operation opens its broker on Tokio's blocking pool
-        // (`open_host_admission_broker` in the daemon's branch admin).
-        let Some(runtime) = native_runtime::tokio_handle("daemon-service.host_admission.bootstrap")
-        else {
-            return;
-        };
         let task_worker = Arc::clone(&worker);
-        let task = AbortOnDropHandle::new(runtime.spawn(tracing::Instrument::instrument(
+        let run = tracing::Instrument::instrument(
             async move {
                 task_worker.run(operation).await;
             },
             tracing::trace_span!("daemon.authority.host_admission.bootstrap.run"),
-        )));
+        );
+        // The worker's events go to the caller's subscriber, the one its span
+        // was created under, whichever native thread polls it.
+        let task = match NativeTask::spawn(run.with_current_subscriber()) {
+            Ok(task) => task,
+            Err(error) => {
+                tracing::error!(%error, "profile host-admission bootstrap worker was not started");
+                return;
+            }
+        };
         workers.insert(
             profile_root,
             ProfileHostAdmissionBootstrapEntry { worker, task },
@@ -381,7 +390,7 @@ impl ProfileHostAdmissionReplayRegistry {
             entry.task.wait().await;
         }
         for entry in bootstrap_entries {
-            let _ = entry.task.await;
+            entry.task.wait().await;
         }
     }
 
@@ -934,7 +943,9 @@ mod tests {
             let attempts = Arc::clone(&operation_attempts);
             Box::pin(async move {
                 attempts.fetch_add(1, Ordering::AcqRel);
-                tokio::time::sleep(Duration::from_millis(40)).await;
+                native_runtime::sleep_until(Instant::now() + Duration::from_millis(40))
+                    .await
+                    .expect("native timer");
                 Ok(())
             })
         });
@@ -1820,6 +1831,48 @@ mod tests {
             tracedecay_rusqlite_runtime::exact_sql::native_thread_writer_waits(),
             writer_waits
         );
+    }
+
+    /// A bootstrap ensured by a caller with no Tokio runtime runs its
+    /// operation on the native runtime, and shutdown joins it there.
+    #[test]
+    fn a_bootstrap_ensured_off_tokio_completes_and_joins() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let profile_root = temp.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        let registry = ProfileHostAdmissionReplayRegistry::default();
+        let ran_on_tokio = Arc::new(AtomicBool::new(true));
+        let operation_ran_on_tokio = Arc::clone(&ran_on_tokio);
+        let operation: ProfileHostAdmissionBootstrapOperation = Arc::new(move || {
+            let ran_on_tokio = Arc::clone(&operation_ran_on_tokio);
+            Box::pin(async move {
+                ran_on_tokio.store(
+                    tokio::runtime::Handle::try_current().is_ok(),
+                    Ordering::Release,
+                );
+                Ok(())
+            })
+        });
+
+        native_runtime::block_on(async {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            registry.ensure_bootstrap(&profile_root, operation).await;
+            assert_eq!(
+                registry
+                    .wait_bootstrap_completed(&profile_root, Duration::from_secs(10))
+                    .await,
+                BootstrapCompletion::Completed
+            );
+            assert!(matches!(
+                registry.bootstrap_status(&profile_root).await,
+                Some(ProfileHostAdmissionBootstrapStatus::Ready)
+            ));
+            native_runtime::timeout(Duration::from_secs(10), registry.shutdown())
+                .await
+                .expect("shutdown joins the native bootstrap worker");
+        })
+        .expect("native runtime");
+        assert!(!ran_on_tokio.load(Ordering::Acquire));
     }
 
     #[test]
