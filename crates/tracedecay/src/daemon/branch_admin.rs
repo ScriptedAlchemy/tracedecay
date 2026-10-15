@@ -124,9 +124,8 @@ struct MaintenanceReaperKey {
 
 #[cfg(unix)]
 struct MaintenanceReaperHandle {
-    retired_task: tokio::task::AbortHandle,
+    retired_task: Arc<native_runtime::NativeTask<()>>,
     termination: Arc<MaintenanceTaskTermination>,
-    _task: tokio::task::JoinHandle<()>,
 }
 
 #[cfg(unix)]
@@ -498,7 +497,7 @@ struct ManualBranchPublicationTasks {
     closed: AtomicBool,
     join_failed: AtomicBool,
     cancellation: CancellationToken,
-    tasks: tokio::sync::Mutex<tokio::task::JoinSet<()>>,
+    tasks: tokio::sync::Mutex<Vec<ManualBranchPublication>>,
 }
 
 #[cfg(unix)]
@@ -508,8 +507,41 @@ impl Default for ManualBranchPublicationTasks {
             closed: AtomicBool::new(false),
             join_failed: AtomicBool::new(false),
             cancellation: CancellationToken::new(),
-            tasks: tokio::sync::Mutex::new(tokio::task::JoinSet::new()),
+            tasks: tokio::sync::Mutex::new(Vec::new()),
         }
+    }
+}
+
+/// One admitted publication; dropping it aborts the task, as a dropped
+/// `JoinSet` did.
+#[cfg(unix)]
+struct ManualBranchPublication(native_runtime::NativeTask<()>);
+
+#[cfg(unix)]
+impl Drop for ManualBranchPublication {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+#[cfg(unix)]
+impl ManualBranchPublicationTasks {
+    /// Logs and records a publication that ended without completing.
+    fn record_join_failure(&self, action: &str, outcome: native_runtime::NativeTaskOutcome<()>) {
+        let reason = match outcome {
+            native_runtime::NativeTaskOutcome::Completed(()) => return,
+            native_runtime::NativeTaskOutcome::Cancelled => "task cancelled".to_owned(),
+            native_runtime::NativeTaskOutcome::Panicked(panic) => format!("task panicked: {panic}"),
+        };
+        self.join_failed.store(true, Ordering::Release);
+        log_daemon_event(
+            "manual_branch_publication",
+            &[
+                ("action", action.to_owned()),
+                ("outcome", "task_join_failed".to_owned()),
+                ("reason", reason),
+            ],
+        );
     }
 }
 
@@ -645,25 +677,26 @@ impl StoreAdministration {
                     "manual branch publication admission is closed",
                 ));
             }
-            while let Some(result) = tasks.try_join_next() {
-                if let Err(error) = result {
+            tasks.retain(|task| match task.0.try_finished() {
+                Some(outcome) => {
                     self.manual_branch_publications
-                        .join_failed
-                        .store(true, Ordering::Release);
-                    log_daemon_event(
-                        "manual_branch_publication",
-                        &[
-                            ("action", "reap".to_owned()),
-                            ("outcome", "task_join_failed".to_owned()),
-                            ("reason", error.to_string()),
-                        ],
-                    );
+                        .record_join_failure("reap", outcome);
+                    false
                 }
-            }
-            let cancellation = self.manual_branch_publications.cancellation.clone();
-            tasks.spawn(async move {
-                let _ = result_sender.send(publication(cancellation).await);
+                None => true,
             });
+            let cancellation = self.manual_branch_publications.cancellation.clone();
+            let task = native_runtime::NativeTask::spawn(async move {
+                let _ = result_sender.send(publication(cancellation).await);
+            })
+            .map_err(|error| {
+                TraceDecayError::project_route(
+                    "branch_tracking_failed",
+                    true,
+                    format!("manual branch publication could not start: {error}"),
+                )
+            })?;
+            tasks.push(ManualBranchPublication(task));
         }
         Ok(result_receiver)
     }
@@ -733,24 +766,14 @@ impl StoreAdministration {
         &self,
     ) -> std::result::Result<(), String> {
         self.cancel_manual_branch_publications();
-        let mut tasks = {
+        let tasks = {
             let mut owned = self.manual_branch_publications.tasks.lock().await;
             std::mem::take(&mut *owned)
         };
-        while let Some(result) = tasks.join_next().await {
-            if let Err(error) = result {
-                self.manual_branch_publications
-                    .join_failed
-                    .store(true, Ordering::Release);
-                log_daemon_event(
-                    "manual_branch_publication",
-                    &[
-                        ("action", "shutdown".to_owned()),
-                        ("outcome", "task_join_failed".to_owned()),
-                        ("reason", error.to_string()),
-                    ],
-                );
-            }
+        for task in tasks {
+            let outcome = task.0.wait().await;
+            self.manual_branch_publications
+                .record_join_failure("shutdown", outcome);
         }
         if self
             .manual_branch_publications
@@ -1444,7 +1467,7 @@ impl StoreAdministration {
         mut reservation: MaintenanceReaperReservation,
         kind: MaintenanceReaperKind,
         owner: ProjectServerKey,
-        task: tokio::task::JoinHandle<()>,
+        task: native_runtime::NativeTask<()>,
         termination: Arc<MaintenanceTaskTermination>,
         cleanup: F,
     ) where
@@ -1463,31 +1486,44 @@ impl StoreAdministration {
             barrier.block();
         }
 
-        let retired_task = task.abort_handle();
         task.abort();
-        let mut state = self.retirement_reapers.state();
-        let key = MaintenanceReaperRegistry::next_key(&mut state, kind, &owner);
+        let retired_task = Arc::new(task);
+        let key =
+            MaintenanceReaperRegistry::next_key(&mut self.retirement_reapers.state(), kind, &owner);
         let finalizer = MaintenanceReaperFinalizer {
             registry: Arc::clone(&self.retirement_reapers),
             key: key.clone(),
             termination: Arc::clone(&termination),
         };
         let (start, registered) = tokio::sync::oneshot::channel();
-        let reaper = tokio::spawn(tracing::Instrument::instrument(
+        let reaped_task = Arc::clone(&retired_task);
+        // Spawned before the registry lock: a refused spawn drops the
+        // finalizer, which takes that lock.
+        if let Err(error) = native_runtime::NativeTask::spawn(tracing::Instrument::instrument(
             async move {
                 let _finalizer = finalizer;
                 let _ = registered.await;
-                let _ = task.await;
+                let _ = reaped_task.wait().await;
                 cleanup.await;
             },
             tracing::trace_span!("daemon.branch_admin.retirement_reaper"),
-        ));
+        )) {
+            log_daemon_event(
+                "retirement_reaper",
+                &[
+                    ("owner", format!("{:?}", owner.owner.project_id)),
+                    ("outcome", "runtime_unavailable".to_owned()),
+                    ("error", error),
+                ],
+            );
+            return;
+        }
+        let mut state = self.retirement_reapers.state();
         let replaced = state.reapers.insert(
             key,
             MaintenanceReaperHandle {
                 retired_task,
                 termination,
-                _task: reaper,
             },
         );
         debug_assert!(replaced.is_none());

@@ -24,6 +24,10 @@ pub(crate) fn native_runtime_hazards() -> u64 {
         "daemon-service.observability.mount_drain",
         "daemon-service.observability.settle_drain",
         "daemon-service.observability.producer_drop",
+        "daemon-service.work_attempt.spawn_for_worktree",
+        "daemon-service.host_admission.bootstrap",
+        "daemon-service.shutdown.runner",
+        "daemon-service.shutdown_coordination.runner",
     ]
     .into_iter()
     .map(tracedecay_runtime_core::native_runtime::tokio_runtime_missing_count)
