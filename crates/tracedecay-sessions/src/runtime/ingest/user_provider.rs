@@ -25,6 +25,7 @@ use super::failure::{
     failed_observation_run, warn_transcript_catch_up_failure,
 };
 use super::project_provider::hermes_run_outcome;
+use super::quarantine::SourceSweep;
 use super::scheduler::{read_codex_discovery_frontier, write_codex_discovery_frontier};
 use super::user::{
     BoundedProviderFailure, BoundedProviderOutcome, try_ingest_user_codex_sessions_rotated,
@@ -210,6 +211,7 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
             stored_coverage,
             Some(HostProviderCoverage::Complete)
         ));
+        let mut sweep = SourceSweep::new("codex", self.codex_discovery);
         let ingested = erase_send!(
             try_ingest_user_codex_sessions_rotated(
                 self.profile_root,
@@ -220,10 +222,11 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
                 self.cancellation,
                 frontier,
                 self.codex_discovery,
+                &mut sweep,
             ),
             crate::runtime::source::TranscriptIngestResult<super::user::CodexUserIngestOutcome>
         );
-        match ingested.await {
+        let mut run = match ingested.await {
             Ok(result) => {
                 let outcome = result.outcome;
                 let mut run = ProviderRunOutcome::bounded(
@@ -288,7 +291,9 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
                 "Codex transcript catch-up failed",
                 self.max_new_bytes,
             ),
-        }
+        };
+        sweep.report_into(&mut run);
+        run
     }
 
     #[tracing::instrument(name = "sessions.ingest.user.cursor", level = "trace", skip_all)]

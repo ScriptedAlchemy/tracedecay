@@ -25,7 +25,7 @@ use super::failure::{
     cancelled_provider_outcome, classify_transcript_ingest_failure, claude_catch_up_failure,
     failed_observation_run, warn_transcript_catch_up_failure,
 };
-use super::quarantine::SourceClaim;
+use super::quarantine::SourceSweep;
 
 pub(super) const PROJECT_CATCH_UP_PROVIDERS: &[SessionProvider] = &[
     SessionProvider::Codex,
@@ -281,9 +281,7 @@ impl<'a> ProjectProviderRun<'a> {
         // session stays active and never reach an older in-scope day.
         let mut persisted_day: Option<&Path> = None;
         let mut outcome = ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);
-        let ledger = self
-            .codex_discovery
-            .and_then(|(hub, consumer)| hub.source_ledger(consumer));
+        let mut sweep = SourceSweep::new("codex", self.codex_discovery);
         for path in &discovery.paths {
             if remaining == 0 {
                 deferred = true;
@@ -295,10 +293,7 @@ impl<'a> ProjectProviderRun<'a> {
                 frontier_committable = false;
                 break;
             }
-            let Some(pending) = SourceClaim::observe_file("codex", ledger.clone(), path)
-                .await
-                .transpose()
-            else {
+            let Some(pending) = sweep.observe_file(path).await.transpose() else {
                 continue;
             };
             if persisted_day.is_some_and(|day| path.parent() != Some(day)) {
@@ -402,6 +397,10 @@ impl<'a> ProjectProviderRun<'a> {
                     if let Some(cancelled) = cancelled_provider_outcome(&error) {
                         return cancelled;
                     }
+                    frontier_committable = false;
+                    let Err(error) = sweep.refused(pending, error) else {
+                        continue;
+                    };
                     let failure = warn_transcript_catch_up_failure(
                         "codex",
                         "observation",
@@ -412,16 +411,7 @@ impl<'a> ProjectProviderRun<'a> {
                         outcome.failures.len().saturating_add(1),
                         failure.retryable,
                     );
-                    if let Err(record_error) = pending.record_source_failure(&error) {
-                        outcome.add_failure(warn_transcript_catch_up_failure(
-                            "codex",
-                            "discovery",
-                            &record_error,
-                            "project Codex source failure retention failed",
-                        ));
-                    }
                     outcome.add_failure(failure);
-                    frontier_committable = false;
                     if stop {
                         deferred = true;
                         break;
@@ -429,6 +419,7 @@ impl<'a> ProjectProviderRun<'a> {
                 }
             }
         }
+        sweep.report_into(&mut outcome);
         outcome.bytes_consumed = self.max_new_bytes.saturating_sub(remaining);
         outcome.add_deferred_units(u64::from(deferred));
         let mut frontier_persisted = frontier_committable;
