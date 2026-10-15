@@ -435,3 +435,35 @@ async fn serve_points_and_hints_identical_json_reads() {
         "the full JSON answer after a pointer is hinted about the earlier one: {after_pointer}"
     );
 }
+
+#[tokio::test]
+async fn serve_does_not_hint_a_call_correcting_a_refused_request() {
+    let home = TempDir::new().unwrap();
+    let project = init_project_with_file(home.path(), &source("refused_call_marker")).await;
+    let _daemon = common::spawn_tracedecay_daemon(home.path());
+    let mut client = hinted_client(home.path(), project.path(), &[], "refused_call_marker");
+
+    let misnamed = client.request(call(
+        100,
+        "tracedecay_source_outline",
+        &json!({ "path": "src/lib.rs", "format": "json" }),
+    ));
+    assert!(
+        text(&misnamed).contains("invalid_request"),
+        "a misnamed parameter is refused as an invalid request: {misnamed}"
+    );
+    let corrected = client.request(call(
+        101,
+        "tracedecay_source_outline",
+        &json!({ "file": "src/lib.rs", "format": "json" }),
+    ));
+    assert!(
+        text(&corrected).contains("refused_call_marker"),
+        "{corrected}"
+    );
+    assert!(
+        !text(&corrected).contains(QUERY_HINT),
+        "a call correcting a refused request does not repeat it: refused {misnamed}\n\
+         corrected {corrected}"
+    );
+}
