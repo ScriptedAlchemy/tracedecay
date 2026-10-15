@@ -898,10 +898,12 @@ impl<'a> ProjectProviderRun<'a> {
 
     #[tracing::instrument(name = "sessions.ingest.project.hermes", level = "trace", skip_all)]
     async fn run_hermes(self) -> ProviderRunOutcome {
-        let Some(outcome) = hermes::ingest_for_project_capped_with_admission_and_cancellation(
+        let mut sweep = SourceSweep::new("hermes", self.codex_discovery);
+        let Some(outcome) = hermes::ingest_project_with_sweep(
             self.project_root,
             self.project_id.clone(),
             self.facade,
+            &mut sweep,
             Some(self.max_new_bytes),
             self.cancellation,
         )
@@ -910,13 +912,17 @@ impl<'a> ProjectProviderRun<'a> {
             return ProviderRunOutcome::skipped();
         };
         let byte_cap_exceeded = outcome.bytes_consumed > self.max_new_bytes;
-        hermes_run_outcome(outcome, byte_cap_exceeded)
+        let mut run = hermes_run_outcome(outcome, byte_cap_exceeded);
+        sweep.report_into(&mut run);
+        run
     }
 }
 
-/// A failed Hermes source remains a retryable partial scan: destination
+/// A failed Hermes `state.db` remains a retryable partial scan: destination
 /// admission and SQLite availability can recover without changing the source
-/// file. An incomplete projection drain is a deferred unit.
+/// file. A session the store permanently refuses is not a failed `state.db`;
+/// the run's sweep reports it. An incomplete projection drain is a deferred
+/// unit.
 pub(super) fn hermes_run_outcome(
     outcome: hermes::HermesSweepOutcome,
     byte_cap_exceeded: bool,

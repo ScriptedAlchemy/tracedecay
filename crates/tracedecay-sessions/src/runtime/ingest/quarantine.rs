@@ -113,13 +113,29 @@ impl Witness {
             len: metadata.len(),
         }))
     }
+
+    fn content(parts: &[&[u8]]) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(b"tracedecay-source-content-witness-v1");
+        let mut len = 0u64;
+        for part in parts {
+            let part_len = u64::try_from(part.len()).unwrap_or(u64::MAX);
+            hasher.update(part_len.to_le_bytes());
+            hasher.update(part);
+            len = len.saturating_add(part_len);
+        }
+        Self {
+            identity: hasher.finalize().into(),
+            len,
+        }
+    }
 }
 
 #[cfg_attr(
     not(test),
     expect(
         dead_code,
-        reason = "the snapshot and row-stream providers adopt multi-file and content witnesses"
+        reason = "the snapshot providers adopt multi-file witnesses"
     )
 )]
 impl Witness {
@@ -149,22 +165,6 @@ impl Witness {
             identity: hasher.finalize().into(),
             len,
         }))
-    }
-
-    fn content(parts: &[&[u8]]) -> Self {
-        let mut hasher = Sha256::new();
-        hasher.update(b"tracedecay-source-content-witness-v1");
-        let mut len = 0u64;
-        for part in parts {
-            let part_len = u64::try_from(part.len()).unwrap_or(u64::MAX);
-            hasher.update(part_len.to_le_bytes());
-            hasher.update(part);
-            len = len.saturating_add(part_len);
-        }
-        Self {
-            identity: hasher.finalize().into(),
-            len,
-        }
     }
 }
 
@@ -345,42 +345,6 @@ impl SourceSweep {
     pub(crate) fn report_into(self, outcome: &mut ProviderRunOutcome) {
         outcome.failures.splice(0..0, self.failures);
     }
-}
-
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the snapshot and row-stream providers adopt these observations"
-    )
-)]
-impl SourceSweep {
-    #[expect(
-        dead_code,
-        reason = "the JSONL providers observe through it on their blocking threads"
-    )]
-    pub(crate) fn ledger(&self) -> Option<SourceLedger> {
-        self.ledger.clone()
-    }
-
-    pub(crate) async fn observe_files(
-        &self,
-        key: &Path,
-        members: Vec<PathBuf>,
-    ) -> TranscriptIngestResult<Option<SourceClaim>> {
-        let key = SourceKey::file(key);
-        if self.blocked.contains(&key) {
-            return Ok(None);
-        }
-        let Some(ledger) = self.ledger.clone() else {
-            return Ok(Some(SourceClaim { key, settled: None }));
-        };
-        run_blocking_transcript_section(self.provider, move || {
-            let witness = Witness::settled_files(&members)?;
-            Ok(SourceClaim::unless_recorded(Some(&ledger), key, witness))
-        })
-        .await?
-    }
 
     pub(crate) fn observe_stream(
         &mut self,
@@ -408,6 +372,39 @@ impl SourceSweep {
             settled: self.ledger.clone().map(|ledger| (ledger, witness)),
             key,
         })
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the snapshot providers adopt these observations")
+)]
+impl SourceSweep {
+    #[expect(
+        dead_code,
+        reason = "the JSONL providers observe through it on their blocking threads"
+    )]
+    pub(crate) fn ledger(&self) -> Option<SourceLedger> {
+        self.ledger.clone()
+    }
+
+    pub(crate) async fn observe_files(
+        &self,
+        key: &Path,
+        members: Vec<PathBuf>,
+    ) -> TranscriptIngestResult<Option<SourceClaim>> {
+        let key = SourceKey::file(key);
+        if self.blocked.contains(&key) {
+            return Ok(None);
+        }
+        let Some(ledger) = self.ledger.clone() else {
+            return Ok(Some(SourceClaim { key, settled: None }));
+        };
+        run_blocking_transcript_section(self.provider, move || {
+            let witness = Witness::settled_files(&members)?;
+            Ok(SourceClaim::unless_recorded(Some(&ledger), key, witness))
+        })
+        .await?
     }
 }
 
