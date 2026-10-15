@@ -16,8 +16,6 @@ STORAGE_OWNERS = {
     "tracedecay-sessions",
 }
 
-SHIPPED_ROOTS = ("tracedecay", "tracedecay-cli")
-
 
 def run(repo: Path, arguments: list[str]) -> str:
     return subprocess.run(
@@ -44,14 +42,15 @@ def main() -> int:
             ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
         )
     )
-    manifest_violations: list[str] = []
+    declared_owners: set[str] = set()
+    manifest_violations: set[str] = set()
     for package in metadata["packages"]:
-        if package["source"] is not None or package["name"] in STORAGE_OWNERS:
+        if package["source"] is not None:
             continue
         for dependency in package["dependencies"]:
-            if dependency["name"] != "rusqlite" or dependency["kind"] is not None:
+            if dependency["name"] != "rusqlite" or dependency["kind"] == "dev":
                 continue
-            if dependency["optional"]:
+            if dependency["kind"] is None and dependency["optional"]:
                 enabling_features = {
                     name
                     for name, members in package["features"].items()
@@ -59,49 +58,25 @@ def main() -> int:
                 }
                 if enabling_features == {"test-helpers"}:
                     continue
-            manifest_violations.append(package["name"])
+            declared_owners.add(package["name"])
+            if package["name"] not in STORAGE_OWNERS:
+                manifest_violations.add(package["name"])
     if manifest_violations:
         raise SystemExit(
             "workspace package declares production rusqlite outside storage: "
-            + ", ".join(sorted(set(manifest_violations)))
+            + ", ".join(sorted(manifest_violations))
         )
 
-    owners: set[str] = set()
-    for root in SHIPPED_ROOTS:
-        output = run(
-            repo,
-            [
-                "cargo",
-                "tree",
-                "--locked",
-                "--package",
-                root,
-                "--edges",
-                "normal,build",
-                "--no-default-features",
-                "--features",
-                "production",
-                "--invert",
-                "rusqlite",
-                "--depth",
-                "1",
-                "--prefix",
-                "none",
-                "--format",
-                "{p}",
-            ],
-        )
-        rows = [line for line in output.splitlines() if line]
-        if not rows or not rows[0].startswith("rusqlite "):
-            raise SystemExit(f"{root} production graph omitted rusqlite")
-        owners.update(row.split(maxsplit=1)[0] for row in rows[1:])
-    violations = owners - STORAGE_OWNERS
-    if violations:
+    missing_owners = STORAGE_OWNERS - declared_owners
+    if missing_owners:
         raise SystemExit(
-            "production rusqlite dependency escaped the storage boundary: "
-            + ", ".join(sorted(violations))
+            "storage owner allowlist contains packages without production rusqlite: "
+            + ", ".join(sorted(missing_owners))
         )
-    print("production rusqlite dependency owners: " + ", ".join(sorted(owners)))
+    print(
+        "production rusqlite dependency owners: "
+        + ", ".join(sorted(declared_owners))
+    )
     return 0
 
 
