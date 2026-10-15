@@ -2263,6 +2263,8 @@ mod long_dispatch_tests {
                         while spun.elapsed() < native_runtime::LONG_POLL_CPU * 2 {
                             std::hint::spin_loop();
                         }
+                        // Await again after the synchronous work, so the
+                        // response is not written inside the long poll.
                         let _ =
                             native_runtime::sleep_until(Instant::now() + Duration::from_millis(1))
                                 .await;
