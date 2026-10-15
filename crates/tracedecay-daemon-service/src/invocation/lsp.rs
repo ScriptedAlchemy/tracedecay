@@ -282,21 +282,25 @@ impl DaemonInvocationService {
         // first durable write. Once the first compare-and-swap starts, finish
         // every authorized replica so the caller receives one authoritative
         // settlement instead of a fabricated interruption over a partial
-        // effect.
-        for storage in storages {
-            match storage
-                .compare_and_swap(request.expected_revision, &next)
-                .ok()?
-            {
-                tracedecay_store::runtime::ScopeSetCasOutcomeV1::Applied(_) => {}
-                tracedecay_store::runtime::ScopeSetCasOutcomeV1::Conflict { .. } => {
-                    let stored = storage.read(next.scope_set_id()).ok()?;
-                    if stored.as_ref() != Some(&next) {
-                        return None;
+        // effect. The writes park their thread on the writer, so they run on
+        // the blocking pool.
+        let expected_revision = request.expected_revision;
+        let next = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+            for storage in storages {
+                match storage.compare_and_swap(expected_revision, &next).ok()? {
+                    tracedecay_store::runtime::ScopeSetCasOutcomeV1::Applied(_) => {}
+                    tracedecay_store::runtime::ScopeSetCasOutcomeV1::Conflict { .. } => {
+                        let stored = storage.read(next.scope_set_id()).ok()?;
+                        if stored.as_ref() != Some(&next) {
+                            return None;
+                        }
                     }
                 }
             }
-        }
+            Some(next)
+        })
+        .await
+        .ok()??;
         Some((
             active_scope,
             MultiRootScopeSetCasResultV1 {
