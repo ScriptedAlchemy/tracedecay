@@ -644,13 +644,21 @@ impl CodeGraphActivationAuthorityV1 {
                     ));
                 }
                 let prewarm_cpu = injected_faults().prewarm_cpu.remove(worktree_id.as_str());
-                if let Some(cpu) = prewarm_cpu {
-                    let spun = std::time::Instant::now();
-                    while spun.elapsed() < cpu {
-                        std::hint::spin_loop();
+                native_runtime::spawn_blocking(move || {
+                    if let Some(cpu) = prewarm_cpu {
+                        let spun = std::time::Instant::now();
+                        while spun.elapsed() < cpu {
+                            std::hint::spin_loop();
+                        }
                     }
-                }
-                latest.prewarm_serving_derivations();
+                    latest.prewarm_serving_derivations();
+                })
+                .await
+                .map_err(|error| {
+                    CodeIndexSchedulerErrorV1::GraphActivation(format!(
+                        "code graph activation task failed: {error}"
+                    ))
+                })?;
                 Ok(None)
             }
         }
