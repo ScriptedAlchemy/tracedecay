@@ -1349,6 +1349,44 @@ async fn schema_convergence_is_reported_and_completes_after_admission() {
     );
 }
 
+/// Convergence ends with a glibc `malloc_trim`, which walks every arena and
+/// measured up to 0.8 s of CPU in a loaded test process. Run inside the
+/// convergence task's poll, it stalls every socket wake on that native worker,
+/// and the debug long-poll guard fails the task as it completes (#4023).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn schema_convergence_completes_when_its_allocator_trim_outlasts_a_native_poll() {
+    let (_temporary, identity, project_id, project_root, _sessions_path, _database_scope) =
+        project_sessions_pending_convergence("project.schema-long-trim").await;
+    let shard_id = StoreShardIdV1::project_sessions(
+        identity.brain_id().clone(),
+        identity.profile_id().clone(),
+        project_id.clone(),
+    );
+    let registry = DaemonSessionRuntimeRegistryV1::open_with_session_maintenance(identity, true)
+        .await
+        .expect("session runtime registry");
+    registry.inject_registered_schema_convergence_trim_cpu_for_test(
+        tracedecay_runtime_core::native_runtime::LONG_POLL_CPU * 4,
+    );
+
+    registry
+        .project_sessions(project_id, [project_root])
+        .await
+        .expect("project sessions admission");
+
+    assert_eq!(
+        wait_for_schema_convergence(&registry, &shard_id).await,
+        RegisteredSchemaConvergenceStatus::Complete
+    );
+    tokio::time::timeout(
+        MUST_NOT_BLOCK,
+        registry.shutdown_terminal_tasks(&tracedecay_runtime_core::native_runtime::cx().unwrap()),
+    )
+    .await
+    .expect("terminal shutdown joins the finished convergence task")
+    .expect("the convergence task must finish without failing");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn foreground_project_open_defers_historical_convergence_until_full_publication() {
     let (_temporary, identity, project_id, project_root, _sessions_path, _database_scope) =

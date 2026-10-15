@@ -46,8 +46,8 @@ use super::{
     ServingGenerationSlot, ServingSwapOutcomeV1, TEXT_PROJECTION_DOCUMENTS_PER_PASS_V1,
     clear_convergence_park, clear_graph_resident_memory_park, clear_reconcile_refusal_park,
     convergence_park_retries_on_wake, graph_head_belongs_to_another_generation,
-    is_repeated_conflict_verdict, park_convergence, publication_authority_is_terminal,
-    retained_noop_requires_follow_up_wake,
+    is_repeated_conflict_verdict, park_convergence, park_panicked_worker,
+    publication_authority_is_terminal, retained_noop_requires_follow_up_wake,
 };
 use tracedecay_runtime_core::native_runtime::{self, NativeTask, NativeTaskOutcome};
 
@@ -1080,6 +1080,8 @@ impl CodeIndexSchedulerRegistryV1 {
                     &worker_phase_signal,
                     super::CodeIndexWorkerPhaseV1::Working,
                 );
+                #[cfg(test)]
+                Self::panic_worker_pass_if_armed(&worker_project_root);
                 let wake_to_gates_held_micros =
                     u64::try_from(pass_wake_observed_at.elapsed().as_micros()).unwrap_or(u64::MAX);
                 let scheduler = Arc::clone(&worker_scheduler);
@@ -3859,6 +3861,23 @@ impl CodeIndexSchedulerRegistryV1 {
                 "code-index scheduler worker did not start: {error}"
             ))
         })?;
+        let task = Arc::new(task);
+        // A panic outside the per-step guard, or a poll the debug long-poll
+        // guard fails, ends the worker. Its outcome is the one place both land.
+        let supervised = Arc::clone(&task);
+        let supervised_park = Arc::clone(&convergence_park);
+        let supervised_phase = Arc::clone(&worker_phase);
+        let supervised_serving_changed = Arc::clone(&serving_generation_changed);
+        spawn_detached("code_index_worker_supervisor", async move {
+            if let NativeTaskOutcome::Panicked(panic) = supervised.wait().await {
+                park_panicked_worker(
+                    &supervised_park,
+                    &supervised_phase,
+                    &supervised_serving_changed,
+                    &panic.to_string(),
+                );
+            }
+        });
         self.register_worker_shutdown_signal(&shutting_down, &wake, &serving_generation_changed);
         let residency_registration = Arc::clone(&residency).register(
             &self.resident_owners,
