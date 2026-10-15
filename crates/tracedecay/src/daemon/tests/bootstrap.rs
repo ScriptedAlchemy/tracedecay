@@ -2413,7 +2413,6 @@ async fn explicit_init_retries_after_joining_an_ordinary_missing_database_open()
     // enrollment, so the request can subscribe before the bound is spent.
     // It is retried the way a client retries the warming hint, so the route is
     // left with no open of its own before the fixture takes it over.
-    let warmup_give_up = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         let error = match engine
             .project_server_for_request(
@@ -2432,10 +2431,6 @@ async fn explicit_init_retries_after_joining_an_ordinary_missing_database_open()
             super::super::error_is_project_warming(&error),
             "the warm-up open must refuse the missing database: {error:?}"
         );
-        assert!(
-            tokio::time::Instant::now() < warmup_give_up,
-            "the warm-up open never published its missing-index refusal"
-        );
     }
 
     let (_, route) = engine
@@ -2446,10 +2441,6 @@ async fn explicit_init_retries_after_joining_an_ordinary_missing_database_open()
     // JoinHandle necessarily reports finished. Let pruning observe both
     // before this fixture claims the same route for its controlled open.
     while tasks.status(&route).is_some() {
-        assert!(
-            tokio::time::Instant::now() < warmup_give_up,
-            "the warm-up route task did not finish after publishing its refusal"
-        );
         tokio::task::yield_now().await;
     }
     let (release, blocked) = tokio::sync::oneshot::channel();
@@ -2480,22 +2471,30 @@ async fn explicit_init_retries_after_joining_an_ordinary_missing_database_open()
     );
     tokio::pin!(ordinary_request);
     tokio::pin!(init_request);
-    // Drive both requests onto this open before it publishes. A request that
+    // Drive each request onto this open before it publishes. A request that
     // has not been polled to its join holds no receiver on this open's watch
     // channel, and a recorded `Config` failure carries no backoff, so the
     // finished entry is pruned (`ProjectOpenTaskRegistry::prune`) and the next
-    // poll mints a fresh open that is still `Opening` at the bound. The window
-    // is the warmed path's headroom, not a settling delay: it must outlast a
-    // loaded machine's walk to the join and still leave the 500 ms bound
-    // unspent when the failure is released below.
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(150), async {
-            tokio::join!(&mut ordinary_request, &mut init_request)
-        })
-        .await
-        .is_err(),
-        "neither request may answer while the open they joined is blocked"
-    );
+    // poll mints a fresh open instead. A joined request is not polled again
+    // until the failure is published, so its publication bound cannot spend
+    // itself on this test's schedule.
+    let mut joins = tasks.joins();
+    let joined_before = *joins.borrow_and_update();
+    for (joined, request) in [
+        (joined_before + 1, ordinary_request.as_mut()),
+        (joined_before + 2, init_request.as_mut()),
+    ] {
+        tokio::select! {
+            biased;
+            observed = joins.wait_for(|joins| *joins >= joined) => {
+                observed.expect("project-open join observer");
+            }
+            answered = request => panic!(
+                "a request answered before joining the blocked open: {:?}",
+                answered.err()
+            ),
+        }
+    }
     assert!(
         matches!(
             inflight.borrow().clone(),
@@ -2504,17 +2503,16 @@ async fn explicit_init_retries_after_joining_an_ordinary_missing_database_open()
         "the joined open must still be in flight when its failure is released"
     );
     release.send(()).expect("release ordinary open");
+    // Resume the joined waiter only once the failure is on its watch. If its
+    // publication bound elapsed meanwhile, `prefer_recorded_open_failure`
+    // classifies the recorded failure, not the warming hint.
+    let mut published = inflight.clone();
+    published
+        .wait_for(|state| !matches!(state, super::super::ProjectOpenTaskState::Opening))
+        .await
+        .expect("the released open must publish its outcome");
 
-    // The failure lands while the ordinary waiter stays joined and polled,
-    // which is the state `prefer_recorded_open_failure` classifies.
-    let ordinary_outcome =
-        tokio::time::timeout(std::time::Duration::from_secs(10), &mut ordinary_request)
-            .await
-            .expect(
-                "the joined ordinary waiter never settled after the open published its failure",
-            );
-
-    let ordinary_error = match ordinary_outcome {
+    let ordinary_error = match ordinary_request.await {
         Ok(_) => panic!("ordinary open must not initialize a missing database"),
         Err(error) => error,
     };
@@ -2547,10 +2545,7 @@ async fn explicit_init_retries_after_joining_an_ordinary_missing_database_open()
     // is the retry production tells the client to repeat; any other refusal
     // would mean the retry inherited the ordinary open's missing-index failure
     // instead of opening under its own authorization.
-    let mut init_outcome = tokio::time::timeout(std::time::Duration::from_secs(30), init_request)
-        .await
-        .expect("explicit init retry never settled");
-    let give_up = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut init_outcome = init_request.await;
     let server = loop {
         let warming = match init_outcome {
             Ok(server) => break server,
@@ -2559,10 +2554,6 @@ async fn explicit_init_retries_after_joining_an_ordinary_missing_database_open()
         assert!(
             super::super::error_is_project_warming(&warming),
             "explicit init must retry with its own authorization: {warming:?}"
-        );
-        assert!(
-            tokio::time::Instant::now() < give_up,
-            "the admitted explicit-init open never published its owners"
         );
         // Each retry parks on the admitted open's own publication, so this
         // waits on that open rather than on elapsed time.
@@ -3475,7 +3466,6 @@ async fn project_warmup_settles_when_drain_is_simultaneously_ready() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_bootstrap_catalog_bypasses_project_writer_gate() {
-    const PHASE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(20);
     let temp = TempDir::new().expect("temp dir");
     let project = temp.path().join("project");
     let profile_root = temp.path().join("profile");
@@ -3533,35 +3523,15 @@ async fn mcp_bootstrap_catalog_bypasses_project_writer_gate() {
         "id": 2,
         "method": "tools/list"
     });
-    let initialize_engine = engine.clone();
-    let initialize_handshake = handshake.clone();
-    let mut initialize_task = tokio::spawn(async move {
-        super::handshake::daemon_round_trip(initialize_engine, &initialize_handshake, initialize)
-            .await
-    });
-    let tools_list_engine = engine.clone();
-    let tools_list_handshake = handshake.clone();
-    let mut tools_list_task = tokio::spawn(async move {
-        super::handshake::daemon_round_trip(tools_list_engine, &tools_list_handshake, tools_list)
-            .await
-    });
-    let (initialize_within_bound, tools_list_within_bound) = tokio::join!(
-        tokio::time::timeout(tokio::time::Duration::from_secs(2), &mut initialize_task),
-        tokio::time::timeout(tokio::time::Duration::from_secs(2), &mut tools_list_task),
+    // The writer stays held until both answers arrive, so answering at all
+    // proves neither request waited for the project writer gate.
+    let (initialize_responses, tools_list_responses) = tokio::join!(
+        super::handshake::daemon_round_trip(engine.clone(), &handshake, initialize),
+        super::handshake::daemon_round_trip(engine.clone(), &handshake, tools_list),
     );
-
     release_writer.send(()).expect("signal writer gate release");
     blocker.await.expect("writer gate blocker task");
-    if initialize_within_bound.is_err() {
-        let _ = initialize_task.await;
-    }
-    if tools_list_within_bound.is_err() {
-        let _ = tools_list_task.await;
-    }
 
-    let initialize_responses = initialize_within_bound
-        .expect("initialize must not wait for project writer gate")
-        .expect("initialize client task");
     let initialize_response = initialize_responses
         .iter()
         .find(|response| response["id"] == json!(1))
@@ -3582,9 +3552,6 @@ async fn mcp_bootstrap_catalog_bypasses_project_writer_gate() {
         })
     );
 
-    let tools_list_responses = tools_list_within_bound
-        .expect("tools/list must not wait for project writer gate")
-        .expect("tools/list client task");
     let tools = tools_list_responses
         .iter()
         .find(|response| response["id"] == json!(2))
@@ -3602,36 +3569,14 @@ async fn mcp_bootstrap_catalog_bypasses_project_writer_gate() {
     assert!(context_description.contains("3 broad context calls"));
     assert!(context_description.contains("graph is still warming"));
 
-    tokio::time::timeout(PHASE_TIMEOUT, async {
-        while engine
-            .project_open_attempts
-            .load(std::sync::atomic::Ordering::Relaxed)
-            == 0
-        {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("initialize warmup did not start after the writer gate was released");
-    let mut shutdown = Box::pin(engine.shutdown_all());
-    if tokio::time::timeout(PHASE_TIMEOUT, &mut shutdown)
-        .await
-        .is_err()
+    while engine
+        .project_open_attempts
+        .load(std::sync::atomic::Ordering::Relaxed)
+        == 0
     {
-        match tokio::time::timeout(
-            tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE,
-            &mut shutdown,
-        )
-        .await
-        {
-            Ok(receipt) => {
-                panic!("bootstrap-cache shutdown exceeded its phase bound: {receipt:#?}")
-            }
-            Err(error) => panic!(
-                "bootstrap-cache shutdown coordinator did not return after its global deadline: {error}"
-            ),
-        }
+        tokio::task::yield_now().await;
     }
+    engine.shutdown_all().await;
     assert_eq!(
         engine
             .project_open_attempts
@@ -3644,7 +3589,6 @@ async fn mcp_bootstrap_catalog_bypasses_project_writer_gate() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn direct_tool_cache_miss_returns_warming_while_project_opens_in_background() {
-    const PHASE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(20);
     let temp = TempDir::new().expect("temp dir");
     let project = temp.path().join("project");
     let profile_root = temp.path().join("profile");
@@ -3683,22 +3627,10 @@ async fn direct_tool_cache_miss_returns_warming_while_project_opens_in_backgroun
             "arguments": {"format": "json"}
         }
     });
-    let request_engine = engine.clone();
-    let request_handshake = handshake.clone();
-    let mut request_task = tokio::spawn(async move {
-        super::handshake::daemon_round_trip(request_engine, &request_handshake, request).await
-    });
-    let response_within_bound =
-        tokio::time::timeout(tokio::time::Duration::from_secs(2), &mut request_task).await;
-
+    // The admission stays held until the response arrives, so the open cannot
+    // publish first: an answer at all proves the request did not wait for it.
+    let responses = super::handshake::daemon_round_trip(engine.clone(), &handshake, request).await;
     drop(capacity_admission);
-    if response_within_bound.is_err() {
-        let _ = request_task.await;
-    }
-
-    let responses = response_within_bound
-        .expect("direct tool cache miss must return a bounded warming response")
-        .expect("direct tool client task");
     let response = responses
         .iter()
         .find(|response| response["id"] == json!(3))
@@ -3714,28 +3646,41 @@ async fn direct_tool_cache_miss_returns_warming_while_project_opens_in_backgroun
     assert!(message.contains("warming in the background"), "{message}");
     assert!(message.contains("retry"), "{message}");
 
+    // Retry the warming hint the way a client does. Each retry rides the
+    // detached open's own publication, and a retry that had to start a new
+    // open would show up as a second attempt.
+    loop {
+        match engine
+            .project_server_for_request(&handshake, super::super::ProjectServerRequirement::Core)
+            .await
+        {
+            Ok(_) => break,
+            Err(error) => assert!(
+                super::super::error_is_project_warming(&error),
+                "the detached warm-up must publish, not fail: {error:?}"
+            ),
+        }
+    }
     let route =
         super::super::ProjectRouteKey::from_handshake(&project, &handshake).expect("project route");
-    tokio::time::timeout(PHASE_TIMEOUT, async {
-        loop {
-            let warmed = engine
-                .store_administration
-                .project_servers()
-                .lock()
-                .await
-                .get_route(&route)
-                .is_some();
-            if warmed {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("detached project warmup timed out");
-    tokio::time::timeout(PHASE_TIMEOUT, engine.shutdown_all())
-        .await
-        .expect("direct warmup shutdown timed out");
+    assert!(
+        engine
+            .store_administration
+            .project_servers()
+            .lock()
+            .await
+            .get_route(&route)
+            .is_some(),
+        "the detached warm-up must publish the project route"
+    );
+    assert_eq!(
+        engine
+            .project_open_attempts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "the warming request's detached open must be the only open"
+    );
+    engine.shutdown_all().await;
 }
 
 /// A profile registry read from a project connection answers from the
@@ -3777,12 +3722,10 @@ async fn project_registry_read_does_not_wait_for_a_blocked_project_open() {
             "arguments": {"format": "json", "limit": 5}
         }
     });
-    let responses = tokio::time::timeout(
-        super::super::PROJECT_OPEN_REQUEST_DEADLINE,
-        super::handshake::daemon_round_trip(engine.clone(), &handshake, request),
-    )
-    .await
-    .expect("a registry read must not wait for the blocked project open");
+    // The open stays blocked until the answer arrives, so a typed `ok` answer
+    // came from the registry. A read routed through the open would answer
+    // with the warming hint instead.
+    let responses = super::handshake::daemon_round_trip(engine.clone(), &handshake, request).await;
     drop(capacity_admission);
 
     let response = responses
@@ -3801,9 +3744,7 @@ async fn project_registry_read_does_not_wait_for_a_blocked_project_open() {
         1,
         "the handshake project must be marked active without being opened: {payload}"
     );
-    tokio::time::timeout(tokio::time::Duration::from_secs(20), engine.shutdown_all())
-        .await
-        .expect("registry read shutdown timed out");
+    engine.shutdown_all().await;
 }
 
 // The publication wait runs under the request's executor, which need not be
