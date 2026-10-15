@@ -570,17 +570,24 @@ impl RuntimeExternalSourceStore {
         projector
             .validate()
             .map_err(|error| RuntimeExternalSourceErrorV1::Invalid(error.to_string()))?;
-        let mut projected = 0;
+        let mut projected = 0_usize;
         let mut exhausted = false;
-        while projected < max && !cancellation.is_cancelled() {
+        // A head lost to another drainer still spends budget, so a drainer
+        // that keeps losing ends with the queue deferred, never spinning.
+        for _ in 0..max {
+            if cancellation.is_cancelled() {
+                break;
+            }
             let Some(pending) = self.read_pending_projection(binding.clone()).await? else {
                 exhausted = true;
                 break;
             };
-            let projection =
-                build_source_projection(&pending, projector.clone()).map_err(invalid)?;
-            self.submit_projection(projection).await?;
-            projected = projected.saturating_add(1);
+            if self
+                .project_pending_head(&pending, projector.clone())
+                .await?
+            {
+                projected = projected.saturating_add(1);
+            }
         }
         let deferred = !exhausted
             && !cancellation.is_cancelled()
@@ -589,6 +596,28 @@ impl RuntimeExternalSourceStore {
             projected,
             deferred,
         })
+    }
+
+    /// Projects `pending`, the queue head this drainer read. Returns `false`
+    /// when the write failed because another drainer already projected that
+    /// head: the next read sees the head it left.
+    async fn project_pending_head(
+        &self,
+        pending: &SourcePendingProjectionV1,
+        projector: ComponentVersion,
+    ) -> Result<bool, RuntimeExternalSourceErrorV1> {
+        let projection = build_source_projection(pending, projector).map_err(invalid)?;
+        let Err(error) = self.submit_projection(projection).await else {
+            return Ok(true);
+        };
+        let binding = pending.binding_identity().map_err(invalid)?;
+        let head = self.read_pending_projection(Some(binding)).await?;
+        if head.is_some_and(|head| {
+            head.receipt().receipt_digest() == pending.receipt().receipt_digest()
+        }) {
+            return Err(error);
+        }
+        Ok(false)
     }
 
     /// A stream cutover may replace only the exact retained combined record.

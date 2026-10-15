@@ -343,6 +343,7 @@ const fn map_spool_start_error(error: DeliveryRecorderSpoolError) -> &'static st
         DeliveryRecorderSpoolError::Full => "delivery_settlement_recorder_spool_full",
         DeliveryRecorderSpoolError::UnsafePath => "delivery_settlement_recorder_spool_unsafe",
         DeliveryRecorderSpoolError::Corrupt => "delivery_settlement_recorder_spool_corrupt",
+        DeliveryRecorderSpoolError::Removed => "delivery_settlement_recorder_spool_removed",
         DeliveryRecorderSpoolError::Io => "delivery_settlement_recorder_spool_io",
         DeliveryRecorderSpoolError::InvalidReceipt => "delivery_settlement_recorder_spool_invalid",
         DeliveryRecorderSpoolError::LockPoisoned => {
@@ -357,6 +358,7 @@ const fn map_spool_admission_error(error: DeliveryRecorderSpoolError) -> &'stati
         DeliveryRecorderSpoolError::Busy => "delivery_settlement_recorder_spool_busy",
         DeliveryRecorderSpoolError::UnsafePath => "delivery_settlement_recorder_spool_unsafe",
         DeliveryRecorderSpoolError::Corrupt => "delivery_settlement_recorder_spool_corrupt",
+        DeliveryRecorderSpoolError::Removed => "delivery_settlement_recorder_spool_removed",
         DeliveryRecorderSpoolError::Io => "delivery_settlement_recorder_spool_io",
         DeliveryRecorderSpoolError::InvalidReceipt => "delivery_settlement_recorder_spool_invalid",
         DeliveryRecorderSpoolError::LockPoisoned => {
