@@ -405,15 +405,27 @@ pub fn install(builder: RuntimeBuilder) -> Result<&'static Runtime, InstallError
 
 static TOKIO_RUNTIME_MISSING: Mutex<BTreeMap<&'static str, u64>> = Mutex::new(BTreeMap::new());
 
-static TOKIO_RUNTIME: OnceLock<tokio::runtime::Handle> = OnceLock::new();
+static TOKIO_RUNTIME: Mutex<Option<tokio::runtime::Handle>> = Mutex::new(None);
 
 /// Makes `handle` the Tokio runtime [`tokio_handle`] returns on a thread that
 /// has none entered, such as a native worker. The foreground daemon installs
 /// the one Tokio runtime it still owns; no other host installs one.
 pub fn install_tokio_runtime(handle: tokio::runtime::Handle) -> Result<(), InstallError> {
+    let mut installed = TOKIO_RUNTIME.lock().unwrap_or_else(PoisonError::into_inner);
+    if installed.is_some() {
+        return Err(InstallError::AlreadyStarted);
+    }
+    *installed = Some(handle);
+    Ok(())
+}
+
+/// Removes the installed Tokio runtime before its owner shuts it down, so a
+/// later [`tokio_handle`] is a counted miss rather than a dead runtime.
+pub fn uninstall_tokio_runtime() -> Option<tokio::runtime::Handle> {
     TOKIO_RUNTIME
-        .set(handle)
-        .map_err(|_| InstallError::AlreadyStarted)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take()
 }
 
 /// The Tokio runtime for a `site` whose work still needs one: the runtime
@@ -423,9 +435,12 @@ pub fn install_tokio_runtime(handle: tokio::runtime::Handle) -> Result<(), Insta
 /// native runtime.
 #[must_use]
 pub fn tokio_handle(site: &'static str) -> Option<tokio::runtime::Handle> {
-    let handle = tokio::runtime::Handle::try_current()
-        .ok()
-        .or_else(|| TOKIO_RUNTIME.get().cloned());
+    let handle = tokio::runtime::Handle::try_current().ok().or_else(|| {
+        TOKIO_RUNTIME
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    });
     if handle.is_none() {
         *TOKIO_RUNTIME_MISSING
             .lock()

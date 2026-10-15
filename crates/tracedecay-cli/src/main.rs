@@ -631,6 +631,7 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
     // supervisor's TERM grace. The installed native runtime is process-static
     // and never dropped.
     if let Some(runtime) = tokio {
+        tracedecay_runtime_core::native_runtime::uninstall_tokio_runtime();
         runtime.shutdown_background();
     }
     if json_requested
