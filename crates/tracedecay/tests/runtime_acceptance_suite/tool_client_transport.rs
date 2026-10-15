@@ -5,6 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Barrier, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -26,10 +27,14 @@ use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 const LOCAL_TIMEOUT: Duration = Duration::from_secs(5);
 const CHILD_TIMEOUT: Duration = Duration::from_secs(8);
+/// Leak guard for the fake daemon's accept loop, not a startup budget: tests
+/// that must outlast a slow CLI start wait on the request receipt instead.
+const ACCEPT_HANG_GUARD: Duration = Duration::from_secs(120);
 
 struct ChildResult {
     output: Output,
     elapsed: Duration,
+    ended: Instant,
     killed_by_harness: bool,
 }
 
@@ -69,6 +74,7 @@ fn run_command_with_timeout(mut command: Command, timeout: Duration) -> ChildRes
             stderr: stderr_reader.join().expect("join stderr reader"),
         },
         elapsed: started.elapsed(),
+        ended: Instant::now(),
         killed_by_harness,
     }
 }
@@ -219,7 +225,7 @@ where
             .set_nonblocking(true)
             .expect("nonblocking listener");
         ready_tx.send(()).expect("signal daemon ready");
-        let accept_deadline = Instant::now() + CHILD_TIMEOUT;
+        let accept_deadline = Instant::now() + ACCEPT_HANG_GUARD;
         let mut workers = Vec::new();
         while workers.len() < connections {
             match listener.accept() {
@@ -597,12 +603,16 @@ fn generic_tool_json_preserves_large_result_while_daemon_waits() {
 #[test]
 fn generic_read_only_tool_times_out_without_late_success() {
     let (_home, _project, _socket_dir, home, project, socket) = fixture();
+    let (request_at_tx, request_at_rx) = mpsc::channel();
     let (_requests, server) = spawn_scripted_daemon(
         socket.clone(),
         &home,
         &project,
         1,
-        |mut stream, request, scope| {
+        move |mut stream, request, scope| {
+            request_at_tx
+                .send(Instant::now())
+                .expect("publish request arrival");
             std::thread::sleep(Duration::from_secs(1));
             let _ = stream.write_all(&response_bytes(&request, scope, "too-late"));
         },
@@ -615,7 +625,10 @@ fn generic_read_only_tool_times_out_without_late_success() {
     // effects retain the response-grace settlement policy.
     assert_problem(&result, "timed_out");
     assert!(result.elapsed >= Duration::from_millis(200));
-    assert!(result.elapsed < Duration::from_secs(5));
+    // Bound the settlement from the daemon receiving the request: CLI start-up
+    // time under CPU contention is not part of the contract.
+    let request_at = request_at_rx.recv().expect("fake daemon saw the request");
+    assert!(result.ended.duration_since(request_at) < LOCAL_TIMEOUT);
     assert!(!String::from_utf8_lossy(&result.output.stdout).contains("too-late"));
 }
 
@@ -715,9 +728,20 @@ fn cancelling_generic_tool_reaps_child_and_closes_request() {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let mut child = command.spawn().expect("spawn cancellable CLI");
-    requests
-        .recv_timeout(LOCAL_TIMEOUT)
-        .expect("observe cancellable request");
+    // Wait for the request itself, however long the CLI takes to start under
+    // load, and fail fast if the CLI dies or the daemon stops first.
+    loop {
+        match requests.recv_timeout(Duration::from_millis(50)) {
+            Ok(()) => break,
+            Err(RecvTimeoutError::Timeout) => assert!(
+                child.try_wait().expect("poll cancellable CLI").is_none(),
+                "CLI exited before the fake daemon received its request"
+            ),
+            Err(RecvTimeoutError::Disconnected) => {
+                panic!("fake daemon stopped before the CLI sent its request")
+            }
+        }
+    }
     child.kill().expect("cancel CLI child");
     let status = child.wait().expect("reap cancelled CLI child");
     assert!(!status.success());
