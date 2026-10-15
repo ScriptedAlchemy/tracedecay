@@ -272,9 +272,8 @@ dependencies = [
 
 [[package]]
 name = "asupersync"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f34b1a19ffd6b74570339a156912436335bb09c594c675c62ea164b19a1f2511"
+version = "0.6.0"
+source = "git+https://github.com/Dicklesworthstone/asupersync?rev=432e2c3b2cf2bad02fc88e380d29a6b0b5c01422#432e2c3b2cf2bad02fc88e380d29a6b0b5c01422"
 dependencies = [
  "aes-gcm",
  "asupersync-macros",
@@ -328,9 +327,8 @@ dependencies = [
 
 [[package]]
 name = "asupersync-macros"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b00d5ceff520908bcb2fa6efacf2ab6a0ae45639e87eb1de70b78df13acf636"
+version = "0.6.0"
+source = "git+https://github.com/Dicklesworthstone/asupersync?rev=432e2c3b2cf2bad02fc88e380d29a6b0b5c01422#432e2c3b2cf2bad02fc88e380d29a6b0b5c01422"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1147,7 +1145,7 @@ dependencies = [
  "ciborium",
  "clap",
  "criterion-plot",
- "itertools 0.13.0",
+ "itertools",
  "num-traits",
  "oorandom",
  "page_size",
@@ -1168,7 +1166,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8d80a2f4f5b554395e47b5d8305bc3d27813bacb73493eb1001e8f76dae29ea"
 dependencies = [
  "cast",
- "itertools 0.13.0",
+ "itertools",
 ]
 
 [[package]]
@@ -1772,9 +1770,8 @@ dependencies = [
 
 [[package]]
 name = "franken-decision"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b01c92bbc04816e42bc68dbf697777e83d87fc00e9ad5cec70a5c86331d834b3"
+version = "0.6.0"
+source = "git+https://github.com/Dicklesworthstone/asupersync?rev=432e2c3b2cf2bad02fc88e380d29a6b0b5c01422#432e2c3b2cf2bad02fc88e380d29a6b0b5c01422"
 dependencies = [
  "franken-evidence",
  "franken-kernel",
@@ -1783,9 +1780,8 @@ dependencies = [
 
 [[package]]
 name = "franken-evidence"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ccdd9e8e38746aa524dd8b22a35aa7c1485379156d3a145d077521e80ce429de"
+version = "0.6.0"
+source = "git+https://github.com/Dicklesworthstone/asupersync?rev=432e2c3b2cf2bad02fc88e380d29a6b0b5c01422#432e2c3b2cf2bad02fc88e380d29a6b0b5c01422"
 dependencies = [
  "serde",
  "serde_json",
@@ -1793,9 +1789,8 @@ dependencies = [
 
 [[package]]
 name = "franken-kernel"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbe470e8d7f35572ff1571ac02cb14486a77bc8a98ac6830eb8756ba4a869c0a"
+version = "0.6.0"
+source = "git+https://github.com/Dicklesworthstone/asupersync?rev=432e2c3b2cf2bad02fc88e380d29a6b0b5c01422#432e2c3b2cf2bad02fc88e380d29a6b0b5c01422"
 dependencies = [
  "serde",
 ]
@@ -2342,7 +2337,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c48eccd894bd15555b0346470e63491ded94aefe76b3fcb1052084b5a393238"
 dependencies = [
  "bstr",
- "hashbrown 0.17.1",
+ "hashbrown 0.16.1",
 ]
 
 [[package]]
@@ -3434,15 +3429,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "itertools"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
-dependencies = [
- "either",
-]
-
-[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4427,7 +4413,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
