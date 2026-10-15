@@ -391,7 +391,7 @@ fn status_is_a_one_shot_daemon_client() {
 }
 
 #[test]
-fn every_command_but_the_foreground_daemon_runs_on_the_native_runtime() {
+fn only_the_foreground_daemon_owns_a_tokio_runtime() {
     for args in [
         &["hook-stop"][..],
         &["current-counter"],
@@ -427,7 +427,7 @@ fn every_command_but_the_foreground_daemon_runs_on_the_native_runtime() {
     assert_eq!(command_runtime(None), CommandRuntime::Native);
     assert_eq!(
         command_runtime(Some(&parse_command(&["daemon", "run"]))),
-        CommandRuntime::Tokio
+        CommandRuntime::NativeWithTokio
     );
 }
 

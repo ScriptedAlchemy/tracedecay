@@ -233,13 +233,16 @@ impl Drop for Spinner {
 /// an explicit stack size gives every platform the same headroom.
 const ASYNC_STACK_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ASYNC_WORKER_THREADS: usize = 16;
-/// The executor that drives a command's future.
+/// The runtimes a command's process owns. The native runtime drives every
+/// command's future.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CommandRuntime {
     /// The native runtime alone. No Tokio runtime exists in the process.
     Native,
-    /// A multi-thread Tokio runtime beside the native one.
-    Tokio,
+    /// The native runtime plus one multi-thread Tokio runtime, which the
+    /// daemon's remaining Tokio sites reach through
+    /// `native_runtime::tokio_handle`.
+    NativeWithTokio,
 }
 
 const MIN_SERVING_BLOCKING_RESERVE: usize = 4;
@@ -263,7 +266,7 @@ fn async_worker_threads(command: Option<&Commands>) -> usize {
 /// project-server lifecycle and invocation seams.
 fn command_runtime(command: Option<&Commands>) -> CommandRuntime {
     if is_daemon_run(command) {
-        CommandRuntime::Tokio
+        CommandRuntime::NativeWithTokio
     } else {
         CommandRuntime::Native
     }
@@ -582,20 +585,25 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
     tracing::trace!(name: "process_command_runtime", value = ?command_runtime);
     let tokio = match command_runtime {
         CommandRuntime::Native => None,
-        CommandRuntime::Tokio => {
+        CommandRuntime::NativeWithTokio => {
             let _span = tracing::trace_span!("tokio_runtime_build").entered();
-            Some(
-                tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .worker_threads(worker_threads)
-                    .max_blocking_threads(blocking_threads)
-                    .thread_stack_size(ASYNC_STACK_BYTES)
-                    .on_thread_park(collect_idle_thread_heap_v1)
-                    .build()
-                    .map_err(|e| tracedecay_domain::errors::TraceDecayError::Config {
-                        message: format!("failed to start async runtime: {e}"),
-                    })?,
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(worker_threads)
+                .max_blocking_threads(blocking_threads)
+                .thread_stack_size(ASYNC_STACK_BYTES)
+                .on_thread_park(collect_idle_thread_heap_v1)
+                .build()
+                .map_err(|e| tracedecay_domain::errors::TraceDecayError::Config {
+                    message: format!("failed to start async runtime: {e}"),
+                })?;
+            tracedecay_runtime_core::native_runtime::install_tokio_runtime(
+                runtime.handle().clone(),
             )
+            .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
+                message: format!("failed to install the Tokio runtime: {error}"),
+            })?;
+            Some(runtime)
         }
     };
 
@@ -612,14 +620,12 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
             run(cli),
             tracing::trace_span!("process_command_future"),
         );
-        match &tokio {
-            Some(runtime) => runtime.block_on(command),
-            None => native.block_on(command),
-        }
+        native.block_on(command)
     };
 
-    // Only the foreground daemon has a Tokio runtime. It already coordinated
-    // every owner with typed receipts; a blocking task still running here is
+    // Only the foreground daemon has a Tokio runtime, and it outlives the
+    // daemon's shutdown coordinator, whose Tokio-side owners report typed
+    // receipts before `run` returns. A blocking task still running here is
     // one its shutdown owner reported as pending and abandoned at the
     // task-abort deadline. Waiting for it a second time only spends the
     // supervisor's TERM grace. The installed native runtime is process-static

@@ -1,11 +1,14 @@
 //! Foreground daemon bootstrap: `run_foreground` entry points, the Unix
 //! accept/serve loop, socket preparation, and client-task draining.
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Instant;
 
-use tokio::task::JoinSet;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 
 #[cfg(unix)]
 use tracedecay_code_index_runtime::{GitWatchMaintenanceWakeV1, git_watch};
@@ -13,7 +16,7 @@ use tracedecay_daemon_control::RemoteBrainTlsConfig;
 use tracedecay_daemon_identity::authority;
 use tracedecay_domain::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE;
-use tracedecay_runtime_core::native_runtime;
+use tracedecay_runtime_core::native_runtime::{self, NativeTask, NativeTaskOutcome};
 
 use super::*;
 #[cfg(unix)]
@@ -28,6 +31,62 @@ use tracedecay_runtime_core::logging::log_daemon_event;
 /// after the coordinator returns.
 const DAEMON_SHUTDOWN_COORDINATION_DEADLINE: std::time::Duration =
     DAEMON_SHUTDOWN_DEADLINE.saturating_sub(std::time::Duration::from_millis(100));
+
+/// How a client connection task ended. The error is rendered because a
+/// native task's outcome must be `Clone`.
+pub(super) type ClientOutcome = NativeTaskOutcome<std::result::Result<(), String>>;
+
+/// The accepted client connections, each a native task. Dropping the set
+/// aborts every connection still running.
+#[derive(Default)]
+pub(super) struct ClientTasks(FuturesUnordered<ClientTask>);
+
+struct ClientTask {
+    task: NativeTask<std::result::Result<(), String>>,
+    outcome: Pin<Box<dyn Future<Output = ClientOutcome> + Send>>,
+}
+
+impl Future for ClientTask {
+    type Output = ClientOutcome;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<ClientOutcome> {
+        self.outcome.as_mut().poll(context)
+    }
+}
+
+impl ClientTasks {
+    pub(super) fn spawn(
+        &mut self,
+        client: impl Future<Output = Result<()>> + Send + 'static,
+    ) -> std::result::Result<(), String> {
+        let task =
+            NativeTask::spawn(async move { client.await.map_err(|error| error.to_string()) })?;
+        let outcome = Box::pin(task.wait());
+        self.0.push(ClientTask { task, outcome });
+        Ok(())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The next connection to end. Cancel-safe.
+    pub(super) async fn join_next(&mut self) -> Option<ClientOutcome> {
+        self.0.next().await
+    }
+
+    fn abort_all(&self) {
+        for client in &self.0 {
+            client.task.abort();
+        }
+    }
+}
+
+impl Drop for ClientTasks {
+    fn drop(&mut self) {
+        self.abort_all();
+    }
+}
 
 #[tracing::instrument(name = "daemon.bootstrap.catalog_prewarm", level = "trace", skip_all)]
 fn prewarm_static_daemon_bootstrap_catalog() {
@@ -79,8 +138,6 @@ async fn run_foreground_loopback(
     remote_tls: Option<RemoteBrainTlsConfig>,
 ) -> Result<()> {
     let bootstrap_started = Instant::now();
-    tracedecay_runtime_core::native_runtime::process_runtime()
-        .map_err(|message| TraceDecayError::Config { message })?;
     let profile_root = profile.data_dir().to_path_buf();
     let catalog_prewarm = native_runtime::spawn_blocking(prewarm_static_daemon_bootstrap_catalog);
     let requested = default_loopback_endpoint();
@@ -199,7 +256,7 @@ async fn run_foreground_loopback(
     );
     let admission = DaemonClientAdmission::new(MAX_CONCURRENT_DAEMON_CLIENTS);
     let per_client_admission = DaemonPerClientAdmission::default();
-    let mut clients: JoinSet<Result<()>> = JoinSet::new();
+    let mut clients = ClientTasks::default();
     let mut shutdown_signals = ShutdownSignals::listen()?;
     log_daemon_event(
         "daemon_ready",
@@ -218,8 +275,8 @@ async fn run_foreground_loopback(
                 }
             },
             completed = clients.join_next(), if !clients.is_empty() => {
-                if let Some(Err(error)) = completed {
-                    log_daemon_event("daemon_client", &[("outcome", error.to_string())]);
+                if let Some(completed) = completed {
+                    log_client_task_result(completed);
                 }
                 continue;
             },
@@ -241,7 +298,7 @@ async fn run_foreground_loopback(
         let invocation = invocation.clone();
         let http_application_registry = http_application_registry.clone();
         let per_client_admission = per_client_admission.clone();
-        clients.spawn(tracing::Instrument::instrument(
+        let spawned = clients.spawn(tracing::Instrument::instrument(
             with_connection_admission(permit, async move {
                 Box::pin(serve_windows_broker_client_with_class_and_invocation(
                     stream,
@@ -260,11 +317,16 @@ async fn run_foreground_loopback(
             }),
             tracing::trace_span!("daemon.bootstrap.broker_connection"),
         ));
+        if let Err(error) = spawned {
+            log_client_spawn_refusal(error);
+        }
     }
     lifecycle.begin_draining();
     tracedecay_daemon_service::shutdown::arm_shutdown_exit_bound();
     drop(listener);
-    spooled_hook_opener.abort();
+    if let Some(opener) = spooled_hook_opener {
+        opener.abort();
+    }
     cancel_retained_session_history(&store_administration).await;
     let shutdown_deadline = Instant::now() + DAEMON_SHUTDOWN_COORDINATION_DEADLINE;
     let endpoint_cleanup = authority.cleanup_owned_endpoint();
@@ -408,6 +470,7 @@ async fn run_foreground_loopback(
     log_client_drain_shutdown_receipt(&shutdown);
     log_background_shutdown_receipt(&shutdown.background);
     log_project_server_shutdown_receipt(&shutdown.project_servers);
+    log_runtime_hazards();
     endpoint_cleanup
 }
 
@@ -466,6 +529,26 @@ fn log_background_shutdown_receipt(receipt: &tracedecay_daemon_service::shutdown
     }
 }
 
+/// The daemon's lifetime count of Tokio-only paths skipped for want of a Tokio
+/// runtime, and of writer waits that parked a native thread. Zero is the only
+/// healthy value for either.
+fn log_runtime_hazards() {
+    log_daemon_event(
+        "daemon_shutdown",
+        &[
+            ("outcome", "runtime_hazards".to_string()),
+            (
+                "tokio_runtime_missing",
+                native_runtime::tokio_runtime_missing_total().to_string(),
+            ),
+            (
+                "native_thread_writer_waits",
+                native_runtime::native_thread_writer_waits().to_string(),
+            ),
+        ],
+    );
+}
+
 fn log_project_server_shutdown_receipt(receipt: &tracedecay_store_runtime::ShutdownTaskReceipt) {
     if receipt.is_clean() {
         return;
@@ -498,7 +581,7 @@ fn log_project_server_shutdown_receipt(receipt: &tracedecay_store_runtime::Shutd
 /// Aborts the accepted client connections and joins them. An aborted client is
 /// clean; a client that failed or panicked is reported.
 pub(super) fn client_shutdown_owner(
-    mut clients: JoinSet<Result<()>>,
+    mut clients: ClientTasks,
 ) -> tracedecay_daemon_service::shutdown::ShutdownOwner {
     tracedecay_daemon_service::shutdown::ShutdownOwner::with_deadline_result(
         "clients",
@@ -507,11 +590,8 @@ pub(super) fn client_shutdown_owner(
             clients.abort_all();
             let mut failures = Vec::new();
             while let Some(completed) = clients.join_next().await {
-                match completed {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => failures.push(error.to_string()),
-                    Err(error) if error.is_cancelled() => {}
-                    Err(error) => failures.push(error.to_string()),
+                if let Some(failure) = client_failure(completed) {
+                    failures.push(failure);
                 }
             }
             if failures.is_empty() {
@@ -546,8 +626,6 @@ async fn run_foreground_unix(
     remote_tls: Option<RemoteBrainTlsConfig>,
 ) -> Result<()> {
     let bootstrap_started = Instant::now();
-    tracedecay_runtime_core::native_runtime::process_runtime()
-        .map_err(|message| TraceDecayError::Config { message })?;
     let profile_root = profile.data_dir().to_path_buf();
     let catalog_prewarm = native_runtime::spawn_blocking(prewarm_static_daemon_bootstrap_catalog);
     let endpoint = DaemonEndpoint::Unix(socket_path);
@@ -734,7 +812,7 @@ async fn run_foreground_unix(
     let spooled_hook_opener =
         hook_v2_replay_consumer::spawn_spooled_hook_opener(engine.clone(), profile.clone());
     let admission = DaemonClientAdmission::new(MAX_CONCURRENT_DAEMON_CLIENTS);
-    let mut client_tasks: JoinSet<Result<()>> = JoinSet::new();
+    let mut client_tasks = ClientTasks::default();
     // launchd appends this daemon's stderr to a plain file with no rotation
     // of its own; the journal (systemd) or a terminal is not a regular file
     // and is left alone. Detection is truthful about what fd 2 is, so a
@@ -793,14 +871,18 @@ async fn run_foreground_unix(
             auth_token,
             admission_class,
         ));
-        client_tasks.spawn(tracing::Instrument::instrument(
+        if let Err(error) = client_tasks.spawn(tracing::Instrument::instrument(
             with_connection_admission(permit, client),
             tracing::trace_span!("daemon.bootstrap.socket_connection"),
-        ));
+        )) {
+            log_client_spawn_refusal(error);
+        }
     }
     engine.lifecycle.begin_draining();
     tracedecay_daemon_service::shutdown::arm_shutdown_exit_bound();
-    spooled_hook_opener.abort();
+    if let Some(opener) = spooled_hook_opener {
+        opener.abort();
+    }
     if let Some(rotation) = stderr_log_rotation {
         rotation.abort();
     }
@@ -864,6 +946,7 @@ async fn run_foreground_unix(
     log_client_drain_shutdown_receipt(&shutdown);
     log_background_shutdown_receipt(&shutdown.background);
     log_project_server_shutdown_receipt(&shutdown.project_servers);
+    log_runtime_hazards();
     endpoint_cleanup
 }
 
@@ -982,16 +1065,33 @@ impl ShutdownSignals {
     }
 }
 
-fn log_client_task_result(completed: std::result::Result<Result<()>, tokio::task::JoinError>) {
-    let error = match completed {
-        Ok(Ok(())) => return,
-        Ok(Err(error)) => error.to_string(),
-        Err(error) if error.is_cancelled() => return,
-        Err(error) => error.to_string(),
-    };
+/// A client that failed or panicked; an aborted client is clean.
+fn client_failure(completed: ClientOutcome) -> Option<String> {
+    match completed {
+        NativeTaskOutcome::Completed(Ok(())) | NativeTaskOutcome::Cancelled => None,
+        NativeTaskOutcome::Completed(Err(error)) => Some(error),
+        NativeTaskOutcome::Panicked(panic) => Some(panic.to_string()),
+    }
+}
+
+fn log_client_task_result(completed: ClientOutcome) {
+    if let Some(error) = client_failure(completed) {
+        log_daemon_event(
+            "daemon_client",
+            &[("outcome", "error".to_string()), ("error", error)],
+        );
+    }
+}
+
+/// The native runtime refused the connection's task, so the accepted stream
+/// is closed unserved.
+fn log_client_spawn_refusal(error: String) {
     log_daemon_event(
         "daemon_client",
-        &[("outcome", "error".to_string()), ("error", error)],
+        &[
+            ("outcome", "runtime_unavailable".to_string()),
+            ("error", error),
+        ],
     );
 }
 

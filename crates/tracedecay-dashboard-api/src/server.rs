@@ -55,6 +55,12 @@ pub async fn serve_loopback(
     router: Router,
     shutdown: impl Future<Output = ()>,
 ) {
+    // Daemon routes served here still reach Tokio, so connections run on it.
+    let Some(runtime) =
+        tracedecay_runtime_core::native_runtime::tokio_handle("dashboard_api.serve_loopback")
+    else {
+        return;
+    };
     let graceful = CancellationToken::new();
     let mut connections = JoinSet::new();
     let mut shutdown = std::pin::pin!(shutdown);
@@ -69,11 +75,11 @@ pub async fn serve_loopback(
                 Ok((stream, address)) => {
                     let router = router.clone();
                     let graceful = graceful.clone();
-                    connections.spawn(async move {
+                    connections.spawn_on(async move {
                         if let Err(error) = serve_http_connection(stream, router, true, graceful).await {
                             tracing::trace!(%error, %address, "loopback HTTP connection stopped");
                         }
-                    });
+                    }, &runtime);
                 }
                 Err(error) => wait_after_accept_error(&error).await,
             },

@@ -651,26 +651,34 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for InProcessDaemonInv
             let executor = self.clone();
             let admitted_cancellation = self.admitted_cancellation.clone();
             let request_cancellations = self.invocation.service.request_cancellations().clone();
-            tokio::spawn(async move {
-                let request_id = request.request_id.clone();
-                let invocation = tokio::spawn(tracing::Instrument::instrument(
-                    async move { executor.invoke_once(request).await },
-                    tracing::trace_span!("daemon.invocation.invoke_once"),
-                ));
-                settle_in_process_invocation(
-                    &request_cancellations,
-                    &request_id,
-                    invocation,
-                    remaining,
-                    cancellation,
-                    admitted_cancellation,
-                    policy,
-                    DAEMON_TOOL_RESPONSE_GRACE,
-                )
+            // Work-attempt invocations reach `spawn_for_worktree`, which still
+            // needs Tokio.
+            let runtime = tracedecay_runtime_core::native_runtime::tokio_handle(
+                "daemon.invocation_executor.in_process",
+            )
+            .ok_or(tracedecay_daemon_protocol::DaemonInvocationError::Unavailable)?;
+            let invocation_runtime = runtime.clone();
+            runtime
+                .spawn(async move {
+                    let request_id = request.request_id.clone();
+                    let invocation = invocation_runtime.spawn(tracing::Instrument::instrument(
+                        async move { executor.invoke_once(request).await },
+                        tracing::trace_span!("daemon.invocation.invoke_once"),
+                    ));
+                    settle_in_process_invocation(
+                        &request_cancellations,
+                        &request_id,
+                        invocation,
+                        remaining,
+                        cancellation,
+                        admitted_cancellation,
+                        policy,
+                        DAEMON_TOOL_RESPONSE_GRACE,
+                    )
+                    .await
+                })
                 .await
-            })
-            .await
-            .map_err(|_| tracedecay_daemon_protocol::DaemonInvocationError::Unavailable)?
+                .map_err(|_| tracedecay_daemon_protocol::DaemonInvocationError::Unavailable)?
         })
     }
 

@@ -501,7 +501,7 @@ pub(crate) fn register_hook_v2_replay_consumer(
     let task_background_cpu = background_cpu;
     spool_watch::attach_consumer(&data_root, &project_root, Arc::clone(&wake));
     let task_wake = Arc::clone(&wake);
-    let task = tokio::spawn(async move {
+    let consumer = async move {
         loop {
             let (Some(graph_owner), Some(delivery_settlements)) =
                 (task_graph.upgrade(), task_delivery_settlements.upgrade())
@@ -548,15 +548,16 @@ pub(crate) fn register_hook_v2_replay_consumer(
                 break;
             }
         }
-        spool_watch::detach_consumer(&task_data_root, &task_wake);
-        if let Ok(mut roots) = registered_replay_roots().lock()
-            && roots
-                .get(&task_data_root)
-                .is_some_and(|registered| Arc::ptr_eq(&registered.wake, &task_wake))
-        {
-            roots.remove(&task_data_root);
-        }
-    });
+        release_replay_registration(&task_data_root, &task_wake);
+    };
+    // The drain has not been traced Tokio-free, so it stays on Tokio.
+    let Some(runtime) =
+        tracedecay_runtime_core::native_runtime::tokio_handle("daemon.hook_v2_replay_consumer")
+    else {
+        release_replay_registration(&data_root, &wake);
+        return false;
+    };
+    let task = runtime.spawn(consumer);
     match registered_replay_roots().lock() {
         Ok(mut roots) => match roots.get_mut(&data_root) {
             Some(registered) if Arc::ptr_eq(&registered.wake, &wake) => {
@@ -567,6 +568,19 @@ pub(crate) fn register_hook_v2_replay_consumer(
         Err(_) => task.abort(),
     }
     true
+}
+
+/// Detaches the consumer woken by `wake` and drops its registration, unless a
+/// newer consumer already took `data_root` over.
+fn release_replay_registration(data_root: &Path, wake: &Arc<tokio::sync::Notify>) {
+    spool_watch::detach_consumer(data_root, wake);
+    if let Ok(mut roots) = registered_replay_roots().lock()
+        && roots
+            .get(data_root)
+            .is_some_and(|registered| Arc::ptr_eq(&registered.wake, wake))
+    {
+        roots.remove(data_root);
+    }
 }
 
 /// Stop and join whichever replay consumer owns `data_root`. For daemon

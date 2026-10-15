@@ -131,12 +131,7 @@ impl McpServer {
                 .await
                 {
                     Ok(true) => {
-                        if let Some(reconcile) = &self.automation_scheduler_reconciler {
-                            let reconcile = Arc::clone(reconcile);
-                            tokio::spawn(async move {
-                                let _ = reconcile().await;
-                            });
-                        }
+                        self.spawn_automation_scheduler_reconcile();
                         HostAdmissionOutcome::replay_completed(true, false)
                     }
                     Ok(false) => HostAdmissionOutcome::replay_completed(false, true),
@@ -157,12 +152,7 @@ impl McpServer {
                 .await
                 {
                     Ok(()) => {
-                        if let Some(reconcile) = &self.automation_scheduler_reconciler {
-                            let reconcile = Arc::clone(reconcile);
-                            tokio::spawn(async move {
-                                let _ = reconcile().await;
-                            });
-                        }
+                        self.spawn_automation_scheduler_reconcile();
                         HostAdmissionOutcome::replay_completed(true, false)
                     }
                     Err(_) => {
@@ -171,6 +161,21 @@ impl McpServer {
                 }
             }
             HookEventPlan::Noop => HostAdmissionOutcome::replay_completed(false, true),
+        }
+    }
+
+    /// Best-effort, and on Tokio until the daemon's reconcile is traced
+    /// Tokio-free. A miss skips it and is counted.
+    fn spawn_automation_scheduler_reconcile(&self) {
+        if let Some(reconcile) = &self.automation_scheduler_reconciler
+            && let Some(runtime) = tracedecay_runtime_core::native_runtime::tokio_handle(
+                "mcp.hook_dispatch.automation_scheduler_reconcile",
+            )
+        {
+            let reconcile = Arc::clone(reconcile);
+            runtime.spawn(async move {
+                let _ = reconcile().await;
+            });
         }
     }
 

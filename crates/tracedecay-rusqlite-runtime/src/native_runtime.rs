@@ -305,8 +305,10 @@ impl<T: Clone + Send + Sync + 'static> NativeTask<T> {
         self.abort.abort();
     }
 
-    pub async fn wait(&self) -> NativeTaskOutcome<T> {
-        self.outcome.clone().await
+    /// The task's outcome. The returned future borrows nothing, so an owner
+    /// can keep it beside the handle it aborts through.
+    pub fn wait(&self) -> impl Future<Output = NativeTaskOutcome<T>> + Send + 'static {
+        self.outcome.clone()
     }
 
     #[must_use]
@@ -351,13 +353,27 @@ pub fn install(builder: RuntimeBuilder) -> Result<&'static Runtime, InstallError
 
 static TOKIO_RUNTIME_MISSING: Mutex<BTreeMap<&'static str, u64>> = Mutex::new(BTreeMap::new());
 
-/// The Tokio runtime entered on this thread, for a `site` whose work still
-/// needs one. A miss is logged and counted against `site`: the caller skips
-/// that work, which would otherwise stop silently once the caller runs on the
+static TOKIO_RUNTIME: OnceLock<tokio::runtime::Handle> = OnceLock::new();
+
+/// Makes `handle` the Tokio runtime [`tokio_handle`] returns on a thread that
+/// has none entered, such as a native worker. The foreground daemon installs
+/// the one Tokio runtime it still owns; no other host installs one.
+pub fn install_tokio_runtime(handle: tokio::runtime::Handle) -> Result<(), InstallError> {
+    TOKIO_RUNTIME
+        .set(handle)
+        .map_err(|_| InstallError::AlreadyStarted)
+}
+
+/// The Tokio runtime for a `site` whose work still needs one: the runtime
+/// entered on this thread, else the one installed by
+/// [`install_tokio_runtime`]. A miss is logged and counted against `site`:
+/// the caller skips that work, which would otherwise stop silently on the
 /// native runtime.
 #[must_use]
 pub fn tokio_handle(site: &'static str) -> Option<tokio::runtime::Handle> {
-    let handle = tokio::runtime::Handle::try_current().ok();
+    let handle = tokio::runtime::Handle::try_current()
+        .ok()
+        .or_else(|| TOKIO_RUNTIME.get().cloned());
     if handle.is_none() {
         *TOKIO_RUNTIME_MISSING
             .lock()
@@ -367,6 +383,35 @@ pub fn tokio_handle(site: &'static str) -> Option<tokio::runtime::Handle> {
         tracing::error!(site, "Tokio runtime missing; path skipped");
     }
     handle
+}
+
+/// Runs `work` on the Tokio runtime [`tokio_handle`] resolves for `site`, and
+/// awaits it from any executor. For work that polls Tokio timers or spawns on
+/// Tokio while its caller may run on a native thread. The work starts at the
+/// call; dropping the returned future aborts it, and a panic in it resumes on
+/// the caller, so the hop keeps a direct await's semantics.
+pub fn on_tokio<T, F>(site: &'static str, work: F) -> BoxFuture<'static, Result<T, String>>
+where
+    T: Send + 'static,
+    F: Future<Output = T> + Send + 'static,
+{
+    let task = tokio_handle(site).map(|runtime| AbortOnDrop(runtime.spawn(work)));
+    Box::pin(async move {
+        let mut task = task.ok_or_else(|| format!("no Tokio runtime for {site}"))?;
+        match (&mut task.0).await {
+            Ok(output) => Ok(output),
+            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+            Err(error) => Err(format!("Tokio work for {site} ended: {error}")),
+        }
+    })
+}
+
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// How many times [`tokio_handle`] found no Tokio runtime for `site` in this
@@ -421,6 +466,70 @@ mod tests {
     use super::*;
 
     const HANG_GUARD: Duration = Duration::from_secs(10);
+
+    fn hop_test_tokio_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("hop-test-tokio")
+            .enable_time()
+            .build()
+            .expect("tokio runtime")
+    }
+
+    #[test]
+    fn on_tokio_runs_the_work_on_a_tokio_worker_for_a_native_caller() {
+        let runtime = hop_test_tokio_runtime();
+        let _entered = runtime.enter();
+
+        let ran_on = block_on(on_tokio("native_runtime.tests.on_tokio", async {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            std::thread::current().name().map(str::to_owned)
+        }))
+        .expect("native root");
+
+        assert_eq!(ran_on, Ok(Some("hop-test-tokio".to_owned())));
+    }
+
+    #[test]
+    fn dropping_an_on_tokio_wait_aborts_the_work() {
+        struct DropSignal(std::sync::mpsc::Sender<()>);
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+        let runtime = hop_test_tokio_runtime();
+        let _entered = runtime.enter();
+        let (dropped, dropped_signal) = std::sync::mpsc::channel();
+
+        let hop = on_tokio("native_runtime.tests.on_tokio", async move {
+            let _signal = DropSignal(dropped);
+            std::future::pending::<()>().await;
+        });
+        drop(hop);
+
+        // An aborted task drops its future: the signal fires, or the sender is
+        // dropped unpolled. A detached task would hold it until the timeout.
+        assert_ne!(
+            dropped_signal.recv_timeout(HANG_GUARD),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+            "the dropped wait must abort its Tokio work"
+        );
+    }
+
+    #[test]
+    fn a_panic_in_on_tokio_work_resumes_on_the_caller() {
+        let runtime = hop_test_tokio_runtime();
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.block_on(on_tokio("native_runtime.tests.on_tokio", async {
+                panic!("tokio hop panic");
+            }))
+        }))
+        .expect_err("the panic must reach the caller");
+
+        assert_eq!(panic.downcast_ref::<&str>(), Some(&"tokio hop panic"));
+    }
 
     #[test]
     fn a_missing_tokio_runtime_is_counted_per_site_and_a_present_one_is_not() {
