@@ -1540,3 +1540,126 @@ async fn remote_tls_listener_expires_saturated_non_reading_responses() {
         .expect("egress saturation must not delay shutdown")
         .expect("shutdown TLS egress service");
 }
+
+/// The listener serves each connection on the native runtime, so a remote
+/// handler runs with no Tokio runtime entered.
+#[tokio::test]
+async fn remote_tls_connections_are_served_off_tokio() {
+    let temporary = tempfile::tempdir().expect("remote TLS runtime fixture");
+    let (tls, certificate) = remote_tls_fixture(&temporary);
+    let credentials = Arc::new(
+        tracedecay_store_runtime::DaemonRemoteCredentialAuthorityV1::new(
+            BrainId::new("brain.remote-tls-runtime").expect("remote brain identity"),
+            UserProfileId::new("profile.remote-tls-runtime").expect("remote profile identity"),
+        ),
+    );
+    let router = Router::new().route(
+        "/runtime",
+        axum::routing::post(|| async {
+            if tokio::runtime::Handle::try_current().is_err() {
+                "native"
+            } else {
+                "tokio"
+            }
+        }),
+    );
+    let registry = DaemonHttpApplicationRegistry::default();
+    registry
+        .install_remote(router, credentials, None)
+        .expect("install runtime-probe remote router");
+    let hazards = crate::test_support::native_runtime_hazards();
+    let service =
+        DaemonHttpApplicationService::bind_with_remote_tls(registry, AUTH_TOKEN, Some(&tls))
+            .await
+            .expect("bind Remote Brain TLS runtime-probe service");
+
+    let response = remote_tls_request(
+        service.remote_tls_endpoint().expect("TLS endpoint"),
+        &certificate,
+        "/remote/runtime",
+        None,
+        None,
+        b"",
+    )
+    .await;
+
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(
+        response.ends_with("native"),
+        "the remote handler must run off Tokio: {response}"
+    );
+    service
+        .shutdown()
+        .await
+        .expect("shutdown TLS runtime-probe service");
+    assert_eq!(crate::test_support::native_runtime_hazards(), hazards);
+}
+
+struct HandlerDropReceipt(Option<tokio::sync::oneshot::Sender<()>>);
+
+impl Drop for HandlerDropReceipt {
+    fn drop(&mut self) {
+        if let Some(receipt) = self.0.take() {
+            let _ = receipt.send(());
+        }
+    }
+}
+
+/// Dropping the service aborts its listener, and the listener's connections
+/// with it, without waiting out the shutdown drain.
+#[tokio::test]
+async fn dropping_the_remote_tls_service_aborts_an_open_connection() {
+    let temporary = tempfile::tempdir().expect("remote TLS dropped-service fixture");
+    let (tls, certificate) = remote_tls_fixture(&temporary);
+    let credentials = Arc::new(
+        tracedecay_store_runtime::DaemonRemoteCredentialAuthorityV1::new(
+            BrainId::new("brain.remote-tls-dropped").expect("remote brain identity"),
+            UserProfileId::new("profile.remote-tls-dropped").expect("remote profile identity"),
+        ),
+    );
+    let (dropped, handler_dropped) = tokio::sync::oneshot::channel();
+    let dropped = Arc::new(std::sync::Mutex::new(Some(dropped)));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let handler_started = Arc::clone(&started);
+    let router = Router::new().route(
+        "/held",
+        get(move || {
+            let receipt = HandlerDropReceipt(dropped.lock().expect("drop receipt").take());
+            let handler_started = Arc::clone(&handler_started);
+            async move {
+                let _receipt = receipt;
+                handler_started.notify_one();
+                std::future::pending::<&'static str>().await
+            }
+        }),
+    );
+    let registry = DaemonHttpApplicationRegistry::default();
+    registry
+        .install_remote(router, credentials, None)
+        .expect("install held-response remote router");
+    let service =
+        DaemonHttpApplicationService::bind_with_remote_tls(registry, AUTH_TOKEN, Some(&tls))
+            .await
+            .expect("bind Remote Brain TLS dropped-service service");
+    let mut peer = remote_tls_connect(
+        service.remote_tls_endpoint().expect("TLS endpoint"),
+        &certificate,
+    )
+    .await;
+    peer.write_all(b"GET /remote/held HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .expect("write held request");
+    tokio::time::timeout(Duration::from_secs(5), started.notified())
+        .await
+        .expect("held handler must start");
+
+    drop(service);
+
+    tokio::time::timeout(
+        RemoteBrainTlsDeadlines::PRODUCTION.shutdown_drain / 2,
+        handler_dropped,
+    )
+    .await
+    .expect("dropping the service must abort its open connection")
+    .expect("handler drop receipt");
+}
