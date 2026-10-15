@@ -84,7 +84,7 @@ fn payload(evidence: &Value) -> &Value {
 }
 
 /// Four conversational Claude records (two user, two assistant) whose text all
-/// contains [`SHARED_TERM`]; the third additionally contains [`UNIQUE_TERM`].
+/// contains [`SHARED_TERM`]; the third also contains [`UNIQUE_TERM`].
 fn write_claude_transcript(home: &std::path::Path, project: &std::path::Path) {
     let dir = home.join(".claude/projects/-claude-recall");
     std::fs::create_dir_all(&dir).expect("transcript directory");

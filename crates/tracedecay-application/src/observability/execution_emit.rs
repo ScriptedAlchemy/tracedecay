@@ -427,7 +427,7 @@ fn transition_envelope(
 /// producer. The owner transition reference is hashed into opaque event and
 /// trace identities; it is never copied into an exportable envelope field.
 /// The trace identity depends only on that stable owner reference. The event
-/// identity additionally binds the exact times, terminal state, coverage, and
+/// identity also binds the exact times, terminal state, coverage, and
 /// payload, so a revision of one logical owner receipt is a distinct event on
 /// the same trace while an exact replay remains idempotent.
 ///

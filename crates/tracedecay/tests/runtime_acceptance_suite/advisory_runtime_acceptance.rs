@@ -1418,7 +1418,7 @@ fn find_advisory_cycle(value: &Value) -> Option<Value> {
 //
 // `packaged_host_ingest_delivers_a_registered_advisory_cycle` above proves the
 // truthful *negative*: a hermetic project has no GitHub/CI reachability, so
-// those pillars report their own unavailable state. The plan additionally
+// those pillars report their own unavailable state. The plan also
 // requires one scenario where a single saved-edit/stop boundary returns
 // post-edit diagnostics/impact, a localized CI failure, an existing GitHub
 // review finding, and a concurrent-agent proximity warning *together*, in one

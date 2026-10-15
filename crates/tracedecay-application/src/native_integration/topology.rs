@@ -1,7 +1,7 @@
 //! Exact native-integration topology resolution.
 //!
 //! Independent branches are proven from the enrolled repository. Declared
-//! stacks additionally require the exact registered linked-worktree roots and
+//! stacks also require the exact registered linked-worktree roots and
 //! publish their frozen revision and observed occupancies through the verified
 //! Git topology projection.
 //!

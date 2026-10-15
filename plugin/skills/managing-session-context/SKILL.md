@@ -24,7 +24,7 @@ Preserve `coverage`, `anchors`, watermarks, redaction, and hidden-content
 notices. Partial coverage does not prove content never existed. Git-scoped
 session relations (`tracedecay_sessions_for`) distinguish produced from observed
 commits; workflow recovery reads `wf_*` session runs through
-`tracedecay_workflows`, not the Workflow definition/run mutation surface.
+`tracedecay_workflows`, not the API for changing Workflow definitions and runs.
 
 For refresh lifecycle and read-only LCM health, see
 [refresh and health](references/refresh-and-health.md). For Hermes native alias

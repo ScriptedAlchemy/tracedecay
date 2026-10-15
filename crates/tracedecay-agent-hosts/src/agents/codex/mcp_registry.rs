@@ -182,7 +182,7 @@ pub(super) fn require_codex_cli() -> Result<PathBuf> {
 /// values the plugin bundle's `.mcp.json` writer consumes, so the two
 /// spellings of the same server cannot drift apart.
 ///
-/// The bundle additionally pins `startup_timeout_sec`/`tool_timeout_sec`, which
+/// The bundle also pins `startup_timeout_sec`/`tool_timeout_sec`, which
 /// `codex mcp add` exposes no flag for. Those are deliberately *not* emulated by
 /// writing the config afterwards: the registered server takes Codex's own
 /// defaults, and an operator who wants the bundle's longer bounds installs the

@@ -3,7 +3,7 @@
 //! A discovered test node carries the qualified name the extractor observed
 //! inside one file: `<file path>::<in-file module chain>::<test>`. Cargo's
 //! `--exact` filter matches a different identity, the path relative to the
-//! *test binary*, which additionally carries the module chain the file itself
+//! *test binary*, which also carries the module chain the file itself
 //! contributes to the crate (`src/auth/login.rs` -> `auth::login`). Dispatching
 //! the in-file suffix alone makes `cargo test` filter every test out and still
 //! exit `0`, so a managed run executes nothing while reading as a success.

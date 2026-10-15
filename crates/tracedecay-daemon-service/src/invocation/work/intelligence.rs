@@ -2,7 +2,7 @@
 //!
 //! These handlers bind their read operation to the admitted capability and
 //! use-case context before reading the registered Work authorities. Experience
-//! additionally snapshots current configuration consent, so expertise never
+//! also snapshots current configuration consent, so expertise never
 //! relies on caller-provided or stale authorization state.
 
 use tracedecay_contracts::{

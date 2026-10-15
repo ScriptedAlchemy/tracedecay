@@ -187,7 +187,7 @@ include serial and concurrent throughput cases. Hook and host cases measure
 their full external boundary rather than reporting only an internal handler
 timer.
 
-The final incident catalog additionally covers missing-daemon after-shell
+The final incident catalog also covers missing-daemon after-shell
 failure and descendant reaping, sustained edit/commit indexing coalescence,
 foreground work under maintenance, diagnostic deduplication/batching, daemon
 steady-state CPU/memory/WAL/I/O/queue/generation, and renderer-consumer event

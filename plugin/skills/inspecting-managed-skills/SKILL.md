@@ -6,7 +6,7 @@ description: Inspect TraceDecay-managed skill proposals, activation, run evidenc
 # Inspecting managed skills
 
 Managed skills are profile-owned runtime artifacts, distinct from bundled plugin
-skills. Inspect the exact skill or run through supported automation surfaces.
+skills. Inspect the exact skill or run through supported automation tools.
 Artifact views verify advertised hashes; filesystem guesses and raw database
 rows are not equivalent evidence.
 

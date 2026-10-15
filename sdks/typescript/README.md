@@ -3,7 +3,7 @@
 `@tracedecay/sdk` provides generated TypeScript contracts and a strict client
 for TraceDecay's public application API.
 
-The generated callable surface includes every Work and Workflow operation
+The generated client includes every Work and Workflow operation
 admitted by the canonical executable binding registry plus the
 cancellation/resumable-stream lifecycle. Only the canonical executable binding
 registry determines whether an operation is available to the SDK.
@@ -49,7 +49,7 @@ Malformed or unavailable contracts fail closed.
 
 `pnpm test` runs the fast, mock-server unit suite only; it does not by itself
 demonstrate that the built package works against a real daemon. `npm publish`
-runs `prepublishOnly`, which additionally requires `pnpm run test:installed`,
+runs `prepublishOnly`, which also requires `pnpm run test:installed`,
 a check that requires a prebuilt production `tracedecay` executable at
 `target/debug/tracedecay`, or at the absolute path supplied through
 `TRACEDECAY_TEST_BIN`; the check does not build the daemon. It starts that

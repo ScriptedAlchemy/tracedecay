@@ -165,7 +165,7 @@ async fn summary_expansion_ids(
 }
 
 /// Materializes one published summary's records in `Current` mode. The read
-/// is provider-unscoped: a provider scope additionally demands retained
+/// is provider-unscoped: a provider scope also demands retained
 /// source occurrences the raw-only production seed never projects, which
 /// would leave the summary predicate under test unexercised.
 async fn current_summary_records(

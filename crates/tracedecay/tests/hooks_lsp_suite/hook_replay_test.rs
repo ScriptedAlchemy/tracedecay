@@ -3,7 +3,7 @@
 //! telemetry wiring, every native callback, response-capable or capture-only,
 //! records one attributed `hook_analytics.jsonl` row, and `tracedecay analytics
 //! sync` bridges those rows into durable analytics events. Capture-only
-//! callbacks additionally persist delivery receipts; that durable spool journey
+//! callbacks also persist delivery receipts; that durable spool journey
 //! is covered by the lifecycle suite.
 //!
 //! Uses only child-process env (no process-global mutation).

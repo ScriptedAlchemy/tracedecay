@@ -7,7 +7,7 @@ description: Use the shared TraceDecay code graph from Pi for repository explora
 
 Pi registers one native `tracedecay_*` tool per TraceDecay catalog tool, plus
 `/tracedecay` commands (see the `tracedecay` extension in
-`~/.pi/agent/extensions/`). They bridge the same tool surface that the Codex
+`~/.pi/agent/extensions/`). They bridge the same tool interface that the Codex
 and Cursor plugins expose over MCP, through the supported CLI. Tools that
 change project state ask for approval first and refuse an explicit project
 selector. Do not read `.tracedecay` databases directly.

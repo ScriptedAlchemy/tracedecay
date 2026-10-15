@@ -48,7 +48,7 @@ static STANDALONE_MAINTENANCE_SCOPES: LazyLock<
 /// therefore cannot open the store. Standalone test opens share one retained
 /// runtime per key, mirroring the production single-registry invariant (and
 /// `STANDALONE_MAINTENANCE_SCOPES` above); the underlying daemon session
-/// registry is additionally shared per profile inside the runtime
+/// registry is also shared per profile inside the runtime
 /// constructor, the way one production daemon mounts many projects. Entries
 /// are weak: once every graph holding the runtime drops, the next open
 /// constructs a fresh runtime, so close-then-reopen journeys still observe

@@ -1,21 +1,21 @@
-# TraceDecay ChatGPT Bundle
+# TraceDecay ChatGPT bundle
 
-A portable Agent Plugins bundle exposing the local TraceDecay daemon's
-semantic code intelligence to ChatGPT: a daemon-owned code-graph MCP server
-(`graph`) and a code-explorer MCP app (`tracedecay-explorer`). Read-only:
-every answer comes from the local TraceDecay daemon that already indexes
-your checkout, with separately reported project status and per-response
-relation generations. Symbol and impact reads do not report snapshot identity.
+This Agent Plugins bundle gives ChatGPT read-only access to the local
+TraceDecay daemon through a code-graph MCP server, `graph`, and a
+code-explorer MCP app, `tracedecay-explorer`. The daemon supplies every
+answer from its index of your checkout. It reports project status separately
+and includes relation generations in each response. Symbol and impact reads
+do not report snapshot identity.
 
 ## Contents
 
-- `plugin.json` / `mcp.json` — the portable Agent Plugins manifest pair.
-- `chatgpt-extension/embedded/server.mjs` — self-contained Node MCP adapter
+- `plugin.json` and `mcp.json` are the portable Agent Plugins manifests.
+- `chatgpt-extension/embedded/server.mjs` is the self-contained Node MCP adapter
   (stdio by default, `--http [host:]port` for a loopback Streamable HTTP
   endpoint).
-- `chatgpt-extension/embedded/app.html` — the shared MCP App resource
+- `chatgpt-extension/embedded/app.html` is the shared MCP App resource
   (`ui://tracedecay/code-explorer`).
-- `chatgpt-extension/assets/icon.svg` — manifest icon.
+- `chatgpt-extension/assets/icon.svg` is the manifest icon.
 
 ## Requirements
 
@@ -26,9 +26,11 @@ relation generations. Symbol and impact reads do not report snapshot identity.
 ## Installing
 
 `tracedecay install --agent chatgpt` stages this bundle at
-`~/.tracedecay/host-bundle-stage/chatgpt/tracedecay` and reports host registration as unverifiable (exit 0). ChatGPT registers plugins and connectors only
-through its own interactive surfaces — developer-mode connector setup or
-the app's plugin flow — so TraceDecay cannot activate it for you.
+`~/.tracedecay/host-bundle-stage/chatgpt/tracedecay` and reports host
+registration as unverifiable with exit code 0. ChatGPT requires you to
+register plugins and connectors through its
+developer-mode connector setup or plugin flow. TraceDecay cannot activate
+the bundle for you.
 
 Two ways to finish:
 
@@ -39,5 +41,5 @@ Two ways to finish:
    `graph` and `tracedecay-explorer` from `mcp.json` over stdio.
 
 `tracedecay uninstall --agent chatgpt` removes the staged bundle; remove the
-connector or plugin inside ChatGPT yourself — the host-side step cannot be
-observed or driven from here.
+connector or plugin inside ChatGPT yourself. TraceDecay cannot perform or
+verify that step.
