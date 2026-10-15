@@ -7205,6 +7205,18 @@ async fn shutdown_timeout_retains_blocked_worker_owner_until_retry_joins_it() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn project_retirement_retains_blocked_worker_until_remount_joins_completion() {
+    remount_after_a_retirement_outlives_its_deadline(false).await;
+}
+
+/// A retired worker that panics after its retirement deadline has already
+/// parked the worktree it owned. The remount that joins it starts a clean
+/// owner instead of failing once on the dead worker's outcome (#4028).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remount_after_a_retired_worker_panics_starts_a_clean_owner() {
+    remount_after_a_retirement_outlives_its_deadline(true).await;
+}
+
+async fn remount_after_a_retirement_outlives_its_deadline(worker_panics_on_exit: bool) {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn busy() -> u32 { 1 }\n")]);
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
@@ -7268,6 +7280,9 @@ async fn project_retirement_retains_blocked_worker_until_remount_joins_completio
         Err(super::super::CodeIndexSchedulerErrorV1::Identity(message))
             if message.contains("still retiring")
     ));
+    if worker_panics_on_exit {
+        CodeIndexSchedulerRegistryV1::panic_next_worker_pass(fixture.path());
+    }
     drop(release);
     drop(scheduler);
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -7298,6 +7313,15 @@ async fn project_retirement_retains_blocked_worker_until_remount_joins_completio
         "remount must publish a replacement owner"
     );
     assert_eq!(registry.retiring_owner_count().await, 0);
+    wait_for_initial_generation(&registry, fixture.path()).await;
+    let freshness = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("remounted freshness");
+    assert_eq!(
+        freshness.parked, None,
+        "the replacement owner starts unparked"
+    );
     registry.shutdown().await;
 }
 
