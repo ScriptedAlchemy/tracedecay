@@ -37,13 +37,12 @@ impl Default for ShutdownCoordinatorV1 {
 impl ShutdownCoordinatorV1 {
     pub async fn coordinate_until<Work>(
         &self,
-        deadline: impl Into<std::time::Instant>,
+        deadline: std::time::Instant,
         work: Work,
     ) -> ShutdownStatus
     where
         Work: std::future::Future<Output = ShutdownStatus> + Send + 'static,
     {
-        let deadline = deadline.into();
         let mut work = Some(work);
         loop {
             self.reap_completed_coordinator().await;

@@ -125,6 +125,12 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if let Err(error) = tracedecay_runtime_core::native_runtime::install(
+        tracedecay_runtime_core::native_runtime::default_builder(),
+    ) {
+        eprintln!("tracedecay-index-bench: {error}");
+        return ExitCode::FAILURE;
+    }
 
     match run(&options) {
         Ok(summary) => {

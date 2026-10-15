@@ -3,11 +3,12 @@
 //! Storage, shard lifecycle, and session-memory paths spawn their settlement
 //! work on an Asupersync runtime so accepted work outlives a cancelled request.
 //! Callers that already run on a native runtime use it. Every other caller
-//! (the Tokio daemon, CLI commands, and Tokio tests) shares one process
-//! runtime: the one the host [`install`]s at startup, or a default one started
-//! on first use when the host never installs. Callers only await native join handles and
-//! channel receivers, which wake through ordinary `Waker`s, so a foreign
-//! executor never blocks on the native runtime.
+//! (the daemon's Tokio sites, CLI commands, and tests) shares one process
+//! runtime: the one the host [`install`]s at startup. Without an install every
+//! helper here refuses with [`NOT_INSTALLED`]; the `test-runtime` feature
+//! instead starts a default runtime on first use, for tests. Callers only
+//! await native join handles and channel receivers, which wake through
+//! ordinary `Waker`s, so a foreign executor never blocks on the native runtime.
 
 use std::collections::BTreeMap;
 use std::pin::Pin;
@@ -29,13 +30,15 @@ pub const MAX_BLOCKING_THREADS: usize = 512;
 
 static PROCESS_RUNTIME: OnceLock<Result<Runtime, String>> = OnceLock::new();
 
+/// Why a helper refused when the host never called [`install`].
+pub const NOT_INSTALLED: &str = "native execution runtime not installed";
+
 /// The runtime the caller runs on, or the process runtime.
 ///
-/// `None` only when the process runtime failed to start; the failure is
-/// logged once.
+/// `None` when no runtime was installed or the installed one failed to start.
 #[must_use]
 pub fn handle() -> Option<RuntimeHandle> {
-    Runtime::current_handle().or_else(|| process_runtime().ok())
+    Runtime::current_handle().or_else(|| process_runtime().ok().map(Runtime::handle))
 }
 
 /// The caller's task context, or a request context on the process runtime.
@@ -44,15 +47,10 @@ pub fn cx() -> Option<Cx> {
     Cx::current().or_else(|| {
         process_runtime()
             .ok()?
+            .handle()
             .try_request_cx_with_budget(Budget::INFINITE)
             .ok()
     })
-}
-
-/// Starts the process runtime, so a daemon fails at startup rather than on
-/// its first storage operation.
-pub fn process_runtime() -> Result<RuntimeHandle, String> {
-    started_process_runtime().map(Runtime::handle)
 }
 
 /// Runs `future` to completion on the calling thread, with the tasks it
@@ -63,7 +61,7 @@ pub fn block_on<F: Future>(future: F) -> Result<F::Output, String> {
     if Runtime::current_handle().is_some() {
         return Err("native block_on called from a native runtime thread".to_owned());
     }
-    Ok(started_process_runtime()?.block_on(future))
+    Ok(process_runtime()?.block_on(future))
 }
 
 /// Queues `work` on the runtime's blocking pool now, at the call, and returns
@@ -452,8 +450,7 @@ pub enum InstallError {
 }
 
 /// Builds `builder` and makes it the process runtime every helper here uses.
-/// A host installs it at startup, before any native helper runs; a host that
-/// never installs gets a default runtime on first use.
+/// A host installs it at startup, before any native helper runs.
 pub fn install(builder: RuntimeBuilder) -> Result<&'static Runtime, InstallError> {
     let mut installed = false;
     let runtime = PROCESS_RUNTIME.get_or_init(|| {
@@ -584,15 +581,22 @@ pub fn tokio_runtime_missing_total() -> u64 {
         .sum()
 }
 
-fn started_process_runtime() -> Result<&'static Runtime, String> {
-    PROCESS_RUNTIME
-        .get_or_init(|| {
-            start(
-                RuntimeBuilder::multi_thread()
-                    .thread_name_prefix("tracedecay-native")
-                    .blocking_threads(1, MAX_BLOCKING_THREADS),
-            )
-        })
+/// The runtime a host without its own sizing installs: the CLI's thread name
+/// and blocking ceiling, Asupersync's default worker count.
+#[must_use]
+pub fn default_builder() -> RuntimeBuilder {
+    RuntimeBuilder::multi_thread()
+        .thread_name_prefix("tracedecay-native")
+        .blocking_threads(1, MAX_BLOCKING_THREADS)
+}
+
+fn process_runtime() -> Result<&'static Runtime, String> {
+    #[cfg(feature = "test-runtime")]
+    let runtime = Some(PROCESS_RUNTIME.get_or_init(|| start(default_builder())));
+    #[cfg(not(feature = "test-runtime"))]
+    let runtime = PROCESS_RUNTIME.get();
+    runtime
+        .ok_or_else(|| NOT_INSTALLED.to_owned())?
         .as_ref()
         .map_err(Clone::clone)
 }
@@ -1069,7 +1073,7 @@ mod tests {
 
     #[test]
     fn install_after_the_default_runtime_started_is_refused() {
-        process_runtime().expect("default process runtime");
+        handle().expect("default process runtime");
         assert_eq!(
             install(RuntimeBuilder::multi_thread()).err(),
             Some(InstallError::AlreadyStarted)

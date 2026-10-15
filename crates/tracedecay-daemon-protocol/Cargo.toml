@@ -13,7 +13,7 @@ doctest = false
 [features]
 # Repo-wide `test-helpers` convention: exposes this crate's test-only helper
 # surfaces to dependent crates' test builds only. Never gates production code.
-test-helpers = ["tracedecay-framing/test-helpers"]
+test-helpers = ["tracedecay-framing/test-helpers", "tokio/net"]
 
 [dependencies]
 asupersync.workspace = true
@@ -25,7 +25,7 @@ serde_path_to_error = "0.1"
 # Non-blocking Unix connect that reports a full listen backlog (see transport.rs).
 socket2 = "0.6"
 thiserror = "2"
-tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "sync"] }
 tracedecay-contracts = { path = "../tracedecay-contracts" }
 tracedecay-domain = { path = "../tracedecay-domain" }
 tracedecay-framing = { path = "../tracedecay-framing" }
