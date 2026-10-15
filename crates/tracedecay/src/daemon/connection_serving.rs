@@ -2154,3 +2154,120 @@ mod delivery_ack_tests {
         );
     }
 }
+
+/// Debug builds fail a native task whose poll runs longer than
+/// `LONG_POLL_CPU`; a broker connection's request dispatch must not be that
+/// poll, or the daemon closes the socket after the request was sent (#4056).
+#[cfg(all(test, unix, debug_assertions))]
+mod long_dispatch_tests {
+    use std::collections::HashMap;
+    use std::io::{BufRead, BufReader};
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    use tracedecay_daemon_protocol::{
+        BrokerStream, DaemonClientIdentity, DaemonHandshake, DaemonInvocationProblem,
+        DaemonInvocationRequest, DaemonInvocationResponse, MovedStoreAdoption,
+    };
+    use tracedecay_daemon_service::shutdown::DaemonLifecycle;
+    use tracedecay_mcp::BrokerStreamTransport;
+    use tracedecay_runtime_core::native_runtime::{self, NativeTask, NativeTaskOutcome};
+
+    use super::{DaemonInvocationState, drive_retained_invocation_responses};
+
+    const REQUEST_ID: &str = "request.long-dispatch";
+
+    fn handshake() -> DaemonHandshake {
+        let profile_root = PathBuf::from("/profiles/long-dispatch");
+        DaemonHandshake {
+            project_path: None,
+            scope_prefix: None,
+            timings: false,
+            allow_init: false,
+            allow_initialize_root_routing: false,
+            client_identity: DaemonClientIdentity {
+                global_db_path: profile_root.join("global.db"),
+                profile_root,
+            },
+            client_version: String::new(),
+            client_instance_id: "client.long-dispatch".to_owned(),
+            tool_list_changed_capable: false,
+            catalog_version: String::new(),
+            moved_store_adoption: MovedStoreAdoption::Never,
+        }
+    }
+
+    fn request() -> DaemonInvocationRequest {
+        let now = tracedecay_contracts::now_micros();
+        DaemonInvocationRequest::profile_graph_tool(
+            REQUEST_ID,
+            tracedecay_tool_catalog::ApplicationSurfaceOperation::AffectedTests,
+            serde_json::Map::new(),
+            now,
+            tracedecay_contracts::Deadline::new(tracedecay_domain::UtcMicros(now.0 + 30_000_000))
+                .expect("deadline"),
+            tracedecay_contracts::CancellationContext::active("cancel.long-dispatch")
+                .expect("cancellation"),
+        )
+    }
+
+    #[test]
+    fn a_dispatch_longer_than_one_native_poll_still_answers_its_request() {
+        let (daemon_end, client) = std::os::unix::net::UnixStream::pair().expect("socket pair");
+        daemon_end
+            .set_nonblocking(true)
+            .expect("nonblocking daemon end");
+        let daemon_end = BrokerStream::Unix(
+            asupersync::net::unix::UnixStream::from_std(daemon_end).expect("daemon end"),
+        );
+        let invocation = DaemonInvocationState::default();
+        let connection = NativeTask::spawn(async move {
+            let mut transport = BrokerStreamTransport::new(daemon_end);
+            drive_retained_invocation_responses(
+                Ok(request()),
+                &mut transport,
+                &invocation.service,
+                &handshake(),
+                &DaemonLifecycle::default(),
+                &mut HashMap::new(),
+                |request| {
+                    Box::pin(async move {
+                        let spun = Instant::now();
+                        while spun.elapsed() < native_runtime::LONG_POLL_CPU * 2 {
+                            std::hint::spin_loop();
+                        }
+                        let _ =
+                            native_runtime::sleep_until(Instant::now() + Duration::from_millis(1))
+                                .await;
+                        DaemonInvocationResponse::problem(
+                            request.request_id,
+                            DaemonInvocationProblem::Unavailable,
+                        )
+                    })
+                },
+            )
+            .await
+            .map_err(|error| error.to_string())
+        })
+        .expect("native connection task");
+
+        client
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .expect("client read timeout");
+        let mut line = String::new();
+        BufReader::new(&client)
+            .read_line(&mut line)
+            .expect("read the response");
+        let response: DaemonInvocationResponse =
+            serde_json::from_str(&line).expect("the connection answers the sent request");
+        assert_eq!(response.request_id, REQUEST_ID);
+        client
+            .shutdown(std::net::Shutdown::Both)
+            .expect("close the client");
+        assert_eq!(
+            native_runtime::block_on(connection.wait()).expect("process runtime"),
+            NativeTaskOutcome::Completed(Ok(())),
+            "the connection ends cleanly when its client closes"
+        );
+    }
+}
