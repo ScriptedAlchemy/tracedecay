@@ -311,8 +311,10 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
 
     #[tracing::instrument(name = "sessions.ingest.user.hermes", level = "trace", skip_all)]
     async fn run_hermes(self) -> ProviderRunOutcome {
-        let Some(outcome) = hermes::ingest_user_sessions_capped_with_admission(
+        let mut sweep = SourceSweep::new("hermes", self.codex_discovery);
+        let Some(outcome) = hermes::ingest_user_with_sweep(
             self.facade,
+            &mut sweep,
             self.roots,
             Some(self.max_new_bytes),
             self.cancellation,
@@ -321,7 +323,9 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
         else {
             return ProviderRunOutcome::skipped();
         };
-        hermes_run_outcome(outcome, false)
+        let mut run = hermes_run_outcome(outcome, false);
+        sweep.report_into(&mut run);
+        run
     }
 
     #[tracing::instrument(name = "sessions.ingest.user.claude", level = "trace", skip_all)]

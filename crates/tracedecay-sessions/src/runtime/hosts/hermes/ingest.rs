@@ -7,15 +7,16 @@ use tracedecay_domain::{ObservationScopeV1, ProjectId};
 
 use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
+use crate::runtime::ingest::quarantine::SourceSweep;
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
 use crate::runtime::shared::TranscriptIngestStats;
 use crate::runtime::source::run_blocking_transcript_section;
 
-use super::DEFAULT_HERMES_SWEEP_BYTES;
 use super::coverage::drain_hermes_projections_with_admission_and_cancellation;
 use super::state_db::{
     try_ingest_state_db_bounded_with_admission, try_ingest_user_state_db_bounded_with_admission,
 };
+use super::{DEFAULT_HERMES_SWEEP_BYTES, PROVIDER};
 
 fn new_sweep_budget(max_new_bytes: Option<u64>) -> IngestByteBudget {
     IngestByteBudget::bounded(max_new_bytes.unwrap_or(DEFAULT_HERMES_SWEEP_BYTES))
@@ -76,6 +77,7 @@ pub struct HermesSweepOutcome {
     pub bytes_consumed: u64,
     pub deferred_by_byte_cap: bool,
     /// Discovered `state.db` sources the sweep could not open, query, or admit.
+    /// Through the public entry points, each permanently refused session too.
     pub source_failures: u64,
     /// The post-sweep projection drain did not complete for this scope.
     pub projection_drain_deferred: bool,
@@ -95,6 +97,27 @@ pub async fn ingest_for_project_capped_with_admission_and_cancellation(
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
 ) -> Option<HermesSweepOutcome> {
+    ingest_project_with_sweep(
+        project_root,
+        project_id,
+        admission,
+        &mut SourceSweep::new(PROVIDER, None),
+        max_new_bytes,
+        cancellation,
+    )
+    .await
+}
+
+/// [`ingest_for_project_capped_with_admission_and_cancellation`] for a
+/// provider run, which reports the sessions `sweep` quarantines.
+pub(crate) async fn ingest_project_with_sweep(
+    project_root: &Path,
+    project_id: ProjectId,
+    admission: &dyn HostAdmission,
+    sweep: &mut SourceSweep,
+    max_new_bytes: Option<u64>,
+    cancellation: &ObservationCancellation,
+) -> Option<HermesSweepOutcome> {
     let homes = hermes_homes()?;
     Some(
         ingest_homes_capped_with_admission_and_cancellation(
@@ -102,6 +125,7 @@ pub async fn ingest_for_project_capped_with_admission_and_cancellation(
             project_root,
             project_id,
             admission,
+            sweep,
             max_new_bytes,
             cancellation,
         )
@@ -119,6 +143,7 @@ pub(super) async fn ingest_homes_capped_with_admission_and_cancellation(
     project_root: &Path,
     project_id: ProjectId,
     admission: &dyn HostAdmission,
+    sweep: &mut SourceSweep,
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
 ) -> HermesSweepOutcome {
@@ -155,6 +180,7 @@ pub(super) async fn ingest_homes_capped_with_admission_and_cancellation(
             project_root,
             project_id.clone(),
             admission,
+            sweep,
             &mut budget,
             cancellation,
         )
@@ -203,10 +229,30 @@ pub async fn ingest_user_sessions_capped_with_admission(
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
 ) -> Option<HermesSweepOutcome> {
+    ingest_user_with_sweep(
+        admission,
+        &mut SourceSweep::new(PROVIDER, None),
+        registered_roots,
+        max_new_bytes,
+        cancellation,
+    )
+    .await
+}
+
+/// [`ingest_user_sessions_capped_with_admission`] for a provider run, which
+/// reports the sessions `sweep` quarantines.
+pub(crate) async fn ingest_user_with_sweep(
+    admission: &dyn HostAdmission,
+    sweep: &mut SourceSweep,
+    registered_roots: &[PathBuf],
+    max_new_bytes: Option<u64>,
+    cancellation: &ObservationCancellation,
+) -> Option<HermesSweepOutcome> {
     let homes = hermes_homes()?;
     Some(
         ingest_user_homes_capped_with_admission(
             admission,
+            sweep,
             &homes,
             registered_roots,
             max_new_bytes,
@@ -219,6 +265,7 @@ pub async fn ingest_user_sessions_capped_with_admission(
 #[tracing::instrument(name = "sessions.hosts.hermes.ingest_user", level = "trace", skip_all)]
 async fn ingest_user_homes_capped_with_admission(
     admission: &dyn HostAdmission,
+    sweep: &mut SourceSweep,
     hermes_homes: &[PathBuf],
     registered_roots: &[PathBuf],
     max_new_bytes: Option<u64>,
@@ -253,6 +300,7 @@ async fn ingest_user_homes_capped_with_admission(
         }
         match try_ingest_user_state_db_bounded_with_admission(
             admission,
+            sweep,
             &source,
             registered_roots,
             &mut budget,
