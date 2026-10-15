@@ -1098,7 +1098,10 @@ async fn client_errors_and_panics_are_named_while_aborted_clients_are_clean() {
         })
         .expect("panicking client task");
     clients
-        .spawn(std::future::pending())
+        .spawn(async {
+            let _unwind = SlowUnwind;
+            std::future::pending().await
+        })
         .expect("pending client task");
     // Both have run before the shutdown aborts the set.
     let _ = failure_settled.await;
@@ -1122,13 +1125,26 @@ fn panicking_client() -> std::result::Result<(), String> {
     panic!("client panicked during shutdown")
 }
 
+/// An aborted client whose unwind holds its native worker for 50 ms, as a
+/// worker busy under load does, well inside `DAEMON_TASK_ABORT_DEADLINE`.
+struct SlowUnwind;
+
+impl Drop for SlowUnwind {
+    fn drop(&mut self) {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 async fn shutdown_with_clients(
     lifecycle: &DaemonLifecycle,
     clients: crate::daemon::bootstrap::ClientTasks,
 ) -> Arc<tracedecay_daemon_service::shutdown::DaemonShutdownReceipt> {
+    // The daemon's own deadline. A shorter one leaves nothing for the client
+    // phase once the later phases' reserves are set aside, so any unwind at
+    // all would read as TimedOut.
     tracedecay_daemon_service::shutdown::coordinate_daemon_shutdown(
         lifecycle,
-        std::time::Instant::now() + std::time::Duration::from_secs(5),
+        std::time::Instant::now() + tracedecay_runtime_core::DAEMON_SHUTDOWN_DEADLINE,
         async move {
             tracedecay_daemon_service::shutdown::DaemonShutdownPlan::new(Vec::new(), |_| async {
                 tracedecay_store_runtime::ShutdownTaskReceipt::default()
@@ -1286,6 +1302,7 @@ async fn a_client_dropped_mid_tokio_hop_releases_the_hop_before_the_drain_receip
     struct HopResource(Arc<std::sync::atomic::AtomicBool>);
     impl Drop for HopResource {
         fn drop(&mut self) {
+            drop(SlowUnwind);
             self.0.store(true, std::sync::atomic::Ordering::SeqCst);
         }
     }

@@ -926,6 +926,69 @@ async fn last_alias_shutdown_keeps_the_store_retiring_until_drain_finishes() {
     service.expire_all().await;
 }
 
+/// A write that missed its persistence deadline is a gap in the stream, not
+/// an owner still running: the producer worker still joins. Quiescence has
+/// already taken the root's runtime out of the registry by then, so it must
+/// report the root quiesced rather than fail the capacity retirement.
+#[tokio::test]
+async fn quiescence_survives_a_producer_write_that_missed_its_deadline() {
+    let (_project, project_id, database, _runtime) =
+        runtime("observability-quiesce-missed-write").await;
+    let root = PathBuf::from("/project/observability-quiesce-missed-write");
+    let service = DaemonInvocationService::default();
+    let producer = service
+        .mount_observability_producer(
+            root.clone(),
+            database.clone(),
+            project_id.clone(),
+            digest('3'),
+            digest('4'),
+        )
+        .await
+        .expect("producer");
+    let blocker = database
+        .begin_write_transaction()
+        .await
+        .expect("hold registered writer");
+    producer
+        .try_emit(envelope(&project_id, "quiesce:missed-write"))
+        .expect("enqueue the event whose write misses its deadline");
+
+    let lsp_registry = Arc::new(tokio::sync::Mutex::new(
+        tracedecay_lsp::LspSessionRegistry::default(),
+    ));
+    let profile_id = database.binding().shard_id.profile_id.clone();
+    let quiescing_service = service.clone();
+    let quiescing_project = project_id.clone();
+    let quiescence = tokio::spawn(async move {
+        quiescing_service
+            .quiesce_project(
+                &lsp_registry,
+                &profile_id,
+                &quiescing_project,
+                &BTreeSet::from([root]),
+            )
+            .await
+    });
+    while !producer.shutdown_joined() && !quiescence.is_finished() {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    blocker.commit().await.expect("release registered writer");
+
+    let quiescence = quiescence
+        .await
+        .expect("quiescence task")
+        .expect("a missed persistence deadline must not fail quiescence");
+    assert_eq!(
+        producer
+            .try_emit(envelope(&project_id, "quiesce:after-drain"))
+            .expect_err("quiescence closes the producer"),
+        "observability_producer_closed"
+    );
+    drop(quiescence);
+    service.expire_all().await;
+}
+
 #[tokio::test]
 async fn concurrent_two_alias_release_keeps_the_store_retiring_until_drain_finishes() {
     let (_project, project_id, database, _runtime) =

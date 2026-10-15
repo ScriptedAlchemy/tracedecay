@@ -92,16 +92,25 @@ impl ProjectRuntimeRegistryV1 {
             },
         )
         .await;
-        match retired {
-            Ok(mut runtimes) => {
-                let mut clean = shut_down_advisory(&runtimes).await;
-                clean &= shut_down_feedback(&runtimes).await;
-                clean &= shut_down_observability(&mut runtimes).await;
-                drop(shut_down_runtimes(runtimes));
-                clean
-            }
-            Err(_) => false,
+        let Ok(mut runtimes) = retired else {
+            return false;
+        };
+        // The roots are drained once their runtimes leave the registry. Each
+        // teardown below joins its owner before returning; `false` only means
+        // the owner lost work on the way out (an aborted advisory task, an
+        // observation write past its deadline), which a retry cannot recover
+        // and which must not fail the retirement of roots already torn down.
+        let mut clean = shut_down_advisory(&runtimes).await;
+        clean &= shut_down_feedback(&runtimes).await;
+        clean &= shut_down_observability(&mut runtimes).await;
+        drop(shut_down_runtimes(runtimes));
+        if !clean {
+            tracing::warn!(
+                roots = ?roots,
+                "retired project runtimes lost work while shutting down"
+            );
         }
+        true
     }
 
     fn release_quiesced_roots(&self, roots: &BTreeSet<PathBuf>) {

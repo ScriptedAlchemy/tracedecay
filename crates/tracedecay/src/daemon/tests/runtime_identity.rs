@@ -914,7 +914,8 @@ async fn retiring_observability_owner_reopens_same_route_without_cached_degradat
             .project_runtimes
             .quiesce_roots(&roots)
             .await
-            .is_none()
+            .is_some(),
+        "the root's runtime retires while its store owner still awaits the writer"
     );
     // Remove the initial published route to model a capacity reopen. From the
     // first refusal onward, only production open/retry logic may change it.
