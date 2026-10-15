@@ -1,8 +1,8 @@
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rusqlite::Savepoint;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tracedecay_domain::UtcMicros;
@@ -12,9 +12,9 @@ use tracedecay_graph_db::{
     VerifiedGraphSnapshot,
 };
 use tracedecay_rusqlite_runtime::{
-    ExistingWriterLocator, PersistentWriter, StorageOperationExecutor,
+    ExactSqlOnlyStorageOperationV1, ExistingWriterLocator, PersistentWriter,
     exact_sql::{ExactSqlError, ExactSqlHandle, ExactSqlWriteAuthority, ExactSqlWriteIntent},
-    reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor},
+    reader::{ExactSqlOnlyReaderV1, ExistingReaderLocator, ReaderPool},
     repository::{GRAPH_PUBLICATION_SCHEMA_V1, GraphPublicationExactSqlStorage},
 };
 use tracedecay_store::{
@@ -67,32 +67,6 @@ impl RetainedGraphStoreOwnerAttachmentV1 for BenchmarkGraphLease {
     ) -> Result<Arc<dyn RetainedGraphStoreLeaseV1>, RetainedGraphStoreOwnerOperationLeaseErrorV1>
     {
         Ok(Arc::new(self.clone()))
-    }
-}
-
-struct NoWrites;
-
-impl StorageOperationExecutor for NoWrites {
-    fn execute(
-        &mut self,
-        _savepoint: &Savepoint<'_>,
-        _payload: &tracedecay_store::RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()> {
-        Ok(())
-    }
-}
-
-#[derive(Clone)]
-struct NoReads;
-
-impl ReaderQueryExecutor for NoReads {
-    fn execute_read(
-        &mut self,
-        _snapshot: &rusqlite::Transaction<'_>,
-        _request: &tracedecay_store::RuntimeReadRequestV1,
-    ) -> Result<tracedecay_store::RuntimeReadOutcomeV1, tracedecay_store::StorageRuntimeErrorV1>
-    {
-        unreachable!("Git benchmark publication authority uses exact SQL only")
     }
 }
 
@@ -152,7 +126,7 @@ fn operation_control(sequence: usize) -> (RuntimeRequestControlV1, BenchmarkProb
 
 pub struct PersistentGitGraph {
     _writer: PersistentWriter,
-    _readers: ReaderPool<NoReads>,
+    _readers: ReaderPool<ExactSqlOnlyReaderV1>,
     registry: GraphDbRegistry,
     owner_attachment: Option<GraphDbOwnerAttachmentV1>,
     binding: StoreRuntimeBindingV1,
@@ -180,10 +154,12 @@ impl PersistentGitGraph {
             StoreAuthorityEpochV1::new(1).expect("benchmark authority epoch is valid"),
         );
         let relational_path = root.path().join("publication.sqlite3");
-        drop(
-            rusqlite::Connection::open(&relational_path)
-                .expect("benchmark publication database is created"),
-        );
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&relational_path)
+            .expect("benchmark publication database is created");
         let relational_path = relational_path
             .canonicalize()
             .expect("benchmark publication database path is canonical");
@@ -203,14 +179,14 @@ impl PersistentGitGraph {
             )
             .expect("benchmark writer locator is valid"),
             AdmissionConfigV1::default(),
-            NoWrites,
+            ExactSqlOnlyStorageOperationV1,
         )
         .expect("benchmark publication writer starts");
         let readers = ReaderPool::start(
             ExistingReaderLocator::new(binding.clone(), relational_locator, relational_path)
                 .expect("benchmark reader locator is valid"),
             AdmissionConfigV1::default().readers,
-            NoReads,
+            ExactSqlOnlyReaderV1,
         )
         .expect("benchmark publication readers start");
         let handle =

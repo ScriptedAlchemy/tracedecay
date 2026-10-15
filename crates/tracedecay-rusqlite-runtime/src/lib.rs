@@ -1,13 +1,15 @@
 //! Bundled SQLite storage runtime.
 
 mod admission;
+mod allocator;
 mod authority;
 mod checkpoint;
 mod connection;
 pub mod schema_version;
 pub use connection::{
     ConnectionPolicyError, OpenedDatabaseFileError, VerifiedReader, VerifiedReaderError,
-    open_immutable_reader, open_verified_immutable_reader, open_verified_read_snapshot,
+    default_vfs_max_pathname, open_immutable_reader, open_verified_immutable_reader,
+    open_verified_read_snapshot,
 };
 #[doc(hidden)]
 pub mod exact_sql;
@@ -37,6 +39,7 @@ pub mod work_run_control;
 pub mod workflow;
 mod writer;
 
+pub use allocator::{SqliteAllocatorMethodsV1, install_sqlite_allocator};
 pub use authority::{
     RuntimeWriteAuthority, RuntimeWriteAuthorityError, RuntimeWriteAuthorityStage,
 };
@@ -44,7 +47,9 @@ pub use checkpoint::{
     CheckpointBlocker, CheckpointBlockers, CheckpointFrameReport, CheckpointInterruption,
     CheckpointKind, CheckpointOutcome, CheckpointPressure, CheckpointStatus, CheckpointWal,
 };
-pub use operation::{StorageOperationError, StorageOperationExecutor};
+pub use operation::{
+    ExactSqlOnlyStorageOperationV1, StorageOperationError, StorageOperationExecutor,
+};
 pub use telemetry::{
     ReaderAdmissionSnapshot, SqliteStoreSizeTelemetryPort, SqliteVmSnapshot, WalCheckpointSample,
     WalCheckpointSnapshot, WriterBatchMetrics, WriterBatchTotals, WriterClientServiceSnapshot,

@@ -126,7 +126,7 @@ jobs:
   gates:
     name: Repository gates
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -227,6 +227,9 @@ jobs:
         run: |
           python3 scripts/test-check-sqlite-plan-stability.py
           python3 scripts/check-sqlite-plan-stability.py
+
+      - name: Check rusqlite stays inside storage owners
+        run: python3 scripts/check-rusqlite-storage-boundary.py
 
       # Lint proposed commits without rejudging already-published history.
       - name: Validate commit messages

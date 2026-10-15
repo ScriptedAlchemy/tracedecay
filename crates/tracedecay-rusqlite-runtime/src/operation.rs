@@ -33,6 +33,21 @@ pub trait StorageOperationExecutor {
     }
 }
 
+/// Writer executor for isolated runtimes whose writes are performed through
+/// the bounded exact-SQL channel.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ExactSqlOnlyStorageOperationV1;
+
+impl StorageOperationExecutor for ExactSqlOnlyStorageOperationV1 {
+    fn execute(
+        &mut self,
+        _savepoint: &Savepoint<'_>,
+        _payload: &RepositoryWritePayloadV1,
+    ) -> rusqlite::Result<()> {
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 pub enum StorageOperationError {
     Contract(StorageRuntimeContractErrorV1),

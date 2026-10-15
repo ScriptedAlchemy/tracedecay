@@ -4,6 +4,8 @@
 //! Production access is exclusively through [`GraphPublicationExactSqlStorage`]
 //! over an already-authorized exact-SQL attachment.
 
+use std::collections::BTreeMap;
+
 use tracedecay_store::{
     GraphCanonicalReplaySourceDigestV1, GraphDependencyGenerationClosureDigestV1,
     GraphDependencyGenerationIdentityV1, GraphGenerationIdV1, GraphNamespaceV1,
@@ -20,6 +22,64 @@ mod exact;
 pub use exact::GraphPublicationExactSqlStorage;
 
 pub const GRAPH_PUBLICATION_SCHEMA_V1: &str = include_str!("graph_publication_schema.sql");
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphPublicationSchemaObjectV1 {
+    pub object_type: String,
+    pub table: String,
+    pub sql: String,
+}
+
+pub fn canonical_graph_publication_schema_inventory()
+-> Result<BTreeMap<String, GraphPublicationSchemaObjectV1>, String> {
+    let connection = rusqlite::Connection::open_in_memory()
+        .map_err(|error| format!("failed to open canonical graph publication schema: {error}"))?;
+    connection
+        .execute_batch(GRAPH_PUBLICATION_SCHEMA_V1)
+        .map_err(|error| {
+            format!("failed to install canonical graph publication schema: {error}")
+        })?;
+    let mut statement = connection
+        .prepare(
+            "SELECT type, name, tbl_name, COALESCE(sql, '')
+             FROM sqlite_master
+             WHERE type IN ('table', 'index', 'trigger', 'view')
+               AND name NOT LIKE 'sqlite_%'
+             ORDER BY name",
+        )
+        .map_err(|error| format!("failed to prepare canonical graph schema inventory: {error}"))?;
+    let rows = statement
+        .query_map((), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|error| format!("failed to query canonical graph schema inventory: {error}"))?;
+    let mut inventory = BTreeMap::new();
+    for row in rows {
+        let (object_type, name, table, sql) =
+            row.map_err(|error| format!("failed to read canonical graph schema object: {error}"))?;
+        if inventory
+            .insert(
+                name.clone(),
+                GraphPublicationSchemaObjectV1 {
+                    object_type,
+                    table,
+                    sql,
+                },
+            )
+            .is_some()
+        {
+            return Err(format!(
+                "canonical graph publication schema repeats object '{name}'"
+            ));
+        }
+    }
+    Ok(inventory)
+}
 
 #[derive(Clone)]
 struct EncodedProjection {
