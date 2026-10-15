@@ -1030,7 +1030,7 @@ async fn remote_project_deletion_stays_settling_until_transferred_reaper_joins()
         project_root: project.canonicalize().expect("canonical project"),
         scope_prefix: None,
     };
-    let (task, started_rx, completed_rx, release) = spawn_noncooperative_test_task();
+    let (task, _, started_rx, completed_rx, release) = spawn_noncooperative_native_test_task();
     started_rx.await.expect("maintenance task started");
     engine
         .store_administration

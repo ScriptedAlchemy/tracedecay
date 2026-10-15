@@ -11,9 +11,10 @@ async fn pr_autotrack_is_cancelled_before_invocation_join() {
     let task = crate::daemon::pr_autotrack::spawn_with_administration(
         engine.store_administration.clone(),
         tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1),
-    );
+    )
+    .expect("the native runtime admits the loop");
     let cancellation = task.cancellation();
-    let engine = engine.with_pr_autotrack_task(task).await;
+    let engine = engine.with_pr_autotrack_task(Some(task)).await;
 
     let owner_phases = engine.shutdown_owner_phases().await;
     assert!(!cancellation.is_cancelled());
@@ -166,7 +167,7 @@ async fn daemon_scheduler_shutdown_aborts_and_joins_every_loop() {
         project_root: PathBuf::from("/projects/shutdown-test"),
         scope_prefix: None,
     };
-    let task = tokio::spawn(std::future::pending::<()>());
+    let task = NativeTask::spawn(std::future::pending::<()>()).expect("native task");
     engine
         .store_administration
         .automation_schedulers()
@@ -208,11 +209,11 @@ async fn automation_shutdown_timeout_keeps_unfinished_task_tracked() {
         project_root: PathBuf::from("/projects/automation-shutdown-timeout-test"),
         scope_prefix: None,
     };
-    let (task, started_rx, completed_rx, release) = spawn_noncooperative_test_task();
+    let (task, stale_task, started_rx, completed_rx, release) =
+        spawn_noncooperative_native_test_task();
     started_rx
         .await
         .expect("noncooperative automation owner started");
-    let stale_task = task.abort_handle();
     engine
         .store_administration
         .automation_schedulers()
@@ -324,7 +325,7 @@ async fn automation_retirement_reserves_only_after_scheduler_lock_admission() {
         project_root: PathBuf::from("/projects/retirement-lock-admission"),
         scope_prefix: None,
     };
-    let task = tokio::spawn(std::future::pending::<()>());
+    let task = NativeTask::spawn(std::future::pending::<()>()).expect("native task");
     engine
         .store_administration
         .automation_schedulers()
@@ -383,7 +384,7 @@ async fn cancelled_contended_automation_retirement_remains_shutdown_owned() {
     let mut replacement = key.clone();
     replacement.owner.graph_db_path =
         PathBuf::from("/stores/automation-registration-cancel-test/new.db");
-    let (task, started_rx, completed_rx, release) = spawn_noncooperative_test_task();
+    let (task, _, started_rx, completed_rx, release) = spawn_noncooperative_native_test_task();
     tokio::time::timeout(MAINTENANCE_TEST_DEADLINE, started_rx)
         .await
         .expect("noncooperative automation owner start timed out")
@@ -536,7 +537,7 @@ async fn deletion_drain_retains_already_transferred_maintenance_reaper_until_ret
         project_root: PathBuf::from("/projects/deletion-reaper-test"),
         scope_prefix: None,
     };
-    let (task, started_rx, completed_rx, release) = spawn_noncooperative_test_task();
+    let (task, _, started_rx, completed_rx, release) = spawn_noncooperative_native_test_task();
     started_rx.await.expect("maintenance owner started");
     engine
         .store_administration
@@ -589,7 +590,7 @@ async fn project_reaper_settle_ignores_unrelated_pending_registration() {
         project_root: PathBuf::from("/projects/unrelated-pending-reaper"),
         scope_prefix: None,
     };
-    let (task, started_rx, completed_rx, release) = spawn_noncooperative_test_task();
+    let (task, _, started_rx, completed_rx, release) = spawn_noncooperative_native_test_task();
     started_rx
         .await
         .expect("unrelated maintenance owner started");
@@ -654,9 +655,10 @@ async fn panicked_retired_task_releases_scheduler_registration() {
         project_root: PathBuf::from("/projects/panicked-automation-retirement-test"),
         scope_prefix: None,
     };
-    let automation_task = tokio::spawn(async {
+    let automation_task = NativeTask::spawn(async {
         panic!("panicked automation owner");
-    });
+    })
+    .expect("native task");
     engine
         .store_administration
         .automation_schedulers()
@@ -713,7 +715,9 @@ async fn scheduler_shutdown_does_not_wait_for_contended_administration_gate() {
         .await
         .insert(
             key,
-            test_automation_scheduler_handle(tokio::spawn(std::future::pending::<()>())),
+            test_automation_scheduler_handle(
+                NativeTask::spawn(std::future::pending::<()>()).expect("native task"),
+            ),
         );
     let (gate_entered_tx, gate_entered_rx) = tokio::sync::oneshot::channel();
     let (gate_release_tx, gate_release_rx) = tokio::sync::oneshot::channel();
@@ -851,4 +855,165 @@ async fn engine_shutdown_with_code_index_reconcile_in_flight_stays_inside_term_g
         "every background owner must join cleanly: {:?}",
         receipt.background.unfinished()
     );
+}
+
+/// Retirement hands the aborted loop to a reaper on the native runtime, which
+/// joins it and releases its registration with no Tokio runtime entered.
+#[cfg(unix)]
+#[test]
+fn automation_retirement_reaps_without_a_tokio_runtime() {
+    let hazards = crate::test_support::native_runtime_hazards();
+    tracedecay_runtime_core::native_runtime::block_on(async {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let engine = DaemonEngine::default();
+        let key = ProjectServerKey {
+            owner: StoreOwnerKey {
+                profile_root: PathBuf::from("/profiles/native-reaper-test"),
+                global_db_path: PathBuf::from("/profiles/native-reaper-test/global.db"),
+                project_id: Some("native-reaper-test".to_string()),
+                store_root: PathBuf::from("/stores/native-reaper-test"),
+                graph_db_path: PathBuf::from("/stores/native-reaper-test/graph.db"),
+            },
+            project_root: PathBuf::from("/projects/native-reaper-test"),
+            scope_prefix: None,
+        };
+        let (task, stale_task) = probed_native_test_task(std::future::pending::<()>());
+        engine
+            .store_administration
+            .automation_schedulers()
+            .lock()
+            .await
+            .insert(key.clone(), test_automation_scheduler_handle(task));
+
+        let retirement = engine
+            .retire_automation_scheduler_locked(&key)
+            .await
+            .expect("automation owner retirement");
+        tracedecay_runtime_core::native_runtime::timeout(
+            MAINTENANCE_TEST_DEADLINE,
+            retirement.wait(),
+        )
+        .await
+        .expect("the reaper joins the retired loop");
+        tracedecay_runtime_core::native_runtime::timeout(
+            MAINTENANCE_TEST_DEADLINE,
+            engine
+                .store_administration
+                .wait_for_retirement_reaper_count_for_test(0),
+        )
+        .await
+        .expect("the reaper releases its registration");
+
+        assert!(stale_task.is_finished(), "retirement aborts the loop");
+        assert!(
+            engine
+                .store_administration
+                .automation_schedulers()
+                .lock()
+                .await
+                .is_empty()
+        );
+    })
+    .expect("native runtime");
+    assert_eq!(crate::test_support::native_runtime_hazards(), hazards);
+}
+
+/// Branch add admits its publication onto the native runtime and shutdown
+/// joins it, with no Tokio runtime entered.
+#[cfg(unix)]
+#[test]
+fn manual_branch_publication_runs_and_joins_without_a_tokio_runtime() {
+    let hazards = crate::test_support::native_runtime_hazards();
+    tracedecay_runtime_core::native_runtime::block_on(async {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let administration = DaemonEngine::default().store_administration.clone();
+        let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
+        let admission = administration
+            .admit_manual_branch_publication(|_, admitted| async move {
+                let _ = admitted.send(());
+                let _ = release_receiver.await;
+                Ok(tracedecay_runtime_core::branch::BranchAddOutcome::Added)
+            })
+            .await
+            .expect("manual branch publication is admitted");
+        assert_eq!(
+            admission,
+            tracedecay_runtime_core::branch::BranchAddOutcome::Deferred
+        );
+        let _ = release_sender.send(());
+        assert_eq!(
+            tracedecay_runtime_core::native_runtime::timeout(
+                MAINTENANCE_TEST_DEADLINE,
+                administration.shutdown_manual_branch_publications(),
+            )
+            .await,
+            Ok(Ok(())),
+            "shutdown joins the completed publication"
+        );
+    })
+    .expect("native runtime");
+    assert_eq!(crate::test_support::native_runtime_hazards(), hazards);
+}
+
+/// Dropping the administration's last handle aborts a publication it still
+/// owns, as the `JoinSet` it replaced did.
+#[cfg(unix)]
+#[tokio::test]
+async fn dropping_the_administration_aborts_an_owned_manual_branch_publication() {
+    let administration = DaemonEngine::default().store_administration.clone();
+    let alive = Arc::new(());
+    let held = Arc::downgrade(&alive);
+    let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
+    administration
+        .admit_manual_branch_publication(|_, admitted| async move {
+            let _ = admitted.send(());
+            let _ = started_sender.send(());
+            std::future::pending::<()>().await;
+            drop(alive);
+            Ok(tracedecay_runtime_core::branch::BranchAddOutcome::Added)
+        })
+        .await
+        .expect("manual branch publication is admitted");
+    started_receiver.await.expect("publication started");
+    assert_eq!(held.strong_count(), 1);
+
+    drop(administration);
+    tokio::time::timeout(MAINTENANCE_TEST_DEADLINE, async {
+        while held.strong_count() > 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the dropped owner aborts its publication");
+}
+
+/// Dropping the PR auto-track owner aborts its loop, as a timed-out shutdown
+/// join does. The parked loop holds one administration clone until then.
+#[cfg(unix)]
+#[tokio::test]
+async fn dropping_the_pr_autotrack_owner_aborts_its_parked_loop() {
+    let dir = TempDir::new().expect("temp dir");
+    let profile_root = dir.path().join("profile");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let _database_scope = enter_test_daemon_database_scope(&profile_root, "pr-autotrack-drop-test");
+    let administration = engine.store_administration.clone();
+    let owners = Arc::strong_count(administration.automation_schedulers());
+    let task = crate::daemon::pr_autotrack::spawn_with_administration(
+        administration.clone(),
+        tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1),
+    )
+    .expect("the native runtime admits the loop");
+    assert_eq!(
+        Arc::strong_count(administration.automation_schedulers()),
+        owners + 1
+    );
+
+    drop(task);
+    tokio::time::timeout(MAINTENANCE_TEST_DEADLINE, async {
+        while Arc::strong_count(administration.automation_schedulers()) > owners {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the dropped owner aborts its loop");
 }

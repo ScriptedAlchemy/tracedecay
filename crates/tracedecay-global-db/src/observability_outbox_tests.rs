@@ -1,9 +1,32 @@
+use crate::registered_analytics::OBSERVABILITY_EVENT_BY_IDEMPOTENCY_KEY_SQL;
 use crate::tests::harness::RegisteredGlobalDbHarness;
 use crate::{
     AnalyticsEventInsert, CoverageStateV1, ObservabilityEmissionClaimV1,
     ObservabilityOwnerEmissionWriteOutcomeV1, ObservabilityOwnerEmissionWriteV1,
     ObservabilityRollupRebuildV1, PreparedObservabilityEmissionV1,
 };
+
+#[asupersync::test]
+async fn idempotency_lookup_searches_its_partial_index() {
+    let harness = RegisteredGlobalDbHarness::open("observability-idempotency-plan").await;
+    let snapshot = harness.registered.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(
+            &format!("EXPLAIN QUERY PLAN {OBSERVABILITY_EVENT_BY_IDEMPOTENCY_KEY_SQL}"),
+            ["scope:fixture", "idempotency:fixture"],
+        )
+        .await
+        .unwrap();
+    let mut plan = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        plan.push(row.get::<String>(3).unwrap());
+    }
+    assert!(
+        plan.iter()
+            .any(|detail| detail.contains("idx_observability_event_idempotency")),
+        "the idempotency lookup must search its partial index: {plan:?}"
+    );
+}
 
 #[asupersync::test]
 async fn observability_append_is_idempotent_and_rejects_changed_input() {

@@ -3,17 +3,41 @@ use std::time::Duration;
 
 use super::*;
 use crate::test_support::git::git;
+use tracedecay_runtime_core::native_runtime;
 
-#[tokio::test]
-async fn spawned_loop_is_cancellable_and_joinable() {
-    let schedulers = CodeIndexSchedulerRegistryV1::new(1);
-    let task = spawn_with_administration(StoreAdministration::default(), schedulers);
+#[test]
+fn spawned_loop_is_cancellable_and_joinable_without_a_tokio_runtime() {
+    let hazards = crate::test_support::native_runtime_hazards();
+    native_runtime::block_on(async {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        let schedulers = CodeIndexSchedulerRegistryV1::new(1);
+        let task = spawn_with_administration(StoreAdministration::default(), schedulers)
+            .expect("the native runtime admits the loop");
 
-    assert!(
-        tokio::time::timeout(Duration::from_secs(1), task.shutdown())
-            .await
-            .is_ok()
-    );
+        assert!(
+            native_runtime::timeout(Duration::from_secs(1), task.shutdown())
+                .await
+                .is_ok()
+        );
+    })
+    .expect("native runtime");
+    assert_eq!(crate::test_support::native_runtime_hazards(), hazards);
+}
+
+/// The tick's reconcile mounts the PR head through the code-index scheduler
+/// with no Tokio runtime entered.
+#[test]
+fn reconcile_activates_a_pr_head_without_a_tokio_runtime() {
+    let repo = tempfile::tempdir().unwrap();
+    let origin = tempfile::tempdir().unwrap();
+    init_repo_with_pr_11_head(repo.path(), origin.path());
+    let hazards = crate::test_support::native_runtime_hazards();
+    native_runtime::block_on(async {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        assert_pr_11_head_reconciles(repo.path()).await;
+    })
+    .expect("native runtime");
+    assert_eq!(crate::test_support::native_runtime_hazards(), hazards);
 }
 
 // ---- Reconcile: removal + idempotency (no index required) -------------------
@@ -334,48 +358,52 @@ async fn reconcile_does_not_prepare_new_pr_without_scheduler_activation() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconcile_activates_discovered_pr_head_when_scheduler_is_injected() {
-    use tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1;
-
     let repo = tempfile::tempdir().unwrap();
     let origin = tempfile::tempdir().unwrap();
-    git(repo.path(), &["init", "-q", "-b", "main"]);
-    git(repo.path(), &["config", "user.name", "TraceDecay Test"]);
+    init_repo_with_pr_11_head(repo.path(), origin.path());
+    assert_pr_11_head_reconciles(repo.path()).await;
+}
+
+/// A repository whose origin holds `refs/pull/11/head`, with the PR branch
+/// deleted locally.
+fn init_repo_with_pr_11_head(repo: &Path, origin: &Path) {
+    git(repo, &["init", "-q", "-b", "main"]);
+    git(repo, &["config", "user.name", "TraceDecay Test"]);
     git(
-        repo.path(),
+        repo,
         &["config", "user.email", "tracedecay@example.invalid"],
     );
-    std::fs::create_dir_all(repo.path().join("src")).unwrap();
-    std::fs::write(repo.path().join("src/lib.rs"), "pub fn on_main() {}\n").unwrap();
-    git(repo.path(), &["add", "."]);
-    git(repo.path(), &["commit", "-qm", "initial"]);
-    git(origin.path(), &["init", "-q", "--bare", "-b", "main"]);
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::write(repo.join("src/lib.rs"), "pub fn on_main() {}\n").unwrap();
+    git(repo, &["add", "."]);
+    git(repo, &["commit", "-qm", "initial"]);
+    git(origin, &["init", "-q", "--bare", "-b", "main"]);
+    git(repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git(repo, &["push", "-q", "origin", "main"]);
+    git(repo, &["checkout", "-q", "-b", "feature-11", "main"]);
+    std::fs::write(repo.join("src/pr_11.rs"), "pub fn pr_eleven() {}\n").unwrap();
+    git(repo, &["add", "."]);
+    git(repo, &["commit", "-qm", "PR 11 content"]);
+    git(repo, &["push", "-q", "origin", "feature-11"]);
     git(
-        repo.path(),
-        &["remote", "add", "origin", origin.path().to_str().unwrap()],
-    );
-    git(repo.path(), &["push", "-q", "origin", "main"]);
-    git(repo.path(), &["checkout", "-q", "-b", "feature-11", "main"]);
-    std::fs::write(repo.path().join("src/pr_11.rs"), "pub fn pr_eleven() {}\n").unwrap();
-    git(repo.path(), &["add", "."]);
-    git(repo.path(), &["commit", "-qm", "PR 11 content"]);
-    git(repo.path(), &["push", "-q", "origin", "feature-11"]);
-    git(
-        origin.path(),
+        origin,
         &["update-ref", "refs/pull/11/head", "refs/heads/feature-11"],
     );
-    git(repo.path(), &["checkout", "-q", "main"]);
-    git(repo.path(), &["branch", "-q", "-D", "feature-11"]);
+    git(repo, &["checkout", "-q", "main"]);
+    git(repo, &["branch", "-q", "-D", "feature-11"]);
+}
 
+async fn assert_pr_11_head_reconciles(repo: &Path) {
     let graph = Arc::new(
         tracedecay_project::project::TraceDecay::open_with_options_for_test(
-            repo.path(),
+            repo,
             tracedecay_project::project::TraceDecayOpenOptions::default(),
         )
         .await
         .expect("open project graph"),
     );
     let data_root = graph.store_layout().data_root.clone();
-    let discovery = discover_open_prs_with_control(repo.path(), default_pr_command_control())
+    let discovery = discover_open_prs_with_control(repo, default_pr_command_control())
         .expect("discover PR head");
     assert_eq!(discovery.open.len(), 1);
     assert_eq!(discovery.open[0].number, 11);
@@ -383,7 +411,7 @@ async fn reconcile_activates_discovered_pr_head_when_scheduler_is_injected() {
     let schedulers = CodeIndexSchedulerRegistryV1::new(2);
     let command_control = PrCommandControl::default();
     let report = reconcile_project_with_administration(
-        repo.path(),
+        repo,
         &data_root,
         &discovery,
         10,

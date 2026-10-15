@@ -221,10 +221,6 @@ pub(crate) fn try_run(args: &[OsString]) -> Option<i32> {
     })
 }
 
-pub(crate) fn is_native_hook_command(command: &Commands) -> bool {
-    matches!(command, Commands::HookPreToolUse) || capture_command_for(command).is_some()
-}
-
 /// The capture source of a native hook subcommand and the host event it
 /// names, when it names one.
 pub(crate) fn capture_command_for(

@@ -11,6 +11,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::task::JoinHandle;
 use tracedecay_query::code_search;
+#[cfg(unix)]
+use tracedecay_runtime_core::native_runtime::NativeTask;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
 
 #[cfg(unix)]
@@ -523,44 +525,62 @@ fn an_unservable_search_reports_every_lane_down() {
 }
 
 #[cfg(unix)]
-fn test_automation_scheduler_handle(task: JoinHandle<()>) -> AutomationSchedulerHandle {
+fn test_automation_scheduler_handle(task: NativeTask<()>) -> AutomationSchedulerHandle {
     AutomationSchedulerHandle::for_test(task)
+}
+
+/// Reports whether a native test task's future has finished or been dropped.
+#[cfg(unix)]
+struct NativeTaskProbe(std::sync::Weak<()>);
+
+#[cfg(unix)]
+impl NativeTaskProbe {
+    fn is_finished(&self) -> bool {
+        self.0.strong_count() == 0
+    }
+}
+
+#[cfg(unix)]
+fn probed_native_test_task(
+    work: impl std::future::Future<Output = ()> + Send + 'static,
+) -> (NativeTask<()>, NativeTaskProbe) {
+    let alive = Arc::new(());
+    let probe = NativeTaskProbe(Arc::downgrade(&alive));
+    let task = NativeTask::spawn(async move {
+        work.await;
+        drop(alive);
+    })
+    .expect("native test task");
+    (task, probe)
 }
 
 #[cfg(unix)]
 async fn wait_for_automation_scheduler_state(
     engine: &DaemonEngine,
-    deadline: tokio::time::Instant,
-    description: &str,
     mut matches: impl FnMut(
         &std::collections::HashMap<ProjectServerKey, AutomationSchedulerHandle>,
     ) -> bool,
 ) {
-    let message = format!("timed out waiting for {description}");
-    tokio::time::timeout(remaining_test_budget(deadline, &message), async {
-        loop {
-            let changed = engine.automation_scheduler_state_changed.notified();
-            tokio::pin!(changed);
-            changed.as_mut().enable();
-            let schedulers = engine
-                .store_administration
-                .automation_schedulers()
-                .lock()
-                .await;
-            if matches(&schedulers) {
-                return;
-            }
-            drop(schedulers);
-            changed.await;
+    loop {
+        let changed = engine.automation_scheduler_state_changed.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        let schedulers = engine
+            .store_administration
+            .automation_schedulers()
+            .lock()
+            .await;
+        if matches(&schedulers) {
+            return;
         }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("{message}"));
+        drop(schedulers);
+        changed.await;
+    }
 }
 
 #[cfg(unix)]
 async fn wait_for_finished_task(
-    task: &JoinHandle<()>,
+    task: &NativeTask<()>,
     deadline: tokio::time::Instant,
     description: &str,
 ) {
@@ -601,6 +621,44 @@ impl Drop for NoncooperativeTaskRelease {
     fn drop(&mut self) {
         self.release();
     }
+}
+
+/// A native owner stuck in synchronous work until released: an abort cannot
+/// drop it before it yields. It runs on its own one-worker runtime so the
+/// blocked worker is never one the process runtime needs.
+#[cfg(unix)]
+fn spawn_noncooperative_native_test_task() -> (
+    NativeTask<()>,
+    NativeTaskProbe,
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Receiver<()>,
+    NoncooperativeTaskRelease,
+) {
+    let release = NoncooperativeTaskRelease {
+        state: Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new())),
+    };
+    let task_release = release.clone();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (completed_tx, completed_rx) = tokio::sync::oneshot::channel();
+    let runtime: &'static tracedecay_runtime_core::native_runtime::Runtime = Box::leak(Box::new(
+        tracedecay_runtime_core::native_runtime::RuntimeBuilder::multi_thread()
+            .worker_threads(1)
+            .build()
+            .expect("dedicated native runtime"),
+    ));
+    let (task, probe) = runtime.block_on(async move {
+        probed_native_test_task(async move {
+            let _ = started_tx.send(());
+            let (released, changed) = &*task_release.state;
+            let mut ready = released.lock().unwrap_or_else(PoisonError::into_inner);
+            while !*ready {
+                ready = changed.wait(ready).unwrap_or_else(PoisonError::into_inner);
+            }
+            drop(ready);
+            let _ = completed_tx.send(());
+        })
+    });
+    (task, probe, started_rx, completed_rx, release)
 }
 
 #[cfg(unix)]

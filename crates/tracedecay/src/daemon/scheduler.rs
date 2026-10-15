@@ -2,11 +2,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::task::JoinHandle;
 use tracedecay_automation_runtime::automation::AutomationRunControl;
 use tracedecay_automation_runtime::automation::backend::{AgentTaskBackend, AgentTaskKind};
 use tracedecay_automation_runtime::automation::maintenance_termination::MaintenanceTaskTermination;
 use tracedecay_automation_runtime::automation::scheduler_stop::AutomationSchedulerStop;
+use tracedecay_runtime_core::native_runtime::NativeTask;
 
 use tracedecay_automation_runtime::automation::effect_runtime::settlement::{
     AutomationEffectAdmission, AutomationEffectAuthority, RetainedAutomationSettlementOutcome,
@@ -261,7 +261,7 @@ pub(super) enum AutomationSchedulerLifecycle {
 }
 
 pub(super) struct AutomationSchedulerHandle {
-    pub(super) task: Option<JoinHandle<()>>,
+    pub(super) task: Option<NativeTask<()>>,
     pub(super) wake: Arc<tokio::sync::Notify>,
     pub(super) completion: Arc<()>,
     pub(super) generation: Arc<std::sync::atomic::AtomicU64>,
@@ -272,7 +272,7 @@ pub(super) struct AutomationSchedulerHandle {
 
 #[cfg(test)]
 impl AutomationSchedulerHandle {
-    pub(super) fn for_test(task: JoinHandle<()>) -> Self {
+    pub(super) fn for_test(task: NativeTask<()>) -> Self {
         Self {
             task: Some(task),
             wake: Arc::new(tokio::sync::Notify::new()),
@@ -541,7 +541,7 @@ impl DaemonEngine {
         if let Some(mut handle) = finished
             && let Some(task) = handle.task.take()
         {
-            let _ = task.await;
+            let _ = task.wait().await;
         }
 
         #[cfg(test)]
@@ -635,7 +635,7 @@ impl DaemonEngine {
             if let Some(mut handle) = finished
                 && let Some(task) = handle.task.take()
             {
-                let _ = task.await;
+                let _ = task.wait().await;
             }
             debug_assert!(matches!(
                 lifecycle,
@@ -771,10 +771,23 @@ impl DaemonEngine {
                         || handle.lifecycle == AutomationSchedulerLifecycle::Retiring
                 });
         };
-        let task = tokio::spawn(tracing::Instrument::instrument(
+        let task = match NativeTask::spawn(tracing::Instrument::instrument(
             scheduler_loop,
             tracing::trace_span!("daemon.scheduler.loop"),
-        ));
+        )) {
+            Ok(task) => task,
+            Err(error) => {
+                log_daemon_event(
+                    "scheduler_start",
+                    &[
+                        ("project", key.project_root.display().to_string()),
+                        ("outcome", "runtime_unavailable".to_string()),
+                        ("error", error),
+                    ],
+                );
+                return AutomationSchedulerReconcileOutcome::OwnerUnavailable;
+            }
+        };
         {
             let mut signals = self
                 .store_administration
@@ -1062,7 +1075,7 @@ pub(super) fn same_scheduler_owner(left: &ProjectServerKey, right: &ProjectServe
 fn observed_scheduler_lifecycle(
     handle: &AutomationSchedulerHandle,
 ) -> AutomationSchedulerLifecycle {
-    if handle.task.as_ref().is_some_and(JoinHandle::is_finished) {
+    if handle.task.as_ref().is_some_and(NativeTask::is_finished) {
         AutomationSchedulerLifecycle::Finished
     } else {
         handle.lifecycle

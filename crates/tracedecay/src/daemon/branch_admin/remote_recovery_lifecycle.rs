@@ -321,7 +321,8 @@ async fn retire_maintenance_tasks(
         task.abort();
     }
     for (owner, task) in tasks {
-        super::project_retirement::track_aborted_retirement_task(retirements, owner, task).await;
+        super::project_retirement::track_aborted_native_retirement_task(retirements, owner, task)
+            .await;
     }
 }
 

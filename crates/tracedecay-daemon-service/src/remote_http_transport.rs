@@ -597,6 +597,11 @@ impl RemoteBrainTlsIo {
         match handshake.as_mut().poll(context) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Ok(stream)) => {
+                // A write-side poll can finish the handshake after the reader
+                // parked on it. Its final read may already hold the request,
+                // so no readiness edge follows, and the reset deadlines below
+                // arm only when polled: wake the reader to re-poll the stream.
+                context.waker().wake_by_ref();
                 self.transport = RemoteBrainTlsTransport::Streaming(Box::new(stream));
                 let now = wall_now();
                 self.read_idle_deadline
@@ -928,5 +933,148 @@ fn declared_http11_body_length(header_bytes: &[u8]) -> io::Result<u64> {
 fn tls_configuration_error(operation: &str, error: impl std::fmt::Display) -> TraceDecayError {
     TraceDecayError::Config {
         message: format!("failed to {operation}: {error}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write as _;
+    use std::path::Path;
+    use std::sync::mpsc;
+    use std::sync::{Condvar, Mutex};
+    use std::task::{Wake, Waker};
+
+    use super::*;
+
+    const CERTIFICATE_CHAIN: &[u8] =
+        include_bytes!("../../../tests/fixtures/remote_tls/localhost.crt.pem");
+    const PRIVATE_KEY: &[u8] =
+        include_bytes!("../../../tests/fixtures/remote_tls/localhost.key.pem");
+    const TRUST_ROOT: &[u8] =
+        include_bytes!("../../../tests/fixtures/remote_tls/localhost-root.crt.pem");
+    const REQUEST: &[u8] = b"GET /remote/authority HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+
+    #[derive(Default)]
+    struct CountingWaker {
+        wakes: Mutex<usize>,
+        woken: Condvar,
+    }
+
+    impl Wake for CountingWaker {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            *self.wakes.lock().unwrap() += 1;
+            self.woken.notify_all();
+        }
+    }
+
+    impl CountingWaker {
+        fn count(&self) -> usize {
+            *self.wakes.lock().unwrap()
+        }
+
+        fn wait_past(&self, seen: usize) -> usize {
+            let wakes = self.wakes.lock().unwrap();
+            *self
+                .woken
+                .wait_while(wakes, |wakes| *wakes <= seen)
+                .unwrap()
+        }
+    }
+
+    fn tls_listener(directory: &Path) -> RemoteBrainTlsListener {
+        let certificate_chain = directory.join("chain.pem");
+        let private_key = directory.join("key.pem");
+        std::fs::write(&certificate_chain, CERTIFICATE_CHAIN).unwrap();
+        std::fs::write(&private_key, PRIVATE_KEY).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&private_key, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let config = RemoteBrainTlsConfig::from_optional_parts(
+            Some(SocketAddr::from(([127, 0, 0, 1], 0))),
+            Some(certificate_chain),
+            Some(private_key),
+        )
+        .unwrap()
+        .unwrap();
+        native_runtime::block_on(RemoteBrainTlsListener::bind(&config))
+            .unwrap()
+            .unwrap()
+    }
+
+    /// Completes the handshake, sends `REQUEST` in the same flight as the
+    /// client Finished, then holds the connection open until released, so the
+    /// server sees no readiness edge after that flight.
+    fn hold_open_client(address: SocketAddr, release: mpsc::Receiver<()>) {
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(CertificateDer::from_pem_slice(TRUST_ROOT).unwrap())
+            .unwrap();
+        let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+        let mut tls = rustls::ClientConnection::new(
+            Arc::new(config),
+            ServerName::IpAddress(address.ip().into()),
+        )
+        .unwrap();
+        let mut socket = std::net::TcpStream::connect(address).unwrap();
+        tls.writer().write_all(REQUEST).unwrap();
+        while tls.is_handshaking() || tls.wants_write() {
+            tls.complete_io(&mut socket).unwrap();
+        }
+        let _ = release.recv();
+    }
+
+    #[test]
+    fn a_handshake_finished_by_a_flush_wakes_the_parked_reader() {
+        let directory = tempfile::tempdir().unwrap();
+        let listener = tls_listener(directory.path());
+        let address = listener.bound_addr().unwrap();
+        let (release, held) = mpsc::channel();
+        let client = std::thread::spawn(move || hold_open_client(address, held));
+        let (mut io, _) = native_runtime::block_on(listener.accept())
+            .unwrap()
+            .expect("accepted connection");
+
+        let waker = Arc::new(CountingWaker::default());
+        let task_waker = Waker::from(Arc::clone(&waker));
+        let mut context = Context::from_waker(&task_waker);
+        let mut storage = [0_u8; 4096];
+        let mut buffer = ReadBuf::new(&mut storage);
+        assert!(
+            Pin::new(&mut io)
+                .poll_read(&mut context, &mut buffer)
+                .is_pending(),
+            "the reader parks on the handshake"
+        );
+        let mut seen = 0;
+        while matches!(io.transport, RemoteBrainTlsTransport::Handshaking(_)) {
+            seen = waker.wait_past(seen);
+            if let Poll::Ready(result) = Pin::new(&mut io).poll_flush(&mut context) {
+                result.unwrap();
+            }
+        }
+        assert!(
+            waker.count() > seen,
+            "the flush that finished the handshake wakes the reader parked on it"
+        );
+        assert!(matches!(
+            Pin::new(&mut io).poll_read(&mut context, &mut buffer),
+            Poll::Ready(Ok(()))
+        ));
+        assert_eq!(buffer.filled(), REQUEST);
+
+        drop(release);
+        client.join().unwrap();
     }
 }
