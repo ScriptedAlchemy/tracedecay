@@ -11,11 +11,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::attribution::attribute_commits;
 use super::backfill::{advance_history_frontier, collect_incremental_backfill, scan_span_target};
-use super::rows::{GitEvidenceBatch, GitEvidenceGeneration, GitEvidenceWrite, GitEvidenceWriter};
+use super::rows::{GitEvidenceBatch, GitEvidenceGeneration, GitEvidenceWriter};
 use super::{
     BackfillOptions, BackfillStats, DEFAULT_SPAN_MERGE_GAP_SECS, GitCorrelationError,
     GitCorrelationSessionStore, GitCorrelationWriteTxn, GitHistoryIndexFrontier, GitReflogSource,
+    read_meta_value, write_meta_value,
 };
+
+/// Consecutive passes whose attribution a transient Git failure held back.
+const GIT_ATTRIBUTION_FAILED_PASSES_KEY: &str = "git_attribution_failed_passes";
+/// Passes a span target whose Git reads fail may hold attribution back before
+/// it is given up as unavailable. A failure that never clears must not pin
+/// every later drain (#3984).
+const MAX_ATTRIBUTION_ATTEMPTS: i64 = 5;
 
 /// Receipt of one convergence pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,32 +95,59 @@ where
         .await?;
     let pending = writer.spans_pending_attribution(open_since).await?;
     let max_commits = BackfillOptions::default().max_commits_per_repo;
-    let mut attributed = GitEvidenceWrite::default();
-    let later_failure = match attribute_commits(&pending, DEFAULT_SPAN_MERGE_GAP_SECS, |target| {
+    let attribution = attribute_commits(&pending, DEFAULT_SPAN_MERGE_GAP_SECS, |target| {
         scan_span_target(git, target, DEFAULT_SPAN_MERGE_GAP_SECS, max_commits)
-    }) {
-        Ok(attribution) => {
+    });
+    stats.unavailable_attributions = stats
+        .unavailable_attributions
+        .saturating_add(attribution.unavailable_references);
+    let failed_passes = read_meta_value(&transaction, GIT_ATTRIBUTION_FAILED_PASSES_KEY)
+        .await?
+        .unwrap_or(0);
+    let later_failure = match attribution.retryable_targets.first() {
+        Some(target) if failed_passes.saturating_add(1) < MAX_ATTRIBUTION_ATTEMPTS => {
+            stats.skipped_git_error = stats.skipped_git_error.saturating_add(1);
+            Some(GitCorrelationError::Unavailable(format!(
+                "cannot scan Git history for retained span target {target}"
+            )))
+        }
+        Some(_) => {
+            tracing::warn!(
+                targets = ?attribution.retryable_targets,
+                attempts = MAX_ATTRIBUTION_ATTEMPTS,
+                "Git history of retained span targets stayed unreadable; their historical commit attribution is unavailable"
+            );
             stats.unavailable_attributions = stats
                 .unavailable_attributions
-                .saturating_add(attribution.unavailable_references);
-            attributed = writer
-                .apply(GitEvidenceBatch {
-                    commits: attribution.records,
-                    merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
-                    ..GitEvidenceBatch::default()
-                })
-                .await?;
-            writer.mark_attributed();
+                .saturating_add(attribution.retryable_targets.len());
             None
         }
-        Err(error) => {
-            stats.skipped_git_error = stats.skipped_git_error.saturating_add(1);
-            Some(error)
-        }
+        None => None,
+    };
+    let attributed = writer
+        .apply(GitEvidenceBatch {
+            commits: attribution.records,
+            merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
+            ..GitEvidenceBatch::default()
+        })
+        .await?;
+    let next_failed_passes = if later_failure.is_some() {
+        failed_passes.saturating_add(1)
+    } else {
+        writer.mark_attributed();
+        0
     };
     stats.spans_written = backfilled.spans_changed + attributed.spans_changed;
     stats.commits_attributed = backfilled.commits_changed + attributed.commits_changed;
     let generation = writer.finish().await?;
+    if next_failed_passes != failed_passes {
+        write_meta_value(
+            &transaction,
+            GIT_ATTRIBUTION_FAILED_PASSES_KEY,
+            next_failed_passes,
+        )
+        .await?;
+    }
     let frontier = match backfill.settled_through {
         Some(settled) => advance_history_frontier(&transaction, settled).await?,
         None => backfill.start,

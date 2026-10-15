@@ -58,6 +58,17 @@ crate.annotation(
     version = "0.46.0",
 )
 
+# Dicklesworthstone/asupersync#83: a reactor leader that leaves epoll to run a
+# task promotes no parked follower, so one long poll delays every socket wake
+# and shared timer on the runtime. Delete this annotation and the patch once
+# the pinned or published asupersync contains the fix.
+crate.annotation(
+    crate = "asupersync",
+    patch_args = ["-p1"],
+    patches = ["//scripts:bazel/patches/asupersync-reactor-handoff.patch"],
+    version = "0.6.0",
+)
+
 # .cargo/config.toml's [env] LIBSQLITE3_FLAGS, which Cargo hands every build
 # script and Bazel does not: bundled SQLite's worker-thread cap and disabled
 # memory status counters.

@@ -276,9 +276,10 @@ pub struct BackfillStats {
     pub skipped_no_window: usize,
     pub skipped_not_worktree: usize,
     pub skipped_git_error: usize,
-    /// Retained spans whose archived branch no longer resolves. Their observed
-    /// identity remains authoritative; only inferred historical attribution is
-    /// unavailable.
+    /// Retained span targets whose archived branch or worktree no longer
+    /// resolves, or whose Git reads kept failing past the retry budget. Their
+    /// observed identity remains authoritative; only inferred historical
+    /// attribution is unavailable.
     pub unavailable_attributions: usize,
     /// Whether this pass durably advanced the incremental session tuple.
     pub frontier_advanced: bool,
@@ -625,8 +626,9 @@ pub(super) async fn advance_history_frontier(
 /// mirroring the ingest-time sweep's scanner: commits on the recorded branch
 /// (or `HEAD` for detached spans) inside the gap-widened span window. Reports
 /// [`TargetScan::MissingReference`] for an archived branch that no longer
-/// exists, and [`TargetScan::Unavailable`] for a missing worktree or Git
-/// failure that a later sweep may recover.
+/// exists, [`TargetScan::MissingWorktree`] for a worktree that is gone or no
+/// longer a repository, and [`TargetScan::Unavailable`] for a Git failure
+/// that a later sweep may recover.
 pub(super) fn scan_span_target<G: GitReflogSource + ?Sized>(
     git: &G,
     target: &SpanScanTarget,
@@ -635,7 +637,7 @@ pub(super) fn scan_span_target<G: GitReflogSource + ?Sized>(
 ) -> TargetScan {
     let worktree = std::path::Path::new(&target.worktree);
     if !worktree.is_dir() {
-        return TargetScan::Unavailable;
+        return TargetScan::MissingWorktree;
     }
     let since = target.window_start.saturating_sub(gap_secs);
     let until = target.window_end.saturating_add(gap_secs);
@@ -647,6 +649,9 @@ pub(super) fn scan_span_target<G: GitReflogSource + ?Sized>(
     match git.commit_reference_exists(worktree, branch) {
         Ok(true) => {}
         Ok(false) => return TargetScan::MissingReference,
+        Err(_) if tracedecay_runtime_core::worktree::git_worktree_root(worktree).is_none() => {
+            return TargetScan::MissingWorktree;
+        }
         Err(_) => return TargetScan::Unavailable,
     }
     let Some(log_text) = git.commit_log(worktree, branch, since) else {
