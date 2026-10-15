@@ -1275,3 +1275,75 @@ async fn a_panicking_connection_isolates_from_its_peers_and_returns_its_permit()
         "recovered capacity must be general, not the reserved control lane"
     );
 }
+
+/// A client dropped mid-hop drops the hop's work with it, so the admission
+/// slot and anything the hop holds are free when the clients owner reports.
+#[tokio::test]
+async fn a_client_dropped_mid_tokio_hop_releases_the_hop_before_the_drain_receipt() {
+    use super::super::{DaemonClientAdmission, DaemonClientAdmissionOutcome};
+
+    struct HopResource(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for HopResource {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    let hop_runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_time()
+        .build()
+        .expect("hop runtime");
+    let hop_handle = hop_runtime.handle().clone();
+    let lifecycle = DaemonLifecycle::default();
+    let admission = DaemonClientAdmission::with_reserved_capacity(2, 1);
+    let DaemonClientAdmissionOutcome::Admitted(permit) = admission.try_admit() else {
+        panic!("client rejected below capacity");
+    };
+    let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let resource = HopResource(Arc::clone(&released));
+    let (started, hop_started) = tokio::sync::oneshot::channel();
+    let mut clients = crate::daemon::bootstrap::ClientTasks::default();
+    clients
+        .spawn(super::super::with_connection_admission(
+            permit,
+            async move {
+                tracedecay_runtime_core::native_runtime::in_tokio_context(hop_handle, async move {
+                    let _resource = resource;
+                    let _ = started.send(());
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                })
+                .await;
+                Ok(())
+            },
+        ))
+        .expect("native client task");
+    hop_started.await.expect("the hop started");
+    assert_eq!(admission.available_general_permits(), 0);
+    // Tokio's only worker is busy, as under load, when the client is dropped.
+    let (unblock, blocked) = std::sync::mpsc::channel::<()>();
+    let (busy, worker_busy) = std::sync::mpsc::channel();
+    hop_runtime.spawn(async move {
+        let _ = busy.send(());
+        let _ = blocked.recv();
+    });
+    worker_busy.recv().expect("the Tokio worker is busy");
+
+    let receipt = shutdown_with_clients(&lifecycle, clients).await;
+
+    assert_eq!(
+        receipt.clients,
+        tracedecay_daemon_service::shutdown::ShutdownStatus::Clean
+    );
+    assert!(
+        released.load(std::sync::atomic::Ordering::SeqCst),
+        "the hop's work outlived the clients owner's receipt"
+    );
+    assert_eq!(
+        admission.available_general_permits(),
+        1,
+        "the hop kept the client's admission slot past the drain receipt"
+    );
+    drop(unblock);
+    hop_runtime.shutdown_background();
+}

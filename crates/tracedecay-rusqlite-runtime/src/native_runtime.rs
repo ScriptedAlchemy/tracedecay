@@ -385,32 +385,47 @@ pub fn tokio_handle(site: &'static str) -> Option<tokio::runtime::Handle> {
     handle
 }
 
-/// Runs `work` on the Tokio runtime [`tokio_handle`] resolves for `site`, and
-/// awaits it from any executor. For work that polls Tokio timers or spawns on
-/// Tokio while its caller may run on a native thread. The work starts at the
-/// call; dropping the returned future aborts it, and a panic in it resumes on
-/// the caller, so the hop keeps a direct await's semantics.
-pub fn on_tokio<T, F>(site: &'static str, work: F) -> BoxFuture<'static, Result<T, String>>
-where
-    T: Send + 'static,
-    F: Future<Output = T> + Send + 'static,
-{
-    let task = tokio_handle(site).map(|runtime| AbortOnDrop(runtime.spawn(work)));
-    Box::pin(async move {
-        let mut task = task.ok_or_else(|| format!("no Tokio runtime for {site}"))?;
-        match (&mut task.0).await {
-            Ok(output) => Ok(output),
-            Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
-            Err(error) => Err(format!("Tokio work for {site} ended: {error}")),
-        }
-    })
+/// `work` in the caller's own task with the Tokio runtime [`tokio_handle`]
+/// resolves for `site` entered, for work that polls Tokio timers or spawns on
+/// Tokio while its caller may run on a native thread. `None` is a counted miss.
+pub fn on_tokio<F: Future>(site: &'static str, work: F) -> Option<InTokioContext<F>> {
+    tokio_handle(site).map(|runtime| in_tokio_context(runtime, work))
 }
 
-struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+/// `work` polled and dropped with `runtime` entered. It stays in the caller's
+/// task, so dropping the caller drops it, and everything it holds, at once.
+pub fn in_tokio_context<F: Future>(runtime: tokio::runtime::Handle, work: F) -> InTokioContext<F> {
+    InTokioContext {
+        runtime,
+        work: Some(Box::pin(work)),
+    }
+}
 
-impl<T> Drop for AbortOnDrop<T> {
+/// The future [`on_tokio`] and [`in_tokio_context`] return.
+pub struct InTokioContext<F> {
+    runtime: tokio::runtime::Handle,
+    work: Option<Pin<Box<F>>>,
+}
+
+impl<F: Future> Future for InTokioContext<F> {
+    type Output = F::Output;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<F::Output> {
+        let this = &mut *self;
+        let _entered = this.runtime.enter();
+        this.work
+            .as_mut()
+            .expect("work is present until drop")
+            .as_mut()
+            .poll(context)
+    }
+}
+
+impl<F> Drop for InTokioContext<F> {
     fn drop(&mut self) {
-        self.0.abort();
+        // Tokio resources the work holds may need the runtime to deregister.
+        let _entered = self.runtime.enter();
+        drop(self.work.take());
     }
 }
 
@@ -477,21 +492,36 @@ mod tests {
     }
 
     #[test]
-    fn on_tokio_runs_the_work_on_a_tokio_worker_for_a_native_caller() {
+    fn a_native_task_uses_tokio_timers_and_spawns_in_tokio_context() {
         let runtime = hop_test_tokio_runtime();
-        let _entered = runtime.enter();
+        let handle = runtime.handle().clone();
 
-        let ran_on = block_on(on_tokio("native_runtime.tests.on_tokio", async {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-            std::thread::current().name().map(str::to_owned)
-        }))
-        .expect("native root");
+        let task = NativeTask::spawn(async move {
+            let ambient = tokio::runtime::Handle::try_current().is_ok();
+            let spawned_on = in_tokio_context(handle, async {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                tokio::spawn(async { std::thread::current().name().map(str::to_owned) })
+                    .await
+                    .ok()
+                    .flatten()
+            })
+            .await;
+            (ambient, spawned_on)
+        })
+        .expect("native task");
+        let outcome = block_on(timeout(HANG_GUARD, task.wait()))
+            .expect("native root")
+            .expect("the hop must finish");
 
-        assert_eq!(ran_on, Ok(Some("hop-test-tokio".to_owned())));
+        assert_eq!(
+            outcome,
+            NativeTaskOutcome::Completed((false, Some("hop-test-tokio".to_owned()))),
+            "a native worker has no ambient Tokio, yet the hop's timer fires and its spawn lands on Tokio"
+        );
     }
 
     #[test]
-    fn dropping_an_on_tokio_wait_aborts_the_work() {
+    fn dropping_a_tokio_hop_drops_its_work_at_once() {
         struct DropSignal(std::sync::mpsc::Sender<()>);
         impl Drop for DropSignal {
             fn drop(&mut self) {
@@ -499,37 +529,23 @@ mod tests {
             }
         }
         let runtime = hop_test_tokio_runtime();
-        let _entered = runtime.enter();
         let (dropped, dropped_signal) = std::sync::mpsc::channel();
-
-        let hop = on_tokio("native_runtime.tests.on_tokio", async move {
+        let mut hop = in_tokio_context(runtime.handle().clone(), async move {
             let _signal = DropSignal(dropped);
-            std::future::pending::<()>().await;
+            tokio::time::sleep(Duration::from_secs(3600)).await;
         });
+        assert!(
+            (&mut hop).now_or_never().is_none(),
+            "the hop parks on its timer"
+        );
+
         drop(hop);
 
-        // An aborted task drops its future: the signal fires, or the sender is
-        // dropped unpolled. A detached task would hold it until the timeout.
-        assert_ne!(
-            dropped_signal.recv_timeout(HANG_GUARD),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
-            "the dropped wait must abort its Tokio work"
+        assert_eq!(
+            dropped_signal.try_recv(),
+            Ok(()),
+            "the work must be dropped by the time the hop's drop returns"
         );
-    }
-
-    #[test]
-    fn a_panic_in_on_tokio_work_resumes_on_the_caller() {
-        let runtime = hop_test_tokio_runtime();
-        let _entered = runtime.enter();
-
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            block_on(on_tokio("native_runtime.tests.on_tokio", async {
-                panic!("tokio hop panic");
-            }))
-        }))
-        .expect_err("the panic must reach the caller");
-
-        assert_eq!(panic.downcast_ref::<&str>(), Some(&"tokio hop panic"));
     }
 
     #[test]

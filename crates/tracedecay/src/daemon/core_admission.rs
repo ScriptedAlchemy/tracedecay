@@ -200,22 +200,6 @@ where
         .await
 }
 
-/// `future` under the caller's connection admission scope, for work the
-/// caller hands to another task: a task-local does not cross a spawn, and
-/// without it a park inside `future` would keep the slot held.
-pub(crate) fn carry_connection_admission<F>(future: F) -> impl Future<Output = F::Output>
-where
-    F: Future,
-{
-    let lease = CONNECTION_ADMISSION.try_with(Arc::clone).ok();
-    async move {
-        match lease {
-            Some(lease) => with_dual_connection_admission_scope(lease, future).await,
-            None => future.await,
-        }
-    }
-}
-
 /// Run `future` without holding a general admission slot across a long park.
 ///
 /// Wrap the wait, never the work. The grace, release, and reacquire live in
