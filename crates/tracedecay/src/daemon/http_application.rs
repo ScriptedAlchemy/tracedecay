@@ -898,9 +898,10 @@ impl DaemonHttpApplicationService {
         active.store(true, Ordering::Release);
         let (shutdown, shutdown_requested) = oneshot::channel();
         let task_active = Arc::clone(&active);
+        let serve_runtime = runtime.clone();
         let task = runtime.spawn(tracing::Instrument::instrument(
             async move {
-                serve_loopback(listener, app, async {
+                serve_loopback(serve_runtime, listener, app, async {
                     let _ = shutdown_requested.await;
                 })
                 .await;

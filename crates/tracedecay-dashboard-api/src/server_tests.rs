@@ -6,6 +6,8 @@ use axum::Router;
 use axum::routing::get;
 use tokio::sync::{Notify, oneshot};
 
+use tracedecay_runtime_core::native_runtime::{self, NativeTask, NativeTaskOutcome};
+
 use crate::server::{bind_dashboard, serve_loopback};
 
 fn get_over_std_socket(addr: SocketAddr, path: &str) -> String {
@@ -28,7 +30,9 @@ fn loopback_server_drains_in_flight_request_after_shutdown_without_tokio_drivers
         .worker_threads(2)
         .build()
         .expect("Tokio runtime without drivers");
+    let handle = runtime.handle().clone();
     runtime.block_on(async {
+        let runtime = handle;
         let entered = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
         let router = Router::new().route(
@@ -47,7 +51,7 @@ fn loopback_server_drains_in_flight_request_after_shutdown_without_tokio_drivers
             .await
             .expect("bind loopback listener");
         let (stop, stopped) = oneshot::channel::<()>();
-        let server = tokio::spawn(serve_loopback(listener, router, async {
+        let server = tokio::spawn(serve_loopback(runtime.clone(), listener, router, async {
             let _ = stopped.await;
         }));
         let client = tokio::task::spawn_blocking(move || get_over_std_socket(addr, "/slow"));
@@ -74,4 +78,42 @@ fn loopback_server_drains_in_flight_request_after_shutdown_without_tokio_drivers
         );
         server.await.expect("serve loop returns after the drain");
     });
+}
+
+/// A native caller hands the serve loop its Tokio handle; the loop needs no
+/// ambient Tokio runtime to serve.
+#[test]
+fn loopback_server_serves_from_a_native_task_with_an_explicit_handle() {
+    let tokio = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .build()
+        .expect("Tokio runtime");
+    let router = Router::new().route("/ping", get(|| async { "pong" }));
+    let (listener, addr) = native_runtime::block_on(bind_dashboard("127.0.0.1", 0))
+        .expect("native root")
+        .expect("bind loopback listener");
+    let (stop, stopped) = oneshot::channel::<()>();
+    let server = NativeTask::spawn(serve_loopback(
+        tokio.handle().clone(),
+        listener,
+        router,
+        async {
+            let _ = stopped.await;
+        },
+    ))
+    .expect("native serve task");
+
+    let response = get_over_std_socket(addr, "/ping");
+    let _ = stop.send(());
+    let served = native_runtime::block_on(native_runtime::timeout(
+        std::time::Duration::from_secs(10),
+        server.wait(),
+    ))
+    .expect("native root");
+
+    assert!(
+        response.starts_with("HTTP/1.1 200 OK") && response.ends_with("pong"),
+        "the native-driven loop must serve: {response:?}"
+    );
+    assert_eq!(served, Ok(NativeTaskOutcome::Completed(())));
 }

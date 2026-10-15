@@ -1111,9 +1111,10 @@ pub(super) async fn compute_dashboard(
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
             let completed = Arc::new(tokio::sync::Semaphore::new(0));
             let task_completion = DashboardTaskCompletion(Arc::clone(&completed));
+            let serve_runtime = runtime.clone();
             let task = runtime.spawn(async move {
                 let _completion = task_completion;
-                serve_loopback(listener, app, async move {
+                serve_loopback(serve_runtime, listener, app, async move {
                     let _ = shutdown_rx.await;
                 })
                 .await;
