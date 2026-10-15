@@ -18,7 +18,7 @@ async fn timed_out_waiter_does_not_cancel_the_owned_shutdown() {
     let first = tokio::spawn(async move {
         first_coordinator
             .coordinate_until(
-                tokio::time::Instant::now() + std::time::Duration::from_millis(20),
+                std::time::Instant::now() + std::time::Duration::from_millis(20),
                 async move {
                     first_attempts.fetch_add(1, Ordering::AcqRel);
                     first_entered.notify_one();
@@ -38,7 +38,7 @@ async fn timed_out_waiter_does_not_cancel_the_owned_shutdown() {
     let second = tokio::spawn(async move {
         second_coordinator
             .coordinate_until(
-                tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+                std::time::Instant::now() + std::time::Duration::from_secs(5),
                 async move {
                     second_attempts.fetch_add(1, Ordering::AcqRel);
                     ShutdownStatus::Failed("duplicate coordinator".to_owned())
@@ -57,7 +57,7 @@ async fn timed_out_waiter_does_not_cancel_the_owned_shutdown() {
     assert_eq!(
         coordinator
             .coordinate_until(
-                tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+                std::time::Instant::now() + std::time::Duration::from_secs(1),
                 async { ShutdownStatus::Failed("terminal rerun".to_owned()) },
             )
             .await,
@@ -80,7 +80,7 @@ async fn cancelled_waiter_does_not_cancel_the_owned_shutdown() {
     let first = tokio::spawn(async move {
         first_coordinator
             .coordinate_until(
-                tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+                std::time::Instant::now() + std::time::Duration::from_secs(5),
                 async move {
                     first_attempts.fetch_add(1, Ordering::AcqRel);
                     first_entered.notify_one();
@@ -100,7 +100,7 @@ async fn cancelled_waiter_does_not_cancel_the_owned_shutdown() {
     let retry = tokio::spawn(async move {
         retry_coordinator
             .coordinate_until(
-                tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+                std::time::Instant::now() + std::time::Duration::from_secs(5),
                 async move {
                     retry_attempts.fetch_add(1, Ordering::AcqRel);
                     ShutdownStatus::Failed("duplicate coordinator".to_owned())
