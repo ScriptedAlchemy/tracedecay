@@ -45,8 +45,8 @@ const MAX_REMOTE_BRAIN_TLS_HEADER_BYTES: usize = 64 * 1024;
 pub struct RemoteBrainTlsDeadlines {
     /// Longest silence while the handshake or request is still being read.
     pub read_idle: Duration,
-    /// Absolute bound on reading one request, restarted when the handshake
-    /// completes.
+    /// Absolute bound on reading one request. It starts when the listener
+    /// first reads from the peer and restarts when the handshake completes.
     pub request_read: Duration,
     /// Longest stall of a started response write.
     pub write_idle: Duration,
@@ -510,6 +510,7 @@ enum RemoteBrainTlsTransport {
 struct RemoteBrainTlsIo {
     transport: RemoteBrainTlsTransport,
     handshake_read: Arc<AtomicBool>,
+    peer_heard: bool,
     deadlines: RemoteBrainTlsDeadlines,
     read_idle_deadline: IoDeadline,
     request_read_deadline: IoDeadline,
@@ -551,6 +552,7 @@ impl RemoteBrainTlsIo {
         Self {
             transport: RemoteBrainTlsTransport::Handshaking(handshake),
             handshake_read,
+            peer_heard: false,
             deadlines,
             read_idle_deadline: IoDeadline::after(deadlines.read_idle),
             request_read_deadline: IoDeadline::after(deadlines.request_read),
@@ -709,8 +711,14 @@ impl RemoteBrainTlsIo {
         match handshake.as_mut().poll(context) {
             Poll::Pending => {
                 if self.handshake_read.swap(false, Ordering::Relaxed) {
+                    let now = wall_now();
                     self.read_idle_deadline
-                        .reset_after(wall_now(), self.deadlines.read_idle);
+                        .reset_after(now, self.deadlines.read_idle);
+                    if !self.peer_heard {
+                        self.peer_heard = true;
+                        self.request_read_deadline
+                            .reset_after(now, self.deadlines.request_read);
+                    }
                 }
                 Poll::Pending
             }
