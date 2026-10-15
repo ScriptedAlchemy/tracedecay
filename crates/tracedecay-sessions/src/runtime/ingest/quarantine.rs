@@ -318,7 +318,9 @@ impl SourceSweep {
         error: E,
     ) -> Result<(), E> {
         let (failure, quarantines) = error.catch_up_failure(self.provider);
-        if !quarantines {
+        // A sweep without a ledger cannot remember the quarantine, so its
+        // caller (a hook ingesting one session) keeps reporting the error.
+        if !quarantines || self.ledger.is_none() {
             return Err(error);
         }
         if let Some((ledger, witness)) = &claim.settled
@@ -668,9 +670,27 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_sweep_without_a_ledger_hands_a_permanent_refusal_back() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("rollout.jsonl");
+        std::fs::write(&path, "{}\n").unwrap();
+        let mut detached = SourceSweep::new("codex", None);
+
+        let claim = detached.observe_file(&path).await.unwrap().unwrap();
+        assert!(detached.refused(claim, permanent()).is_err());
+        assert!(
+            detached.observe_file(&path).await.unwrap().is_some(),
+            "the source is not blocked"
+        );
+        assert!(reports(detached).is_empty(), "nothing is absorbed");
+    }
+
     #[test]
     fn quarantine_reports_precede_the_failure_that_ended_the_run() {
-        let mut pass = SourceSweep::new("codex", None);
+        let home = tempfile::tempdir().unwrap();
+        let hub = registered_hub(home.path());
+        let mut pass = sweep(&hub);
         let claim = pass.observe_stream(Path::new("state.db"), "session", &[b"record"]);
         pass.refused(claim.unwrap(), permanent()).unwrap();
         let stopping = classify_transcript_ingest_failure(
