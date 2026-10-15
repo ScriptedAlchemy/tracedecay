@@ -874,7 +874,7 @@ pub struct MountedCodeIndexWorktreeV1 {
     /// Live handle to the publication's encoded-byte counter; observed only by
     /// test memory accounting today.
     _active_generation_encoded_bytes: Arc<AtomicU64>,
-    pub task: native_runtime::NativeTask<()>,
+    pub task: Arc<native_runtime::NativeTask<()>>,
 }
 
 // The scheduler registry stores these worktrees in a `BTreeMap`. One `Send`
@@ -1024,6 +1024,13 @@ const CONVERGENCE_PARK_CONTRACT_REMEDIATION_V1: &str = "fix the named contract v
 const CONVERGENCE_PARK_TASK_FAILURE_REMEDIATION_V1: &str = "inspect the daemon log for the \
      abnormal text-projection failure; indexing retries when a new generation seals over \
      changed input";
+
+/// Remediation when the background worker itself panicked. Nothing in the
+/// daemon restarts it, so only a new mount does.
+const CONVERGENCE_PARK_WORKER_PANIC_REMEDIATION_V1: &str = "the code-index worker for this \
+     worktree panicked and stopped indexing; the last seated generation keeps serving; run \
+     `tracedecay daemon restart` to restart indexing, and report the daemon log's \
+     code_index_worker_panicked event";
 
 /// Remediation when a background reconcile fails the same way over unchanged
 /// source. Passes stay held until the input changes, so the operator either
@@ -1193,6 +1200,7 @@ fn clear_convergence_park_unless(
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if slot.as_ref().is_some_and(|parked| {
         is_terminal_publication_authority_park(parked)
+            || parked.remediation == CONVERGENCE_PARK_WORKER_PANIC_REMEDIATION_V1
             || parked.blocked_reason == Some(CodeIndexBuildBlockedReasonV1::ResidentMemory)
             || preserve(parked)
     }) {
@@ -1216,6 +1224,31 @@ fn clear_reconcile_refusal_park(slot: &RwLock<Option<CodeIndexConvergenceParkedV
     if slot.as_ref().is_some_and(is_reconcile_refusal_park) {
         *slot = None;
     }
+}
+
+/// Park a worktree whose worker panicked and mark the worker failed, so
+/// status reports the panic and every seat wait ends with the park instead of
+/// waiting for a seat no pass will install.
+fn park_panicked_worker(
+    slot: &RwLock<Option<CodeIndexConvergenceParkedV1>>,
+    phase: &tokio::sync::watch::Sender<CodeIndexWorkerPhaseV1>,
+    serving_generation_changed: &tokio::sync::watch::Sender<()>,
+    panic: &str,
+) {
+    tracing::error!(
+        event = "code_index_worker_panicked",
+        panic,
+        "code-index worker panicked and stopped; its worktree is parked"
+    );
+    park_convergence(
+        slot,
+        format!("code-index worker panicked: {panic}"),
+        CONVERGENCE_PARK_WORKER_PANIC_REMEDIATION_V1,
+        None,
+        false,
+    );
+    CodeIndexWorkerPhaseV1::enter(phase, CodeIndexWorkerPhaseV1::Failed);
+    serving_generation_changed.send_replace(());
 }
 
 /// Retire a resident-memory graph refusal once a native graph activated.
@@ -1717,6 +1750,8 @@ pub enum CodeIndexWorkerPhaseV1 {
     /// Building a sealed generation's code graph: corpus-sized work a read
     /// that waits on the graph cannot shorten.
     PublishingGraph,
+    /// The worker panicked and stopped. Its convergence park names the panic.
+    Failed,
 }
 
 impl CodeIndexWorkerPhaseV1 {
