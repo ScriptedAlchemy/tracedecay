@@ -825,6 +825,10 @@ async fn capacity_retirement_completes_while_a_maintenance_tick_runs() {
 
     let log = fs::read_to_string(&log_path).expect("daemon log");
     assert!(
+        !log.contains("panicked"),
+        "the maintenance tick must stay parked through the retirement; log={log}"
+    );
+    assert!(
         !log.contains("project_server_capacity_reached"),
         "a running maintenance tick must not block capacity retirement; log={log}"
     );
