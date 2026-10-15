@@ -28,8 +28,7 @@ use tracedecay_store::{ParseOffset, observation::ObservationCoverageReason};
 use crate::admission::{HostAdmission, HostDiscoveryQueueEntry};
 use crate::observation::ObservationCancellation;
 use crate::runtime::host_scan::{HOST_SCAN_WINDOW, HostScanBudget, isolatable_source_error};
-use crate::runtime::hosts::codex::CodexDiscoveryHub;
-use crate::runtime::ingest::quarantine::{SourceClaim, SourceLedger};
+use crate::runtime::ingest::quarantine::{SourceClaim, SourceLedger, SourceSweep};
 use crate::runtime::jsonl_observation_admission::{
     JsonlFrameAdmission, JsonlObservationAdmissionProgress, JsonlObservationAdmissionRequest,
     admit_jsonl_observations,
@@ -487,7 +486,8 @@ fn read_session_header(path: &Path) -> Result<HeaderRead, (PiDiscoveryFailureKin
     Ok(HeaderRead::Header(header))
 }
 
-/// Sweep every in-scope Pi session through the durable discovery queue.
+/// A capture pass for a caller outside a provider run. It returns a permanent
+/// source refusal as its error instead of quarantining the source.
 pub async fn capture_pi_observations(
     facade: &dyn HostAdmission,
     source: &PiSource,
@@ -495,7 +495,28 @@ pub async fn capture_pi_observations(
     scope: ObservationScopeV1,
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
-    convergence: Option<(&CodexDiscoveryHub, &str)>,
+) -> TranscriptIngestResult<PiCaptureOutcome> {
+    capture_pi_sweep(
+        facade,
+        source,
+        project_root,
+        scope,
+        max_new_bytes,
+        cancellation,
+        &mut SourceSweep::new(PROVIDER, None),
+    )
+    .await
+}
+
+/// Sweep every in-scope Pi session through the durable discovery queue.
+pub(crate) async fn capture_pi_sweep(
+    facade: &dyn HostAdmission,
+    source: &PiSource,
+    project_root: &Path,
+    scope: ObservationScopeV1,
+    max_new_bytes: Option<u64>,
+    cancellation: &ObservationCancellation,
+    sweep: &mut SourceSweep,
 ) -> TranscriptIngestResult<PiCaptureOutcome> {
     tracing::Instrument::instrument(
         async {
@@ -524,8 +545,7 @@ pub async fn capture_pi_observations(
             );
             let owned_source = source.clone();
             let owned_project_root = project_root.to_path_buf();
-            let ledger = convergence.and_then(|(hub, consumer)| hub.source_ledger(consumer));
-            let owned_ledger = ledger.clone();
+            let owned_ledger = sweep.ledger();
             let (discovery, scan_budget) = tracing::Instrument::instrument(
                 tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
                     owned_source.discover(
@@ -599,8 +619,7 @@ pub async fn capture_pi_observations(
                     break;
                 }
                 processed_sequence = Some(sequence);
-                let pending = match SourceClaim::observe_file(PROVIDER, ledger.clone(), &path).await
-                {
+                let pending = match sweep.observe_file(&path).await {
                     Ok(Some(pending)) => pending,
                     Ok(None) => continue,
                     Err(error) => {
@@ -608,7 +627,7 @@ pub async fn capture_pi_observations(
                         continue;
                     }
                 };
-                if let Some(progress) = admit_scheduled_file(
+                match admit_scheduled_file(
                     facade,
                     &path,
                     None,
@@ -617,9 +636,17 @@ pub async fn capture_pi_observations(
                     cancellation,
                     &mut outcome,
                 )
-                .await?
+                .await
                 {
-                    pending.admitted(progress.source_deferred, progress.covered_through)?;
+                    Ok(Some(progress)) => {
+                        pending.admitted(progress.source_deferred, progress.covered_through)?;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        if let Err(error) = sweep.refused(pending, error) {
+                            isolate_source_failure(&path, error, &mut outcome)?;
+                        }
+                    }
                 }
                 remaining = max_new_bytes.map_or(u64::MAX, |budget| {
                     budget.saturating_sub(outcome.bytes_consumed)
@@ -707,7 +734,7 @@ pub async fn capture_pi_session(
             outcome.deferred = true;
             break;
         }
-        admit_scheduled_file(
+        if let Err(error) = admit_scheduled_file(
             facade,
             &path,
             Some(&matcher),
@@ -716,13 +743,16 @@ pub async fn capture_pi_session(
             cancellation,
             &mut outcome,
         )
-        .await?;
+        .await
+        {
+            isolate_source_failure(&path, error, &mut outcome)?;
+        }
     }
     Ok(outcome)
 }
 
-/// Admit one session file, isolating a file whose identity or bytes cannot be
-/// read so the rest of the pass still lands.
+/// Admit one session file, isolating a file whose header cannot be read so
+/// the rest of the pass still lands. An admission failure is the caller's.
 async fn admit_scheduled_file(
     facade: &dyn HostAdmission,
     path: &Path,
@@ -751,16 +781,13 @@ async fn admit_scheduled_file(
     if matcher.is_some_and(|matcher| !matcher.accepts(Some(Path::new(&header.cwd)))) {
         return Ok(None);
     }
-    match admit_session_file(facade, path, &header, scope, max_new_bytes, cancellation).await {
-        Ok(progress) => {
-            outcome.bytes_consumed = outcome
-                .bytes_consumed
-                .saturating_add(progress.bytes_consumed);
-            outcome.deferred |= progress.source_deferred;
-            Ok(Some(progress))
-        }
-        Err(error) => isolate_source_failure(path, error, outcome).map(|()| None),
-    }
+    let progress =
+        admit_session_file(facade, path, &header, scope, max_new_bytes, cancellation).await?;
+    outcome.bytes_consumed = outcome
+        .bytes_consumed
+        .saturating_add(progress.bytes_consumed);
+    outcome.deferred |= progress.source_deferred;
+    Ok(Some(progress))
 }
 
 fn isolate_source_failure(
