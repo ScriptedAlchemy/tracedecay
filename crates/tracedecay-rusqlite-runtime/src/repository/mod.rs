@@ -64,7 +64,10 @@ pub use configuration_receipt::{
 pub use diagnostics::DiagnosticExecutor;
 pub use external_source::{EXTERNAL_SOURCE_SCHEMA_V1, ExternalSourceExecutor};
 pub use fact::FactExecutor;
-pub use graph_publication::{GRAPH_PUBLICATION_SCHEMA_V1, GraphPublicationExactSqlStorage};
+pub use graph_publication::{
+    GRAPH_PUBLICATION_SCHEMA_V1, GraphPublicationExactSqlStorage, GraphPublicationSchemaObjectV1,
+    canonical_graph_publication_schema_inventory,
+};
 pub use observation::cursor_authority as observation_cursor_authority;
 pub use observation::{
     ObservationExecutor, REPOSITORY_PROVENANCE_CAPTURE_JOIN, REPOSITORY_PROVENANCE_HYDRATED_COLUMNS,

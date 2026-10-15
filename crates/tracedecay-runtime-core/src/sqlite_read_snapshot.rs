@@ -14,8 +14,6 @@ use std::cell::RefCell;
 use rusqlite::backup::StepResult;
 use rusqlite::config::DbConfig;
 use rusqlite::{Connection, OpenFlags};
-use sha2::{Digest, Sha256};
-use tracedecay_domain::canonical_text::encode_lowercase_hex;
 use tracedecay_private_fs::FileLease;
 use tracedecay_private_fs::framed_log::rename_noreplace;
 
@@ -730,121 +728,6 @@ pub async fn open_foreign_in(
     })
 }
 
-/// Inspects a checkpointed, offline database through the canonical immutable
-/// snapshot boundary. This is intentionally purpose-bound: callers cannot
-/// obtain a connection or issue arbitrary SQL.
-pub fn checkpointed_database_has_any_rows(path: &Path, tables: &[&str]) -> io::Result<bool> {
-    let mut has_rows = false;
-    for table in tables {
-        if table.is_empty()
-            || !table
-                .bytes()
-                .all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("invalid SQLite table identifier '{table}'"),
-            ));
-        }
-    }
-    for suffix in ["-wal", "-shm"] {
-        let sidecar = with_suffix(path, suffix);
-        if fs::metadata(&sidecar).is_ok_and(|metadata| metadata.len() > 0) {
-            return Err(io::Error::other(format!(
-                "checkpointed SQLite inspection refused live sidecar '{}'",
-                sidecar.display()
-            )));
-        }
-    }
-
-    let _authority = crate::db::DatabaseAuthority::for_runtime(
-        path,
-        "inspect checkpointed SQLite family for offline maintenance",
-    )
-    .map_err(io::Error::other)?;
-    let before = family_state(path)?;
-    let uri = PathBuf::from(immutable_uri(path)?);
-    let snapshot = SnapshotConnection::open(
-        &uri,
-        OpenFlags::SQLITE_OPEN_READ_ONLY
-            | OpenFlags::SQLITE_OPEN_URI
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(io::Error::other)?;
-    let connection = snapshot
-        .connection
-        .lock()
-        .map_err(|_| io::Error::other("snapshot connection lock poisoned"))?;
-    for table in tables {
-        let exists = connection
-            .query_row(
-                "SELECT EXISTS(
-                     SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1
-                 )",
-                [table],
-                |row| row.get::<_, bool>(0),
-            )
-            .map_err(io::Error::other)?;
-        if !exists {
-            continue;
-        }
-        let sql = format!("SELECT EXISTS(SELECT 1 FROM \"{table}\" LIMIT 1)");
-        if connection
-            .query_row(&sql, [], |row| row.get::<_, bool>(0))
-            .map_err(io::Error::other)?
-        {
-            has_rows = true;
-            break;
-        }
-    }
-    drop(connection);
-    if family_state(path)? != before {
-        return Err(changed_during_snapshot(path));
-    }
-    Ok(has_rows)
-}
-
-pub fn family_fingerprint(path: &Path) -> io::Result<String> {
-    use std::io::Read;
-
-    let _authority = crate::db::DatabaseAuthority::for_runtime(
-        path,
-        "fingerprint SQLite family for offline maintenance",
-    )
-    .map_err(io::Error::other)?;
-    let before = family_state(path)?;
-    let mut hash = Sha256::new();
-    for (label, member) in [
-        (b"db".as_slice(), path.to_path_buf()),
-        (b"wal", with_suffix(path, "-wal")),
-    ] {
-        if !member.is_file() {
-            continue;
-        }
-        let bytes = fs::metadata(&member)?.len();
-        // BEGIN IMMEDIATE may create an empty WAL while acquiring the apply
-        // guard. An empty sidecar contains no logical database state.
-        if label == b"wal" && bytes == 0 {
-            continue;
-        }
-        hash.update(label);
-        hash.update(bytes.to_be_bytes());
-        let mut file = fs::File::open(&member)?;
-        let mut buffer = vec![0_u8; 1024 * 1024];
-        loop {
-            let read = file.read(&mut buffer)?;
-            if read == 0 {
-                break;
-            }
-            hash.update(&buffer[..read]);
-        }
-    }
-    if family_state(path)? != before {
-        return Err(changed_during_snapshot(path));
-    }
-    Ok(encode_lowercase_hex(&hash.finalize()))
-}
-
 /// How long a bounded probe waits on a lock before giving up.
 ///
 /// Short on purpose, and the same bound everywhere: a probe reports its store
@@ -869,26 +752,6 @@ pub fn open_read_only_probe(path: &Path, busy_timeout: Duration) -> rusqlite::Re
     )?;
     connection.busy_timeout(busy_timeout)?;
     Ok(connection)
-}
-
-/// Opens `path` through the canonical immutable read-only URI, for callers that
-/// read a database nothing can be writing.
-///
-/// `immutable=1` promises `SQLite` the family cannot change, so it skips locking
-/// and ignores WAL/SHM sidecars entirely. That promise is the caller's to keep:
-/// use this only for a quiesced file the caller owns, never for a live store.
-///
-/// `SQLITE_OPEN_NO_MUTEX` is sound here for the same reason it is in
-/// [`open_read_only_probe`]: `rusqlite::Connection` is not `Sync`, so the
-/// returned connection stays owned by one thread at a time.
-pub fn open_immutable_read_only(path: &Path) -> io::Result<Connection> {
-    Connection::open_with_flags(
-        immutable_uri(path)?,
-        OpenFlags::SQLITE_OPEN_READ_ONLY
-            | OpenFlags::SQLITE_OPEN_URI
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(io::Error::other)
 }
 
 /// Reads `PRAGMA <pragma>` as a non-negative count, or `None` when the pragma
@@ -1521,42 +1384,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn checkpointed_inspection_is_purpose_bound_and_refuses_live_wal() {
-        let temp = TempDir::new().unwrap();
-        let path = temp.path().join("source.db");
-        let connection = Connection::open(&path).unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE durable(value TEXT NOT NULL);
-                 CREATE TABLE empty(value TEXT NOT NULL);
-                 INSERT INTO durable(value) VALUES ('retained');",
-            )
-            .unwrap();
-        drop(connection);
-
-        assert!(checkpointed_database_has_any_rows(&path, &["empty", "durable"]).unwrap());
-        assert!(!checkpointed_database_has_any_rows(&path, &["empty"]).unwrap());
-        let rejected = checkpointed_database_has_any_rows(&path, &["bad-name"]).unwrap_err();
-        assert_eq!(rejected.kind(), io::ErrorKind::InvalidInput);
-        assert_eq!(
-            rejected.to_string(),
-            "invalid SQLite table identifier 'bad-name'"
-        );
-
-        let sidecar = with_suffix(&path, "-wal");
-        fs::write(&sidecar, b"live").unwrap();
-        let live = checkpointed_database_has_any_rows(&path, &["durable"]).unwrap_err();
-        assert_eq!(live.kind(), io::ErrorKind::Other);
-        assert_eq!(
-            live.to_string(),
-            format!(
-                "checkpointed SQLite inspection refused live sidecar '{}'",
-                sidecar.display()
-            )
-        );
-    }
-
     /// A snapshot owner removes its own `read-*` directory without the
     /// cleanup lock, so a cleanup that listed that directory can find it gone
     /// by the time it inspects or removes it. That is the state cleanup
@@ -1992,18 +1819,6 @@ mod tests {
             .unwrap();
         assert_eq!(snapshots.copied_bytes(), fs::metadata(&path).unwrap().len());
         fs::copy(&path, temp.path().join("backup.db")).unwrap();
-    }
-
-    #[test]
-    fn empty_wal_does_not_change_the_content_fingerprint() {
-        let temp = TempDir::new().unwrap();
-        let path = temp.path().join("source.db");
-        fs::write(&path, b"database bytes").unwrap();
-        let before = family_fingerprint(&path).unwrap();
-        fs::write(with_suffix(&path, "-wal"), b"").unwrap();
-        assert_eq!(family_fingerprint(&path).unwrap(), before);
-        fs::write(with_suffix(&path, "-wal"), b"logical frame").unwrap();
-        assert_ne!(family_fingerprint(&path).unwrap(), before);
     }
 
     #[test]

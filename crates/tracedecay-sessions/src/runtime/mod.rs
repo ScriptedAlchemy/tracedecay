@@ -8,6 +8,7 @@ pub mod git_correlation;
 mod host_coverage;
 pub use host_coverage::HostCoverageReason;
 mod host_scan;
+pub(crate) mod host_sqlite;
 pub mod hosts;
 pub mod ingest;
 mod native_ingest_source;

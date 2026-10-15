@@ -1160,7 +1160,7 @@ async fn batched_page_is_byte_identical_to_reference_projection() {
 }
 
 async fn explain_query_plan(
-    conn: &crate::runtime::shared::SqliteReadConn,
+    conn: &crate::runtime::host_sqlite::SqliteReadConn,
     sql: String,
     parameters: Vec<i64>,
 ) -> Vec<String> {
