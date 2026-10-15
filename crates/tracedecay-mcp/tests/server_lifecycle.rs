@@ -18,11 +18,13 @@ async fn background_owner_aborts_joins_and_closes_admission() {
     let owner = McpBackgroundTaskOwner::default();
     let dropped = Arc::new(AtomicBool::new(false));
     let task_dropped = Arc::clone(&dropped);
+    let (started, task_started) = tokio::sync::oneshot::channel();
     assert!(owner.spawn(async move {
         let _signal = DropSignal(task_dropped);
+        let _ = started.send(());
         std::future::pending::<()>().await;
     }));
-    tokio::task::yield_now().await;
+    task_started.await.expect("the background task runs");
 
     assert!(owner.shutdown().await.is_empty());
     assert!(dropped.load(Ordering::Acquire));
