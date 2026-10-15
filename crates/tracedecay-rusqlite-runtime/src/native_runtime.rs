@@ -520,9 +520,10 @@ mod tests {
     #[test]
     fn a_panic_in_on_tokio_work_resumes_on_the_caller() {
         let runtime = hop_test_tokio_runtime();
+        let _entered = runtime.enter();
 
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            runtime.block_on(on_tokio("native_runtime.tests.on_tokio", async {
+            block_on(on_tokio("native_runtime.tests.on_tokio", async {
                 panic!("tokio hop panic");
             }))
         }))
