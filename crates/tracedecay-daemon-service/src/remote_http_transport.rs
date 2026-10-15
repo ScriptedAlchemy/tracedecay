@@ -1203,8 +1203,8 @@ mod tests {
     }
 
     /// The listener polls each handshake flight only after its connection has
-    /// waited past a deadline. The client sent every flight at once, so the
-    /// listener's lateness must not count as the client's silence.
+    /// waited past both read deadlines. The client sent every flight at once,
+    /// so the listener's lateness must not count as the client's silence.
     #[test]
     fn a_late_listener_poll_does_not_time_out_a_prompt_handshake() {
         let deadlines = RemoteBrainTlsDeadlines {
@@ -1232,15 +1232,14 @@ mod tests {
         let mut storage = [0_u8; 4096];
         let mut buffer = ReadBuf::new(&mut storage);
         client_sent.recv().expect("client sends its ClientHello");
-        poll_late(deadlines.read_idle * 3 / 2);
+        poll_late(deadlines.request_read * 3 / 2);
+        let first_read = Pin::new(&mut io).poll_read(&mut context, &mut buffer);
         assert!(
-            Pin::new(&mut io)
-                .poll_read(&mut context, &mut buffer)
-                .is_pending(),
-            "reading the waiting ClientHello restarts the read-idle deadline"
+            first_read.is_pending(),
+            "reading the waiting ClientHello restarts both read deadlines: {first_read:?}"
         );
         client_sent.recv().expect("client sends its final flight");
-        poll_late(deadlines.request_read * 3 / 2);
+        poll_late(deadlines.request_read * 3);
         let read = Pin::new(&mut io).poll_read(&mut context, &mut buffer);
         assert!(
             matches!(read, Poll::Ready(Ok(()))),
