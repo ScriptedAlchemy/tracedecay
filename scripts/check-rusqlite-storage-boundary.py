@@ -16,6 +16,11 @@ STORAGE_OWNERS = {
     "tracedecay-sessions",
 }
 
+SHIPPED_ROOTS = {
+    "tracedecay": {"production"},
+    "tracedecay-cli": {"production"},
+}
+
 
 def run(repo: Path, arguments: list[str]) -> str:
     return subprocess.run(
@@ -25,6 +30,95 @@ def run(repo: Path, arguments: list[str]) -> str:
         capture_output=True,
         encoding="utf-8",
     ).stdout
+
+
+def production_feature_closure(metadata: dict) -> dict[str, set[str]]:
+    packages = {
+        package["name"]: package
+        for package in metadata["packages"]
+        if package["source"] is None
+    }
+    missing_roots = SHIPPED_ROOTS.keys() - packages.keys()
+    if missing_roots:
+        raise SystemExit(
+            "production root is absent from cargo metadata: "
+            + ", ".join(sorted(missing_roots))
+        )
+
+    active_packages = set(SHIPPED_ROOTS)
+    active_features = {
+        name: set(features) for name, features in SHIPPED_ROOTS.items()
+    }
+    changed = True
+    while changed:
+        changed = False
+        for package_name in tuple(active_packages):
+            package = packages[package_name]
+            dependencies: dict[str, list[dict]] = {}
+            for dependency in package["dependencies"]:
+                if dependency["kind"] == "dev":
+                    continue
+                alias = dependency["rename"] or dependency["name"]
+                dependencies.setdefault(alias, []).append(dependency)
+
+            enabled = active_features.setdefault(package_name, set())
+            active_aliases = {
+                alias
+                for alias, variants in dependencies.items()
+                if any(not dependency["optional"] for dependency in variants)
+            }
+            forwarded: list[tuple[str, str, bool]] = []
+            for feature in tuple(enabled):
+                for member in package["features"].get(feature, []):
+                    if member.startswith("dep:"):
+                        active_aliases.add(member.removeprefix("dep:"))
+                    elif "/" in member:
+                        alias, dependency_feature = member.split("/", maxsplit=1)
+                        weak = alias.endswith("?")
+                        alias = alias.removesuffix("?")
+                        if not weak:
+                            active_aliases.add(alias)
+                        forwarded.append((alias, dependency_feature, weak))
+                    elif member in package["features"]:
+                        if member not in enabled:
+                            enabled.add(member)
+                            changed = True
+                    elif member in dependencies:
+                        active_aliases.add(member)
+
+            for alias in active_aliases:
+                for dependency in dependencies.get(alias, []):
+                    dependency_name = dependency["name"]
+                    if dependency_name not in packages:
+                        continue
+                    if dependency_name not in active_packages:
+                        active_packages.add(dependency_name)
+                        changed = True
+                    dependency_features = active_features.setdefault(
+                        dependency_name, set()
+                    )
+                    requested = set(dependency["features"])
+                    if dependency["uses_default_features"]:
+                        requested.add("default")
+                    if not requested.issubset(dependency_features):
+                        dependency_features.update(requested)
+                        changed = True
+
+            for alias, dependency_feature, weak in forwarded:
+                if weak and alias not in active_aliases:
+                    continue
+                for dependency in dependencies.get(alias, []):
+                    dependency_name = dependency["name"]
+                    if dependency_name not in packages:
+                        continue
+                    dependency_features = active_features.setdefault(
+                        dependency_name, set()
+                    )
+                    if dependency_feature not in dependency_features:
+                        dependency_features.add(dependency_feature)
+                        changed = True
+
+    return active_features
 
 
 def main() -> int:
@@ -42,6 +136,18 @@ def main() -> int:
             ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
         )
     )
+    production_features = production_feature_closure(metadata)
+    test_helper_packages = {
+        package
+        for package, features in production_features.items()
+        if "test-helpers" in features
+    }
+    if test_helper_packages:
+        raise SystemExit(
+            "production features reach test-only helper surfaces: "
+            + ", ".join(sorted(test_helper_packages))
+        )
+
     declared_owners: set[str] = set()
     manifest_violations: set[str] = set()
     for package in metadata["packages"]:
