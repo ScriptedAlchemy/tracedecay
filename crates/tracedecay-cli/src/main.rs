@@ -233,10 +233,13 @@ impl Drop for Spinner {
 /// an explicit stack size gives every platform the same headroom.
 const ASYNC_STACK_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ASYNC_WORKER_THREADS: usize = 16;
+/// The executor that drives a command's future.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AsyncRuntimeFlavor {
-    CurrentThread,
-    MultiThread,
+enum CommandRuntime {
+    /// The native runtime alone. No Tokio runtime exists in the process.
+    Native,
+    /// A multi-thread Tokio runtime beside the native one.
+    Tokio,
 }
 
 const MIN_SERVING_BLOCKING_RESERVE: usize = 4;
@@ -244,20 +247,35 @@ const DEFAULT_MAX_DAEMON_CPU_THREADS: usize = 16;
 const DAEMON_CPU_THREADS_ENV: &str = "TRACEDECAY_DAEMON_CPU_THREADS";
 const RAYON_NUM_THREADS_ENV: &str = "RAYON_NUM_THREADS";
 
-fn async_worker_threads() -> usize {
+fn async_worker_threads(command: Option<&Commands>) -> usize {
+    // One-shot daemon clients drive a single socket request and exit; up to
+    // 16 eagerly started workers would sit idle.
+    if is_one_shot_daemon_client(command) {
+        return 1;
+    }
     std::thread::available_parallelism()
         .map_or(1, usize::from)
         .clamp(1, MAX_ASYNC_WORKER_THREADS)
 }
 
-fn async_runtime_flavor(command: Option<&Commands>) -> AsyncRuntimeFlavor {
-    match command {
-        // One-shot daemon clients drive a single socket request and exit. A
-        // multi-thread runtime eagerly starts up to 16 workers they never
-        // use; the current thread already has a fixed 16 MiB stack and
-        // Tokio's blocking pool remains available when needed.
-        Some(Commands::Tool { .. } | Commands::Status { .. }) => AsyncRuntimeFlavor::CurrentThread,
-        _ => AsyncRuntimeFlavor::MultiThread,
+/// Commands whose every path is Tokio-free run on the native runtime alone.
+/// Project commands open project owners and runtime commands serve, and both
+/// still reach Tokio-only owners.
+fn command_runtime(command: Option<&Commands>) -> CommandRuntime {
+    let Some(command) = command else {
+        return CommandRuntime::Tokio;
+    };
+    if matches!(command, Commands::Tool { .. } | Commands::Status { .. }) {
+        return CommandRuntime::Native;
+    }
+    match CommandFamily::for_command(command) {
+        CommandFamily::Agent
+        | CommandFamily::Hook
+        | CommandFamily::Update
+        | CommandFamily::Configuration
+        | CommandFamily::Diagnostics
+        | CommandFamily::Knowledge => CommandRuntime::Native,
+        CommandFamily::Project | CommandFamily::Runtime => CommandRuntime::Tokio,
     }
 }
 
@@ -551,13 +569,9 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
         let _span = tracing::trace_span!("daemon_cpu_pool_install").entered();
         install_daemon_cpu_pool(cli.command.as_ref())
     }?;
-    let runtime_flavor = async_runtime_flavor(cli.command.as_ref());
-    let worker_threads = match runtime_flavor {
-        AsyncRuntimeFlavor::CurrentThread => 1,
-        AsyncRuntimeFlavor::MultiThread => async_worker_threads(),
-    };
+    let worker_threads = async_worker_threads(cli.command.as_ref());
     let blocking_threads = tokio_blocking_thread_limit();
-    {
+    let native = {
         use tracedecay_runtime_core::native_runtime;
         let _span = tracing::trace_span!("native_runtime_install").entered();
         native_runtime::install(
@@ -572,30 +586,28 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
         )
         .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
             message: error.to_string(),
-        })?;
-    }
-    let runtime = {
-        let _span = tracing::trace_span!("tokio_runtime_build").entered();
-        {
-            let build = match runtime_flavor {
-                AsyncRuntimeFlavor::CurrentThread => tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .max_blocking_threads(blocking_threads)
-                    .thread_stack_size(ASYNC_STACK_BYTES)
-                    .build(),
-                AsyncRuntimeFlavor::MultiThread => tokio::runtime::Builder::new_multi_thread()
+        })?
+    };
+    let command_runtime = command_runtime(cli.command.as_ref());
+    tracing::trace!(name: "process_command_runtime", value = ?command_runtime);
+    let tokio = match command_runtime {
+        CommandRuntime::Native => None,
+        CommandRuntime::Tokio => {
+            let _span = tracing::trace_span!("tokio_runtime_build").entered();
+            Some(
+                tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
                     .worker_threads(worker_threads)
                     .max_blocking_threads(blocking_threads)
                     .thread_stack_size(ASYNC_STACK_BYTES)
                     .on_thread_park(collect_idle_thread_heap_v1)
-                    .build(),
-            };
-            build.map_err(|e| tracedecay_domain::errors::TraceDecayError::Config {
-                message: format!("failed to start async runtime: {e}"),
-            })
+                    .build()
+                    .map_err(|e| tracedecay_domain::errors::TraceDecayError::Config {
+                        message: format!("failed to start async runtime: {e}"),
+                    })?,
+            )
         }
-    }?;
+    };
 
     {
         let command_family = cli.command.as_ref().map_or("none", |command| {
@@ -613,24 +625,32 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
 
     let result = {
         let _span = tracing::trace_span!("process_command").entered();
-        runtime.block_on(tracing::Instrument::instrument(
+        let command = tracing::Instrument::instrument(
             run(cli),
             tracing::trace_span!("process_command_future"),
-        ))
+        );
+        match &tokio {
+            Some(runtime) => runtime.block_on(command),
+            None => native.block_on(command),
+        }
     };
 
-    // Runtime drop waits indefinitely for blocking tasks. Daemon integrations
-    // can leave OS-backed watcher work behind after their async handles abort,
-    // so bound teardown after the command's own graceful shutdown completes.
+    // Tokio runtime drop waits indefinitely for blocking tasks. Daemon
+    // integrations can leave OS-backed watcher work behind after their async
+    // handles abort, so bound teardown after the command's own graceful
+    // shutdown completes. The installed native runtime is process-static and
+    // never dropped.
     //
     // The foreground daemon already coordinated every owner with typed
     // receipts; a blocking task still running here is one its shutdown owner
     // reported as pending and abandoned at the task-abort deadline. Waiting
     // for it a second time only spends the supervisor's TERM grace.
-    if foreground_daemon {
-        runtime.shutdown_background();
-    } else {
-        runtime.shutdown_timeout(std::time::Duration::from_secs(2));
+    if let Some(runtime) = tokio {
+        if foreground_daemon {
+            runtime.shutdown_background();
+        } else {
+            runtime.shutdown_timeout(std::time::Duration::from_secs(2));
+        }
     }
     if json_requested
         && let Err(error) = &result
@@ -1921,7 +1941,7 @@ enum CommandStartupPolicy {
 
 impl CommandStartupPolicy {
     fn for_command(command: &Commands) -> Self {
-        if hook_capture_cmd::is_native_hook_command(command) {
+        if CommandFamily::for_command(command) == CommandFamily::Hook {
             return Self::SkipAll;
         }
 
@@ -2057,3 +2077,6 @@ fn normalize_tool_reserved_global_flags(cli: &mut Cli) {
 
 #[cfg(test)]
 mod startup_tests;
+
+#[cfg(test)]
+mod native_root_tests;
