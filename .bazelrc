@@ -5,10 +5,16 @@ startup --windows_enable_symlinks
 common --enable_bzlmod
 common --announce_rc
 common --show_progress_rate_limit=15
-# crate_universe re-fetches git dependencies on every splice. libgit2 indexes
-# asupersync's ~1 GB history on one thread for over 25 minutes; the git CLI
-# indexes it in about 2.
+# crate_universe re-fetches git dependencies into an empty CARGO_HOME on every
+# splice. libgit2 indexes asupersync's ~1 GB history on one thread for over 25
+# minutes; the git CLI indexes it in about 2.
 common --repo_env=CARGO_NET_GIT_FETCH_WITH_CLI=true
+# Fetch only the pinned commit of each git dependency: 76 MB instead of 1.3 GB,
+# and a cold splice drops from about 6 minutes to 1. The splice runs rules_rust's
+# stable host cargo, which reads -Z options only under RUSTC_BOOTSTRAP. A nightly
+# host cargo would download another 418 MB toolchain on every CI job.
+common --repo_env=CARGO_UNSTABLE_GIT=shallow-deps
+common --repo_env=RUSTC_BOOTSTRAP=1
 # MODULE.bazel registers only nightly/2026-09-27. Without this, rules_rust
 # resolves the stable channel and the build fails closed.
 build --@rules_rust//rust/toolchain/channel=nightly
