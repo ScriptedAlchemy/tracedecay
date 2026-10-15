@@ -502,14 +502,15 @@ impl<'a> ProjectProviderRun<'a> {
         let Some(source) = kimi::KimiSource::new() else {
             return ProviderRunOutcome::skipped();
         };
-        match kimi::capture_kimi_observations(
+        let mut sweep = SourceSweep::new("kimi", self.codex_discovery);
+        let mut run = match kimi::capture_kimi_sweep(
             self.facade,
             &source,
             self.project_root,
             self.scope.clone(),
             Some(self.max_new_bytes),
             self.cancellation,
-            self.codex_discovery,
+            &mut sweep,
         )
         .await
         {
@@ -525,7 +526,8 @@ impl<'a> ProjectProviderRun<'a> {
                 run
             }
             Err(error) => {
-                if let Some(cancelled) = cancelled_provider_outcome(&error) {
+                if let Some(mut cancelled) = cancelled_provider_outcome(&error) {
+                    sweep.report_into(&mut cancelled);
                     return cancelled;
                 }
                 let mut run = ProviderRunOutcome::failed(
@@ -556,7 +558,9 @@ impl<'a> ProjectProviderRun<'a> {
                 }
                 run
             }
-        }
+        };
+        sweep.report_into(&mut run);
+        run
     }
 
     #[tracing::instrument(name = "sessions.ingest.project.pi", level = "trace", skip_all)]
@@ -564,14 +568,15 @@ impl<'a> ProjectProviderRun<'a> {
         let Some(source) = pi::PiSource::new() else {
             return ProviderRunOutcome::skipped();
         };
-        match pi::capture_pi_observations(
+        let mut sweep = SourceSweep::new("pi", self.codex_discovery);
+        let mut run = match pi::capture_pi_sweep(
             self.facade,
             &source,
             self.project_root,
             self.scope.clone(),
             Some(self.max_new_bytes),
             self.cancellation,
-            self.codex_discovery,
+            &mut sweep,
         )
         .await
         {
@@ -587,7 +592,8 @@ impl<'a> ProjectProviderRun<'a> {
                 run
             }
             Err(error) => {
-                if let Some(cancelled) = cancelled_provider_outcome(&error) {
+                if let Some(mut cancelled) = cancelled_provider_outcome(&error) {
+                    sweep.report_into(&mut cancelled);
                     return cancelled;
                 }
                 let mut run = ProviderRunOutcome::failed(
@@ -618,7 +624,9 @@ impl<'a> ProjectProviderRun<'a> {
                 }
                 run
             }
-        }
+        };
+        sweep.report_into(&mut run);
+        run
     }
 
     #[tracing::instrument(name = "sessions.ingest.project.opencode", level = "trace", skip_all)]
@@ -734,14 +742,15 @@ impl<'a> ProjectProviderRun<'a> {
         let Some(source) = vibe::VibeSource::new() else {
             return ProviderRunOutcome::skipped();
         };
-        match vibe::capture_vibe_observations(
+        let mut sweep = SourceSweep::new("vibe", self.codex_discovery);
+        let mut run = match vibe::capture_vibe_sweep(
             self.facade,
             &source,
             self.project_root,
             self.scope.clone(),
             Some(self.max_new_bytes),
             self.cancellation,
-            self.codex_discovery,
+            &mut sweep,
         )
         .await
         {
@@ -756,7 +765,9 @@ impl<'a> ProjectProviderRun<'a> {
                 "project Vibe observation catch-up failed",
                 0,
             ),
-        }
+        };
+        sweep.report_into(&mut run);
+        run
     }
 
     #[tracing::instrument(name = "sessions.ingest.project.claude", level = "trace", skip_all)]
@@ -847,6 +858,7 @@ impl<'a> ProjectProviderRun<'a> {
         let mut session_ids = composer.projected_session_ids();
         let jsonl_skip_session_ids = composer.jsonl_skip_session_ids();
         let remaining = self.max_new_bytes.saturating_sub(composer.bytes_consumed);
+        let mut sweep = SourceSweep::new("cursor", self.codex_discovery);
         match cursor::try_ingest_cursor_project_sweep_capped_with_session_ids(
             self.project_root,
             self.project_id.clone(),
@@ -854,14 +866,16 @@ impl<'a> ProjectProviderRun<'a> {
             Some(remaining),
             jsonl_skip_session_ids,
             self.cancellation,
+            &mut sweep,
         )
         .await
         {
-            Ok(sweep) => {
-                merge_cursor_sweep_outcome(&mut outcome, &mut session_ids, sweep, remaining);
+            Ok(jsonl) => {
+                merge_cursor_sweep_outcome(&mut outcome, &mut session_ids, jsonl, remaining);
             }
             Err(error) => {
                 if error.is_cancelled() {
+                    sweep.report_into(&mut outcome);
                     return outcome;
                 }
                 outcome.add_failure(warn_transcript_catch_up_failure(
@@ -872,6 +886,7 @@ impl<'a> ProjectProviderRun<'a> {
                 ));
             }
         }
+        sweep.report_into(&mut outcome);
         if let Err(error) = persist_host_provider_coverage(
             self.facade,
             self.scope,

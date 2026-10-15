@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 use tracedecay_domain::{ObservationScopeV1, ProjectId};
 use tracedecay_runtime_core::config::ProfileRoot;
+use tracedecay_store::{ParseOffset, TranscriptStore, TranscriptStoreResult, TranscriptWriteBatch};
 
 use crate::admission::test_support::MemoryHostAdmission;
 use crate::observation::ObservationCancellation;
@@ -14,10 +15,12 @@ use crate::runtime::hosts::cursor::cursor_project_slug;
 use crate::runtime::ingest::project_provider::ProjectProviderRun;
 use crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority;
 use crate::runtime::source::spin_until_jsonl_change_settled;
+use crate::runtime::store_port::TranscriptIngestStore;
 
 use super::failure::ProviderRunOutcome;
 use super::project::with_transcript_source_profile;
 use super::quarantine_contract::{assert_refused_source_contract, refuse_session};
+use super::user_provider::UserProviderUnit;
 
 const REFUSED: &str = "refused";
 const SIBLING: &str = "sibling";
@@ -248,4 +251,66 @@ async fn cursor_keeps_the_refused_source_contract() {
             append_settled(&transcript(REFUSED), &cursor_message("refused second turn"));
         })
         .await;
+}
+
+/// Only the Codex user run reads the transcript store.
+struct UnusedTranscriptStore;
+
+impl TranscriptStore for UnusedTranscriptStore {
+    fn get_parse_offset(
+        &self,
+        _cursor_path: &Path,
+    ) -> impl Future<Output = TranscriptStoreResult<ParseOffset>> + Send {
+        std::future::ready(Ok(ParseOffset::default()))
+    }
+
+    fn persist_transcript_batch(
+        &self,
+        _batch: TranscriptWriteBatch,
+    ) -> impl Future<Output = TranscriptStoreResult<()>> + Send {
+        std::future::ready(Ok(()))
+    }
+}
+
+impl TranscriptIngestStore for UnusedTranscriptStore {}
+
+#[tokio::test]
+async fn cursor_keeps_the_refused_source_contract_in_user_scope() {
+    let fixture = Fixture::new("cursor-user");
+    fixture.hub.register("profile", Some(&fixture.home));
+    let transcript = |id: &str| {
+        fixture
+            .home
+            .join(".cursor/projects")
+            .join(cursor_project_slug(&fixture.project).unwrap())
+            .join("agent-transcripts")
+            .join(format!("{id}.jsonl"))
+    };
+    for id in [REFUSED, SIBLING] {
+        write_settled(
+            &transcript(id),
+            &[cursor_message(&format!("{id} first turn"))],
+        );
+    }
+    // User scope sweeps the transcripts of every project nobody registered.
+    let pass = || {
+        let unit = UserProviderUnit {
+            store: &UnusedTranscriptStore,
+            profile_root: &fixture.home,
+            roots: &[],
+            facade: &fixture.admission,
+            candidate: SessionProvider::Cursor,
+            max_new_bytes: u64::MAX,
+            cancellation: &fixture.cancellation,
+            codex_discovery: Some((&fixture.hub, "profile")),
+        };
+        with_transcript_source_profile(ProfileRoot::under_home(fixture.home.clone()), async move {
+            unit.run().await.outcome
+        })
+    };
+
+    assert_refused_source_contract(&fixture.admission, SIBLING, pass, || {
+        append_settled(&transcript(REFUSED), &cursor_message("refused second turn"));
+    })
+    .await;
 }

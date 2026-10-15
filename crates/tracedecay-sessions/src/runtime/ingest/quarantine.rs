@@ -355,10 +355,6 @@ impl SourceSweep {
     )
 )]
 impl SourceSweep {
-    #[expect(
-        dead_code,
-        reason = "the JSONL providers observe through it on their blocking threads"
-    )]
     pub(crate) fn ledger(&self) -> Option<SourceLedger> {
         self.ledger.clone()
     }
