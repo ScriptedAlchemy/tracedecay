@@ -388,14 +388,10 @@ fn status_is_a_one_shot_daemon_client() {
         "init",
         "/tmp/project"
     ]))));
-    assert_eq!(
-        command_runtime(Some(&parse_command(&["init", "/tmp/project"]))),
-        CommandRuntime::Tokio
-    );
 }
 
 #[test]
-fn client_families_run_on_the_native_runtime_and_owners_stay_on_tokio() {
+fn every_command_but_the_foreground_daemon_runs_on_the_native_runtime() {
     for args in [
         &["hook-stop"][..],
         &["current-counter"],
@@ -409,6 +405,18 @@ fn client_families_run_on_the_native_runtime_and_owners_stay_on_tokio() {
         &["sessions", "search", "query"],
         &["analytics", "sync"],
         &["automation", "skills", "list"],
+        &["init", "/tmp/project"],
+        &["sync"],
+        &["projects", "list"],
+        &["storage", "report"],
+        &["wipe", "--stale"],
+        &["list"],
+        &["serve"],
+        &["lsp", "bridge", "--stdio"],
+        &["dashboard"],
+        &["remote", "status"],
+        &["daemon", "status"],
+        &["daemon", "stop"],
     ] {
         assert_eq!(
             command_runtime(Some(&parse_command(args))),
@@ -416,20 +424,11 @@ fn client_families_run_on_the_native_runtime_and_owners_stay_on_tokio() {
             "{args:?}"
         );
     }
-    for args in [
-        &["sync"][..],
-        &["serve"],
-        &["lsp", "bridge", "--stdio"],
-        &["daemon", "run"],
-        &["dashboard"],
-    ] {
-        assert_eq!(
-            command_runtime(Some(&parse_command(args))),
-            CommandRuntime::Tokio,
-            "{args:?}"
-        );
-    }
-    assert_eq!(command_runtime(None), CommandRuntime::Tokio);
+    assert_eq!(command_runtime(None), CommandRuntime::Native);
+    assert_eq!(
+        command_runtime(Some(&parse_command(&["daemon", "run"]))),
+        CommandRuntime::Tokio
+    );
 }
 
 #[test]
