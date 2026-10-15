@@ -263,8 +263,9 @@ pub(super) async fn retire_runtime_work(
             // store retirement inspects live clients.
             for server in &servers {
                 let graph = server.cg().await;
-                crate::daemon::hook_v2_replay_consumer::shutdown_hook_v2_replay_consumer(
+                crate::daemon::hook_v2_replay_consumer::retire_hook_v2_replay_consumer(
                     &graph.hook_store_layout().data_root,
+                    &Arc::downgrade(&graph),
                 )
                 .await;
             }

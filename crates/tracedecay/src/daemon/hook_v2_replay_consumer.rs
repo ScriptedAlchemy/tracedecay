@@ -402,6 +402,8 @@ struct RegisteredReplayConsumer {
     delivery_settlements:
         Weak<tracedecay_application::observability::DeliverySettlementAuthorityV1>,
     task: Option<tokio::task::JoinHandle<()>>,
+    /// This registration's spool wake; its identity is the registration's.
+    wake: Arc<tokio::sync::Notify>,
     /// The failures of the last finished sweep; `None` before the first.
     last_sweep: Option<Vec<StatusHookReplayFailureV1>>,
 }
@@ -451,8 +453,11 @@ pub(crate) fn hook_v2_replay_consumer_registered(data_root: &Path) -> bool {
     })
 }
 
-/// Start the per-project replay consumer exactly once per hook data root.
-/// Returns `false` when one is already running for this root.
+/// Start `graph`'s replay consumer for its hook data root. The newest owner
+/// of a data root takes it over: a reopen can register while the retiring
+/// owner's server still holds the older graph, and that graph's release must
+/// not leave the reopened project without a consumer. Returns `false` when
+/// `graph`'s own consumer is already running.
 pub(crate) fn register_hook_v2_replay_consumer(
     graph: Arc<tracedecay_project::project::TraceDecay>,
     delivery_settlements: Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>,
@@ -463,10 +468,12 @@ pub(crate) fn register_hook_v2_replay_consumer(
     let project_root = graph.project_root().to_path_buf();
     let graph = Arc::downgrade(&graph);
     let delivery_settlements = Arc::downgrade(&delivery_settlements);
-    match registered_replay_roots().lock() {
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let displaced = match registered_replay_roots().lock() {
         Ok(mut roots) => {
             if roots.get(&data_root).is_some_and(|consumer| {
-                consumer.graph.upgrade().is_some()
+                Weak::ptr_eq(&consumer.graph, &graph)
+                    && consumer.graph.upgrade().is_some()
                     && consumer.delivery_settlements.upgrade().is_some()
             }) {
                 return false;
@@ -477,19 +484,23 @@ pub(crate) fn register_hook_v2_replay_consumer(
                     graph: graph.clone(),
                     delivery_settlements: delivery_settlements.clone(),
                     task: None,
+                    wake: Arc::clone(&wake),
                     last_sweep: None,
                 },
-            );
+            )
         }
         Err(_) => return false,
+    };
+    if let Some(task) = displaced.and_then(|consumer| consumer.task) {
+        task.abort();
     }
     let task_data_root = data_root.clone();
     let task_graph = graph.clone();
     let task_delivery_settlements = delivery_settlements.clone();
     let task_project_sessions = project_sessions;
     let task_background_cpu = background_cpu;
-    let wake = Arc::new(tokio::sync::Notify::new());
     spool_watch::attach_consumer(&data_root, &project_root, Arc::clone(&wake));
+    let task_wake = Arc::clone(&wake);
     let task = tokio::spawn(async move {
         loop {
             let (Some(graph_owner), Some(delivery_settlements)) =
@@ -525,7 +536,7 @@ pub(crate) fn register_hook_v2_replay_consumer(
                         slept = tracedecay_runtime_core::native_runtime::sleep_until(
                             std::time::Instant::now() + REPLAY_INTERVAL,
                         ) => slept,
-                        () = wake.notified() => Ok(()),
+                        () = task_wake.notified() => Ok(()),
                     }
                 },
                 tracing::trace_span!("daemon.hook_replay.interval_wait"),
@@ -537,18 +548,18 @@ pub(crate) fn register_hook_v2_replay_consumer(
                 break;
             }
         }
-        spool_watch::detach_consumer(&task_data_root);
+        spool_watch::detach_consumer(&task_data_root, &task_wake);
         if let Ok(mut roots) = registered_replay_roots().lock()
             && roots
                 .get(&task_data_root)
-                .is_some_and(|registered| Weak::ptr_eq(&registered.graph, &task_graph))
+                .is_some_and(|registered| Arc::ptr_eq(&registered.wake, &task_wake))
         {
             roots.remove(&task_data_root);
         }
     });
     match registered_replay_roots().lock() {
         Ok(mut roots) => match roots.get_mut(&data_root) {
-            Some(registered) if Weak::ptr_eq(&registered.graph, &graph) => {
+            Some(registered) if Arc::ptr_eq(&registered.wake, &wake) => {
                 registered.task = Some(task);
             }
             _ => task.abort(),
@@ -558,18 +569,42 @@ pub(crate) fn register_hook_v2_replay_consumer(
     true
 }
 
-/// Stop and join the exact project replay consumer before releasing its graph.
+/// Stop and join whichever replay consumer owns `data_root`. For daemon
+/// shutdown and project deletion, which end every owner of the data root.
 pub(crate) async fn shutdown_hook_v2_replay_consumer(data_root: &Path) {
-    let task = registered_replay_roots()
-        .lock()
-        .ok()
-        .and_then(|mut roots| roots.remove(data_root))
-        .and_then(|consumer| consumer.task);
-    if let Some(task) = task {
+    stop_replay_consumer(data_root, None).await;
+}
+
+/// Stop and join `owner`'s replay consumer before releasing its graph. A
+/// newer owner's consumer for the same data root keeps running.
+pub(crate) async fn retire_hook_v2_replay_consumer(
+    data_root: &Path,
+    owner: &Weak<tracedecay_project::project::TraceDecay>,
+) {
+    stop_replay_consumer(data_root, Some(owner)).await;
+}
+
+async fn stop_replay_consumer(
+    data_root: &Path,
+    owner: Option<&Weak<tracedecay_project::project::TraceDecay>>,
+) {
+    let consumer = {
+        let mut roots = registered_replay_roots()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let owned = roots.get(data_root).is_some_and(|registered| {
+            owner.is_none_or(|owner| Weak::ptr_eq(&registered.graph, owner))
+        });
+        owned.then(|| roots.remove(data_root)).flatten()
+    };
+    let Some(consumer) = consumer else {
+        return;
+    };
+    spool_watch::detach_consumer(data_root, &consumer.wake);
+    if let Some(task) = consumer.task {
         task.abort();
         let _ = task.await;
     }
-    spool_watch::detach_consumer(data_root);
 }
 
 #[cfg(test)]
@@ -608,5 +643,161 @@ mod tests {
         std::fs::write(&file, b"x").unwrap();
         assert_eq!(spool_root_absent(&file), Ok(false));
         assert!(spool_root_absent(&file.join("child")).is_err());
+    }
+
+    struct ReplayOwnerFixture {
+        _temp: tempfile::TempDir,
+        _settlement_runtime: tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime,
+        project_sessions: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
+        settlements: Arc<tracedecay_application::observability::DeliverySettlementAuthorityV1>,
+        background_cpu: Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,
+    }
+
+    type ProjectGraph = Arc<tracedecay_project::project::TraceDecay>;
+
+    /// Two owners of one project, so both resolve the same hook data root.
+    async fn replay_owner_fixture() -> (ReplayOwnerFixture, ProjectGraph, ProjectGraph) {
+        let temp = tempfile::tempdir().expect("replay owner fixture");
+        let project = temp.path().join("project");
+        let profile = temp.path().join("profile");
+        std::fs::create_dir_all(project.join("src")).expect("project source directory");
+        std::fs::write(project.join("src/lib.rs"), "pub fn fixture() {}\n").expect("source");
+        let options = tracedecay_project::project::TraceDecayOpenOptions {
+            profile_root: Some(profile.clone()),
+            global_db_path: Some(profile.join("global.db")),
+        };
+        let older = Arc::new(
+            tracedecay_project::project::TraceDecay::init_with_options_for_test(
+                &project,
+                options.clone(),
+            )
+            .await
+            .expect("older project owner"),
+        );
+        let newer = Arc::new(
+            tracedecay_project::project::TraceDecay::open_with_options_for_test(&project, options)
+                .await
+                .expect("newer project owner"),
+        );
+        let project_id = tracedecay_domain::ProjectId::new("project.replay.owner").expect("id");
+        let settlement_runtime =
+            tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
+                &temp.path().join("settlement-profile"),
+                &project,
+                project_id.clone(),
+            )
+            .await
+            .expect("settlement runtime");
+        let project_sessions = settlement_runtime
+            .project_database_arc()
+            .expect("project sessions database");
+        let identity = tracedecay_application::observability::ObservabilityProducerIdentityV1 {
+            authorized_scope_ref: project_id.as_str().to_owned(),
+            process_boot_id: "boot:replay-owner".to_owned(),
+            producer_revision: "replay-owner-producer.v1".to_owned(),
+            configuration_revision: "replay-owner-config.v1".to_owned(),
+            policy_revision: "replay-owner-policy.v1".to_owned(),
+        };
+        let producer = Arc::new(
+            tracedecay_application::observability::BoundedObservabilityProducerV1::start(
+                project_sessions.clone(),
+                identity.clone(),
+                8,
+            )
+            .expect("producer"),
+        );
+        let settlements = Arc::new(
+            tracedecay_application::observability::DeliverySettlementAuthorityV1::new(
+                project_sessions.clone(),
+                producer,
+                identity,
+            )
+            .expect("settlement authority"),
+        );
+        let fixture = ReplayOwnerFixture {
+            _temp: temp,
+            _settlement_runtime: settlement_runtime,
+            project_sessions,
+            settlements,
+            background_cpu: Arc::new(
+                tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1::new(
+                    std::num::NonZeroUsize::MIN,
+                ),
+            ),
+        };
+        (fixture, older, newer)
+    }
+
+    impl ReplayOwnerFixture {
+        fn register(&self, graph: &ProjectGraph) -> bool {
+            register_hook_v2_replay_consumer(
+                Arc::clone(graph),
+                Arc::clone(&self.settlements),
+                self.project_sessions.clone(),
+                Arc::clone(&self.background_cpu),
+            )
+        }
+    }
+
+    async fn assert_newer_owner_survives(data_root: &Path, newer: &ProjectGraph) {
+        let newer_task_running = registered_replay_roots()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(data_root)
+            .is_some_and(|registered| {
+                Weak::ptr_eq(&registered.graph, &Arc::downgrade(newer))
+                    && registered
+                        .task
+                        .as_ref()
+                        .is_some_and(|task| !task.is_finished())
+            });
+        assert!(
+            newer_task_running,
+            "the newer owner must own the data root's running replay consumer"
+        );
+        assert!(hook_v2_replay_consumer_registered(data_root));
+        assert!(
+            spool_watch::consumer_attached(data_root),
+            "the newer owner's consumer must keep the spool wake"
+        );
+        shutdown_hook_v2_replay_consumer(data_root).await;
+        assert!(!hook_v2_replay_consumer_registered(data_root));
+    }
+
+    /// The older owner's graph is gone by the time the project reopens, so
+    /// the newer owner registers; the older owner's retirement then arrives.
+    #[tokio::test]
+    async fn a_late_retirement_leaves_the_newer_owners_replay_consumer_running() {
+        let (fixture, older, newer) = replay_owner_fixture().await;
+        let data_root = older.hook_store_layout().data_root.clone();
+        assert_eq!(data_root, newer.hook_store_layout().data_root);
+        assert!(fixture.register(&older), "the older owner starts replay");
+        let older_owner = Arc::downgrade(&older);
+        drop(older);
+        assert!(fixture.register(&newer), "the reopened owner starts replay");
+
+        retire_hook_v2_replay_consumer(&data_root, &older_owner).await;
+
+        assert_newer_owner_survives(&data_root, &newer).await;
+    }
+
+    /// The project reopens while its retiring owner's server still holds the
+    /// older graph. The reopened owner must take over the data root, or the
+    /// older graph's release leaves the project with no consumer at all.
+    #[tokio::test]
+    async fn a_reopen_takes_over_replay_from_an_owner_still_retiring() {
+        let (fixture, older, newer) = replay_owner_fixture().await;
+        let data_root = older.hook_store_layout().data_root.clone();
+        assert!(fixture.register(&older), "the older owner starts replay");
+        let newer_registered = fixture.register(&newer);
+
+        retire_hook_v2_replay_consumer(&data_root, &Arc::downgrade(&older)).await;
+        drop(older);
+
+        assert!(
+            newer_registered,
+            "the reopened owner's registration must be accepted"
+        );
+        assert_newer_owner_survives(&data_root, &newer).await;
     }
 }
