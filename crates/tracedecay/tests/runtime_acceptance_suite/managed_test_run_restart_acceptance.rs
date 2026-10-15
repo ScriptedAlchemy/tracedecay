@@ -1,10 +1,6 @@
 //! A daemon-managed test run a session requested is recorded durably at the
 //! moment it runs, so a physically restarted daemon still serves it on that
 //! session's Loom lane.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 
 use crate::common;
 use crate::private_route_restart_acceptance::await_published_code_index;

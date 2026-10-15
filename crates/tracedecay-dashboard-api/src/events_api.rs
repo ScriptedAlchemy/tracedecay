@@ -1232,10 +1232,6 @@ pub(crate) async fn dashboard_state_fixture(
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 mod tests {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};

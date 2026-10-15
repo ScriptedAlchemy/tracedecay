@@ -448,10 +448,6 @@ use project_open_handshake::{
 };
 mod project_open_orchestration;
 mod project_routing;
-#[allow(
-    clippy::disallowed_methods,
-    reason = "its Tokio timers run on Tokio tasks or in native_runtime::on_tokio hops"
-)]
 mod project_server_lifecycle;
 #[cfg(unix)]
 use project_open_orchestration::{

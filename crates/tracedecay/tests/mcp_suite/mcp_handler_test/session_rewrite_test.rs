@@ -1,10 +1,6 @@
 //! An in-place rewrite of a host transcript replaces what it offered: the
 //! edited record's old text and a deleted record leave every read path, for
 //! records with and without a native item id.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 
 use std::path::Path;
 use std::process::Command;

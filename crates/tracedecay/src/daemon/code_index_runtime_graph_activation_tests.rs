@@ -2,10 +2,6 @@
 //!
 //! These journeys used to live beside the scheduler. They open
 //! `DaemonSessionRuntimeRegistryV1`, so they compile in the composition root.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 
 use std::collections::BTreeSet;
 use std::num::NonZeroU64;

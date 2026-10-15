@@ -1,9 +1,5 @@
 #![allow(clippy::too_many_arguments, clippy::clone_on_copy)] // test builders
 //! Shared fixtures and helpers for the MCP handler test domains.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 
 #[cfg(feature = "test-transport")]
 use crate::common;

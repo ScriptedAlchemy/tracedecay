@@ -38,10 +38,6 @@ use serde_json::Value;
 use tracedecay_mcp::transport::JsonRpcRequest;
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 mod tests {
     use std::borrow::Cow;
     use std::sync::atomic::{AtomicUsize, Ordering};

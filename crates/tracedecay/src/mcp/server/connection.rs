@@ -545,10 +545,6 @@ impl McpServer {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 mod cancellable_queue_tests {
     use super::*;
     use crate::test_support::git::git;

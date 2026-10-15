@@ -1140,10 +1140,6 @@ pub async fn cleanup_pr_worktree_off_runtime(
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 mod tests {
     use super::{
         ManualBranchActivationError, ManualBranchArtifactsV1, PrCommandControlV1,

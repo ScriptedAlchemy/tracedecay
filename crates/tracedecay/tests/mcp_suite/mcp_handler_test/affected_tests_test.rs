@@ -6,10 +6,6 @@
 //! handle exists. The reachable tool answers are the refusals. The cycle
 //! impact is the test list a later publication would project; symbol ids come
 //! from `tracedecay_find_exact_symbol`, not from the cycle.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 
 use std::time::{Duration, Instant};
 

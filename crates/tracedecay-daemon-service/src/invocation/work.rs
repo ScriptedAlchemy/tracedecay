@@ -331,10 +331,6 @@ fn work_activity_detail(outcome: &DaemonInvocationOutcome) -> Option<&'static st
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 mod placement_observation_tests {
     use super::*;
     use tracedecay_domain::{

@@ -360,10 +360,6 @@ impl AutomationSchedulerExitBarrier {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 mod automation_scheduler_exit_barrier_tests {
     use std::time::Duration;
 
@@ -1648,10 +1644,6 @@ async fn maybe_run_global_retention(
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 mod global_retention_tests {
     use std::sync::Arc;
     use std::time::Duration;

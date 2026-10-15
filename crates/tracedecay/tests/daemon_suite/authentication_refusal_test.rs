@@ -6,10 +6,6 @@
 //! Closing without the frame made every client surface report "connection
 //! closed, the outcome is unknown" for what is a definitive daemon answer.
 //! The daemon must survive the refusal and keep serving healthy clients.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

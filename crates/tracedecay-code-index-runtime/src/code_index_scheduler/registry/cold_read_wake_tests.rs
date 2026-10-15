@@ -1,8 +1,4 @@
 //! Cold-read wake behavior while the retained code-index owner is active.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 
 use std::fs;
 use std::sync::Arc;

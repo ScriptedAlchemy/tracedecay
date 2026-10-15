@@ -4,10 +4,6 @@
 //! these fixtures hold none beyond the opened project, so every opt-in section
 //! reports its typed unattached state. Assertions are the JSON a caller reads,
 //! not which helpers ran.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

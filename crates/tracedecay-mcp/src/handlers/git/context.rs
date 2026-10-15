@@ -2027,10 +2027,6 @@ fn pr_context_completion(
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 mod blocking_git_span_tests {
     use super::{
         BlockingGitWorkerState, blocking_git_span, blocking_git_span_controlled_with_state,

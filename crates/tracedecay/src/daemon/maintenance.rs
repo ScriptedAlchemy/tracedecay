@@ -1253,10 +1253,6 @@ pub(super) fn retention_maintenance_enabled(
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 mod tests {
     use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering};

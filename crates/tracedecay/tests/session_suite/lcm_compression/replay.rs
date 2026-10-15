@@ -1,7 +1,3 @@
-#![allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 use super::*;
 
 // The daemon LCM authority owns summarizer selection: a compress without a

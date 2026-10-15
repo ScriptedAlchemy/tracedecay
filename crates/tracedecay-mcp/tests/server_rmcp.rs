@@ -1,7 +1,3 @@
-#![allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;

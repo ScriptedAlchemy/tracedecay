@@ -1530,10 +1530,6 @@ fn windows_process_state(pid: u32) -> ProcessState {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 mod tests {
     use super::super::backend::{AgentTaskFailureClass, AgentTaskRetryAttempt};
     use super::super::backend_identity::BACKEND_IDENTITY_SUPPRESSED;

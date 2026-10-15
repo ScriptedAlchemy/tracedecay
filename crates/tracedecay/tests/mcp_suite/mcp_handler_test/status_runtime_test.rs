@@ -1,7 +1,3 @@
-#![allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 use crate::support::*;
 #[cfg(feature = "test-transport")]
 use serde_json::Value;

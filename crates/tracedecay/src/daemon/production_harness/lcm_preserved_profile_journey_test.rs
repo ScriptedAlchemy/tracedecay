@@ -15,10 +15,6 @@
 //! every admission claim is asserted as a populated payload. A typed
 //! `code-graph-unavailable` is not accepted as admission here: it would make
 //! "graph retrieval stays admitted" satisfiable with no code graph at all.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};

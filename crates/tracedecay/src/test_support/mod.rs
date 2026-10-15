@@ -1,9 +1,5 @@
 //! Test-only composition-root fixtures. Compiled under `cfg(test)` or
 //! `test-helpers`, never into a default or `production` library build.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 
 use std::path::PathBuf;
 

@@ -1,7 +1,3 @@
-#![allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 use super::super::*;
 use crate::structured_hook_error_data;
 use tracedecay_project::test_support::host_admission::HostAdmissionTestRuntimeV1;

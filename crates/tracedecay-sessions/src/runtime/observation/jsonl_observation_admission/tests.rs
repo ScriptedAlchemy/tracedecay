@@ -12,10 +12,6 @@
 //!
 //! Exact duplicates (same identity + digest) are idempotent no-op receipts on
 //! the persist path and never reach either disposition.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 
 use std::io::Write as _;
 use std::num::NonZeroUsize;

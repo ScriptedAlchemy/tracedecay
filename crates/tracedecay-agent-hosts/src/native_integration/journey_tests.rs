@@ -4,10 +4,6 @@
 //! store actor, the exact-pair resolver, and the real `gix` adapter against
 //! temporary repositories. It deliberately does not substitute a mock
 //! transaction port or a test-only Git implementation.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 
 use std::collections::BTreeSet;
 use std::path::Path;

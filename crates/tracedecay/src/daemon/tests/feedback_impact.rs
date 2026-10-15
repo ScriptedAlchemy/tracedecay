@@ -9,10 +9,6 @@
 //! `daemon_unavailable` and mints no handle. The production way to move one
 //! provider off that state is a real compiler warning admitted by
 //! `tracedecay_diagnose`.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 
 use std::path::Path;
 use std::process::Command;

@@ -3,10 +3,6 @@
 //! deadline and answers from the retained generation, or, when its deadline
 //! cannot cover the seat, reports the typed `graph_warming` partial instead
 //! of an answer that looks like nothing was indexed.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 
 use std::fs;
 use std::path::Path;

@@ -1765,10 +1765,6 @@ fn worktree_mode(path: &Path) -> Option<GitFileModeV1> {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 mod tests {
     use super::*;
     #[cfg(unix)]

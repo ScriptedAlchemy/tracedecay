@@ -2,10 +2,6 @@
 //!
 //! Private watcher routing is covered beside its implementation; these journeys
 //! drive its public scheduler and sealed-generation read boundaries.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 
 use std::fs;
 use std::path::{Path, PathBuf};

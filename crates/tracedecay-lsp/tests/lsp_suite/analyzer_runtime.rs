@@ -1,8 +1,4 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
-#![allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

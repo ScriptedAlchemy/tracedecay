@@ -177,10 +177,6 @@ pub async fn bind_exact_source_cursor(
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 mod tests {
     use std::sync::Arc;
 

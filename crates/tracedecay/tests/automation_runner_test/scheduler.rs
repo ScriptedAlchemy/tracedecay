@@ -1,7 +1,3 @@
-#![allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 use tempfile::tempdir;
 use tracedecay_automation_runtime::automation::backend::{AgentTaskFailureClass, AgentTaskKind};
 use tracedecay_automation_runtime::automation::config::{

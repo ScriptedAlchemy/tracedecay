@@ -1,8 +1,4 @@
 #![cfg(feature = "test-transport")]
-#![allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 
 use crate::support::*;
 use serde_json::{Value, json};

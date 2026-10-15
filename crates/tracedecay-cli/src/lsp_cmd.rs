@@ -668,10 +668,6 @@ fn lsp_analyzer_state_label(
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 mod tests {
     use serde_json::{Value, json};
     use tracedecay_runtime_core::path_safety::canonical_root_identity;

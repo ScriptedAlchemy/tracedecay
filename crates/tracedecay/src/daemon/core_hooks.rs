@@ -112,10 +112,6 @@ async fn notify_hook_event_to_connection(
 }
 
 #[cfg(all(test, unix))]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 mod tests {
     use std::time::{Duration, Instant};
 

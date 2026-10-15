@@ -200,10 +200,6 @@ impl SharedAnalyzerClient {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 mod tests {
     use std::future::poll_fn;
     use std::sync::atomic::{AtomicUsize, Ordering};

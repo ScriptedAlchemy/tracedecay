@@ -2044,10 +2044,6 @@ fn validate_request(request: &FeedbackReadRequestV1) -> Result<(), ApplicationCo
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 mod tests {
     use super::*;
     use tracedecay_contracts::{CancellationContext, CapabilityGrantSnapshot, Deadline, RequestId};

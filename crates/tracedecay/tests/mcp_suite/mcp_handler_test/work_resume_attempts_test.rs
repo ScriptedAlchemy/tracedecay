@@ -8,10 +8,6 @@
 //! settle the child recovery is supposed to find still open, so the live
 //! daemon is a separate process stopped with SIGKILL. Its provider must die
 //! with it rather than keep running after recovery fences the attempt.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 
 use crate::common::die_with_test_process;
 use crate::common::fixture::git_capture;

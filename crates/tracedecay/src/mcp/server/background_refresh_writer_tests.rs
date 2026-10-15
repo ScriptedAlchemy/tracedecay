@@ -1,7 +1,3 @@
-#![allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 use super::writer_test_support::init_indexed_repo;
 use super::{
     BackgroundRefreshModeV1, BackgroundRefreshRequest, BackgroundRefreshWriter, McpServer,

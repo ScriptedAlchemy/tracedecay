@@ -5,10 +5,6 @@
 //! A host cannot list findings until a completed cycle mints a list handle.
 //! This test publishes one real compiler diagnostic, then reads it back and
 //! checks that other handles are refused rather than returned as an empty page.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 
 use std::path::Path;
 use std::process::Command;

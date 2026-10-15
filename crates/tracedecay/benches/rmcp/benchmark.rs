@@ -6,10 +6,6 @@
 //! production-composition `McpServer`. The initial replay models the daemon
 //! handshake, which consumes the first initialize frame before handing the
 //! routed connection to RMCP.
-#![allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 
 use std::collections::VecDeque;
 use std::future::Future;

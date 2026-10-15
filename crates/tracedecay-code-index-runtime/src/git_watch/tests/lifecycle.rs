@@ -1,7 +1,3 @@
-#![allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 use super::*;
 
 use crate::git_watch::ownership::retire_missing_repository_owners;
