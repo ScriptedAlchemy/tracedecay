@@ -72,7 +72,7 @@ async fn census_from_snapshot(conn: &impl QueryExecutor) -> Option<IngestRefusal
     let mut refusals = Vec::new();
     while let Some(row) = rows.next().await.ok()? {
         let reason = row.get::<String>(2).ok()?;
-        let reason = match ObservationCoverageReason::try_from(reason.as_str()) {
+        let reason = match reason.parse::<ObservationCoverageReason>() {
             Ok(reason) if !reason.is_refusal() => continue,
             Ok(reason) => reason.as_str().to_owned(),
             Err(unknown) => unknown.fingerprint().as_str().to_owned(),

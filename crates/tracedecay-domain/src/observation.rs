@@ -1624,45 +1624,6 @@ impl CanonicalMessageRoleV1 {
     }
 }
 
-#[cfg(test)]
-mod canonical_message_role_label_tests {
-    use super::CanonicalMessageRoleV1;
-
-    #[test]
-    fn known_labels_parse_and_foreign_aliases_stay_unknown() {
-        assert_eq!(
-            CanonicalMessageRoleV1::from_known_label("user"),
-            Some(CanonicalMessageRoleV1::User)
-        );
-        assert_eq!(
-            CanonicalMessageRoleV1::from_known_label("assistant"),
-            Some(CanonicalMessageRoleV1::Assistant)
-        );
-        assert_eq!(
-            CanonicalMessageRoleV1::from_known_label("system"),
-            Some(CanonicalMessageRoleV1::System)
-        );
-        assert_eq!(
-            CanonicalMessageRoleV1::from_known_label("tool"),
-            Some(CanonicalMessageRoleV1::Tool)
-        );
-        assert_eq!(CanonicalMessageRoleV1::from_known_label("unknown"), None);
-        assert_eq!(CanonicalMessageRoleV1::from_known_label("developer"), None);
-        assert_eq!(
-            CanonicalMessageRoleV1::from_wire_label("user"),
-            CanonicalMessageRoleV1::User
-        );
-        assert_eq!(
-            CanonicalMessageRoleV1::from_wire_label("developer"),
-            CanonicalMessageRoleV1::Unknown
-        );
-        assert_eq!(
-            CanonicalMessageRoleV1::from_wire_label(""),
-            CanonicalMessageRoleV1::Unknown
-        );
-    }
-}
-
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CanonicalGitEvidenceKindV1 {
@@ -3062,4 +3023,43 @@ fn sha256_digest(bytes: &[u8]) -> String {
 
 fn format_sha256(digest: &[u8]) -> String {
     crate::canonical_text::encode_tagged_lowercase_hex("sha256:", digest)
+}
+
+#[cfg(test)]
+mod canonical_message_role_label_tests {
+    use super::CanonicalMessageRoleV1;
+
+    #[test]
+    fn known_labels_parse_and_foreign_aliases_stay_unknown() {
+        assert_eq!(
+            CanonicalMessageRoleV1::from_known_label("user"),
+            Some(CanonicalMessageRoleV1::User)
+        );
+        assert_eq!(
+            CanonicalMessageRoleV1::from_known_label("assistant"),
+            Some(CanonicalMessageRoleV1::Assistant)
+        );
+        assert_eq!(
+            CanonicalMessageRoleV1::from_known_label("system"),
+            Some(CanonicalMessageRoleV1::System)
+        );
+        assert_eq!(
+            CanonicalMessageRoleV1::from_known_label("tool"),
+            Some(CanonicalMessageRoleV1::Tool)
+        );
+        assert_eq!(CanonicalMessageRoleV1::from_known_label("unknown"), None);
+        assert_eq!(CanonicalMessageRoleV1::from_known_label("developer"), None);
+        assert_eq!(
+            CanonicalMessageRoleV1::from_wire_label("user"),
+            CanonicalMessageRoleV1::User
+        );
+        assert_eq!(
+            CanonicalMessageRoleV1::from_wire_label("developer"),
+            CanonicalMessageRoleV1::Unknown
+        );
+        assert_eq!(
+            CanonicalMessageRoleV1::from_wire_label(""),
+            CanonicalMessageRoleV1::Unknown
+        );
+    }
 }

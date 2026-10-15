@@ -287,7 +287,9 @@ fn observation_identity_collision_is_a_receiptless_refusal_reason() {
     assert!(reason.is_receiptless());
     assert!(reason.disposition_matches(None));
     assert_eq!(
-        ObservationCoverageReason::try_from("observation_identity_collision").unwrap(),
+        "observation_identity_collision"
+            .parse::<ObservationCoverageReason>()
+            .unwrap(),
         reason
     );
 }
@@ -298,7 +300,9 @@ fn unknown_coverage_reason_error_does_not_retain_private_wire_text() {
     let long_secret = format!("provider-private-transcript-{}", "x".repeat(16 * 1024));
 
     for secret in [short_secret, long_secret.as_str()] {
-        let error = ObservationCoverageReason::try_from(secret).expect_err("unknown reason");
+        let error = secret
+            .parse::<ObservationCoverageReason>()
+            .expect_err("unknown reason");
 
         assert!(
             !error.to_string().contains(secret),
