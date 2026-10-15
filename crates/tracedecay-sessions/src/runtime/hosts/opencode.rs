@@ -1010,7 +1010,7 @@ fn outcome_for_scan_evidence(evidence: HostScanEvidence) -> OpenCodeCaptureOutco
     }
 }
 
-fn opencode_data_dir(home: &Path) -> PathBuf {
+pub(in crate::runtime) fn opencode_data_dir(home: &Path) -> PathBuf {
     if cfg!(target_os = "macos") {
         home.join("Library/Application Support/opencode")
     } else if cfg!(target_os = "windows") {
