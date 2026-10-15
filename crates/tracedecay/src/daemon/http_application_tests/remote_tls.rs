@@ -417,99 +417,81 @@ async fn remote_tls_start_handler(
     panic!("the test thread stalled past the read-idle deadline in every handshake")
 }
 
-/// Waits until the real TLS reader has consumed exactly `expected` body
-/// bytes, refusing any reading past it.
-async fn wait_for_ingress_body_bytes(service: &DaemonHttpApplicationService, expected: usize) {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let observed = service
-                .remote_tls_ingress_snapshot()
-                .expect("TLS ingress observer")
-                .body_bytes_observed;
-            assert!(
-                observed <= expected,
-                "TLS ingress consumed body bytes out of order"
-            );
-            if observed == expected {
-                return;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("the listener must keep reading the request body");
+/// How the listener ended a request body the client trickled to it.
+enum Trickle {
+    /// The listener answered the complete request.
+    Answered(Vec<u8>),
+    /// The listener closed the connection at the absolute request deadline.
+    ClosedAtRequestDeadline,
+    /// The client went quiet for the read-idle deadline between two writes,
+    /// so the listener may rightly have closed the connection.
+    ClientStalled,
 }
 
-/// Trickles an 11-byte body one byte per `progress_step` after headers that
-/// leave with the TLS handshake, and returns the listener's response.
+/// Sends `headers` with the handshake, then `body` one byte per `step`, and
+/// reads until the listener closes the connection.
 ///
-/// Returns `None` when the test thread stalled long enough that the listener
-/// may rightly have closed the connection: two writes spanned the read-idle
-/// deadline, or the body spanned the absolute request deadline. The listener
-/// reads each byte no earlier than the client starts writing it, and no
-/// earlier than the connect starts, so these client-side spans bound the
-/// listener's own.
-async fn remote_tls_progressing_body(
+/// The listener's deadlines start no earlier than the connect, and it reads
+/// the bytes waiting for it before it applies a deadline, so the client's own
+/// clock bounds the listener's. A close is a listener defect unless the
+/// client went quiet for the read-idle deadline, or the request deadline
+/// closed it after the listener read every byte sent before that deadline
+/// could start.
+async fn remote_tls_trickle_body(
     service: &DaemonHttpApplicationService,
     endpoint: std::net::SocketAddr,
     certificate: &Path,
     headers: &[u8],
+    body: &[u8],
     deadlines: RemoteBrainTlsDeadlines,
-    progress_step: Duration,
-) -> Option<Vec<u8>> {
-    let initial_ingress = service
-        .remote_tls_ingress_snapshot()
-        .expect("TLS ingress observer");
-    let connect_started = std::time::Instant::now();
-    let mut stream = remote_tls_connect_sending(endpoint, certificate, headers).await;
-    loop {
-        let observed = service
+    step: Duration,
+) -> Trickle {
+    let ingress = || {
+        service
             .remote_tls_ingress_snapshot()
             .expect("TLS ingress observer")
-            .headers_complete;
-        assert!(
-            observed <= initial_ingress.headers_complete + 1,
-            "TLS ingress observed unexpected request headers"
-        );
-        if observed == initial_ingress.headers_complete + 1 {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    let initial_body_bytes = service
-        .remote_tls_ingress_snapshot()
-        .expect("TLS ingress observer")
-        .body_bytes_observed;
-    let progressing_started = std::time::Instant::now();
+    };
+    let initial = ingress();
+    let connect_started = std::time::Instant::now();
+    let mut stream = remote_tls_connect_sending(endpoint, certificate, headers).await;
+    let mut stalled = connect_started.elapsed() >= deadlines.read_idle;
     let mut previous_write = connect_started;
-    for (offset, byte) in b"         {}".iter().enumerate() {
-        tokio::time::sleep(progress_step).await;
+    let mut sent_in_time = 0;
+    for byte in body {
+        tokio::time::sleep(step).await;
         let write_started = std::time::Instant::now();
         let mut written = stream.write_all(std::slice::from_ref(byte)).await;
         if written.is_ok() {
             written = stream.flush().await;
         }
-        let sent = std::time::Instant::now();
-        if sent - previous_write >= deadlines.read_idle
-            || sent - connect_started >= deadlines.request_read
-        {
-            return None;
+        if written.is_err() {
+            break;
         }
-        written
-            .unwrap_or_else(|error| panic!("write progressing HTTP body byte {offset}: {error}"));
-        wait_for_ingress_body_bytes(service, initial_body_bytes + offset + 1).await;
+        stalled |= previous_write.elapsed() >= deadlines.read_idle;
         previous_write = write_started;
+        if connect_started.elapsed() < deadlines.request_read {
+            sent_in_time += 1;
+        }
+    }
+    let mut response = Vec::new();
+    let _closed = stream.read_to_end(&mut response).await;
+    if !response.is_empty() {
+        return Trickle::Answered(response);
+    }
+    let closed = ingress();
+    if closed.request_read_expirations > initial.request_read_expirations {
+        let read = closed.body_bytes_observed - initial.body_bytes_observed;
+        assert!(
+            read >= sent_in_time,
+            "the listener applied the request deadline after reading {read} of the {sent_in_time} body bytes sent before it could start"
+        );
+        return Trickle::ClosedAtRequestDeadline;
     }
     assert!(
-        progressing_started.elapsed() > deadlines.response,
-        "the progressing body must outlive the response deadline"
+        stalled,
+        "the listener closed a connection whose client kept every deadline: {closed:?}"
     );
-    let mut response = Vec::new();
-    stream
-        .read_to_end(&mut response)
-        .await
-        .expect("read progressing HTTP body response");
-    Some(response)
+    Trickle::ClientStalled
 }
 
 async fn remote_tls_h2_only_handshake_is_rejected(
@@ -1100,16 +1082,26 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
         ..RemoteBrainTlsDeadlines::PRODUCTION
     };
     let progress_step = deadlines.read_idle * 3 / 10;
-    // Shorter than the absolute deadline, so only the idle deadline can close
-    // a connection inside it.
-    let idle_closure_bound = deadlines.request_read / 2;
     let service = DaemonHttpApplicationService::bind_with_remote_tls_deadlines(
         registry, AUTH_TOKEN, &tls, deadlines,
     )
     .await
     .expect("bind Remote Brain TLS admission service");
     let endpoint = service.remote_tls_endpoint().expect("TLS endpoint");
+    // The listener counts which read deadline closed each connection, so the
+    // test tells the idle deadline from the absolute one without timing a
+    // listener that a loaded host may poll seconds late.
+    let read_expirations = || {
+        let ingress = service
+            .remote_tls_ingress_snapshot()
+            .expect("TLS ingress observer");
+        (
+            ingress.read_idle_expirations,
+            ingress.request_read_expirations,
+        )
+    };
 
+    let (idle, absolute) = read_expirations();
     let mut idle_connections = Vec::with_capacity(128);
     for _ in 0..128 {
         idle_connections.push(
@@ -1118,22 +1110,23 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
                 .expect("open bounded idle connection"),
         );
     }
-    while service.remote_tls_available_admissions() != Some(0) {
+    for connection in &mut idle_connections {
+        let _closed = connection.read(&mut [0_u8; 1]).await;
+    }
+    assert_eq!(
+        read_expirations(),
+        (idle + 128, absolute),
+        "idle handshakes must expire at the read-idle deadline"
+    );
+    drop(idle_connections);
+    while service.remote_tls_available_admissions() != Some(128) {
         tokio::task::yield_now().await;
     }
-
-    tokio::time::timeout(idle_closure_bound, async {
-        while service.remote_tls_available_admissions() != Some(128) {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("idle handshakes must expire at the read-idle deadline");
-    drop(idle_connections);
 
     // Each request below leaves with the TLS handshake. Written after it, a
     // test thread stalled past the read-idle deadline would find the
     // connection closed as idle before its request arrived.
+    let (idle, absolute) = read_expirations();
     let mut partial_headers = remote_tls_connect_sending(
         endpoint,
         &certificate,
@@ -1141,14 +1134,15 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
     )
     .await;
     let mut response = Vec::new();
-    let _closed = tokio::time::timeout(
-        idle_closure_bound,
-        partial_headers.read_to_end(&mut response),
-    )
-    .await
-    .expect("the incomplete-header connection must be torn down at the read-idle deadline");
+    let _closed = partial_headers.read_to_end(&mut response).await;
     assert_eq!(response.len(), 0);
+    assert_eq!(
+        read_expirations(),
+        (idle + 1, absolute),
+        "the incomplete-header connection must be torn down at the read-idle deadline"
+    );
 
+    let (idle, absolute) = read_expirations();
     let partial_body_request = format!(
         "POST /remote/enrollment HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nx-tracedecay-enrollment-credential: {}\r\nContent-Type: application/json\r\nContent-Length: 32\r\n\r\n{{",
         String::from_utf8_lossy(&credential),
@@ -1158,13 +1152,13 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
     let mut partial_body =
         remote_tls_connect_sending(endpoint, &certificate, &partial_body_request).await;
     let mut partial_body_response = Vec::new();
-    let _closed = tokio::time::timeout(
-        idle_closure_bound,
-        partial_body.read_to_end(&mut partial_body_response),
-    )
-    .await
-    .expect("the incomplete-body connection must be torn down at the read-idle deadline");
+    let _closed = partial_body.read_to_end(&mut partial_body_response).await;
     assert_eq!(partial_body_response.len(), 0);
+    assert_eq!(
+        read_expirations(),
+        (idle + 1, absolute),
+        "the incomplete-body connection must be torn down at the read-idle deadline"
+    );
 
     let progressing_body_headers = format!(
         "POST /remote/enrollment HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nx-tracedecay-enrollment-credential: {}\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n",
@@ -1174,16 +1168,22 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
     .into_bytes();
     let mut stalled_attempts = 0;
     let progressing_response = loop {
-        if let Some(response) = remote_tls_progressing_body(
+        let progressing_started = std::time::Instant::now();
+        if let Trickle::Answered(response) = remote_tls_trickle_body(
             &service,
             endpoint,
             &certificate,
             &progressing_body_headers,
+            b"         {}",
             deadlines,
             progress_step,
         )
         .await
         {
+            assert!(
+                progressing_started.elapsed() > deadlines.response,
+                "the progressing body must outlive the response deadline"
+            );
             break response;
         }
         stalled_attempts += 1;
@@ -1202,66 +1202,42 @@ async fn remote_tls_listener_bounds_connections_and_expires_incomplete_headers()
             .any(|window| window == b"\"kind\":\"problem\""),
         "progressing body failure must retain the canonical typed problem wrapper"
     );
-    let (mut absolute_slowloris, initial_absolute_body_bytes) = {
-        let initial_absolute_ingress = service
-            .remote_tls_ingress_snapshot()
-            .expect("TLS ingress observer");
-        let headers = format!(
-                "POST /remote/enrollment HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nx-tracedecay-enrollment-credential: {}\r\nContent-Type: application/json\r\nContent-Length: 32\r\n\r\n",
-                String::from_utf8_lossy(&credential),
-                "0123456789abcdef0123456789abcdef",
-            )
-            .into_bytes();
-        let stream = remote_tls_connect_sending(endpoint, &certificate, &headers).await;
-        loop {
-            let observed = service
-                .remote_tls_ingress_snapshot()
-                .expect("TLS ingress observer")
-                .headers_complete;
-            assert!(
-                observed <= initial_absolute_ingress.headers_complete + 1,
-                "TLS ingress observed unexpected absolute slowloris request headers"
-            );
-            if observed == initial_absolute_ingress.headers_complete + 1 {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-        let body_bytes = service
-            .remote_tls_ingress_snapshot()
-            .expect("TLS ingress observer")
-            .body_bytes_observed;
-        (stream, body_bytes)
-    };
     // The full 32-byte body takes longer than the absolute deadline to
     // trickle in, one byte per progress step, so the idle deadline never
     // fires. Without the absolute deadline the body completes and the
     // listener answers it.
-    for _ in 0..32 {
-        tokio::time::sleep(progress_step).await;
-        if absolute_slowloris.write_all(b" ").await.is_err()
-            || absolute_slowloris.flush().await.is_err()
+    let slowloris_headers = format!(
+        "POST /remote/enrollment HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nx-tracedecay-enrollment-credential: {}\r\nContent-Type: application/json\r\nContent-Length: 32\r\n\r\n",
+        String::from_utf8_lossy(&credential),
+        "0123456789abcdef0123456789abcdef",
+    )
+    .into_bytes();
+    let mut stalled_attempts = 0;
+    loop {
+        match remote_tls_trickle_body(
+            &service,
+            endpoint,
+            &certificate,
+            &slowloris_headers,
+            &[b' '; 32],
+            deadlines,
+            progress_step,
+        )
+        .await
         {
-            break;
+            Trickle::ClosedAtRequestDeadline => break,
+            Trickle::ClientStalled => {
+                stalled_attempts += 1;
+                assert!(
+                    stalled_attempts < 3,
+                    "the test thread stalled past the read-idle deadline in every slowloris attempt"
+                );
+            }
+            Trickle::Answered(_) => {
+                panic!("the absolute deadline must close the slowloris before its body completes")
+            }
         }
     }
-    let mut absolute_slowloris_response = Vec::new();
-    let _closed = absolute_slowloris
-        .read_to_end(&mut absolute_slowloris_response)
-        .await;
-    assert!(
-        absolute_slowloris_response.is_empty(),
-        "a progressing slowloris must hit the absolute admission deadline"
-    );
-    let absolute_body_bytes = service
-        .remote_tls_ingress_snapshot()
-        .expect("TLS ingress observer")
-        .body_bytes_observed
-        - initial_absolute_body_bytes;
-    assert!(
-        absolute_body_bytes < 32,
-        "the absolute deadline must close the slowloris before its body completes, read {absolute_body_bytes} bytes"
-    );
     while service.remote_tls_available_admissions() != Some(128) {
         tokio::task::yield_now().await;
     }
