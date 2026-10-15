@@ -323,6 +323,17 @@ async fn remote_tls_connect(
     endpoint: std::net::SocketAddr,
     certificate: &Path,
 ) -> tokio_rustls::client::TlsStream<tokio::net::TcpStream> {
+    remote_tls_connect_sending(endpoint, certificate, b"").await
+}
+
+/// Connects with `request` queued before the handshake, so it leaves in the
+/// client's final handshake flight and no client scheduling delay can let the
+/// listener's read-idle deadline expire before the request arrives.
+async fn remote_tls_connect_sending(
+    endpoint: std::net::SocketAddr,
+    certificate: &Path,
+    request: &[u8],
+) -> tokio_rustls::client::TlsStream<tokio::net::TcpStream> {
     let certificates = rustls::pki_types::CertificateDer::pem_file_iter(certificate)
         .expect("open TLS chain fixture")
         .collect::<std::result::Result<Vec<_>, _>>()
@@ -355,7 +366,10 @@ async fn remote_tls_connect(
         .expect("TLS server name")
         .to_owned();
     let stream = connector
-        .connect(server_name, stream)
+        .connect_with(server_name, stream, |connection| {
+            std::io::Write::write_all(&mut connection.writer(), request)
+                .expect("queue the request behind the TLS handshake");
+        })
         .await
         .expect("authenticate Remote Brain TLS authority");
     assert_eq!(
@@ -1247,11 +1261,12 @@ async fn remote_tls_listener_does_not_apply_ingress_timeout_to_a_slow_handler() 
     .await
     .expect("bind Remote Brain TLS slow-handler service");
     let endpoint = service.remote_tls_endpoint().expect("TLS endpoint");
-    let mut peer = remote_tls_connect(endpoint, &certificate).await;
-
-    peer.write_all(b"GET /remote/slow HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        .await
-        .expect("write complete slow-handler request");
+    let mut peer = remote_tls_connect_sending(
+        endpoint,
+        &certificate,
+        b"GET /remote/slow HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    )
+    .await;
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
         handler_started.notified(),

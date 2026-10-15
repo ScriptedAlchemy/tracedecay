@@ -564,11 +564,16 @@ impl CodeIndexSchedulerRegistryV1 {
                 .is_some_and(|worktree| worktree.task.is_finished())
                 && let Some(worktree) = retiring.remove(&project_root)
             {
+                // However the worker ended, it no longer holds the store, so
+                // its replacement starts clean. A panic was already parked on
+                // the retired owner by its supervisor.
                 let outcome = worktree.task.wait().await;
                 if !matches!(outcome, NativeTaskOutcome::Completed(())) {
-                    return Err(CodeIndexSchedulerErrorV1::Identity(format!(
-                        "retired code-index scheduler worker failed: {outcome:?}"
-                    )));
+                    tracing::warn!(
+                        event = "code_index_retired_worker_failed",
+                        outcome = ?outcome,
+                        "retired code-index worker ended without completing; remounting"
+                    );
                 }
             }
             if retiring.contains_key(&project_root) {
@@ -724,6 +729,8 @@ impl CodeIndexSchedulerRegistryV1 {
         let worker_generation_publications = self.generation_publications.clone();
         let worker_serving_seats = Arc::clone(&self.serving_seats);
         let worker_project_root = project_root.clone();
+        #[cfg(test)]
+        let exit_root = project_root.clone();
         let worker_project_id = project_id.clone();
         let worker_repository_id = repository_id.clone();
         let worker_worktree_id = worktree_id.clone();
@@ -3851,6 +3858,11 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
                 let _ = result;
             }
+        });
+        #[cfg(test)]
+        let worker_loop = Box::pin(async move {
+            worker_loop.await;
+            Self::panic_worker_pass_if_armed(&exit_root);
         });
         let task = NativeTask::spawn(tracing::Instrument::instrument(
             worker_loop,
