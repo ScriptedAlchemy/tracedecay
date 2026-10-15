@@ -16,6 +16,7 @@ use hyper_util::service::TowerToHyperService;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
+use tracedecay_runtime_core::native_runtime::{NativeTaskOutcome, NativeTaskSet};
 
 use crate::state::config_error;
 use tracedecay_domain::errors::Result;
@@ -50,33 +51,29 @@ pub fn validate_dashboard_host(host: &str) -> Result<&str> {
 /// Matches `axum::serve(..).with_graceful_shutdown(..)` on an Asupersync
 /// socket. The drain has no deadline because callers own one. Accept errors
 /// never end the loop. Dropping the future aborts every connection.
-/// Connections run on `runtime`, because daemon routes served here still
-/// reach Tokio.
 pub async fn serve_loopback(
-    runtime: tokio::runtime::Handle,
+    executor: ConnectionExecutor,
     listener: TcpListener,
     router: Router,
     shutdown: impl Future<Output = ()>,
 ) {
     let graceful = CancellationToken::new();
-    let mut connections = JoinSet::new();
+    let mut connections = Connections::new(executor);
     let mut shutdown = std::pin::pin!(shutdown);
     loop {
         tokio::select! {
             biased;
             () = &mut shutdown => break,
-            Some(joined) = connections.join_next(), if !connections.is_empty() => {
-                observe_connection_join(joined);
-            }
+            Some(()) = connections.join_next(), if !connections.is_empty() => {}
             accepted = listener.accept() => match accepted {
                 Ok((stream, address)) => {
                     let router = router.clone();
                     let graceful = graceful.clone();
-                    connections.spawn_on(async move {
+                    connections.spawn(async move {
                         if let Err(error) = serve_http_connection(stream, router, true, graceful).await {
                             tracing::trace!(%error, %address, "loopback HTTP connection stopped");
                         }
-                    }, &runtime);
+                    });
                 }
                 Err(error) => wait_after_accept_error(&error).await,
             },
@@ -84,8 +81,69 @@ pub async fn serve_loopback(
     }
     drop(listener);
     graceful.cancel();
-    while let Some(joined) = connections.join_next().await {
-        observe_connection_join(joined);
+    while connections.join_next().await.is_some() {}
+}
+
+/// Where [`serve_loopback`] runs each connection.
+pub enum ConnectionExecutor {
+    Native,
+    /// For daemon routes that still reach `project_server_lifecycle` inside
+    /// their connection task.
+    Tokio(tokio::runtime::Handle),
+}
+
+enum Connections {
+    Native(NativeTaskSet<()>),
+    Tokio(tokio::runtime::Handle, JoinSet<()>),
+}
+
+impl Connections {
+    fn new(executor: ConnectionExecutor) -> Self {
+        match executor {
+            ConnectionExecutor::Native => Self::Native(NativeTaskSet::default()),
+            ConnectionExecutor::Tokio(runtime) => Self::Tokio(runtime, JoinSet::new()),
+        }
+    }
+
+    /// A refused connection's IO drops with it, closing the socket.
+    fn spawn(&mut self, connection: impl Future<Output = ()> + Send + 'static) {
+        match self {
+            Self::Native(set) => {
+                if let Err(error) = set.spawn(connection) {
+                    tracing::warn!(%error, "loopback HTTP connection not admitted");
+                }
+            }
+            Self::Tokio(runtime, set) => {
+                set.spawn_on(connection, runtime);
+            }
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Native(set) => set.is_empty(),
+            Self::Tokio(_, set) => set.is_empty(),
+        }
+    }
+
+    /// Joins the next connection to end, logging a failed one; `None` once
+    /// none remain.
+    async fn join_next(&mut self) -> Option<()> {
+        match self {
+            Self::Native(set) => {
+                if let NativeTaskOutcome::Panicked(payload) = set.join_next().await? {
+                    tracing::warn!(?payload, "loopback HTTP connection task failed");
+                }
+            }
+            Self::Tokio(_, set) => {
+                if let Err(error) = set.join_next().await?
+                    && !error.is_cancelled()
+                {
+                    tracing::warn!(%error, "loopback HTTP connection task failed");
+                }
+            }
+        }
+        Some(())
     }
 }
 
@@ -102,14 +160,6 @@ async fn wait_after_accept_error(error: &io::Error) {
     }
     tracing::error!(%error, "loopback HTTP accept failed");
     Sleep::after(wall_now(), Duration::from_secs(1)).await;
-}
-
-fn observe_connection_join(joined: std::result::Result<(), tokio::task::JoinError>) {
-    if let Err(error) = joined
-        && !error.is_cancelled()
-    {
-        tracing::warn!(%error, "loopback HTTP connection task failed");
-    }
 }
 
 /// Serves one HTTP/1.1 connection with `router` and starts a graceful

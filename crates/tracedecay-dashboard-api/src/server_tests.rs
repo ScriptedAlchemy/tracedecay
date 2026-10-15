@@ -8,7 +8,7 @@ use tokio::sync::{Notify, oneshot};
 
 use tracedecay_runtime_core::native_runtime::{self, NativeTask, NativeTaskOutcome};
 
-use crate::server::{bind_dashboard, serve_loopback};
+use crate::server::{ConnectionExecutor, bind_dashboard, serve_loopback};
 
 fn get_over_std_socket(addr: SocketAddr, path: &str) -> String {
     let mut stream = TcpStream::connect(addr).expect("connect loopback server");
@@ -51,9 +51,14 @@ fn loopback_server_drains_in_flight_request_after_shutdown_without_tokio_drivers
             .await
             .expect("bind loopback listener");
         let (stop, stopped) = oneshot::channel::<()>();
-        let server = tokio::spawn(serve_loopback(runtime.clone(), listener, router, async {
-            let _ = stopped.await;
-        }));
+        let server = tokio::spawn(serve_loopback(
+            ConnectionExecutor::Tokio(runtime.clone()),
+            listener,
+            router,
+            async {
+                let _ = stopped.await;
+            },
+        ));
         let client = tokio::task::spawn_blocking(move || get_over_std_socket(addr, "/slow"));
         entered.notified().await;
 
@@ -80,21 +85,23 @@ fn loopback_server_drains_in_flight_request_after_shutdown_without_tokio_drivers
     });
 }
 
-/// A native caller hands the serve loop its Tokio handle; the loop needs no
-/// ambient Tokio runtime to serve.
+/// The hosted dashboard serves every connection natively, with no Tokio
+/// runtime in the process path.
 #[test]
-fn loopback_server_serves_from_a_native_task_with_an_explicit_handle() {
-    let tokio = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .build()
-        .expect("Tokio runtime");
-    let router = Router::new().route("/ping", get(|| async { "pong" }));
+fn loopback_server_serves_native_connections_without_tokio() {
+    let router = Router::new().route(
+        "/ping",
+        get(|| async {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            "pong"
+        }),
+    );
     let (listener, addr) = native_runtime::block_on(bind_dashboard("127.0.0.1", 0))
         .expect("native root")
         .expect("bind loopback listener");
     let (stop, stopped) = oneshot::channel::<()>();
     let server = NativeTask::spawn(serve_loopback(
-        tokio.handle().clone(),
+        ConnectionExecutor::Native,
         listener,
         router,
         async {
