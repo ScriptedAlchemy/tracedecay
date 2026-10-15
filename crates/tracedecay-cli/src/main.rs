@@ -1920,7 +1920,7 @@ enum CommandStartupPolicy {
 
 impl CommandStartupPolicy {
     fn for_command(command: &Commands) -> Self {
-        if hook_capture_cmd::is_native_hook_command(command) {
+        if CommandFamily::for_command(command) == CommandFamily::Hook {
             return Self::SkipAll;
         }
 
