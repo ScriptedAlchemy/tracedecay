@@ -597,45 +597,74 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             }
         }
         state.observe_quiescence();
+        let release = tracing::Instrument::instrument(
+            async {
+                match history_release.as_mut() {
+                    Some(release) if state.history_retry_pending() => {
+                        release.released(&history_admission).await
+                    }
+                    _ => std::future::pending().await,
+                }
+            },
+            tracing::trace_span!("daemon.scheduler.session_temporal.history_release_wait"),
+        );
+        tokio::pin!(release);
+        // Poll the release wait once so a refused pass joins the admission's
+        // FIFO queue before the worker reads idle: an observer that frees a
+        // permit once it sees idle must find this worker queued for it.
+        let granted_at_once = tokio::select! {
+            biased;
+            granted = &mut release => Some(granted),
+            () = tokio::task::yield_now() => None,
+        };
         state.mark_worker_idle();
         state.idle.notify_waiters();
-        let wake = tracing::Instrument::instrument(
-            state.wake.notified(),
-            tracing::trace_span!("daemon.scheduler.session_temporal.wake_wait"),
-        );
-        if state.has_pending_work() {
+        if let Some(granted) = granted_at_once {
+            granted_history_admission = granted;
+            state.update_history_retry_state(false);
+            state.wake_history();
             continue;
         }
-        let release = async {
-            match history_release.as_mut() {
-                Some(release) if state.history_retry_pending() => {
-                    release.released(&history_admission).await
-                }
-                _ => std::future::pending().await,
+        loop {
+            let wake = tracing::Instrument::instrument(
+                state.wake.notified(),
+                tracing::trace_span!("daemon.scheduler.session_temporal.wake_wait"),
+            );
+            if state.has_pending_work() {
+                break;
             }
-        };
-        tokio::select! {
-            () = tracing::Instrument::instrument(state.wait_for_cancellation(), tracing::trace_span!("daemon.scheduler.session_temporal.idle_cancel")) => return,
-            () = wake => {}
-            granted = tracing::Instrument::instrument(release, tracing::trace_span!("daemon.scheduler.session_temporal.history_release_wait")) => {
-                granted_history_admission = granted;
-                state.update_history_retry_state(false);
-                state.wake_history();
-            }
-            // Discovery of new sources, and the retry of a refusal nothing
-            // signals (a still-mounting authority, an undecidable source),
-            // share this cadence. Unchanged sources cost it no reads.
-            fired = tracing::Instrument::instrument(native_runtime::sleep_until(Instant::now() + HISTORY_IDLE_RECHECK_INTERVAL), tracing::trace_span!("daemon.scheduler.session_temporal.history_idle_wait")) => {
-                if stop_without_timer(fired) {
-                    return;
+            tokio::select! {
+                () = tracing::Instrument::instrument(state.wait_for_cancellation(), tracing::trace_span!("daemon.scheduler.session_temporal.idle_cancel")) => return,
+                // Every wake sets its work flag first, so a wake without work
+                // is a stale permit whose work a pass already took. Waiting
+                // on keeps a refused pass's place in the admission queue.
+                () = wake => {
+                    if state.has_pending_work() {
+                        break;
+                    }
                 }
-                state.update_history_retry_state(false);
-                if history
-                    .read()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .is_some()
-                {
+                granted = &mut release => {
+                    granted_history_admission = granted;
+                    state.update_history_retry_state(false);
                     state.wake_history();
+                    break;
+                }
+                // Discovery of new sources, and the retry of a refusal nothing
+                // signals (a still-mounting authority, an undecidable source),
+                // share this cadence. Unchanged sources cost it no reads.
+                fired = tracing::Instrument::instrument(native_runtime::sleep_until(Instant::now() + HISTORY_IDLE_RECHECK_INTERVAL), tracing::trace_span!("daemon.scheduler.session_temporal.history_idle_wait")) => {
+                    if stop_without_timer(fired) {
+                        return;
+                    }
+                    state.update_history_retry_state(false);
+                    if history
+                        .read()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .is_some()
+                    {
+                        state.wake_history();
+                    }
+                    break;
                 }
             }
         }

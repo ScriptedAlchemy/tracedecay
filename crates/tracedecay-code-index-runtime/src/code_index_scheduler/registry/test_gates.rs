@@ -111,8 +111,9 @@ impl CodeIndexSchedulerRegistryV1 {
         Self::pass_worker_step_gate(gate).await;
     }
 
-    /// Panic the worker for `project_root` on its next admitted pass, outside
-    /// the per-step guard that catches a reconcile step's panic.
+    /// Panic the worker for `project_root` on its next admitted pass, or as it
+    /// exits if no pass comes first, outside the per-step guard that catches a
+    /// reconcile step's panic.
     #[cfg(test)]
     pub fn panic_next_worker_pass(project_root: &Path) {
         armed_worker_panics()

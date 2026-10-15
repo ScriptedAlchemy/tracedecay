@@ -260,8 +260,10 @@ struct MaintenanceReaperFinalizer {
 #[cfg(unix)]
 impl Drop for MaintenanceReaperFinalizer {
     fn drop(&mut self) {
-        self.termination.finish();
+        // Termination is the reaper's completion latch: waiters that wake on it
+        // must already see the registry record gone.
         self.registry.finish(&self.key);
+        self.termination.finish();
     }
 }
 

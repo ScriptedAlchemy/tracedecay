@@ -131,8 +131,14 @@ async fn hold_for_test(variable: &str, stage: &[u8]) -> Result<()> {
             entered.display()
         ),
     })?;
+    // Holds park daemon tasks on the native runtime too, where a Tokio timer
+    // panics for want of a reactor.
     while hold.exists() {
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tracedecay_runtime_core::native_runtime::sleep_until(
+            std::time::Instant::now() + Duration::from_millis(20),
+        )
+        .await
+        .map_err(|message| TraceDecayError::Config { message })?;
     }
     Ok(())
 }
