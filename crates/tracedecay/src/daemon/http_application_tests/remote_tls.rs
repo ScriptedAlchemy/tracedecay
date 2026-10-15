@@ -328,7 +328,9 @@ async fn remote_tls_connect(
 
 /// Connects with `request` queued before the handshake, so it leaves in the
 /// client's final handshake flight and no client scheduling delay can let the
-/// listener's read-idle deadline expire before the request arrives.
+/// listener's read-idle deadline expire before the request arrives. Nagle is
+/// off, so each client write is on the wire when it returns and the client's
+/// own timings bound the listener's.
 async fn remote_tls_connect_sending(
     endpoint: std::net::SocketAddr,
     certificate: &Path,
@@ -362,6 +364,9 @@ async fn remote_tls_connect_sending(
     let stream = tokio::net::TcpStream::connect(endpoint)
         .await
         .expect("connect Remote Brain TLS listener");
+    stream
+        .set_nodelay(true)
+        .expect("disable Nagle on the Remote Brain TLS client");
     let server_name = rustls::pki_types::ServerName::try_from("localhost")
         .expect("TLS server name")
         .to_owned();
@@ -1282,18 +1287,36 @@ async fn remote_tls_listener_does_not_apply_ingress_timeout_to_a_slow_handler() 
     .await
     .expect("bind Remote Brain TLS slow-handler service");
     let endpoint = service.remote_tls_endpoint().expect("TLS endpoint");
-    let mut peer = remote_tls_connect_sending(
-        endpoint,
-        &certificate,
-        b"GET /remote/slow HTTP/1.1\r\nHost: localhost\r\n\r\n",
-    )
-    .await;
-    tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        handler_started.notified(),
-    )
-    .await
-    .expect("slow handler must start");
+    // The request leaves with the client's final handshake flight, and the
+    // listener's deadlines start no earlier than the connect. A client whose
+    // handshake returned within the read-idle deadline therefore met both, so
+    // only a slower handshake may let the listener close the connection, and
+    // the attempt is then retried on a fresh connection.
+    let mut peer = None;
+    for _ in 0..3 {
+        let connect_started = std::time::Instant::now();
+        let mut stream = remote_tls_connect_sending(
+            endpoint,
+            &certificate,
+            b"GET /remote/slow HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        )
+        .await;
+        let handshake = connect_started.elapsed();
+        let mut probe = [0_u8; 1];
+        tokio::select! {
+            biased;
+            () = handler_started.notified() => {
+                peer = Some(stream);
+                break;
+            }
+            closed = stream.read(&mut probe) => assert!(
+                handshake >= deadlines.read_idle,
+                "the listener closed a connection whose handshake took {handshake:?}: {closed:?}"
+            ),
+        }
+    }
+    let mut peer =
+        peer.expect("the test thread stalled past the read-idle deadline in every handshake");
     // The handler outlives both ingress deadlines several times over.
     tokio::time::sleep(deadlines.request_read * 3).await;
     handler_release.notify_one();
