@@ -996,6 +996,14 @@ async fn a_panicked_worker_parks_its_worktree_and_ends_seat_waits() {
             .pass_finished(),
         "a dead worker runs no pass"
     );
+    assert_eq!(
+        fixture
+            .registry
+            .background_reconcile_admission()
+            .available_permits(),
+        1,
+        "a dead worker must give back its reconcile permit to other worktrees"
+    );
     fixture.registry.shutdown().await;
 }
 
