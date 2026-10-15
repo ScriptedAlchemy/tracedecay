@@ -855,7 +855,7 @@ async fn serve_broker_socket_client(
     clippy::too_many_lines,
     reason = "Delivery ACK settlement is one state machine shared by the Unix and portable brokers."
 )]
-async fn drive_retained_invocation_responses<'a>(
+async fn drive_retained_invocation_responses(
     mut invocation: std::result::Result<DaemonInvocationRequest, DaemonInvocationResponse>,
     transport: &mut BrokerStreamTransport,
     service: &DaemonInvocationService,
@@ -865,7 +865,7 @@ async fn drive_retained_invocation_responses<'a>(
     mut execute: impl FnMut(
         DaemonInvocationRequest,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = DaemonInvocationResponse> + Send + 'a>,
+        Box<dyn std::future::Future<Output = DaemonInvocationResponse> + Send + 'static>,
     >,
 ) -> Result<()> {
     let mut pending_line = None;
@@ -888,7 +888,19 @@ async fn drive_retained_invocation_responses<'a>(
             .ok()
             .and_then(invocation_lsp_session_transition);
         let response = match invocation {
-            Ok(request) => execute(request).await,
+            // Dispatch runs synchronous routing and storage work. On a native
+            // worker that work holds the reactor (#3994), and in debug builds
+            // a long poll fails this connection after the request was sent.
+            Ok(request) => match native_runtime::off_native_thread(execute(request)).await {
+                Ok(response) => response,
+                Err(error) => {
+                    tracing::error!(%error, "daemon request did not run on the blocking pool");
+                    DaemonInvocationResponse::problem(
+                        request_id.clone().unwrap_or_default(),
+                        tracedecay_daemon_protocol::DaemonInvocationProblem::Unavailable,
+                    )
+                }
+            },
             Err(response) => response,
         };
         update_connection_lsp_sessions(owned_lsp_sessions, session_transition.as_ref(), &response);
@@ -1072,7 +1084,11 @@ async fn serve_retained_invocation_connection(
         &handshake,
         &lifecycle,
         &mut owned_lsp_sessions,
-        |request| Box::pin(execute_daemon_invocation(&engine, &handshake, request)),
+        |request| {
+            let engine = engine.clone();
+            let handshake = handshake.clone();
+            Box::pin(async move { execute_daemon_invocation(&engine, &handshake, request).await })
+        },
     ))
     .await;
     cleanup_connection_lsp_sessions(&engine.invocation, owned_lsp_sessions).await;
@@ -1914,17 +1930,28 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
             &lifecycle,
             &mut owned_lsp_sessions,
             |request| {
-                Box::pin(execute_portable_daemon_invocation(
-                    lifecycle.clone(),
-                    store_administration.clone(),
-                    Arc::clone(&project_open_gates),
-                    &handshake,
-                    &invocation,
-                    http_application_registry.clone(),
-                    request,
-                    #[cfg(test)]
-                    project_open_attempts.clone(),
-                ))
+                let lifecycle = lifecycle.clone();
+                let store_administration = store_administration.clone();
+                let project_open_gates = Arc::clone(&project_open_gates);
+                let handshake = handshake.clone();
+                let invocation = invocation.clone();
+                let http_application_registry = http_application_registry.clone();
+                #[cfg(test)]
+                let project_open_attempts = project_open_attempts.clone();
+                Box::pin(async move {
+                    execute_portable_daemon_invocation(
+                        lifecycle,
+                        store_administration,
+                        project_open_gates,
+                        &handshake,
+                        &invocation,
+                        http_application_registry,
+                        request,
+                        #[cfg(test)]
+                        project_open_attempts,
+                    )
+                    .await
+                })
             },
         ))
         .await;
