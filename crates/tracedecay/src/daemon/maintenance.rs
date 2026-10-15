@@ -1780,6 +1780,21 @@ mod tests {
         assert_eq!(generation_files(), 1);
     }
 
+    /// Tick state released 200 ms after its tick drops, past the abort
+    /// deadline, as when a loaded host runs an aborted tick's unwind late. The
+    /// release runs on its own thread so no shared runtime worker blocks.
+    struct LateUnwind<T: Send + 'static>(Option<T>);
+
+    impl<T: Send + 'static> Drop for LateUnwind<T> {
+        fn drop(&mut self) {
+            let state = self.0.take();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(200));
+                drop(state);
+            });
+        }
+    }
+
     #[tokio::test]
     async fn shutdown_aborts_a_stuck_tick_at_the_abort_deadline() {
         let tick_state = Arc::new(());
@@ -1787,9 +1802,9 @@ mod tests {
         let started = Arc::new(Notify::new());
         let task_started = Arc::clone(&started);
         let handle = NativeTask::spawn(async move {
+            let _held_state = LateUnwind(Some(held_state));
             task_started.notify_one();
             std::future::pending::<()>().await;
-            drop(held_state);
         })
         .expect("native task");
         started.notified().await;
