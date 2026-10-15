@@ -1,6 +1,16 @@
 use std::future::Future;
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
+use tracedecay_runtime_core::native_runtime::NativeTask;
+
+/// Aborts the HTTP mount when the joined pair is dropped or fails.
+struct HttpMountTask(NativeTask<()>);
+
+impl Drop for HttpMountTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 
 /// Spawn HTTP so its sync router build cannot starve owner polls.
 /// Box both arms so the caller's phase future stays one leaf wide.
@@ -23,18 +33,19 @@ where
     ));
     tracing::Instrument::instrument(
         async move {
-            let mut http_tasks = tokio::task::JoinSet::new();
-            http_tasks.spawn(http_mount);
+            // A `NativeTask` output must be `Clone`; the mount's error is not.
+            let (mounted, http_mounted) = tokio::sync::oneshot::channel();
+            let _http_task = NativeTask::spawn(async move {
+                let _ = mounted.send(http_mount.await);
+            })
+            .map(HttpMountTask)
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("http application mount task could not start: {error}"),
+            })?;
             tokio::try_join!(owners_mount, async {
-                http_tasks
-                    .join_next()
-                    .await
-                    .ok_or_else(|| TraceDecayError::Config {
-                        message: "http application mount task missing".to_owned(),
-                    })?
-                    .map_err(|error| TraceDecayError::Config {
-                        message: format!("http application mount task failed: {error}"),
-                    })?
+                http_mounted.await.map_err(|_| TraceDecayError::Config {
+                    message: "http application mount task ended without a result".to_owned(),
+                })?
             })
         },
         tracing::trace_span!("daemon.project.compose.join_full_mounts"),
@@ -197,5 +208,25 @@ mod tests {
             .await
             .expect("full mount cancellation must cancel the spawned HTTP mount")
             .expect("HTTP cancellation receipt");
+    }
+
+    #[test]
+    fn independent_full_mounts_join_without_a_tokio_runtime() {
+        let hazards = crate::test_support::native_runtime_hazards();
+        let joined = tracedecay_runtime_core::native_runtime::block_on(async {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            join_independent_full_owner_mounts(async { Ok("owners-ready") }, async {
+                Ok(tokio::runtime::Handle::try_current().is_err())
+            })
+            .await
+        })
+        .expect("native runtime runs the full mount")
+        .expect("admit both full mounts");
+        assert_eq!(
+            joined,
+            ("owners-ready", true),
+            "the HTTP mount runs off Tokio"
+        );
+        assert_eq!(crate::test_support::native_runtime_hazards(), hazards);
     }
 }

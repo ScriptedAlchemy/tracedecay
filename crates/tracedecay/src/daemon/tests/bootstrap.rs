@@ -3309,20 +3309,29 @@ async fn project_server_warmup_drops_lifecycle_activity_on_draining() {
 async fn scheduler_activation_drain_wins_when_discovery_is_simultaneously_ready() {
     for _ in 0..32 {
         let lifecycle = DaemonLifecycle::default();
-        let discovery_polled = Arc::new(tokio::sync::Notify::new());
-        let discovery_polled_by_future = Arc::clone(&discovery_polled);
+        let discovery_parked = Arc::new(tokio::sync::Notify::new());
+        let discovery_parked_by_future = Arc::clone(&discovery_parked);
         let discovery_lifecycle = lifecycle.clone();
         let discovery_won = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let discovery_won_by_future = Arc::clone(&discovery_won);
+        let mut discovery = Box::pin(async move {
+            discovery_lifecycle.wait_for_draining().await;
+            discovery_won_by_future.store(true, std::sync::atomic::Ordering::Release);
+        });
+        // The activation runs on a native worker beside this thread. Draining
+        // only after discovery has returned `Pending` makes both arms ready
+        // on the activation's next poll instead of racing the current one.
         super::super::project_open_orchestration::spawn_lifecycle_automation_scheduler_activation(
             lifecycle.clone(),
-            async move {
-                discovery_polled_by_future.notify_one();
-                discovery_lifecycle.wait_for_draining().await;
-                discovery_won_by_future.store(true, std::sync::atomic::Ordering::Release);
-            },
+            std::future::poll_fn(move |context| {
+                let polled = discovery.as_mut().poll(context);
+                if polled.is_pending() {
+                    discovery_parked_by_future.notify_one();
+                }
+                polled
+            }),
         );
-        discovery_polled.notified().await;
+        discovery_parked.notified().await;
 
         lifecycle.begin_draining();
         tokio::time::timeout(
