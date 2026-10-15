@@ -35,11 +35,12 @@ pub struct SnapshotCaptureOutcome {
     pub deferred_by_byte_cap: bool,
 }
 
-/// A session whose own record the store permanently refused. The runner
-/// skipped that record's source for the rest of the call.
+/// A record the store permanently refused. The runner skipped that record's
+/// source for the rest of the call.
 #[derive(Debug)]
 pub struct SnapshotSourceRefusal {
     pub session_id: String,
+    pub native_record_id: String,
     pub error: TranscriptIngestError,
 }
 
@@ -50,6 +51,9 @@ fn quarantines_source(error: &TranscriptIngestError) -> bool {
 /// The sources one `admit_batch` call stopped admitting, and why.
 #[derive(Default)]
 struct Refused {
+    /// Sources with a record the caller declined. Records of theirs already
+    /// pending stay admitted, so only later ones stop.
+    declined: BTreeSet<ObservationSourceIdentityV1>,
     sources: BTreeSet<ObservationSourceIdentityV1>,
     refusals: Vec<SnapshotSourceRefusal>,
 }
@@ -59,12 +63,28 @@ impl Refused {
         self.sources.contains(source)
     }
 
-    /// Keeps a permanent refusal of `source`'s record; anything else comes
-    /// back for the caller to fail on.
-    fn absorb(
+    fn admits<R>(
         &mut self,
         source: &ObservationSourceIdentityV1,
-        session_id: &str,
+        record: &R,
+        admit_record: &mut impl FnMut(&R) -> bool,
+    ) -> bool {
+        if self.declined.contains(source) {
+            return false;
+        }
+        if admit_record(record) {
+            return true;
+        }
+        self.declined.insert(source.clone());
+        false
+    }
+
+    /// Keeps a permanent refusal of `record`; anything else comes back for
+    /// the caller to fail on.
+    fn absorb<R: SnapshotAdmissionRecord>(
+        &mut self,
+        source: &ObservationSourceIdentityV1,
+        record: &R,
         error: TranscriptIngestError,
     ) -> TranscriptIngestResult<()> {
         if !quarantines_source(&error) {
@@ -72,7 +92,8 @@ impl Refused {
         }
         self.sources.insert(source.clone());
         self.refusals.push(SnapshotSourceRefusal {
-            session_id: session_id.to_owned(),
+            session_id: record.session_id().to_owned(),
+            native_record_id: record.native_record_id().to_owned(),
             error,
         });
         Ok(())
@@ -320,6 +341,28 @@ impl SnapshotAdmissionRunner {
             + Send
             + 'static,
     {
+        self.admit_batch_gated(facade, input_bytes, scope, cancellation, load, |_| true)
+            .await
+    }
+
+    /// [`Self::admit_batch`] that first shows `admit_record` each record its
+    /// cursor does not cover yet, and admits nothing from a record it
+    /// declines onwards in that record's source.
+    pub async fn admit_batch_gated<R, F>(
+        &mut self,
+        facade: &dyn HostAdmission,
+        input_bytes: u64,
+        scope: &ObservationScopeV1,
+        cancellation: &ObservationCancellation,
+        load: F,
+        mut admit_record: impl FnMut(&R) -> bool + Send,
+    ) -> TranscriptIngestResult<Vec<SnapshotSourceRefusal>>
+    where
+        R: SnapshotAdmissionRecord + Send + 'static,
+        F: FnOnce() -> TranscriptIngestResult<Option<Vec<SnapshotAdmissionBatch<R>>>>
+            + Send
+            + 'static,
+    {
         ensure_snapshot_admission_active(self.provider, cancellation)?;
         if !self.budget.try_consume(input_bytes) {
             return Ok(Vec::new());
@@ -355,12 +398,14 @@ impl SnapshotAdmissionRunner {
                 batch.generation,
                 batch.records,
                 &mut refused,
+                &mut admit_record,
             )
             .await?;
         }
         Ok(refused.refusals)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn admit_records<R: SnapshotAdmissionRecord>(
         &mut self,
         facade: &dyn HostAdmission,
@@ -369,6 +414,7 @@ impl SnapshotAdmissionRunner {
         generation: ObservationSourceGenerationV1,
         records: Vec<R>,
         refused: &mut Refused,
+        admit_record: &mut impl FnMut(&R) -> bool,
     ) -> TranscriptIngestResult<()> {
         let mut cursors: BTreeMap<ObservationSourceIdentityV1, Option<ObservationSourceCursorV1>> =
             BTreeMap::new();
@@ -378,6 +424,9 @@ impl SnapshotAdmissionRunner {
             let provider = record.provider();
             ensure_snapshot_admission_active(provider, cancellation)?;
             let source_identity = record.source_identity()?;
+            if refused.contains(&source_identity) {
+                continue;
+            }
             let range = ObservationSourceRangeV1::new(record.order(), record.order() + 1)?;
             ensure_snapshot_admission_active(provider, cancellation)?;
             let expected_cursor = source_cursor(
@@ -390,7 +439,9 @@ impl SnapshotAdmissionRunner {
             )
             .await?;
             ensure_snapshot_admission_active(provider, cancellation)?;
-            if snapshot_cursor_covers_range(expected_cursor.as_ref(), generation, range) {
+            if snapshot_cursor_covers_range(expected_cursor.as_ref(), generation, range)
+                || !refused.admits(&source_identity, &record, admit_record)
+            {
                 continue;
             }
             pending.push((record, source_identity, range, generation));
@@ -424,7 +475,7 @@ impl SnapshotAdmissionRunner {
                 ) {
                     Ok(request) => requests.push(request),
                     Err(error) => {
-                        refused.absorb(source_identity, record.session_id(), error)?;
+                        refused.absorb(source_identity, record, error)?;
                         continue;
                     }
                 }
@@ -531,7 +582,7 @@ impl SnapshotAdmissionRunner {
                         )
                         .await
                     {
-                        refused.absorb(source_identity, record.session_id(), error)?;
+                        refused.absorb(source_identity, record, error)?;
                     }
                 }
             }
