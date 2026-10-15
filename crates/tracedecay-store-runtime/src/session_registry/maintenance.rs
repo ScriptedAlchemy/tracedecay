@@ -16,7 +16,7 @@ use tracedecay_domain::errors::{
     TraceDecayError,
 };
 use tracedecay_global_db::schema_stages::RegisteredSchemaConvergence;
-use tracedecay_runtime_core::native_runtime::NativeTask;
+use tracedecay_runtime_core::native_runtime::{self, NativeTask};
 use tracedecay_runtime_core::storage::profile_root_of_sharded_data_root;
 use tracedecay_store::{StoreRuntimeBindingV1, StoreShardIdV1, StoreShardScopeV1};
 
@@ -370,14 +370,19 @@ impl RegisteredSchemaConvergenceMaintenance {
                     ],
                 );
             }
-            #[cfg(any(test, feature = "test-helpers"))]
-            if let Some(cpu) = trim_cpu {
-                let spun = std::time::Instant::now();
-                while spun.elapsed() < cpu {
-                    std::hint::spin_loop();
+            // `malloc_trim` walks every glibc arena: up to 0.8 s of CPU on a
+            // large heap, which would stall this native worker's I/O.
+            let _ = native_runtime::spawn_blocking(move || {
+                #[cfg(any(test, feature = "test-helpers"))]
+                if let Some(cpu) = trim_cpu {
+                    let spun = std::time::Instant::now();
+                    while spun.elapsed() < cpu {
+                        std::hint::spin_loop();
+                    }
                 }
-            }
-            let _ = release_process_allocator_memory_v1();
+                release_process_allocator_memory_v1()
+            })
+            .await;
             drop(permit);
             let status = match result {
                 Ok(()) => {
