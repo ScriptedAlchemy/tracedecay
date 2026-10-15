@@ -120,7 +120,7 @@ pub struct ExactSqlHandle {
 /// (a worker or a `block_on` caller; its blocking pool carries no runtime
 /// handle) still parks that thread. Each such wait is logged and counted in
 /// [`native_thread_writer_waits`] so the caller can be moved onto
-/// `native_runtime::spawn_blocking`.
+/// `native_runtime::off_native_thread` or `native_runtime::spawn_blocking`.
 #[track_caller]
 fn recv_writer_reply<T>(
     response: async_channel::Receiver<T>,
