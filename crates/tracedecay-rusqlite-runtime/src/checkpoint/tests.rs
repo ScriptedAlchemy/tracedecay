@@ -301,3 +301,89 @@ fn rusqlite_driver_samples_and_checkpoints_its_owned_writer_connection() {
     assert!(report.checkpointed_frames <= report.log_frames);
     assert!(report.complete());
 }
+
+static FOREIGN_CHECKPOINTER_WAITING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static FOREIGN_CHECKPOINTER_RELEASED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn park_foreign_checkpointer(_attempt: i32) -> bool {
+    use std::sync::atomic::Ordering;
+    FOREIGN_CHECKPOINTER_WAITING.store(true, Ordering::Release);
+    while !FOREIGN_CHECKPOINTER_RELEASED.load(Ordering::Acquire) {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    false
+}
+
+/// `SQLite` answers a checkpoint that cannot take the checkpoint lock with the
+/// row `(1, -1, -1)`. Another connection checkpointing the same file is an
+/// ordinary deferral, so the scheduled checkpoint must report it pending
+/// rather than fault the writer (#4007).
+#[test]
+fn scheduled_checkpoint_defers_while_another_connection_checkpoints() {
+    use std::sync::atomic::Ordering;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("checkpoint.db");
+    std::fs::File::create(&path).unwrap();
+    let connection =
+        crate::connection::open(&path, crate::connection::ConnectionMode::Writer).unwrap();
+    connection
+        .execute_batch("CREATE TABLE item (value INTEGER); INSERT INTO item VALUES (1);")
+        .unwrap();
+    let mut controller = WriterCheckpointController::new(
+        RusqliteCheckpointDriver::new(connection),
+        CheckpointConfig {
+            soft_wal_bytes: 1,
+            hard_wal_bytes: 1024 * 1024 * 1024,
+        },
+    )
+    .unwrap();
+
+    // A FULL checkpoint holds the checkpoint lock while its busy handler waits
+    // out the open write transaction.
+    let lock_holder = rusqlite::Connection::open(&path).unwrap();
+    lock_holder
+        .execute_batch("BEGIN IMMEDIATE; INSERT INTO item VALUES (2);")
+        .unwrap();
+    let checkpointer_path = path.clone();
+    let checkpointer = std::thread::spawn(move || {
+        let connection = rusqlite::Connection::open(checkpointer_path).unwrap();
+        connection
+            .busy_handler(Some(park_foreign_checkpointer))
+            .unwrap();
+        connection
+            .query_row("PRAGMA wal_checkpoint(FULL)", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+    });
+    while !FOREIGN_CHECKPOINTER_WAITING.load(Ordering::Acquire) {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    let result = controller.evaluate_scheduled(CheckpointBlockers::default());
+
+    FOREIGN_CHECKPOINTER_RELEASED.store(true, Ordering::Release);
+    assert_eq!(
+        checkpointer.join().unwrap(),
+        1,
+        "the foreign FULL gave up busy"
+    );
+    lock_holder.execute_batch("ROLLBACK").unwrap();
+    assert!(
+        matches!(
+            result,
+            Ok(CheckpointResult::Decision {
+                decision: CheckpointDecision::Pending {
+                    mode: CheckpointMode::Passive,
+                    report: CheckpointReport { busy: true, .. },
+                    ..
+                },
+                ..
+            })
+        ),
+        "a busy checkpoint lock is a pending checkpoint, not a driver fault: {result:?}"
+    );
+}
