@@ -795,7 +795,7 @@ async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmiss
 }
 
 #[tokio::test]
-async fn current_codex_user_pair_projects_once_and_rejects_malformed_items() {
+async fn current_codex_user_pair_projects_each_record_and_rejects_malformed_items() {
     let tmp = TempDir::new().unwrap();
     let project = tmp.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
@@ -913,13 +913,16 @@ async fn current_codex_user_pair_projects_once_and_rejects_malformed_items() {
         .await
         .unwrap();
 
-    assert_eq!(projection.projected_outputs, 1);
+    // a2a0cb1c53 (#3884) made a user `response_item` message a turn of its
+    // own beside its `item_completed` echo. The two malformed items still
+    // project nothing.
+    assert_eq!(projection.projected_outputs, 2);
     assert_eq!(
         runtime
             .session_message_count_for_test(HostAdmissionScope::Project, None)
             .await
             .unwrap(),
-        1
+        2
     );
     let messages = runtime
         .search_session_messages_for_test(
@@ -931,8 +934,19 @@ async fn current_codex_user_pair_projects_once_and_rejects_malformed_items() {
         )
         .await
         .unwrap();
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].message.message_id, "user-item-1");
+    assert_eq!(messages.len(), 2);
+    assert!(
+        messages
+            .iter()
+            .all(|hit| hit.message.role == "user" && hit.message.text == prompt),
+        "{messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|hit| hit.message.message_id == "user-item-1"),
+        "{messages:?}"
+    );
 }
 
 #[tokio::test]
