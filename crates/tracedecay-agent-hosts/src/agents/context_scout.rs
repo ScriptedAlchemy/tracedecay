@@ -790,6 +790,8 @@ fn validated_model_candidate(
     if !base.durable()
         || !safe_suggestion_text(&output.suggestion_text)
         || !unsupported_code_tokens(&base.suggestion_text, &output.suggestion_text).is_empty()
+        // A dropped error code, path, or number loses what the citations support.
+        || !unsupported_code_tokens(&output.suggestion_text, &base.suggestion_text).is_empty()
         || output.suggestion_text.len() > limits.max_text_bytes
         || output_tokens > limits.max_model_output_tokens
         || output.cited_anchor_ids.len() > limits.max_evidence
@@ -2385,7 +2387,7 @@ mod tests {
         assert_eq!(envelope.candidate.dedupe_key, [1; 32]);
         assert_eq!(
             envelope.candidate.suggestion_text,
-            "Evidence-bound model refinement."
+            "Refined: Use evidence 1."
         );
     }
 
@@ -2491,11 +2493,13 @@ mod tests {
 
     #[cfg(feature = "token-counting")]
     #[tokio::test]
-    async fn refinement_inventing_identifiers_falls_back_to_deterministic_text() {
+    async fn refinement_inventing_or_dropping_code_tokens_falls_back_to_deterministic_text() {
         for invented in [
             "Fix the mismatched types in apply_tax at src/orders.rs:42 (E0308).",
             "Fix the mismatched types in order_total at src/billing.rs (E0308).",
             "Fix the mismatched types in order_total at src/orders.rs:42 (E0308) via TaxRate.",
+            "Fix the mismatched types in order_total at src/orders.rs:42.",
+            "Fix the mismatched types in order_total (E0308).",
         ] {
             let selection = refine_diagnostic(invented).await;
             assert_eq!(
@@ -2683,7 +2687,7 @@ mod tests {
                 Ok(ContextScoutModelProposalV1 {
                     candidate: ContextScoutModelCandidateV1 {
                         selected_dedupe_key: candidate.dedupe_key,
-                        suggestion_text: "Evidence-bound model refinement.".to_owned(),
+                        suggestion_text: format!("Refined: {}", candidate.suggestion_text),
                         cited_anchor_ids: candidate.citation_anchor_ids.clone(),
                     },
                     receipt: model_receipt(),
@@ -3196,10 +3200,12 @@ mod tests {
     /// of a `codex` executable (the production backend), or with
     /// `TRACEDECAY_SCOUT_LIVE_EVAL_CLAUDE` set to a `claude` executable that
     /// stands in for it. `TRACEDECAY_SCOUT_LIVE_EVAL_MODEL` sets the model and
-    /// `TRACEDECAY_SCOUT_LIVE_EVAL_REPS` the repetitions per case (default 1):
+    /// `TRACEDECAY_SCOUT_LIVE_EVAL_REPS` the repetitions per case (default 1).
+    /// Bazel gives the test a throwaway `HOME`, so `CODEX_HOME` must name the
+    /// real Codex login:
     ///
     /// ```text
-    /// TRACEDECAY_SCOUT_LIVE_EVAL_CODEX=/path/to/codex \
+    /// CODEX_HOME=~/.codex TRACEDECAY_SCOUT_LIVE_EVAL_CODEX=/path/to/codex \
     /// TRACEDECAY_SCOUT_LIVE_EVAL_MODEL=<model> TRACEDECAY_SCOUT_LIVE_EVAL_REPS=3 \
     /// env -u CC -u CXX bazel run //crates/tracedecay-agent-hosts:unit_test -- \
     ///   --ignored --nocapture live_refinement_eval
