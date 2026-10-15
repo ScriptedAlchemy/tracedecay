@@ -57,7 +57,7 @@ pub(crate) struct VersionCheckState {
 /// single-flights concurrent callers off that stamp so at most one
 /// caller per window proceeds.
 ///
-/// Note: call sites are inconsistent about additionally special-casing
+/// Note: call sites are inconsistent about also special-casing
 /// a `0` (never-checked) stamp before calling `try_claim`, some do,
 /// some don't. That inconsistency predates this extraction and is
 /// preserved as-is here rather than harmonized.

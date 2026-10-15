@@ -5,7 +5,7 @@ description: Create or control TraceDecay Work tasks, attempts, graph mutations,
 
 # Managing Work
 
-Work is the daemon-owned task/attempt surface. `tracedecay_work_create` mints a
+Work manages tasks and attempts in the daemon. `tracedecay_work_create` creates a
 task; proposal review and acceptance (`tracedecay_work_review_proposal`,
 `tracedecay_work_accept_proposal`) precede execution admission
 (`tracedecay_work_admit_execution`). An existing attempt's status and evidence

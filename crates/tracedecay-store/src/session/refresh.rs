@@ -683,7 +683,7 @@ impl SessionRefreshReceiptV1 {
     }
 
     /// Terminal receipts must preserve identity and never regress committed
-    /// progress. Complete additionally requires a fully committed frontier.
+    /// progress. Complete also requires a fully committed frontier.
     pub fn validate_transition_from(
         &self,
         progress: &SessionRefreshProgressV1,

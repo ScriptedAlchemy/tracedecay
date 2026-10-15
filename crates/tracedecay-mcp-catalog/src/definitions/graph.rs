@@ -102,7 +102,7 @@ pub(super) fn def_files(input_schema: Value) -> ToolDefinition {
     )
 }
 
-/// Family API surface for verified shared implementations.
+/// Family API for verified shared implementations.
 pub(super) fn def_similar(input_schema: Value) -> ToolDefinition {
     def(
         "tracedecay_similar",

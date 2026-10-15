@@ -220,7 +220,7 @@ pub(super) async fn execute_native_integration(
         execution.owner_preview.as_ref(),
     );
     // Telemetry only: the preflight disposition and terminal apply receipt
-    // additionally prove one mechanical conflict prediction/outcome pair.
+    // also prove one mechanical conflict prediction/outcome pair.
     match record_work_conflict_observation(
         registered.scope.project_id.as_str(),
         observability_producer.as_deref(),

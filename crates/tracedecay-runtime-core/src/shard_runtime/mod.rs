@@ -1,15 +1,13 @@
 //! Shard-runtime kernel: the per-shard `SQLite` runtime and its registry.
 //!
-//! This tree is the substrate under `db::Database`: a database facade is a
-//! client lease on a published [`shard::ShardRuntime`], the registry opens,
-//! attaches, retires, and closes those runtimes, and `telemetry` projects
-//! their inventory. It sits below every store and cannot move above them.
+//! `db::Database` holds a client lease on a published [`shard::ShardRuntime`].
+//! The registry opens, attaches, retires, and closes those runtimes.
+//! `telemetry` reports their inventory. Every store depends on this module.
 //!
-//! It is not the store runtime. Project-store and session lifecycle, which
-//! shards a daemon opens, in what order, under which profile authority, and
-//! how they converge, retire, and shut down, is owned by
-//! `tracedecay-store-runtime`, which drives this registry through its public
-//! ports (`registry::StoreRuntimeResolver`, `registry::ShardRuntimePublisher`).
+//! `tracedecay-store-runtime` owns project-store and session lifecycle. It
+//! selects the shards a daemon opens, their order and profile authority, and
+//! how they converge, retire, and shut down. It uses this registry through
+//! `registry::StoreRuntimeResolver` and `registry::ShardRuntimePublisher`.
 
 pub mod registry;
 pub mod shard;

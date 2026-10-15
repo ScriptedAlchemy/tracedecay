@@ -6,13 +6,14 @@ This guide describes the single final-V2 memory-curation authority. It applies
 to project and profile memory, the automation runner, its dashboard
 observation, its transport adapters, and its durable terminal receipts.
 
-The curator mines bounded canonical facts, asks the configured agent backend
-for supported operations, validates them, and automatically commits only
-policy-valid results. Durable evidence, receipts, telemetry, and typed partial
-effects are the public boundary. Human surfaces may launch a run and inspect
-its terminal state; they do not select its operations or settle its effects.
+The curator reads a bounded set of canonical facts and asks the configured
+agent backend to propose supported operations. It validates those operations
+and commits only results that pass policy checks. The API returns durable
+evidence, receipts, telemetry, and typed partial effects. Users may launch a
+run and inspect its terminal state; they cannot select its operations or
+commit its effects.
 
-## Current Curation Surfaces
+## Current curation interfaces
 
 Memory curation is automation-owned and policy-governed. Subagents may inspect
 and classify evidence within their assigned scope, but the curator alone may
@@ -23,11 +24,10 @@ callers cannot request or approve them individually. Each run produces a
 ledger record, activity events, post-action telemetry, and, when present,
 advertised artifacts.
 
-This is a breaking public-surface cutover. The duplicate launchers
-`POST /api/automation/run/memory-curator`, `tracedecay_memory_automation_run`,
-and `tracedecay automation run memory-curation` were removed. They are not
-aliases: every caller must use `fact_store_curate`, while the existing
-automation run list, view, and artifact reads remain unchanged.
+The duplicate launchers `POST /api/automation/run/memory-curator`,
+`tracedecay_memory_automation_run`, and `tracedecay automation run memory-curation`
+were removed in a breaking API change. Every caller must use `fact_store_curate`.
+The existing automation run list, view, and artifact reads remain unchanged.
 
 `fact_store_curate` is one public semantic launcher. MCP, generic CLI, and HTTP
 are adapters for that same retained application operation, not three launchers.
@@ -35,7 +35,7 @@ Its request accepts only `fact_review_limit` and
 `min_confidence_millionths`; callers cannot supply task, run identity,
 operations, validation, policy, or effect authority.
 
-Use existing TraceDecay surfaces before inventing a new plan format:
+Use the existing TraceDecay tools and APIs:
 
 - Canonical fact tools: direct reads through `tracedecay_fact_store_get`,
   `tracedecay_fact_store_search`, `tracedecay_fact_store_list`,
@@ -75,7 +75,7 @@ Use existing TraceDecay surfaces before inventing a new plan format:
   carries its committed receipt and requires reconciliation; it is never safe
   to replay blindly.
 
-## Runner Contract
+## Runner contract
 
 The backend sees a bounded canonical-fact context and returns strict JSON:
 
@@ -111,7 +111,7 @@ Operator notes:
 - The runner owns validation repair and commits accepted operations within the
   same terminal run.
 
-## Terminal Contract
+## Terminal contract
 
 Successful operations carry canonical commit receipts. A failure before any
 commit is an ordinary typed application failure. A failure after a commit is a
@@ -119,7 +119,7 @@ typed `partial_effect` with the committed `EffectReceipt`, retry `never`, and
 legal action `reconcile`. That receipt must survive HTTP, MCP, CLI, SDK, and
 daemon restart boundaries unchanged.
 
-## Operator Workflow
+## Operator workflow
 
 1. **Resolve scope.** Confirm the active project root and memory store. Project
    profiles use user-level TraceDecay storage scoped to the project by default.
@@ -152,7 +152,7 @@ daemon restart boundaries unchanged.
    inspect the oplog or receipt projection. Report changed, skipped, rejected,
    and still ambiguous facts.
 
-## Required Operator Report
+## Required operator report
 
 For each completed run, produce this compact report:
 
@@ -163,7 +163,7 @@ For each completed run, produce this compact report:
 - `verification`: exact read-only checks and the resulting canonical fact
   state.
 
-## Risk Tiers
+## Risk tiers
 
 | Tier | Operations | Default |
 | --- | --- | --- |
@@ -176,7 +176,7 @@ The automatic curator may select remove or merge only inside its closed,
 policy-validated batch; a caller cannot force that choice. A direct removal is
 a separate exact-administration request and requires an exact user instruction.
 
-## Subagent Roles
+## Subagent roles
 
 When subagents participate, give each one an explicit project selector and a non-overlapping ownership boundary such as a path set, memory namespace, report section, or review category. Subagents should return evidence-backed recommendations and exact target identifiers, leaving cross-scope reconciliation and destructive curation to the parent agent.
 
@@ -198,7 +198,7 @@ For multi-agent runs, each role owns separate notes or database rows. Writers
 do not share editable artifacts. The automation runner alone validates and
 commits automatic curation output.
 
-## Standalone And Wrapper Boundaries
+## Standalone and wrapper boundaries
 
 - Standalone TraceDecay retains one automation contract regardless of which
   configured backend performs the model call.
@@ -209,7 +209,7 @@ commits automatic curation output.
 - Host wrappers may launch or observe the run but cannot supply operations or
   settle effects.
 
-## Permanent-Delete Guardrails
+## Permanent-delete guardrails
 
 - Never promise archive, restore, undo, recycle-bin, or soft-delete behavior.
 - Automatic curation never hard-deletes a fact.
@@ -219,7 +219,7 @@ commits automatic curation output.
 - After any mutation, verify the resulting fact set and report failed or
   skipped operations.
 
-## Telemetry To Capture
+## Telemetry to capture
 
 Telemetry should measure usefulness without overstating savings:
 
@@ -233,7 +233,7 @@ Telemetry should measure usefulness without overstating savings:
 - Token accounting: audited net token delta using real transcript and usage
   data, not gross avoided-read estimates.
 
-## Verification Targets
+## Verification targets
 
 When curation logic changes, run the focused agent-host automation and public
 journey tests that cover validation, application, partial effects, restart

@@ -408,7 +408,7 @@ This is the highest-risk surface. Three independent gates, **all** required:
 Only filenames matching `^payload_[0-9a-f]{64}\.payload$` directly under the
 canonical payload dir are even considered. `validate_payload_ref`
 (`payload.rs:56`) already enforces "single `Normal` component, no `.`/`..`/`/`/`\`";
-GC additionally rejects names that don't match the owner-hash shape so stray
+GC also rejects names that don't match the owner-hash shape so stray
 files (e.g. editor swaps, `.tmp`) are ignored, never reaped.
 
 ### 7.2 Symlink / type gate (lstat, never stat)

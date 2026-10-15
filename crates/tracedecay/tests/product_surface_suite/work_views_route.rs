@@ -1,6 +1,6 @@
 //! Mount contract for the Work graph views route.
 //!
-//! The views route is the one public surface over the durable work-product
+//! The views route is the one public API over the durable work-product
 //! graph authority, and it is composed from three tables owned by three
 //! different crates: the [`WorkOperation`] descriptor that names its path, the
 //! executable catalog row that advertises its schemas, and the operation-id

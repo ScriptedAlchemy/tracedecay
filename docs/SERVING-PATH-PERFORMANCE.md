@@ -251,7 +251,7 @@ violated it and are now closed:
   exactly: two writers of the same class on one store still contend, and
   `Destructive` still excludes everything on its store, which is what lets
   branch GC keep proving no holder before it unlinks a SQLite family. Request-
-  side waits (project open) additionally carry a 500ms deadline and answer
+  side waits (project open) also carry a 500ms deadline and answer
   with the typed retryable `project_warming_error` rather than queuing
   without bound; other writer waits park their admission slot
   (`park_admission`) and stay bounded by the caller's request deadline.

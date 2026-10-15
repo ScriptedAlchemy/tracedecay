@@ -1030,7 +1030,7 @@ fn hunk_commit_matches_preview(
 
 /// Verify the complete operation-specific terminal state before emitting a
 /// success receipt. Native publication proves which process crossed the
-/// boundary; this observation additionally refuses success if HEAD/ref or
+/// boundary; this observation also refuses success if HEAD/ref or
 /// stable repository authority drifted before the terminal receipt.
 fn live_result_matches_preview(
     preview: &GitIndexPreviewV1,

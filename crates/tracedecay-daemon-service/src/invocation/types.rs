@@ -83,7 +83,7 @@ type HookOrchestrationWorkV1 = dyn Fn(
     + Send
     + Sync;
 /// Native admissions share one cycle for the same project, worktree, and
-/// hook event. An explicit request additionally carries its public effect
+/// hook event. An explicit request also carries its public effect
 /// identity, so its retries join each other without joining native delivery.
 type HookOrchestrationEventKeyV1 = ([u8; 16], [u8; 16], [u8; 16], Option<ManifestDigest>);
 /// Stable per-session work address. A newer boundary at the same address

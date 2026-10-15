@@ -163,7 +163,7 @@ case-insensitively:
   `Kubernetes`, `Database`), filtered by a sentence-function-word stoplist
   (`is_common_sentence_word`: articles, pronouns, auxiliaries, etc.).
 
-Every candidate is additionally shape-checked (`is_valid_entity`): at most 80
+Every candidate is also shape-checked (`is_valid_entity`): at most 80
 characters, at most 6 words, and, for anything that isn't a single trusted
 code token, every word must be a clean identifier-ish token (no stray
 sentence punctuation).
@@ -286,7 +286,7 @@ has acted on it.
 
 ## 5. Reproducing this evaluation
 
-The tool surface changed along with the retrieval rewrite: memory operations
+The tool interface changed along with the retrieval rewrite: memory operations
 are now separate MCP tools (`fact_store_add`, `fact_store_search`,
 `fact_store_probe`, `fact_store_reason`, …) rather than one `fact_store` tool
 with an `action` field, and the CLI's `tracedecay tool <name> --args '<json>'`

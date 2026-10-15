@@ -54,7 +54,7 @@ const PROOF_MAX_WORKERS: usize = 8;
 /// order while the calling thread hashes completed chunks strictly in order,
 /// so the digest bytes are identical to the serial stream. Cancellation is
 /// polled on the calling thread at least once per row plus every hashed
-/// 64 KiB, exactly as before; workers additionally abort between rows once
+/// 64 KiB, exactly as before; workers also abort between rows once
 /// the calling thread has observed a failure. In-flight chunk buffers are
 /// bounded (workers × 2), so verification memory stays a small constant over
 /// the one-decoded-row posture of the serial path. Generations at or below

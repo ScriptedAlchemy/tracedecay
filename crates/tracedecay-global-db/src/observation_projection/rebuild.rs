@@ -566,7 +566,7 @@ async fn project_observation_in_transaction(
         .map(|(outcome, _)| outcome)
 }
 
-/// Like [`project_observation_in_transaction`], additionally returning the
+/// Like [`project_observation_in_transaction`], also returning the
 /// observation's session identity so batched drains need no follow-up point
 /// read per projected item.
 async fn project_observation_in_transaction_with_session(
@@ -1082,7 +1082,7 @@ async fn write_effect_converging_collisions(
 /// `OutputCollision` skip, and re-run so the drain or rebuild checkpoints past
 /// the collided observation.
 ///
-/// A live drain additionally reconciles any provenance rows already durable
+/// A live drain also reconciles any provenance rows already durable
 /// under the collided observation's key: the skip authority contract
 /// (`schema_contract::invariants`) defines a valid skip as zero provenance
 /// rows plus exactly one disposition, so a stale row left behind by an

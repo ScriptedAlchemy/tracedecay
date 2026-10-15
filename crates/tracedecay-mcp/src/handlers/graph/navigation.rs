@@ -198,7 +198,7 @@ pub async fn compute_by_qualified_name(
 }
 
 /// Signature-only lookup (no body) by qualified name or node ID. Returns
-/// the public-API surface of a symbol so callers can avoid reading the
+/// the public API of a symbol so callers can avoid reading the
 /// source file just to inspect the signature.
 #[tracing::instrument(name = "mcp.graph.signature.total", level = "trace", skip_all)]
 pub async fn compute_signature(

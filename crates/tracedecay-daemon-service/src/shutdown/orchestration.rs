@@ -34,7 +34,7 @@ const SHUTDOWN_COORDINATOR_RECEIPT_GRACE: tokio::time::Duration =
 /// Splits one shutdown deadline into per-phase budgets.
 ///
 /// Each phase deadline is recomputed from the clock when that phase starts,
-/// so unspent budget flows forward; each is additionally floored so it cannot
+/// so unspent budget flows forward; each is also floored so it cannot
 /// eat the reserve belonging to the phases behind it.
 #[derive(Clone, Copy)]
 struct DaemonShutdownBudget {

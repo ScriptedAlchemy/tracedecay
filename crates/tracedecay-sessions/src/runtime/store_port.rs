@@ -1,7 +1,7 @@
 //! Store contracts the session runtime writes through.
 //!
 //! The portable [`TranscriptStore`] contract owns cursor and transcript
-//! writes. Ingest scheduling additionally needs compare-and-set parse-offset
+//! writes. Ingest scheduling also needs compare-and-set parse-offset
 //! transitions, so the extension trait belongs here rather than next to the
 //! registered-database adapter that implements it.
 

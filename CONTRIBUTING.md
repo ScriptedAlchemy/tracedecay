@@ -1,8 +1,8 @@
 # Contributing to tracedecay
 
-Thanks for your interest in contributing! This guide covers everything you need to get started.
+This guide covers local setup, tests, and contribution requirements.
 
-## Getting Started
+## Getting started
 
 ```bash
 git clone https://github.com/ScriptedAlchemy/tracedecay.git
@@ -103,7 +103,7 @@ tests/                Shared fixtures, distribution suites, and cross-crate gate
 docs/                 Design docs and the V2 roadmap
 ```
 
-## Feature Flags
+## Feature flags
 
 tracedecay supports more than 50 languages. The root `Cargo.toml` is a virtual
 workspace, not a package. `crates/tracedecay-cli/Cargo.toml` and
@@ -126,7 +126,7 @@ bazel test //crates/tracedecay-code-extraction:main --test_output=errors
 Use Cargo for a feature combination only when `scripts/bazel/gen_builds.py`
 does not generate an equivalent Bazel target.
 
-## Making Changes
+## Making changes
 
 1. **Use the task's branch**, or branch from `master` for a new contribution. Confirm the target before working on a release-channel branch.
 2. **Write tests in the owning crate.** Extraction changes belong with `crates/tracedecay-code-extraction/`; follow nearby inline tests or crate-local integration suites and assert on extracted nodes/edges.
@@ -177,7 +177,7 @@ promotes additional advisory lints to blocking, update the owning crate's lint
 policy, fix or narrowly allow the existing violations in the same change, and update this
 section so the contributor command and blocking/advisory split still match CI.
 
-## Adding a New Language Extractor
+## Adding a new language extractor
 
 1. Add a tree-sitter grammar dependency (or vendor it under `vendor/`).
 2. Create `crates/tracedecay-code-extraction/src/{lang}_extractor.rs` implementing the `LanguageExtractor` trait.
@@ -190,7 +190,7 @@ node handling, and direct-child versus descendant semantics. Compare against
 `crates/tracedecay-code-extraction/src/traversal.rs` and keep language-specific
 behavior local; cover the consuming extractor before and after consolidation.
 
-## Validating Plugins and Skills
+## Validating plugins and skills
 
 Changes under `plugin/` or `crates/tracedecay-agent-hosts/` are covered
 by a layered validation system: vendored JSON-schema checks, per-host skill
@@ -206,7 +206,7 @@ See [`docs/PLUGIN-VALIDATION.md`](docs/PLUGIN-VALIDATION.md) for the full
 layer breakdown, schema refresh procedure, and how to add a skill or a new
 ecosystem bundle correctly.
 
-## Changing the Rust-to-Dashboard Wire Contract
+## Changing the Rust-to-dashboard wire contract
 
 `dashboard/src/contracts/types.ts`, `dashboard/src/contracts/decoders.ts`,
 `dashboard/src/contracts/generated.ts`, and
@@ -235,7 +235,7 @@ marked `linguist-generated` in `.gitattributes`, so GitHub collapses them in
 PR diffs and excludes them from language stats; review the Rust source of the
 contract change instead.
 
-## Running Specific Tests
+## Running specific tests
 
 Run the generated Bazel test target that owns the behavior:
 
@@ -251,7 +251,7 @@ bazel test //crates/tracedecay-code-extraction:main \
   --test_arg=test_rust_file_node_is_root --test_output=errors
 ```
 
-## Commit Messages
+## Commit messages
 
 Follow conventional commit style:
 
@@ -279,7 +279,7 @@ Run the same command locally (per commit) before pushing to lint every
 non-merge commit in a branch range. Merge commits are skipped to match CI
 behavior.
 
-## Pull Requests
+## Pull requests
 
 - Target `master` for bug fixes and stable features.
 - Confirm the target branch with the maintainer for release-channel work; do not
@@ -292,8 +292,8 @@ behavior.
 ### What CI spends on a pull request
 
 CI runs on GitHub's free hosted runners: 20 concurrent jobs for the whole
-account, 5 of them macOS. Every job a pull request queues is a job the
-integration branch waits behind, so a run spends only what its state earns:
+account, 5 of them macOS. Pull requests and the
+integration branch share that capacity. CI selects jobs by run state:
 
 | State | Runs |
 |---|---|
@@ -307,10 +307,10 @@ Use `gh workflow run ci.yml --ref <branch>` to request an additional run; add
 head replaces its prior run. Master finishes its current snapshot and retains
 only the newest pending run. Closing or merging a PR cancels its remaining
 runs and drops its Actions caches. Nothing runs on a
-timer: the packaged-crate distribution battery and the Hawk lint are
+timer: the packaged-crate distribution tests and the Hawk lint are
 `workflow_dispatch` only.
 
-## Reporting Issues
+## Reporting issues
 
 Open an issue at https://github.com/ScriptedAlchemy/tracedecay/issues with:
 
@@ -319,7 +319,7 @@ Open an issue at https://github.com/ScriptedAlchemy/tracedecay/issues with:
 - Steps to reproduce
 - Expected vs. actual behavior
 
-## Code of Conduct
+## Code of conduct
 
 This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md). Be respectful and constructive.
 

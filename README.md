@@ -15,7 +15,7 @@
   <img src="https://img.shields.io/badge/Windows-supported-blue.svg" alt="Windows">
 </p>
 
-TraceDecay builds a local semantic graph of your repository so AI coding agents can ask for the right symbols, call relationships, impact radius, docs, and source snippets without scanning the tree.
+TraceDecay builds a local semantic graph of your repository. AI coding agents query it for symbols, call relationships, affected callers, docs, and source snippets.
 
 Instead of repeated `grep`, `glob`, and file reads, agents use MCP tools such as `tracedecay_context`, `tracedecay_search`, `tracedecay_callers`, and `tracedecay_impact`.
 
@@ -55,7 +55,7 @@ only its exact persisted shape: an incompatible store returns `ResetRequired`
 and requires explicit reset or recreation, never conversion. See [the V2
 operating model](docs/V2-OPERATING-MODEL.md).
 
-## Quick Start
+## Quick start
 
 ```bash
 cd /path/to/your/project
@@ -288,4 +288,4 @@ TraceDecay is a Rust port of the original [CodeGraph](https://github.com/colbymc
 
 ## License
 
-MIT License -- see [LICENSE](LICENSE).
+See [LICENSE](LICENSE) for the MIT License.

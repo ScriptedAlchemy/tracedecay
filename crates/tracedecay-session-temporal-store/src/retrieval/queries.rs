@@ -6,7 +6,7 @@
 // The anchor-owner authority predicate shared by every root-scope query: a
 // participant is readable when its anchor owner matches the authorized root
 // (profile owners under the 'user' root, project owners under project roots).
-// `ROOT_SUMMARY_BROWSE_CANDIDATE_QUERY` alone additionally accepts
+// `ROOT_SUMMARY_BROWSE_CANDIDATE_QUERY` alone also accepts
 // session-owned anchors; that deliberate divergence is the `with_session_owner`
 // arm and is documented at that query's definition.
 macro_rules! anchor_owner_authority_predicate {

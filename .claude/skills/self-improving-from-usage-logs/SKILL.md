@@ -21,7 +21,7 @@ Read only the evidence relevant to the suspected failure.
 |---|---|
 | Repeated invalid command | Misleading help, trigger text, or a missing affordance. |
 | Misinterpreted counts | Field semantics, scope, and sample limits. |
-| Direct store queries | Missing supported retrieval or analytics surface. |
+| Direct store queries | Missing supported retrieval or analytics API. |
 | Missed useful skill | Trigger specificity and task relevance. |
 | Healthy skips treated as failures | Status explanations and grouping. |
 | Repeated fact proposals | The canonical deduplication/validation path. |

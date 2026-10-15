@@ -33,7 +33,7 @@
 //!
 //! Exactly one call. Both stage the same rows through the same public
 //! `apply_unverified` path and close through the same registry. `compact` mode
-//! additionally calls [`GraphDb::compact_snapshot_for_bench`] after the last
+//! also calls [`GraphDb::compact_snapshot_for_bench`] after the last
 //! commit and before the close. That single call swaps grafeo's live store for a
 //! `LayeredStore` (columnar base + empty overlay), which changes what `close`
 //! serializes and what the next `open` has to reconstruct:

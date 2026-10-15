@@ -330,7 +330,7 @@ impl AnalyzerSupervisor {
     ///
     /// An analyzer is owned by exactly one admitted root *URI*: that is the
     /// process's workspace, and it is the identity every caller already checks
-    /// before reaching here. `AdmittedRoot` equality additionally compares the
+    /// before reaching here. `AdmittedRoot` equality also compares the
     /// optional scope digest, which binds a presentation URI to a resolved
     /// scope-set and is absent on the plain root the analyzer owner is
     /// constructed with. Comparing the whole value therefore rejected every

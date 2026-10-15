@@ -417,7 +417,7 @@ impl ProjectOpenFailure {
     }
 
     /// Records a failed open for its route. A `ResetRequired` refusal
-    /// additionally captures the refused store's on-disk fingerprint so a
+    /// also captures the refused store's on-disk fingerprint so a
     /// later retry can distinguish "still the refused files" from "the
     /// operator reset the store on disk".
     fn recorded_for_route(error: &TraceDecayError, route: &ProjectRouteKey) -> Self {

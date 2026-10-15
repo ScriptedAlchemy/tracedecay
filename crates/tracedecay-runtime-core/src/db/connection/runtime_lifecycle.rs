@@ -138,7 +138,7 @@ impl Database {
     /// ```
     ///
     /// The runtime already carries its typed binding, verified locator, and
-    /// opened file identity. A read-write facade additionally retains the
+    /// opened file identity. A read-write facade also retains the
     /// originating authority; a read-only facade never requests it. Neither
     /// mode derives identity from a path or extracts the physical attachment.
     pub async fn publish_runtime(
