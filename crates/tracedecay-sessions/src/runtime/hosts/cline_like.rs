@@ -25,6 +25,7 @@ use crate::admission::HostAdmission;
 use crate::admission::{HostAdmissionOutcome, HostAdmissionStatus};
 use crate::observation::ObservationCancellation;
 use crate::runtime::SessionMessageRecord;
+use crate::runtime::ingest::quarantine::SourceSweep;
 use crate::runtime::shared::{
     ProjectMembership, ProjectRootMatcherCache, TranscriptLocation, TranscriptLocationMetadataKeys,
     append_location_metadata, append_tool_calls_metadata, append_usage_metadata,
@@ -375,6 +376,29 @@ pub async fn capture_cline_like_snapshot_observations(
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<SnapshotCaptureOutcome> {
+    capture_cline_like_snapshot_observations_with_sweep(
+        facade,
+        source,
+        project_root,
+        scope,
+        max_new_bytes,
+        cancellation,
+        &mut SourceSweep::new(source.provider, None),
+    )
+    .await
+}
+
+/// A task the store permanently refuses is reported in `sweep` and skipped
+/// until any of its files changes.
+pub(crate) async fn capture_cline_like_snapshot_observations_with_sweep(
+    facade: &dyn HostAdmission,
+    source: &ClineLikeSource,
+    project_root: &Path,
+    scope: ObservationScopeV1,
+    max_new_bytes: Option<u64>,
+    cancellation: &ObservationCancellation,
+    sweep: &mut SourceSweep,
+) -> TranscriptIngestResult<SnapshotCaptureOutcome> {
     let source = source.clone();
     let project_root = project_root.to_path_buf();
     capture_snapshot_observations(
@@ -383,6 +407,7 @@ pub async fn capture_cline_like_snapshot_observations(
         scope,
         cancellation,
         max_new_bytes,
+        sweep,
         {
             let source = source.clone();
             let project_root = project_root.clone();
@@ -392,6 +417,14 @@ pub async fn capture_cline_like_snapshot_observations(
                     TranscriptDiscoveryBounds::from_discovered_units(MAX_TASKS_PER_PASS),
                 )
             }
+        },
+        |path| {
+            let task_dir = path.parent().unwrap_or(path).to_path_buf();
+            let members = [path.to_path_buf(), task_dir.join("ui_messages.json")]
+                .into_iter()
+                .chain(TASK_METADATA_FILES.iter().map(|name| task_dir.join(name)))
+                .collect();
+            (task_dir, members)
         },
         {
             let provider = source.provider;

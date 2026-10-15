@@ -6,6 +6,8 @@ use sha2::{Digest, Sha256};
 use tracedecay_runtime_core::resident_memory::ProcessSharedMemoryReservationV1;
 
 use super::failure::{ProviderRunOutcome, TranscriptCatchUpFailure};
+use crate::admission::HostAdmissionStatus;
+use crate::runtime::hosts::claude_observation::ClaudeObservationIngestError;
 use crate::runtime::hosts::codex::{
     CodexDiscoveryHub, candidate_charge, change_stamp, codex_corpus_identity,
 };
@@ -13,7 +15,10 @@ use crate::runtime::jsonl_observation_admission::reserve_shared_jsonl_bytes;
 use crate::runtime::source::{
     TranscriptIngestError, TranscriptIngestResult, run_blocking_transcript_section,
 };
-use crate::runtime::{classify_transcript_ingest_disposition, classify_transcript_ingest_failure};
+use crate::runtime::{
+    classify_claude_observation_failure, classify_transcript_ingest_disposition,
+    classify_transcript_ingest_failure,
+};
 
 #[derive(Clone, Default)]
 pub(crate) struct SourceLedger {
@@ -129,16 +134,7 @@ impl Witness {
             len,
         }
     }
-}
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the snapshot providers adopt multi-file witnesses"
-    )
-)]
-impl Witness {
     fn settled_files(members: &[PathBuf]) -> TranscriptIngestResult<Option<Self>> {
         let mut hasher = Sha256::new();
         hasher.update(b"tracedecay-source-member-files-witness-v1");
@@ -282,6 +278,21 @@ impl SourceFailure for TranscriptIngestError {
     }
 }
 
+impl SourceFailure for ClaudeObservationIngestError {
+    fn catch_up_failure(&self, provider: &'static str) -> (TranscriptCatchUpFailure, bool) {
+        let class = classify_claude_observation_failure(self);
+        (
+            TranscriptCatchUpFailure::new(
+                provider,
+                "observation",
+                class.reason_code,
+                class.retryable,
+            ),
+            !class.retryable && class.status == HostAdmissionStatus::Degraded,
+        )
+    }
+}
+
 pub(crate) struct SourceSweep {
     provider: &'static str,
     ledger: Option<SourceLedger>,
@@ -310,6 +321,34 @@ impl SourceSweep {
             return Ok(None);
         }
         SourceClaim::observe_file(self.provider, self.ledger.clone(), path).await
+    }
+
+    pub(crate) fn observe_stream(
+        &mut self,
+        container: &Path,
+        stream: &str,
+        content: &[&[u8]],
+    ) -> Option<SourceClaim> {
+        let key = SourceKey {
+            origin: container.to_path_buf(),
+            stream: Some(stream.into()),
+        };
+        if self.blocked.contains(&key) {
+            return None;
+        }
+        let witness = Witness::content(content);
+        if self
+            .ledger
+            .as_ref()
+            .is_some_and(|ledger| ledger.holds(&key, witness))
+        {
+            self.blocked.insert(key);
+            return None;
+        }
+        Some(SourceClaim {
+            settled: self.ledger.clone().map(|ledger| (ledger, witness)),
+            key,
+        })
     }
 
     pub(crate) fn refused<E: SourceFailure>(
@@ -346,44 +385,6 @@ impl SourceSweep {
         outcome.failures.splice(0..0, self.failures);
     }
 
-    pub(crate) fn observe_stream(
-        &mut self,
-        container: &Path,
-        stream: &str,
-        content: &[&[u8]],
-    ) -> Option<SourceClaim> {
-        let key = SourceKey {
-            origin: container.to_path_buf(),
-            stream: Some(stream.into()),
-        };
-        if self.blocked.contains(&key) {
-            return None;
-        }
-        let witness = Witness::content(content);
-        if self
-            .ledger
-            .as_ref()
-            .is_some_and(|ledger| ledger.holds(&key, witness))
-        {
-            self.blocked.insert(key);
-            return None;
-        }
-        Some(SourceClaim {
-            settled: self.ledger.clone().map(|ledger| (ledger, witness)),
-            key,
-        })
-    }
-}
-
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the snapshot providers adopt these observations")
-)]
-impl SourceSweep {
-    #[expect(
-        dead_code,
-        reason = "the JSONL providers observe through it on their blocking threads"
-    )]
     pub(crate) fn ledger(&self) -> Option<SourceLedger> {
         self.ledger.clone()
     }

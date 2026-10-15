@@ -542,6 +542,19 @@ pub fn classify_claude_observation_failure(
             }
         }
     };
+    // A policy or detector fault rejects every record alike until the
+    // sanitizer is repaired; only the remaining refusals name the record.
+    let privacy = |error: &tracedecay_privacy::PrivacySanitizerError| match error {
+        tracedecay_privacy::PrivacySanitizerError::InvalidPolicy
+        | tracedecay_privacy::PrivacySanitizerError::DetectorUnavailable => {
+            ClaudeObservationFailureClass {
+                reason_code: "observation_privacy_rejected",
+                retryable: false,
+                status: Unavailable,
+            }
+        }
+        _ => permanent("observation_privacy_rejected"),
+    };
     let transcript = |error: &source::TranscriptIngestError| {
         let disposition = classify_transcript_ingest_disposition(error);
         ClaudeObservationFailureClass {
@@ -555,7 +568,7 @@ pub fn classify_claude_observation_failure(
         Ingest::Domain(_) => permanent("observation_domain_invalid"),
         Ingest::Contract(_) => permanent("observation_contract_invalid"),
         Ingest::Request(_) => permanent("observation_request_invalid"),
-        Ingest::Privacy(_) => permanent("observation_privacy_rejected"),
+        Ingest::Privacy(error) => privacy(error),
         Ingest::Store(error) => store(error),
         Ingest::Projection(error) => projection(error),
         Ingest::Transcript(error) => transcript(error),
@@ -568,9 +581,7 @@ pub fn classify_claude_observation_failure(
             crate::observation::ObservationApplicationError::Contract(_) => {
                 permanent("observation_contract_invalid")
             }
-            crate::observation::ObservationApplicationError::Privacy(_) => {
-                permanent("observation_privacy_rejected")
-            }
+            crate::observation::ObservationApplicationError::Privacy(error) => privacy(error),
             // A batch reached the durable persist path carrying a rejected or
             // quarantined outcome. That is an admission invariant break, not a
             // transient source or authority fault, so re-running cannot fix it.

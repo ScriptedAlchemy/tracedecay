@@ -46,6 +46,7 @@ async fn sweep_pass(
             project_id: ProjectId::new("project.cursor-sweep-page").unwrap(),
         },
         &ObservationCancellation::default(),
+        &mut SourceSweep::new("cursor", None),
     )
     .await
     .unwrap()

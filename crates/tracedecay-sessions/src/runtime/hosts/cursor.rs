@@ -23,6 +23,7 @@ use tracedecay_store::observation::ObservationCoverageReason;
 
 use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
+use crate::runtime::ingest::quarantine::SourceSweep;
 use crate::runtime::ingest_byte_budget::IngestByteBudget;
 use crate::runtime::jsonl_observation_admission::{
     JsonlFrameAdmission, JsonlObservationAdmissionProgress, JsonlObservationAdmissionRequest,
@@ -562,6 +563,7 @@ pub(in crate::runtime) fn try_ingest_cursor_project_sweep_capped_with_session_id
     max_new_bytes: Option<u64>,
     skip_session_ids: std::collections::HashSet<String, S>,
     cancellation: &'a ObservationCancellation,
+    sweep: &'a mut SourceSweep,
 ) -> Pin<Box<dyn Future<Output = TranscriptIngestResult<CursorSweepIngestOutcome>> + Send + 'a>> {
     // Rehash into the default (Send) hasher before boxing so the returned
     // future never captures the caller's `S` hasher and stays `Send`.
@@ -578,6 +580,7 @@ pub(in crate::runtime) fn try_ingest_cursor_project_sweep_capped_with_session_id
             max_new_bytes,
             ObservationScopeV1::Project { project_id },
             cancellation,
+            sweep,
         )
         .await
     })
@@ -591,6 +594,7 @@ pub(in crate::runtime) async fn try_ingest_cursor_user_sweep_capped_with_session
     max_new_bytes: Option<u64>,
     skip_session_ids: std::collections::HashSet<String, S>,
     cancellation: &ObservationCancellation,
+    sweep: &mut SourceSweep,
 ) -> TranscriptIngestResult<CursorSweepIngestOutcome> {
     let Some(source) = CursorSweepSource::new() else {
         return Ok(CursorSweepIngestOutcome::default());
@@ -604,6 +608,7 @@ pub(in crate::runtime) async fn try_ingest_cursor_user_sweep_capped_with_session
         max_new_bytes,
         ObservationScopeV1::Profile,
         cancellation,
+        sweep,
     )
     .await
 }
@@ -627,6 +632,7 @@ async fn admit_cursor_sweep_observations_with_session_ids(
     max_new_bytes: Option<u64>,
     scope: ObservationScopeV1,
     cancellation: &ObservationCancellation,
+    sweep: &mut SourceSweep,
 ) -> TranscriptIngestResult<CursorSweepIngestOutcome> {
     if cancellation.is_cancelled() {
         return Err(TranscriptIngestError::Cancelled { provider: "cursor" });
@@ -659,6 +665,9 @@ async fn admit_cursor_sweep_observations_with_session_ids(
             let Some(parent_session_id) = sweep_parent_session_id(path) else {
                 continue;
             };
+            let Some(claim) = sweep.observe_file(path).await? else {
+                continue;
+            };
             let event = cursor_sweep_event(
                 &parent_session_id,
                 project_root,
@@ -684,15 +693,22 @@ async fn admit_cursor_sweep_observations_with_session_ids(
             // scanned. One rescan starts from the peer's durable cursor. If that
             // also loses, the file's cursor is unchanged and the next pass resumes
             // at its session. Do not fail the rest of the sweep.
-            let progress = match admit_file().await {
+            let admitted_file = match admit_file().await {
                 Err(error) if retryable_cursor_conflict(&error) => match admit_file().await {
                     Err(error) if retryable_cursor_conflict(&error) => {
                         unfinished.get_or_insert(page.start + offset);
                         continue;
                     }
-                    other => other?,
+                    other => other,
                 },
-                other => other?,
+                other => other,
+            };
+            let progress = match admitted_file {
+                Ok(progress) => progress,
+                Err(error) => {
+                    sweep.refused(claim, error)?;
+                    continue;
+                }
             };
             if progress.source_deferred {
                 unfinished.get_or_insert(page.start + offset);

@@ -31,6 +31,7 @@ use tracedecay_capture::normalize_timestamp_secs;
 use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
 use crate::runtime::SessionMessageRecord;
+use crate::runtime::ingest::quarantine::SourceSweep;
 use crate::runtime::shared::{
     ProjectMembership, ProjectRootMatcherCache, TranscriptLocation, TranscriptLocationMetadataKeys,
     TranscriptScopeMatcher, append_location_metadata, append_tool_calls_metadata,
@@ -268,14 +269,39 @@ pub async fn capture_kiro_snapshot_observations(
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<SnapshotCaptureOutcome> {
+    capture_kiro_snapshot_observations_with_sweep(
+        facade,
+        source,
+        project_root,
+        scope,
+        max_new_bytes,
+        cancellation,
+        &mut SourceSweep::new(PROVIDER, None),
+    )
+    .await
+}
+
+/// A snapshot the store permanently refuses is reported in `sweep` and
+/// skipped until it or its workspace metadata changes.
+pub(crate) async fn capture_kiro_snapshot_observations_with_sweep(
+    facade: &dyn HostAdmission,
+    source: &KiroSource,
+    project_root: &Path,
+    scope: ObservationScopeV1,
+    max_new_bytes: Option<u64>,
+    cancellation: &ObservationCancellation,
+    sweep: &mut SourceSweep,
+) -> TranscriptIngestResult<SnapshotCaptureOutcome> {
     let source = source.clone();
     let project_root = project_root.to_path_buf();
+    let workspace_storage_dir = source.workspace_storage_dir.clone();
     capture_snapshot_observations(
         facade,
         PROVIDER,
         scope,
         cancellation,
         max_new_bytes,
+        sweep,
         {
             let source = source.clone();
             let project_root = project_root.clone();
@@ -285,6 +311,14 @@ pub async fn capture_kiro_snapshot_observations(
                     TranscriptDiscoveryBounds::from_discovered_units(MAX_TRANSCRIPTS_PER_PASS),
                 )
             }
+        },
+        move |path| {
+            let mut members = vec![path.to_path_buf()];
+            members.extend(
+                workspace_hash_from_path(path)
+                    .map(|hash| workspace_metadata_path(&workspace_storage_dir, &hash)),
+            );
+            (path.to_path_buf(), members)
         },
         {
             let source = source.clone();
