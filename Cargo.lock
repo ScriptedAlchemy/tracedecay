@@ -7174,6 +7174,7 @@ dependencies = [
  "tokio",
  "tracedecay-contracts",
  "tracedecay-domain",
+ "tracedecay-rusqlite-runtime",
  "tracedecay-store",
  "tracedecay-tool-catalog",
  "tracing",

@@ -59,7 +59,13 @@ enum Command {
 }
 
 fn main() -> ExitCode {
-    match Cli::parse().command {
+    let command = Cli::parse().command;
+    if let Err(error) = tracedecay_runtime_core::native_runtime::install(
+        tracedecay_runtime_core::native_runtime::default_builder(),
+    ) {
+        return invalid("runtime", error);
+    }
+    match command {
         Command::Validate {
             repo_root,
             workload,

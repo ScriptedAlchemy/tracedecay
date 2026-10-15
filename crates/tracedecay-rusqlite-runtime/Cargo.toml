@@ -9,6 +9,9 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [features]
 test-transport = []
+# Starts a default native runtime on first use when the host never called
+# `native_runtime::install`. Tests only; production hosts install at startup.
+test-runtime = []
 
 [dependencies]
 async-channel = "2.5.0"
@@ -34,7 +37,10 @@ tracing = "0.1"
 libc = "0.2"
 
 [dev-dependencies]
-tokio = { version = "1", default-features = false, features = ["macros", "rt", "rt-multi-thread", "sync", "test-util", "time"] }
+# Self dev-dependency: every workspace test build shares one resolution, so
+# this gives each test the lazy default runtime.
+tracedecay-rusqlite-runtime = { path = ".", features = ["test-runtime"] }
+tokio ={ version = "1", default-features = false, features = ["macros", "rt", "rt-multi-thread", "sync", "test-util", "time"] }
 proptest = { version = "1.11.0", default-features = false, features = ["std"] }
 tempfile = "3"
 tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog" }
