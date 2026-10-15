@@ -563,9 +563,8 @@ fn run_snapshot<E: ReaderQueryExecutor>(
                 // Any read starts the snapshot; counting the schema would
                 // read every schema page on each pinned snapshot.
                 let result = transaction
-                    .query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema)", [], |row| {
-                        row.get::<_, i64>(0)
-                    })
+                    .prepare_cached("SELECT EXISTS(SELECT 1 FROM sqlite_schema)")
+                    .and_then(|mut statement| statement.query_row([], |row| row.get::<_, i64>(0)))
                     .map(|_| ())
                     .map_err(|error| {
                         ReaderWorkerError::Storage(StorageRuntimeErrorV1::Infrastructure {

@@ -83,6 +83,7 @@ paths, so do **not** commit run artifacts.
 | `REPS` | `1` | repetitions per scenario x host x model x condition cell; `>1` suffixes transcripts with `__r<N>` and the grader pools the repetitions, so a cell of n=15 gives a usable exact-binomial interval instead of a single draw |
 | `PARALLEL` | `1` | concurrent live agent runs; scenarios are read-only against shared fixtures and each `claude` process spawns its own MCP server, so `4` is a safe default for high-rep cells |
 | `REPEATED_QUERY_HINTS` | `off` | `on` turns on the profile setting `user.repeated_query_hints.v1` for the eval's isolated profile before any agent launches, and suffixes transcripts with `__qhints`; see "Repeated-query hints on vs off" |
+| `REAL_CLAUDE_DIR` | `$CLAUDE_CONFIG_DIR` or `~/.claude` | where the Claude credential comes from: its `.claude_code_oauth_token` and `settings.json` `env`/`model` keys; see "Store isolation & auth" |
 | `TRACEDECAY_BIN` | candidate branch (live) | explicit tracedecay binary override |
 | `EVAL_OUT` | unset | dir to copy scoreboard + report into |
 | `LEARNED_SKILL_WORKFLOW` | unset | run only that workflow's held-out scenarios, once per variant, on `full` |
@@ -102,13 +103,23 @@ The runner points `TRACEDECAY_DATA_DIR` at a throwaway dir and sets
 `TRACEDECAY_DISABLE_GLOBAL_DB=1`, so the fixture graph and seeded facts never
 touch your real tracedecay store, and `tracedecay init` stays fast (indexing the
 multi-thousand-node global DB is what makes a naive `init` hang). Each host gets
-a throwaway `HOME` and config directory. Only its auth file is copied in, mode
-`0400`; the copy is deleted on runner exit. For Claude the `env` and `model`
-keys of the real `settings.json` travel too, because a profile aimed at a
-non-Anthropic endpoint authenticates through `ANTHROPIC_BASE_URL` /
-`ANTHROPIC_API_KEY` there rather than through `.credentials.json`; permissions,
-plugins, hooks, and every other key stay behind. The real Claude/Codex profile
-is never loaded or mutated. Name the model exactly as the profile does
+a throwaway `HOME` and config directory. Codex gets a copy of `auth.json`, mode
+`0400`, deleted on runner exit. Claude never gets a copy of `.credentials.json`:
+its refresh token is shared with the real login, so a refresh inside an eval
+would sign the real profile out. Claude runs authenticate with
+`CLAUDE_CODE_OAUTH_TOKEN`, or with a `claude setup-token` grant saved as
+`.claude_code_oauth_token` in the auth source directory (`REAL_CLAUDE_DIR`,
+default `~/.claude`). The runner exits 5 before building fixtures when no such
+credential or endpoint key exists. The `env` and `model` keys of the
+real `settings.json` travel too, because a profile aimed at a non-Anthropic
+endpoint authenticates through `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY`
+there; permissions, plugins, hooks, and every other key stay behind. The real
+Claude/Codex profile is never loaded or mutated.
+
+Codex starts plugin MCP servers with a minimal environment, so the runner adds
+the isolated daemon's `TRACEDECAY_*` variables to the installed plugin's
+`env_vars`. Without them `serve` looks for a daemon under the throwaway `HOME`,
+fails, and Codex drops the graph server without any transcript error. Name the model exactly as the profile does
 (`CLAUDE_MODELS='k3[1m]'`, not `opus`) so transcripts and scoreboards carry the
 model that actually answered; an alias resolved through
 `ANTHROPIC_DEFAULT_*_MODEL` would be mislabelled.
@@ -349,17 +360,25 @@ for example on a binary that does not register the key. Run and record both
 settings on the same scenarios:
 
 ```sh
-TRACEDECAY_AGENT_EVALS=1 HOSTS=claude CLAUDE_MODELS=sonnet REPS=4 \
-  SCENARIOS="loop_absent_stock_release narrow_availability_call_chain" \
-  REPEATED_QUERY_HINTS=on evals/agent_adoption/run.sh
+pack="$(cd evals/agent_adoption/scenarios && grep -l repeated_query_class *.json | sed 's/.json$//' | tr '\n' ' ')"
+TRACEDECAY_AGENT_EVALS=1 HOSTS=claude CLAUDE_MODELS=sonnet REPS=3 PARALLEL=4 \
+  SCENARIOS="$pack" REPEATED_QUERY_HINTS=on evals/agent_adoption/run.sh
 # then the same command with REPEATED_QUERY_HINTS=off
 ```
 
-`loop_absent_stock_release` asks for behavior the fixture lacks, so agents tend
-to re-query with variants. `narrow_availability_call_chain` needs several
-related caller queries, so a hint there is a false-positive opportunity. The
-`__qhints` suffix keeps the two runs' transcripts apart, so one grade covers
-both:
+Scenarios in this pack carry `repeated_query_class`, the situation the
+hint must handle:
+
+| class | scenario | the hint should |
+|---|---|---|
+| `stuck_loop` | `loop_absent_stock_release`, `loop_retry_absent_release` | fire on a near repeat and help the agent stop |
+| `narrowing` | `narrow_availability_call_chain`, `narrow_inventory_bodies` | not fire |
+| `pagination` | `page_every_function` | not fire |
+| `changed_scope` | `scope_branch_pricing_notes` | not fire |
+| `repeated_verification` | `verify_callers_recheck` | fire only harmlessly: the prompt asks for an identical re-check |
+
+The `__qhints` suffix keeps the two runs' transcripts apart, so one grade
+covers both:
 
 ```sh
 merged="$(mktemp -d)"
@@ -368,24 +387,25 @@ cp <off-run-dir>/*__*.stdout.jsonl <off-run-dir>/*__*.meta.json \
 python3 evals/agent_adoption/grade.py --run-dir "$merged"
 ```
 
-Each scoreboard result carries `repeated_query_hints`, `cost` (Claude
-`total_cost_usd`, `num_turns`, and input/output/cache tokens; Codex tokens
-only; unreported fields stay `null`), and `repeated_query_hint_next_steps`:
-one entry per hint block, naming the next tool call or `answer`.
-`cost_and_hints` and the report's **Outcome, cost, and repeated-query hints**
-table put the `hints-on` and `hints-off` cells of each host/model and
-condition side by side. Read outcome first, then cost and turns. A hint
-helped when hints-on keeps or raises outcome at lower cost on the loop
-scenario; on the narrowing scenario any hint is a false positive, and a lower
-outcome or extra cost there is harm. `after hint` shows whether agents
-changed course (a different tool or an answer) or repeated the same tool. At
-`REPS=4`, read differences as direction, not significance; check transcripts
-before claiming either way.
+Each scoreboard result carries `repeated_query_hints`, `repeated_query_class`,
+`cost` (Claude `total_cost_usd`, `num_turns`, and input/output/cache tokens;
+Codex tokens only; unreported fields stay `null`), and
+`repeated_query_hint_next_steps`: one entry per hint block, naming the next
+tool call or `answer`. `cost_and_hints` and the report's **Outcome, cost, and
+repeated-query hints** table put the `hints-on` and `hints-off` cells of each
+host/model and condition side by side; `repeated_query_scenarios` and its
+**Per repeated-query scenario** table split them per scenario. `completed` is
+the share of runs that ended with an answer. Read outcome first, then cost and
+turns. A hint helped when hints-on keeps or raises outcome at lower cost on a
+`stuck_loop` scenario; on a class where it should not fire, any hint is a
+false positive, and a lower outcome or extra cost there is harm. `after hint`
+shows whether agents changed course (a different tool or an answer) or
+repeated the same tool. At `REPS=3`, read differences as direction, not
+significance; the outcome column checks fragments, so review the final
+answers before claiming either way.
 
-Use Claude for this comparison. The hint is added by `tracedecay serve`, and
-Codex in this harness reaches TraceDecay through the `tracedecay-explorer`
-extension and the shell instead: 12 Codex runs of these two scenarios made no
-`serve` call, so no hint could fire in either setting.
+Both hosts deliver the hint through `tracedecay serve`. Claude runs `serve`
+from the harness MCP config; Codex runs it as the plugin's `graph` server.
 
 ## Adding a scenario
 
@@ -532,9 +552,9 @@ The report's learned-skill table gives, per variant and model:
 The table ranks nothing and prints no verdict. Read it with `n` and the invalid
 count beside every rate.
 
-Both live steps need current host logins. The runner copies the Claude
-credential read-only, so a copied login whose access token has already expired
-fails every run with `authentication_failed`; those runs land in the invalid
-count, not in the outcome columns. Refresh the login with an interactive
-`claude` session first. Generation stops with the backend's error when the
+Both live steps need current host credentials: a Claude setup-token (see
+"Store isolation & auth") and a Codex `auth.json` whose login is still valid.
+A Codex copy whose access token has expired and whose refresh token was
+already used fails every run with `401`; those runs land in the invalid count,
+not in the outcome columns. Generation stops with the backend's error when the
 codex account is over its usage limit.

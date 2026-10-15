@@ -74,6 +74,12 @@ impl DoctorTestRuntime {
             .profile_sessions()
             .await
             .expect("mount Doctor test profile session store");
+        // The relation graph opens as background work after the mount
+        // returns; diagnosing before it settles reports it unavailable.
+        registry
+            .settle_profile_session_graph()
+            .await
+            .expect("settle Doctor test profile session relation graph");
         Self {
             database,
             _registry: registry,

@@ -1,0 +1,46 @@
+{
+  "id": "verify_callers_recheck",
+  "category": "call_tracing",
+  "pack": "pack_repeated_query",
+  "hosts": [
+    "claude",
+    "codex"
+  ],
+  "fixture": "main",
+  "status": "active",
+  "prompt": "Before I rename reserve_stock, confirm that place_order is its only caller. Look up its callers, then look them up a second time to make sure the answer is stable, and tell me whether the rename is safe.",
+  "expected_tools": {
+    "required_first": [
+      "tracedecay_callers",
+      "tracedecay_impact",
+      "tracedecay_search",
+      "tracedecay_context"
+    ],
+    "acceptable": [
+      "tracedecay_grep",
+      "tracedecay_rename_preview",
+      "tracedecay_source_body",
+      "Read"
+    ],
+    "forbidden_first": [
+      "Grep",
+      "Glob"
+    ],
+    "forbidden_bash": [
+      "grep",
+      "rg ",
+      "rg\t",
+      "find ",
+      "cat ",
+      "sed ",
+      "awk ",
+      "ack "
+    ]
+  },
+  "ground_truth": [
+    "place_order"
+  ],
+  "max_tool_calls": 6,
+  "repeated_query_class": "repeated_verification",
+  "notes": "Repeated verification without an edit: the prompt asks for an identical second lookup, whose unchanged answer the heuristic counts as a loop. The hint fires by design here; it should not change the answer or add calls."
+}

@@ -16,7 +16,7 @@ use tracedecay_store::{
     ObservationCursorAdvance, RepositoryProvenanceAttachmentV1, RetrievalAnchorDispositionRecordV1,
 };
 
-use super::super::support::{decode, encode, invalid, same_json};
+use super::super::support::{CachedStatements, decode, encode, invalid, same_json};
 use super::cursor_authority::{
     READ_CURSOR_ADVANCE_SQL, READ_SOURCE_CURSOR_SQL, cursor_advance_ledger_row_matches,
 };
@@ -27,7 +27,7 @@ pub(super) fn persist_sanitization_receipt(
 ) -> rusqlite::Result<()> {
     let receipt_json = encode(receipt)?;
     let receipt_id = receipt.receipt().receipt_id().as_str();
-    connection.execute(
+    connection.execute_cached(
         "INSERT INTO sanitization_receipts (
             receipt_id, sanitizer_version, payload_digest, receipt_json
          ) VALUES (?1, ?2, ?3, ?4)
@@ -41,7 +41,7 @@ pub(super) fn persist_sanitization_receipt(
             receipt_json,
         ],
     )?;
-    let stored_receipt: String = connection.query_row(
+    let stored_receipt: String = connection.query_row_cached(
         "SELECT receipt_json FROM sanitization_receipts WHERE receipt_id = ?1",
         [receipt_id],
         |row| row.get(0),
@@ -59,7 +59,7 @@ pub(super) fn cursor_advance_receipt_matches(
     advance: &ObservationCursorAdvance,
 ) -> rusqlite::Result<bool> {
     let stored = connection
-        .query_row(
+        .query_row_cached(
             READ_CURSOR_ADVANCE_SQL,
             params![source_json, scope_json, encode(&advance.coverage())?],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
@@ -77,7 +77,7 @@ pub(super) fn cursor_advance_receipt_matches(
     }
     if let Some(receipt) = advance.sanitization_receipt() {
         let receipt_json = connection
-            .query_row(
+            .query_row_cached(
                 "SELECT receipt_json FROM sanitization_receipts WHERE receipt_id = ?1",
                 [receipt.receipt().receipt_id().as_str()],
                 |row| row.get::<_, String>(0),
@@ -96,7 +96,7 @@ pub(super) fn persist_retrieval_anchor(
 ) -> rusqlite::Result<()> {
     let anchor_json = encode(anchor)?;
     let owner_json = encode(anchor.owner())?;
-    let inserted = connection.execute(
+    let inserted = connection.execute_cached(
         "INSERT INTO retrieval_anchors (
             anchor_id, anchor_json, owner_json, projection_generation
          ) VALUES (?1, ?2, ?3, ?4)
@@ -114,7 +114,7 @@ pub(super) fn persist_retrieval_anchor(
         return verify_retrieval_anchor(connection, anchor);
     }
     for alias in anchor.aliases() {
-        connection.execute(
+        connection.execute_cached(
             "INSERT INTO retrieval_anchor_aliases (
                 owner_json, alias_kind, locator_digest, anchor_id
              ) VALUES (?1, ?2, ?3, ?4)
@@ -139,7 +139,7 @@ fn verify_retrieval_anchor(
 ) -> rusqlite::Result<()> {
     let owner_json = encode(anchor.owner())?;
     let stored = connection
-        .query_row(
+        .query_row_cached(
             "SELECT anchor_json, owner_json, projection_generation
              FROM retrieval_anchors WHERE anchor_id = ?1",
             [anchor.anchor_id().as_str()],
@@ -165,7 +165,7 @@ fn verify_retrieval_anchor(
     let mut owned_aliases = 0_usize;
     for alias in anchor.aliases() {
         let stored_anchor_id = connection
-            .query_row(
+            .query_row_cached(
                 "SELECT anchor_id FROM retrieval_anchor_aliases
                  WHERE owner_json = ?1 AND alias_kind = ?2 AND locator_digest = ?3",
                 params![
@@ -185,7 +185,7 @@ fn verify_retrieval_anchor(
             return Err(invalid("retrieval anchor alias collision"));
         }
     }
-    let alias_count = connection.query_row(
+    let alias_count = connection.query_row_cached(
         "SELECT COUNT(*) FROM retrieval_anchor_aliases
          WHERE owner_json = ?1 AND anchor_id = ?2",
         params![owner_json, anchor.anchor_id().as_str()],
@@ -206,7 +206,7 @@ fn cline_alias_transition_is_valid(
     current_anchor_id: &str,
 ) -> rusqlite::Result<bool> {
     let Some(current_json) = connection
-        .query_row(
+        .query_row_cached(
             "SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = ?1",
             [current_anchor_id],
             |row| row.get::<_, String>(0),
@@ -239,7 +239,7 @@ fn cline_alias_transition_is_valid(
         return Ok(false);
     }
     let Some((anchor_json, current_json)) = connection
-        .query_row(
+        .query_row_cached(
             "SELECT candidate.observation_json, current.observation_json
              FROM observations AS candidate
              JOIN observations AS current ON current.observation_id = ?2
@@ -269,7 +269,7 @@ fn cline_alias_transition_is_valid(
         return Ok(false);
     }
     let Some(disposition_json) = connection
-        .query_row(
+        .query_row_cached(
             "SELECT record_json FROM retrieval_anchor_dispositions
              WHERE anchor_id = ?1 ORDER BY sequence DESC LIMIT 1",
             [anchor.anchor_id().as_str()],
@@ -369,13 +369,13 @@ pub(super) fn persist_repository_provenance(
     }
     let slim = slim_repository_provenance(attachment)?;
     if let Some((capture_id, capture_json)) = &slim.capture {
-        connection.execute(
+        connection.execute_cached(
             "INSERT OR IGNORE INTO observation_repository_captures (capture_id, capture_json)
              VALUES (?1, ?2)",
             params![capture_id, capture_json],
         )?;
     }
-    connection.execute(
+    connection.execute_cached(
         "INSERT INTO observation_repository_provenance (
             observation_id, availability_json, capture_json, retrieval_anchor_id, owner_json
          ) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -401,7 +401,7 @@ pub(super) fn verify_observation_authority(
 ) -> rusqlite::Result<()> {
     let observation_id = write.observation().observation_id().as_str();
     let bound_anchor_id = connection
-        .query_row(
+        .query_row_cached(
             "SELECT anchor_id FROM observation_retrieval_anchors WHERE observation_id = ?1",
             [observation_id],
             |row| row.get::<_, String>(0),
@@ -414,7 +414,7 @@ pub(super) fn verify_observation_authority(
 
     let attachment = write.repository_provenance_attachment();
     let stored = connection
-        .query_row(
+        .query_row_cached(
             &format!(
                 "SELECT {REPOSITORY_PROVENANCE_HYDRATED_COLUMNS},
                         repository.retrieval_anchor_id, repository.owner_json
@@ -576,7 +576,7 @@ pub(super) fn read_cursor(
     scope_json: &str,
 ) -> rusqlite::Result<Option<ObservationSourceCursorV1>> {
     connection
-        .query_row(
+        .query_row_cached(
             READ_SOURCE_CURSOR_SQL,
             params![source_json, scope_json],
             |row| row.get::<_, String>(0),

@@ -5,6 +5,7 @@ use tracedecay_domain::{
     UtcMicros,
 };
 use tracedecay_store::{
+    CLEAR_CURRENT_DIAGNOSTIC_PUBLICATION_SQL, CLEAR_CURRENT_DIAGNOSTICS_SQL,
     DIAGNOSTIC_STATE_CLEARED, DIAGNOSTIC_STATE_CURRENT, DiagnosticReadOperationV1,
     DiagnosticReadResultV1, DiagnosticRecordStateKindV1, SanitizedCleanDiagnosticSnapshotV1,
     diagnostic_evidence_class_name, diagnostic_producer_kind_name, diagnostic_severity_name,
@@ -104,21 +105,12 @@ impl DiagnosticExecutor {
         }
 
         savepoint.execute(
-            "UPDATE generation_diagnostics
-             SET record_state = ?1, state_generation = ?2
-             WHERE record_state = ?3 AND generation_id != ?2
-             AND (generation_id, publication_revision) IN (
-               SELECT generation_id, publication_revision
-               FROM diagnostic_generation_publications
-               WHERE record_state = ?3
-             )",
+            CLEAR_CURRENT_DIAGNOSTICS_SQL,
             params![CLEARED, generation.as_str(), CURRENT],
         )?;
         savepoint.execute(
-            "UPDATE diagnostic_generation_publications
-             SET record_state = ?1, state_generation = ?2
-             WHERE record_state = ?3",
-            params![CLEARED, generation.as_str(), CURRENT],
+            CLEAR_CURRENT_DIAGNOSTIC_PUBLICATION_SQL,
+            params![CLEARED, generation.as_str()],
         )?;
         for record in snapshot.records() {
             insert_record(savepoint, publication_revision, record)?;
@@ -393,4 +385,45 @@ fn parse_producer(value: &str) -> rusqlite::Result<DiagnosticProducerKindV1> {
 fn parse_evidence(value: &str) -> rusqlite::Result<DiagnosticEvidenceClassV1> {
     parse_diagnostic_evidence_class(value)
         .ok_or_else(|| conversion(format!("unknown diagnostic evidence class {value}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::NamedTempFile;
+    use tracedecay_store::{
+        CLEAR_CURRENT_DIAGNOSTIC_PUBLICATION_SQL, CLEAR_CURRENT_DIAGNOSTICS_SQL,
+        GENERATION_DIAGNOSTICS_SCHEMA_DDL,
+    };
+
+    use crate::connection::{ConnectionMode, open};
+
+    #[test]
+    fn clearing_the_current_publication_searches_its_partial_index() {
+        let file = NamedTempFile::new().expect("temporary database");
+        let connection = open(file.path(), ConnectionMode::Writer).expect("writer policy");
+        connection
+            .execute_batch(GENERATION_DIAGNOSTICS_SCHEMA_DDL)
+            .expect("install diagnostics schema");
+        for sql in [
+            CLEAR_CURRENT_DIAGNOSTICS_SQL,
+            CLEAR_CURRENT_DIAGNOSTIC_PUBLICATION_SQL,
+        ] {
+            let mut statement = connection
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .expect("explain diagnostics clear");
+            let unbound = vec![rusqlite::types::Null; statement.parameter_count()];
+            let plan = statement
+                .query_map(rusqlite::params_from_iter(unbound), |row| {
+                    row.get::<_, String>(3)
+                })
+                .expect("read query plan")
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .expect("query plan detail");
+            assert!(
+                plan.iter()
+                    .any(|detail| detail.contains("idx_diagnostic_generation_current")),
+                "{sql}\nmust search the current-publication partial index: {plan:?}"
+            );
+        }
+    }
 }

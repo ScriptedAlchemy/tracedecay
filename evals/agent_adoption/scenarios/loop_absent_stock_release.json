@@ -42,5 +42,6 @@
     "on_hand"
   ],
   "max_tool_calls": 6,
+  "repeated_query_class": "stuck_loop",
   "notes": "Stuck-loop probe: no cancel, release, or restock path exists, so agents tend to re-query with variants. on_hand is only ever decremented, in reserve_stock. The fragments name what exists; an answer that names a release function is wrong whatever it matches, so review the transcript for the absence claim."
 }

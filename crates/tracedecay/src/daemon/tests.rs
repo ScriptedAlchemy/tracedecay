@@ -237,6 +237,11 @@ fn test_store_administration_for_profile(profile_root: &std::path::Path) -> Stor
         .with_profile_identity(profile_identity)
 }
 
+/// Finishes the profile's cold session-runtime open before a client connects.
+///
+/// The handshake's profile binding answers `project_warming` when that open
+/// outlasts its 10 s liveness bound, which a loaded suite run can reach. A
+/// test that is not about warming waits for the open here instead.
 async fn prewarm_test_profile_runtime(store_administration: &StoreAdministration) {
     store_administration
         .registered_profile_database()
@@ -525,32 +530,25 @@ fn test_automation_scheduler_handle(task: JoinHandle<()>) -> AutomationScheduler
 #[cfg(unix)]
 async fn wait_for_automation_scheduler_state(
     engine: &DaemonEngine,
-    deadline: tokio::time::Instant,
-    description: &str,
     mut matches: impl FnMut(
         &std::collections::HashMap<ProjectServerKey, AutomationSchedulerHandle>,
     ) -> bool,
 ) {
-    let message = format!("timed out waiting for {description}");
-    tokio::time::timeout(remaining_test_budget(deadline, &message), async {
-        loop {
-            let changed = engine.automation_scheduler_state_changed.notified();
-            tokio::pin!(changed);
-            changed.as_mut().enable();
-            let schedulers = engine
-                .store_administration
-                .automation_schedulers()
-                .lock()
-                .await;
-            if matches(&schedulers) {
-                return;
-            }
-            drop(schedulers);
-            changed.await;
+    loop {
+        let changed = engine.automation_scheduler_state_changed.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        let schedulers = engine
+            .store_administration
+            .automation_schedulers()
+            .lock()
+            .await;
+        if matches(&schedulers) {
+            return;
         }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("{message}"));
+        drop(schedulers);
+        changed.await;
+    }
 }
 
 #[cfg(unix)]
