@@ -486,9 +486,8 @@ fn log_background_shutdown_receipt(receipt: &tracedecay_daemon_service::shutdown
 /// healthy value for either.
 fn log_runtime_hazards() {
     log_daemon_event(
-        "daemon_shutdown",
+        "daemon_runtime_hazards",
         &[
-            ("outcome", "runtime_hazards".to_string()),
             (
                 "tokio_runtime_missing",
                 native_runtime::tokio_runtime_missing_total().to_string(),

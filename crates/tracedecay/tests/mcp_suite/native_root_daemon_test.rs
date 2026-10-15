@@ -1,7 +1,8 @@
 //! `tracedecay daemon run` drives its root on the native runtime. Its
 //! remaining Tokio sites reach the one Tokio runtime it owns through explicit
-//! handles, so a tool call, an MCP session and a dashboard request skip no
-//! Tokio path, and the stop settles every shutdown owner.
+//! handles. A tool call, an MCP session and a dashboard request succeed
+//! without a writer wait parking a native worker, and the stop settles every
+//! shutdown owner.
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -14,11 +15,11 @@ use crate::serve_harness::{ServeSession, init_project_with_file, serve_command};
 
 const MARKER: &str = "native_root_daemon_marker";
 
-/// The value of `field` on the daemon's `runtime_hazards` shutdown line.
+/// The value of `field` on the daemon's runtime hazards receipt.
 fn runtime_hazard(log: &str, field: &str) -> u64 {
     let line = log
         .lines()
-        .find(|line| line.contains("event=daemon_shutdown outcome=runtime_hazards "))
+        .find(|line| line.contains("event=daemon_runtime_hazards "))
         .unwrap_or_else(|| panic!("the daemon must log its runtime hazards at exit; log={log}"));
     line.split(' ')
         .find_map(|pair| pair.strip_prefix(&format!("{field}=")))
@@ -129,19 +130,14 @@ async fn daemon_on_the_native_root_serves_tool_mcp_and_dashboard_then_stops_clea
     );
 
     assert_eq!(
-        runtime_hazard(&log, "tokio_runtime_missing"),
+        runtime_hazard(&log, "native_thread_writer_waits"),
         0,
-        "no Tokio path may be skipped; log={log}"
-    );
-    eprintln!(
-        "native_thread_writer_waits={}",
-        runtime_hazard(&log, "native_thread_writer_waits")
+        "a writer wait parked a native worker; log={log}"
     );
     for unsettled in [
         "outcome=background_task_unfinished",
         "outcome=client_drain_timeout",
         "outcome=project_server_shutdown_incomplete",
-        "Tokio runtime missing",
         "there is no reactor running",
         "panicked at",
     ] {
