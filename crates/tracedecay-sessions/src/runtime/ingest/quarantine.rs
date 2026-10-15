@@ -6,6 +6,8 @@ use sha2::{Digest, Sha256};
 use tracedecay_runtime_core::resident_memory::ProcessSharedMemoryReservationV1;
 
 use super::failure::{ProviderRunOutcome, TranscriptCatchUpFailure};
+use crate::admission::HostAdmissionStatus;
+use crate::runtime::hosts::claude_observation::ClaudeObservationIngestError;
 use crate::runtime::hosts::codex::{
     CodexDiscoveryHub, candidate_charge, change_stamp, codex_corpus_identity,
 };
@@ -13,7 +15,10 @@ use crate::runtime::jsonl_observation_admission::reserve_shared_jsonl_bytes;
 use crate::runtime::source::{
     TranscriptIngestError, TranscriptIngestResult, run_blocking_transcript_section,
 };
-use crate::runtime::{classify_transcript_ingest_disposition, classify_transcript_ingest_failure};
+use crate::runtime::{
+    classify_claude_observation_failure, classify_transcript_ingest_disposition,
+    classify_transcript_ingest_failure,
+};
 
 #[derive(Clone, Default)]
 pub(crate) struct SourceLedger {
@@ -129,16 +134,14 @@ impl Witness {
             len,
         }
     }
-}
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the snapshot providers adopt multi-file witnesses"
-    )
-)]
-impl Witness {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the snapshot providers adopt multi-file witnesses"
+        )
+    )]
     fn settled_files(members: &[PathBuf]) -> TranscriptIngestResult<Option<Self>> {
         let mut hasher = Sha256::new();
         hasher.update(b"tracedecay-source-member-files-witness-v1");
@@ -282,6 +285,21 @@ impl SourceFailure for TranscriptIngestError {
     }
 }
 
+impl SourceFailure for ClaudeObservationIngestError {
+    fn catch_up_failure(&self, provider: &'static str) -> (TranscriptCatchUpFailure, bool) {
+        let class = classify_claude_observation_failure(self);
+        (
+            TranscriptCatchUpFailure::new(
+                provider,
+                "observation",
+                class.reason_code,
+                class.retryable,
+            ),
+            !class.retryable && class.status == HostAdmissionStatus::Degraded,
+        )
+    }
+}
+
 pub(crate) struct SourceSweep {
     provider: &'static str,
     ledger: Option<SourceLedger>,
@@ -373,20 +391,18 @@ impl SourceSweep {
     pub(crate) fn report_into(self, outcome: &mut ProviderRunOutcome) {
         outcome.failures.splice(0..0, self.failures);
     }
-}
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the snapshot providers adopt multi-file observations"
-    )
-)]
-impl SourceSweep {
     pub(crate) fn ledger(&self) -> Option<SourceLedger> {
         self.ledger.clone()
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the snapshot providers adopt multi-file observations"
+        )
+    )]
     pub(crate) async fn observe_files(
         &self,
         key: &Path,

@@ -15,6 +15,7 @@ use tracedecay_store::observation::ObservationCoverageReason;
 
 use crate::admission::test_support::{MemoryHostAdmission, PanicHostAdmission};
 use crate::observation::ObservationCancellation;
+use crate::runtime::ingest::quarantine::SourceSweep;
 use crate::runtime::shared::StoredCursor;
 use tracedecay_privacy::{MAX_OBSERVATION_RECORD_BYTES, parse_normalized_observation_record_v1};
 
@@ -183,6 +184,8 @@ async fn cancelled_hermes_admission_stops_before_the_next_transactional_row() {
 
     let stats = admit_rows_with_admission_and_cancellation(
         &PanicHostAdmission,
+        &mut SourceSweep::new(PROVIDER, None),
+        std::path::Path::new("state.db"),
         &[fixture(1)],
         ObservationScopeV1::Project { project_id },
         ObservationSourceGenerationV1::new(1).unwrap(),
@@ -217,6 +220,7 @@ async fn cancelled_hermes_sweep_stops_before_opening_the_host_database() {
         dir.path(),
         tracedecay_domain::ProjectId::new("project.hermes-cancelled-read").unwrap(),
         &PanicHostAdmission,
+        &mut SourceSweep::new(PROVIDER, None),
         &mut budget,
         &cancellation,
     )
@@ -1569,6 +1573,7 @@ async fn unreadable_state_db_is_a_counted_source_failure_not_a_clean_sweep() {
         &project_root,
         tracedecay_domain::ProjectId::new("project.hermes-unreadable-source").unwrap(),
         &admission,
+        &mut SourceSweep::new(PROVIDER, None),
         None,
         &ObservationCancellation::default(),
     )
@@ -1600,6 +1605,8 @@ mod deterministic_refusal_recovery {
         admission.refuse_captures_deterministically(reason);
         let stats = admit_rows_with_admission_and_cancellation(
             &admission,
+            &mut SourceSweep::new(PROVIDER, None),
+            std::path::Path::new("state.db"),
             &[fixture(1)],
             ObservationScopeV1::Profile,
             ObservationSourceGenerationV1::new(1).unwrap(),
@@ -1698,5 +1705,71 @@ fn hermes_timestamp_survives_the_json_boundary_into_one_identity() {
             tracedecay_privacy::ObservationSanitizationOutcomeV1::Durable { .. }
         ),
         "row must be durable, not refused"
+    );
+}
+
+/// A quarantined session is witnessed at its first uncovered row. Deleting
+/// that row makes the next row first, whose witness differs, so the session
+/// leaves quarantine instead of staying blocked behind a row that is gone.
+#[tokio::test]
+async fn deleting_a_refused_row_releases_its_session() {
+    crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+    let home = tempfile::tempdir().unwrap();
+    let state_db = home.path().join("state.db");
+    let hub = crate::runtime::hosts::codex::CodexDiscoveryHub::default();
+    hub.register("consumer", Some(home.path()));
+    let admission = MemoryHostAdmission::default();
+    admission.fail_captures_for_session(
+        "session-redacted",
+        crate::admission::HostAdmissionOutcome {
+            status: crate::admission::HostAdmissionStatus::Degraded,
+            retryable: false,
+            reason_code: Some("observation_cursor_advance_ledger_disagreement"),
+            recovery: None,
+            cause: None,
+        },
+    );
+    let pass = |rows: Vec<HermesRow>| {
+        let (admission, hub, state_db) = (&admission, &hub, &state_db);
+        async move {
+            let mut sweep = SourceSweep::new(PROVIDER, Some((hub, "consumer")));
+            admit_rows_with_admission_and_cancellation(
+                admission,
+                &mut sweep,
+                state_db,
+                &rows,
+                ObservationScopeV1::Profile,
+                ObservationSourceGenerationV1::new(1).unwrap(),
+                1,
+                1,
+                |_| Some(fixture_projection()),
+                &ObservationCancellation::default(),
+            )
+            .await
+            .expect("a refused session must not abandon the state.db");
+            let mut reports = crate::ProviderRunOutcome::skipped();
+            sweep.report_into(&mut reports);
+            reports.failures.len()
+        }
+    };
+
+    assert_eq!(pass(vec![fixture(1), fixture(2)]).await, 1);
+    assert_eq!(
+        admission.failed_session_capture_attempts(),
+        1,
+        "the refused session's later row is not attempted in the same pass"
+    );
+    assert_eq!(pass(vec![fixture(1), fixture(2)]).await, 0);
+    assert_eq!(
+        admission.failed_session_capture_attempts(),
+        1,
+        "the unchanged session stays quarantined"
+    );
+
+    assert_eq!(pass(vec![fixture(2)]).await, 1);
+    assert_eq!(
+        admission.failed_session_capture_attempts(),
+        2,
+        "deleting the refused row releases the session"
     );
 }
