@@ -225,11 +225,6 @@ pub(super) async fn try_ingest_user_codex_sessions_rotated(
         let Some(pending) = codex::PendingTranscript::observe(discovery_state, path).await? else {
             continue;
         };
-        if let Some(failure) = pending.cached_source_failure(path) {
-            failures.push(failure);
-            frontier_committable = false;
-            continue;
-        }
         let progress = match codex::try_admit_codex_jsonl_observations_for_profile_with_admission_and_cancellation(
             path,
             session_id.as_deref(),

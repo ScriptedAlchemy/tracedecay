@@ -225,6 +225,7 @@ fn authority_write_failed_includes_cause_in_hook_detail() {
             provider: "codex",
             reason: "authority_write_failed",
             retryable: true,
+            status: tracedecay_sessions::admission::HostAdmissionStatus::Unavailable,
             detail: Some(
                 "submit observation batch: exact SQL transaction lease expired".to_owned(),
             ),

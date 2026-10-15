@@ -275,6 +275,85 @@ fn permanent_admission_failures_still_classify_permanent() {
     assert!(!failure.retryable);
 }
 
+/// Only a healthy authority's permanent refusal of the record quarantines
+/// the source; an authority fault must not strand unchanged bytes it could
+/// admit once it recovers.
+#[test]
+fn only_permanent_record_refusals_quarantine_the_source() {
+    use crate::admission::{HostAdmissionOutcome, HostAdmissionStatus};
+    use tracedecay_privacy::PrivacySanitizerError;
+
+    let admission = |status, retryable, reason| {
+        crate::runtime::snapshot_observation::host_admission_error(
+            "codex",
+            HostAdmissionOutcome {
+                status,
+                retryable,
+                reason_code: Some(reason),
+                recovery: None,
+                cause: None,
+            },
+        )
+    };
+    let cases = [
+        (
+            admission(
+                HostAdmissionStatus::Degraded,
+                false,
+                "observation_cursor_advance_ledger_disagreement",
+            ),
+            true,
+        ),
+        (
+            admission(
+                HostAdmissionStatus::Unavailable,
+                false,
+                "sanitizer_unavailable",
+            ),
+            false,
+        ),
+        (
+            admission(
+                HostAdmissionStatus::Unavailable,
+                false,
+                "projection_store_corrupt",
+            ),
+            false,
+        ),
+        (
+            admission(HostAdmissionStatus::Unknown, false, "unknown_provider"),
+            false,
+        ),
+        (
+            admission(HostAdmissionStatus::Backpressured, true, "cursor_conflict"),
+            false,
+        ),
+        (
+            source::TranscriptIngestError::Privacy(PrivacySanitizerError::InvalidPolicy),
+            false,
+        ),
+        (
+            source::TranscriptIngestError::Privacy(PrivacySanitizerError::SourceRangeMismatch),
+            true,
+        ),
+        (
+            source::TranscriptIngestError::InvalidSourceIdentity {
+                provider: "codex",
+                path: PathBuf::from("/rollout.jsonl"),
+            },
+            true,
+        ),
+    ];
+
+    for (error, quarantines) in cases {
+        assert_eq!(
+            crate::runtime::classify_transcript_ingest_disposition(&error).quarantines_source(),
+            quarantines,
+            "{error:?}"
+        );
+    }
+}
+
 #[test]
 fn transcript_source_contract_failures_are_bounded_and_permanent() {
     let errors = [
@@ -498,7 +577,7 @@ fn project_provider_deferral_preserves_existing_deferred_work() {
 }
 
 #[tokio::test]
-async fn unchanged_codex_contract_failure_stays_blocked_without_reopening() {
+async fn unchanged_codex_contract_failure_is_quarantined_without_reopening() {
     install_test_shared_jsonl_preparation_authority();
     let home = tempfile::tempdir().unwrap();
     let project = home.path().join("project");
@@ -546,26 +625,35 @@ async fn unchanged_codex_contract_failure_stays_blocked_without_reopening() {
     );
 
     let second = with_transcript_source_profile(ProfileRoot::under_home(home.path()), run()).await;
-    assert_eq!(second.failures, first.failures);
-    assert!(
-        !second.succeeded(),
-        "cached failure must not become complete coverage"
-    );
     if settled {
+        assert!(
+            second.failures.is_empty(),
+            "a quarantined rollout is reported once: {:?}",
+            second.failures
+        );
         assert_eq!(
             session_meta_read_count_for_test(&path),
             reads_after_first,
             "the unchanged invalid rollout must not be reopened"
         );
     }
-    let other = crate::runtime::hosts::codex::PendingTranscript::observe(
-        Some((&hub, "other-project")),
-        &path,
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert!(other.cached_source_failure(&path).is_none());
+    let observe = |consumer: &'static str| {
+        let hub = hub.clone();
+        let path = path.clone();
+        async move {
+            crate::runtime::hosts::codex::PendingTranscript::observe(Some((&hub, consumer)), &path)
+                .await
+                .unwrap()
+                .is_some()
+        }
+    };
+    assert!(
+        observe("other-project").await,
+        "another consumer reads the rollout independently"
+    );
+    if settled {
+        assert!(!observe("project").await, "the rollout stays quarantined");
+    }
 
     let before = std::fs::metadata(&path).unwrap();
     std::fs::write(&path, "[]\n").unwrap();
@@ -576,14 +664,8 @@ async fn unchanged_codex_contract_failure_stays_blocked_without_reopening() {
         .set_modified(before.modified().unwrap())
         .unwrap();
     crate::runtime::source::spin_until_jsonl_change_settled(&path);
-    let third = with_transcript_source_profile(ProfileRoot::under_home(home.path()), run()).await;
-    assert_eq!(
-        third.failures.len(),
-        1,
-        "a changed terminal source must be retried"
-    );
     assert!(
-        session_meta_read_count_for_test(&path) > reads_after_first,
-        "the changed rollout must be opened again"
+        observe("project").await,
+        "a same-size rewrite with the old mtime leaves quarantine"
     );
 }
