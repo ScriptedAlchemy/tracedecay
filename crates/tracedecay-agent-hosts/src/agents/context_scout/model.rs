@@ -28,8 +28,10 @@ pub struct ContextScoutModelConfig<'a> {
 const CONTEXT_SCOUT_PROMPT: &str = "\
 The request holds one candidate. Return only the JSON object required by the response schema. \
 You may rewrite its suggestion_text for clarity and actionability. Copy its dedupe_key into \
-selected_dedupe_key and its citation_anchor_ids into cited_anchor_ids unchanged. Do not add \
-facts, identifiers, paths, or numbers absent from that candidate. Do not call tools, inspect \
+selected_dedupe_key and its citation_anchor_ids into cited_anchor_ids unchanged. Keep every \
+identifier, path, number, error code, and time qualifier it states. Do not add facts, \
+identifiers, paths, or numbers absent from that candidate, and do not infer what it does not \
+state, such as which value was expected or what caused a failure. Do not call tools, inspect \
 files, run commands, access credentials, mutate state.";
 
 pub fn context_scout_backend_from_automation_config(
@@ -219,7 +221,7 @@ fn backend_request(
         serde_json::to_value(request).map_err(|_| ContextScoutModelErrorV1::InvalidOutput)?;
     let contract = AgentTaskContract {
         task_key: "context_scout_v1".to_string(),
-        prompt_version: "context-scout-model-v2".to_string(),
+        prompt_version: "context-scout-model-v3".to_string(),
         response_schema: response_schema(),
         strict_json: true,
     };
