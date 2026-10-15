@@ -1,7 +1,7 @@
 use super::{
-    AnalyticsAction, AsyncRuntimeFlavor, Cli, CommandFamily, Commands, DAEMON_CPU_THREADS_ENV,
+    AnalyticsAction, Cli, CommandFamily, CommandRuntime, Commands, DAEMON_CPU_THREADS_ENV,
     DEFAULT_MAX_DAEMON_CPU_THREADS, HostBundleCliOptions, PackageHookAction, RAYON_NUM_THREADS_ENV,
-    ScoopPackageHookAction, StderrTracingDefault, async_runtime_flavor, command_profile_label,
+    ScoopPackageHookAction, StderrTracingDefault, command_profile_label, command_runtime,
     daemon_cpu_threads_from, is_one_shot_daemon_client, normalize_tool_reserved_global_flags,
     runs_worldwide_counter_flush, should_skip_agent_install_check, should_skip_startup_maintenance,
     stderr_tracing_default, try_print_cli_version, validate_host_bundle_options,
@@ -374,10 +374,7 @@ fn tool_fallback_skips_network_and_agent_startup_maintenance() {
     assert!(should_skip_startup_maintenance(&command));
     assert!(should_skip_agent_install_check(&command));
     assert!(is_one_shot_daemon_client(Some(&command)));
-    assert_eq!(
-        async_runtime_flavor(Some(&command)),
-        AsyncRuntimeFlavor::CurrentThread
-    );
+    assert_eq!(command_runtime(Some(&command)), CommandRuntime::Native);
 }
 
 #[test]
@@ -386,18 +383,53 @@ fn status_is_a_one_shot_daemon_client() {
     assert!(should_skip_startup_maintenance(&command));
     assert!(should_skip_agent_install_check(&command));
     assert!(is_one_shot_daemon_client(Some(&command)));
-    assert_eq!(
-        async_runtime_flavor(Some(&command)),
-        AsyncRuntimeFlavor::CurrentThread
-    );
+    assert_eq!(command_runtime(Some(&command)), CommandRuntime::Native);
     assert!(!is_one_shot_daemon_client(Some(&parse_command(&[
         "init",
         "/tmp/project"
     ]))));
     assert_eq!(
-        async_runtime_flavor(Some(&parse_command(&["init", "/tmp/project"]))),
-        AsyncRuntimeFlavor::MultiThread
+        command_runtime(Some(&parse_command(&["init", "/tmp/project"]))),
+        CommandRuntime::Tokio
     );
+}
+
+#[test]
+fn client_families_run_on_the_native_runtime_and_owners_stay_on_tokio() {
+    for args in [
+        &["hook-stop"][..],
+        &["current-counter"],
+        &["channel"],
+        &["update"],
+        &["install"],
+        &["feedback-rollback", "dry-run", "--agent", "claude"],
+        &["doctor"],
+        &["gain"],
+        &["git", "status"],
+        &["sessions", "search", "query"],
+        &["analytics", "sync"],
+        &["automation", "skills", "list"],
+    ] {
+        assert_eq!(
+            command_runtime(Some(&parse_command(args))),
+            CommandRuntime::Native,
+            "{args:?}"
+        );
+    }
+    for args in [
+        &["sync"][..],
+        &["serve"],
+        &["lsp", "bridge", "--stdio"],
+        &["daemon", "run"],
+        &["dashboard"],
+    ] {
+        assert_eq!(
+            command_runtime(Some(&parse_command(args))),
+            CommandRuntime::Tokio,
+            "{args:?}"
+        );
+    }
+    assert_eq!(command_runtime(None), CommandRuntime::Tokio);
 }
 
 #[test]
