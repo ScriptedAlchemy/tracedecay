@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! Daemon invocation wire contract, authenticated client, and leaf transport.
 //!
 //! This crate sits below the composition root. It owns request/response

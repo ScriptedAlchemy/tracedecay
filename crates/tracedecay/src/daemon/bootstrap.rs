@@ -713,7 +713,18 @@ async fn run_foreground_unix(
     let pr_autotrack_task = pr_autotrack::spawn_with_administration(
         engine.store_administration.clone(),
         engine.invocation.code_index_schedulers.clone(),
-    );
+    )
+    .inspect_err(|error| {
+        log_daemon_event(
+            "pr_autotrack",
+            &[
+                ("action", "start".to_string()),
+                ("outcome", "runtime_unavailable".to_string()),
+                ("reason", error.clone()),
+            ],
+        );
+    })
+    .ok();
     let engine = engine
         .with_git_watcher(git_watcher)
         .with_maintenance_coordinator(maintenance)

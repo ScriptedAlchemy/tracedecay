@@ -78,6 +78,10 @@ struct ProjectOpenTaskRegistry {
     routes: HashMap<ProjectRouteKey, ProjectOpenTaskEntry>,
     retiring: HashMap<ProjectRouteKey, ProjectOpenTaskEntry>,
     closed_profiles: BTreeSet<PathBuf>,
+    /// Claims that joined an open already in flight. A test waits on this to
+    /// know a request reached the join, which no wall-clock window can show.
+    #[cfg(test)]
+    joins: tokio::sync::watch::Sender<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -619,6 +623,8 @@ impl ProjectOpenTasks {
                     return ProjectOpenTaskClaim::Failed(failure);
                 }
                 ProjectOpenTaskState::Opening | ProjectOpenTaskState::Ready => {
+                    #[cfg(test)]
+                    registry.joins.send_modify(|joins| *joins += 1);
                     return ProjectOpenTaskClaim::InFlight(receiver);
                 }
             }
@@ -840,6 +846,11 @@ impl ProjectOpenTasks {
                 }
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn joins(&self) -> tokio::sync::watch::Receiver<usize> {
+        self.lock_registry().joins.subscribe()
     }
 
     #[cfg(test)]

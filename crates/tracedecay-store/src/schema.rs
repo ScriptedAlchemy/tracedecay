@@ -101,3 +101,26 @@ pub const GENERATION_DIAGNOSTICS_SCHEMA_DDL: &str =
     CREATE UNIQUE INDEX IF NOT EXISTS idx_diagnostic_generation_current
         ON diagnostic_generation_publications (record_state)
         WHERE record_state = 'current';";
+
+/// Clears the current generation's records before a newer clean generation
+/// publishes (`?1` cleared state, `?2` the publishing generation, `?3` current
+/// state).
+///
+/// Both clear statements name the `'current'` literal of the
+/// `idx_diagnostic_generation_current` predicate: connections plan once
+/// without bound values, so a bound state would scan the publication table.
+pub const CLEAR_CURRENT_DIAGNOSTICS_SQL: &str = "UPDATE generation_diagnostics
+     SET record_state = ?1, state_generation = ?2
+     WHERE record_state = ?3 AND generation_id != ?2
+     AND (generation_id, publication_revision) IN (
+       SELECT generation_id, publication_revision
+       FROM diagnostic_generation_publications
+       WHERE record_state = 'current'
+     )";
+
+/// Clears the current publication row (`?1` cleared state, `?2` the publishing
+/// generation).
+pub const CLEAR_CURRENT_DIAGNOSTIC_PUBLICATION_SQL: &str =
+    "UPDATE diagnostic_generation_publications
+     SET record_state = ?1, state_generation = ?2
+     WHERE record_state = 'current'";

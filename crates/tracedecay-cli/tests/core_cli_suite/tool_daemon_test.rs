@@ -910,15 +910,12 @@ fn cursor_after_shell_hook_is_typed_unsupported_without_spool_record() {
 
 #[test]
 fn cursor_after_shell_missing_daemon_exits_promptly_without_children() {
-    const SAMPLE_COUNT: usize = 10;
-
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let socket_dir = TempDir::new().unwrap();
     let home_path = canonical_existing_path(home.path());
     let project_path = canonical_existing_path(project.path());
     init_project_with_cli(&home_path, &project_path);
-    let missing_socket = socket_dir.path().join("missing.sock");
     let event = json!({
         "hook_event_name": "afterShellExecution",
         "command": "git status",
@@ -926,13 +923,10 @@ fn cursor_after_shell_missing_daemon_exits_promptly_without_children() {
         "workspace_roots": [project_path],
     })
     .to_string();
-    let mut samples = Vec::with_capacity(SAMPLE_COUNT);
-
-    for _ in 0..SAMPLE_COUNT {
-        let started = Instant::now();
+    let run_hook = |daemon_socket: &Path| {
         let output = tracedecay_command_with_home(&home_path)
             .current_dir(&project_path)
-            .env("TRACEDECAY_DAEMON_SOCKET", &missing_socket)
+            .env("TRACEDECAY_DAEMON_SOCKET", daemon_socket)
             .arg("hook-cursor-after-shell")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -956,29 +950,31 @@ fn cursor_after_shell_missing_daemon_exits_promptly_without_children() {
                 }
                 child.wait_with_output()
             })
-            .expect("missing-daemon hook command should run");
-        samples.push(started.elapsed());
+            .expect("after-shell hook command should run");
         assert!(
             output.status.success(),
-            "missing-daemon hook must fail open\nstdout:\n{}\nstderr:\n{}",
+            "after-shell hook must fail open\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-    }
+    };
 
-    samples.sort_unstable();
-    let min = samples[0];
-    let median = samples[SAMPLE_COUNT / 2];
-    let max = samples[SAMPLE_COUNT - 1];
-    eprintln!(
-        "cursor missing-daemon after-shell samples={SAMPLE_COUNT} min_us={} median_us={} max_us={}",
-        min.as_micros(),
-        median.as_micros(),
-        max.as_micros()
-    );
+    run_hook(&socket_dir.path().join("missing.sock"));
+
+    // Promptness is measured by what the hook waits on, not by a wall clock
+    // that host load stretches: it never dials the daemon, so a missing or
+    // unresponsive daemon cannot delay it. This daemon's authority is
+    // published but it never answers, so a dial would sit in its backlog.
+    let unresponsive_socket = socket_dir.path().join("unresponsive.sock");
+    let _authority = seed_fake_daemon_authority(&unresponsive_socket);
+    let unresponsive = UnixListener::bind(&unresponsive_socket).unwrap();
+    unresponsive.set_nonblocking(true).unwrap();
+    run_hook(&unresponsive_socket);
+    let dial = unresponsive.accept();
     assert!(
-        max < Duration::from_secs(2),
-        "missing-daemon hook exceeded its bounded fail-fast ceiling: {max:?}"
+        dial.as_ref()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock),
+        "after-shell hook dialed the daemon socket: {dial:?}"
     );
 }
 

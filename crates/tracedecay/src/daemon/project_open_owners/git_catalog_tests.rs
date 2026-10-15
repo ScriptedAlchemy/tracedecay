@@ -264,14 +264,14 @@ fn transaction_preview(
     suffix: &str,
     operation: GitIndexTransactionOperationV1,
 ) -> tracedecay_contracts::GitIndexApplyRequestV1 {
-    let current = owner.current_authority(operation).unwrap();
+    let captured = owner.current_authority(operation).unwrap();
     let binding = GitIndexOperationBindingV1::for_operation(operation).unwrap();
     let snapshot = tracedecay_code_index_runtime::git_transactions::capture_exact_snapshot(
         &owner.repository_root,
-        current.scope.project_id.clone(),
-        current.scope.repository_id.clone(),
-        current.scope.worktree_id.clone(),
-        current.evaluated_at,
+        captured.scope.project_id.clone(),
+        captured.scope.repository_id.clone(),
+        captured.scope.worktree_id.clone(),
+        captured.evaluated_at,
         None,
     )
     .unwrap();
@@ -279,8 +279,8 @@ fn transaction_preview(
     let hunks = if operation == GitIndexTransactionOperationV1::StageHunks {
         let hunks = NativeGitIntelligence::new(
             owner.repository_root.clone(),
-            current.scope.repository_id.clone(),
-            current.scope.worktree_id.clone(),
+            captured.scope.repository_id.clone(),
+            captured.scope.worktree_id.clone(),
         )
         .hunk_refs(
             &GitDiffScopeV1::WorkingTree,
@@ -293,6 +293,10 @@ fn transaction_preview(
     } else {
         Vec::new()
     };
+    // The preview input lives 30 s from the authority evaluation that admits
+    // it. Evaluate that authority after the Git capture, which takes seconds
+    // on a loaded host, so the lifetime covers only the transaction itself.
+    let current = owner.current_authority(operation).unwrap();
     let expires_at =
         UtcMicros(current.evaluated_at.0 + MAX_GIT_INDEX_PREVIEW_INPUT_LIFETIME_MICROS);
     let input = GitIndexPreviewInputV1::new_hunk_selection(

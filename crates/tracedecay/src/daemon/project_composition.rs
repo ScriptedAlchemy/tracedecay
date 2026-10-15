@@ -117,10 +117,13 @@ async fn release_one_idle_project_server_before_open(
             tracedecay_runtime_core::path_safety::canonical_root_identity(&key.project_root)
         })
         .collect::<std::collections::BTreeSet<_>>();
-    let mut hook_data_roots = std::collections::BTreeSet::new();
+    let mut hook_replay_owners = Vec::with_capacity(retired_servers.len());
     for (_, server) in &retired_servers {
         let graph = server.cg().await;
-        hook_data_roots.insert(graph.hook_store_layout().data_root.clone());
+        hook_replay_owners.push((
+            graph.hook_store_layout().data_root.clone(),
+            Arc::downgrade(&graph),
+        ));
     }
     let retired_servers = retired_servers
         .into_iter()
@@ -151,8 +154,9 @@ async fn release_one_idle_project_server_before_open(
             )
             .await;
             super::project_server_lifecycle::retire_project_servers(retired_servers, None).await;
-            for data_root in hook_data_roots {
-                super::hook_v2_replay_consumer::shutdown_hook_v2_replay_consumer(&data_root).await;
+            for (data_root, owner) in hook_replay_owners {
+                super::hook_v2_replay_consumer::retire_hook_v2_replay_consumer(&data_root, &owner)
+                    .await;
             }
             // A prior same-owner retirement can be a bind eviction cleanup,
             // which waits on this capacity gate before its owner check.
@@ -318,7 +322,7 @@ pub(crate) fn daemon_transcript_source_profile(
 /// registered.
 async fn retire_unserved_process_owners(
     store_administration: &StoreAdministration,
-    cg: &tracedecay_project::project::TraceDecay,
+    cg: &Arc<tracedecay_project::project::TraceDecay>,
 ) {
     let graph_db_path = cg.db().canonical_database_path();
     let served = store_administration
@@ -335,8 +339,9 @@ async fn retire_unserved_process_owners(
     {
         let _ = crate::test_support::hold_after_unserved_owner_check_for_test().await;
     }
-    super::hook_v2_replay_consumer::shutdown_hook_v2_replay_consumer(
+    super::hook_v2_replay_consumer::retire_hook_v2_replay_consumer(
         &cg.hook_store_layout().data_root,
+        &Arc::downgrade(cg),
     )
     .await;
     if let Some(project_id) = hook_project_id_for_layout(cg.hook_store_layout()) {
