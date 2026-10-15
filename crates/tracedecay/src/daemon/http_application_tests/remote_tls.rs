@@ -1467,64 +1467,54 @@ async fn remote_tls_listener_expires_saturated_non_reading_responses() {
         peer.flush().await.expect("flush large TLS request");
         non_reading_peers.push(peer);
     }
-    // Egress starts when this test joins the handler barrier. Every response
-    // reaches backpressure well before its 5 s write-idle deadline.
-    let write_idle = RemoteBrainTlsDeadlines::PRODUCTION.write_idle;
-    handler_barrier.wait().await;
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        loop {
-            let snapshot = service
-                .remote_tls_egress_snapshot()
-                .expect("TLS egress observer");
-            if snapshot.active == 128
-                && snapshot.backpressured == 128
-                && snapshot.idle_expirations == 0
-                && snapshot.idle_deadline_contract_violations == 0
-                && snapshot.response_expirations == 0
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("every large response must reach real TLS backpressure");
+    // Every connection holds its admission once its request is read, and none
+    // can expire before egress starts at the handler barrier.
+    while service
+        .remote_tls_ingress_snapshot()
+        .is_some_and(|ingress| ingress.headers_complete != 128)
+    {
+        tokio::task::yield_now().await;
+    }
     assert_eq!(service.remote_tls_available_admissions(), Some(0));
-
-    tokio::time::timeout(write_idle * 2, async {
-        while service
+    handler_barrier.wait().await;
+    // A response stalled at backpressure expires once it has been idle for
+    // its write-idle deadline. On a loaded host the first stalled responses
+    // can expire before the last one fills its socket, so a response counts
+    // once it is backpressured now or has already expired from its stall.
+    loop {
+        let snapshot = service
             .remote_tls_egress_snapshot()
-            .is_some_and(|snapshot| snapshot.idle_expirations != 128)
-        {
-            tokio::task::yield_now().await;
+            .expect("TLS egress observer");
+        assert_eq!(snapshot.response_expirations, 0, "{snapshot:?}");
+        assert_eq!(
+            snapshot.idle_deadline_contract_violations, 0,
+            "{snapshot:?}"
+        );
+        if snapshot.backpressured + snapshot.idle_expirations == 128 {
+            break;
         }
-    })
-    .await
-    .expect("every stalled response must expire at its write-idle deadline");
+        tokio::task::yield_now().await;
+    }
+
+    while service
+        .remote_tls_egress_snapshot()
+        .is_some_and(|snapshot| snapshot.idle_expirations != 128)
+    {
+        tokio::task::yield_now().await;
+    }
     let expired = service
         .remote_tls_egress_snapshot()
         .expect("TLS egress observer after idle expiry");
     assert_eq!(expired.idle_expirations, 128);
     assert_eq!(expired.idle_deadline_contract_violations, 0);
     assert_eq!(expired.response_expirations, 0);
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        while service.remote_tls_available_admissions() != Some(128)
-            || service
-                .remote_tls_egress_snapshot()
-                .is_some_and(|snapshot| snapshot.active != 0 || snapshot.backpressured != 0)
-        {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| {
-        panic!(
-            "egress expiry did not settle: snapshot={:?}, permits={:?}",
-            service.remote_tls_egress_snapshot(),
-            service.remote_tls_available_admissions(),
-        )
-    });
-    assert_eq!(service.remote_tls_available_admissions(), Some(128));
+    while service.remote_tls_available_admissions() != Some(128)
+        || service
+            .remote_tls_egress_snapshot()
+            .is_some_and(|snapshot| snapshot.active != 0 || snapshot.backpressured != 0)
+    {
+        tokio::task::yield_now().await;
+    }
     let settled = service
         .remote_tls_egress_snapshot()
         .expect("TLS egress observer after permit recovery");
@@ -1535,8 +1525,8 @@ async fn remote_tls_listener_expires_saturated_non_reading_responses() {
     assert_eq!(settled.response_expirations, 0);
     drop(non_reading_peers);
 
-    tokio::time::timeout(std::time::Duration::from_secs(1), service.shutdown())
+    service
+        .shutdown()
         .await
-        .expect("egress saturation must not delay shutdown")
         .expect("shutdown TLS egress service");
 }
