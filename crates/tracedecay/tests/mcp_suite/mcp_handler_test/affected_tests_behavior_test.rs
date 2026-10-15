@@ -557,29 +557,31 @@ async fn stop_dashboard(fixture: &ProductionCompositionFixture) {
 }
 
 /// The Loom temporal read once the project session authority it composes has
-/// mounted; a freshly opened daemon answers `loading` until then.
+/// mounted; a freshly opened daemon answers `loading` until then. Each read
+/// waits for the route's answer, which the route's own request deadline
+/// bounds.
 async fn loom_temporal(dashboard: String) -> Value {
     let url = format!("{dashboard}/api/loom/temporal?limit=200");
-    tokio::time::timeout(std::time::Duration::from_secs(30), async move {
-        loop {
-            let url = url.clone();
-            let envelope = tokio::task::spawn_blocking(move || {
-                let (status, envelope) =
-                    crate::common::get_json(&crate::common::http_agent(), &url);
-                assert_eq!(status, 200, "{envelope}");
-                envelope
-            })
-            .await
-            .expect("Loom temporal read");
-            if envelope["payload"]["available"] == json!(true) {
-                break envelope;
-            }
-            assert_eq!(envelope["domain_state"], json!("loading"), "{envelope}");
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let agent = tracedecay_application::http_agent::http_agent(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build(),
+    );
+    loop {
+        let (agent, url) = (agent.clone(), url.clone());
+        let envelope = tokio::task::spawn_blocking(move || {
+            let (status, envelope) = crate::common::get_json(&agent, &url);
+            assert_eq!(status, 200, "{envelope}");
+            envelope
+        })
+        .await
+        .expect("Loom temporal read");
+        if envelope["payload"]["available"] == json!(true) {
+            return envelope;
         }
-    })
-    .await
-    .expect("Loom session authority mount deadline")
+        assert_eq!(envelope["domain_state"], json!("loading"), "{envelope}");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
 }
 
 /// Ingests the composed Codex rollout through the shared not-ready retry.

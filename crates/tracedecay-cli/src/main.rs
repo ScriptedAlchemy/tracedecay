@@ -258,24 +258,14 @@ fn async_worker_threads(command: Option<&Commands>) -> usize {
         .clamp(1, MAX_ASYNC_WORKER_THREADS)
 }
 
-/// Commands whose every path is Tokio-free run on the native runtime alone.
-/// Project commands open project owners and runtime commands serve, and both
-/// still reach Tokio-only owners.
+/// Every command but `daemon run` is a daemon client or a local store tool
+/// whose paths are Tokio-free. The foreground daemon still owns Tokio-only
+/// project-server lifecycle and invocation seams.
 fn command_runtime(command: Option<&Commands>) -> CommandRuntime {
-    let Some(command) = command else {
-        return CommandRuntime::Tokio;
-    };
-    if matches!(command, Commands::Tool { .. } | Commands::Status { .. }) {
-        return CommandRuntime::Native;
-    }
-    match CommandFamily::for_command(command) {
-        CommandFamily::Agent
-        | CommandFamily::Hook
-        | CommandFamily::Update
-        | CommandFamily::Configuration
-        | CommandFamily::Diagnostics
-        | CommandFamily::Knowledge => CommandRuntime::Native,
-        CommandFamily::Project | CommandFamily::Runtime => CommandRuntime::Tokio,
+    if is_daemon_run(command) {
+        CommandRuntime::Tokio
+    } else {
+        CommandRuntime::Native
     }
 }
 
@@ -616,13 +606,6 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
         tracing::trace!(name: "process_command_family", value = ?command_family);
         tracing::trace!(name: "cli.command.name", value = ?command_name.as_str());
     }
-    let foreground_daemon = matches!(
-        cli.command.as_ref(),
-        Some(Commands::Daemon {
-            action: DaemonAction::Run { .. }
-        })
-    );
-
     let result = {
         let _span = tracing::trace_span!("process_command").entered();
         let command = tracing::Instrument::instrument(
@@ -635,22 +618,14 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
         }
     };
 
-    // Tokio runtime drop waits indefinitely for blocking tasks. Daemon
-    // integrations can leave OS-backed watcher work behind after their async
-    // handles abort, so bound teardown after the command's own graceful
-    // shutdown completes. The installed native runtime is process-static and
-    // never dropped.
-    //
-    // The foreground daemon already coordinated every owner with typed
-    // receipts; a blocking task still running here is one its shutdown owner
-    // reported as pending and abandoned at the task-abort deadline. Waiting
-    // for it a second time only spends the supervisor's TERM grace.
+    // Only the foreground daemon has a Tokio runtime. It already coordinated
+    // every owner with typed receipts; a blocking task still running here is
+    // one its shutdown owner reported as pending and abandoned at the
+    // task-abort deadline. Waiting for it a second time only spends the
+    // supervisor's TERM grace. The installed native runtime is process-static
+    // and never dropped.
     if let Some(runtime) = tokio {
-        if foreground_daemon {
-            runtime.shutdown_background();
-        } else {
-            runtime.shutdown_timeout(std::time::Duration::from_secs(2));
-        }
+        runtime.shutdown_background();
     }
     if json_requested
         && let Err(error) = &result

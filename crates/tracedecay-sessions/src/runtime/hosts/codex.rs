@@ -32,7 +32,9 @@
 //!   the boundary/provenance as a summary record without claiming plaintext
 //!   access to Codex's private summary.
 //! * `response_item` with `payload.type == "message"` and role `user` or
-//!   `assistant`, a conversational turn. Goal-context user messages are still
+//!   `assistant`, a conversational turn. When the `event_msg` written right
+//!   after it records the same message in the same turn, projection keeps the
+//!   event and retires this echo. Goal-context user messages are still
 //!   cataloged as compact goal-context rows from that message text, because
 //!   real rollouts often record the active goal only in this form. Other
 //!   roles stay unsupported injected context.

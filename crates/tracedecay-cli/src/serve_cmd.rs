@@ -97,17 +97,27 @@ pub async fn run_serve(
     // advisory must never delay or take down MCP, for example on a loaded
     // daemon or when serve and the daemon disagree on the configuration surface.
     let (hints_enabled, repeated_query_hints) = tokio::sync::watch::channel(false);
+    // The read composes the application catalog and its schemas, about 100 ms
+    // of CPU, so it gets its own thread: on a native worker it stalled the
+    // reactor that delivers the daemon's replies to this root.
     let hints_profile = profile.clone();
-    let hints_read = tracedecay_runtime_core::native_runtime::NativeTask::spawn(async move {
-        match crate::commands::repeated_query_hints_enabled(&hints_profile).await {
-            Ok(enabled) => {
-                hints_enabled.send_replace(enabled);
+    let hints_read = std::thread::Builder::new()
+        .name("tracedecay-serve-hints".to_owned())
+        .spawn(move || {
+            match tracedecay_runtime_core::native_runtime::block_on(Box::pin(
+                crate::commands::repeated_query_hints_enabled(&hints_profile),
+            )) {
+                Ok(Ok(enabled)) => {
+                    hints_enabled.send_replace(enabled);
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "repeated-query hints are off: setting read failed");
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "repeated-query hints are off: setting read did not start");
+                }
             }
-            Err(error) => {
-                tracing::warn!(%error, "repeated-query hints are off: setting read failed");
-            }
-        }
-    });
+        });
     if let Err(error) = hints_read {
         tracing::warn!(%error, "repeated-query hints are off: setting read did not start");
     }
@@ -213,25 +223,24 @@ fn serve_scope_prefix(original_cwd: Option<&Path>, project_root: &Path) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracedecay_runtime_core::native_runtime::{self, NativeTask, NativeTaskOutcome};
+    use tracedecay_runtime_core::native_runtime;
 
-    /// `serve` reads the hint setting on a native task, so the read must
-    /// settle with no Tokio runtime entered.
+    /// `serve` reads the hint setting on its own thread's native root, so the
+    /// read must settle with no Tokio runtime entered.
     #[test]
     fn repeated_query_hints_read_settles_without_an_entered_tokio_runtime() {
         let home = tempfile::tempdir().expect("temporary home");
         let profile = ProfileRoot::under_home(home.path());
-        let read = NativeTask::spawn(async move {
+        let read_failed = native_runtime::block_on(Box::pin(async move {
             assert!(tokio::runtime::Handle::try_current().is_err());
             crate::commands::repeated_query_hints_enabled(&profile)
                 .await
                 .is_err()
-        })
-        .expect("native task");
+        }))
+        .expect("native runtime");
 
-        assert_eq!(
-            native_runtime::block_on(read.wait()).expect("native runtime"),
-            NativeTaskOutcome::Completed(true),
+        assert!(
+            read_failed,
             "no daemon serves this profile, so the read fails without panicking"
         );
     }

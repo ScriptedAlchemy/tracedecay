@@ -195,7 +195,8 @@ pub(super) fn spawn_lifecycle_automation_scheduler_activation<ActivationFuture>(
     let Some(activity) = lifecycle.try_enter() else {
         return;
     };
-    tokio::spawn(tracing::Instrument::instrument(
+    // Detached: draining ends it, and its activity permit holds idle until then.
+    let started = native_runtime::NativeTask::spawn(tracing::Instrument::instrument(
         async move {
             let _activity = activity;
             tokio::select! {
@@ -206,6 +207,15 @@ pub(super) fn spawn_lifecycle_automation_scheduler_activation<ActivationFuture>(
         },
         tracing::trace_span!("daemon.project.activate.automation"),
     ));
+    if let Err(error) = started {
+        log_daemon_event(
+            "automation_scheduler_activation",
+            &[
+                ("outcome", "runtime_unavailable".to_string()),
+                ("error", error),
+            ],
+        );
+    }
 }
 
 #[tracing::instrument(name = "daemon.project.enroll.route", level = "trace", skip_all)]

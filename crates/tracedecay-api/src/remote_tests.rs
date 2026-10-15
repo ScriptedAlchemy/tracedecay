@@ -59,6 +59,7 @@ struct RejectingCredentialAdmission {
 }
 
 struct OneCredentialAuthority {
+    class: RemoteCredentialClassV1,
     fingerprint: RemoteCredentialFingerprintV1,
     record: RemoteCredentialAuthorityRecordV1,
 }
@@ -69,7 +70,7 @@ impl RemoteCredentialLookupPortV1 for OneCredentialAuthority {
         class: RemoteCredentialClassV1,
         fingerprint: &RemoteCredentialFingerprintV1,
     ) -> Result<RemoteCredentialAuthorityRecordV1, RemoteCredentialLookupErrorV1> {
-        if class == RemoteCredentialClassV1::Enrollment && fingerprint == &self.fingerprint {
+        if class == self.class && fingerprint == &self.fingerprint {
             return Ok(self.record.clone());
         }
         Err(RemoteCredentialLookupErrorV1::NotFound)
@@ -200,6 +201,16 @@ fn repository_scope(snapshot_id: &str) -> RemoteRepositoryScopeV1 {
 }
 
 fn credential_authority() -> RemoteCredentialAdmissionServiceV1<OneCredentialAuthority> {
+    credential_authority_for(RemoteCredentialClassV1::Enrollment)
+}
+
+const GRANT_CREDENTIAL: &[u8; 32] = b"fedcba9876543210fedcba9876543210";
+
+/// Admits [`ACTIVE_CREDENTIAL`] as the enrollment, or [`GRANT_CREDENTIAL`] as
+/// the grant it was enrolled from.
+fn credential_authority_for(
+    class: RemoteCredentialClassV1,
+) -> RemoteCredentialAdmissionServiceV1<OneCredentialAuthority> {
     let scope = repository_scope("snapshot.remote");
     let enrollment = EnrollmentCredentialRecordV1 {
         enrollment_id: id::<EntityId>("enrollment.remote"),
@@ -221,7 +232,7 @@ fn credential_authority() -> RemoteCredentialAdmissionServiceV1<OneCredentialAut
         grant_id: id::<EntityId>("grant.remote"),
         brain_id: enrollment.brain_id.clone(),
         node_id: enrollment.node_id.clone(),
-        fingerprint: RemoteCredentialFingerprintV1::from_secret(&[3_u8; 32]).unwrap(),
+        fingerprint: RemoteCredentialFingerprintV1::from_secret(GRANT_CREDENTIAL).unwrap(),
         revision: 1,
         issued_at: UtcMicros(1),
         expires_at: UtcMicros(100),
@@ -262,6 +273,16 @@ fn credential_authority() -> RemoteCredentialAdmissionServiceV1<OneCredentialAut
         Deadline::new(UtcMicros(100)).unwrap(),
     )
     .unwrap();
+    if class == RemoteCredentialClassV1::EnrollmentGrant {
+        return RemoteCredentialAdmissionServiceV1::new(OneCredentialAuthority {
+            class,
+            fingerprint: grant.fingerprint.clone(),
+            record: RemoteCredentialAuthorityRecordV1::Grant {
+                grant: Box::new(grant),
+                admission: Box::new(admission),
+            },
+        });
+    }
     let receipt = RemoteEnrollmentCommitReceiptV1 {
         admission,
         prior_grant_digest: grant_digest,
@@ -281,6 +302,7 @@ fn credential_authority() -> RemoteCredentialAdmissionServiceV1<OneCredentialAut
         receipt: Box::new(receipt),
     };
     RemoteCredentialAdmissionServiceV1::new(OneCredentialAuthority {
+        class,
         fingerprint: RemoteCredentialFingerprintV1::from_secret(ACTIVE_CREDENTIAL).unwrap(),
         record,
     })
@@ -695,4 +717,103 @@ fn block_on<F: Future>(future: F) -> F::Output {
             Poll::Pending => std::thread::yield_now(),
         }
     }
+}
+
+/// Records whether its enrollment ran on a native runtime thread, where the
+/// enrollment commit's store-writer wait would park that thread.
+struct EnrollmentThreadProbe {
+    ran_on_native_thread: Arc<std::sync::Mutex<Option<bool>>>,
+}
+
+impl RemoteEnrollmentProtocolPortV1 for EnrollmentThreadProbe {
+    fn execute_enrollment(
+        &self,
+        request: RemoteProtocolRequestV1<EnrollmentRequestV1>,
+        _grant_credential: OpaqueRemoteCredential,
+        _enrollment_credential: OpaqueRemoteCredential,
+    ) -> Result<
+        RemoteProtocolResponseV1<EnrollmentCredentialRecordV1>,
+        tracedecay_contracts::ApplicationContractError,
+    > {
+        // `block_on` refuses exactly on native runtime threads.
+        let native_thread =
+            tracedecay_rusqlite_runtime::native_runtime::block_on(async {}).is_err();
+        *self.ran_on_native_thread.lock().unwrap() = Some(native_thread);
+        unavailable_response(request)
+    }
+}
+
+/// The enrollment route runs its port on the native blocking pool, as every
+/// operation route does, so a native worker never waits on the store writer.
+#[test]
+fn enrollment_route_runs_its_port_off_native_runtime_threads() {
+    let ran_on_native_thread = Arc::new(std::sync::Mutex::new(None));
+    let operations = Arc::new(UnreachedProtocolPort {
+        calls: Arc::new(AtomicUsize::new(0)),
+        controlled_deadline: None,
+    });
+    let router = remote_protocol_router(
+        Arc::new(EnrollmentThreadProbe {
+            ran_on_native_thread: Arc::clone(&ran_on_native_thread),
+        }),
+        RemoteOperationProtocolPortsV1 {
+            capture: operations.clone(),
+            replay: operations.clone(),
+            replay_pending: operations.clone(),
+            frame_transfer: operations.clone(),
+            query: operations.clone(),
+            promotion: operations.clone(),
+            authority: operations,
+        },
+        Arc::new(credential_authority_for(
+            RemoteCredentialClassV1::EnrollmentGrant,
+        )),
+        fixed_remote_clock,
+    );
+    let scope = repository_scope("snapshot.remote");
+    let body = serde_json::to_vec(&RemoteHttpRequestV1 {
+        request: RemoteProtocolRequestV1::new_initial_enrollment(
+            RequestId::new("request.remote.enrollment").unwrap(),
+            id::<BrainId>("brain.remote"),
+            id::<BrainNodeId>("node.remote"),
+            fixed_remote_clock(),
+            EnrollmentRequestV1 {
+                grant_id: id::<EntityId>("grant.remote"),
+                grant_revision: 1,
+                enrollment_id: id::<EntityId>("enrollment.remote"),
+                brain_id: id::<BrainId>("brain.remote"),
+                node_id: id::<BrainNodeId>("node.remote"),
+                expires_at: UtcMicros(100),
+                capabilities: std::collections::BTreeSet::from([RemoteCapabilityV1::Query]),
+                scope,
+            },
+        )
+        .unwrap(),
+    })
+    .unwrap();
+    let request = Request::builder()
+        .method("POST")
+        .uri("/enrollment")
+        .header(
+            AUTHORIZATION,
+            [b"Bearer ".as_slice(), GRANT_CREDENTIAL].concat(),
+        )
+        .header(
+            REMOTE_ENROLLMENT_CREDENTIAL_HEADER,
+            ACTIVE_CREDENTIAL.as_slice(),
+        )
+        .header("content-type", "application/json")
+        .body(Body::from(body))
+        .unwrap();
+
+    let response = tracedecay_rusqlite_runtime::native_runtime::block_on(router.oneshot(request))
+        .expect("native runtime")
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        *ran_on_native_thread.lock().unwrap(),
+        Some(false),
+        "the enrollment port must run off native runtime threads"
+    );
 }
