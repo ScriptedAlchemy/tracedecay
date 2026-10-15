@@ -405,6 +405,7 @@ impl<T: Clone> Default for NativeTaskSet<T> {
 }
 
 impl<T: Clone + Send + Sync + 'static> NativeTaskSet<T> {
+    #[track_caller]
     pub fn spawn<F>(&mut self, work: F) -> Result<(), String>
     where
         F: Future<Output = T> + Send + 'static,
@@ -605,6 +606,10 @@ fn start(builder: RuntimeBuilder) -> Result<Runtime, String> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "tests run on an ambient Tokio runtime"
+)]
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -877,9 +882,11 @@ mod tests {
         let runtime = RuntimeBuilder::current_thread()
             .build()
             .expect("test runtime");
-        let task = runtime.block_on(async {
-            NativeTask::spawn(std::future::pending::<()>()).expect("native task")
+        let mut task = None;
+        runtime.block_on(async {
+            task = Some(NativeTask::spawn(std::future::pending::<()>()).expect("native task"));
         });
+        let task = task.expect("spawned");
         drop(runtime);
         assert_eq!(task.try_finished(), Some(NativeTaskOutcome::Cancelled));
     }
