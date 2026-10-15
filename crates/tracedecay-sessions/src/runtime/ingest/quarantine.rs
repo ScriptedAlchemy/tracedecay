@@ -135,13 +135,6 @@ impl Witness {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the snapshot providers adopt multi-file witnesses"
-        )
-    )]
     fn settled_files(members: &[PathBuf]) -> TranscriptIngestResult<Option<Self>> {
         let mut hasher = Sha256::new();
         hasher.update(b"tracedecay-source-member-files-witness-v1");
@@ -396,13 +389,6 @@ impl SourceSweep {
         self.ledger.clone()
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the snapshot providers adopt multi-file observations"
-        )
-    )]
     pub(crate) async fn observe_files(
         &self,
         key: &Path,

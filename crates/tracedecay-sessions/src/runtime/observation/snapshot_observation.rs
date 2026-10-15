@@ -22,10 +22,12 @@ use tracedecay_privacy::ObservationRecordParseErrorV1;
 
 mod admission;
 
+pub(crate) use admission::capture_snapshot_observations;
+
 pub use admission::{
     SnapshotAdmissionBatch, SnapshotAdmissionRecord, SnapshotAdmissionRunner,
-    SnapshotCaptureOutcome, advance_snapshot_coverage, advance_snapshot_coverage_maybe,
-    capture_snapshot_observations, snapshot_capture_request, snapshot_cursor_covers_range,
+    SnapshotCaptureOutcome, SnapshotSourceRefusal, advance_snapshot_coverage,
+    advance_snapshot_coverage_maybe, snapshot_capture_request, snapshot_cursor_covers_range,
     snapshot_range_was_committed, snapshot_source_identity,
 };
 
