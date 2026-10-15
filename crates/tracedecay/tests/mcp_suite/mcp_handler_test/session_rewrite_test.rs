@@ -2,8 +2,6 @@
 //! edited record's old text and a deleted record leave every read path, for
 //! records with and without a native item id.
 
-use std::cell::Cell;
-use std::future::Future;
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
@@ -111,95 +109,14 @@ fn write_rollout(path: &Path, records: &[Value]) {
 }
 
 async fn ingest(harness: &ProductionProjectCompositionHarnessV1, project: &Path) {
-    let arguments = json!({"action": "ingest_transcript", "provider": "codex", "user_scope": false, "format": "json"});
-    let result = resend_refused_request(|| {
-        call_tool_when_ready(
-            harness,
-            project,
-            "tracedecay_hook_runtime",
-            arguments.clone(),
-        )
-    })
+    let ingest = call_production_tool(
+        harness,
+        project,
+        "tracedecay_hook_runtime",
+        json!({"action": "ingest_transcript", "provider": "codex", "user_scope": false, "format": "json"}),
+    )
     .await;
-    assert_ne!(
-        result["isError"], true,
-        "tracedecay_hook_runtime returned an error: {result}"
-    );
-    let body = recovered_owner_payload(harness, project, result).await;
-    let ingest = body
-        .pointer("/outcome/value/payload")
-        .cloned()
-        .unwrap_or(body);
     assert_eq!(ingest["completed"], true, "{ingest}");
-}
-
-/// Re-sends a request the runtime refused before admission with a retry
-/// scoped to that same request. Nothing was committed, and the refusal names
-/// no event beyond the request itself: the ingest's projection drain lost a
-/// race with another drainer of the same queue, which the next request
-/// observes.
-async fn resend_refused_request<F, Fut>(mut call: F) -> Value
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = Value>,
-{
-    tokio::time::timeout(Duration::from_secs(120), async {
-        loop {
-            let result = call().await;
-            let problem = &result["structuredContent"]["problem"];
-            let resend = result["isError"] == true
-                && problem["retryable"] == true
-                && problem["retry_scope"] == "same_request"
-                && problem["terminality"] == "pre_admission";
-            if !resend {
-                break result;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("the refused request was answered before its deadline")
-}
-
-fn refusal(retryable: bool, terminality: &str) -> Value {
-    json!({"isError": true, "structuredContent": {"problem": {
-        "code": "external_source_projection_unavailable",
-        "retryable": retryable,
-        "retry_scope": "same_request",
-        "terminality": terminality,
-    }}})
-}
-
-async fn answers_after(first: Value) -> (Value, usize) {
-    let answer = json!({"structuredContent": {"completed": true}});
-    let calls = Cell::new(0);
-    let result = resend_refused_request(|| {
-        calls.set(calls.get() + 1);
-        let next = if calls.get() == 1 {
-            first.clone()
-        } else {
-            answer.clone()
-        };
-        async move { next }
-    })
-    .await;
-    (result, calls.get())
-}
-
-#[tokio::test]
-async fn a_retryable_same_request_refusal_is_resent_until_answered() {
-    let (result, calls) = answers_after(refusal(true, "pre_admission")).await;
-    assert_eq!(result["structuredContent"]["completed"], true, "{result}");
-    assert_eq!(calls, 2);
-
-    for terminal in [
-        refusal(false, "pre_admission"),
-        refusal(true, "admitted_terminal"),
-    ] {
-        let (result, calls) = answers_after(terminal.clone()).await;
-        assert_eq!(result, terminal, "a terminal refusal is the answer");
-        assert_eq!(calls, 1);
-    }
 }
 
 async fn grep_count(
