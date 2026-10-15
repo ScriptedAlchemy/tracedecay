@@ -1,7 +1,3 @@
-//! Source quarantine: a permanently refused transcript source is reported
-//! once and skipped until its witness changes, while the rest of the pass
-//! keeps making progress.
-
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -19,27 +15,17 @@ use crate::runtime::source::{
 };
 use crate::runtime::{classify_transcript_ingest_disposition, classify_transcript_ingest_failure};
 
-/// One discovery consumer's memory of sources it finished or quarantined.
-///
-/// Held by `CodexDiscoveryHub` per registered consumer, so records and their
-/// memory reservations are released when the consumer deregisters. Records
-/// are best-effort: without memory capacity a source is simply read again.
 #[derive(Clone, Default)]
 pub(crate) struct SourceLedger {
     inner: Arc<Mutex<HashMap<SourceKey, Disposition>>>,
 }
 
-/// `stream` is `None` for a file or task directory, and names the cursor
-/// stream (session, composer key) inside a shared container such as a SQLite
-/// file.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct SourceKey {
     origin: PathBuf,
     stream: Option<Box<str>>,
 }
 
-/// A source's identity before reading; equal witnesses prove the source
-/// unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Witness {
     identity: [u8; 32],
@@ -62,7 +48,6 @@ impl SourceKey {
 }
 
 impl SourceLedger {
-    /// Whether the source was finished or quarantined at exactly `witness`.
     pub(crate) fn holds(&self, key: &SourceKey, witness: Witness) -> bool {
         self.inner
             .lock()
@@ -71,9 +56,6 @@ impl SourceLedger {
             .is_some_and(|recorded| recorded.witness == witness)
     }
 
-    /// Whether the source's last record is a finish. Used while its change
-    /// time is still inside the coarse timestamp quantum and cannot mint a
-    /// fresh witness, but an earlier pass already proved the bytes unchanged.
     fn recorded_converged(&self, key: &SourceKey) -> bool {
         self.inner
             .lock()
@@ -118,9 +100,6 @@ impl SourceLedger {
 }
 
 impl Witness {
-    /// `None` while the file's change time is inside the timestamp quantum,
-    /// or where no stat field witnesses a rewrite: the pass then reads it as
-    /// before.
     pub(crate) fn settled_file(
         path: &Path,
         metadata: &std::fs::Metadata,
@@ -144,9 +123,6 @@ impl Witness {
     )
 )]
 impl Witness {
-    /// One witness over every member file, so a change to any of them, or a
-    /// member appearing or disappearing, releases the source. `None` while
-    /// any present member is unsettled.
     fn settled_files(members: &[PathBuf]) -> TranscriptIngestResult<Option<Self>> {
         let mut hasher = Sha256::new();
         hasher.update(b"tracedecay-source-member-files-witness-v1");
@@ -175,8 +151,6 @@ impl Witness {
         }))
     }
 
-    /// A witness over bytes the caller already read, such as a stream's first
-    /// record its cursor does not cover yet.
     fn content(parts: &[&[u8]]) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(b"tracedecay-source-content-witness-v1");
@@ -194,11 +168,6 @@ impl Witness {
     }
 }
 
-/// A source this pass decided to read. Dropping it records nothing.
-///
-/// Every host's history pass for a scope runs under that scope's discovery
-/// consumer, so one per-consumer record proves a source unchanged for all of
-/// them.
 pub(crate) struct SourceClaim {
     key: SourceKey,
     settled: Option<(SourceLedger, Witness)>,
@@ -225,8 +194,6 @@ impl SourceClaim {
         })
     }
 
-    /// `None` when the ledger already finished or quarantined this exact
-    /// file, or the file is gone, so the pass skips it without opening it.
     pub(crate) async fn observe_file(
         provider: &'static str,
         ledger: Option<SourceLedger>,
@@ -239,7 +206,6 @@ impl SourceClaim {
         .await?
     }
 
-    /// [`Self::observe_file`] for a caller already on a blocking thread.
     pub(crate) fn observe_file_blocking(
         ledger: Option<&SourceLedger>,
         path: &Path,
@@ -248,11 +214,8 @@ impl SourceClaim {
         if ledger.is_none() {
             return Ok(Some(Self { key, settled: None }));
         }
-        // A delivered pass is replayed until a catch-up acknowledges it, and a
-        // read failure withholds the acknowledgement. A file moved away since
-        // delivery (Codex archives a session by moving its rollout) has
-        // nothing left to read; failing on it would replay the same path
-        // forever. A later walk delivers the file again if it returns.
+        // Codex archives a session by moving its rollout away; failing on the
+        // vanished path would replay the unacknowledged discovery pass forever.
         let Some(metadata) = stat_if_present(path, "stat transcript for convergence")? else {
             return Ok(None);
         };
@@ -260,8 +223,6 @@ impl SourceClaim {
         Ok(Self::unless_recorded(ledger, key, witness))
     }
 
-    /// Records convergence once admission covered every byte the witness
-    /// measured; a deferred or shorter admission reads the source again.
     pub(crate) fn admitted(
         self,
         source_deferred: bool,
@@ -274,10 +235,6 @@ impl SourceClaim {
         }
     }
 
-    /// Records that the pass read this source and found nothing the
-    /// consumer's scope will ever admit from it unchanged (it is outside the
-    /// scope, or every source it names already converged), so later passes
-    /// do not re-read it to decide again.
     pub(crate) fn finished(self) -> TranscriptIngestResult<()> {
         match self.settled {
             Some((ledger, witness)) => ledger.record(&self.key, witness, false),
@@ -285,17 +242,12 @@ impl SourceClaim {
         }
     }
 
-    /// Whether admission consumed the whole settled source and left no tail.
-    /// An unsettled change time cannot prove that, so a later pass reads the
-    /// source again.
     pub(crate) fn admission_settles(&self, source_deferred: bool, covered_through: u64) -> bool {
         self.settled
             .as_ref()
             .is_some_and(|(_, witness)| !source_deferred && covered_through == witness.len)
     }
 
-    /// Owned copy of the settled witness, so a caller can finish the source
-    /// after asynchronous admission without observing it again.
     pub(crate) fn settled(&self) -> Option<SettledClaim> {
         self.settled.as_ref().map(|(ledger, witness)| SettledClaim {
             ledger: ledger.clone(),
@@ -305,10 +257,6 @@ impl SourceClaim {
     }
 }
 
-/// A source whose change time was already settled when this pass observed it.
-///
-/// Held across admission so the parent file can be finished once every
-/// source it names is covered, without a later pass opening it to decide.
 pub(crate) struct SettledClaim {
     ledger: SourceLedger,
     key: SourceKey,
@@ -321,8 +269,6 @@ impl SettledClaim {
     }
 }
 
-/// A source failure classified into its catch-up report and whether it
-/// quarantines the source.
 pub(crate) trait SourceFailure {
     fn catch_up_failure(&self, provider: &'static str) -> (TranscriptCatchUpFailure, bool);
 }
@@ -336,12 +282,9 @@ impl SourceFailure for TranscriptIngestError {
     }
 }
 
-/// One provider run over its sources: decides which to read, absorbs
-/// permanent refusals, and keeps their reports until the run folds them in.
 pub(crate) struct SourceSweep {
     provider: &'static str,
     ledger: Option<SourceLedger>,
-    /// Sources refused or skipped this pass.
     blocked: HashSet<SourceKey>,
     failures: Vec<TranscriptCatchUpFailure>,
 }
@@ -359,8 +302,6 @@ impl SourceSweep {
         }
     }
 
-    /// `None` when the source is gone, finished, or quarantined at its
-    /// current witness, or was refused earlier in this pass.
     pub(crate) async fn observe_file(
         &self,
         path: &Path,
@@ -371,10 +312,6 @@ impl SourceSweep {
         SourceClaim::observe_file(self.provider, self.ledger.clone(), path).await
     }
 
-    /// A permanent refusal of the claimed source's own records quarantines
-    /// it at the claim's witness, keeps one report, and returns `Ok(())` so
-    /// the caller moves on. Any other failure (retryable, an authority fault,
-    /// cancellation) comes back untouched for the caller's existing handling.
     pub(crate) fn refused<E: SourceFailure>(
         &mut self,
         claim: SourceClaim,
@@ -384,7 +321,6 @@ impl SourceSweep {
         if !quarantines {
             return Err(error);
         }
-        // Without a record the source is read, and reported, again next pass.
         if let Some((ledger, witness)) = &claim.settled
             && let Err(record_error) = ledger.record(&claim.key, *witness, true)
         {
@@ -404,8 +340,6 @@ impl SourceSweep {
         Ok(())
     }
 
-    /// Prepends the quarantine reports, so a failure that ended the run stays
-    /// last for `ProviderRunOutcome::retryable`.
     pub(crate) fn report_into(self, outcome: &mut ProviderRunOutcome) {
         outcome.failures.splice(0..0, self.failures);
     }
@@ -419,7 +353,6 @@ impl SourceSweep {
     )
 )]
 impl SourceSweep {
-    /// The ledger for a caller that observes sources on a blocking thread.
     #[expect(
         dead_code,
         reason = "the JSONL providers observe through it on their blocking threads"
@@ -428,8 +361,6 @@ impl SourceSweep {
         self.ledger.clone()
     }
 
-    /// [`Self::observe_file`] for a source made of several files keyed by
-    /// `key`, such as a task directory.
     pub(crate) async fn observe_files(
         &self,
         key: &Path,
@@ -449,11 +380,6 @@ impl SourceSweep {
         .await?
     }
 
-    /// A cursor stream inside a shared container, witnessed by the content of
-    /// its first record the cursor does not cover yet. The cursor cannot move
-    /// past a refused record, so that record stays first while it is
-    /// unchanged; a changed or deleted one yields a new witness and releases
-    /// the stream.
     pub(crate) fn observe_stream(
         &mut self,
         container: &Path,
@@ -561,8 +487,6 @@ mod tests {
         let path = home.path().join("rollout.jsonl");
         std::fs::write(&path, "{}\n").unwrap();
         if !spin_until_jsonl_change_settled(&path) {
-            // No stat field proves the bytes unchanged here, so nothing is
-            // ever quarantined.
             return;
         }
         let hub = registered_hub(home.path());

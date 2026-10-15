@@ -104,9 +104,8 @@ impl<F> Default for ProviderRunFold<F> {
 }
 
 impl<F: ProviderRunFailure + Clone> ProviderRunFold<F> {
-    /// Accounts an attempt the caller abandons to retry. Its non-retryable
-    /// failures are kept: the retry skips a source the attempt quarantined,
-    /// so nothing else reports it.
+    /// Accounts an attempt the caller abandons to retry, keeping its
+    /// non-retryable failures.
     pub fn record_retry(&mut self, outcome: &ProviderRunOutcome<F>) {
         self.deferred_units = self.deferred_units.saturating_add(outcome.deferred_units);
         self.byte_bounds_enforced &= outcome.byte_bounds_enforced;

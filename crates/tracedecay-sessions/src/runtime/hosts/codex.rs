@@ -186,8 +186,6 @@ struct CodexDiscoveryConsumerState {
     mode: CodexDiscoveryConsumerMode,
     awaiting_ack: Option<CodexQueuedDiscoveryPass>,
     _memory: Option<ProcessSharedMemoryReservationV1>,
-    /// Sources this consumer finished or quarantined; later passes skip each
-    /// until its witness changes. Released when the consumer deregisters.
     sources: SourceLedger,
 }
 
@@ -885,8 +883,6 @@ impl CodexDiscoveryHub {
         }
     }
 
-    /// The ledger of sources `consumer` finished or quarantined, while it is
-    /// registered.
     pub(crate) fn source_ledger(&self, consumer: &str) -> Option<SourceLedger> {
         self.inner
             .lock()

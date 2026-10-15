@@ -1,8 +1,3 @@
-//! The contract every session provider keeps for a source whose own records a
-//! healthy store permanently refuses (#4021): the refusal is reported once, a
-//! healthy sibling is admitted in the same pass, the unchanged source is not
-//! attempted again, and a change to the source lets it back in.
-
 use std::collections::BTreeSet;
 use std::future::Future;
 
@@ -13,8 +8,6 @@ use super::failure::ProviderRunOutcome;
 
 pub(crate) const REFUSED_REASON: &str = "observation_cursor_advance_ledger_disagreement";
 
-/// Refuse every capture for `session` the way a store whose cursor ledger
-/// keeps disagreeing with one source does.
 pub(crate) fn refuse_session(admission: &MemoryHostAdmission, session: &'static str) {
     admission.fail_captures_for_session(
         session,
@@ -51,9 +44,6 @@ fn refusal_reports(outcome: &ProviderRunOutcome) -> usize {
         .count()
 }
 
-/// Runs `pass` until the contract is proven. The refused source must be
-/// settled before the first pass, and `change_refused_source` must leave it
-/// settled with a new witness.
 pub(crate) async fn assert_refused_source_contract<P, F>(
     admission: &MemoryHostAdmission,
     sibling_session: &str,
