@@ -370,13 +370,15 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
             return ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);
         };
         let source = source.for_user_scope(self.roots.to_vec());
-        match kiro::capture_kiro_snapshot_observations(
+        let mut sweep = SourceSweep::new("kiro", self.codex_discovery);
+        let mut run = match kiro::capture_kiro_snapshot_observations_with_sweep(
             self.facade,
             &source,
             self.profile_root,
             ObservationScopeV1::Profile,
             Some(self.max_new_bytes),
             self.cancellation,
+            &mut sweep,
         )
         .await
         {
@@ -391,7 +393,9 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
                 "user Kiro observation catch-up failed",
                 self.max_new_bytes,
             ),
-        }
+        };
+        sweep.report_into(&mut run);
+        run
     }
 
     #[tracing::instrument(name = "sessions.ingest.user.kimi", level = "trace", skip_all)]
@@ -597,13 +601,15 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
             return ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);
         };
         let source = source.for_user_scope(self.roots.to_vec());
-        match cline_like::capture_cline_like_snapshot_observations(
+        let mut sweep = SourceSweep::new(self.candidate.id(), self.codex_discovery);
+        let mut run = match cline_like::capture_cline_like_snapshot_observations_with_sweep(
             self.facade,
             &source,
             self.profile_root,
             ObservationScopeV1::Profile,
             Some(self.max_new_bytes),
             self.cancellation,
+            &mut sweep,
         )
         .await
         {
@@ -612,21 +618,26 @@ impl<'a, S: TranscriptIngestStore + 'a> UserProviderUnit<'a, S> {
                 outcome.bytes_consumed,
                 outcome.deferred_by_byte_cap,
             ),
-            Err(error) => {
-                if let Some(cancelled) = cancelled_provider_outcome(&error) {
-                    return cancelled;
+            Err(error) => match cancelled_provider_outcome(&error) {
+                Some(cancelled) => cancelled,
+                None => {
+                    let failure = classify_transcript_ingest_failure(
+                        self.candidate.id(),
+                        "observation",
+                        &error,
+                    );
+                    tracing::warn!(
+                        provider = self.candidate.id(),
+                        reason_code = failure.reason_code,
+                        retryable = failure.retryable,
+                        "user snapshot observation catch-up failed"
+                    );
+                    ProviderRunOutcome::failed(failure, self.max_new_bytes)
                 }
-                let failure =
-                    classify_transcript_ingest_failure(self.candidate.id(), "observation", &error);
-                tracing::warn!(
-                    provider = self.candidate.id(),
-                    reason_code = failure.reason_code,
-                    retryable = failure.retryable,
-                    "user snapshot observation catch-up failed"
-                );
-                ProviderRunOutcome::failed(failure, self.max_new_bytes)
-            }
-        }
+            },
+        };
+        sweep.report_into(&mut run);
+        run
     }
 
     #[tracing::instrument(name = "sessions.ingest.user.vibe", level = "trace", skip_all)]

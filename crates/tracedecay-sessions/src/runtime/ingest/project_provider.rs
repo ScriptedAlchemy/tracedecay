@@ -473,13 +473,15 @@ impl<'a> ProjectProviderRun<'a> {
         let Some(source) = kiro::KiroSource::new() else {
             return ProviderRunOutcome::skipped();
         };
-        match kiro::capture_kiro_snapshot_observations(
+        let mut sweep = SourceSweep::new("kiro", self.codex_discovery);
+        let mut run = match kiro::capture_kiro_snapshot_observations_with_sweep(
             self.facade,
             &source,
             self.project_root,
             self.scope.clone(),
             Some(self.max_new_bytes),
             self.cancellation,
+            &mut sweep,
         )
         .await
         {
@@ -494,7 +496,9 @@ impl<'a> ProjectProviderRun<'a> {
                 "project Kiro observation catch-up failed",
                 0,
             ),
-        }
+        };
+        sweep.report_into(&mut run);
+        run
     }
 
     #[tracing::instrument(name = "sessions.ingest.project.kimi", level = "trace", skip_all)]
@@ -697,13 +701,15 @@ impl<'a> ProjectProviderRun<'a> {
         let Some(source) = source else {
             return ProviderRunOutcome::skipped();
         };
-        match cline_like::capture_cline_like_snapshot_observations(
+        let mut sweep = SourceSweep::new(self.candidate.id(), self.codex_discovery);
+        let mut run = match cline_like::capture_cline_like_snapshot_observations_with_sweep(
             self.facade,
             &source,
             self.project_root,
             self.scope.clone(),
             Some(self.max_new_bytes),
             self.cancellation,
+            &mut sweep,
         )
         .await
         {
@@ -712,21 +718,26 @@ impl<'a> ProjectProviderRun<'a> {
                 outcome.bytes_consumed,
                 outcome.deferred_by_byte_cap || outcome.bytes_consumed > self.max_new_bytes,
             ),
-            Err(error) => {
-                if let Some(cancelled) = cancelled_provider_outcome(&error) {
-                    return cancelled;
+            Err(error) => match cancelled_provider_outcome(&error) {
+                Some(cancelled) => cancelled,
+                None => {
+                    let failure = classify_transcript_ingest_failure(
+                        self.candidate.id(),
+                        "observation",
+                        &error,
+                    );
+                    tracing::warn!(
+                        provider = self.candidate.id(),
+                        reason_code = failure.reason_code,
+                        retryable = failure.retryable,
+                        "project snapshot observation catch-up failed"
+                    );
+                    ProviderRunOutcome::failed(failure, 0)
                 }
-                let failure =
-                    classify_transcript_ingest_failure(self.candidate.id(), "observation", &error);
-                tracing::warn!(
-                    provider = self.candidate.id(),
-                    reason_code = failure.reason_code,
-                    retryable = failure.retryable,
-                    "project snapshot observation catch-up failed"
-                );
-                ProviderRunOutcome::failed(failure, 0)
-            }
-        }
+            },
+        };
+        sweep.report_into(&mut run);
+        run
     }
 
     #[tracing::instrument(name = "sessions.ingest.project.vibe", level = "trace", skip_all)]

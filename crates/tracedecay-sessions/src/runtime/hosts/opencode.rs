@@ -378,7 +378,7 @@ pub(crate) async fn capture_opencode_observations(
             let mut page_fully_processed = returned_budget.checkpoint();
             if let Some(materialized) = materialized {
                 page_fully_processed = materialized.fully_processed;
-                runner
+                let refusals = runner
                     .admit_batch(facade, materialized.input_bytes, &scope, cancellation, {
                         let generation = database.generation;
                         move || {
@@ -389,6 +389,9 @@ pub(crate) async fn capture_opencode_observations(
                         }
                     })
                     .await?;
+                if let Some(refusal) = refusals.into_iter().next() {
+                    return Err(refusal.error);
+                }
             }
             if page_fully_processed && cursor != previous_cursor {
                 durable_frontier = ParseOffset {

@@ -113,16 +113,7 @@ impl Witness {
             len: metadata.len(),
         }))
     }
-}
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the snapshot and row-stream providers adopt multi-file and content witnesses"
-    )
-)]
-impl Witness {
     fn settled_files(members: &[PathBuf]) -> TranscriptIngestResult<Option<Self>> {
         let mut hasher = Sha256::new();
         hasher.update(b"tracedecay-source-member-files-witness-v1");
@@ -150,7 +141,13 @@ impl Witness {
             len,
         }))
     }
+}
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the row-stream providers adopt content witnesses")
+)]
+impl Witness {
     fn content(parts: &[&[u8]]) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(b"tracedecay-source-content-witness-v1");
@@ -345,23 +342,6 @@ impl SourceSweep {
     pub(crate) fn report_into(self, outcome: &mut ProviderRunOutcome) {
         outcome.failures.splice(0..0, self.failures);
     }
-}
-
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the snapshot and row-stream providers adopt these observations"
-    )
-)]
-impl SourceSweep {
-    #[expect(
-        dead_code,
-        reason = "the JSONL providers observe through it on their blocking threads"
-    )]
-    pub(crate) fn ledger(&self) -> Option<SourceLedger> {
-        self.ledger.clone()
-    }
 
     pub(crate) async fn observe_files(
         &self,
@@ -380,6 +360,23 @@ impl SourceSweep {
             Ok(SourceClaim::unless_recorded(Some(&ledger), key, witness))
         })
         .await?
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the row-stream providers adopt stream observations"
+    )
+)]
+impl SourceSweep {
+    #[expect(
+        dead_code,
+        reason = "the JSONL providers observe through it on their blocking threads"
+    )]
+    pub(crate) fn ledger(&self) -> Option<SourceLedger> {
+        self.ledger.clone()
     }
 
     pub(crate) fn observe_stream(
