@@ -19,6 +19,7 @@ use tracedecay_contracts::retained_surfaces::{
     RetainedSurfaceResultV1,
 };
 use tracedecay_project::project::TraceDecay;
+use tracedecay_runtime_core::native_runtime::{self, NativeTask};
 
 const MEMORY_CURATOR_REQUEST_TIMEOUT_SECS: u64 = 80;
 
@@ -33,18 +34,11 @@ pub async fn execute_retained_memory_curator(
     context: &RetainedSurfaceExecutionContextV1<'_>,
     request: &FactStoreCurateRequestV1,
 ) -> Result<ApplicationOutcome<RetainedSurfaceResultV1>, RetainedSurfaceExecutionErrorV1> {
-    // The curator calls its Codex backend synchronously for the whole model
-    // run (`CodexAppServerBackend::run_task`), which would park a native
-    // worker; the run stays on a Tokio worker until that call moves off the
-    // async path.
-    let curator_runtime = tracedecay_runtime_core::native_runtime::tokio_handle(
-        "daemon-service.retained_curator.run",
-    )
-    .ok_or_else(|| {
-        RetainedSurfaceExecutionErrorV1::unavailable(
+    if native_runtime::handle().is_none() {
+        return Err(RetainedSurfaceExecutionErrorV1::unavailable(
             "the memory curator runtime is unavailable".to_owned(),
-        )
-    })?;
+        ));
+    }
     let pinned = cg
         .configuration_runtime()
         .client()
@@ -162,7 +156,7 @@ pub async fn execute_retained_memory_curator(
         fact_review_limit: request.fact_review_limit as usize,
         min_confidence,
     };
-    drop(curator_runtime.spawn(async move {
+    let run = async move {
         let retained_run = run_memory_curator_with_backend_for_retained_settlement(
             &automation_context,
             &config,
@@ -176,7 +170,15 @@ pub async fn execute_retained_memory_curator(
             (run.ledger_record, run.committed_receipt)
         });
         log_curator_settlement(&run_id, waiter.wait().await);
-    }));
+    };
+    // The Codex backend blocks its thread for the whole model run
+    // (`CodexAppServerBackend::run_task`), so the run polls on a blocking-pool
+    // thread. Dropping the task detaches it; the run outlives this request.
+    if let Err(error) =
+        NativeTask::spawn(async move { native_runtime::off_native_thread(run).await })
+    {
+        tracing::error!(%error, "memory curator run was not started");
+    }
     Ok(started)
 }
 
