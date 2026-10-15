@@ -1287,11 +1287,33 @@ impl Drop for ProductionProjectCompositionHarnessV1 {
         let Some(resources) = self.resources.take() else {
             return;
         };
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(tracing::Instrument::instrument(
-                shutdown_production_project_harness(resources),
+        // A test drops its harness as its runtime stops, and that runtime
+        // cancels anything spawned on it. Unshut, the composition's native
+        // tasks keep every store and its threads alive for the whole process,
+        // so the shutdown runs to completion on a thread of its own.
+        let shutdown = move || match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime.block_on(tracing::Instrument::instrument(
+                Box::pin(shutdown_production_project_harness(resources)),
                 tracing::trace_span!("daemon.harness.shutdown"),
-            ));
+            )),
+            Err(error) => tracing::warn!(
+                event = "production_harness_drop_shutdown_unavailable",
+                %error,
+                "production-composition harness dropped without a shutdown runtime"
+            ),
+        };
+        if let Err(error) = std::thread::Builder::new()
+            .name("tracedecay-harness-shutdown".to_owned())
+            .spawn(shutdown)
+        {
+            tracing::warn!(
+                event = "production_harness_drop_shutdown_unavailable",
+                %error,
+                "production-composition harness dropped without a shutdown thread"
+            );
         }
     }
 }
