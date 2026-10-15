@@ -6,6 +6,8 @@ use sha2::{Digest, Sha256};
 use tracedecay_runtime_core::resident_memory::ProcessSharedMemoryReservationV1;
 
 use super::failure::{ProviderRunOutcome, TranscriptCatchUpFailure};
+use crate::admission::HostAdmissionStatus;
+use crate::runtime::hosts::claude_observation::ClaudeObservationIngestError;
 use crate::runtime::hosts::codex::{
     CodexDiscoveryHub, candidate_charge, change_stamp, codex_corpus_identity,
 };
@@ -13,7 +15,10 @@ use crate::runtime::jsonl_observation_admission::reserve_shared_jsonl_bytes;
 use crate::runtime::source::{
     TranscriptIngestError, TranscriptIngestResult, run_blocking_transcript_section,
 };
-use crate::runtime::{classify_transcript_ingest_disposition, classify_transcript_ingest_failure};
+use crate::runtime::{
+    classify_claude_observation_failure, classify_transcript_ingest_disposition,
+    classify_transcript_ingest_failure,
+};
 
 #[derive(Clone, Default)]
 pub(crate) struct SourceLedger {
@@ -278,6 +283,21 @@ impl SourceFailure for TranscriptIngestError {
         (
             classify_transcript_ingest_failure(provider, "observation", self),
             classify_transcript_ingest_disposition(self).quarantines_source(),
+        )
+    }
+}
+
+impl SourceFailure for ClaudeObservationIngestError {
+    fn catch_up_failure(&self, provider: &'static str) -> (TranscriptCatchUpFailure, bool) {
+        let class = classify_claude_observation_failure(self);
+        (
+            TranscriptCatchUpFailure::new(
+                provider,
+                "observation",
+                class.reason_code,
+                class.retryable,
+            ),
+            !class.retryable && class.status == HostAdmissionStatus::Degraded,
         )
     }
 }
