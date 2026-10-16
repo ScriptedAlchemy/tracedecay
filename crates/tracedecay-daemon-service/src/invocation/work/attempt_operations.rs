@@ -8,9 +8,9 @@ use tracedecay_contracts::{
     AdmitWorkSynthesisCommand, ApplicationProblem, CancelWorkAttemptCommand, Deadline,
     RequestContext, RequestId, ResumeWorkAttemptsCommand, RetryWorkAttemptCommandV1,
     SafeDiagnostic, StartWorkAttemptCommand, WorkAttemptStatusRequestV1, WorkSynthesisAttemptV1,
-    WorkflowArtifactStorePort,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros, WorkAttemptStateV1, WorkAttemptV1};
+use tracedecay_rusqlite_runtime::work_run_control::WorkSqliteJobStorage;
 use tracedecay_tool_catalog::UseCaseId;
 
 use tracedecay_application::work::{
@@ -31,16 +31,10 @@ fn consume_synthesis_bytes(remaining: &mut u64, bytes: u64) -> Result<(), Applic
 }
 
 fn synthesis_source_context(
-    registered: &RegisteredWorkRuntime,
+    artifacts: &WorkSqliteJobStorage<'_>,
     start: &StartWorkAttemptCommand,
     attempts: &[WorkAttemptV1],
 ) -> Result<String, ApplicationProblem> {
-    let artifacts = registered.database.workflow_storage().map_err(|_| {
-        ApplicationProblem::unavailable(SafeDiagnostic {
-            code: "application.work-synthesis.artifact-body-unavailable".to_owned(),
-            message: "The admitted synthesis source payload authority is unavailable.".to_owned(),
-        })
-    })?;
     let mut remaining = start.execution_snapshot.limits().max_protocol_bytes();
     consume_synthesis_bytes(&mut remaining, start.instructions.len() as u64)?;
     consume_synthesis_bytes(&mut remaining, 2)?;
@@ -50,7 +44,7 @@ fn synthesis_source_context(
         let mut payloads = Vec::with_capacity(attempt.artifacts().len());
         for artifact in attempt.artifacts() {
             consume_synthesis_bytes(&mut remaining, artifact.byte_length())?;
-            let payload = artifacts.load(artifact).map_err(|_| {
+            let payload = artifacts.load_workflow_artifact(artifact).map_err(|_| {
                 ApplicationProblem::unavailable(SafeDiagnostic {
                     code: "application.work-synthesis.artifact-body-unavailable".to_owned(),
                     message: "An admitted synthesis source payload is absent or invalid."
@@ -103,10 +97,8 @@ fn synthesis_source_context(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[tracing::instrument(name = "daemon.service.work.start_attempt", level = "trace", skip_all)]
-pub(super) fn start_attempt(
+pub(super) async fn start_attempt(
     registered: &RegisteredWorkRuntime,
-    services: &RegisteredWorkApplicationServicesV1,
     binding: tracedecay_contracts::WorkProductBindingV1,
     attempt_processes: &Arc<WorkAttemptProcessRegistryV1>,
     observability_producer: Option<&Arc<BoundedObservabilityProducerV1>>,
@@ -121,30 +113,25 @@ pub(super) fn start_attempt(
     deadline: Deadline,
     command: StartWorkAttemptCommand,
 ) -> DaemonInvocationResponse {
-    let started = services
-        .run_control()
-        .admit_reservation(context, &command.task_id, &command.run_id)
-        .and_then(|()| {
-            RegisteredWorkProductServicesV1::attach(&registered.database, binding.clone())
-                .map_err(|_| {
-                    work_product_problem(
-                        tracedecay_contracts::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
-                    )
-                })
-                .and_then(|product| {
-                    preparation::current_work_product_revision_pins(registered).and_then(
-                        |revisions| {
-                            product.attempts().start_against_registered_topology(
-                                context,
-                                &binding,
-                                &revisions,
-                                &registered.work_topology_policy,
-                                command,
-                            )
-                        },
-                    )
-                })
-        });
+    let started = match (
+        attach_product(registered, &binding),
+        preparation::current_work_product_revision_pins(registered),
+    ) {
+        (Ok(product), Ok(revisions)) => {
+            tracing::Instrument::instrument(
+                product.start_attempt(
+                    context.clone(),
+                    binding,
+                    revisions,
+                    registered.work_topology_policy.clone(),
+                    command,
+                ),
+                tracing::trace_span!("daemon.service.work.start_attempt"),
+            )
+            .await
+        }
+        (Err(problem), _) | (_, Err(problem)) => Err(problem),
+    };
     if let (Ok(attempt), Some(project_root)) = (&started, project_root)
         && attempt.state() == WorkAttemptStateV1::Leased
     {
@@ -171,11 +158,20 @@ pub(super) fn start_attempt(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-#[tracing::instrument(name = "daemon.service.work.synthesize", level = "trace", skip_all)]
-pub(super) fn synthesize(
+fn attach_product(
     registered: &RegisteredWorkRuntime,
-    services: &RegisteredWorkApplicationServicesV1,
+    binding: &tracedecay_contracts::WorkProductBindingV1,
+) -> Result<RegisteredWorkProductServicesV1, ApplicationProblem> {
+    RegisteredWorkProductServicesV1::attach(&registered.database, binding.clone()).map_err(|_| {
+        work_product_problem(
+            tracedecay_contracts::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn synthesize(
+    registered: &RegisteredWorkRuntime,
     binding: tracedecay_contracts::WorkProductBindingV1,
     attempt_processes: &Arc<WorkAttemptProcessRegistryV1>,
     observability_producer: Option<&Arc<BoundedObservabilityProducerV1>>,
@@ -190,31 +186,26 @@ pub(super) fn synthesize(
     deadline: Deadline,
     command: AdmitWorkSynthesisCommand,
 ) -> DaemonInvocationResponse {
-    let admitted = RegisteredWorkProductServicesV1::attach(&registered.database, binding.clone())
-        .map_err(|_| {
-            work_product_problem(
-                tracedecay_contracts::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
+    let admitted = match (
+        attach_product(registered, &binding),
+        preparation::current_work_product_revision_pins(registered),
+    ) {
+        (Ok(product), Ok(revisions)) => {
+            tracing::Instrument::instrument(
+                product.synthesize(
+                    context.clone(),
+                    binding,
+                    revisions,
+                    registered.work_topology_policy.clone(),
+                    command,
+                    synthesis_source_context,
+                ),
+                tracing::trace_span!("daemon.service.work.synthesize"),
             )
-        })
-        .and_then(|product| {
-            let revisions = preparation::current_work_product_revision_pins(registered)?;
-            tracedecay_contracts::admit_work_synthesis_against_registered_topology(
-                product.synthesis(),
-                context,
-                &binding,
-                &revisions,
-                &registered.work_topology_policy,
-                command,
-                |start, sources| {
-                    services.run_control().admit_reservation(
-                        context,
-                        &start.task_id,
-                        &start.run_id,
-                    )?;
-                    synthesis_source_context(registered, start, sources)
-                },
-            )
-        });
+            .await
+        }
+        (Err(problem), _) | (_, Err(problem)) => Err(problem),
+    };
     if let (Ok(WorkSynthesisAttemptV1::Admitted(admission)), Some(project_root)) =
         (&admitted, project_root)
         && admission.attempt.state() == WorkAttemptStateV1::Leased
@@ -308,10 +299,8 @@ pub(super) fn cancel_attempt(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[tracing::instrument(name = "daemon.service.work.retry_attempt", level = "trace", skip_all)]
-pub(super) fn retry_attempt(
+pub(super) async fn retry_attempt(
     registered: &RegisteredWorkRuntime,
-    _services: &RegisteredWorkApplicationServicesV1,
     binding: tracedecay_contracts::WorkProductBindingV1,
     attempt_processes: &Arc<WorkAttemptProcessRegistryV1>,
     observability_producer: Option<&Arc<BoundedObservabilityProducerV1>>,
@@ -326,33 +315,35 @@ pub(super) fn retry_attempt(
     deadline: Deadline,
     command: RetryWorkAttemptCommandV1,
 ) -> DaemonInvocationResponse {
-    let retried = if project_root.is_none() {
+    let prepared = if project_root.is_none() {
         Err(ApplicationProblem::unavailable(SafeDiagnostic {
             code: "application.work-retry.project-root-unavailable".to_owned(),
             message: "The Work retry runtime owner is unavailable.".to_owned(),
         }))
     } else {
-        RegisteredWorkProductServicesV1::attach(&registered.database, binding.clone())
-            .map_err(|_| {
-                work_product_problem(
-                    tracedecay_contracts::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
-                )
-            })
-            .and_then(|product| {
-                preparation::current_work_product_revision_pins(registered).and_then(|revisions| {
-                    let workflow_rebind =
-                        workflow_retry_rebind(registered, &command.original_attempt)?;
-                    product.retry().retry(
-                        context,
-                        &binding,
-                        &revisions,
-                        &registered.work_topology_policy,
-                        command,
-                        observed_at,
-                        workflow_rebind,
-                    )
-                })
-            })
+        attach_product(registered, &binding).and_then(|product| {
+            let revisions = preparation::current_work_product_revision_pins(registered)?;
+            let workflow_rebind = workflow_retry_rebind(registered, &command.original_attempt)?;
+            Ok((product, revisions, workflow_rebind))
+        })
+    };
+    let retried = match prepared {
+        Ok((product, revisions, workflow_rebind)) => {
+            tracing::Instrument::instrument(
+                product.retry_attempt(
+                    context.clone(),
+                    binding,
+                    revisions,
+                    registered.work_topology_policy.clone(),
+                    command,
+                    observed_at,
+                    workflow_rebind,
+                ),
+                tracing::trace_span!("daemon.service.work.retry_attempt"),
+            )
+            .await
+        }
+        Err(problem) => Err(problem),
     };
     if let Ok(outcome) = &retried {
         let _ = tracedecay_application::observability::record_work_retry_observation(
@@ -432,12 +423,7 @@ fn workflow_retry_rebind(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[tracing::instrument(
-    name = "daemon.service.work.resume_attempts",
-    level = "trace",
-    skip_all
-)]
-pub(super) fn resume_attempts(
+pub(super) async fn resume_attempts(
     registered: &RegisteredWorkRuntime,
     services: &RegisteredWorkApplicationServicesV1,
     attempt_processes: &Arc<WorkAttemptProcessRegistryV1>,
@@ -463,7 +449,11 @@ pub(super) fn resume_attempts(
             "Work attempt recovery requires the current worktree to have no live provider holder.",
         ))
     } else {
-        services.attempts().resume(context, &command)
+        tracing::Instrument::instrument(
+            services.resume_attempts(context.clone(), command),
+            tracing::trace_span!("daemon.service.work.resume_attempts"),
+        )
+        .await
     };
     if report.is_ok()
         && let Some(project_root) = project_root

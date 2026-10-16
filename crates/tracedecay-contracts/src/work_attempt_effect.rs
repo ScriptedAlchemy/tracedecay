@@ -157,7 +157,7 @@ pub enum WorkAttemptEffectStorageErrorV1 {
 
 /// Persistence owned by the exact Work-attempt authority. Implementations
 /// must make the immutable dispatch identity replay-safe and settlement CASed.
-pub trait WorkAttemptEffectStoragePortV1: Send + Sync {
+pub trait WorkAttemptEffectStoragePortV1 {
     fn begin_effect_dispatch(
         &self,
         authority: &WorkAuthority,

@@ -33,9 +33,8 @@ use crate::work_attempt::{
 };
 use crate::workflow_synthesis::WorkflowSynthesisDraft;
 use crate::{
-    ApplicationProblem, RequestContext, SafeDiagnostic, WorkGraphReadPortV1,
-    WorkProductAttemptAdmissionPortV1, WorkProductBindingV1, WorkProductOwnerAuthorizationPortV1,
-    WorkProductRevisionPinsV1,
+    ApplicationProblem, RequestContext, SafeDiagnostic, WorkGraphReadPortV1, WorkProductBindingV1,
+    WorkProductOwnerAuthorizationPortV1, WorkProductRevisionPinsV1,
 };
 
 const WORK_SYNTHESIS_SOURCE_SET_DOMAIN: &str =
@@ -208,8 +207,7 @@ pub fn admit_work_synthesis_against_registered_topology<S, F>(
 where
     S: WorkSynthesisAdmissionStoragePort
         + WorkGraphReadPortV1
-        + WorkProductOwnerAuthorizationPortV1
-        + WorkProductAttemptAdmissionPortV1,
+        + WorkProductOwnerAuthorizationPortV1,
     F: FnOnce(&StartWorkAttemptCommand, &[WorkAttemptV1]) -> Result<String, ApplicationProblem>,
 {
     crate::require_registered_work_topology(

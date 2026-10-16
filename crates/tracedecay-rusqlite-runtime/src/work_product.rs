@@ -40,6 +40,7 @@ use crate::exact_sql::ExactSqlValue;
 use crate::work::{RegisteredWorkQuery, exact_sql_integer, exact_sql_text, registered_work_query};
 
 mod attempt_admission;
+pub(crate) use attempt_admission::{admit_retry, admit_synthesis};
 mod authorization;
 mod events;
 mod evidence;

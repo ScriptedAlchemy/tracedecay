@@ -25,6 +25,7 @@ use tracedecay_contracts::{
 use tracedecay_domain::UtcMicros;
 
 use crate::work::WorkSqliteStorage;
+use crate::work_run_control::WorkSqliteJobStorage;
 
 impl WorkProductOwnerAuthorizationPortV1 for WorkSqliteStorage {
     fn authorize_scope(
@@ -33,17 +34,35 @@ impl WorkProductOwnerAuthorizationPortV1 for WorkSqliteStorage {
         selection: &WorkProductSelectionScopeV1,
         _observed_at: UtcMicros,
     ) -> Result<AuthorizedWorkProductScopeV1, WorkProductOwnerAuthorizationErrorV1> {
-        let shard = &self.handle().binding().shard_id;
-        if !selection_is_within_resolved_scope(context, selection) {
-            return Err(WorkProductOwnerAuthorizationErrorV1::NotAuthorized);
-        }
-        AuthorizedWorkProductScopeV1::new(
-            shard.brain_id.clone(),
-            shard.profile_id.clone(),
-            selection.clone(),
-        )
-        .map_err(|_| WorkProductOwnerAuthorizationErrorV1::Unavailable)
+        authorize_for_owner(&self.handle().binding().shard_id, context, selection)
     }
+}
+
+impl WorkProductOwnerAuthorizationPortV1 for WorkSqliteJobStorage<'_> {
+    fn authorize_scope(
+        &self,
+        context: &RequestContext,
+        selection: &WorkProductSelectionScopeV1,
+        _observed_at: UtcMicros,
+    ) -> Result<AuthorizedWorkProductScopeV1, WorkProductOwnerAuthorizationErrorV1> {
+        authorize_for_owner(self.owner, context, selection)
+    }
+}
+
+fn authorize_for_owner(
+    shard: &tracedecay_store::StoreShardIdV1,
+    context: &RequestContext,
+    selection: &WorkProductSelectionScopeV1,
+) -> Result<AuthorizedWorkProductScopeV1, WorkProductOwnerAuthorizationErrorV1> {
+    if !selection_is_within_resolved_scope(context, selection) {
+        return Err(WorkProductOwnerAuthorizationErrorV1::NotAuthorized);
+    }
+    AuthorizedWorkProductScopeV1::new(
+        shard.brain_id.clone(),
+        shard.profile_id.clone(),
+        selection.clone(),
+    )
+    .map_err(|_| WorkProductOwnerAuthorizationErrorV1::Unavailable)
 }
 
 fn selection_is_within_resolved_scope(

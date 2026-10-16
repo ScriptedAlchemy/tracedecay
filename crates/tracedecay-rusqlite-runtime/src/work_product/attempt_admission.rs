@@ -17,9 +17,49 @@ use tracedecay_domain::{WorkProductAuthorizedRelationScopeV1, WorkProductGraphV1
 
 use super::{fold_graph, load_journal};
 use crate::exact_sql::ExactSqlTransaction;
-use crate::work::WorkSqliteStorage;
+use crate::work::{RegisteredWorkWrite, WorkSqliteStorage};
+use crate::work_run_control::WorkSqliteJobStorage;
 
 type AdmissionError = WorkProductAttemptAdmissionErrorV1;
+
+/// The writer job commits the product link and the attempt row together, or
+/// rolls both back with any refusal the job returns.
+impl WorkProductAttemptAdmissionPortV1 for WorkSqliteJobStorage<'_> {
+    fn admit_attempt(
+        &self,
+        admission: &WorkProductAttemptAdmissionV1,
+    ) -> Result<WorkProductAttemptAdmissionOutcomeV1, AdmissionError> {
+        admission.validate()?;
+        require_declared_authority(admission)?;
+        require_request_active(&admission.product_context)?;
+        admit_attempt_in_transaction(self.transaction, admission)
+    }
+}
+
+/// Admits one retry inside a writer job, which commits or rolls back the
+/// product link, the receipt, the attempt row and the workflow rebind
+/// together.
+pub(crate) fn admit_retry(
+    transaction: &impl RegisteredWorkWrite,
+    admission: &WorkProductRetryAdmissionV1,
+) -> Result<(WorkProductEventCommitV1, WorkRetryAttemptOutcomeV1), AdmissionError> {
+    admission.validate()?;
+    require_declared_authority(&admission.admission)?;
+    require_request_active(&admission.admission.product_context)?;
+    admit_retry_in_transaction(transaction, admission)
+}
+
+/// Admits one synthesis inside a writer job, which commits or rolls back the
+/// product link, the attempt row and its synthesis record together.
+pub(crate) fn admit_synthesis(
+    transaction: &impl RegisteredWorkWrite,
+    admission: &WorkProductSynthesisAdmissionV1,
+) -> Result<(WorkProductEventCommitV1, WorkSynthesisInsertOutcome), AdmissionError> {
+    admission.validate()?;
+    require_declared_authority(&admission.admission)?;
+    require_request_active(&admission.admission.product_context)?;
+    admit_synthesis_in_transaction(transaction, admission)
+}
 
 impl WorkProductAttemptAdmissionPortV1 for WorkSqliteStorage {
     fn admit_attempt(
@@ -50,74 +90,10 @@ impl WorkProductAttemptAdmissionPortV1 for WorkSqliteStorage {
             Err(error) => rollback_after_failure(transaction, error),
         }
     }
-
-    fn admit_retry(
-        &self,
-        admission: &WorkProductRetryAdmissionV1,
-    ) -> Result<(WorkProductEventCommitV1, WorkRetryAttemptOutcomeV1), AdmissionError> {
-        admission.validate()?;
-        require_declared_authority(&admission.admission)?;
-        require_request_active(&admission.admission.product_context)?;
-        let transaction = self
-            .handle()
-            .begin_immediate()
-            .map_err(|_| AdmissionError::Unavailable)?;
-        let outcome = admit_retry_in_transaction(&transaction, admission);
-        match outcome {
-            Ok((product, WorkRetryAttemptOutcomeV1::Created { receipt, attempt })) => {
-                transaction
-                    .commit()
-                    .map_err(|_| AdmissionError::DurabilityUncertain)?;
-                Ok((
-                    product,
-                    WorkRetryAttemptOutcomeV1::Created { receipt, attempt },
-                ))
-            }
-            Ok((product, WorkRetryAttemptOutcomeV1::Replayed { receipt, attempt })) => {
-                transaction
-                    .rollback()
-                    .map_err(|_| AdmissionError::DurabilityUncertain)?;
-                Ok((
-                    product,
-                    WorkRetryAttemptOutcomeV1::Replayed { receipt, attempt },
-                ))
-            }
-            Err(error) => rollback_after_failure(transaction, error),
-        }
-    }
-
-    fn admit_synthesis(
-        &self,
-        admission: &WorkProductSynthesisAdmissionV1,
-    ) -> Result<(WorkProductEventCommitV1, WorkSynthesisInsertOutcome), AdmissionError> {
-        admission.validate()?;
-        require_declared_authority(&admission.admission)?;
-        require_request_active(&admission.admission.product_context)?;
-        let transaction = self
-            .handle()
-            .begin_immediate()
-            .map_err(|_| AdmissionError::Unavailable)?;
-        let outcome = admit_synthesis_in_transaction(&transaction, admission);
-        match outcome {
-            Ok((product, WorkSynthesisInsertOutcome::Inserted)) => {
-                transaction
-                    .commit()
-                    .map_err(|_| AdmissionError::DurabilityUncertain)?;
-                Ok((product, WorkSynthesisInsertOutcome::Inserted))
-            }
-            Ok((product, WorkSynthesisInsertOutcome::Replayed(result))) => {
-                transaction
-                    .rollback()
-                    .map_err(|_| AdmissionError::DurabilityUncertain)?;
-                Ok((product, WorkSynthesisInsertOutcome::Replayed(result)))
-            }
-            Err(error) => rollback_after_failure(transaction, error),
-        }
-    }
 }
 
 fn admit_attempt_in_transaction(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl RegisteredWorkWrite,
     admission: &WorkProductAttemptAdmissionV1,
 ) -> Result<WorkProductAttemptAdmissionOutcomeV1, AdmissionError> {
     let product = super::events::append_in_transaction(
@@ -162,7 +138,7 @@ fn admit_attempt_in_transaction(
 }
 
 fn admit_retry_in_transaction(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl RegisteredWorkWrite,
     admission: &WorkProductRetryAdmissionV1,
 ) -> Result<(WorkProductEventCommitV1, WorkRetryAttemptOutcomeV1), AdmissionError> {
     let product = super::events::append_in_transaction(
@@ -221,7 +197,7 @@ fn map_workflow_error(error: WorkflowRunStorageError) -> AdmissionError {
 }
 
 fn admit_synthesis_in_transaction(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl RegisteredWorkWrite,
     admission: &WorkProductSynthesisAdmissionV1,
 ) -> Result<(WorkProductEventCommitV1, WorkSynthesisInsertOutcome), AdmissionError> {
     let product = super::events::append_in_transaction(
@@ -269,7 +245,7 @@ fn product_commit(outcome: &WorkProductEventCommitOutcomeV1) -> &WorkProductEven
 }
 
 fn graph_for_product(
-    transaction: &ExactSqlTransaction,
+    transaction: &impl RegisteredWorkWrite,
     context: &tracedecay_contracts::WorkProductPortContextV1,
     product: &WorkProductEventCommitV1,
 ) -> Result<WorkProductGraphV1, AdmissionError> {

@@ -317,7 +317,6 @@ pub(super) async fn dispatch_work_application(
                 tracedecay_contracts::WorkProductBindingV1::new(capability, use_case.clone());
             attempt_operations::start_attempt(
                 &registered,
-                &services,
                 binding,
                 &attempt_processes,
                 observability_producer.as_ref(),
@@ -332,6 +331,7 @@ pub(super) async fn dispatch_work_application(
                 deadline,
                 command,
             )
+            .await
         }
         WorkApplicationInvocationV1::Synthesize(command) => {
             let Ok(capability) = CapabilityId::new(*capability) else {
@@ -344,7 +344,6 @@ pub(super) async fn dispatch_work_application(
                 tracedecay_contracts::WorkProductBindingV1::new(capability, use_case.clone());
             attempt_operations::synthesize(
                 &registered,
-                &services,
                 binding,
                 &attempt_processes,
                 observability_producer.as_ref(),
@@ -359,6 +358,7 @@ pub(super) async fn dispatch_work_application(
                 deadline,
                 command,
             )
+            .await
         }
         WorkApplicationInvocationV1::AttemptStatus(request) => attempt_operations::attempt_status(
             &registered,
@@ -398,7 +398,6 @@ pub(super) async fn dispatch_work_application(
                 tracedecay_contracts::WorkProductBindingV1::new(capability, use_case.clone());
             attempt_operations::retry_attempt(
                 &registered,
-                &services,
                 binding,
                 &attempt_processes,
                 observability_producer.as_ref(),
@@ -413,6 +412,7 @@ pub(super) async fn dispatch_work_application(
                 deadline,
                 command,
             )
+            .await
         }
         WorkApplicationInvocationV1::ListAttempts(request) => {
             let _span = tracing::trace_span!("daemon.service.work.list_attempts").entered();
@@ -731,6 +731,7 @@ pub(super) async fn dispatch_work_application(
                 deadline,
                 command,
             )
+            .await
         }
         WorkApplicationInvocationV1::Views(request) => {
             let _span = tracing::trace_span!("daemon.service.work.views").entered();

@@ -27,9 +27,9 @@ use crate::work_attempt_effect::{
 };
 use crate::{
     ApplicationContractError, ApplicationProblem, RequestContext, RetryDirective, SafeDiagnostic,
-    WorkGraphReadPortV1, WorkProductAttemptAdmissionPortV1, WorkProductAttemptAdmissionV1,
-    WorkProductBindingV1, WorkProductOwnerAuthorizationPortV1, WorkProductRetryAdmissionV1,
-    WorkProductRevisionPinsV1, WorkflowFanOutAttemptBindingV1, WorkflowRunAppendRequest,
+    WorkGraphReadPortV1, WorkProductAttemptAdmissionV1, WorkProductBindingV1,
+    WorkProductOwnerAuthorizationPortV1, WorkProductRetryAdmissionV1, WorkProductRevisionPinsV1,
+    WorkflowFanOutAttemptBindingV1, WorkflowRunAppendRequest,
 };
 
 const RETRY_INPUT_DIGEST_DOMAIN: &str = "tracedecay.application.work-retry-input.v1";
@@ -329,6 +329,16 @@ pub trait WorkRetryStoragePortV1: WorkAttemptStoragePort {
         write: &WorkRetryWriteV1,
         concurrency: &TopologyConcurrencyPolicyV1,
     ) -> Result<WorkRetryAttemptOutcomeV1, WorkAttemptStorageError>;
+
+    /// Commits the accepted-attempt link, the retry receipt, the attempt row
+    /// and any workflow child rebind as one transaction.
+    fn admit_retry(
+        &self,
+        admission: &WorkProductRetryAdmissionV1,
+    ) -> Result<
+        (crate::WorkProductEventCommitV1, WorkRetryAttemptOutcomeV1),
+        crate::WorkProductAttemptAdmissionErrorV1,
+    >;
 }
 
 /// Public retry admission over the verified Work product graph. The legacy
@@ -352,8 +362,7 @@ where
     S: WorkRetryStoragePortV1
         + WorkAttemptEffectStoragePortV1
         + WorkGraphReadPortV1
-        + WorkProductOwnerAuthorizationPortV1
-        + WorkProductAttemptAdmissionPortV1,
+        + WorkProductOwnerAuthorizationPortV1,
     E: WorkRetryEvidencePortV1,
 {
     pub const fn new(storage: S, evidence: E) -> Self {

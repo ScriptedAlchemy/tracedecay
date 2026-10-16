@@ -22,6 +22,7 @@ use tracedecay_contracts::{
     ResumeWorkRunCommand, WorkRunAdmissionV1, WorkRunControlFrontierV1, WorkRunControlReadingV1,
     WorkRunControlRequestV1, WorkRunControlService, WorkRunControlStorageError,
     WorkRunControlStoragePort, WorkRunControlTransitionPort, WorkRunLiveAttemptV1,
+    WorkRunReservationPort,
 };
 use tracedecay_domain::{
     ActorId, AttemptId, ProjectId, RepositoryId, RunId, TaskId, UtcMicros, WorkAuthority,
@@ -215,6 +216,22 @@ impl WorkRunControlTransitionPort for TestStore {
     }
 }
 
+impl WorkRunReservationPort for TestStore {
+    fn load_run_control(
+        &self,
+        authority: &WorkAuthority,
+        task_id: &TaskId,
+        run_id: &RunId,
+    ) -> Result<Option<WorkRunControlV1>, WorkRunControlStorageError> {
+        Ok(self
+            .controls
+            .lock()
+            .unwrap()
+            .get(&(authority.clone(), task_id.clone(), run_id.clone()))
+            .cloned())
+    }
+}
+
 impl WorkRunControlStoragePort for TestStore {
     fn run_admission(
         &self,
@@ -224,20 +241,6 @@ impl WorkRunControlStoragePort for TestStore {
     ) -> Result<Option<WorkRunAdmissionV1>, WorkRunControlStorageError> {
         Ok(self
             .admissions
-            .lock()
-            .unwrap()
-            .get(&(authority.clone(), task_id.clone(), run_id.clone()))
-            .cloned())
-    }
-
-    fn load_run_control(
-        &self,
-        authority: &WorkAuthority,
-        task_id: &TaskId,
-        run_id: &RunId,
-    ) -> Result<Option<WorkRunControlV1>, WorkRunControlStorageError> {
-        Ok(self
-            .controls
             .lock()
             .unwrap()
             .get(&(authority.clone(), task_id.clone(), run_id.clone()))

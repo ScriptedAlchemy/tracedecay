@@ -11,7 +11,10 @@ use tracedecay_domain::{
 
 use super::{WORK_PRODUCT_EVENT_ID_DOMAIN, load_journal_tail, owner_params, selection_covers};
 use crate::exact_sql::ExactSqlValue;
-use crate::work::{WorkSqliteStorage, exact_sql_statement, exact_sql_text, registered_work_query};
+use crate::work::{
+    RegisteredWorkWrite, WorkSqliteStorage, exact_sql_statement, exact_sql_text,
+    registered_work_query,
+};
 
 type PortError = WorkProductEventPortErrorV1;
 
@@ -90,7 +93,7 @@ impl WorkProductEventPortV1 for WorkSqliteStorage {
 }
 
 pub(super) fn append_in_transaction(
-    transaction: &crate::exact_sql::ExactSqlTransaction,
+    transaction: &impl RegisteredWorkWrite,
     context: &WorkProductPortContextV1,
     draft: &WorkProductEventDraftV1,
 ) -> Result<WorkProductEventCommitOutcomeV1, PortError> {
@@ -133,7 +136,7 @@ pub(super) fn append_in_transaction(
 }
 
 fn replay_in_transaction(
-    transaction: &crate::exact_sql::ExactSqlTransaction,
+    transaction: &impl RegisteredWorkWrite,
     context: &WorkProductPortContextV1,
     draft: &WorkProductEventDraftV1,
 ) -> Result<Option<WorkProductEventV1>, PortError> {
@@ -202,7 +205,7 @@ fn mint_event(
 }
 
 fn insert_event(
-    transaction: &crate::exact_sql::ExactSqlTransaction,
+    transaction: &impl RegisteredWorkWrite,
     context: &WorkProductPortContextV1,
     event: &WorkProductEventV1,
     sequence: WorkProductEventSequenceV1,
@@ -215,7 +218,7 @@ fn insert_event(
         None => ExactSqlValue::Null,
     };
     transaction
-        .execute(
+        .work_execute(
             exact_sql_statement(
                 "INSERT INTO work_product_events_v1 (
                     owner_brain_id, owner_profile_id, sequence, event_id, command_id,
