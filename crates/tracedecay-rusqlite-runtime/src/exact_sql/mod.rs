@@ -105,9 +105,12 @@ pub struct ExactSqlHandle {
 ///
 /// Every synchronous storage port in this workspace (`WorkAttemptStoragePort`,
 /// `WorkflowRunStoragePort`, and their siblings) reaches the writer through
-/// these one-shot replies, and the daemon calls those ports from Tokio tasks.
-/// A plain `recv_blocking` therefore parks a whole worker for as long as the
-/// writer's command queue takes to reach this command. On a small runtime two
+/// these one-shot replies. The daemon's loopback HTTP application still serves
+/// on Tokio workers, because its `/remote-deletions` route reaches the project
+/// server lifecycle, and its Remote Brain handlers (node provisioning among
+/// them) call those ports there. A plain `recv_blocking` would park a whole
+/// worker for as long as the writer's command queue takes to reach this
+/// command. On a small runtime two
 /// concurrent waits starve every other task on it, including the HTTP reads
 /// whose admitted deadline then expires. `block_in_place` hands the worker's
 /// run queue to another thread for the wait; it panics outside a multi-thread

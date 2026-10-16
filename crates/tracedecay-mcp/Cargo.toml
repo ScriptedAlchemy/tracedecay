@@ -32,7 +32,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt", "sync"] }
+tokio = { version = "1", features = ["macros", "sync"] }
 toml = "1"
 tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts" }
 tracedecay-api = { path = "../tracedecay-api" }

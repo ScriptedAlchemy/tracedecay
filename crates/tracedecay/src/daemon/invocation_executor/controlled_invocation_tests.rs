@@ -10,6 +10,7 @@ use tracedecay_daemon_protocol::{
     DaemonInvocationResponse,
 };
 use tracedecay_daemon_service::{DaemonInvocationOperation, RequestCancellationRegistryV1};
+use tracedecay_runtime_core::native_runtime::NativeTask;
 
 #[test]
 fn native_worktree_operations_request_the_native_integration_owner() {
@@ -47,11 +48,12 @@ async fn in_process_effect_cancellation_requests_daemon_cancel_and_awaits_settle
     let daemon_cancellation = lease.token();
     let completed = Arc::new(AtomicBool::new(false));
     let completed_by_invocation = Arc::clone(&completed);
-    let invocation = tokio::spawn(async move {
+    let invocation = NativeTask::spawn(async move {
         daemon_cancellation.cancelled().await;
         completed_by_invocation.store(true, Ordering::Release);
         authoritative_response(REQUEST_ID)
-    });
+    })
+    .expect("native invocation task");
     let cancellation =
         CancellationSignal::active("cancel.in-process-effect-cancel").expect("cancellation signal");
     let caller_cancellation = cancellation.clone();
@@ -92,11 +94,12 @@ async fn in_process_effect_deadline_requests_daemon_cancel_and_awaits_settlement
     let daemon_cancellation = lease.token();
     let completed = Arc::new(AtomicBool::new(false));
     let completed_by_invocation = Arc::clone(&completed);
-    let invocation = tokio::spawn(async move {
+    let invocation = NativeTask::spawn(async move {
         daemon_cancellation.cancelled().await;
         completed_by_invocation.store(true, Ordering::Release);
         authoritative_response(REQUEST_ID)
-    });
+    })
+    .expect("native invocation task");
 
     let response = tokio::time::timeout(
         Duration::from_secs(1),
@@ -129,7 +132,8 @@ async fn in_process_effect_without_settlement_returns_reset_required() {
     let lease = request_cancellations
         .register(REQUEST_ID)
         .expect("register invocation cancellation");
-    let invocation = tokio::spawn(std::future::pending::<DaemonInvocationResponse>());
+    let invocation = NativeTask::spawn(std::future::pending::<DaemonInvocationResponse>())
+        .expect("native invocation task");
 
     let started = std::time::Instant::now();
     let response = tokio::time::timeout(
@@ -180,11 +184,12 @@ async fn in_process_read_observes_admitted_outer_cancellation_after_start() {
         .expect("register invocation cancellation");
     let admitted_cancellation = lease.token();
     let (started, started_rx) = tokio::sync::oneshot::channel::<()>();
-    let invocation = tokio::spawn(async move {
+    let invocation = NativeTask::spawn(async move {
         let _admission = admission;
         started.send(()).expect("report invocation start");
         std::future::pending::<DaemonInvocationResponse>().await
-    });
+    })
+    .expect("native invocation task");
     started_rx.await.expect("nested invocation starts");
     let quiescing_registry = registry.clone();
     let quiescing_project = project.clone();

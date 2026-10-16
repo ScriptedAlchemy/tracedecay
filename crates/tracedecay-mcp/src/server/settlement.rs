@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 use tracedecay_domain::errors::{Result, TraceDecayError};
-use tracedecay_runtime_core::native_runtime;
+use tracedecay_runtime_core::native_runtime::{self, NativeTaskOutcome, NativeTaskSet};
 
 const SETTLEMENT_NOT_STARTED: u8 = 0;
 const SETTLEMENT_SETTLING: u8 = 1;
@@ -155,9 +155,12 @@ impl Drop for DispatchCapacityLease {
     }
 }
 
+type DispatchId = u64;
+
 struct RetainedDispatchState {
-    tasks: tokio::task::JoinSet<Arc<DispatchExecutionSettlement>>,
-    active: HashMap<tokio::task::Id, ActiveDispatch>,
+    tasks: NativeTaskSet<(DispatchId, Arc<DispatchExecutionSettlement>)>,
+    active: HashMap<DispatchId, ActiveDispatch>,
+    next_id: DispatchId,
 }
 
 /// Daemon-owned lifetime authority for admitted MCP handlers.
@@ -186,8 +189,9 @@ impl RetainedDispatchRegistry {
             capacity,
             active_slots: Arc::new(AtomicUsize::new(0)),
             state: tokio::sync::Mutex::new(RetainedDispatchState {
-                tasks: tokio::task::JoinSet::new(),
+                tasks: NativeTaskSet::default(),
                 active: HashMap::new(),
+                next_id: 0,
             }),
             #[cfg(any(test, feature = "test-transport"))]
             retained_spawn_count: AtomicUsize::new(0),
@@ -239,10 +243,6 @@ impl RetainedDispatchRegistry {
         T: Send + 'static,
         F: Future<Output = Result<T>> + Send + 'static,
     {
-        // Tool dispatches still reach Tokio, so they settle there.
-        let runtime =
-            tracedecay_runtime_core::native_runtime::tokio_handle("mcp.dispatch.settlement")
-                .ok_or_else(dispatch_runtime_unavailable_error)?;
         let capacity_lease = self.acquire_capacity()?;
         let mut state = self.state.lock().await;
         Self::reap_finished(&mut state);
@@ -254,21 +254,26 @@ impl RetainedDispatchRegistry {
         let worker_settlement = Arc::clone(&settlement);
         let settlement_lease = DispatchSettlementLease(Arc::clone(&settlement));
         let (sender, receiver) = tokio::sync::oneshot::channel();
-        #[cfg(any(test, feature = "test-transport"))]
-        self.retained_spawn_count.fetch_add(1, Ordering::AcqRel);
-        let task = state.tasks.spawn_on(
-            async move {
+        let id = state.next_id;
+        state.next_id += 1;
+        // Tool dispatches run on the native runtime. Handlers move synchronous
+        // storage-port calls off the worker with `off_native_thread` and reach
+        // Tokio-only work through `native_runtime::tokio_handle`.
+        state
+            .tasks
+            .spawn(async move {
                 let _capacity_lease = capacity_lease;
                 worker_settlement.mark_settling();
                 let output = future.await;
                 drop(settlement_lease);
                 let _ = sender.send(output);
-                worker_settlement
-            },
-            &runtime,
-        );
+                (id, worker_settlement)
+            })
+            .map_err(|error| dispatch_runtime_unavailable_error(&error))?;
+        #[cfg(any(test, feature = "test-transport"))]
+        self.retained_spawn_count.fetch_add(1, Ordering::AcqRel);
         state.active.insert(
-            task.id(),
+            id,
             ActiveDispatch {
                 cancellation,
                 live_cancellable,
@@ -295,28 +300,27 @@ impl RetainedDispatchRegistry {
     }
 
     fn reap_finished(state: &mut RetainedDispatchState) {
-        while let Some(joined) = state.tasks.try_join_next_with_id() {
+        while let Some(joined) = state.tasks.try_join_next() {
             Self::settle_joined(state, joined);
         }
     }
 
     fn settle_joined(
         state: &mut RetainedDispatchState,
-        joined: std::result::Result<
-            (tokio::task::Id, Arc<DispatchExecutionSettlement>),
-            tokio::task::JoinError,
-        >,
+        joined: NativeTaskOutcome<(DispatchId, Arc<DispatchExecutionSettlement>)>,
     ) {
         match joined {
-            Ok((id, settlement)) => {
+            NativeTaskOutcome::Completed((id, settlement)) => {
                 settlement.mark_joined();
                 state.active.remove(&id);
             }
-            Err(error) => {
-                if let Some(active) = state.active.remove(&error.id()) {
-                    active.settlement.mark_joined();
-                }
-                tracing::error!(error = %error, "retained MCP dispatch task failed");
+            failed => {
+                // A failed task returns no id. Its dropped settlement lease
+                // already marked it joined, which identifies its entry.
+                state
+                    .active
+                    .retain(|_, active| active.settlement.snapshot() != DispatchSettlement::Joined);
+                tracing::error!(outcome = ?failed, "retained MCP dispatch task failed");
             }
         }
     }
@@ -330,7 +334,7 @@ impl RetainedDispatchRegistry {
                 let _ = active.cancellation.cancel(requested_at);
             }
         }
-        while let Some(joined) = state.tasks.join_next_with_id().await {
+        while let Some(joined) = state.tasks.join_next().await {
             Self::settle_joined(&mut state, joined);
         }
     }
@@ -783,11 +787,11 @@ fn dispatch_shutdown_error() -> TraceDecayError {
     )
 }
 
-fn dispatch_runtime_unavailable_error() -> TraceDecayError {
+fn dispatch_runtime_unavailable_error(error: &str) -> TraceDecayError {
     TraceDecayError::project_route(
         "tool_dispatch_runtime_unavailable",
         true,
-        "MCP tool dispatch found no Tokio runtime",
+        format!("MCP tool dispatch was not started: {error}"),
     )
 }
 
