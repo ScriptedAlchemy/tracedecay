@@ -1,4 +1,4 @@
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::path::Path;
 use std::time::Duration;
 use tracedecay_automation_runtime::automation::config_error;
@@ -671,28 +671,15 @@ pub(super) async fn ingest_transcript(
     if let Some(cg) = cg
         && !user_scope
     {
-        output.hint_outcomes = Some(match profile_root.map(|profile_root| {
-            tracedecay_application::analytics_bridge::hook_import_sources(
+        output.hint_outcomes = Some(
+            super::hint_settlement::settle_hint_outcomes(
+                cg.project_root(),
                 profile_root,
-                Some(cg.project_root()),
+                global_db,
+                session_authorities.project.map(std::convert::AsRef::as_ref),
             )
-        }) {
-            None => json!({ "status": "unavailable", "reason": "profile_root_unavailable" }),
-            Some(Err(error)) => json!({
-                "status": "failed",
-                "operation": "hook_import_sources",
-                "detail": error.to_string(),
-            }),
-            Some(Ok(sources)) => tracing::Instrument::instrument(tracedecay_agent_hosts::hooks::hint_outcomes::settlement::settle_project_hint_outcomes(
-                    global_db,
-                    session_authorities.project.map(std::convert::AsRef::as_ref),
-                    sources,
-                    cg.project_root(),
-                    tracedecay_runtime_core::tracedecay::current_timestamp()
-                ), tracing::trace_span!("mcp.hook_runtime.hint_settle"))
-            .await
-            .as_json(),
-        });
+            .await,
+        );
     }
     // Routes that admit observations directly report what they committed, so a
     // `messages_upserted: 0` pass is readable without guessing which drainer
