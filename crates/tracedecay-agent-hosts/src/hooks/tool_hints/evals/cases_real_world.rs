@@ -82,6 +82,18 @@ pub(super) fn real_world_prompt_cases() -> Vec<HintEval> {
             Some(HintCategory::ProjectContext),
             &["tracedecay_project_search"],
         ),
+        prompt_eval(
+            "in-repo-absolute-path-is-not-cross-project",
+            "/fast/projects/tracedecay/crates/foo/src/lib.rs fails to compile, look at it",
+            None,
+            &[],
+        ),
+        prompt_eval(
+            "sibling-repo-absolute-path-is-cross-project",
+            "/fast/projects/rsncc/src/lib.rs in the sibling repo fails to compile, look at it",
+            Some(HintCategory::ProjectContext),
+            &["tracedecay_project_search"],
+        ),
         prompt_eval("what-repo-is-this", "what repo is this?", None, &[]),
         prompt_eval(
             "github-pr-live-status",
