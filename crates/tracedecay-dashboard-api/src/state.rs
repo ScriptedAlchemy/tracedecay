@@ -328,14 +328,12 @@ impl DashboardState {
     pub fn reconcile_automation_scheduler(&self) {
         if let Some(reconcile) = &self.automation_scheduler_reconciler {
             let reconcile = Arc::clone(reconcile);
-            // Stays on Tokio until the daemon's reconcile is traced Tokio-free.
-            // A miss skips this best-effort reconcile; the miss is counted.
-            if let Some(runtime) = tracedecay_runtime_core::native_runtime::tokio_handle(
-                "dashboard_api.automation_scheduler_reconcile",
-            ) {
-                runtime.spawn(async move {
+            if let Err(error) =
+                tracedecay_runtime_core::native_runtime::NativeTask::spawn(async move {
                     let _ = reconcile().await;
-                });
+                })
+            {
+                tracing::warn!(%error, "dashboard automation scheduler reconcile not admitted");
             }
         }
     }
