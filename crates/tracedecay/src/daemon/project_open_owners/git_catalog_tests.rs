@@ -11,7 +11,7 @@ use tracedecay_contracts::{
     GitIndexPreviewRequestV1, GitIndexTransactionPort, IdempotencyKey, OperationTermination,
     PolicyDecisionRef, RequestContext, RequestId,
 };
-use tracedecay_daemon_service::{GRANT_HORIZON, daemon_owned_project_source_access_at};
+use tracedecay_daemon_service::daemon_owned_project_source_access_at;
 use tracedecay_domain::git::{
     GitDiffScopeV1, GitIndexPreviewDispositionV1, GitIndexPreviewV1, GitIndexReceiptOutcomeV1,
     GitIndexTransactionOperationV1, MAX_GIT_INDEX_PREVIEW_INPUT_LIFETIME_MICROS,
@@ -225,14 +225,33 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
         std::fs::read(project_root.join(".git/index")).unwrap(),
         index_before_denial
     );
+    // Project open snapshots this access once for every owner it registers
+    // and nothing renews it, so a route opened a day ago must still serve.
     let observed_at = tracedecay_contracts::now_micros();
-    let issued_at =
-        UtcMicros(observed_at.0 - i64::try_from(GRANT_HORIZON.as_micros()).unwrap() - 1);
-    let expired =
-        daemon_owned_project_source_access_at(&scope, &project_root, &configuration, issued_at)
+    let opened_at = UtcMicros(observed_at.0 - 25 * 60 * 60 * 1_000_000);
+    let day_old =
+        daemon_owned_project_source_access_at(&scope, &project_root, &configuration, opened_at)
             .unwrap();
-    assert!(issued_at < expired.grant_expires_at);
-    assert!(expired.grant_expires_at < observed_at);
+    assert!(
+        !super::project_open_retained_grant(&day_old, opened_at)
+            .unwrap()
+            .is_expired_at(observed_at),
+        "the retained session and memory grant must outlive a day-old route"
+    );
+    registry
+        .mount(
+            database.clone(),
+            project_root.clone(),
+            day_old.clone(),
+            tracedecay_contracts::now_micros(),
+        )
+        .await
+        .unwrap();
+    owner
+        .current_authority(operation)
+        .expect("the Git owner must still authorize a day-old route");
+    let mut expired = day_old;
+    expired.grant_expires_at = UtcMicros(observed_at.0 - 1);
     registry
         .mount(
             database,
