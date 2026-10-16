@@ -95,6 +95,7 @@ TraceDecay adapts the graph server to that host:
   TraceDecay `PostToolUse` hook matches only `Bash` and `apply_patch`.
 
 The full tool list and the short instructions together cut input per task
-by 13% on gpt-5.6-sol and 9% on gpt-6.1-sol in the agent-adoption eval, with
-the same task success. The measurements and every decision behind this section are in
+by 13% on gpt-5.6-sol and 9% on gpt-6.1-sol in the agent-adoption eval,
+without a measurable change in task success on its small fixture. The
+measurements and every decision behind this section are in
 [`docs/code-mode/decisions.tsv`](../docs/code-mode/decisions.tsv).
