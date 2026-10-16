@@ -704,6 +704,48 @@ pub fn decide_hint(input: &ToolHintInput) -> Option<ToolHint> {
     classify_hint(input).map(hint_for_category)
 }
 
+/// [`decide_hint`], then, for a prompt no keyword rule classified, the
+/// optional session-recall model configured by
+/// `TRACEDECAY_HINT_RECALL_MODEL_URL`.
+#[tracing::instrument(
+    name = "hosts.hooks.tool_hints.decide_with_recall_model",
+    level = "trace",
+    skip_all
+)]
+pub fn decide_hint_with_recall_model(input: &ToolHintInput) -> Option<ToolHint> {
+    decide_hint_consulting(input, RecallModel::from_env)
+}
+
+fn decide_hint_consulting(
+    input: &ToolHintInput,
+    recall_model: impl FnOnce() -> Option<RecallModel>,
+) -> Option<ToolHint> {
+    if !input.hints_enabled {
+        return None;
+    }
+    classify_hint(input)
+        .or_else(|| {
+            let prompt = recall_model_prompt(input)?;
+            recall_model()?
+                .asks_for_recall(prompt)?
+                .then_some(HintCategory::SessionRecall)
+        })
+        .map(hint_for_category)
+}
+
+/// The model reads only a bare user prompt; tool events keep their
+/// deterministic shape rules.
+fn recall_model_prompt(input: &ToolHintInput) -> Option<&str> {
+    if input.tool_name.is_some() || input.command.is_some() {
+        return None;
+    }
+    input
+        .prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty())
+}
+
 #[tracing::instrument(name = "hosts.hooks.tool_hints.classify", level = "trace", skip_all)]
 fn classify_hint(input: &ToolHintInput) -> Option<HintCategory> {
     let facts = HintRequestFacts::new(input);
@@ -914,6 +956,9 @@ use classifiers::{
     is_single_file_read, is_subagent_context_handoff, is_tracedecay_tool_descriptor_read,
     looks_like_pasted_diagnostic, matches_normalized, signals_unexpected_change,
 };
+
+mod recall_model;
+use recall_model::RecallModel;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]

@@ -9,5 +9,7 @@ preserving the distinct runtimes:
   fixtures, scorers, and smoke commands.
 - `agent_adoption/` contains the neutral-prompt adoption and ablation matrix,
   including its dry-run and self-test tooling.
+- `hint_recall_model/` scores the optional Laya second opinion for
+  session-recall hook hints against a held-out prompt set.
 
 Each subdirectory documents its own prerequisites and runnable commands.

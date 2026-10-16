@@ -373,3 +373,62 @@ fn every_tool_a_hint_names_is_cataloged() {
         }
     }
 }
+
+fn prompt_input(prompt: &str) -> ToolHintInput {
+    ToolHintInput {
+        prompt: Some(prompt.to_string()),
+        session_id: Some("session-1".to_string()),
+        ..ToolHintInput::default()
+    }
+}
+
+fn recall_model_at(url: &str) -> impl FnOnce() -> Option<RecallModel> + '_ {
+    move || RecallModel::from_values(Some(url), Some("2000"))
+}
+
+#[test]
+fn the_recall_model_classifies_a_prompt_the_keywords_missed() {
+    use super::recall_model::test_server::{fake_laya, recall_answer};
+    let server = fake_laya(200, &recall_answer(0.9), std::time::Duration::ZERO);
+    let input = prompt_input("pull up our earlier discussion on the hook budget");
+    assert_eq!(classify_hint(&input), None);
+    let hint = decide_hint_consulting(&input, recall_model_at(&server.url)).unwrap();
+    assert_eq!(hint.category, HintCategory::SessionRecall);
+    assert!(hint.context.contains("tracedecay_message_search"));
+}
+
+#[test]
+fn the_recall_model_is_not_consulted_when_it_cannot_change_the_answer() {
+    use super::recall_model::test_server::{fake_laya, recall_answer};
+    use std::sync::atomic::Ordering;
+    let server = fake_laya(200, &recall_answer(0.9), std::time::Duration::ZERO);
+
+    let keyword = prompt_input("who calls classify_hint?");
+    let hint = decide_hint_consulting(&keyword, recall_model_at(&server.url)).unwrap();
+    assert_eq!(hint.category, HintCategory::CallGraph);
+
+    let tool_event = ToolHintInput {
+        tool_name: Some("Bash".to_string()),
+        command: Some("cargo check".to_string()),
+        ..prompt_input("see whether this builds")
+    };
+    assert!(decide_hint_consulting(&tool_event, recall_model_at(&server.url)).is_none());
+
+    let disabled = ToolHintInput {
+        hints_enabled: false,
+        ..prompt_input("pull up our earlier discussion")
+    };
+    assert!(decide_hint_consulting(&disabled, recall_model_at(&server.url)).is_none());
+    assert!(decide_hint_consulting(&prompt_input("   "), recall_model_at(&server.url)).is_none());
+
+    assert_eq!(server.requests.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn a_recall_model_no_or_absence_keeps_the_prompt_silent() {
+    use super::recall_model::test_server::{fake_laya, recall_answer};
+    let input = prompt_input("add a session timeout setting to the config");
+    let server = fake_laya(200, &recall_answer(0.1), std::time::Duration::ZERO);
+    assert!(decide_hint_consulting(&input, recall_model_at(&server.url)).is_none());
+    assert!(decide_hint_consulting(&input, || None).is_none());
+}

@@ -12,7 +12,7 @@ use crate::ports::hook_runtime::HookRuntimeV1;
 use tracedecay_runtime_core::config::ProfileRoot;
 
 use super::steering::{HookWorkspaceStatus, UNINDEXED_STATUS_LINE};
-use super::tool_hints::{ToolHint, ToolHintInput, decide_hint};
+use super::tool_hints::{ToolHint, ToolHintInput, decide_hint_with_recall_model};
 use super::{
     additional_context_json, append_tool_hint, deduped_project_hint_with_id, event_cwd_from_parsed,
     event_project_root, event_project_root_from_json, event_project_root_with_identity,
@@ -349,7 +349,7 @@ fn deduped_codex_hint(
 }
 
 fn codex_prompt_hint(profile: &ProfileRoot, parsed: &Value) -> Option<ToolHint> {
-    let hint = decide_hint(&ToolHintInput {
+    let hint = decide_hint_with_recall_model(&ToolHintInput {
         agent: HostIntegrationIdV1::Codex,
         session_id: event_session_id(parsed),
         tool_name: None,
