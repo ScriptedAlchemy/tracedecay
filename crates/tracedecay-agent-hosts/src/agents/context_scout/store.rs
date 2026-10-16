@@ -1425,42 +1425,6 @@ impl ProjectContextScoutDurableStoreV1 {
         .unwrap_or(ContextScoutDurableStoreOutcomeV1::Unavailable)
     }
 
-    /// Atomically resolves one public opaque claim proof and records its
-    /// delivery. Resolution and mutation share the store transaction so lease
-    /// takeover or supersession cannot race a transport round trip.
-    pub async fn record_delivery_by_lease(
-        &self,
-        work: ContextScoutWorkV1,
-        envelope_id: [u8; 16],
-        lease: ContextScoutLeaseV1,
-        configuration_revision: [u8; 32],
-        receipt: &ContextScoutDeliveryReceiptV1,
-    ) -> ContextScoutDurableStoreOutcomeV1 {
-        if work.generation == 0
-            || work.input_watermark == [0; 32]
-            || !self.in_scope(work.address)
-            || envelope_id == [0; 16]
-            || configuration_revision == [0; 32]
-            || receipt.envelope_id != envelope_id
-            || validate_receipt_shape(receipt).is_err()
-            || lease.validate(receipt.delivered_at).is_err()
-        {
-            return ContextScoutDurableStoreOutcomeV1::Unavailable;
-        }
-        let receipt = receipt.clone();
-        self.update_state("record Context Scout delivery by lease", move |state| {
-            state.record_delivery_by_lease(
-                work,
-                envelope_id,
-                lease,
-                configuration_revision,
-                &receipt,
-            )
-        })
-        .await
-        .unwrap_or(ContextScoutDurableStoreOutcomeV1::Unavailable)
-    }
-
     /// Records explicit feedback only after the receipt binding has survived
     /// the caller-side validation in this module.
     pub async fn record_feedback(
