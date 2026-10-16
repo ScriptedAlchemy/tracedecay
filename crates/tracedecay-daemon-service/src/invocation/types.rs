@@ -1440,31 +1440,32 @@ pub(super) struct SharedGitTransactionPort {
 }
 
 impl GitIndexTransactionPort for SharedGitTransactionPort {
-    fn preview(
+    async fn preview(
         &self,
         request: &GitIndexPreviewRequestV1,
     ) -> Result<GitIndexPreviewPortResultV1, GitIndexTransactionPortError> {
-        self.service.preview(request)
+        self.service.preview(request).await
     }
 
-    fn apply(
+    async fn apply(
         &self,
         request: &GitIndexApplyRequestV1,
     ) -> Result<GitIndexApplyPortResultV1, GitIndexTransactionPortError> {
-        self.cancellation.as_ref().map_or_else(
-            || self.service.apply(request),
-            |emitter| {
+        match &self.cancellation {
+            None => self.service.apply(request).await,
+            Some(emitter) => {
                 self.service
                     .apply_cancellable(request, || emitter.cancellation_requested_at())
-            },
-        )
+                    .await
+            }
+        }
     }
 
-    fn recover(
+    async fn recover(
         &self,
         request: &GitIndexRecoveryRequestV1,
     ) -> Result<GitIndexTransactionReceiptV1, GitIndexTransactionPortError> {
-        self.service.recover(request)
+        self.service.recover(request).await
     }
 }
 

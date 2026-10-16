@@ -153,8 +153,8 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
     let before = git(&project_root, &["rev-parse", "HEAD"]);
     std::fs::write(project_root.join("file.txt"), "accepted\n").unwrap();
     let index_tree_before = git(&project_root, &["write-tree"]);
-    let accepted = transaction_preview(&owner, "accepted", operation);
-    let accepted_result = owner.service.apply(&accepted).unwrap();
+    let accepted = transaction_preview(&owner, "accepted", operation).await;
+    let accepted_result = owner.service.apply(&accepted).await.unwrap();
     assert_eq!(
         accepted_result.receipt.outcome,
         GitIndexReceiptOutcomeV1::Committed
@@ -164,13 +164,13 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
     assert_eq!(git(&project_root, &["rev-parse", "HEAD"]), before);
 
     std::fs::write(project_root.join("file.txt"), "previewed\n").unwrap();
-    let stale = transaction_preview(&owner, "stale", operation);
+    let stale = transaction_preview(&owner, "stale", operation).await;
     std::fs::write(project_root.join("file.txt"), "changed\n").unwrap();
     let head_before_stale = git(&project_root, &["rev-parse", "HEAD"]);
     let index_before_stale = std::fs::read(project_root.join(".git/index")).unwrap();
     // Repository revalidation happens after durable admission, so refusal
     // must return a terminal no-change receipt.
-    let stale_result = owner.service.apply(&stale).unwrap();
+    let stale_result = owner.service.apply(&stale).await.unwrap();
     stale_result.validate_for(&stale).unwrap();
     assert_eq!(
         stale_result.receipt.outcome,
@@ -192,7 +192,7 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
         std::fs::read(project_root.join("file.txt")).unwrap(),
         b"changed\n"
     );
-    let denied = transaction_preview(&owner, "revoked", operation);
+    let denied = transaction_preview(&owner, "revoked", operation).await;
     let before_denial = git(&project_root, &["rev-parse", "HEAD"]);
     let index_before_denial = std::fs::read(project_root.join(".git/index")).unwrap();
     let mut revoked = access.clone();
@@ -210,7 +210,7 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
         owner.current_authority(operation),
         Err(GitIndexTransactionPortError::PolicyDenied)
     ));
-    let denied_result = owner.service.apply(&denied).unwrap();
+    let denied_result = owner.service.apply(&denied).await.unwrap();
     denied_result.validate_for(&denied).unwrap();
     assert_eq!(
         denied_result.receipt.outcome,
@@ -246,8 +246,8 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
             && current.grant_expires_at.0 <= current.evaluated_at.0 + horizon,
         "an authorized request keeps a finite grant expiry: {current:?}"
     );
-    let day_old_preview = transaction_preview(&owner, "day-old", operation);
-    let day_old_result = owner.service.apply(&day_old_preview).unwrap();
+    let day_old_preview = transaction_preview(&owner, "day-old", operation).await;
+    let day_old_result = owner.service.apply(&day_old_preview).await.unwrap();
     assert_eq!(
         day_old_result.receipt.outcome,
         GitIndexReceiptOutcomeV1::Committed
@@ -266,7 +266,7 @@ fn git(root: &std::path::Path, arguments: &[&str]) -> Vec<u8> {
     output.stdout
 }
 
-fn transaction_preview(
+async fn transaction_preview(
     owner: &tracedecay_code_index_runtime::git_transactions::DaemonGitInvocationOwner,
     suffix: &str,
     operation: GitIndexTransactionOperationV1,
@@ -315,7 +315,7 @@ fn transaction_preview(
         expires_at,
     )
     .unwrap();
-    owner.service.save_preview_input(input).unwrap();
+    owner.service.save_preview_input(input).await.unwrap();
     let grant = CapabilityGrantSnapshot::new(
         CapabilityGrantId::new(format!("grant.catalog.{suffix}")).unwrap(),
         current.policy_revision,
@@ -361,6 +361,7 @@ fn transaction_preview(
             selected_hunks: hunks,
             observed_at: current.evaluated_at,
         })
+        .await
         .unwrap()
         .preview;
     assert_eq!(
