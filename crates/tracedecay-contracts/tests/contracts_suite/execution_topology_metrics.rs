@@ -312,7 +312,7 @@ async fn admission_refuses_missing_capability_cancellation_deadline_and_grant_ex
                 Deadline::new(UtcMicros(i64::MAX)).unwrap(),
                 CancellationContext::active("cancel.grant-expiry").unwrap(),
             ),
-            "timed_out",
+            "unavailable",
         ),
     ];
 

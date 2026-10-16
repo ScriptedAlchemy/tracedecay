@@ -16,6 +16,33 @@ use crate::source_authorization::{ProjectSourceAccessSnapshot, ProjectSourceAcce
 
 const POLICY_REVISION_V1: u64 = 1;
 
+pub const GRANT_HORIZON: Duration = Duration::from_hours(24);
+
+/// The grant expiry of one request observed at `observed_at` under a mounted
+/// project-open owner. Project open snapshots its access once and nothing
+/// renews it, so the owner's authority lasts as long as it is mounted and the
+/// expiry is measured from each request: one fixed at project open refused
+/// every request from one horizon after the project opened.
+pub fn mounted_grant_expires_at(observed_at: UtcMicros) -> UtcMicros {
+    UtcMicros(
+        observed_at
+            .0
+            .saturating_add(i64::try_from(GRANT_HORIZON.as_micros()).unwrap_or(i64::MAX)),
+    )
+}
+
+/// `grant`, minted by a mounted owner, bounded to one request observed at
+/// `observed_at`.
+pub fn mounted_grant_at(
+    grant: &CapabilityGrantSnapshot,
+    observed_at: UtcMicros,
+) -> CapabilityGrantSnapshot {
+    CapabilityGrantSnapshot {
+        expires_at: mounted_grant_expires_at(observed_at),
+        ..grant.clone()
+    }
+}
+
 #[derive(Clone)]
 pub struct ProjectOpenSourceAccessAuthorityV1 {
     requester: ActorId,

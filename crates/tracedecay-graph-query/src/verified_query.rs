@@ -772,6 +772,9 @@ fn refuse_if_query_closed(
         tracedecay_contracts::RequestAdmission::TimedOut => Err(map_code_graph_read_runtime_error(
             super::CodeGraphReadError::TimedOut,
         )),
+        tracedecay_contracts::RequestAdmission::GrantExpired => Err(
+            map_code_graph_read_runtime_error(super::CodeGraphReadError::Denied),
+        ),
     }
 }
 

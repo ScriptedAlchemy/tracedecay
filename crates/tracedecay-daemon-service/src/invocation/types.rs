@@ -863,6 +863,11 @@ pub struct RegisteredWorkRuntime {
 }
 
 impl RegisteredWorkRuntime {
+    /// The registered grant, bounded to one request observed at `observed_at`.
+    pub(crate) fn grant_at(&self, observed_at: UtcMicros) -> CapabilityGrantSnapshot {
+        mounted_grant_at(&self.grant, observed_at)
+    }
+
     /// Cancel every retained background recovery owner without awaiting.
     ///
     /// Hoisted out of [`Self::shut_down_background_recovery`] so daemon
@@ -903,10 +908,7 @@ pub struct RegisteredRetainedRuntime {
 impl RegisteredRetainedRuntime {
     /// The registered grant, bounded to one request observed at `observed_at`.
     pub(super) fn grant_at(&self, observed_at: UtcMicros) -> CapabilityGrantSnapshot {
-        CapabilityGrantSnapshot {
-            expires_at: mounted_grant_expires_at(observed_at),
-            ..self.grant.clone()
-        }
+        mounted_grant_at(&self.grant, observed_at)
     }
 }
 
@@ -1332,6 +1334,13 @@ pub struct AuthorizedDaemonLspWorkspace {
 }
 
 impl DaemonLspInvocationOwner {
+    /// The scope grant, bounded to one request observed at `observed_at`.
+    pub(super) fn scope_grant_at(&self, observed_at: UtcMicros) -> Option<CapabilityGrantSnapshot> {
+        self.scope_grant
+            .as_ref()
+            .map(|grant| mounted_grant_at(grant, observed_at))
+    }
+
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn for_test_project(
         factory: Arc<DaemonLspSessionFactory>,

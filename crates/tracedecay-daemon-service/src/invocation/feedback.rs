@@ -554,6 +554,10 @@ pub fn advisory_cycle_invocation_result(
             RequestAdmission::TimedOut => {
                 Some((OperationTermination::TimedOut, OmissionReason::TimedOut))
             }
+            RequestAdmission::GrantExpired => Some((
+                OperationTermination::Unavailable,
+                OmissionReason::Unavailable,
+            )),
             RequestAdmission::Admitted => None,
         }
     };

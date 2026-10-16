@@ -100,6 +100,7 @@ impl CodeGraphProjectionReadPort for FixtureCodeGraphReadPort {
                 RequestAdmission::Admitted => {}
                 RequestAdmission::Cancelled => return Err(CodeGraphReadError::Cancelled),
                 RequestAdmission::TimedOut => return Err(CodeGraphReadError::TimedOut),
+                RequestAdmission::GrantExpired => return Err(CodeGraphReadError::Denied),
             }
             let store = self
                 .store

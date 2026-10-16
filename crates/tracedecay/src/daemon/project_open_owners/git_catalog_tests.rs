@@ -225,27 +225,34 @@ async fn git_owner_uses_explicit_canonical_catalog_and_rechecks_authorization() 
         std::fs::read(project_root.join(".git/index")).unwrap(),
         index_before_denial
     );
+    // Project open snapshots this access once and nothing renews it, so an
+    // owner mounted one horizon and one hour ago must still serve.
     let observed_at = tracedecay_contracts::now_micros();
-    let issued_at =
-        UtcMicros(observed_at.0 - i64::try_from(GRANT_HORIZON.as_micros()).unwrap() - 1);
-    let expired =
-        daemon_owned_project_source_access_at(&scope, &project_root, &configuration, issued_at)
+    let horizon = i64::try_from(GRANT_HORIZON.as_micros()).unwrap();
+    let opened_at = UtcMicros(observed_at.0 - horizon - 3_600_000_000);
+    let day_old =
+        daemon_owned_project_source_access_at(&scope, &project_root, &configuration, opened_at)
             .unwrap();
-    assert!(issued_at < expired.grant_expires_at);
-    assert!(expired.grant_expires_at < observed_at);
+    assert!(day_old.grant_expires_at < observed_at);
     registry
-        .mount(
-            database,
-            project_root.clone(),
-            expired,
-            tracedecay_contracts::now_micros(),
-        )
+        .mount(database, project_root.clone(), day_old, opened_at)
         .await
         .unwrap();
-    assert!(matches!(
-        owner.current_authority(operation),
-        Err(GitIndexTransactionPortError::PolicyDenied)
-    ));
+    let current = owner
+        .current_authority(operation)
+        .expect("the Git owner must still authorize a route opened a day ago");
+    assert!(
+        current.grant_expires_at > current.evaluated_at
+            && current.grant_expires_at.0 <= current.evaluated_at.0 + horizon,
+        "an authorized request keeps a finite grant expiry: {current:?}"
+    );
+    let day_old_preview = transaction_preview(&owner, "day-old", operation);
+    let day_old_result = owner.service.apply(&day_old_preview).unwrap();
+    assert_eq!(
+        day_old_result.receipt.outcome,
+        GitIndexReceiptOutcomeV1::Committed
+    );
+    assert_eq!(git(&project_root, &["show", ":file.txt"]), b"changed\n");
 }
 
 fn git(root: &std::path::Path, arguments: &[&str]) -> Vec<u8> {

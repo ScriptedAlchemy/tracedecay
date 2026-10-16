@@ -187,7 +187,7 @@ fn workflow_fan_out_recovery_context(
     RequestContext::new(
         registered.actor.clone(),
         registered.grant.scope.clone(),
-        registered.grant.clone(),
+        registered.grant_at(now_micros()),
         RequestId::new("workflow-fan-out-startup-recovery")?,
         Deadline::new(UtcMicros(
             now_micros().0.saturating_add(BACKGROUND_DEADLINE_MICROS),

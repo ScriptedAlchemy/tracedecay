@@ -191,6 +191,18 @@ impl DaemonLcmAuthority {
             let interruption = match admission {
                 RequestAdmission::Cancelled => RequestInterruption::Cancelled,
                 RequestAdmission::TimedOut => RequestInterruption::DeadlineExceeded,
+                RequestAdmission::GrantExpired => {
+                    return terminal(
+                        &invocation.context,
+                        operation,
+                        started_at,
+                        LcmAuthorityOutcome::Denied,
+                        OperationTermination::Failed,
+                        None,
+                        None,
+                        None,
+                    );
+                }
                 RequestAdmission::Admitted => {
                     return terminal_failure(
                         &invocation.context,
@@ -344,6 +356,18 @@ impl DaemonLcmAuthority {
                     started_at,
                     RequestInterruption::DeadlineExceeded,
                     CancellationStage::BeforeAdmission,
+                    None,
+                );
+            }
+            RequestAdmission::GrantExpired => {
+                return terminal(
+                    context,
+                    operation,
+                    started_at,
+                    LcmAuthorityOutcome::Denied,
+                    OperationTermination::Failed,
+                    None,
+                    None,
                     None,
                 );
             }

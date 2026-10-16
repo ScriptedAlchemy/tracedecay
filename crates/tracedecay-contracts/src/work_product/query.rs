@@ -398,6 +398,7 @@ fn authorize_port_context<A: WorkProductOwnerAuthorizationPortV1>(
         RequestAdmission::Admitted => {}
         RequestAdmission::Cancelled => return Err(WorkProductApplicationErrorV1::Cancelled),
         RequestAdmission::TimedOut => return Err(WorkProductApplicationErrorV1::TimedOut),
+        RequestAdmission::GrantExpired => return Err(WorkProductApplicationErrorV1::NotAuthorized),
     }
     selection
         .validate()

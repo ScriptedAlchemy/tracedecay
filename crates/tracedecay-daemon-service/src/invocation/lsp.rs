@@ -165,7 +165,7 @@ impl DaemonInvocationService {
         observed_at: UtcMicros,
     ) -> Option<(RequestContext, ManifestDigest)> {
         let owner = self.lsp_owner(Some(project_root)).await?;
-        let grant = owner.scope_grant?;
+        let grant = owner.scope_grant_at(observed_at)?;
         if grant.scope != *scope {
             return None;
         }
@@ -243,7 +243,7 @@ impl DaemonInvocationService {
         let mut storages = vec![active_storage.clone()];
         for (ordinal, (project_root, scope, locator)) in roots.iter().enumerate() {
             let owner = self.lsp_owner(Some(project_root)).await?;
-            let grant = owner.scope_grant?;
+            let grant = owner.scope_grant_at(observed_at)?;
             if grant.scope != *scope {
                 return None;
             }
@@ -324,7 +324,7 @@ impl DaemonInvocationService {
         T: Serialize,
     {
         let owner = self.lsp_owner(Some(project_root)).await?;
-        let grant = owner.scope_grant?;
+        let grant = owner.scope_grant_at(observed_at)?;
         let scope = grant.scope.clone();
         let context = RequestContext::new(
             grant.issuer.clone(),

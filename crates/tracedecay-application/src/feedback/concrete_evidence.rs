@@ -30,6 +30,10 @@ pub(super) fn interruption<T>(
             OmissionReason::TimedOut,
             true,
         )),
+        RequestAdmission::GrantExpired => Some(RetrievalPortOutcome::Refused(
+            unknown_evidence(finished_at, domains),
+            Box::new(ApplicationProblem::grant_expired_before_admission()),
+        )),
     }
 }
 
