@@ -689,7 +689,6 @@ pub(super) fn asks_for_session_recall(text: &str) -> bool {
             "prior run",
             "previous run",
             "automation run",
-            "memory curator",
             "self-improvement run",
             "past session",
             "prior conversation",
@@ -711,7 +710,6 @@ pub(super) fn asks_for_session_recall(text: &str) -> bool {
             &[
                 "raw codex jsonl transcript",
                 "raw codex jsonl transcripts",
-                "transcript files",
                 "hook input",
                 "hook usage",
                 "hint displayed",
