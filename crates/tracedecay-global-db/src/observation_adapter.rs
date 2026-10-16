@@ -1525,7 +1525,7 @@ impl ObservationStore for GlobalDbObservationStore {
         source: &ObservationSourceIdentityV1,
         scope: &ObservationScopeV1,
     ) -> ObservationStoreResult<Option<ObservationSourceCursorV1>> {
-        read_runtime_source_cursor(&self.runtime, source, scope)
+        read_runtime_source_cursor(&self.runtime, source, scope).await
     }
 
     async fn committed_source_cursors(
@@ -1539,7 +1539,9 @@ impl ObservationStore for GlobalDbObservationStore {
                 source: source.clone(),
                 scope: scope.clone(),
             },
-        )? {
+        )
+        .await?
+        {
             ObservationReadResultV1::CommittedSourceCursors(cursors) => Ok(cursors),
             _ => Err(runtime_storage_error(
                 "read committed observation source cursors",
@@ -1557,7 +1559,8 @@ impl ObservationStore for GlobalDbObservationStore {
             runtime,
             advance.next_cursor().source(),
             advance.next_cursor().scope(),
-        )?;
+        )
+        .await?;
         // One owner per frontier. A cursor that already reached `next` has
         // recorded the range; a second reason must not become a permanent
         // collision that both ingest owners then warn on forever. The
@@ -1621,7 +1624,8 @@ impl ObservationStore for GlobalDbObservationStore {
             | RuntimeSubmitOutcomeV1::IdempotencyConflict { .. } => {
                 // Another owner may have committed this key after the
                 // pre-check; it owns the range.
-                if read_runtime_source_cursor(runtime, next_cursor.source(), next_cursor.scope())?
+                if read_runtime_source_cursor(runtime, next_cursor.source(), next_cursor.scope())
+                    .await?
                     .is_some_and(|cursor| cursor.reached(&next_cursor))
                 {
                     return Ok(CursorAdvanceOutcome::ExactDuplicate);
@@ -1666,7 +1670,7 @@ impl ObservationStore for GlobalDbObservationStore {
         &self,
         observation_id: &CanonicalObservationIdV1,
     ) -> ObservationStoreResult<Option<StoredObservation>> {
-        read_runtime_stored_observation(&self.runtime, observation_id)
+        read_runtime_stored_observation(&self.runtime, observation_id).await
     }
 
     async fn replay_observations(
@@ -1685,7 +1689,9 @@ impl ObservationStore for GlobalDbObservationStore {
                 after_sequence: request.after_sequence(),
                 limit,
             },
-        )? {
+        )
+        .await?
+        {
             ObservationReadResultV1::Replay(rows) => rows
                 .into_iter()
                 .map(stored_observation_from_runtime_row)
@@ -1749,7 +1755,7 @@ fn identity_collision(
     }
 }
 
-fn dispatch_runtime_observation_read(
+async fn dispatch_runtime_observation_read(
     runtime: &DatabaseRuntimeClientV1,
     operation: ObservationReadOperationV1,
 ) -> ObservationStoreResult<ObservationReadResultV1> {
@@ -1790,14 +1796,15 @@ fn dispatch_runtime_observation_read(
         control,
     )
     .map_err(|error| runtime_storage_error("build observation runtime read", error))?;
-    let probe = RuntimeObservationProbe::from_control(request.control());
+    let probe = Arc::new(RuntimeObservationProbe::from_control(request.control()));
     tracing::trace!(
         target: "tracedecay::observation_admission_work",
         work = "runtime_command",
         "dispatch observation runtime read"
     );
     let outcome = runtime
-        .dispatch_read(request, &probe)
+        .dispatch_read(request, probe)
+        .await
         .map_err(|error| match error {
             StoreRuntimeRegistryFailure::ReaderSaturated => {
                 ObservationStoreError::ReaderSaturated {
@@ -1857,7 +1864,7 @@ fn stored_observation_from_runtime_row(
     ))
 }
 
-fn read_runtime_source_cursor(
+async fn read_runtime_source_cursor(
     runtime: &DatabaseRuntimeClientV1,
     source: &ObservationSourceIdentityV1,
     scope: &ObservationScopeV1,
@@ -1868,7 +1875,9 @@ fn read_runtime_source_cursor(
             source: source.clone(),
             scope: scope.clone(),
         },
-    )? {
+    )
+    .await?
+    {
         ObservationReadResultV1::SourceCursor(cursor) => Ok(cursor),
         _ => Err(runtime_storage_error(
             "read observation source cursor",
@@ -1929,7 +1938,7 @@ fn refused_scan_frontier(
     .map(RefusedScanFrontier::AtFrontier)
 }
 
-fn read_runtime_stored_observation(
+async fn read_runtime_stored_observation(
     runtime: &DatabaseRuntimeClientV1,
     observation_id: &CanonicalObservationIdV1,
 ) -> ObservationStoreResult<Option<StoredObservation>> {
@@ -1938,7 +1947,9 @@ fn read_runtime_stored_observation(
         ObservationReadOperationV1::Observation {
             observation_id: observation_id.clone(),
         },
-    )? {
+    )
+    .await?
+    {
         ObservationReadResultV1::Observation(row) => match *row {
             Some(row) => stored_observation_from_runtime_row(row).map(Some),
             None => Ok(None),
@@ -2454,6 +2465,7 @@ impl ObservationProjectionStore for GlobalDbObservationStore {
                 now_micros: now_micros().0,
             },
         )
+        .await
         .map_err(projection_runtime_error)?
         {
             ObservationReadResultV1::NextQueuedProjection(observation_id) => Ok(observation_id),
@@ -2485,6 +2497,7 @@ impl ObservationProjectionStore for GlobalDbObservationStore {
             &self.runtime,
             ObservationReadOperationV1::ProjectionCheckpoint,
         )
+        .await
         .map_err(projection_runtime_error)?
         {
             ObservationReadResultV1::ProjectionCheckpoint(sequence) => {
