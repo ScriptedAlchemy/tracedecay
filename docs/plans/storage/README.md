@@ -598,10 +598,8 @@ changes a file that holds memory.
    idempotency rows. Built on the #4099 measurement lane's persisted usage, not
    beside it. Proof: a deleted worktree's data is collected in one tick; a
    directory without a catalog row keeps its memory.
-4. Dead letters on today's queue. Per-stream cursors and the dead-letter table in
-   the current sessions file, built on the drain lane's #4107. Proof: a poisoned row
-   dead-letters while other streams project; an injected connection fault heals by
-   reconnect with no dead letter.
+4. Merged into step 8 (see "Implementation reconciliation"): dead letters ship with
+   the partition, where corrupt derived authority can be rebuilt instead of skipped.
 5. Async journal. `WorkJournal::transact`, `get` and `list`; Work and Workflow
    decisions become pure contracts functions. Delete the 24 sync ports, interactive
    exact-SQL transactions, `off_native_thread` for Work and the three actor threads.
@@ -621,10 +619,15 @@ changes a file that holds memory.
 8. Partition the sessions file and identity by repository. Split each project into
    journal, memory, evidence and derived; telemetry leaves the catalog; identity
    adopts through aliases. The in-place conversion of durable rows ships here.
-   Delete `projection_queue`, `lcm-payloads/`, the string classifier, the store
-   locator resolver and standalone registries. Proof: two full clones and a linked
-   worktree resolve to one project with three worktree directories; converted
-   facts, workflow definitions and approvals read back identically.
+   Per-stream cursors and dead letters replace the global queue: row poison
+   dead-letters per stream, and corrupt derived authority (ghost or divergent
+   provenance) rebuilds `derived.db` instead of being skipped. Delete
+   `projection_queue`, `lcm-payloads/`, the string classifier, the store locator
+   resolver and standalone registries. Proof: two full clones and a linked worktree
+   resolve to one project with three worktree directories; converted facts,
+   workflow definitions and approvals read back identically; a poisoned row
+   dead-letters while other streams project; corrupt provenance triggers a derived
+   rebuild and the stream resumes.
 9. Graph narrowing. The memory graph and session-relation graphs move to SQLite
    tables; the staging container becomes `scratch/`. Proof: no `*.grafeo.wal`
    exists after a seal; heap after open is independent of generation size.
@@ -671,6 +674,22 @@ changes a file that holds memory.
   in step 8. The additive-migration rule for memory ships with the first change to a
   memory table (the conversion in step 8), not as machinery with no migration to
   run. The class contract is unchanged.
+- Step 3 (2026-10-16, branch `refactor/storage-worktree-liveness`). The first
+  growth source is closed: orphan-store liveness no longer counts the shared git
+  common directory, so a deleted worktree's store becomes collectable while its
+  repository lives. Still open in step 3: a daemon-run collector for unregistered
+  `proj_*` directories, collecting a store's non-memory files when memory rows pin
+  it, per-tick response-handle sweeps, `hook_analytics.jsonl` rotation, and
+  age-pruned idempotency rows.
+- Step 4 merged into step 8 (2026-10-16). A dead-letter valve on today's global
+  queue was built and then dropped: the projection code deliberately keeps corrupt
+  projection authority (ghost or divergent provenance, divergent workflow state) a
+  hard error, pinned by three `observation_collision_tests`, because skipping would
+  launder corrupt derived state into a durable skip. The design's answer to corrupt
+  derived state is a derived rebuild, which needs derived in its own file, so dead
+  letters ship with the partition. This is one deviation, not a pattern of them, so
+  the sketch stands (architect Phase E). The attempt is kept out of the tree; the
+  remaining row-poison class (domain anchor errors) was too thin to ship alone.
 
 ## Open questions and risks
 
@@ -689,5 +708,5 @@ changes a file that holds memory.
 
 ## Next implementation step
 
-Step 3: collect worktree data by worktree-root liveness instead of the shared
-`.git`, on top of the #4099 measurement lane.
+The rest of step 3: a daemon-run collector for unregistered project directories
+that never deletes durable data, on top of the #4099 measurement lane.
