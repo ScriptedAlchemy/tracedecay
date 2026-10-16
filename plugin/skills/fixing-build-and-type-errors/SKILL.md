@@ -1,6 +1,8 @@
 ---
 name: fixing-build-and-type-errors
 description: Use when a build, compile, or type check fails and the error spans several symbols or files. Skip when one compiler message already names the line to fix. Load this skill before the first tool call.
+metadata:
+  opencode/slash: "true"
 ---
 
 # Fixing build and type errors

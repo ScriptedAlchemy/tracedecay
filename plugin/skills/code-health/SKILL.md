@@ -1,6 +1,8 @@
 ---
 name: code-health
 description: Use when the user asks for a quality, architecture, coupling, or complexity read on a project or directory, or where its structural risks are. Load this skill before the first tool call.
+metadata:
+  opencode/slash: "true"
 ---
 
 # Code health

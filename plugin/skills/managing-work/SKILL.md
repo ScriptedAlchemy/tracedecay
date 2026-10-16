@@ -1,6 +1,8 @@
 ---
 name: managing-work
 description: Use when the user asks to create or control TraceDecay Work tasks, attempts, graph mutations, placements, or adjudication. Load this skill before the first tool call.
+metadata:
+  opencode/slash: "true"
 ---
 
 # Managing Work

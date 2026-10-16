@@ -1,6 +1,8 @@
 ---
 name: project-memory
 description: Use when the user asks what was decided, agreed, or recorded about the project, or asks to remember a decision. Skip when the user asks what an earlier conversation said. Load this skill before the first tool call.
+metadata:
+  opencode/slash: "true"
 ---
 
 # Project memory

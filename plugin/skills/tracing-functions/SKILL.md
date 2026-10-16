@@ -1,6 +1,8 @@
 ---
 name: tracing-functions
 description: Use when the user asks who calls a function, what it calls, or how one function reaches another. Skip when the user wants occurrences of a string rather than call relationships. Load this skill before the first tool call.
+metadata:
+  opencode/slash: "true"
 ---
 
 # Tracing functions
