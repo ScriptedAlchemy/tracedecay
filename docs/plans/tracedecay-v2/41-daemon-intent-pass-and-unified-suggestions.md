@@ -86,10 +86,13 @@ facts (and, until phase 3, the keyword prompt predicates) produce
 candidates. A model never chooses receptivity.
 
 Measured on the frozen 121-case multi-turn set
-(`evals/intent_engine/`): Intern-Decision-4B macro-F1 0.80 at a fixed 0.6
-threshold (leave-one-out 0.85), Kev-4B 0.69 (0.73), Laya 0.42 (0.46).
-Intern-Decision-4B is the recommended default; Kev-4B is the alternative
-with the cheapest fine-tuning path.
+(`evals/intent_engine/`): macro-F1 at a fixed 0.6 threshold is
+Intern-Decision-4B 0.80, Kev-4B 0.69, Laya 0.42, but at that threshold
+Intern raises a false hint on 35% of no-intent cases against Kev's 11%,
+and Intern cannot separate session recall. Kev-4B is the recommended
+default (mid-range thresholds, best session recall, native
+`/v1/systemone`, cheapest fine-tuning); Intern-Decision-4B is the
+alternative pending a larger re-test.
 
 ### Intent taxonomy
 

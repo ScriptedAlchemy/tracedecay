@@ -1,0 +1,2118 @@
+{
+ "config": "intern4b_sub_B2_noul_text_promptfirst",
+ "dataset_sha256": "1e2dbde57d04538e1c07b8f34f846815cdabdc403a28e1195ce811e611cb01bc",
+ "noul_temperature": 1.9924182353655278,
+ "subset": "subset.json",
+ "rows": [
+  {
+   "id": "c001",
+   "labels": [
+    "session_recall"
+   ],
+   "context_needed": false,
+   "ms": 23083.363228000962,
+   "server_ms": 23051.7,
+   "state_tokens": 928,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.9530876010904831,
+    "memory_store": 0.74393896924065,
+    "call_graph": 0.1910858271857424,
+    "impact": 0.21123544685692777,
+    "refactor_edit": 0.13950622488132866,
+    "review_changes": 0.2328980734066719,
+    "type_orientation": 0.2328980734066719,
+    "project_context": 0.15526082858186438,
+    "unexpected_changes": 0.17243807279553522
+   },
+   "probs_raw": {
+    "session_recall": 0.9975274205207825,
+    "memory_store": 0.8933094143867493,
+    "call_graph": 0.053403329104185104,
+    "impact": 0.06754668802022934,
+    "refactor_edit": 0.02595735527575016,
+    "review_changes": 0.08509904891252518,
+    "type_orientation": 0.08509904891252518,
+    "project_context": 0.03308597952127457,
+    "unexpected_changes": 0.04208773002028465
+   }
+  },
+  {
+   "id": "c002",
+   "labels": [
+    "session_recall"
+   ],
+   "context_needed": true,
+   "ms": 22919.090987001255,
+   "server_ms": 22909.11,
+   "state_tokens": 905,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.7318060430194854,
+    "memory_store": 0.3624744239946402,
+    "call_graph": 0.07519394983661541,
+    "impact": 0.11201237520010486,
+    "refactor_edit": 0.052852978540827676,
+    "review_changes": 0.33400723491024803,
+    "type_orientation": 0.13950622488132866,
+    "project_context": 0.37709364887716756,
+    "unexpected_changes": 0.6229063689931267
+   },
+   "probs_raw": {
+    "session_recall": 0.8807970285415649,
+    "memory_store": 0.24508501589298248,
+    "call_graph": 0.006692850962281227,
+    "impact": 0.01590639166533947,
+    "refactor_edit": 0.0031726828310638666,
+    "review_changes": 0.2018132209777832,
+    "type_orientation": 0.02595735527575016,
+    "project_context": 0.2689414322376251,
+    "unexpected_changes": 0.7310585975646973
+   }
+  },
+  {
+   "id": "c004",
+   "labels": [
+    "session_recall"
+   ],
+   "context_needed": false,
+   "ms": 42300.51343800005,
+   "server_ms": 42288.12,
+   "state_tokens": 923,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.9405018767405415,
+    "memory_store": 0.4686721935470112,
+    "call_graph": 0.06310762516031271,
+    "impact": 0.28068476636393375,
+    "refactor_edit": 0.10592235492567792,
+    "review_changes": 0.24429381515975251,
+    "type_orientation": 0.1636682736514757,
+    "project_context": 0.37709364887716756,
+    "unexpected_changes": 0.4069889596628561
+   },
+   "probs_raw": {
+    "session_recall": 0.9959298968315125,
+    "memory_store": 0.4378235340118408,
+    "call_graph": 0.004609571769833565,
+    "impact": 0.13296423852443695,
+    "refactor_edit": 0.014063626527786255,
+    "review_changes": 0.09534946084022522,
+    "type_orientation": 0.037326883524656296,
+    "project_context": 0.2689414322376251,
+    "unexpected_changes": 0.3208213150501251
+   }
+  },
+  {
+   "id": "c007",
+   "labels": [
+    "session_recall"
+   ],
+   "context_needed": false,
+   "ms": 25922.64298199916,
+   "server_ms": 25907.63,
+   "state_tokens": 909,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.9583886261616144,
+    "memory_store": 0.6932998147072417,
+    "call_graph": 0.07519394983661541,
+    "impact": 0.08439803214491591,
+    "refactor_edit": 0.15526082858186438,
+    "review_changes": 0.2328980734066719,
+    "type_orientation": 0.39193998864571306,
+    "project_context": 0.3624744239946402,
+    "unexpected_changes": 0.7193152205380409
+   },
+   "probs_raw": {
+    "session_recall": 0.9980732202529907,
+    "memory_store": 0.8354835510253906,
+    "call_graph": 0.006692850962281227,
+    "impact": 0.008577484637498856,
+    "refactor_edit": 0.03308597952127457,
+    "review_changes": 0.08509904891252518,
+    "type_orientation": 0.29421496391296387,
+    "project_context": 0.24508501589298248,
+    "unexpected_changes": 0.8670357465744019
+   }
+  },
+  {
+   "id": "c009",
+   "labels": [
+    "session_recall"
+   ],
+   "context_needed": true,
+   "ms": 28155.654129999675,
+   "server_ms": 28141.75,
+   "state_tokens": 904,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.7990282809896275,
+    "memory_store": 0.4686721935470112,
+    "call_graph": 0.04979902440713511,
+    "impact": 0.10012611102849182,
+    "refactor_edit": 0.1636682736514757,
+    "review_changes": 0.4686721935470112,
+    "type_orientation": 0.11201237520010486,
+    "project_context": 0.1636682736514757,
+    "unexpected_changes": 0.48432069654106014
+   },
+   "probs_raw": {
+    "session_recall": 0.9399133324623108,
+    "memory_store": 0.4378235340118408,
+    "call_graph": 0.002800926798954606,
+    "impact": 0.012431650422513485,
+    "refactor_edit": 0.037326883524656296,
+    "review_changes": 0.4378235340118408,
+    "type_orientation": 0.01590639166533947,
+    "project_context": 0.037326883524656296,
+    "unexpected_changes": 0.4687906503677368
+   }
+  },
+  {
+   "id": "c011",
+   "labels": [
+    "session_recall"
+   ],
+   "context_needed": false,
+   "ms": 26166.631022999354,
+   "server_ms": 26148.12,
+   "state_tokens": 913,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.7781221765028631,
+    "memory_store": 0.22187783270651415,
+    "call_graph": 0.05949836523897676,
+    "impact": 0.09461348437049198,
+    "refactor_edit": 0.08439803214491591,
+    "review_changes": 0.4222145377754277,
+    "type_orientation": 0.08937421785124253,
+    "project_context": 0.13214384314984653,
+    "unexpected_changes": 0.3481052403670717
+   },
+   "probs_raw": {
+    "session_recall": 0.9241418242454529,
+    "memory_store": 0.07585818320512772,
+    "call_graph": 0.004070138093084097,
+    "impact": 0.010986942797899246,
+    "refactor_edit": 0.008577484637498856,
+    "review_changes": 0.3486451804637909,
+    "type_orientation": 0.00970847625285387,
+    "project_context": 0.022977370768785477,
+    "unexpected_changes": 0.22270014882087708
+   }
+  },
+  {
+   "id": "c012",
+   "labels": [
+    "session_recall"
+   ],
+   "context_needed": true,
+   "ms": 26021.91069699984,
+   "server_ms": 26007.58,
+   "state_tokens": 889,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.9156017809625218,
+    "memory_store": 0.24429381515975251,
+    "call_graph": 0.052852978540827676,
+    "impact": 0.11840616942007498,
+    "refactor_edit": 0.28068476636393375,
+    "review_changes": 0.22187783270651415,
+    "type_orientation": 0.11201237520010486,
+    "project_context": 0.10012611102849182,
+    "unexpected_changes": 0.15526082858186438
+   },
+   "probs_raw": {
+    "session_recall": 0.9914224743843079,
+    "memory_store": 0.09534946084022522,
+    "call_graph": 0.0031726828310638666,
+    "impact": 0.01798621006309986,
+    "refactor_edit": 0.13296423852443695,
+    "review_changes": 0.07585818320512772,
+    "type_orientation": 0.01590639166533947,
+    "project_context": 0.012431650422513485,
+    "unexpected_changes": 0.03308597952127457
+   }
+  },
+  {
+   "id": "c015",
+   "labels": [
+    "memory_store"
+   ],
+   "context_needed": false,
+   "ms": 25282.070596998892,
+   "server_ms": 25272.1,
+   "state_tokens": 891,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.33400723491024803,
+    "memory_store": 0.9471469197261101,
+    "call_graph": 0.03917967175414356,
+    "impact": 0.24429381515975251,
+    "refactor_edit": 0.25606104570766963,
+    "review_changes": 0.07519394983661541,
+    "type_orientation": 0.07519394983661541,
+    "project_context": 0.21123544685692777,
+    "unexpected_changes": 0.29352403376094427
+   },
+   "probs_raw": {
+    "session_recall": 0.2018132209777832,
+    "memory_store": 0.9968273043632507,
+    "call_graph": 0.0017007224960252643,
+    "impact": 0.09534946084022522,
+    "refactor_edit": 0.10669060051441193,
+    "review_changes": 0.006692850962281227,
+    "type_orientation": 0.006692850962281227,
+    "project_context": 0.06754668802022934,
+    "unexpected_changes": 0.14804719388484955
+   }
+  },
+  {
+   "id": "c016",
+   "labels": [
+    "memory_store"
+   ],
+   "context_needed": true,
+   "ms": 25056.682409000132,
+   "server_ms": 25043.22,
+   "state_tokens": 893,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.4686721935470112,
+    "memory_store": 0.74393896924065,
+    "call_graph": 0.03471990626816868,
+    "impact": 0.1251135055426311,
+    "refactor_edit": 0.6798002235857465,
+    "review_changes": 0.11840616942007498,
+    "type_orientation": 0.07967467583695353,
+    "project_context": 0.09461348437049198,
+    "unexpected_changes": 0.08439803214491591
+   },
+   "probs_raw": {
+    "session_recall": 0.4378235340118408,
+    "memory_store": 0.8933094143867493,
+    "call_graph": 0.0013250223128125072,
+    "impact": 0.020332353189587593,
+    "refactor_edit": 0.8175744414329529,
+    "review_changes": 0.01798621006309986,
+    "type_orientation": 0.007577241398394108,
+    "project_context": 0.010986942797899246,
+    "unexpected_changes": 0.008577484637498856
+   }
+  },
+  {
+   "id": "c019",
+   "labels": [
+    "memory_store"
+   ],
+   "context_needed": false,
+   "ms": 26179.763610998634,
+   "server_ms": 26169.76,
+   "state_tokens": 893,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.8527907165400601,
+    "memory_store": 0.9631147365985373,
+    "call_graph": 0.03917967175414356,
+    "impact": 0.11840616942007498,
+    "refactor_edit": 0.39193998864571306,
+    "review_changes": 0.15526082858186438,
+    "type_orientation": 0.3624744239946402,
+    "project_context": 0.09461348437049198,
+    "unexpected_changes": 0.2681939010586404
+   },
+   "probs_raw": {
+    "session_recall": 0.970687747001648,
+    "memory_store": 0.998498797416687,
+    "call_graph": 0.0017007224960252643,
+    "impact": 0.01798621006309986,
+    "refactor_edit": 0.29421496391296387,
+    "review_changes": 0.03308597952127457,
+    "type_orientation": 0.24508501589298248,
+    "project_context": 0.010986942797899246,
+    "unexpected_changes": 0.11920291185379028
+   }
+  },
+  {
+   "id": "c021",
+   "labels": [
+    "memory_store"
+   ],
+   "context_needed": false,
+   "ms": 27877.83234500057,
+   "server_ms": 27866.85,
+   "state_tokens": 898,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.7193152205380409,
+    "memory_store": 0.9530876010904831,
+    "call_graph": 0.03471990626816868,
+    "impact": 0.13214384314984653,
+    "refactor_edit": 0.1636682736514757,
+    "review_changes": 0.09461348437049198,
+    "type_orientation": 0.11201237520010486,
+    "project_context": 0.11201237520010486,
+    "unexpected_changes": 0.33400723491024803
+   },
+   "probs_raw": {
+    "session_recall": 0.8670357465744019,
+    "memory_store": 0.9975274205207825,
+    "call_graph": 0.0013250223128125072,
+    "impact": 0.022977370768785477,
+    "refactor_edit": 0.037326883524656296,
+    "review_changes": 0.010986942797899246,
+    "type_orientation": 0.01590639166533947,
+    "project_context": 0.01590639166533947,
+    "unexpected_changes": 0.2018132209777832
+   }
+  },
+  {
+   "id": "c022",
+   "labels": [
+    "memory_store"
+   ],
+   "context_needed": true,
+   "ms": 27258.52463299998,
+   "server_ms": 27243.58,
+   "state_tokens": 906,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.7064759047589103,
+    "memory_store": 0.7671019351741681,
+    "call_graph": 0.11201237520010486,
+    "impact": 0.20097169242879018,
+    "refactor_edit": 0.2328980734066719,
+    "review_changes": 0.06692025928836023,
+    "type_orientation": 0.20097169242879018,
+    "project_context": 0.13950622488132866,
+    "unexpected_changes": 0.11840616942007498
+   },
+   "probs_raw": {
+    "session_recall": 0.8519527316093445,
+    "memory_store": 0.9149009585380554,
+    "call_graph": 0.01590639166533947,
+    "impact": 0.06008664891123772,
+    "refactor_edit": 0.08509904891252518,
+    "review_changes": 0.005220125894993544,
+    "type_orientation": 0.06008664891123772,
+    "project_context": 0.02595735527575016,
+    "unexpected_changes": 0.01798621006309986
+   }
+  },
+  {
+   "id": "c024",
+   "labels": [
+    "memory_store"
+   ],
+   "context_needed": false,
+   "ms": 26680.65397800092,
+   "server_ms": 26663.97,
+   "state_tokens": 908,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.7557061528265439,
+    "memory_store": 0.9530876010904831,
+    "call_graph": 0.06692025928836023,
+    "impact": 0.1815757449377046,
+    "refactor_edit": 0.29352403376094427,
+    "review_changes": 0.1251135055426311,
+    "type_orientation": 0.09461348437049198,
+    "project_context": 0.07094578841476491,
+    "unexpected_changes": 0.1251135055426311
+   },
+   "probs_raw": {
+    "session_recall": 0.9046505093574524,
+    "memory_store": 0.9975274205207825,
+    "call_graph": 0.005220125894993544,
+    "impact": 0.04742587357759476,
+    "refactor_edit": 0.14804719388484955,
+    "review_changes": 0.020332353189587593,
+    "type_orientation": 0.010986942797899246,
+    "project_context": 0.005911069456487894,
+    "unexpected_changes": 0.020332353189587593
+   }
+  },
+  {
+   "id": "c027",
+   "labels": [
+    "memory_store"
+   ],
+   "context_needed": true,
+   "ms": 24144.13213899934,
+   "server_ms": 24135.14,
+   "state_tokens": 894,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.3481052403670717,
+    "memory_store": 0.5624106519447879,
+    "call_graph": 0.04979902440713511,
+    "impact": 0.08937421785124253,
+    "refactor_edit": 0.32019974366885906,
+    "review_changes": 0.11840616942007498,
+    "type_orientation": 0.11840616942007498,
+    "project_context": 0.07967467583695353,
+    "unexpected_changes": 0.14720923396282568
+   },
+   "probs_raw": {
+    "session_recall": 0.22270014882087708,
+    "memory_store": 0.622459352016449,
+    "call_graph": 0.002800926798954606,
+    "impact": 0.00970847625285387,
+    "refactor_edit": 0.18242551386356354,
+    "review_changes": 0.01798621006309986,
+    "type_orientation": 0.01798621006309986,
+    "project_context": 0.007577241398394108,
+    "unexpected_changes": 0.02931223064661026
+   }
+  },
+  {
+   "id": "c029",
+   "labels": [
+    "call_graph"
+   ],
+   "context_needed": false,
+   "ms": 32446.849897998618,
+   "server_ms": 32436.69,
+   "state_tokens": 889,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.5,
+    "memory_store": 0.13950622488132866,
+    "call_graph": 0.9471469197261101,
+    "impact": 0.04691279928244129,
+    "refactor_edit": 0.06692025928836023,
+    "review_changes": 0.06692025928836023,
+    "type_orientation": 0.3624744239946402,
+    "project_context": 0.1251135055426311,
+    "unexpected_changes": 0.11840616942007498
+   },
+   "probs_raw": {
+    "session_recall": 0.5,
+    "memory_store": 0.02595735527575016,
+    "call_graph": 0.9968273043632507,
+    "impact": 0.00247262348420918,
+    "refactor_edit": 0.005220125894993544,
+    "review_changes": 0.005220125894993544,
+    "type_orientation": 0.24508501589298248,
+    "project_context": 0.020332353189587593,
+    "unexpected_changes": 0.01798621006309986
+   }
+  },
+  {
+   "id": "c030",
+   "labels": [
+    "call_graph"
+   ],
+   "context_needed": true,
+   "ms": 40248.70644099974,
+   "server_ms": 40230.47,
+   "state_tokens": 903,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.6229063689931267,
+    "memory_store": 0.10592235492567792,
+    "call_graph": 0.4686721935470112,
+    "impact": 0.09461348437049198,
+    "refactor_edit": 0.07967467583695353,
+    "review_changes": 0.08937421785124253,
+    "type_orientation": 0.37709364887716756,
+    "project_context": 0.13950622488132866,
+    "unexpected_changes": 0.13214384314984653
+   },
+   "probs_raw": {
+    "session_recall": 0.7310585975646973,
+    "memory_store": 0.014063626527786255,
+    "call_graph": 0.4378235340118408,
+    "impact": 0.010986942797899246,
+    "refactor_edit": 0.007577241398394108,
+    "review_changes": 0.00970847625285387,
+    "type_orientation": 0.2689414322376251,
+    "project_context": 0.02595735527575016,
+    "unexpected_changes": 0.022977370768785477
+   }
+  },
+  {
+   "id": "c032",
+   "labels": [
+    "call_graph"
+   ],
+   "context_needed": false,
+   "ms": 35772.16694100025,
+   "server_ms": 35758.0,
+   "state_tokens": 878,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.8678562046074189,
+    "memory_store": 0.13950622488132866,
+    "call_graph": 0.7990282809896275,
+    "impact": 0.05949836523897676,
+    "refactor_edit": 0.06692025928836023,
+    "review_changes": 0.07519394983661541,
+    "type_orientation": 0.29352403376094427,
+    "project_context": 0.07094578841476491,
+    "unexpected_changes": 0.10592235492567792
+   },
+   "probs_raw": {
+    "session_recall": 0.977022647857666,
+    "memory_store": 0.02595735527575016,
+    "call_graph": 0.9399133324623108,
+    "impact": 0.004070138093084097,
+    "refactor_edit": 0.005220125894993544,
+    "review_changes": 0.006692850962281227,
+    "type_orientation": 0.14804719388484955,
+    "project_context": 0.005911069456487894,
+    "unexpected_changes": 0.014063626527786255
+   }
+  },
+  {
+   "id": "c034",
+   "labels": [
+    "call_graph"
+   ],
+   "context_needed": false,
+   "ms": 39593.817798999225,
+   "server_ms": 39582.2,
+   "state_tokens": 864,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.03688502106803674,
+    "memory_store": 0.08937421785124253,
+    "call_graph": 0.9203253287210377,
+    "impact": 0.07519394983661541,
+    "refactor_edit": 0.03917967175414356,
+    "review_changes": 0.04418606736136043,
+    "type_orientation": 0.32019974366885906,
+    "project_context": 0.15526082858186438,
+    "unexpected_changes": 0.07094578841476491
+   },
+   "probs_raw": {
+    "session_recall": 0.0015011822106316686,
+    "memory_store": 0.00970847625285387,
+    "call_graph": 0.9924227595329285,
+    "impact": 0.006692850962281227,
+    "refactor_edit": 0.0017007224960252643,
+    "review_changes": 0.002182716503739357,
+    "type_orientation": 0.18242551386356354,
+    "project_context": 0.03308597952127457,
+    "unexpected_changes": 0.005911069456487894
+   }
+  },
+  {
+   "id": "c037",
+   "labels": [
+    "call_graph"
+   ],
+   "context_needed": true,
+   "ms": 36327.74185599919,
+   "server_ms": 36313.67,
+   "state_tokens": 880,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.6798002235857465,
+    "memory_store": 0.1251135055426311,
+    "call_graph": 0.6798002235857465,
+    "impact": 0.17243807279553522,
+    "refactor_edit": 0.07094578841476491,
+    "review_changes": 0.1251135055426311,
+    "type_orientation": 0.4222145377754277,
+    "project_context": 0.1910858271857424,
+    "unexpected_changes": 0.29352403376094427
+   },
+   "probs_raw": {
+    "session_recall": 0.8175744414329529,
+    "memory_store": 0.020332353189587593,
+    "call_graph": 0.8175744414329529,
+    "impact": 0.04208773002028465,
+    "refactor_edit": 0.005911069456487894,
+    "review_changes": 0.020332353189587593,
+    "type_orientation": 0.3486451804637909,
+    "project_context": 0.053403329104185104,
+    "unexpected_changes": 0.14804719388484955
+   }
+  },
+  {
+   "id": "c038",
+   "labels": [
+    "impact"
+   ],
+   "context_needed": false,
+   "ms": 43325.081164999574,
+   "server_ms": 43313.23,
+   "state_tokens": 882,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.8940777472356477,
+    "memory_store": 0.14720923396282568,
+    "call_graph": 0.28068476636393375,
+    "impact": 0.9405018767405415,
+    "refactor_edit": 0.2328980734066719,
+    "review_changes": 0.1815757449377046,
+    "type_orientation": 0.2681939010586404,
+    "project_context": 0.05949836523897676,
+    "unexpected_changes": 0.1251135055426311
+   },
+   "probs_raw": {
+    "session_recall": 0.9859364032745361,
+    "memory_store": 0.02931223064661026,
+    "call_graph": 0.13296423852443695,
+    "impact": 0.9959298968315125,
+    "refactor_edit": 0.08509904891252518,
+    "review_changes": 0.04742587357759476,
+    "type_orientation": 0.11920291185379028,
+    "project_context": 0.004070138093084097,
+    "unexpected_changes": 0.020332353189587593
+   }
+  },
+  {
+   "id": "c040",
+   "labels": [
+    "impact"
+   ],
+   "context_needed": false,
+   "ms": 37880.52214600066,
+   "server_ms": 37866.71,
+   "state_tokens": 892,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.4686721935470112,
+    "memory_store": 0.4069889596628561,
+    "call_graph": 0.11840616942007498,
+    "impact": 0.9248061772887629,
+    "refactor_edit": 0.21123544685692777,
+    "review_changes": 0.10592235492567792,
+    "type_orientation": 0.5156793334621468,
+    "project_context": 0.33400723491024803,
+    "unexpected_changes": 0.13950622488132866
+   },
+   "probs_raw": {
+    "session_recall": 0.4378235340118408,
+    "memory_store": 0.3208213150501251,
+    "call_graph": 0.01798621006309986,
+    "impact": 0.9933071732521057,
+    "refactor_edit": 0.06754668802022934,
+    "review_changes": 0.014063626527786255,
+    "type_orientation": 0.531209409236908,
+    "project_context": 0.2018132209777832,
+    "unexpected_changes": 0.02595735527575016
+   }
+  },
+  {
+   "id": "c042",
+   "labels": [
+    "impact"
+   ],
+   "context_needed": true,
+   "ms": 28612.194733999786,
+   "server_ms": 28603.76,
+   "state_tokens": 883,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.9330801650737622,
+    "memory_store": 0.1910858271857424,
+    "call_graph": 0.3481052403670717,
+    "impact": 0.5156793334621468,
+    "refactor_edit": 0.25606104570766963,
+    "review_changes": 0.13214384314984653,
+    "type_orientation": 0.5469149746918687,
+    "project_context": 0.08439803214491591,
+    "unexpected_changes": 0.11201237520010486
+   },
+   "probs_raw": {
+    "session_recall": 0.9947799444198608,
+    "memory_store": 0.053403329104185104,
+    "call_graph": 0.22270014882087708,
+    "impact": 0.531209409236908,
+    "refactor_edit": 0.10669060051441193,
+    "review_changes": 0.022977370768785477,
+    "type_orientation": 0.5926666259765625,
+    "project_context": 0.008577484637498856,
+    "unexpected_changes": 0.01590639166533947
+   }
+  },
+  {
+   "id": "c043",
+   "labels": [
+    "impact"
+   ],
+   "context_needed": false,
+   "ms": 20310.308527001325,
+   "server_ms": 20303.24,
+   "state_tokens": 874,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.04418606736136043,
+    "memory_store": 0.1815757449377046,
+    "call_graph": 0.8879876188595123,
+    "impact": 0.9502008508682295,
+    "refactor_edit": 0.2681939010586404,
+    "review_changes": 0.10012611102849182,
+    "type_orientation": 0.28068476636393375,
+    "project_context": 0.11840616942007498,
+    "unexpected_changes": 0.09461348437049198
+   },
+   "probs_raw": {
+    "session_recall": 0.002182716503739357,
+    "memory_store": 0.04742587357759476,
+    "call_graph": 0.9840936064720154,
+    "impact": 0.9971990585327148,
+    "refactor_edit": 0.11920291185379028,
+    "review_changes": 0.012431650422513485,
+    "type_orientation": 0.13296423852443695,
+    "project_context": 0.01798621006309986,
+    "unexpected_changes": 0.010986942797899246
+   }
+  },
+  {
+   "id": "c045",
+   "labels": [
+    "impact"
+   ],
+   "context_needed": true,
+   "ms": 20222.41524799938,
+   "server_ms": 20214.55,
+   "state_tokens": 882,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.7193152205380409,
+    "memory_store": 0.22187783270651415,
+    "call_graph": 0.07967467583695353,
+    "impact": 0.8275619205863846,
+    "refactor_edit": 0.10012611102849182,
+    "review_changes": 0.10592235492567792,
+    "type_orientation": 0.11840616942007498,
+    "project_context": 0.07094578841476491,
+    "unexpected_changes": 0.1251135055426311
+   },
+   "probs_raw": {
+    "session_recall": 0.8670357465744019,
+    "memory_store": 0.07585818320512772,
+    "call_graph": 0.007577241398394108,
+    "impact": 0.957912266254425,
+    "refactor_edit": 0.012431650422513485,
+    "review_changes": 0.014063626527786255,
+    "type_orientation": 0.01798621006309986,
+    "project_context": 0.005911069456487894,
+    "unexpected_changes": 0.020332353189587593
+   }
+  },
+  {
+   "id": "c046",
+   "labels": [
+    "refactor_edit"
+   ],
+   "context_needed": true,
+   "ms": 33522.73662100015,
+   "server_ms": 33512.29,
+   "state_tokens": 903,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.8447392480717152,
+    "memory_store": 0.4069889596628561,
+    "call_graph": 0.09461348437049198,
+    "impact": 0.11840616942007498,
+    "refactor_edit": 0.9156017809625218,
+    "review_changes": 0.08439803214491591,
+    "type_orientation": 0.21123544685692777,
+    "project_context": 0.08937421785124253,
+    "unexpected_changes": 0.09461348437049198
+   },
+   "probs_raw": {
+    "session_recall": 0.9669140577316284,
+    "memory_store": 0.3208213150501251,
+    "call_graph": 0.010986942797899246,
+    "impact": 0.01798621006309986,
+    "refactor_edit": 0.9914224743843079,
+    "review_changes": 0.008577484637498856,
+    "type_orientation": 0.06754668802022934,
+    "project_context": 0.00970847625285387,
+    "unexpected_changes": 0.010986942797899246
+   }
+  },
+  {
+   "id": "c047",
+   "labels": [
+    "refactor_edit"
+   ],
+   "context_needed": false,
+   "ms": 27843.40594099922,
+   "server_ms": 27833.56,
+   "state_tokens": 863,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.03688502106803674,
+    "memory_store": 0.5313278367193054,
+    "call_graph": 0.2328980734066719,
+    "impact": 0.6229063689931267,
+    "refactor_edit": 0.9608205860518779,
+    "review_changes": 0.11201237520010486,
+    "type_orientation": 0.13950622488132866,
+    "project_context": 0.1815757449377046,
+    "unexpected_changes": 0.10592235492567792
+   },
+   "probs_raw": {
+    "session_recall": 0.0015011822106316686,
+    "memory_store": 0.562176525592804,
+    "call_graph": 0.08509904891252518,
+    "impact": 0.7310585975646973,
+    "refactor_edit": 0.9982993006706238,
+    "review_changes": 0.01590639166533947,
+    "type_orientation": 0.02595735527575016,
+    "project_context": 0.04742587357759476,
+    "unexpected_changes": 0.014063626527786255
+   }
+  },
+  {
+   "id": "c049",
+   "labels": [
+    "refactor_edit"
+   ],
+   "context_needed": false,
+   "ms": 18091.972705000444,
+   "server_ms": 18084.82,
+   "state_tokens": 886,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.7781221765028631,
+    "memory_store": 0.48432069654106014,
+    "call_graph": 0.17243807279553522,
+    "impact": 0.37709364887716756,
+    "refactor_edit": 0.910625833588785,
+    "review_changes": 0.10012611102849182,
+    "type_orientation": 0.33400723491024803,
+    "project_context": 0.07094578841476491,
+    "unexpected_changes": 0.11201237520010486
+   },
+   "probs_raw": {
+    "session_recall": 0.9241418242454529,
+    "memory_store": 0.4687906503677368,
+    "call_graph": 0.04208773002028465,
+    "impact": 0.2689414322376251,
+    "refactor_edit": 0.9902915358543396,
+    "review_changes": 0.012431650422513485,
+    "type_orientation": 0.2018132209777832,
+    "project_context": 0.005911069456487894,
+    "unexpected_changes": 0.01590639166533947
+   }
+  },
+  {
+   "id": "c051",
+   "labels": [
+    "refactor_edit"
+   ],
+   "context_needed": true,
+   "ms": 19038.125967999804,
+   "server_ms": 19031.41,
+   "state_tokens": 893,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.4686721935470112,
+    "memory_store": 0.21123544685692777,
+    "call_graph": 0.1815757449377046,
+    "impact": 0.21123544685692777,
+    "refactor_edit": 0.8527907165400601,
+    "review_changes": 0.1910858271857424,
+    "type_orientation": 0.1251135055426311,
+    "project_context": 0.052852978540827676,
+    "unexpected_changes": 0.10012611102849182
+   },
+   "probs_raw": {
+    "session_recall": 0.4378235340118408,
+    "memory_store": 0.06754668802022934,
+    "call_graph": 0.04742587357759476,
+    "impact": 0.06754668802022934,
+    "refactor_edit": 0.970687747001648,
+    "review_changes": 0.053403329104185104,
+    "type_orientation": 0.020332353189587593,
+    "project_context": 0.0031726828310638666,
+    "unexpected_changes": 0.012431650422513485
+   }
+  },
+  {
+   "id": "c054",
+   "labels": [
+    "review_changes"
+   ],
+   "context_needed": true,
+   "ms": 19838.816892000978,
+   "server_ms": 19831.3,
+   "state_tokens": 886,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.25606104570766963,
+    "memory_store": 0.14720923396282568,
+    "call_graph": 0.04979902440713511,
+    "impact": 0.1815757449377046,
+    "refactor_edit": 0.07519394983661541,
+    "review_changes": 0.7990282809896275,
+    "type_orientation": 0.08439803214491591,
+    "project_context": 0.04979902440713511,
+    "unexpected_changes": 0.21123544685692777
+   },
+   "probs_raw": {
+    "session_recall": 0.10669060051441193,
+    "memory_store": 0.02931223064661026,
+    "call_graph": 0.002800926798954606,
+    "impact": 0.04742587357759476,
+    "refactor_edit": 0.006692850962281227,
+    "review_changes": 0.9399133324623108,
+    "type_orientation": 0.008577484637498856,
+    "project_context": 0.002800926798954606,
+    "unexpected_changes": 0.06754668802022934
+   }
+  },
+  {
+   "id": "c055",
+   "labels": [
+    "review_changes"
+   ],
+   "context_needed": false,
+   "ms": 19433.780897999895,
+   "server_ms": 19423.98,
+   "state_tokens": 863,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.06310762516031271,
+    "memory_store": 0.08937421785124253,
+    "call_graph": 0.14720923396282568,
+    "impact": 0.5313278367193054,
+    "refactor_edit": 0.052852978540827676,
+    "review_changes": 0.899873775766329,
+    "type_orientation": 0.1910858271857424,
+    "project_context": 0.1636682736514757,
+    "unexpected_changes": 0.4222145377754277
+   },
+   "probs_raw": {
+    "session_recall": 0.004609571769833565,
+    "memory_store": 0.00970847625285387,
+    "call_graph": 0.02931223064661026,
+    "impact": 0.562176525592804,
+    "refactor_edit": 0.0031726828310638666,
+    "review_changes": 0.9875683188438416,
+    "type_orientation": 0.053403329104185104,
+    "project_context": 0.037326883524656296,
+    "unexpected_changes": 0.3486451804637909
+   }
+  },
+  {
+   "id": "c058",
+   "labels": [
+    "review_changes"
+   ],
+   "context_needed": false,
+   "ms": 19843.99187500094,
+   "server_ms": 19835.73,
+   "state_tokens": 886,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.32019974366885906,
+    "memory_store": 0.15526082858186438,
+    "call_graph": 0.04691279928244129,
+    "impact": 0.1636682736514757,
+    "refactor_edit": 0.10592235492567792,
+    "review_changes": 0.8363316337582667,
+    "type_orientation": 0.08937421785124253,
+    "project_context": 0.04691279928244129,
+    "unexpected_changes": 0.08937421785124253
+   },
+   "probs_raw": {
+    "session_recall": 0.18242551386356354,
+    "memory_store": 0.03308597952127457,
+    "call_graph": 0.00247262348420918,
+    "impact": 0.037326883524656296,
+    "refactor_edit": 0.014063626527786255,
+    "review_changes": 0.9626730680465698,
+    "type_orientation": 0.00970847625285387,
+    "project_context": 0.00247262348420918,
+    "unexpected_changes": 0.00970847625285387
+   }
+  },
+  {
+   "id": "c059",
+   "labels": [
+    "review_changes"
+   ],
+   "context_needed": true,
+   "ms": 19268.19718400111,
+   "server_ms": 19260.8,
+   "state_tokens": 889,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.665992765089752,
+    "memory_store": 0.24429381515975251,
+    "call_graph": 0.09461348437049198,
+    "impact": 0.24429381515975251,
+    "refactor_edit": 0.10012611102849182,
+    "review_changes": 0.665992765089752,
+    "type_orientation": 0.20097169242879018,
+    "project_context": 0.17243807279553522,
+    "unexpected_changes": 0.5156793334621468
+   },
+   "probs_raw": {
+    "session_recall": 0.7981867790222168,
+    "memory_store": 0.09534946084022522,
+    "call_graph": 0.010986942797899246,
+    "impact": 0.09534946084022522,
+    "refactor_edit": 0.012431650422513485,
+    "review_changes": 0.7981867790222168,
+    "type_orientation": 0.06008664891123772,
+    "project_context": 0.04208773002028465,
+    "unexpected_changes": 0.531209409236908
+   }
+  },
+  {
+   "id": "c061",
+   "labels": [
+    "type_orientation"
+   ],
+   "context_needed": false,
+   "ms": 20157.692814000256,
+   "server_ms": 20150.1,
+   "state_tokens": 873,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.8363316337582667,
+    "memory_store": 0.1251135055426311,
+    "call_graph": 0.48432069654106014,
+    "impact": 0.08439803214491591,
+    "refactor_edit": 0.08439803214491591,
+    "review_changes": 0.04691279928244129,
+    "type_orientation": 0.8748865406935257,
+    "project_context": 0.07519394983661541,
+    "unexpected_changes": 0.07094578841476491
+   },
+   "probs_raw": {
+    "session_recall": 0.9626730680465698,
+    "memory_store": 0.020332353189587593,
+    "call_graph": 0.4687906503677368,
+    "impact": 0.008577484637498856,
+    "refactor_edit": 0.008577484637498856,
+    "review_changes": 0.00247262348420918,
+    "type_orientation": 0.9796676635742188,
+    "project_context": 0.006692850962281227,
+    "unexpected_changes": 0.005911069456487894
+   }
+  },
+  {
+   "id": "c063",
+   "labels": [
+    "type_orientation"
+   ],
+   "context_needed": false,
+   "ms": 17728.59724599948,
+   "server_ms": 17721.78,
+   "state_tokens": 859,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.03688502106803674,
+    "memory_store": 0.08937421785124253,
+    "call_graph": 0.4069889596628561,
+    "impact": 0.10592235492567792,
+    "refactor_edit": 0.07519394983661541,
+    "review_changes": 0.07519394983661541,
+    "type_orientation": 0.8275619205863846,
+    "project_context": 0.07967467583695353,
+    "unexpected_changes": 0.07519394983661541
+   },
+   "probs_raw": {
+    "session_recall": 0.0015011822106316686,
+    "memory_store": 0.00970847625285387,
+    "call_graph": 0.3208213150501251,
+    "impact": 0.014063626527786255,
+    "refactor_edit": 0.006692850962281227,
+    "review_changes": 0.006692850962281227,
+    "type_orientation": 0.957912266254425,
+    "project_context": 0.007577241398394108,
+    "unexpected_changes": 0.006692850962281227
+   }
+  },
+  {
+   "id": "c065",
+   "labels": [
+    "type_orientation"
+   ],
+   "context_needed": false,
+   "ms": 13836.974851999912,
+   "server_ms": 13827.88,
+   "state_tokens": 859,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.018844988967723637,
+    "memory_store": 0.06310762516031271,
+    "call_graph": 0.39193998864571306,
+    "impact": 0.02409097640409335,
+    "refactor_edit": 0.03917967175414356,
+    "review_changes": 0.03917967175414356,
+    "type_orientation": 0.910625833588785,
+    "project_context": 0.3481052403670717,
+    "unexpected_changes": 0.052852978540827676
+   },
+   "probs_raw": {
+    "session_recall": 0.00037998449988663197,
+    "memory_store": 0.004609571769833565,
+    "call_graph": 0.29421496391296387,
+    "impact": 0.0006263342220336199,
+    "refactor_edit": 0.0017007224960252643,
+    "review_changes": 0.0017007224960252643,
+    "type_orientation": 0.9902915358543396,
+    "project_context": 0.22270014882087708,
+    "unexpected_changes": 0.0031726828310638666
+   }
+  },
+  {
+   "id": "c067",
+   "labels": [
+    "type_orientation"
+   ],
+   "context_needed": true,
+   "ms": 8406.116229998588,
+   "server_ms": 8397.1,
+   "state_tokens": 888,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.8275619205863846,
+    "memory_store": 0.2681939010586404,
+    "call_graph": 0.5,
+    "impact": 0.32019974366885906,
+    "refactor_edit": 0.11201237520010486,
+    "review_changes": 0.14720923396282568,
+    "type_orientation": 0.608060011354287,
+    "project_context": 0.17243807279553522,
+    "unexpected_changes": 0.5
+   },
+   "probs_raw": {
+    "session_recall": 0.957912266254425,
+    "memory_store": 0.11920291185379028,
+    "call_graph": 0.5,
+    "impact": 0.18242551386356354,
+    "refactor_edit": 0.01590639166533947,
+    "review_changes": 0.02931223064661026,
+    "type_orientation": 0.7057850360870361,
+    "project_context": 0.04208773002028465,
+    "unexpected_changes": 0.5
+   }
+  },
+  {
+   "id": "c069",
+   "labels": [
+    "project_context",
+    "impact"
+   ],
+   "context_needed": false,
+   "ms": 17282.595819000562,
+   "server_ms": 17272.42,
+   "state_tokens": 871,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.04979902440713511,
+    "memory_store": 0.32019974366885906,
+    "call_graph": 0.9053865893278981,
+    "impact": 0.8447392480717152,
+    "refactor_edit": 0.0560831634919164,
+    "review_changes": 0.1636682736514757,
+    "type_orientation": 0.25606104570766963,
+    "project_context": 0.74393896924065,
+    "unexpected_changes": 0.20097169242879018
+   },
+   "probs_raw": {
+    "session_recall": 0.002800926798954606,
+    "memory_store": 0.18242551386356354,
+    "call_graph": 0.9890130758285522,
+    "impact": 0.9669140577316284,
+    "refactor_edit": 0.0035936026833951473,
+    "review_changes": 0.037326883524656296,
+    "type_orientation": 0.10669060051441193,
+    "project_context": 0.8933094143867493,
+    "unexpected_changes": 0.06008664891123772
+   }
+  },
+  {
+   "id": "c070",
+   "labels": [
+    "project_context"
+   ],
+   "context_needed": true,
+   "ms": 20169.28222199931,
+   "server_ms": 20157.45,
+   "state_tokens": 893,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.5,
+    "memory_store": 0.29352403376094427,
+    "call_graph": 0.45308505601522014,
+    "impact": 0.11201237520010486,
+    "refactor_edit": 0.11840616942007498,
+    "review_changes": 0.2328980734066719,
+    "type_orientation": 0.3624744239946402,
+    "project_context": 0.74393896924065,
+    "unexpected_changes": 0.24429381515975251
+   },
+   "probs_raw": {
+    "session_recall": 0.5,
+    "memory_store": 0.14804719388484955,
+    "call_graph": 0.4073334336280823,
+    "impact": 0.01590639166533947,
+    "refactor_edit": 0.01798621006309986,
+    "review_changes": 0.08509904891252518,
+    "type_orientation": 0.24508501589298248,
+    "project_context": 0.8933094143867493,
+    "unexpected_changes": 0.09534946084022522
+   }
+  },
+  {
+   "id": "c072",
+   "labels": [
+    "project_context"
+   ],
+   "context_needed": false,
+   "ms": 19878.788505000557,
+   "server_ms": 19863.3,
+   "state_tokens": 871,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.3624744239946402,
+    "memory_store": 0.5624106519447879,
+    "call_graph": 0.32019974366885906,
+    "impact": 0.14720923396282568,
+    "refactor_edit": 0.7781221765028631,
+    "review_changes": 0.13214384314984653,
+    "type_orientation": 0.48432069654106014,
+    "project_context": 0.8604936552747432,
+    "unexpected_changes": 0.1910858271857424
+   },
+   "probs_raw": {
+    "session_recall": 0.24508501589298248,
+    "memory_store": 0.622459352016449,
+    "call_graph": 0.18242551386356354,
+    "impact": 0.02931223064661026,
+    "refactor_edit": 0.9241418242454529,
+    "review_changes": 0.022977370768785477,
+    "type_orientation": 0.4687906503677368,
+    "project_context": 0.9740425944328308,
+    "unexpected_changes": 0.053403329104185104
+   }
+  },
+  {
+   "id": "c074",
+   "labels": [
+    "project_context"
+   ],
+   "context_needed": true,
+   "ms": 20211.259267998685,
+   "server_ms": 20203.8,
+   "state_tokens": 891,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.4222145377754277,
+    "memory_store": 0.32019974366885906,
+    "call_graph": 0.09461348437049198,
+    "impact": 0.1636682736514757,
+    "refactor_edit": 0.09461348437049198,
+    "review_changes": 0.14720923396282568,
+    "type_orientation": 0.25606104570766963,
+    "project_context": 0.5313278367193054,
+    "unexpected_changes": 0.2681939010586404
+   },
+   "probs_raw": {
+    "session_recall": 0.3486451804637909,
+    "memory_store": 0.18242551386356354,
+    "call_graph": 0.010986942797899246,
+    "impact": 0.037326883524656296,
+    "refactor_edit": 0.010986942797899246,
+    "review_changes": 0.02931223064661026,
+    "type_orientation": 0.10669060051441193,
+    "project_context": 0.562176525592804,
+    "unexpected_changes": 0.11920291185379028
+   }
+  },
+  {
+   "id": "c075",
+   "labels": [
+    "unexpected_changes"
+   ],
+   "context_needed": true,
+   "ms": 28281.694342000264,
+   "server_ms": 28273.26,
+   "state_tokens": 908,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.3624744239946402,
+    "memory_store": 0.11840616942007498,
+    "call_graph": 0.09461348437049198,
+    "impact": 0.10592235492567792,
+    "refactor_edit": 0.06310762516031271,
+    "review_changes": 0.5,
+    "type_orientation": 0.11840616942007498,
+    "project_context": 0.1251135055426311,
+    "unexpected_changes": 0.665992765089752
+   },
+   "probs_raw": {
+    "session_recall": 0.24508501589298248,
+    "memory_store": 0.01798621006309986,
+    "call_graph": 0.010986942797899246,
+    "impact": 0.014063626527786255,
+    "refactor_edit": 0.004609571769833565,
+    "review_changes": 0.5,
+    "type_orientation": 0.01798621006309986,
+    "project_context": 0.020332353189587593,
+    "unexpected_changes": 0.7981867790222168
+   }
+  },
+  {
+   "id": "c076",
+   "labels": [
+    "unexpected_changes"
+   ],
+   "context_needed": false,
+   "ms": 23112.401587999557,
+   "server_ms": 23103.2,
+   "state_tokens": 867,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.10012611102849182,
+    "memory_store": 0.2681939010586404,
+    "call_graph": 0.03688502106803674,
+    "impact": 0.17243807279553522,
+    "refactor_edit": 0.04418606736136043,
+    "review_changes": 0.7193152205380409,
+    "type_orientation": 0.07519394983661541,
+    "project_context": 0.22187783270651415,
+    "unexpected_changes": 0.9502008508682295
+   },
+   "probs_raw": {
+    "session_recall": 0.012431650422513485,
+    "memory_store": 0.11920291185379028,
+    "call_graph": 0.0015011822106316686,
+    "impact": 0.04208773002028465,
+    "refactor_edit": 0.002182716503739357,
+    "review_changes": 0.8670357465744019,
+    "type_orientation": 0.006692850962281227,
+    "project_context": 0.07585818320512772,
+    "unexpected_changes": 0.9971990585327148
+   }
+  },
+  {
+   "id": "c079",
+   "labels": [
+    "unexpected_changes"
+   ],
+   "context_needed": false,
+   "ms": 21245.633578000707,
+   "server_ms": 21236.8,
+   "state_tokens": 898,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.30670019686260186,
+    "memory_store": 0.13950622488132866,
+    "call_graph": 0.03917967175414356,
+    "impact": 0.29352403376094427,
+    "refactor_edit": 0.07967467583695353,
+    "review_changes": 0.593011056905055,
+    "type_orientation": 0.07519394983661541,
+    "project_context": 0.10592235492567792,
+    "unexpected_changes": 0.7781221765028631
+   },
+   "probs_raw": {
+    "session_recall": 0.16451646387577057,
+    "memory_store": 0.02595735527575016,
+    "call_graph": 0.0017007224960252643,
+    "impact": 0.14804719388484955,
+    "refactor_edit": 0.007577241398394108,
+    "review_changes": 0.6791787147521973,
+    "type_orientation": 0.006692850962281227,
+    "project_context": 0.014063626527786255,
+    "unexpected_changes": 0.9241418242454529
+   }
+  },
+  {
+   "id": "c080",
+   "labels": [
+    "unexpected_changes"
+   ],
+   "context_needed": true,
+   "ms": 20466.345217000708,
+   "server_ms": 20457.71,
+   "state_tokens": 896,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.30670019686260186,
+    "memory_store": 0.37709364887716756,
+    "call_graph": 0.05949836523897676,
+    "impact": 0.08937421785124253,
+    "refactor_edit": 0.08439803214491591,
+    "review_changes": 0.4222145377754277,
+    "type_orientation": 0.11840616942007498,
+    "project_context": 0.08937421785124253,
+    "unexpected_changes": 0.39193998864571306
+   },
+   "probs_raw": {
+    "session_recall": 0.16451646387577057,
+    "memory_store": 0.2689414322376251,
+    "call_graph": 0.004070138093084097,
+    "impact": 0.00970847625285387,
+    "refactor_edit": 0.008577484637498856,
+    "review_changes": 0.3486451804637909,
+    "type_orientation": 0.01798621006309986,
+    "project_context": 0.00970847625285387,
+    "unexpected_changes": 0.29421496391296387
+   }
+  },
+  {
+   "id": "c081",
+   "labels": [
+    "refactor_edit",
+    "impact"
+   ],
+   "context_needed": false,
+   "ms": 20063.300017000074,
+   "server_ms": 20053.03,
+   "state_tokens": 860,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.06310762516031271,
+    "memory_store": 0.39193998864571306,
+    "call_graph": 0.3624744239946402,
+    "impact": 0.9330801650737622,
+    "refactor_edit": 0.9471469197261101,
+    "review_changes": 0.28068476636393375,
+    "type_orientation": 0.24429381515975251,
+    "project_context": 0.07519394983661541,
+    "unexpected_changes": 0.11840616942007498
+   },
+   "probs_raw": {
+    "session_recall": 0.004609571769833565,
+    "memory_store": 0.29421496391296387,
+    "call_graph": 0.24508501589298248,
+    "impact": 0.9947799444198608,
+    "refactor_edit": 0.9968273043632507,
+    "review_changes": 0.13296423852443695,
+    "type_orientation": 0.09534946084022522,
+    "project_context": 0.006692850962281227,
+    "unexpected_changes": 0.01798621006309986
+   }
+  },
+  {
+   "id": "c083",
+   "labels": [
+    "session_recall",
+    "refactor_edit"
+   ],
+   "context_needed": false,
+   "ms": 20382.176605000495,
+   "server_ms": 20373.46,
+   "state_tokens": 876,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.971065190321079,
+    "memory_store": 0.7318060430194854,
+    "call_graph": 0.08937421785124253,
+    "impact": 0.11201237520010486,
+    "refactor_edit": 0.9405018767405415,
+    "review_changes": 0.10012611102849182,
+    "type_orientation": 0.1910858271857424,
+    "project_context": 0.1910858271857424,
+    "unexpected_changes": 0.13214384314984653
+   },
+   "probs_raw": {
+    "session_recall": 0.9990890026092529,
+    "memory_store": 0.8807970285415649,
+    "call_graph": 0.00970847625285387,
+    "impact": 0.01590639166533947,
+    "refactor_edit": 0.9959298968315125,
+    "review_changes": 0.012431650422513485,
+    "type_orientation": 0.053403329104185104,
+    "project_context": 0.053403329104185104,
+    "unexpected_changes": 0.022977370768785477
+   }
+  },
+  {
+   "id": "c085",
+   "labels": [],
+   "context_needed": false,
+   "ms": 20389.624938999987,
+   "server_ms": 20380.36,
+   "state_tokens": 875,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.910625833588785,
+    "memory_store": 0.665992765089752,
+    "call_graph": 0.08439803214491591,
+    "impact": 0.33400723491024803,
+    "refactor_edit": 0.30670019686260186,
+    "review_changes": 0.13214384314984653,
+    "type_orientation": 0.10592235492567792,
+    "project_context": 0.07519394983661541,
+    "unexpected_changes": 0.08937421785124253
+   },
+   "probs_raw": {
+    "session_recall": 0.9902915358543396,
+    "memory_store": 0.7981867790222168,
+    "call_graph": 0.008577484637498856,
+    "impact": 0.2018132209777832,
+    "refactor_edit": 0.16451646387577057,
+    "review_changes": 0.022977370768785477,
+    "type_orientation": 0.014063626527786255,
+    "project_context": 0.006692850962281227,
+    "unexpected_changes": 0.00970847625285387
+   }
+  },
+  {
+   "id": "c087",
+   "labels": [],
+   "context_needed": false,
+   "ms": 20520.34015100071,
+   "server_ms": 20512.91,
+   "state_tokens": 879,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.3624744239946402,
+    "memory_store": 0.5313278367193054,
+    "call_graph": 0.07519394983661541,
+    "impact": 0.24429381515975251,
+    "refactor_edit": 0.22187783270651415,
+    "review_changes": 0.10012611102849182,
+    "type_orientation": 0.08937421785124253,
+    "project_context": 0.11201237520010486,
+    "unexpected_changes": 0.15526082858186438
+   },
+   "probs_raw": {
+    "session_recall": 0.24508501589298248,
+    "memory_store": 0.562176525592804,
+    "call_graph": 0.006692850962281227,
+    "impact": 0.09534946084022522,
+    "refactor_edit": 0.07585818320512772,
+    "review_changes": 0.012431650422513485,
+    "type_orientation": 0.00970847625285387,
+    "project_context": 0.01590639166533947,
+    "unexpected_changes": 0.03308597952127457
+   }
+  },
+  {
+   "id": "c089",
+   "labels": [],
+   "context_needed": false,
+   "ms": 20396.59440399919,
+   "server_ms": 20389.26,
+   "state_tokens": 856,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.014724119727705312,
+    "memory_store": 0.37709364887716756,
+    "call_graph": 0.05949836523897676,
+    "impact": 0.03917967175414356,
+    "refactor_edit": 0.06310762516031271,
+    "review_changes": 0.02004070546087128,
+    "type_orientation": 0.22187783270651415,
+    "project_context": 0.041610903702583926,
+    "unexpected_changes": 0.04691279928244129
+   },
+   "probs_raw": {
+    "session_recall": 0.00023050671734381467,
+    "memory_store": 0.2689414322376251,
+    "call_graph": 0.004070138093084097,
+    "impact": 0.0017007224960252643,
+    "refactor_edit": 0.004609571769833565,
+    "review_changes": 0.0004305570910219103,
+    "type_orientation": 0.07585818320512772,
+    "project_context": 0.0019267345778644085,
+    "unexpected_changes": 0.00247262348420918
+   }
+  },
+  {
+   "id": "c091",
+   "labels": [],
+   "context_needed": false,
+   "ms": 21412.439495999934,
+   "server_ms": 21397.65,
+   "state_tokens": 863,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.052852978540827676,
+    "memory_store": 0.5,
+    "call_graph": 0.05949836523897676,
+    "impact": 0.3481052403670717,
+    "refactor_edit": 0.5469149746918687,
+    "review_changes": 0.1251135055426311,
+    "type_orientation": 0.11840616942007498,
+    "project_context": 0.07967467583695353,
+    "unexpected_changes": 0.08937421785124253
+   },
+   "probs_raw": {
+    "session_recall": 0.0031726828310638666,
+    "memory_store": 0.5,
+    "call_graph": 0.004070138093084097,
+    "impact": 0.22270014882087708,
+    "refactor_edit": 0.5926666259765625,
+    "review_changes": 0.020332353189587593,
+    "type_orientation": 0.01798621006309986,
+    "project_context": 0.007577241398394108,
+    "unexpected_changes": 0.00970847625285387
+   }
+  },
+  {
+   "id": "c093",
+   "labels": [],
+   "context_needed": false,
+   "ms": 19361.788239000816,
+   "server_ms": 19353.61,
+   "state_tokens": 858,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.011493812593253666,
+    "memory_store": 0.0560831634919164,
+    "call_graph": 0.04418606736136043,
+    "impact": 0.052852978540827676,
+    "refactor_edit": 0.027223959927694996,
+    "review_changes": 0.030751544851984357,
+    "type_orientation": 0.24429381515975251,
+    "project_context": 0.04691279928244129,
+    "unexpected_changes": 0.0560831634919164
+   },
+   "probs_raw": {
+    "session_recall": 0.0001398220774717629,
+    "memory_store": 0.0035936026833951473,
+    "call_graph": 0.002182716503739357,
+    "impact": 0.0031726828310638666,
+    "refactor_edit": 0.0008040859247557819,
+    "review_changes": 0.0010322310263291001,
+    "type_orientation": 0.09534946084022522,
+    "project_context": 0.00247262348420918,
+    "unexpected_changes": 0.0035936026833951473
+   }
+  },
+  {
+   "id": "c095",
+   "labels": [],
+   "context_needed": true,
+   "ms": 19583.439631000147,
+   "server_ms": 19575.49,
+   "state_tokens": 871,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.33400723491024803,
+    "memory_store": 0.14720923396282568,
+    "call_graph": 0.03917967175414356,
+    "impact": 0.22187783270651415,
+    "refactor_edit": 0.04418606736136043,
+    "review_changes": 0.2328980734066719,
+    "type_orientation": 0.06310762516031271,
+    "project_context": 0.041610903702583926,
+    "unexpected_changes": 0.11840616942007498
+   },
+   "probs_raw": {
+    "session_recall": 0.2018132209777832,
+    "memory_store": 0.02931223064661026,
+    "call_graph": 0.0017007224960252643,
+    "impact": 0.07585818320512772,
+    "refactor_edit": 0.002182716503739357,
+    "review_changes": 0.08509904891252518,
+    "type_orientation": 0.004609571769833565,
+    "project_context": 0.0019267345778644085,
+    "unexpected_changes": 0.01798621006309986
+   }
+  },
+  {
+   "id": "c097",
+   "labels": [],
+   "context_needed": true,
+   "ms": 20457.10938100092,
+   "server_ms": 20448.24,
+   "state_tokens": 920,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.8363316337582667,
+    "memory_store": 0.33400723491024803,
+    "call_graph": 0.3624744239946402,
+    "impact": 0.33400723491024803,
+    "refactor_edit": 0.13950622488132866,
+    "review_changes": 0.13214384314984653,
+    "type_orientation": 0.25606104570766963,
+    "project_context": 0.04418606736136043,
+    "unexpected_changes": 0.2681939010586404
+   },
+   "probs_raw": {
+    "session_recall": 0.9626730680465698,
+    "memory_store": 0.2018132209777832,
+    "call_graph": 0.24508501589298248,
+    "impact": 0.2018132209777832,
+    "refactor_edit": 0.02595735527575016,
+    "review_changes": 0.022977370768785477,
+    "type_orientation": 0.10669060051441193,
+    "project_context": 0.002182716503739357,
+    "unexpected_changes": 0.11920291185379028
+   }
+  },
+  {
+   "id": "c099",
+   "labels": [],
+   "context_needed": true,
+   "ms": 20144.444988000032,
+   "server_ms": 20133.89,
+   "state_tokens": 876,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.74393896924065,
+    "memory_store": 0.6932998147072417,
+    "call_graph": 0.07094578841476491,
+    "impact": 0.24429381515975251,
+    "refactor_edit": 0.22187783270651415,
+    "review_changes": 0.07519394983661541,
+    "type_orientation": 0.20097169242879018,
+    "project_context": 0.13214384314984653,
+    "unexpected_changes": 0.11201237520010486
+   },
+   "probs_raw": {
+    "session_recall": 0.8933094143867493,
+    "memory_store": 0.8354835510253906,
+    "call_graph": 0.005911069456487894,
+    "impact": 0.09534946084022522,
+    "refactor_edit": 0.07585818320512772,
+    "review_changes": 0.006692850962281227,
+    "type_orientation": 0.06008664891123772,
+    "project_context": 0.022977370768785477,
+    "unexpected_changes": 0.01590639166533947
+   }
+  },
+  {
+   "id": "c101",
+   "labels": [],
+   "context_needed": false,
+   "ms": 20084.334175999174,
+   "server_ms": 20075.21,
+   "state_tokens": 857,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.05949836523897676,
+    "memory_store": 0.30670019686260186,
+    "call_graph": 0.10012611102849182,
+    "impact": 0.1636682736514757,
+    "refactor_edit": 0.3481052403670717,
+    "review_changes": 0.30670019686260186,
+    "type_orientation": 0.10012611102849182,
+    "project_context": 0.04418606736136043,
+    "unexpected_changes": 0.14720923396282568
+   },
+   "probs_raw": {
+    "session_recall": 0.004070138093084097,
+    "memory_store": 0.16451646387577057,
+    "call_graph": 0.012431650422513485,
+    "impact": 0.037326883524656296,
+    "refactor_edit": 0.22270014882087708,
+    "review_changes": 0.16451646387577057,
+    "type_orientation": 0.012431650422513485,
+    "project_context": 0.002182716503739357,
+    "unexpected_changes": 0.02931223064661026
+   }
+  },
+  {
+   "id": "c103",
+   "labels": [],
+   "context_needed": false,
+   "ms": 22910.435047000647,
+   "server_ms": 22901.59,
+   "state_tokens": 861,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.03688502106803674,
+    "memory_store": 0.4222145377754277,
+    "call_graph": 0.03917967175414356,
+    "impact": 0.45308505601522014,
+    "refactor_edit": 0.33400723491024803,
+    "review_changes": 0.1910858271857424,
+    "type_orientation": 0.04979902440713511,
+    "project_context": 0.1251135055426311,
+    "unexpected_changes": 0.1910858271857424
+   },
+   "probs_raw": {
+    "session_recall": 0.0015011822106316686,
+    "memory_store": 0.3486451804637909,
+    "call_graph": 0.0017007224960252643,
+    "impact": 0.4073334336280823,
+    "refactor_edit": 0.2018132209777832,
+    "review_changes": 0.053403329104185104,
+    "type_orientation": 0.002800926798954606,
+    "project_context": 0.020332353189587593,
+    "unexpected_changes": 0.053403329104185104
+   }
+  },
+  {
+   "id": "c105",
+   "labels": [],
+   "context_needed": false,
+   "ms": 32692.232718000014,
+   "server_ms": 32683.95,
+   "state_tokens": 859,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.02561086115270932,
+    "memory_store": 0.4686721935470112,
+    "call_graph": 0.04418606736136043,
+    "impact": 0.04691279928244129,
+    "refactor_edit": 0.08937421785124253,
+    "review_changes": 0.028935643902246868,
+    "type_orientation": 0.25606104570766963,
+    "project_context": 0.1910858271857424,
+    "unexpected_changes": 0.05949836523897676
+   },
+   "probs_raw": {
+    "session_recall": 0.0007096704212017357,
+    "memory_store": 0.4378235340118408,
+    "call_graph": 0.002182716503739357,
+    "impact": 0.00247262348420918,
+    "refactor_edit": 0.00970847625285387,
+    "review_changes": 0.0009110512328334153,
+    "type_orientation": 0.10669060051441193,
+    "project_context": 0.053403329104185104,
+    "unexpected_changes": 0.004070138093084097
+   }
+  },
+  {
+   "id": "c107",
+   "labels": [],
+   "context_needed": false,
+   "ms": 15959.6916649989,
+   "server_ms": 15950.06,
+   "state_tokens": 857,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.02561086115270932,
+    "memory_store": 0.2328980734066719,
+    "call_graph": 0.06310762516031271,
+    "impact": 0.1910858271857424,
+    "refactor_edit": 0.30670019686260186,
+    "review_changes": 0.04691279928244129,
+    "type_orientation": 0.15526082858186438,
+    "project_context": 0.052852978540827676,
+    "unexpected_changes": 0.06310762516031271
+   },
+   "probs_raw": {
+    "session_recall": 0.0007096704212017357,
+    "memory_store": 0.08509904891252518,
+    "call_graph": 0.004609571769833565,
+    "impact": 0.053403329104185104,
+    "refactor_edit": 0.16451646387577057,
+    "review_changes": 0.00247262348420918,
+    "type_orientation": 0.03308597952127457,
+    "project_context": 0.0031726828310638666,
+    "unexpected_changes": 0.004609571769833565
+   }
+  },
+  {
+   "id": "c108",
+   "labels": [],
+   "context_needed": true,
+   "ms": 8545.253606000188,
+   "server_ms": 8538.33,
+   "state_tokens": 875,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.7064759047589103,
+    "memory_store": 0.7781221765028631,
+    "call_graph": 0.03917967175414356,
+    "impact": 0.041610903702583926,
+    "refactor_edit": 0.24429381515975251,
+    "review_changes": 0.39193998864571306,
+    "type_orientation": 0.06692025928836023,
+    "project_context": 0.07094578841476491,
+    "unexpected_changes": 0.06310762516031271
+   },
+   "probs_raw": {
+    "session_recall": 0.8519527316093445,
+    "memory_store": 0.9241418242454529,
+    "call_graph": 0.0017007224960252643,
+    "impact": 0.0019267345778644085,
+    "refactor_edit": 0.09534946084022522,
+    "review_changes": 0.29421496391296387,
+    "type_orientation": 0.005220125894993544,
+    "project_context": 0.005911069456487894,
+    "unexpected_changes": 0.004609571769833565
+   }
+  },
+  {
+   "id": "c110",
+   "labels": [],
+   "context_needed": false,
+   "ms": 15086.45621100004,
+   "server_ms": 15079.87,
+   "state_tokens": 864,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.32019974366885906,
+    "memory_store": 0.8184242673630524,
+    "call_graph": 0.1636682736514757,
+    "impact": 0.3481052403670717,
+    "refactor_edit": 0.39193998864571306,
+    "review_changes": 0.05949836523897676,
+    "type_orientation": 0.28068476636393375,
+    "project_context": 0.10012611102849182,
+    "unexpected_changes": 0.07967467583695353
+   },
+   "probs_raw": {
+    "session_recall": 0.18242551386356354,
+    "memory_store": 0.9525741338729858,
+    "call_graph": 0.037326883524656296,
+    "impact": 0.22270014882087708,
+    "refactor_edit": 0.29421496391296387,
+    "review_changes": 0.004070138093084097,
+    "type_orientation": 0.13296423852443695,
+    "project_context": 0.012431650422513485,
+    "unexpected_changes": 0.007577241398394108
+   }
+  },
+  {
+   "id": "c113",
+   "labels": [],
+   "context_needed": false,
+   "ms": 18995.73655899985,
+   "server_ms": 18984.59,
+   "state_tokens": 859,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.013010401425464373,
+    "memory_store": 0.28068476636393375,
+    "call_graph": 0.02409097640409335,
+    "impact": 0.0560831634919164,
+    "refactor_edit": 0.07519394983661541,
+    "review_changes": 0.14720923396282568,
+    "type_orientation": 0.08937421785124253,
+    "project_context": 0.052852978540827676,
+    "unexpected_changes": 0.0560831634919164
+   },
+   "probs_raw": {
+    "session_recall": 0.0001795279822545126,
+    "memory_store": 0.13296423852443695,
+    "call_graph": 0.0006263342220336199,
+    "impact": 0.0035936026833951473,
+    "refactor_edit": 0.006692850962281227,
+    "review_changes": 0.02931223064661026,
+    "type_orientation": 0.00970847625285387,
+    "project_context": 0.0031726828310638666,
+    "unexpected_changes": 0.0035936026833951473
+   }
+  },
+  {
+   "id": "c115",
+   "labels": [],
+   "context_needed": false,
+   "ms": 19533.881224999277,
+   "server_ms": 19527.09,
+   "state_tokens": 858,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.041610903702583926,
+    "memory_store": 0.665992765089752,
+    "call_graph": 0.032677570489012465,
+    "impact": 0.14720923396282568,
+    "refactor_edit": 0.39193998864571306,
+    "review_changes": 0.0560831634919164,
+    "type_orientation": 0.28068476636393375,
+    "project_context": 0.07519394983661541,
+    "unexpected_changes": 0.07094578841476491
+   },
+   "probs_raw": {
+    "session_recall": 0.0019267345778644085,
+    "memory_store": 0.7981867790222168,
+    "call_graph": 0.0011695101857185364,
+    "impact": 0.02931223064661026,
+    "refactor_edit": 0.29421496391296387,
+    "review_changes": 0.0035936026833951473,
+    "type_orientation": 0.13296423852443695,
+    "project_context": 0.006692850962281227,
+    "unexpected_changes": 0.005911069456487894
+   }
+  },
+  {
+   "id": "c117",
+   "labels": [],
+   "context_needed": true,
+   "ms": 20493.91062700124,
+   "server_ms": 20483.05,
+   "state_tokens": 874,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.2681939010586404,
+    "memory_store": 0.4222145377754277,
+    "call_graph": 0.052852978540827676,
+    "impact": 0.13214384314984653,
+    "refactor_edit": 0.6375255853464977,
+    "review_changes": 0.1636682736514757,
+    "type_orientation": 0.11201237520010486,
+    "project_context": 0.13950622488132866,
+    "unexpected_changes": 0.10592235492567792
+   },
+   "probs_raw": {
+    "session_recall": 0.11920291185379028,
+    "memory_store": 0.3486451804637909,
+    "call_graph": 0.0031726828310638666,
+    "impact": 0.022977370768785477,
+    "refactor_edit": 0.7549149990081787,
+    "review_changes": 0.037326883524656296,
+    "type_orientation": 0.01590639166533947,
+    "project_context": 0.02595735527575016,
+    "unexpected_changes": 0.014063626527786255
+   }
+  },
+  {
+   "id": "c119",
+   "labels": [],
+   "context_needed": true,
+   "ms": 20605.551495998952,
+   "server_ms": 20597.1,
+   "state_tokens": 886,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.29352403376094427,
+    "memory_store": 0.25606104570766963,
+    "call_graph": 0.39193998864571306,
+    "impact": 0.15526082858186438,
+    "refactor_edit": 0.3481052403670717,
+    "review_changes": 0.15526082858186438,
+    "type_orientation": 0.2328980734066719,
+    "project_context": 0.13214384314984653,
+    "unexpected_changes": 0.09461348437049198
+   },
+   "probs_raw": {
+    "session_recall": 0.14804719388484955,
+    "memory_store": 0.10669060051441193,
+    "call_graph": 0.29421496391296387,
+    "impact": 0.03308597952127457,
+    "refactor_edit": 0.22270014882087708,
+    "review_changes": 0.03308597952127457,
+    "type_orientation": 0.08509904891252518,
+    "project_context": 0.022977370768785477,
+    "unexpected_changes": 0.010986942797899246
+   }
+  },
+  {
+   "id": "c121",
+   "labels": [],
+   "context_needed": true,
+   "ms": 20837.34418000131,
+   "server_ms": 20829.34,
+   "state_tokens": 889,
+   "dropped": 0,
+   "probs": {
+    "session_recall": 0.45308505601522014,
+    "memory_store": 0.8604936552747432,
+    "call_graph": 0.07519394983661541,
+    "impact": 0.29352403376094427,
+    "refactor_edit": 0.10592235492567792,
+    "review_changes": 0.09461348437049198,
+    "type_orientation": 0.1251135055426311,
+    "project_context": 0.30670019686260186,
+    "unexpected_changes": 0.3624744239946402
+   },
+   "probs_raw": {
+    "session_recall": 0.4073334336280823,
+    "memory_store": 0.9740425944328308,
+    "call_graph": 0.006692850962281227,
+    "impact": 0.14804719388484955,
+    "refactor_edit": 0.014063626527786255,
+    "review_changes": 0.010986942797899246,
+    "type_orientation": 0.020332353189587593,
+    "project_context": 0.16451646387577057,
+    "unexpected_changes": 0.24508501589298248
+   }
+  }
+ ]
+}
