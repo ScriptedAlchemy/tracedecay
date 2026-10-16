@@ -62,10 +62,16 @@ crate.annotation(
 # task promotes no parked follower, so one long poll delays every socket wake
 # and shared timer on the runtime. Delete this annotation and the patch once
 # the pinned or published asupersync contains the fix.
+# The blocking-pool stack patch gives pool threads the runtime's
+# thread_stack_size (16 MiB in the CLI); unpatched they get the standard
+# library's 2 MiB while running handler futures moved off a worker.
 crate.annotation(
     crate = "asupersync",
     patch_args = ["-p1"],
-    patches = ["//scripts:bazel/patches/asupersync-reactor-handoff.patch"],
+    patches = [
+        "//scripts:bazel/patches/asupersync-reactor-handoff.patch",
+        "//scripts:bazel/patches/asupersync-blocking-pool-stack.patch",
+    ],
     version = "0.6.0",
 )
 
