@@ -431,9 +431,8 @@ Scenarios may declare `expected_skill` and `allowed_skills`. Omitted allowed
 skills defaults to the expected skill; explicit `[]` marks a no-skill case.
 Claude exposes plugin `commands/` as `tracedecay:*` skills alongside `skills/`,
 so a scenario whose task is exactly one workflow command's job (for example
-`check-health` for the health scorecard, `find-impact` for the impact case)
-lists that command in `allowed_skills`; routing to it is a correct workflow,
-not a false trigger.
+`draft-commit` for a commit message) lists that command in `allowed_skills`;
+routing to it is a correct workflow, not a false trigger.
 
 Claude Code (2.1.x) defers MCP tool schemas behind `ToolSearch` once a server's
 definitions exceed its context budget; only tools the server marks

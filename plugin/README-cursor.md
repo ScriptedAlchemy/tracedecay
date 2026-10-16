@@ -97,12 +97,13 @@ For sessions resumed from compacted context, any recovery guidance is produced
 from the daemon's canonical session state after the hook admission succeeds;
 the `sessionStart` adapter does not read a session store itself.
 
-Slash workflows ship as Cursor-native commands
-(`/tracedecay-map-architecture`, `/tracedecay-check-health`,
-`/tracedecay-curate-memory`, `/tracedecay-review-diff`, ...). Their slugs keep
-the `tracedecay-` prefix so typing `/tracedecay` lists every command. The
-files in `overlays/cursor/commands/` are independently authored for Cursor
-(skill handoff + approval notes), not generated from `plugin/commands/`.
+Workflows no skill covers ship as Cursor-native commands
+(`/tracedecay-audit-safety`, `/tracedecay-draft-commit`,
+`/tracedecay-test-changes`, ...). Their slugs keep the `tracedecay-` prefix so
+typing `/tracedecay` lists every command. Every skill is also invocable by
+name, for example `/assessing-impact`. The files in `overlays/cursor/commands/`
+are independently authored for Cursor (skill handoff + approval notes), not
+generated from `plugin/commands/`.
 
 ## Auto-review and `permissions.json`
 
