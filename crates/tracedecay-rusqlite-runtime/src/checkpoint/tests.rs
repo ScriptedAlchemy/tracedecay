@@ -48,7 +48,7 @@ fn report(busy: bool, log_frames: u64, checkpointed_frames: u64) -> CheckpointRe
 }
 
 #[test]
-fn below_soft_is_a_noop_and_soft_pressure_is_passive() {
+fn below_soft_is_a_noop_and_soft_pressure_restarts() {
     let config = CheckpointConfig::default();
     let mut fixture = CheckpointFixture::open(config);
     assert_eq!(
@@ -66,7 +66,7 @@ fn below_soft_is_a_noop_and_soft_pressure_is_passive() {
             .evaluate(config.soft_wal_bytes, CheckpointBlockers::default())
             .unwrap(),
         CheckpointDecision::Complete {
-            mode: CheckpointMode::Passive,
+            mode: CheckpointMode::Restart,
             pressure: WalPressure::Soft,
             ..
         }
@@ -106,12 +106,12 @@ fn a_configured_wal_budget_moves_the_controller_thresholds() {
             ..
         }
     ));
-    // A live PASSIVE checkpoint of this small WAL finishes completely, including
-    // while another writer holds BEGIN IMMEDIATE, so the partial report is applied
-    // through the decision function the controller uses after the driver returns.
+    // A live RESTART checkpoint of this small WAL finishes completely, so the
+    // partial report is applied through the decision function the controller
+    // uses after the driver returns.
     let (decision, hard_drain_required) = super::controller::checkpoint_decision(
         report(true, 100, 40),
-        CheckpointMode::Passive,
+        CheckpointMode::Restart,
         WalPressure::Hard,
         budget.hard_limit_bytes,
         CheckpointBlockers::default(),
@@ -134,7 +134,7 @@ fn controller_reports_inventory_without_owning_snapshot_state() {
     let blockers = inventory("lease.soft");
     let (decision, hard_drain_required) = super::controller::checkpoint_decision(
         report(true, 100, 40),
-        CheckpointMode::Passive,
+        CheckpointMode::Restart,
         WalPressure::Soft,
         CheckpointConfig::default().soft_wal_bytes,
         blockers.clone(),
@@ -153,7 +153,7 @@ fn controller_reports_inventory_without_owning_snapshot_state() {
 }
 
 #[test]
-fn scheduled_checkpoint_samples_frames_and_bytes_before_passive() {
+fn scheduled_checkpoint_samples_frames_and_bytes_before_restart() {
     let mut idle = CheckpointFixture::open(CheckpointConfig::default());
     assert!(matches!(
         idle.controller
@@ -178,7 +178,7 @@ fn scheduled_checkpoint_samples_frames_and_bytes_before_passive() {
         CheckpointResult::Decision {
             sample,
             decision: CheckpointDecision::Complete {
-                mode: CheckpointMode::Passive,
+                mode: CheckpointMode::Restart,
                 pressure: WalPressure::Soft,
                 wal_bytes,
                 ..
@@ -207,11 +207,11 @@ fn scheduled_checkpoint_surfaces_typed_cancellation_before_driver_work() {
 }
 
 #[test]
-fn incomplete_hard_checkpoint_requires_drain_until_passive_completes() {
+fn incomplete_hard_checkpoint_requires_drain_until_restart_completes() {
     let config = CheckpointConfig::default();
     let (pending, hard_drain_required) = super::controller::checkpoint_decision(
         report(false, 1_000, 500),
-        CheckpointMode::Passive,
+        CheckpointMode::Restart,
         WalPressure::Hard,
         config.hard_wal_bytes,
         inventory("lease.hard"),
@@ -229,7 +229,7 @@ fn incomplete_hard_checkpoint_requires_drain_until_passive_completes() {
     assert!(hard_drain_required);
     let (complete, hard_drain_required) = super::controller::checkpoint_decision(
         report(false, 500, 500),
-        CheckpointMode::Passive,
+        CheckpointMode::Restart,
         WalPressure::BelowSoft,
         config.soft_wal_bytes - 1,
         CheckpointBlockers::default(),
@@ -239,7 +239,7 @@ fn incomplete_hard_checkpoint_requires_drain_until_passive_completes() {
     assert!(matches!(
         complete,
         CheckpointDecision::Complete {
-            mode: CheckpointMode::Passive,
+            mode: CheckpointMode::Restart,
             pressure: WalPressure::BelowSoft,
             ..
         }
@@ -294,7 +294,7 @@ fn rusqlite_driver_samples_and_checkpoints_its_owned_writer_connection() {
 
     driver.disable_auto_checkpoint().unwrap();
     let sample = driver.sample_wal().unwrap();
-    let report = driver.checkpoint(CheckpointMode::Passive).unwrap();
+    let report = driver.checkpoint(CheckpointMode::Restart).unwrap();
 
     assert!(sample.frames >= 1);
     assert!(sample.bytes >= 1);
@@ -377,7 +377,7 @@ fn scheduled_checkpoint_defers_while_another_connection_checkpoints() {
             result,
             Ok(CheckpointResult::Decision {
                 decision: CheckpointDecision::Pending {
-                    mode: CheckpointMode::Passive,
+                    mode: CheckpointMode::Restart,
                     report: CheckpointReport { busy: true, .. },
                     ..
                 },

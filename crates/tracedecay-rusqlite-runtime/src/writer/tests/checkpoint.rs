@@ -135,7 +135,7 @@ fn hard_checkpoint_pressure_blocks_general_admission() {
     let result = CheckpointResult::Decision {
         sample,
         decision: CheckpointDecision::Pending {
-            mode: CheckpointMode::Passive,
+            mode: CheckpointMode::Restart,
             pressure: WalPressure::Hard,
             wal_bytes: sample.bytes,
             report: CheckpointReport {

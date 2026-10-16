@@ -69,9 +69,12 @@ impl WriterCheckpointController {
         Ok(CheckpointResult::Decision { sample, decision })
     }
 
-    /// Apply automatic WAL pressure policy. Soft and hard pressure both first
-    /// attempt PASSIVE. An incomplete hard-pressure attempt requests a drain;
-    /// the snapshot authority remains the source of blocker inventory.
+    /// Apply automatic WAL pressure policy. Soft and hard pressure both
+    /// attempt RESTART. Backfilling every frame does not shrink the log:
+    /// SQLite restarts it only once no reader holds a WAL read slot, and only
+    /// RESTART reports a held slot as busy. An incomplete hard-pressure
+    /// attempt requests a drain; the snapshot authority remains the source of
+    /// blocker inventory.
     pub(crate) fn evaluate(
         &mut self,
         wal_bytes: u64,
@@ -82,7 +85,7 @@ impl WriterCheckpointController {
             return Ok(CheckpointDecision::BelowSoftLimit { wal_bytes });
         }
         self.run_checkpoint(
-            CheckpointMode::Passive,
+            CheckpointMode::Restart,
             pressure,
             wal_bytes,
             snapshot_blockers,

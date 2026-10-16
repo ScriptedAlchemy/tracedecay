@@ -23,7 +23,7 @@ use tracedecay_maintenance::tick::{
     MaintenanceContinuation, MaintenanceTickOutcome, cursor_after_attempted_units,
     select_store_window,
 };
-use tracedecay_runtime_core::storage::profile_sharded_data_root;
+use tracedecay_runtime_core::storage::{RESPONSE_HANDLES_DIRECTORY, profile_sharded_data_root};
 
 use super::branch_admin::StoreAdministration;
 use tracedecay_daemon_service::shutdown::DAEMON_TASK_ABORT_DEADLINE;
@@ -92,6 +92,50 @@ fn record_lost_store_files(
                 ],
             );
         }
+    }
+}
+
+/// Expired response handles are removed from the profile root and every
+/// registered project store, so a daemon that outlives the handle TTL still
+/// reclaims them. The sweep stops between roots once cancellation is
+/// requested.
+async fn sweep_response_handles(
+    handle_roots: Vec<PathBuf>,
+    cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
+) {
+    let swept = native_runtime::spawn_blocking(move || {
+        let now = tracedecay_runtime_core::tracedecay::current_timestamp();
+        let (mut removed, mut failed) = (0usize, 0usize);
+        for root in &handle_roots {
+            if cancellation.is_cancelled() {
+                break;
+            }
+            match tracedecay_mcp::response_handles::cleanup_expired_response_handles(root, now) {
+                Ok(count) => removed = removed.saturating_add(count),
+                Err(_) => failed = failed.saturating_add(1),
+            }
+        }
+        (handle_roots.len(), removed, failed)
+    })
+    .await;
+    match swept {
+        Ok((roots, removed, failed)) if removed > 0 || failed > 0 => log_daemon_event(
+            "response_handle_cleanup",
+            &[
+                ("roots", roots.to_string()),
+                ("removed_expired", removed.to_string()),
+                ("failed_roots", failed.to_string()),
+            ],
+        ),
+        Ok(_) => {}
+        Err(error) => log_daemon_event(
+            "retention_degraded",
+            &[
+                ("pass", "response_handles".to_owned()),
+                ("failure", "blocking_pool_unavailable".to_owned()),
+                ("error", error),
+            ],
+        ),
     }
 }
 
@@ -806,6 +850,17 @@ impl MaintenanceCoordinator {
                     (Vec::new(), false)
                 }
             };
+        if continuation.is_none() && !self.cancellation.is_cancelled() {
+            let handle_roots = std::iter::once(profile_root)
+                .chain(
+                    registered_projects
+                        .iter()
+                        .map(|(_, store)| store.data_root.as_path()),
+                )
+                .map(|root| root.join(RESPONSE_HANDLES_DIRECTORY))
+                .collect();
+            sweep_response_handles(handle_roots, self.cancellation.clone()).await;
+        }
         let mounted_store_roots = project_graphs
             .iter()
             .map(|graph| graph.code_index_store_root.clone())
@@ -1821,6 +1876,76 @@ mod tests {
             .await;
         assert_eq!(continuation, MaintenanceTickOutcome::Complete);
         assert_eq!(generation_files(), 1);
+    }
+
+    #[test]
+    fn a_full_tick_sweeps_expired_response_handles_from_the_profile_and_each_store() {
+        tracedecay_runtime_core::native_runtime::block_on(async {
+            use tracedecay_session_memory::response_handles::{
+                inventory_response_handles, store_response_handle,
+            };
+
+            let temp = tempfile::TempDir::new().expect("temp root");
+            let profile_root = temp.path().join("profile");
+            let checkout = temp.path().join("checkout");
+            std::fs::create_dir_all(&checkout).expect("checkout");
+            let runtime =
+                tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::profile(
+                    &profile_root,
+                )
+                .await
+                .expect("profile database");
+            let profile_database = runtime.profile_database_arc();
+            let project = profile_database
+                .upsert_code_project("proj_handles", &checkout, None, None, None)
+                .await
+                .expect("register project");
+            let store_root = tracedecay_runtime_core::storage::profile_sharded_data_root(
+                &profile_root,
+                &project.project_id,
+            );
+            std::fs::create_dir_all(&store_root).expect("project store");
+            let roots = [
+                profile_root.join(super::RESPONSE_HANDLES_DIRECTORY),
+                store_root.join(super::RESPONSE_HANDLES_DIRECTORY),
+            ];
+            let now = tracedecay_runtime_core::tracedecay::current_timestamp();
+            for root in &roots {
+                store_response_handle(root, "expired", 1).expect("expired handle");
+                store_response_handle(root, "fresh", now).expect("fresh handle");
+                assert_eq!(inventory_response_handles(root).expect("inventory").file_count, 2);
+            }
+            let coordinator = MaintenanceCoordinator {
+                background_cpu: Some(Arc::new(
+                    tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1::new(
+                        std::num::NonZeroUsize::MIN,
+                    ),
+                )),
+                ..MaintenanceCoordinator::default()
+            };
+
+            coordinator
+                .run_tick(
+                    &profile_root,
+                    &profile_database,
+                    &super::StoreAdministration::default(),
+                    &tracedecay_code_index_runtime::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(1),
+                    &tracedecay_configuration::RetentionConfig::default(),
+                    super::BranchStoreGcCadenceV1 { branch_gc_days: 30 },
+                    None,
+                )
+                .await;
+
+            for root in &roots {
+                assert_eq!(
+                    inventory_response_handles(root).expect("inventory").file_count,
+                    1,
+                    "the tick removes the expired handle and keeps the fresh one under {}",
+                    root.display()
+                );
+            }
+        })
+        .expect("native runtime");
     }
 
     /// Tick state released 200 ms after its tick drops, past the abort
