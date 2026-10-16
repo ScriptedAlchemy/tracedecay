@@ -30,6 +30,12 @@
 #   CLAUDE_MODELS        space-separated Claude matrix (default: opus sonnet)
 #   CODEX_MODELS         space-separated Codex matrix (default: gpt-5.6-sol)
 #   CODEX_REASONING_EFFORT Codex reasoning effort (default: medium)
+#   CODEX_FEATURES       space-separated Codex [features] to enable in the eval
+#                        profile, e.g. "code_mode code_mode_tool_search"
+#   CODEX_SERVE_EXTRA_ARGS extra `tracedecay serve` args for the Codex plugin's
+#                        graph server, e.g. "--full-tool-list"
+#   CODEX_KEEP_ROLLOUTS=1 keep Codex session rollouts under the work dir; they
+#                        hold the code-mode `exec` source the event stream omits
 #   SCENARIO_TIMEOUT     per scenario wall-clock seconds (default: 240)
 #   REPS                 repetitions per scenario x host x model x condition cell
 #                        (default: 1; >1 suffixes transcripts with __r<N>)
@@ -54,6 +60,10 @@ HOSTS="${HOSTS:-claude}"
 CLAUDE_MODELS="${CLAUDE_MODELS:-opus sonnet}"
 CODEX_MODELS="${CODEX_MODELS:-gpt-5.6-sol}"
 CODEX_REASONING_EFFORT="${CODEX_REASONING_EFFORT:-medium}"
+CODEX_FEATURES="${CODEX_FEATURES:-}"
+CODEX_SERVE_EXTRA_ARGS="${CODEX_SERVE_EXTRA_ARGS:-}"
+CODEX_EPHEMERAL=(--ephemeral)
+[[ "${CODEX_KEEP_ROLLOUTS:-}" == 1 ]] && CODEX_EPHEMERAL=()
 SCENARIO_TIMEOUT="${SCENARIO_TIMEOUT:-240}"
 REPS="${REPS:-1}"
 PARALLEL="${PARALLEL:-1}"
@@ -292,13 +302,20 @@ prepare_host_profiles() {
     # Codex starts plugin MCP servers with a minimal environment. Without these
     # names `serve` looks for a daemon under the throwaway HOME, fails, and
     # Codex drops the graph server without a transcript error.
-    python3 -c 'import json, sys
+    CODEX_SERVE_EXTRA_ARGS="$CODEX_SERVE_EXTRA_ARGS" python3 -c 'import json, os, sys
 names = ["TRACEDECAY_DATA_DIR", "TRACEDECAY_DAEMON_SOCKET", "TRACEDECAY_GLOBAL_DB", "TRACEDECAY_DISABLE_GLOBAL_DB"]
+extra = os.environ["CODEX_SERVE_EXTRA_ARGS"].split()
 for path in sys.argv[1:]:
     config = json.load(open(path))
     for server in config["mcpServers"].values():
         server["env_vars"] = names
+        if "serve" in server.get("args", []):
+            server["args"] += extra
     json.dump(config, open(path, "w"), indent=2)' "$CODEX_EVAL_CONFIG"/plugins/cache/*/tracedecay/*/.mcp.json
+    if [[ -n "$CODEX_FEATURES" ]]; then
+      { echo; echo "[features]"; for f in $CODEX_FEATURES; do echo "$f = true"; done; } \
+        >>"$CODEX_EVAL_CONFIG/config.toml"
+    fi
     python3 -c 'import os, re, sys
 candidate = os.path.realpath(sys.argv[1])
 launched = {path for config in sys.argv[2:]
@@ -578,7 +595,7 @@ run_codex() {
   local prompt="$1" fixture="$2" out="$3" err="$4" model="$5"
   HOME="$CODEX_EVAL_HOME" CODEX_HOME="$CODEX_EVAL_CONFIG" PATH="$EVAL_PATH" \
     timeout "$SCENARIO_TIMEOUT" codex -a never -s workspace-write exec "$prompt" --json \
-      -C "$fixture" --add-dir "$work" --skip-git-repo-check --ephemeral --ignore-rules \
+      -C "$fixture" --add-dir "$work" --skip-git-repo-check "${CODEX_EPHEMERAL[@]}" --ignore-rules \
       -m "$model" -c "model_reasoning_effort=\"$CODEX_REASONING_EFFORT\"" \
       </dev/null >"$out" 2>"$err"
 }
