@@ -23,8 +23,10 @@ impl HookWorkspaceStatus {
     }
 }
 
-/// The skill mandate a skill-loading host reads at session start.
-const SESSION_START_MANDATE: &str =
+/// The skill mandate: which tasks load a skill first, the entry skill, and the
+/// direct-entry skills. Hook hosts read it at session start; rule hosts carry
+/// it in their always-on instructions.
+pub(crate) const SKILL_MANDATE: &str =
     include_str!("../../../../plugin/hooks/session-start-context.md");
 
 /// Session-start context: the skill mandate, then any Context Scout guidance
@@ -38,8 +40,8 @@ pub(super) fn session_start_context(
         return guidance;
     }
     Some(match guidance {
-        Some(guidance) => format!("{SESSION_START_MANDATE}\n{guidance}"),
-        None => SESSION_START_MANDATE.to_owned(),
+        Some(guidance) => format!("{SKILL_MANDATE}\n{guidance}"),
+        None => SKILL_MANDATE.to_owned(),
     })
 }
 
@@ -47,17 +49,17 @@ pub(super) fn session_start_context(
 mod tests {
     use std::path::Path;
 
-    use super::{SESSION_START_MANDATE, session_start_context};
+    use super::{SKILL_MANDATE, session_start_context};
 
     #[test]
     fn registered_session_start_leads_with_the_skill_mandate() {
         let root = Some(Path::new("/workspace/project"));
         assert_eq!(
             session_start_context(root, None).as_deref(),
-            Some(SESSION_START_MANDATE)
+            Some(SKILL_MANDATE)
         );
         let composed = session_start_context(root, Some("scout guidance".to_owned())).unwrap();
-        assert_eq!(composed, format!("{SESSION_START_MANDATE}\nscout guidance"));
+        assert_eq!(composed, format!("{SKILL_MANDATE}\nscout guidance"));
     }
 
     #[test]

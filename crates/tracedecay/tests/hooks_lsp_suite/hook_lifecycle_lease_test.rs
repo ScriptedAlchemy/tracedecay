@@ -602,7 +602,7 @@ fn bound_claude_hook_returns_only_the_transport_response() {
         .as_str()
         .unwrap_or_else(|| panic!("registered SessionStart carries the skill mandate: {response}"));
     assert!(
-        context.starts_with("TraceDecay indexes this repository")
+        context.starts_with("TraceDecay keeps a code graph")
             && context.contains("`routing-tracedecay`"),
         "{context}"
     );

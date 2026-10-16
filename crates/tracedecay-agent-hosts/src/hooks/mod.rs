@@ -63,6 +63,7 @@ pub use cursor::{
 pub use cursor_compact::{CursorPreCompactOutcome, cursor_pre_compact_via_daemon};
 pub use kiro::hook_kiro_prompt_submit;
 pub use steering::HookWorkspaceStatus;
+pub(crate) use steering::SKILL_MANDATE;
 
 #[cfg(test)]
 use analytics::HOOK_ANALYTICS_FILENAME;

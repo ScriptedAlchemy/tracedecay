@@ -3,9 +3,9 @@
 > **Current layout:** all agent bundles are composed from the shared
 > `plugin/` tree. Skills live in `plugin/skills/`; per-host manifests in
 > `plugin/.{cursor,codex,claude}-plugin/`; hooks in
-> `plugin/hooks/hooks-<host>.json`, and the session-start skill mandate the
-> Claude, Codex, and Cursor `SessionStart` hooks embed in
-> `plugin/hooks/session-start-context.md`; host READMEs in `plugin/README-<host>.md`.
+> `plugin/hooks/hooks-<host>.json`, and the skill mandate in
+> `plugin/hooks/session-start-context.md` (Claude and Codex `SessionStart`,
+> the Cursor rule, Kimi and OpenCode `AGENTS.md`); host READMEs in `plugin/README-<host>.md`.
 > Cursor's workflow dispatchers deploy as native Cursor 1.6+ commands from
 > `plugin/overlays/cursor/commands/*.md`; Claude uses `plugin/commands/*.md`.
 > `crates/tracedecay-agent-hosts/src/agents/plugin_bundle.rs` owns each host's deployed file set.
