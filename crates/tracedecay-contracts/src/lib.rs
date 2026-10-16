@@ -458,8 +458,8 @@ pub use work_attempt::{
 };
 pub use work_attempt_effect::{
     WorkAttemptEffectDispatchOutcomeV1, WorkAttemptEffectHolderErrorV1, WorkAttemptEffectHolderV1,
-    WorkAttemptEffectResolutionV1, WorkAttemptEffectServiceV1, WorkAttemptEffectStorageErrorV1,
-    WorkAttemptEffectStoragePortV1,
+    WorkAttemptEffectReadPortV1, WorkAttemptEffectResolutionV1, WorkAttemptEffectServiceV1,
+    WorkAttemptEffectStorageErrorV1, WorkAttemptEffectStoragePortV1,
 };
 pub use work_catalog::{
     WORK_APPLICATION_OPERATION_IDS_V1, work_executable_binding, work_executable_binding_registry,

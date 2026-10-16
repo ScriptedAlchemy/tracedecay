@@ -2,8 +2,8 @@
 
 use serde::Deserialize;
 use tracedecay_contracts::{
-    WorkAttemptEffectDispatchOutcomeV1, WorkAttemptEffectHolderV1, WorkAttemptEffectResolutionV1,
-    WorkAttemptEffectStorageErrorV1, WorkAttemptEffectStoragePortV1,
+    WorkAttemptEffectDispatchOutcomeV1, WorkAttemptEffectHolderV1, WorkAttemptEffectReadPortV1,
+    WorkAttemptEffectResolutionV1, WorkAttemptEffectStorageErrorV1, WorkAttemptEffectStoragePortV1,
 };
 use tracedecay_domain::{UtcMicros, WorkAttemptIdentityV1, WorkAttemptV1, WorkAuthority};
 
@@ -12,40 +12,11 @@ use crate::work::{
     RegisteredWorkQuery, RegisteredWorkWrite, WorkSqliteStorage, authority_params_owned,
     exact_sql_integer, exact_sql_statement, exact_sql_text, registered_work_query,
 };
+use crate::work_run_control::WorkSqliteJobStorage;
 
 type StorageError = WorkAttemptEffectStorageErrorV1;
 
-impl WorkAttemptEffectStoragePortV1 for WorkSqliteStorage {
-    fn begin_effect_dispatch(
-        &self,
-        authority: &WorkAuthority,
-        holder: &WorkAttemptEffectHolderV1,
-    ) -> Result<WorkAttemptEffectDispatchOutcomeV1, StorageError> {
-        holder.validate().map_err(|_| StorageError::Conflict)?;
-        let transaction = self
-            .handle()
-            .begin_immediate()
-            .map_err(|_| StorageError::Unavailable)?;
-        let outcome = begin_effect_dispatch_tx(&transaction, authority, holder);
-        settle_immediate(transaction, outcome)
-    }
-
-    fn settle_effect_dispatch(
-        &self,
-        authority: &WorkAuthority,
-        attempt: &WorkAttemptIdentityV1,
-        resolution: WorkAttemptEffectResolutionV1,
-        resolved_at: UtcMicros,
-    ) -> Result<WorkAttemptEffectHolderV1, StorageError> {
-        let transaction = self
-            .handle()
-            .begin_immediate()
-            .map_err(|_| StorageError::Unavailable)?;
-        let outcome =
-            settle_effect_dispatch_tx(&transaction, authority, attempt, resolution, resolved_at);
-        settle_immediate(transaction, outcome)
-    }
-
+impl WorkAttemptEffectReadPortV1 for WorkSqliteStorage {
     fn load_effect_dispatch(
         &self,
         authority: &WorkAuthority,
@@ -63,33 +34,7 @@ impl WorkAttemptEffectStoragePortV1 for WorkSqliteStorage {
     }
 }
 
-/// The writer job commits or rolls back the holder write with the job.
-impl WorkAttemptEffectStoragePortV1 for crate::work_run_control::WorkSqliteJobStorage<'_> {
-    fn begin_effect_dispatch(
-        &self,
-        authority: &WorkAuthority,
-        holder: &WorkAttemptEffectHolderV1,
-    ) -> Result<WorkAttemptEffectDispatchOutcomeV1, StorageError> {
-        holder.validate().map_err(|_| StorageError::Conflict)?;
-        begin_effect_dispatch_tx(self.transaction, authority, holder)
-    }
-
-    fn settle_effect_dispatch(
-        &self,
-        authority: &WorkAuthority,
-        attempt: &WorkAttemptIdentityV1,
-        resolution: WorkAttemptEffectResolutionV1,
-        resolved_at: UtcMicros,
-    ) -> Result<WorkAttemptEffectHolderV1, StorageError> {
-        settle_effect_dispatch_tx(
-            self.transaction,
-            authority,
-            attempt,
-            resolution,
-            resolved_at,
-        )
-    }
-
+impl WorkAttemptEffectReadPortV1 for WorkSqliteJobStorage<'_> {
     fn load_effect_dispatch(
         &self,
         authority: &WorkAuthority,
@@ -99,66 +44,52 @@ impl WorkAttemptEffectStoragePortV1 for crate::work_run_control::WorkSqliteJobSt
     }
 }
 
-fn settle_immediate<T>(
-    transaction: crate::exact_sql::ExactSqlTransaction,
-    outcome: Result<T, StorageError>,
-) -> Result<T, StorageError> {
-    match outcome {
-        Ok(value) => {
-            transaction
-                .commit()
-                .map_err(|_| StorageError::Unavailable)?;
-            Ok(value)
+/// The writer job commits or rolls back the holder write with the job.
+impl WorkAttemptEffectStoragePortV1 for WorkSqliteJobStorage<'_> {
+    fn begin_effect_dispatch(
+        &self,
+        authority: &WorkAuthority,
+        holder: &WorkAttemptEffectHolderV1,
+    ) -> Result<WorkAttemptEffectDispatchOutcomeV1, StorageError> {
+        holder.validate().map_err(|_| StorageError::Conflict)?;
+        require_open_attempt(self.transaction, authority, holder)?;
+        if let Some(existing) = load_holder(self.transaction, authority, holder.attempt())? {
+            return if same_dispatch(&existing, holder) {
+                Ok(WorkAttemptEffectDispatchOutcomeV1::Replayed(existing))
+            } else {
+                Err(StorageError::Conflict)
+            };
         }
-        Err(error) => {
-            let _ = transaction.rollback();
-            Err(error)
-        }
+        insert_holder(self.transaction, authority, holder)?;
+        Ok(WorkAttemptEffectDispatchOutcomeV1::Recorded(holder.clone()))
     }
-}
 
-fn begin_effect_dispatch_tx(
-    transaction: &impl RegisteredWorkWrite,
-    authority: &WorkAuthority,
-    holder: &WorkAttemptEffectHolderV1,
-) -> Result<WorkAttemptEffectDispatchOutcomeV1, StorageError> {
-    require_open_attempt(transaction, authority, holder)?;
-    if let Some(existing) = load_holder(transaction, authority, holder.attempt())? {
-        return if same_dispatch(&existing, holder) {
-            Ok(WorkAttemptEffectDispatchOutcomeV1::Replayed(existing))
-        } else {
-            Err(StorageError::Conflict)
-        };
-    }
-    insert_holder(transaction, authority, holder)?;
-    Ok(WorkAttemptEffectDispatchOutcomeV1::Recorded(holder.clone()))
-}
-
-fn settle_effect_dispatch_tx(
-    transaction: &impl RegisteredWorkWrite,
-    authority: &WorkAuthority,
-    attempt: &WorkAttemptIdentityV1,
-    resolution: WorkAttemptEffectResolutionV1,
-    resolved_at: UtcMicros,
-) -> Result<WorkAttemptEffectHolderV1, StorageError> {
-    let existing = load_holder(transaction, authority, attempt)?
-        .ok_or(StorageError::NotFoundOrNotAuthorized)?;
-    let next = match existing.resolution() {
-        None => existing
-            .with_resolution(resolution, resolved_at)
-            .map_err(|_| StorageError::Conflict)?,
-        Some(current) if current == resolution => return Ok(existing),
-        Some(WorkAttemptEffectResolutionV1::Unknown)
-            if resolution == WorkAttemptEffectResolutionV1::NoEffect =>
-        {
-            existing
+    fn settle_effect_dispatch(
+        &self,
+        authority: &WorkAuthority,
+        attempt: &WorkAttemptIdentityV1,
+        resolution: WorkAttemptEffectResolutionV1,
+        resolved_at: UtcMicros,
+    ) -> Result<WorkAttemptEffectHolderV1, StorageError> {
+        let existing = load_holder(self.transaction, authority, attempt)?
+            .ok_or(StorageError::NotFoundOrNotAuthorized)?;
+        let next = match existing.resolution() {
+            None => existing
                 .with_resolution(resolution, resolved_at)
-                .map_err(|_| StorageError::Conflict)?
-        }
-        Some(_) => return Err(StorageError::Conflict),
-    };
-    update_holder(transaction, authority, &next)?;
-    Ok(next)
+                .map_err(|_| StorageError::Conflict)?,
+            Some(current) if current == resolution => return Ok(existing),
+            Some(WorkAttemptEffectResolutionV1::Unknown)
+                if resolution == WorkAttemptEffectResolutionV1::NoEffect =>
+            {
+                existing
+                    .with_resolution(resolution, resolved_at)
+                    .map_err(|_| StorageError::Conflict)?
+            }
+            Some(_) => return Err(StorageError::Conflict),
+        };
+        update_holder(self.transaction, authority, &next)?;
+        Ok(next)
+    }
 }
 
 fn require_open_attempt(

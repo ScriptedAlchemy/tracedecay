@@ -15,16 +15,16 @@ use std::{
 use tracedecay_contracts::{
     VerifiedWorkRetryFailureV1, WorkAttemptAdmissionKind, WorkAttemptCapacityScopeV1,
     WorkAttemptCapacityVerdictV1, WorkAttemptEffectDispatchOutcomeV1, WorkAttemptEffectHolderV1,
-    WorkAttemptEffectResolutionV1, WorkAttemptEffectStorageErrorV1, WorkAttemptEffectStoragePortV1,
-    WorkAttemptEvidenceReadPort, WorkAttemptEvidenceRecordV1, WorkAttemptInsertOutcome,
-    WorkAttemptProviderOutcomeV1, WorkAttemptReceiptReadPortV1, WorkAttemptStorageError,
-    WorkAttemptStoragePort, WorkOwnerObservationMarkOutcomeV1, WorkOwnerObservationStoragePortV1,
-    WorkRetryAttemptOutcomeV1, WorkRetryCauseV1, WorkRetryFailureSelectorV1, WorkRetryReceiptV1,
-    WorkRetrySourceV1, WorkRetryStoragePortV1, WorkRetryWriteV1, WorkRunControlStoragePort,
-    WorkRunControlTransitionPort, WorkSynthesisAdmissionRecordV1,
-    WorkSynthesisAdmissionStoragePort, WorkSynthesisAdmissionV1, WorkSynthesisEvidenceGroupV1,
-    WorkSynthesisInsertOutcome, WorkSynthesisSourceEnvelopeV1, WorkSynthesisSourceOutcomeV1,
-    WorkSynthesisSourceSetV1, WorkflowSynthesisDraft,
+    WorkAttemptEffectReadPortV1, WorkAttemptEffectResolutionV1, WorkAttemptEffectStorageErrorV1,
+    WorkAttemptEffectStoragePortV1, WorkAttemptEvidenceReadPort, WorkAttemptEvidenceRecordV1,
+    WorkAttemptInsertOutcome, WorkAttemptProviderOutcomeV1, WorkAttemptReceiptReadPortV1,
+    WorkAttemptStorageError, WorkAttemptStoragePort, WorkOwnerObservationMarkOutcomeV1,
+    WorkOwnerObservationStoragePortV1, WorkRetryAttemptOutcomeV1, WorkRetryCauseV1,
+    WorkRetryFailureSelectorV1, WorkRetryReceiptV1, WorkRetrySourceV1, WorkRetryStoragePortV1,
+    WorkRetryWriteV1, WorkRunControlStoragePort, WorkRunControlTransitionPort,
+    WorkSynthesisAdmissionRecordV1, WorkSynthesisAdmissionStoragePort, WorkSynthesisAdmissionV1,
+    WorkSynthesisEvidenceGroupV1, WorkSynthesisInsertOutcome, WorkSynthesisSourceEnvelopeV1,
+    WorkSynthesisSourceOutcomeV1, WorkSynthesisSourceSetV1, WorkflowSynthesisDraft,
 };
 use tracedecay_domain::configuration::TopologyConcurrencyPolicyV1;
 use tracedecay_domain::{
@@ -808,10 +808,7 @@ fn effect_holder_is_exact_replayable_and_reconciles_unknown_across_restart() {
     )
     .unwrap();
     assert_eq!(
-        store
-            .storage()
-            .begin_effect_dispatch(&exact_authority, &first)
-            .unwrap(),
+        begin_dispatch(&store, &exact_authority, &first).unwrap(),
         WorkAttemptEffectDispatchOutcomeV1::Recorded(first.clone())
     );
     let replay = WorkAttemptEffectHolderV1::dispatched(
@@ -822,10 +819,7 @@ fn effect_holder_is_exact_replayable_and_reconciles_unknown_across_restart() {
     )
     .unwrap();
     assert_eq!(
-        store
-            .storage()
-            .begin_effect_dispatch(&exact_authority, &replay)
-            .unwrap(),
+        begin_dispatch(&store, &exact_authority, &replay).unwrap(),
         WorkAttemptEffectDispatchOutcomeV1::Replayed(first),
         "an exact receipt replay never authorizes a second provider dispatch"
     );
@@ -837,36 +831,31 @@ fn effect_holder_is_exact_replayable_and_reconciles_unknown_across_restart() {
     )
     .unwrap();
     assert_eq!(
-        store
-            .storage()
-            .begin_effect_dispatch(&exact_authority, &conflicting_deadline)
-            .unwrap_err(),
+        begin_dispatch(&store, &exact_authority, &conflicting_deadline).unwrap_err(),
         WorkAttemptEffectStorageErrorV1::Conflict
     );
-    let unknown = store
-        .storage()
-        .settle_effect_dispatch(
-            &exact_authority,
-            attempt.identity(),
-            WorkAttemptEffectResolutionV1::Unknown,
-            UtcMicros(50),
-        )
-        .unwrap();
+    let unknown = settle_dispatch(
+        &store,
+        &exact_authority,
+        attempt.identity(),
+        WorkAttemptEffectResolutionV1::Unknown,
+        UtcMicros(50),
+    )
+    .unwrap();
     assert_eq!(
         unknown.resolution(),
         Some(WorkAttemptEffectResolutionV1::Unknown)
     );
 
     let restarted = store.restart("attempt-effect-holder");
-    let no_effect = restarted
-        .storage()
-        .settle_effect_dispatch(
-            &exact_authority,
-            attempt.identity(),
-            WorkAttemptEffectResolutionV1::NoEffect,
-            UtcMicros(60),
-        )
-        .unwrap();
+    let no_effect = settle_dispatch(
+        &restarted,
+        &exact_authority,
+        attempt.identity(),
+        WorkAttemptEffectResolutionV1::NoEffect,
+        UtcMicros(60),
+    )
+    .unwrap();
     assert_eq!(
         no_effect.resolution(),
         Some(WorkAttemptEffectResolutionV1::NoEffect)
@@ -1129,16 +1118,37 @@ fn recovery_required(attempt: &WorkAttemptV1) -> WorkAttemptV1 {
 
 /// Runs one storage call as a writer job, which commits only when it returns
 /// `Ok`.
-fn in_job<R: Send + 'static>(
+fn in_job<R: Send + 'static, E: Send + 'static>(
     store: &RegisteredWorkStore,
-    call: impl Fn(WorkSqliteJobStorage<'_>) -> Result<R, WorkAttemptStorageError>
-    + Send
-    + Sync
-    + 'static,
-) -> Result<R, WorkAttemptStorageError> {
+    call: impl Fn(WorkSqliteJobStorage<'_>) -> Result<R, E> + Send + Sync + 'static,
+) -> Result<R, E> {
     tracedecay_rusqlite_runtime::native_runtime::block_on(store.storage().transact(call))
         .expect("native runtime")
         .expect("the writer runs the job")
+}
+
+fn begin_dispatch(
+    store: &RegisteredWorkStore,
+    authority: &WorkAuthority,
+    holder: &WorkAttemptEffectHolderV1,
+) -> Result<WorkAttemptEffectDispatchOutcomeV1, WorkAttemptEffectStorageErrorV1> {
+    let (authority, holder) = (authority.clone(), holder.clone());
+    in_job(store, move |storage| {
+        storage.begin_effect_dispatch(&authority, &holder)
+    })
+}
+
+fn settle_dispatch(
+    store: &RegisteredWorkStore,
+    authority: &WorkAuthority,
+    attempt: &WorkAttemptIdentityV1,
+    resolution: WorkAttemptEffectResolutionV1,
+    resolved_at: UtcMicros,
+) -> Result<WorkAttemptEffectHolderV1, WorkAttemptEffectStorageErrorV1> {
+    let (authority, attempt) = (authority.clone(), attempt.clone());
+    in_job(store, move |storage| {
+        storage.settle_effect_dispatch(&authority, &attempt, resolution, resolved_at)
+    })
 }
 
 fn insert_retry(

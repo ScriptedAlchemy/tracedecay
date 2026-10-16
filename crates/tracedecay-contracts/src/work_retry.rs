@@ -23,7 +23,7 @@ use crate::work_attempt::{
     product_attempt_projection_binding,
 };
 use crate::work_attempt_effect::{
-    WorkAttemptEffectResolutionV1, WorkAttemptEffectStorageErrorV1, WorkAttemptEffectStoragePortV1,
+    WorkAttemptEffectReadPortV1, WorkAttemptEffectResolutionV1, WorkAttemptEffectStorageErrorV1,
 };
 use crate::{
     ApplicationContractError, ApplicationProblem, RequestContext, RetryDirective, SafeDiagnostic,
@@ -360,7 +360,7 @@ pub struct WorkflowFanOutRetryRebindV1 {
 impl<S, E> WorkProductRetryServiceV1<S, E>
 where
     S: WorkRetryStoragePortV1
-        + WorkAttemptEffectStoragePortV1
+        + WorkAttemptEffectReadPortV1
         + WorkGraphReadPortV1
         + WorkProductOwnerAuthorizationPortV1,
     E: WorkRetryEvidencePortV1,
@@ -619,7 +619,7 @@ fn require_retry_effect_safe<S>(
     original: &WorkAttemptV1,
 ) -> Result<(), ApplicationProblem>
 where
-    S: WorkAttemptEffectStoragePortV1,
+    S: WorkAttemptEffectReadPortV1,
 {
     if original.execution().effect_state() != WorkEffectStateV1::CompoundNonRepeatable {
         return Ok(());

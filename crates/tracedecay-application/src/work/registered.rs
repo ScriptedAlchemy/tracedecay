@@ -60,9 +60,6 @@ pub struct RegisteredWorkApplicationServicesV1 {
     attempts: tracedecay_contracts::WorkAttemptService<
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     >,
-    attempt_effects: tracedecay_contracts::WorkAttemptEffectServiceV1<
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-    >,
     run_control: tracedecay_contracts::WorkRunControlService<
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     >,
@@ -335,7 +332,6 @@ impl RegisteredWorkApplicationServicesV1 {
         let storage = db.work_storage()?;
         Ok(Self {
             attempts: tracedecay_contracts::WorkAttemptService::new(storage.clone()),
-            attempt_effects: tracedecay_contracts::WorkAttemptEffectServiceV1::new(storage.clone()),
             run_control: tracedecay_contracts::WorkRunControlService::new(storage.clone()),
             placement: tracedecay_contracts::WorkPlacementService::new(storage.clone()),
             artifact_hydration: tracedecay_contracts::WorkArtifactHydrationService::new(
@@ -398,6 +394,158 @@ impl RegisteredWorkApplicationServicesV1 {
         self.storage
             .transact(move |storage| {
                 tracedecay_contracts::WorkAttemptService::new(storage).resume(&context, &command)
+            })
+            .await
+            .unwrap_or_else(|_| Err(attempt_unavailable()))
+    }
+
+    /// Runs one provider-driver step of the attempt authority as a single
+    /// writer transaction: its load, its decision and its fenced update
+    /// commit together.
+    async fn attempt_step<R>(
+        &self,
+        step: impl Fn(
+            &tracedecay_contracts::WorkAttemptService<
+                tracedecay_rusqlite_runtime::work_run_control::WorkSqliteJobStorage<'_>,
+            >,
+        ) -> Result<R, tracedecay_contracts::ApplicationProblem>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Result<R, tracedecay_contracts::ApplicationProblem>
+    where
+        R: Send + 'static,
+    {
+        self.storage
+            .transact(move |storage| step(&tracedecay_contracts::WorkAttemptService::new(storage)))
+            .await
+            .unwrap_or_else(|_| Err(attempt_unavailable()))
+    }
+
+    /// Marks the provider running under `actual_route`.
+    pub async fn mark_running(
+        &self,
+        context: tracedecay_contracts::RequestContext,
+        identity: tracedecay_domain::WorkAttemptIdentityV1,
+        actual_route: tracedecay_domain::WorkProviderRouteV1,
+    ) -> Result<tracedecay_domain::WorkAttemptV1, tracedecay_contracts::ApplicationProblem> {
+        self.attempt_step(move |attempts| {
+            attempts.mark_running(&context, &identity, actual_route.clone())
+        })
+        .await
+    }
+
+    /// Fences an attempt whose provider could not start for recovery.
+    pub async fn mark_provider_unavailable(
+        &self,
+        context: tracedecay_contracts::RequestContext,
+        identity: tracedecay_domain::WorkAttemptIdentityV1,
+        observed_at: tracedecay_domain::UtcMicros,
+    ) -> Result<tracedecay_domain::WorkAttemptV1, tracedecay_contracts::ApplicationProblem> {
+        self.attempt_step(move |attempts| {
+            attempts.mark_provider_unavailable(&context, &identity, observed_at)
+        })
+        .await
+    }
+
+    /// Fails a recovery-required attempt with sealed denial evidence.
+    pub async fn fail_recovery(
+        &self,
+        context: tracedecay_contracts::RequestContext,
+        identity: tracedecay_domain::WorkAttemptIdentityV1,
+        evidence: tracedecay_contracts::WorkAttemptEvidenceRecordV1,
+    ) -> Result<tracedecay_domain::WorkAttemptV1, tracedecay_contracts::ApplicationProblem> {
+        self.attempt_step(move |attempts| attempts.fail_recovery(&context, &identity, &evidence))
+            .await
+    }
+
+    /// Acknowledges a durable cancellation request.
+    pub async fn acknowledge_cancellation(
+        &self,
+        context: tracedecay_contracts::RequestContext,
+        identity: tracedecay_domain::WorkAttemptIdentityV1,
+        acknowledged_at: tracedecay_domain::UtcMicros,
+    ) -> Result<tracedecay_domain::WorkAttemptV1, tracedecay_contracts::ApplicationProblem> {
+        self.attempt_step(move |attempts| {
+            attempts.acknowledge_cancellation(&context, &identity, acknowledged_at)
+        })
+        .await
+    }
+
+    /// Escalates an acknowledged cancellation to forced termination.
+    pub async fn escalate_cancellation(
+        &self,
+        context: tracedecay_contracts::RequestContext,
+        identity: tracedecay_domain::WorkAttemptIdentityV1,
+        escalated_at: tracedecay_domain::UtcMicros,
+    ) -> Result<tracedecay_domain::WorkAttemptV1, tracedecay_contracts::ApplicationProblem> {
+        self.attempt_step(move |attempts| {
+            attempts.escalate_cancellation(&context, &identity, escalated_at)
+        })
+        .await
+    }
+
+    /// Seals an attempt with terminal evidence and its artifacts.
+    pub async fn settle_with_artifacts(
+        &self,
+        context: tracedecay_contracts::RequestContext,
+        identity: tracedecay_domain::WorkAttemptIdentityV1,
+        evidence: tracedecay_contracts::WorkAttemptEvidenceRecordV1,
+        artifacts: Vec<tracedecay_domain::WorkArtifactRefV1>,
+    ) -> Result<tracedecay_domain::WorkAttemptV1, tracedecay_contracts::ApplicationProblem> {
+        self.attempt_step(move |attempts| {
+            attempts.settle_with_artifacts(&context, &identity, &evidence, artifacts.clone())
+        })
+        .await
+    }
+
+    /// Records the immutable dispatch receipt before a provider launch, as a
+    /// single writer transaction.
+    pub async fn record_effect_dispatch(
+        &self,
+        context: tracedecay_contracts::RequestContext,
+        attempt: tracedecay_domain::WorkAttemptIdentityV1,
+        effect_state: tracedecay_domain::WorkEffectStateV1,
+        dispatched_at: tracedecay_domain::UtcMicros,
+        deadline: tracedecay_domain::UtcMicros,
+    ) -> Result<
+        tracedecay_contracts::WorkAttemptEffectDispatchOutcomeV1,
+        tracedecay_contracts::ApplicationProblem,
+    > {
+        self.storage
+            .transact(move |storage| {
+                tracedecay_contracts::WorkAttemptEffectServiceV1::new(storage).record_dispatch(
+                    &context,
+                    attempt.clone(),
+                    effect_state,
+                    dispatched_at,
+                    deadline,
+                )
+            })
+            .await
+            .unwrap_or_else(|_| Err(attempt_unavailable()))
+    }
+
+    /// Settles the dispatch receipt's effect resolution, as a single writer
+    /// transaction.
+    pub async fn settle_effect_dispatch(
+        &self,
+        context: tracedecay_contracts::RequestContext,
+        attempt: tracedecay_domain::WorkAttemptIdentityV1,
+        resolution: tracedecay_contracts::WorkAttemptEffectResolutionV1,
+        resolved_at: tracedecay_domain::UtcMicros,
+    ) -> Result<
+        tracedecay_contracts::WorkAttemptEffectHolderV1,
+        tracedecay_contracts::ApplicationProblem,
+    > {
+        self.storage
+            .transact(move |storage| {
+                tracedecay_contracts::WorkAttemptEffectServiceV1::new(storage).settle(
+                    &context,
+                    &attempt,
+                    resolution,
+                    resolved_at,
+                )
             })
             .await
             .unwrap_or_else(|_| Err(attempt_unavailable()))
@@ -545,14 +693,6 @@ impl RegisteredWorkApplicationServicesV1 {
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     > {
         &self.attempts
-    }
-
-    pub const fn attempt_effects(
-        &self,
-    ) -> &tracedecay_contracts::WorkAttemptEffectServiceV1<
-        tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
-    > {
-        &self.attempt_effects
     }
 
     /// The run-level pause/resume authority.

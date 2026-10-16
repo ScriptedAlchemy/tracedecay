@@ -580,3 +580,196 @@ async fn a_pause_racing_a_start_never_lands_between_its_fence_and_its_reservatio
         }
     }
 }
+
+fn provider_evidence(
+    attempt: &WorkAttemptIdentityV1,
+    outcome: WorkAttemptProviderOutcomeV1,
+    observed_at: UtcMicros,
+) -> WorkAttemptEvidenceRecordV1 {
+    WorkAttemptEvidenceRecordV1 {
+        identity: attempt.clone(),
+        requested_route: route(),
+        actual_route: Some(route()),
+        outcome,
+        stdout: None,
+        stderr: None,
+        provider_session: None,
+        provider_fallback: None,
+        observed_at,
+    }
+}
+
+#[tokio::test]
+async fn provider_driver_steps_awaited_on_a_native_worker_park_no_native_thread() {
+    let profile = tempfile::tempdir().expect("profile");
+    let project = tempfile::tempdir().expect("project");
+    let runtime = project_runtime(profile.path(), project.path()).await;
+    let database = runtime.project_database().expect("project database");
+    let storage = database.work_storage().expect("Work storage");
+    let run = id::<RunId>("run.attempt-jobs.driver");
+    let [succeeded, denied, cancelled] = ["succeeded", "denied", "cancelled"].map(|suffix| {
+        let attempt = crate::work_run_control_jobs::leased_attempt_of(
+            run.clone(),
+            &format!("attempt-jobs.driver.{suffix}"),
+        );
+        storage
+            .insert(&authority(), &attempt)
+            .expect("the attempt is stored");
+        attempt
+    });
+    let (effect_state, deadline) = (
+        succeeded.execution().effect_state(),
+        succeeded.execution().deadline(),
+    );
+    let [succeeded, denied, cancelled] =
+        [succeeded, denied, cancelled].map(|attempt| attempt.identity().clone());
+    let setup = RegisteredWorkApplicationServicesV1::attach(database).expect("Work services");
+    setup
+        .attempts()
+        .mark_running(&product_context(), &cancelled, route())
+        .expect("the cancelled attempt runs");
+    setup
+        .attempts()
+        .request_cancellation(
+            &product_context(),
+            tracedecay_contracts::CancelWorkAttemptCommand {
+                task_id: task(),
+                run_id: run.clone(),
+                attempt_id: cancelled.attempt_id().clone(),
+                request_id: id("cancellation.attempt-jobs.driver"),
+                occurred_at: UtcMicros(20_000),
+            },
+        )
+        .expect("the cancellation is requested");
+    let work = RegisteredWorkApplicationServicesV1::attach(database).expect("Work services");
+    let identities = (succeeded.clone(), denied.clone(), cancelled.clone());
+    let (outcome, writer_waits, reader_waits) = on_native_worker(async move {
+        let (succeeded, denied, cancelled) = identities;
+        let context = product_context();
+        let dispatched = work
+            .record_effect_dispatch(
+                context.clone(),
+                succeeded.clone(),
+                effect_state,
+                UtcMicros(21_000),
+                deadline,
+            )
+            .await
+            .map(|_| ());
+        let running = work
+            .mark_running(context.clone(), succeeded.clone(), route())
+            .await
+            .map(|attempt| attempt.state());
+        let effect = work
+            .settle_effect_dispatch(
+                context.clone(),
+                succeeded.clone(),
+                tracedecay_contracts::WorkAttemptEffectResolutionV1::NoEffect,
+                UtcMicros(22_000),
+            )
+            .await
+            .map(|holder| holder.resolution());
+        let settled = work
+            .settle_with_artifacts(
+                context.clone(),
+                succeeded.clone(),
+                provider_evidence(
+                    &succeeded,
+                    WorkAttemptProviderOutcomeV1::Exited { code: 0 },
+                    UtcMicros(23_000),
+                ),
+                Vec::new(),
+            )
+            .await
+            .map(|attempt| attempt.state());
+        let fenced = work
+            .mark_provider_unavailable(context.clone(), denied.clone(), UtcMicros(24_000))
+            .await
+            .map(|attempt| attempt.state());
+        let failed = work
+            .fail_recovery(
+                context.clone(),
+                denied.clone(),
+                WorkAttemptEvidenceRecordV1 {
+                    actual_route: None,
+                    ..provider_evidence(
+                        &denied,
+                        WorkAttemptProviderOutcomeV1::LaunchFailed,
+                        UtcMicros(25_000),
+                    )
+                },
+            )
+            .await
+            .map(|attempt| attempt.state());
+        let acknowledged = work
+            .acknowledge_cancellation(context.clone(), cancelled.clone(), UtcMicros(26_000))
+            .await
+            .map(|attempt| attempt.state());
+        let escalated = work
+            .escalate_cancellation(context.clone(), cancelled.clone(), UtcMicros(27_000))
+            .await
+            .map(|attempt| attempt.state());
+        let sealed = work
+            .settle_with_artifacts(
+                context,
+                cancelled.clone(),
+                provider_evidence(
+                    &cancelled,
+                    WorkAttemptProviderOutcomeV1::Cancelled,
+                    UtcMicros(28_000),
+                ),
+                Vec::new(),
+            )
+            .await
+            .map(|attempt| attempt.state());
+        vec![
+            dispatched.map(|()| None),
+            running.map(Some),
+            effect.map(|_| None),
+            settled.map(Some),
+            fenced.map(Some),
+            failed.map(Some),
+            acknowledged.map(Some),
+            escalated.map(Some),
+            sealed.map(Some),
+        ]
+    })
+    .await;
+    assert_eq!(
+        writer_waits, 0,
+        "the provider driver's steps parked no native worker on the writer"
+    );
+    assert_eq!(
+        reader_waits, 0,
+        "the provider driver's steps parked no native worker on a reader"
+    );
+    assert_eq!(
+        outcome,
+        vec![
+            Ok(None),
+            Ok(Some(WorkAttemptStateV1::Running)),
+            Ok(None),
+            Ok(Some(WorkAttemptStateV1::Succeeded)),
+            Ok(Some(WorkAttemptStateV1::RecoveryRequired)),
+            Ok(Some(WorkAttemptStateV1::Failed)),
+            Ok(Some(WorkAttemptStateV1::CancellationAcknowledged)),
+            Ok(Some(WorkAttemptStateV1::CancellationEscalated)),
+            Ok(Some(WorkAttemptStateV1::Cancelled)),
+        ],
+        "every driver step committed its transition"
+    );
+    for (identity, state) in [
+        (&succeeded, WorkAttemptStateV1::Succeeded),
+        (&denied, WorkAttemptStateV1::Failed),
+        (&cancelled, WorkAttemptStateV1::Cancelled),
+    ] {
+        assert_eq!(
+            storage
+                .load(&authority(), identity)
+                .expect("the attempt reads")
+                .state(),
+            state,
+            "the driver's jobs committed the terminal state"
+        );
+    }
+}
