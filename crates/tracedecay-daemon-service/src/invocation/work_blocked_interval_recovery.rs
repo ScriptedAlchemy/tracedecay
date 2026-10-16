@@ -161,7 +161,7 @@ async fn run_recovery(
         "Work blocked-interval recovery",
         move |_| {
             let database = database.clone();
-            // Each cycle runs under its own request: one minted at mount
+            // Each cycle runs under its own request. One minted at mount
             // expired with its deadline and grant a day later.
             let context = work_blocked_interval_recovery_context(&actor, &grant);
             let producer = Arc::clone(&producer);

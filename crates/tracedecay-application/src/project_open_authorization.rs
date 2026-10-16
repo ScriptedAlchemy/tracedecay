@@ -21,7 +21,7 @@ pub const GRANT_HORIZON: Duration = Duration::from_hours(24);
 /// The grant expiry of one request observed at `observed_at` under a mounted
 /// project-open owner. Project open snapshots its access once and nothing
 /// renews it, so the owner's authority lasts as long as it is mounted and the
-/// expiry is measured from each request: one fixed at project open refused
+/// expiry is measured from each request. One fixed at project open refused
 /// every request from one horizon after the project opened.
 pub fn mounted_grant_expires_at(observed_at: UtcMicros) -> UtcMicros {
     UtcMicros(
