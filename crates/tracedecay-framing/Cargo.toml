@@ -10,16 +10,7 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 [lib]
 doctest = false
 
-[features]
-# Repo-wide `test-helpers` convention: exposes this crate's test-only helper
-# surfaces to dependent crates' test builds only. Never gates production code.
-test-helpers = ["dep:tokio"]
-
 [dependencies]
 async-channel = "2.5.0"
 asupersync.workspace = true
-tokio = { version = "1", optional = true }
 tracing = "0.1"
-
-[dev-dependencies]
-tokio = { version = "1", features = ["io-util"] }
