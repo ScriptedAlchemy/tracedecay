@@ -13,8 +13,8 @@ use tracedecay_mcp::tools::response_trailers::{
     self, ToolTokenAccounting, record_token_accounting, response_tokens,
 };
 use tracedecay_mcp::{
-    ToolResult, mark_semantic_tool_error, semantic_failure_reason, server::resources_list_result,
-    tool_error_response, tool_result_has_semantic_error,
+    ToolCallInvoker, ToolResult, mark_semantic_tool_error, semantic_failure_reason,
+    server::resources_list_result, tool_error_response, tool_result_has_semantic_error,
 };
 use tracedecay_runtime_core::db::migrations::render_expected_final_schema_markdown;
 use tracedecay_tool_catalog::ApplicationSurfaceOperation;
@@ -26,6 +26,7 @@ struct PreparedToolCall {
     arguments: Value,
     analytics_arguments: Value,
     analytics_session_id: Option<String>,
+    invoker: ToolCallInvoker,
     /// The deadline the caller declared on the request, when it declared one.
     caller_deadline: Option<tracedecay_contracts::Deadline>,
 }
@@ -788,7 +789,7 @@ impl McpServer {
         let invalid_params = |message: &str| {
             JsonRpcResponse::error(id.clone(), ErrorCode::InvalidParams, message.to_owned())
         };
-        let (tool_name, mut arguments, caller_deadline) = match params {
+        let (tool_name, mut arguments, caller_deadline, invoker) = match params {
             ToolCallParams::Raw(None) => {
                 return Err(invalid_params("missing params for tools/call"));
             }
@@ -800,6 +801,7 @@ impl McpServer {
                     tool_name.to_owned(),
                     params.get("arguments").cloned().unwrap_or(json!({})),
                     tracedecay_mcp::caller_tool_call_deadline(Some(params)),
+                    ToolCallInvoker::from_meta(params.get("_meta").and_then(Value::as_object)),
                 )
             }
             ToolCallParams::Typed(::rmcp::model::CallToolRequestParams {
@@ -807,14 +809,17 @@ impl McpServer {
                 name,
                 arguments,
                 ..
-            }) => (
-                name.into_owned(),
-                arguments.map_or_else(|| json!({}), Value::Object),
-                tracedecay_mcp::caller_tool_call_deadline_from_meta(
-                    meta.as_ref()
-                        .map(|meta| -> &serde_json::Map<String, Value> { meta }),
-                ),
-            ),
+            }) => {
+                let meta = meta
+                    .as_ref()
+                    .map(|meta| -> &serde_json::Map<String, Value> { meta });
+                (
+                    name.into_owned(),
+                    arguments.map_or_else(|| json!({}), Value::Object),
+                    tracedecay_mcp::caller_tool_call_deadline_from_meta(meta),
+                    ToolCallInvoker::from_meta(meta),
+                )
+            }
         };
         if crate::mcp::project_route::protect_tool_structural_ids(&mut arguments).is_err() {
             return Err(invalid_params("invalid structural identifier"));
@@ -823,6 +828,7 @@ impl McpServer {
         Ok(PreparedToolCall {
             analytics_arguments: analytics_arguments_snapshot(&tool_name, &arguments),
             analytics_session_id: mcp_analytics_session_id(&arguments),
+            invoker,
             tool_name,
             arguments,
             caller_deadline,
@@ -1023,6 +1029,7 @@ impl McpServer {
         request_id: &Value,
         analytics_arguments: &Value,
         analytics_session_id: &Option<String>,
+        records_tool_analytics: bool,
         elapsed_us: Option<u64>,
         accounting: ToolTokenAccounting,
         result: &ToolResult,
@@ -1041,7 +1048,7 @@ impl McpServer {
         // [`Self::ledger_writes_settled`] without making it awaited
         // anywhere on the request path.
         let savings_db = self.accounting_db.clone();
-        let analytics_db = self.global_db.clone();
+        let analytics_db = self.global_db.clone().filter(|_| records_tool_analytics);
         if savings_db.is_some() || analytics_db.is_some() {
             let net_saved_tokens = accounting.net_saved_tokens();
             let ToolTokenAccounting {
@@ -1110,6 +1117,7 @@ impl McpServer {
         request_id: &Value,
         analytics_arguments: &Value,
         analytics_session_id: &Option<String>,
+        records_tool_analytics: bool,
         elapsed_us: Option<u64>,
         result: &mut ToolResult,
         connection_client_name: Option<&str>,
@@ -1122,6 +1130,7 @@ impl McpServer {
             request_id,
             analytics_arguments,
             analytics_session_id,
+            records_tool_analytics,
             elapsed_us,
             accounting,
             result,
@@ -1182,10 +1191,12 @@ impl McpServer {
         tool_name: String,
         analytics_arguments: Value,
         analytics_session_id: Option<String>,
+        invoker: ToolCallInvoker,
         refusal_arguments: &Value,
         dispatch: DispatchedToolCall,
         connection_server: &Self,
     ) -> JsonRpcResponse {
+        let records_tool_analytics = invoker == ToolCallInvoker::Host;
         let client_name = connection_server.client_name();
         let connection_client_name = client_name.as_deref();
         let connection_instance_id = connection_server.connection_identity.instance_id();
@@ -1197,6 +1208,21 @@ impl McpServer {
             elapsed_us,
         } = dispatch;
         let request_id = id.clone();
+        let record_error_analytics = |error: &TraceDecayError| {
+            if records_tool_analytics {
+                self.record_mcp_tool_error_analytics(McpToolErrorAnalyticsRequest {
+                    project_root: cg.project_root(),
+                    session_id: analytics_session_id.clone(),
+                    tool_name: &tool_name,
+                    request_id: &request_id,
+                    arguments: &analytics_arguments,
+                    duration_us: elapsed_us,
+                    error,
+                    connection_client_name,
+                    connection_instance_id,
+                });
+            }
+        };
 
         match outcome {
             Ok(mut result) => {
@@ -1218,17 +1244,7 @@ impl McpServer {
                     )
                     .await
                 {
-                    self.record_mcp_tool_error_analytics(McpToolErrorAnalyticsRequest {
-                        project_root: cg.project_root(),
-                        session_id: analytics_session_id,
-                        tool_name: &tool_name,
-                        request_id: &request_id,
-                        arguments: &analytics_arguments,
-                        duration_us: elapsed_us,
-                        error: &error,
-                        connection_client_name,
-                        connection_instance_id,
-                    });
+                    record_error_analytics(&error);
                     return crate::mcp::tools::tool_refusal_response(
                         id,
                         &tool_name,
@@ -1249,6 +1265,7 @@ impl McpServer {
                         &request_id,
                         &analytics_arguments,
                         &analytics_session_id,
+                        records_tool_analytics,
                         elapsed_us,
                         &mut result,
                         connection_client_name,
@@ -1267,17 +1284,7 @@ impl McpServer {
             Err(error) => {
                 let _span = tracing::trace_span!("mcp.server.tools_call.complete.error").entered();
                 {
-                    self.record_mcp_tool_error_analytics(McpToolErrorAnalyticsRequest {
-                        project_root: cg.project_root(),
-                        session_id: analytics_session_id,
-                        tool_name: &tool_name,
-                        request_id: &request_id,
-                        arguments: &analytics_arguments,
-                        duration_us: elapsed_us,
-                        error: &error,
-                        connection_client_name,
-                        connection_instance_id,
-                    });
+                    record_error_analytics(&error);
                     crate::mcp::tools::tool_refusal_response(
                         id,
                         &tool_name,
@@ -1444,6 +1451,7 @@ impl McpServer {
             arguments,
             analytics_arguments,
             analytics_session_id,
+            invoker,
             caller_deadline,
         } = match Self::prepare_tool_call(&id, params) {
             Ok(call) => call,
@@ -1674,6 +1682,7 @@ impl McpServer {
                 tool_name.clone(),
                 analytics_arguments,
                 analytics_session_id,
+                invoker,
                 &refusal_arguments,
                 dispatch,
                 self,
@@ -1724,9 +1733,12 @@ mod tool_call_preparation_tests {
     /// the typed transport skip the JSON bridge without forking the catalog.
     #[test]
     fn typed_and_raw_tool_call_params_prepare_identically() {
-        let deadline_meta = tracedecay_mcp::tool_call_deadline_meta(tracedecay_domain::UtcMicros(
-            1_765_000_000_000_000,
-        ));
+        let mut deadline_meta = tracedecay_mcp::tool_call_deadline_meta(
+            tracedecay_domain::UtcMicros(1_765_000_000_000_000),
+        );
+        ToolCallInvoker::mark_one_shot_client(
+            deadline_meta.as_object_mut().expect("deadline meta object"),
+        );
         let raw_params = json!({
             "name": "tracedecay_search",
             "arguments": arguments_object(),
@@ -1753,6 +1765,8 @@ mod tool_call_preparation_tests {
         assert_eq!(raw.arguments, typed.arguments);
         assert_eq!(raw.analytics_arguments, typed.analytics_arguments);
         assert_eq!(raw.analytics_session_id, typed.analytics_session_id);
+        assert_eq!(raw.invoker, ToolCallInvoker::OneShotClient);
+        assert_eq!(typed.invoker, ToolCallInvoker::OneShotClient);
         let raw_deadline = raw
             .caller_deadline
             .as_ref()

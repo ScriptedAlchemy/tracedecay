@@ -1076,7 +1076,7 @@ impl ProductionProjectCompositionHarnessV1 {
         .await
     }
 
-    async fn call_tool_with_params(
+    pub(crate) async fn call_tool_with_params(
         &self,
         project_root: impl AsRef<Path>,
         tool_name: &str,
