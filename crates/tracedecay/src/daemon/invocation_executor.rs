@@ -651,8 +651,8 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for InProcessDaemonInv
             let executor = self.clone();
             let admitted_cancellation = self.admitted_cancellation.clone();
             let request_cancellations = self.invocation.service.request_cancellations().clone();
-            // Work-attempt invocations reach `spawn_for_worktree`, which still
-            // needs Tokio.
+            // Dispatched operations still reach Tokio-only sites (the hosted
+            // dashboard server, the memory curator run).
             let runtime = tracedecay_runtime_core::native_runtime::tokio_handle(
                 "daemon.invocation_executor.in_process",
             )

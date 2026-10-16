@@ -2118,7 +2118,7 @@ async fn a_cancellation_signalled_before_the_owner_waits_still_reaches_it() {
         &worktree_id,
         move |cancellation| async move {
             task_signalled.notified().await;
-            if tokio::time::timeout(std::time::Duration::from_secs(5), cancellation.notified())
+            if native_runtime::timeout(std::time::Duration::from_secs(5), cancellation.notified())
                 .await
                 .is_ok()
             {
