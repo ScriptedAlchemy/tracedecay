@@ -23,3 +23,7 @@ a score increase alone as proof of better architecture. Ignore dimensions whose
 status is `no_evidence`. A `definition-mismatch` or `definition-unrecorded`
 refusal means the cursor predates the current health definition: call again
 without `before_cursor` to record a new baseline.
+
+**Report:** the weak dimensions, each with the ranked code that makes it weak,
+and the dimensions the panel listed under `no evidence:`. Do not report a score
+as a finding.

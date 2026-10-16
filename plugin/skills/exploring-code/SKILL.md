@@ -1,6 +1,6 @@
 ---
 name: exploring-code
-description: Use when the user asks how a feature or flow works, where something is implemented, or to walk through code end to end; a known file can be read directly. Load this skill before the first tool call.
+description: Use when the user asks how a feature or flow works, where something is implemented, or to walk through code end to end. Skip when the user names the file to read or the text to find. Load this skill before the first tool call.
 ---
 
 # Exploring code
@@ -25,3 +25,7 @@ For type/trait questions, see [types and traits](references/types-and-traits.md)
 For cross-branch reads, see [other branches](references/other-branches.md).
 Call relationships belong to `tracing-functions`; changed consumers and tests
 belong to `assessing-impact`.
+
+**Report:** the answer with the file and symbol behind each claim, plus the
+freshness line when it is not `fresh` and the coverage when it is partial. Do
+not claim absence from an empty or partial result.

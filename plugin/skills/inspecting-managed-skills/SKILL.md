@@ -19,3 +19,7 @@ Hermes uses its standard home integration; do not invent a second home selector
 or bridge authority. Inspect the supported bridge state without modifying host
 files as a side effect of diagnosis. Current operation schemas define available
 controls; this inspection workflow itself is read-only.
+
+**Report:** the skill or run identity and its state at each stage (proposal,
+validation, activation, observed use), with the artifact or receipt behind each.
+Do not infer use from activation.

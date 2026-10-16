@@ -21,3 +21,7 @@ that a peer's change can be overwritten.
 
 When changes overlap active work, resolve ownership and intent before editing.
 For retrieving the underlying conversation, use `managing-session-context`.
+
+**Report:** what changed according to Git, the session that produced or observed
+it, and the coverage of the session search. Say the author is unknown when
+attribution is missing; do not revert or overwrite the change.
