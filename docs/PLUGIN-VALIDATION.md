@@ -93,7 +93,10 @@ cleanly on Claude, Codex, *and* Cursor:
   heading levels, no body-only `## When to Use` section, ≤500 lines. The
   last paragraph is the reply contract: `**Report:**`, what to return and
   which evidence to quote, then what not to do
-  (`bundled_skills_close_with_a_report_contract`).
+  (`bundled_skills_close_with_a_report_contract`). A multi-step skill numbers
+  its steps from 1 and opens them with "Follow these steps in order. Report a
+  step you skip as `skip: <reason>`."; a skippable step names its valid skip
+  reason.
 - **Hygiene + layout.** No BOM/CRLF/tabs/trailing whitespace, one trailing
   newline, balanced fences, non-empty body; a skill dir holds only `SKILL.md`
   plus the supported resource dirs (`agents/`, `scripts/`, `references/`,

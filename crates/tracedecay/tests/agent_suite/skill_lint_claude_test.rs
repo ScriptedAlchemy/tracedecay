@@ -223,6 +223,36 @@ fn bundled_skills_close_with_a_report_contract() {
     }
 }
 
+/// A skill with steps numbers them from 1 and opens them with the skip
+/// convention, so an eval can grade which steps ran and why one was skipped.
+#[test]
+fn stepped_skills_number_their_steps_and_name_the_skip_convention() {
+    const PREAMBLE: &str =
+        "Follow these steps in order. Report a step you skip as `skip: <reason>`.";
+    for skill in load_all_skill_docs() {
+        let numbers = skill
+            .body
+            .lines()
+            .filter_map(|line| line.split_once(". "))
+            .filter_map(|(number, _)| number.parse::<usize>().ok())
+            .collect::<Vec<_>>();
+        if numbers.is_empty() {
+            continue;
+        }
+        assert_eq!(
+            numbers,
+            (1..=numbers.len()).collect::<Vec<_>>(),
+            "{} must number its steps 1..n in order",
+            skill.path.display()
+        );
+        assert!(
+            skill.body.contains(PREAMBLE),
+            "{} has numbered steps, so it must open them with {PREAMBLE:?}",
+            skill.path.display()
+        );
+    }
+}
+
 /// Strict Agent Skills spec conformance.
 ///
 /// The whole shared skill set must stay strictly Agent-Skills-spec conformant:
