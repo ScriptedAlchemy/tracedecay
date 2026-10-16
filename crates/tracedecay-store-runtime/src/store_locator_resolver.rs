@@ -550,8 +550,19 @@ impl StoreRuntimeResolver for LocalStoreRuntimeResolverV1 {
         key: &'a StoreRuntimeKey,
     ) -> StoreRuntimeRegistryFuture<'a, Result<ResolvedStoreLocator, StoreRuntimeRegistryFailure>>
     {
+        // Resolution canonicalizes paths and reads and parses
+        // `/proc/self/mountinfo`. Its callers are native tasks, where that
+        // synchronous work holds the worker; past `LONG_POLL_CPU` a debug
+        // build fails the task (#4066).
+        let resolver = self.clone();
+        let key = key.clone();
         Box::pin(async move {
-            match self.resolve_graph_key(key) {
+            let resolution = tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+                resolver.resolve_graph_key(&key)
+            })
+            .await
+            .map_err(|message| StoreRuntimeRegistryFailure::ResolverFailed { message })?;
+            match resolution {
                 LocalStoreLocatorResolutionV1::Resolved(locator) => {
                     Ok(locator.into_registry_locator())
                 }

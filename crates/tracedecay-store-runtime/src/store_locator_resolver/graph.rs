@@ -15,6 +15,8 @@ impl LocalStoreRuntimeResolverV1 {
     /// `StoreRuntimeRegistry::retain_code_graph_store`; resolving a code shard
     /// here fails closed instead of recreating per-worktree graph sharding.
     pub fn resolve_graph_key(&self, key: &StoreRuntimeKey) -> LocalStoreLocatorResolutionV1 {
+        #[cfg(test)]
+        tests::spin_injected_resolution_cpu(key);
         if matches!(key.shard_id().scope, StoreShardScopeV1::Code { .. }) {
             return LocalStoreLocatorResolutionV1::Unavailable(LocalStoreLocatorUnavailableV1 {
                 shard_id: key.shard_id().clone(),
@@ -210,5 +212,65 @@ mod tests {
 
         let database = mount_and_resolve(&registry, registration).unwrap();
         assert!(database.snapshot().is_ok());
+    }
+
+    static INJECTED_RESOLUTION_CPU: std::sync::Mutex<std::collections::BTreeMap<String, Duration>> =
+        std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+    pub(super) fn spin_injected_resolution_cpu(key: &StoreRuntimeKey) {
+        let cpu = INJECTED_RESOLUTION_CPU
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&format!("{:?}", key.shard_id()));
+        if let Some(cpu) = cpu {
+            let spun = std::time::Instant::now();
+            while spun.elapsed() < cpu {
+                std::hint::spin_loop();
+            }
+        }
+    }
+
+    /// Graph store attachment awaits this resolution from native tasks: the
+    /// code-index worker and the retained graph-open hook tasks. A debug
+    /// build fails a native task whose poll runs past `LONG_POLL_CPU`, so the
+    /// resolution must not run inside the poll (#4066).
+    #[cfg(all(debug_assertions, unix))]
+    #[test]
+    fn a_graph_resolution_longer_than_one_native_poll_does_not_fail_its_task() {
+        use tracedecay_runtime_core::native_runtime::{self, NativeTask, NativeTaskOutcome};
+        use tracedecay_runtime_core::shard_runtime::registry::StoreRuntimeResolver;
+
+        let temporary = TempDir::new().unwrap();
+        let brain = BrainId::try_from("brain-long-resolve".to_owned()).unwrap();
+        let profile = UserProfileId::try_from("profile-long-resolve".to_owned()).unwrap();
+        let resolver = LocalStoreRuntimeResolverV1::new(LocalProfileStoreAuthorityV1::new(
+            brain.clone(),
+            profile.clone(),
+            temporary.path().canonicalize().unwrap(),
+        ));
+        let key = StoreRuntimeKey::new(
+            StoreShardIdV1::project(
+                brain,
+                profile,
+                ProjectId::try_from("project-long-resolve".to_owned()).unwrap(),
+            ),
+            StoreIncarnationV1::new(1).unwrap(),
+        );
+        INJECTED_RESOLUTION_CPU
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                format!("{:?}", key.shard_id()),
+                native_runtime::LONG_POLL_CPU * 2,
+            );
+        // The unenrolled project does not resolve; only where it ran is under test.
+        let resolution = NativeTask::spawn(async move {
+            let _ = resolver.resolve_graph(&key).await;
+        })
+        .expect("native resolution task");
+        assert_eq!(
+            native_runtime::block_on(resolution.wait()).expect("process runtime"),
+            NativeTaskOutcome::Completed(()),
+        );
     }
 }
