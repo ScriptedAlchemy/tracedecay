@@ -11,7 +11,7 @@ use serde_json::Value;
 use crate::ports::hook_runtime::HookRuntimeV1;
 use tracedecay_runtime_core::config::ProfileRoot;
 
-use super::steering::{HookWorkspaceStatus, UNINDEXED_STATUS_LINE};
+use super::steering::{HookWorkspaceStatus, UNINDEXED_STATUS_LINE, session_start_context};
 use super::tool_hints::{ToolHint, ToolHintInput, decide_hint};
 use super::{
     additional_context_json, append_tool_hint, deduped_project_hint_with_id, event_cwd_from_parsed,
@@ -51,7 +51,7 @@ pub async fn hook_codex_session_start(runtime: &HookRuntimeV1) -> i32 {
     .await
     .into_recorded_guidance(&hook_telemetry)
     .flatten();
-    let output = guidance.map_or_else(
+    let output = session_start_context(root.as_deref(), guidance).map_or_else(
         || serde_json::json!({}).to_string(),
         |guidance| additional_context_json("SessionStart", &guidance),
     );
