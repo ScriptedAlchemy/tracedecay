@@ -2,7 +2,8 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::task::{Context, Poll, Waker};
+
+use tracedecay_runtime_core::native_runtime::{NativeTask, NativeTaskOutcome};
 
 use super::*;
 use tracedecay_contracts::RegisteredRootLocatorV1;
@@ -116,7 +117,7 @@ struct HookOrchestrationInFlightV1 {
 struct HookOrchestrationTaskOwnerV1 {
     accepting: bool,
     failed: bool,
-    tasks: Vec<tokio::task::JoinHandle<()>>,
+    tasks: Vec<NativeTask<()>>,
 }
 
 impl Default for HookOrchestrationTaskOwnerV1 {
@@ -132,16 +133,13 @@ impl Default for HookOrchestrationTaskOwnerV1 {
 impl HookOrchestrationTaskOwnerV1 {
     fn reap_finished(&mut self) {
         let tasks = std::mem::take(&mut self.tasks);
-        for mut task in tasks {
-            if !task.is_finished() {
-                self.tasks.push(task);
-                continue;
-            }
-            let waker = Waker::noop();
-            let mut cx = Context::from_waker(waker);
-            match Pin::new(&mut task).poll(&mut cx) {
-                Poll::Ready(Ok(())) => {}
-                Poll::Ready(Err(_)) | Poll::Pending => self.failed = true,
+        for task in tasks {
+            match task.try_finished() {
+                None => self.tasks.push(task),
+                Some(NativeTaskOutcome::Completed(())) => {}
+                Some(NativeTaskOutcome::Cancelled | NativeTaskOutcome::Panicked(_)) => {
+                    self.failed = true;
+                }
             }
         }
     }
@@ -275,14 +273,6 @@ impl BoundedHookOrchestratorV1 {
         tracedecay_runtime_core::cancellation::CancellationToken,
         HookOrchestrationAdmissionV1,
     > {
-        // The production work runs the advisory feedback cycle, which the LSP
-        // runtime spawner in `registrars/lsp.rs` also runs on Tokio; both
-        // move to the native runtime together.
-        let Some(runtime_handle) = tracedecay_runtime_core::native_runtime::tokio_handle(
-            "daemon-service.hook_orchestration.admit",
-        ) else {
-            return Err(HookOrchestrationAdmissionV1::Unavailable);
-        };
         let envelope = request.hook.envelope();
         let event = (
             envelope.project_id,
@@ -380,7 +370,10 @@ impl BoundedHookOrchestratorV1 {
         let cancellation = self.cancellation.clone();
         let permits = Arc::clone(&self.permits);
         let operation_cancellation = operation.cancellation.clone();
-        let task = runtime_handle.spawn(async move {
+        let spawned_in_flight = Arc::clone(&in_flight);
+        let spawned_address = address.clone();
+        let spawned_operation = Arc::clone(&operation);
+        let task = NativeTask::spawn(async move {
             let work_cancellation = operation.cancellation.clone();
             let permit = match permit {
                 Some(permit) => Some(permit),
@@ -465,6 +458,15 @@ impl BoundedHookOrchestratorV1 {
             Self::settle_operation(&in_flight, &address, &operation, emit_terminal);
             drop(permit);
         });
+        let Ok(task) = task else {
+            Self::settle_operation(
+                &spawned_in_flight,
+                &spawned_address,
+                &spawned_operation,
+                false,
+            );
+            return Err(HookOrchestrationAdmissionV1::Unavailable);
+        };
         task_owner.tasks.push(task);
         Ok(operation_cancellation)
     }
@@ -487,14 +489,14 @@ impl BoundedHookOrchestratorV1 {
         }
         let deadline =
             std::time::Instant::now() + tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE;
-        for mut task in tasks {
-            match tracedecay_runtime_core::native_runtime::timeout_at(deadline, &mut task).await {
-                Ok(Ok(())) => {}
-                Ok(Err(_)) => clean = false,
+        for task in tasks {
+            match tracedecay_runtime_core::native_runtime::timeout_at(deadline, task.wait()).await {
+                Ok(NativeTaskOutcome::Completed(())) => {}
+                Ok(NativeTaskOutcome::Cancelled | NativeTaskOutcome::Panicked(_)) => clean = false,
                 // An unavailable timer aborts the task as if its deadline passed.
                 Err(_) => {
                     task.abort();
-                    let _ = task.await;
+                    task.wait().await;
                     clean = false;
                 }
             }
