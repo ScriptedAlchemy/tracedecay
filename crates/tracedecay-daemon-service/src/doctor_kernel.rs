@@ -397,7 +397,6 @@ struct CollectedStoreTelemetryV1 {
     table_growth_evidence: Vec<tracedecay_contracts::storage::TableGrowthDoctorEvidenceV1>,
 }
 
-const MAX_SYNCHRONOUS_TABLE_GROWTH_STORE_BYTES: u64 = 64 * 1024 * 1024;
 /// Entry ceiling for the code-index generation census.
 ///
 /// The census is metadata-only, a `stat` and a bounded manifest prefix per
@@ -434,16 +433,6 @@ fn permits_synchronous_generation_census(generations_root: &Path) -> bool {
     true
 }
 
-fn permits_synchronous_table_growth(
-    read: &tracedecay_contracts::storage::StorageTelemetryReadV1,
-) -> bool {
-    matches!(
-        read,
-        tracedecay_contracts::storage::StorageTelemetryReadV1::Observed { sample }
-            if sample.total_bytes().get() <= MAX_SYNCHRONOUS_TABLE_GROWTH_STORE_BYTES
-    )
-}
-
 #[tracing::instrument(name = "daemon.doctor.over_budget", level = "trace", skip_all)]
 async fn collect_over_budget_store_findings(
     context: &RequestContext,
@@ -463,13 +452,7 @@ async fn collect_over_budget_store_findings(
     let mut table_growth_evidence = Vec::new();
     for (store, port) in telemetry_ports {
         let read = port.store_size(context, store).await;
-        let table_growth = if permits_synchronous_table_growth(&read) {
-            port.preview_table_growth(context, store).await
-        } else {
-            TableGrowthTelemetryReadV1::Unknown {
-                store: store.clone(),
-            }
-        };
+        let table_growth = port.latest_table_growth(context, store);
         if let TableGrowthTelemetryReadV1::Observed { samples, .. } = &table_growth {
             for sample in samples {
                 tracing::info!(

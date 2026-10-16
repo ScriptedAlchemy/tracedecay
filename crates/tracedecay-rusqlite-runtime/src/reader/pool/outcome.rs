@@ -8,9 +8,10 @@ use std::{error::Error, fmt};
 
 use serde::{Deserialize, Serialize};
 
+use tracedecay_contracts::storage::TableGrowthUnavailableReasonV1;
 use tracedecay_store::{
     RuntimeInterruptionV1, RuntimeReadRequestV1, RuntimeRequestProbeV1, SaturationScopeV1,
-    StorageRuntimeContractErrorV1, UnavailableReasonV1,
+    StorageRuntimeContractErrorV1, StorageRuntimeErrorV1, UnavailableReasonV1,
 };
 
 use super::super::{ReaderStartError, ReaderWorkerError};
@@ -91,6 +92,43 @@ impl Error for ReaderAcquireError {
     }
 }
 
+impl ReaderAcquireError {
+    /// Why a table-growth measurement that failed with this error is
+    /// unavailable, as a coarse class that never carries the raw message.
+    #[must_use]
+    pub fn table_growth_unavailable_reason(&self) -> TableGrowthUnavailableReasonV1 {
+        match self {
+            Self::Interrupted { reason }
+            | Self::Worker(ReaderWorkerError::Interrupted { reason }) => match reason {
+                UnavailableReasonV1::DeadlineExceeded => {
+                    TableGrowthUnavailableReasonV1::DeadlineExceeded
+                }
+                UnavailableReasonV1::Cancelled => TableGrowthUnavailableReasonV1::Cancelled,
+                _ => TableGrowthUnavailableReasonV1::ReaderUnavailable,
+            },
+            Self::Saturated { .. }
+            | Self::WorkerStart(_)
+            | Self::Worker(ReaderWorkerError::WorkerClosed) => {
+                TableGrowthUnavailableReasonV1::ReaderUnavailable
+            }
+            Self::Worker(ReaderWorkerError::Storage(StorageRuntimeErrorV1::Corrupt { .. })) => {
+                TableGrowthUnavailableReasonV1::StorageCorrupt
+            }
+            Self::Worker(ReaderWorkerError::Storage(StorageRuntimeErrorV1::Infrastructure {
+                ..
+            })) => TableGrowthUnavailableReasonV1::StorageInfrastructure,
+            Self::InvalidRequest(_)
+            | Self::ProbeBindingMismatch { .. }
+            | Self::BindingMismatch
+            | Self::Worker(
+                ReaderWorkerError::SnapshotAlreadyActive
+                | ReaderWorkerError::SnapshotNotActive
+                | ReaderWorkerError::Storage(_),
+            ) => TableGrowthUnavailableReasonV1::StorageOther,
+        }
+    }
+}
+
 pub(super) fn map_worker_error(error: ReaderWorkerError) -> ReaderAcquireError {
     match error {
         ReaderWorkerError::Interrupted { reason } => ReaderAcquireError::Interrupted { reason },
@@ -122,5 +160,73 @@ pub(super) fn interruption(probe: &dyn RuntimeRequestProbeV1) -> Option<Unavaila
             Some(UnavailableReasonV1::DeadlineExceeded)
         }
         None => None,
+    }
+}
+
+#[cfg(test)]
+mod table_growth_reason_tests {
+    use tracedecay_contracts::storage::TableGrowthUnavailableReasonV1 as Reason;
+    use tracedecay_store::{
+        CorruptionClassV1, SaturationScopeV1, StorageRuntimeErrorV1, UnavailableReasonV1,
+    };
+
+    use super::{ReaderAcquireError, ReaderWorkerError};
+
+    #[test]
+    fn every_reader_failure_names_its_table_growth_reason() {
+        let cases = [
+            (
+                ReaderAcquireError::Interrupted {
+                    reason: UnavailableReasonV1::DeadlineExceeded,
+                },
+                Reason::DeadlineExceeded,
+            ),
+            (
+                ReaderAcquireError::Worker(ReaderWorkerError::Interrupted {
+                    reason: UnavailableReasonV1::Cancelled,
+                }),
+                Reason::Cancelled,
+            ),
+            (
+                ReaderAcquireError::Interrupted {
+                    reason: UnavailableReasonV1::Draining,
+                },
+                Reason::ReaderUnavailable,
+            ),
+            (
+                ReaderAcquireError::Saturated {
+                    scope: SaturationScopeV1::ReaderPool,
+                },
+                Reason::ReaderUnavailable,
+            ),
+            (
+                ReaderAcquireError::Worker(ReaderWorkerError::WorkerClosed),
+                Reason::ReaderUnavailable,
+            ),
+            (
+                ReaderAcquireError::Worker(ReaderWorkerError::Storage(
+                    StorageRuntimeErrorV1::Corrupt {
+                        class: CorruptionClassV1::Authoritative,
+                    },
+                )),
+                Reason::StorageCorrupt,
+            ),
+            (
+                ReaderAcquireError::Worker(ReaderWorkerError::Storage(
+                    StorageRuntimeErrorV1::Infrastructure {
+                        operation: "dbstat".to_owned(),
+                    },
+                )),
+                Reason::StorageInfrastructure,
+            ),
+            (ReaderAcquireError::BindingMismatch, Reason::StorageOther),
+            (
+                ReaderAcquireError::Worker(ReaderWorkerError::SnapshotNotActive),
+                Reason::StorageOther,
+            ),
+        ];
+        for (error, reason) in cases {
+            assert_eq!(error.table_growth_unavailable_reason(), reason, "{error}");
+        }
     }
 }

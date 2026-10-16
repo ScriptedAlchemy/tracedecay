@@ -819,6 +819,10 @@ impl StoreAdministration {
         mut self,
         owner_profile: tracedecay_runtime_core::config::ProfileRoot,
     ) -> Self {
+        self.store_telemetry_sampling =
+            tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry::persisted_under(
+                owner_profile.data_dir(),
+            );
         self.owner_profile = Some(owner_profile);
         self
     }

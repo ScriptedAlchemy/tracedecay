@@ -8,16 +8,12 @@ use tracedecay_agent_hosts::agents::host_bundle::{
     HostBundleComponentDoctorResultV1, HostBundleComponentDoctorStateV1, HostBundleDoctorReportV1,
     HostBundleRegistrationStateV1, HostComponentV1, HostKindV1,
 };
+use tracedecay_contracts::ConfigurationAuthorityReadV1;
 use tracedecay_contracts::doctor::{
     DoctorCoverageCompletenessV1, HostComponentDriftV1, HostConformanceV1, HostIntegrationReadV1,
     IngestRefusalV1, LanguageServerAnalyzerStateV1, LanguageServerReadV1, LanguageServerStateV1,
     ObservabilityReadV1, ObservabilityStateV1, host_integration_finding,
 };
-use tracedecay_contracts::{
-    ConfigurationAuthorityReadV1, storage::StorageTelemetryReadV1, storage::StoreKeyV1,
-    storage::StoreSizeSampleV1,
-};
-use tracedecay_domain::UtcMicros;
 
 use super::*;
 
@@ -228,31 +224,6 @@ fn receipt_and_checked_in_host_evidence_feed_canonical_host_truth() {
          --component context-mcp` (refreshes tracedecay-owned files)",
         "a drift finding names the drifted component and its remedy"
     );
-}
-
-#[test]
-fn synchronous_table_growth_is_bounded_by_observed_store_size() {
-    let sample = |bytes| StorageTelemetryReadV1::Observed {
-        sample: StoreSizeSampleV1 {
-            store: StoreKeyV1::new("sessions.db").unwrap(),
-            page_size_bytes: 4096,
-            page_count: bytes / 4096,
-            freelist_pages: 0,
-            observed_at: UtcMicros(1),
-        },
-    };
-
-    assert!(permits_synchronous_table_growth(&sample(
-        MAX_SYNCHRONOUS_TABLE_GROWTH_STORE_BYTES
-    )));
-    assert!(!permits_synchronous_table_growth(&sample(
-        MAX_SYNCHRONOUS_TABLE_GROWTH_STORE_BYTES + 4096
-    )));
-    assert!(!permits_synchronous_table_growth(
-        &StorageTelemetryReadV1::Unknown {
-            store: StoreKeyV1::new("sessions.db").unwrap(),
-        }
-    ));
 }
 
 fn engine_status(
