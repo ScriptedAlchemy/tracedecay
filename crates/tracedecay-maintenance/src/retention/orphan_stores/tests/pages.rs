@@ -434,6 +434,75 @@ async fn census_finds_unregistered_project_dir_and_ignores_registered_ones() {
     assert!(findings[0].size_bytes >= 4096);
 }
 
+/// The daemon's maintenance tick runs the cold-store page; an unregistered
+/// project directory past the window must be collected there, not only when
+/// someone asks Doctor.
+#[asupersync::test]
+async fn the_maintenance_cold_store_page_collects_an_unregistered_project_dir() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let (_runtime, db) = open_registered_db(&profile_root).await;
+    // A store with a manifest and an inspectable, memory-free SQLite file, but
+    // no registry row: nothing the registered census would ever visit.
+    let unregistered_dir = profile_root.join("projects").join("proj_ghost");
+    std::fs::create_dir_all(&unregistered_dir).unwrap();
+    let graph_db = unregistered_dir.join("tracedecay.db");
+    rusqlite::Connection::open(&graph_db)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE padding(value BLOB); INSERT INTO padding VALUES (zeroblob(4096));",
+        )
+        .unwrap();
+    tracedecay_runtime_core::storage::write_store_manifest_to_path(
+        &unregistered_dir.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
+        &StoreManifest {
+            schema_version: STORE_MANIFEST_SCHEMA_VERSION,
+            project_id: Some("proj_ghost".to_owned()),
+            store_kind: StoreKind::CodeProject,
+            storage_mode: StorageMode::ProfileSharded,
+            project_root: tmp.path().join("deleted-checkout"),
+            data_root: unregistered_dir.clone(),
+            graph_db_relpath: PathBuf::from("tracedecay.db"),
+            sessions_db_relpath: PathBuf::from("sessions.db"),
+            branch_meta_relpath: PathBuf::from("branch-meta.json"),
+            sessions_schema_digest: None,
+        },
+    )
+    .unwrap();
+    let memory_dir = profile_root.join("projects").join("proj_ghost_memory");
+    std::fs::create_dir_all(&memory_dir).unwrap();
+    rusqlite::Connection::open(memory_dir.join(tracedecay_runtime_core::config::DB_FILENAME))
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE memory_facts (fact_id INTEGER PRIMARY KEY, content TEXT NOT NULL);
+             INSERT INTO memory_facts (fact_id, content) VALUES (1, 'durable fact');",
+        )
+        .unwrap();
+
+    let report = crate::retention::cold_store::run_cold_store_page(
+        &profile_root,
+        &db,
+        Some(0),
+        &BTreeSet::new(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        !unregistered_dir.exists(),
+        "an unregistered project directory past the window must be collected"
+    );
+    assert!(report.reclaimed_bytes >= 4096, "{report:?}");
+    assert!(
+        memory_dir
+            .join(tracedecay_runtime_core::config::DB_FILENAME)
+            .is_file(),
+        "an unregistered directory holding durable memory must survive the tick"
+    );
+}
+
 #[asupersync::test]
 async fn sweep_unregistered_stores_protects_unverifiable_payload_and_retains_young() {
     let tmp = tempfile::TempDir::new().unwrap();
