@@ -47,15 +47,14 @@ impl Widget {
 ";
 
 /// `src/nested/extra.rs` lines (1-indexed):
-/// 1 the identifier `note` is a non-comment NOTE (any line, word boundary);
-/// 2 XXX, 3 lower-case todo, 4 TODO (same line also says FIXME; the first
-/// requested kind wins, so an unfiltered scan keeps TODO and a FIXME-only
-/// scan keeps FIXME);
+/// 1 the identifier `note` and 3 the lower-case `todo` are not markers;
+/// 2 XXX, 4 TODO (same line also says FIXME; the first requested kind wins,
+/// so an unfiltered scan keeps TODO and a FIXME-only scan keeps FIXME);
 /// 8 WIP and 9 UNIMPLEMENTED sit outside `note`.
 const EXTRA_RS: &str = "\
 pub fn note() {
     // XXX: drop this
-    // todo: lower case still counts
+    // todo: lower case is not a marker
     // TODO: first and FIXME: second
     let _ = 1;
 }
@@ -119,24 +118,10 @@ fn lib_markers() -> Vec<Value> {
 fn extra_markers() -> Vec<Value> {
     vec![
         marker(
-            "NOTE",
-            "src/nested/extra.rs",
-            1,
-            "pub fn note() {",
-            Some("src/nested/extra.rs::note"),
-        ),
-        marker(
             "XXX",
             "src/nested/extra.rs",
             2,
             "// XXX: drop this",
-            Some("src/nested/extra.rs::note"),
-        ),
-        marker(
-            "TODO",
-            "src/nested/extra.rs",
-            3,
-            "// todo: lower case still counts",
             Some("src/nested/extra.rs::note"),
         ),
         marker(
@@ -174,8 +159,8 @@ fn default_scan() -> Value {
         json!({
             "FIXME": 1,
             "HACK": 1,
-            "NOTE": 2,
-            "TODO": 3,
+            "NOTE": 1,
+            "TODO": 2,
             "UNIMPLEMENTED": 1,
             "WIP": 1,
             "XXX": 1,
@@ -186,13 +171,13 @@ fn default_scan() -> Value {
 
 const DEFAULT_MARKDOWN: &str = "\
 freshness: fresh
-**match_count:** 10
+**match_count:** 8
 
 ## by_kind
 **FIXME:** 1
 **HACK:** 1
-**NOTE:** 2
-**TODO:** 3
+**NOTE:** 1
+**TODO:** 2
 **UNIMPLEMENTED:** 1
 **WIP:** 1
 **XXX:** 1
@@ -218,20 +203,10 @@ freshness: fresh
   **enclosing:** src/lib.rs::Widget::draw
   **text:** // NOTE: keep the method
 - **src/nested/extra.rs**
-  **kind:** NOTE
-  **line:** 1
-  **enclosing:** src/nested/extra.rs::note
-  **text:** pub fn note() {
-- **src/nested/extra.rs**
   **kind:** XXX
   **line:** 2
   **enclosing:** src/nested/extra.rs::note
   **text:** // XXX: drop this
-- **src/nested/extra.rs**
-  **kind:** TODO
-  **line:** 3
-  **enclosing:** src/nested/extra.rs::note
-  **text:** // todo: lower case still counts
 - **src/nested/extra.rs**
   **kind:** TODO
   **line:** 4
@@ -374,8 +349,7 @@ async fn todos_reports_observed_marker_behavior() {
         nested,
         scan(
             json!({
-                "NOTE": 1,
-                "TODO": 2,
+                "TODO": 1,
                 "UNIMPLEMENTED": 1,
                 "WIP": 1,
                 "XXX": 1,

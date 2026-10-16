@@ -28,27 +28,19 @@ const DEFAULT_TODO_KINDS: &[&str] = &[
     "UNIMPLEMENTED",
 ];
 
-/// True if `text` contains `marker` as a standalone uppercase word
-/// (case-insensitive, surrounded by non-alphanumeric characters or string ends).
-fn contains_marker_word(text: &str, marker: &str) -> Option<usize> {
-    let lower = text.to_ascii_lowercase();
-    let marker_lower = marker.to_ascii_lowercase();
-    let bytes = lower.as_bytes();
-    let mlen = marker_lower.len();
-    let mut idx = 0;
-    while idx + mlen <= bytes.len() {
-        if &bytes[idx..idx + mlen] == marker_lower.as_bytes() {
-            let before_ok =
-                idx == 0 || !bytes[idx - 1].is_ascii_alphanumeric() && bytes[idx - 1] != b'_';
-            let after_ok = idx + mlen == bytes.len()
-                || (!bytes[idx + mlen].is_ascii_alphanumeric() && bytes[idx + mlen] != b'_');
-            if before_ok && after_ok {
-                return Some(idx);
-            }
-        }
-        idx += 1;
-    }
-    None
+/// True if `text` contains `marker` exactly as written (the uppercase marker
+/// spelling) bounded by non-identifier characters or string ends. Matching
+/// case-sensitively keeps identifiers such as `todo` or `note` out of the scan.
+fn contains_marker_word(text: &str, marker: &str) -> bool {
+    let bytes = text.as_bytes();
+    let is_identifier = |byte: &u8| byte.is_ascii_alphanumeric() || *byte == b'_';
+    text.match_indices(marker).any(|(start, _)| {
+        !start
+            .checked_sub(1)
+            .and_then(|before| bytes.get(before))
+            .is_some_and(is_identifier)
+            && !bytes.get(start + marker.len()).is_some_and(is_identifier)
+    })
 }
 
 #[tracing::instrument(name = "mcp.info.todos.total", level = "trace", skip_all)]
@@ -159,10 +151,7 @@ fn scan_markers(
                 message: format!("cannot read indexed source '{file}': {error}"),
             })?;
         for (idx, line) in source.lines().enumerate() {
-            let Some(kind) = kinds
-                .iter()
-                .find(|kind| contains_marker_word(line, kind).is_some())
-            else {
+            let Some(kind) = kinds.iter().find(|kind| contains_marker_word(line, kind)) else {
                 continue;
             };
             *scan.by_kind.entry(kind.clone()).or_insert(0) += 1;
