@@ -20,7 +20,8 @@ import sys
 
 TOOL_CALL = re.compile(r"tools\.(mcp__\w+|tool_search|exec_command|\w+)\s*\(")
 TRACEDECAY_CALL = re.compile(r"tools\.mcp__\w*tracedecay\w*\s*\(")
-SERVER_INSTRUCTIONS_HEAD = "TraceDecay provides code-graph"
+# Both the long pre-code-mode instructions and the short ones that replaced them.
+SERVER_INSTRUCTIONS = re.compile(r"TraceDecay (?:provides code-graph|code-graph, memory, session)")
 TRAILER = re.compile(r"tracedecay_(?:metrics|cost):")
 
 
@@ -114,7 +115,7 @@ def condition_rows(root):
                     f"{kind}_output_chars": sum(len(out) for src, out in cells if cell_kind(src) == kind)
                     for kind in ("discovery", "tracedecay", "shell")
                 },
-                "server_instruction_copies": sum(out.count(SERVER_INSTRUCTIONS_HEAD) for _, out in cells),
+                "server_instruction_copies": sum(len(SERVER_INSTRUCTIONS.findall(out)) for _, out in cells),
                 "trailer_lines": sum(len(TRAILER.findall(out)) for _, out in cells),
             }
         )

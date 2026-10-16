@@ -80,8 +80,10 @@ TraceDecay adapts the graph server to that host:
 - The server lists every tool with its full input schema
   (`--full-tool-list`). Codex finds tools through its own `ALL_TOOLS` and
   `tools.tool_search`, and it builds each tool's TypeScript declaration from
-  the input schema. In the agent-adoption eval the full list used fewer input
-  tokens per task than the stub list, with the same task success.
+  the input schema.
+- The server's `initialize` instructions are three short sentences. Codex
+  prefixes them to every tool description it shows a program, so a program
+  that lists 20 tools pays for them 20 times.
 - Results keep the default Markdown rendering. Programs print results rather
   than parse them, and `format: "json"` returns the full typed envelope,
   which is several times larger. Ask for `format: "json"` only when the
@@ -92,5 +94,7 @@ TraceDecay adapts the graph server to that host:
   every call the program makes; Codex reports only `exec` to hooks, and the
   TraceDecay `PostToolUse` hook matches only `Bash` and `apply_patch`.
 
-The measurements and every decision behind this section are in
+The full tool list and the short instructions together cut input by about
+13% per task in the agent-adoption eval (31,000 of 241,000 tokens), with the
+same task success. The measurements and every decision behind this section are in
 [`docs/code-mode/decisions.tsv`](../docs/code-mode/decisions.tsv).
