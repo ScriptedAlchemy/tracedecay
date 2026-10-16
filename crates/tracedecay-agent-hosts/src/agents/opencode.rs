@@ -766,7 +766,7 @@ fn install_prompt_rules(prompt_path: &Path) -> Result<()> {
     let block = super::prompt_rules::standard_prompt_rules(
         PROMPT_RULE_MARKER,
         &PromptRulesOptions {
-            extra_paragraphs: &[],
+            extra_paragraphs: super::prompt_rules::SKILL_MANDATE_PARAGRAPHS,
         },
     );
     super::prompt_rules::reconcile_prompt_rules(prompt_path, PROMPT_RULE_MARKER, &block)

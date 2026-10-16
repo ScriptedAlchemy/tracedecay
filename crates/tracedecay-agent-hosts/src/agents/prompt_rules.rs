@@ -169,6 +169,11 @@ const STANDARD_PARAGRAPHS: &[&str] = &[
      missing decision or an external or destructive action outside that authority.",
 ];
 
+/// Extra paragraphs for a host that ships the bundled skills but has no
+/// session-start context to carry the skill mandate.
+pub(crate) const SKILL_MANDATE_PARAGRAPHS: &[&str] =
+    &[crate::hooks::SKILL_MANDATE.trim_ascii_end()];
+
 /// Host-specific knobs for [`standard_prompt_rules`].
 pub(crate) struct PromptRulesOptions {
     /// Extra paragraphs appended after the shared canonical text.

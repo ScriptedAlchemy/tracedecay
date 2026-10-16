@@ -13,7 +13,6 @@ use crate::ports::hook_runtime::HookRuntimeV1;
 use tracedecay_runtime_core::config::ProfileRoot;
 
 use super::post_tool_use::{captured_tool_output, trusted_tool_failure};
-use super::steering::session_start_context;
 use super::tool_hints::{ToolHint, ToolHintInput, decide_hint};
 use super::{
     deduped_project_hint_with_id, event_session_id, format_tool_hint, mint_hint_id,
@@ -137,8 +136,9 @@ async fn cursor_session_start_response(
     .await
     .into_recorded_guidance(&hook_telemetry)
     .flatten();
-    let context = session_start_context(root.as_deref(), guidance);
-    let output = cursor_session_start_json(root.as_deref(), context.as_deref().unwrap_or(""));
+    // Cursor carries the skill mandate in its always-applied rule, which it
+    // loads reliably; its sessionStart context is best-effort.
+    let output = cursor_session_start_json(root.as_deref(), guidance.as_deref().unwrap_or(""));
     (root, output)
 }
 

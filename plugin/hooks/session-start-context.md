@@ -1,6 +1,6 @@
-TraceDecay indexes this repository: its code graph, past sessions, and recorded decisions.
+TraceDecay keeps a code graph, past sessions, and recorded decisions for each repository it indexes.
 
-Load a TraceDecay skill before the first tool call when a task meets any of these:
+In an indexed repository, load a TraceDecay skill before the first tool call when a task meets any of these:
 
 - it asks how code works or where something lives, and the answer spans more than one file
 - it asks who calls a function, what a change breaks, or which tests cover it
