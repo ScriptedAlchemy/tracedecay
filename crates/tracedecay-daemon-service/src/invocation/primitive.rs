@@ -847,7 +847,7 @@ async fn execute_context_scout_mutation(
                             return context_scout_mutation_unavailable(wire_request_id);
                         };
                         let now = now_micros();
-                        let expires_at = deadline.expires_at.0.min(registered.grants.expires_at.0);
+                        let expires_at = deadline.expires_at.0.min(mounted_grant_expires_at(now).0);
                         let Ok(remaining) = u64::try_from(expires_at.saturating_sub(now.0)) else {
                             return application_problem(
                                 wire_request_id,

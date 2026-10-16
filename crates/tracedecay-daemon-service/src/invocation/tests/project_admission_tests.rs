@@ -656,12 +656,9 @@ async fn configuration_requests_admit_past_the_registration_horizon() {
     let (_runtime, configuration) =
         fixture_configuration_runtime(profile.path(), &project_root, &project_id).await;
     let now = now_micros();
-    let grants = DaemonConfigurationGrantAuthority::for_test(
-        [ConfigurationLayerIdV1::Project {
-            project_id: project_id.clone(),
-        }],
-        UtcMicros(opened_past_the_horizon(now).0 + grant_horizon_micros()),
-    )
+    let grants = DaemonConfigurationGrantAuthority::for_test([ConfigurationLayerIdV1::Project {
+        project_id: project_id.clone(),
+    }])
     .expect("configuration grant authority");
     let service = DaemonInvocationService::default();
     service
