@@ -95,7 +95,9 @@ pub enum DecisionEngineOutcomeV1 {
     /// The whole-request budget elapsed.
     TimedOut,
     /// The server answered with a non-200 status.
-    Refused { status: u16 },
+    Refused {
+        status: u16,
+    },
     /// The body was not the expected shape, a requested answer was missing or
     /// out of range, or the request itself was not well formed (no questions,
     /// duplicate keys, an empty option list); invalid requests never reach
@@ -567,8 +569,7 @@ pub mod test_server {
                     }
                     let mut request_body = vec![0; content_length];
                     let _ = reader.read_exact(&mut request_body);
-                    *captured.lock().unwrap() =
-                        String::from_utf8_lossy(&request_body).into_owned();
+                    *captured.lock().unwrap() = String::from_utf8_lossy(&request_body).into_owned();
                     seen.fetch_add(1, Ordering::SeqCst);
                     std::thread::sleep(delay);
                     let _ = write!(
@@ -761,13 +762,9 @@ mod tests {
     #[test]
     fn a_noul_answer_is_read_as_a_probability() {
         let server = fake_decision_engine(200, &single_noul_body("recall", 0.73), Duration::ZERO);
-        let answers = answered(
-            client(&server.url).ask_blocking(&request("state", vec![noul("recall")])),
-        );
-        assert_eq!(
-            answers.answers["recall"],
-            DecisionAnswerV1::Noul(0.73),
-        );
+        let answers =
+            answered(client(&server.url).ask_blocking(&request("state", vec![noul("recall")])));
+        assert_eq!(answers.answers["recall"], DecisionAnswerV1::Noul(0.73),);
         assert_eq!(answers.model, None);
     }
 
@@ -940,7 +937,11 @@ mod tests {
                 String::new(),
                 DecisionEngineOutcomeV1::Refused { status: 404 },
             ),
-            (200, "not json".to_owned(), DecisionEngineOutcomeV1::Malformed),
+            (
+                200,
+                "not json".to_owned(),
+                DecisionEngineOutcomeV1::Malformed,
+            ),
             (
                 200,
                 r#"{"answers":{}}"#.to_owned(),
@@ -1034,18 +1035,18 @@ mod tests {
             request("s", vec![choice("q", &["a", "a"])]),
             request("s", vec![score("q", &[])]),
         ] {
-            assert_eq!(client.ask_blocking(&bad), DecisionEngineOutcomeV1::Malformed);
+            assert_eq!(
+                client.ask_blocking(&bad),
+                DecisionEngineOutcomeV1::Malformed
+            );
         }
         assert_eq!(server.requests.load(Ordering::SeqCst), 0);
     }
 
     #[test]
     fn a_slow_engine_is_abandoned_at_the_timeout() {
-        let server = fake_decision_engine(
-            200,
-            &single_noul_body("q", 0.99),
-            Duration::from_secs(5),
-        );
+        let server =
+            fake_decision_engine(200, &single_noul_body("q", 0.99), Duration::from_secs(5));
         let mut configured = config(&server.url);
         configured.timeout = Duration::from_millis(150);
         let client = DecisionEngineClientV1::new(configured).unwrap();
@@ -1076,11 +1077,8 @@ mod tests {
 
     #[test]
     fn exhausted_permits_back_pressure_instead_of_queueing() {
-        let server = fake_decision_engine(
-            200,
-            &single_noul_body("q", 0.5),
-            Duration::from_millis(700),
-        );
+        let server =
+            fake_decision_engine(200, &single_noul_body("q", 0.5), Duration::from_millis(700));
         let mut configured = config(&server.url);
         configured.max_concurrent = 1;
         configured.timeout = Duration::from_secs(5);
@@ -1113,16 +1111,11 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn the_async_entry_point_answers_off_the_executor() {
         let server = fake_decision_engine(200, &single_noul_body("q", 0.25), Duration::ZERO);
-        let outcome = client(&server.url)
-            .ask(request("s", vec![noul("q")]))
-            .await;
-        assert_eq!(
-            answered(outcome).answers["q"],
-            DecisionAnswerV1::Noul(0.25)
-        );
+        let outcome = client(&server.url).ask(request("s", vec![noul("q")])).await;
+        assert_eq!(answered(outcome).answers["q"], DecisionAnswerV1::Noul(0.25));
     }
 
     #[test]

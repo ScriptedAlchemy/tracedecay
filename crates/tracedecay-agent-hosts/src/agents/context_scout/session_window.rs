@@ -109,7 +109,9 @@ pub struct SessionWindowMessageV1 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionWindowFreshnessV1 {
     Fresh,
-    Stale { age_micros: u64 },
+    Stale {
+        age_micros: u64,
+    },
     /// No message carried a timestamp.
     Unknown,
 }
@@ -307,13 +309,14 @@ fn tool_calls_from_metadata(metadata: &str) -> Vec<SessionWindowToolCallV1> {
                     if name.is_empty() {
                         return None;
                     }
-                    let arguments = function.get("arguments").and_then(|arguments| {
-                        match arguments {
-                            serde_json::Value::Null => None,
-                            serde_json::Value::String(text) => excerpt(text),
-                            other => excerpt(&other.to_string()),
-                        }
-                    });
+                    let arguments =
+                        function
+                            .get("arguments")
+                            .and_then(|arguments| match arguments {
+                                serde_json::Value::Null => None,
+                                serde_json::Value::String(text) => excerpt(text),
+                                other => excerpt(&other.to_string()),
+                            });
                     Some(SessionWindowToolCallV1 {
                         name: name.to_owned(),
                         argument_excerpt: arguments,
@@ -349,10 +352,15 @@ fn excerpt(text: &str) -> Option<String> {
     if collapsed.is_empty() {
         return None;
     }
-    Some(match collapsed.char_indices().nth(SESSION_WINDOW_ARGUMENT_EXCERPT_CHARS) {
-        Some((end, _)) => format!("{}{ELLIPSIS}", &collapsed[..end]),
-        None => collapsed,
-    })
+    Some(
+        match collapsed
+            .char_indices()
+            .nth(SESSION_WINDOW_ARGUMENT_EXCERPT_CHARS)
+        {
+            Some((end, _)) => format!("{}{ELLIPSIS}", &collapsed[..end]),
+            None => collapsed,
+        },
+    )
 }
 
 fn message_bytes(message: &SessionWindowMessageV1) -> usize {
@@ -360,9 +368,7 @@ fn message_bytes(message: &SessionWindowMessageV1) -> usize {
         + message
             .tool_calls
             .iter()
-            .map(|call| {
-                call.name.len() + call.argument_excerpt.as_ref().map_or(0, String::len)
-            })
+            .map(|call| call.name.len() + call.argument_excerpt.as_ref().map_or(0, String::len))
             .sum::<usize>()
 }
 
@@ -501,7 +507,10 @@ fn window_digest(
             digest_field(&mut hasher, call.name.as_bytes());
             digest_field(
                 &mut hasher,
-                call.argument_excerpt.as_deref().unwrap_or_default().as_bytes(),
+                call.argument_excerpt
+                    .as_deref()
+                    .unwrap_or_default()
+                    .as_bytes(),
             );
         }
     }
@@ -539,7 +548,10 @@ pub fn render_window_state(
             ));
         }
     }
-    if let Some(prompt) = prompt_excerpt.map(str::trim).filter(|prompt| !prompt.is_empty()) {
+    if let Some(prompt) = prompt_excerpt
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty())
+    {
         lines.push(format!("User: {prompt}"));
     }
     tail_on_char_boundary(&lines.join("\n"), max_bytes).to_owned()
@@ -683,7 +695,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn an_unknown_or_empty_session_yields_an_empty_window() {
         let seed = Seed::open("window-empty").await;
         assert_eq!(
@@ -718,7 +730,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn the_last_user_turns_and_their_replies_are_kept_oldest_first() {
         let seed = Seed::open("window-turns").await;
         seed_conversation(&seed).await;
@@ -726,7 +738,12 @@ mod tests {
         let window = ready(read_session_window(seed.db(), &request(limits())).await);
         assert_eq!(
             texts(&window),
-            vec!["second question", "second answer", "third question", "third answer"]
+            vec![
+                "second question",
+                "second answer",
+                "third question",
+                "third answer"
+            ]
         );
         assert_eq!(window.first_store_id, window.messages[0].store_id);
         assert_eq!(window.last_store_id, window.messages[3].store_id);
@@ -764,7 +781,7 @@ mod tests {
         assert_eq!(everything.messages.len(), 6);
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn the_message_cap_drops_the_oldest_first() {
         let seed = Seed::open("window-message-cap").await;
         seed_conversation(&seed).await;
@@ -785,7 +802,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn the_byte_cap_keeps_the_newest_messages() {
         let seed = Seed::open("window-byte-cap").await;
         seed_conversation(&seed).await;
@@ -818,7 +835,7 @@ mod tests {
         assert_eq!(texts(&tiny), vec!["third"]);
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn cursor_tool_calls_come_from_canonical_metadata() {
         let seed = Seed::open("window-cursor-tools").await;
         seed.session(PROVIDER, SESSION).await;
@@ -859,7 +876,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn tool_events_alone_still_name_the_tools() {
         let calls = tool_calls_from_metadata(
             &json!({"tool_events": [
@@ -878,7 +895,7 @@ mod tests {
         assert!(tool_calls_from_metadata("not json").is_empty());
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn typed_fact_hosts_name_tools_through_the_tool_names_column() {
         let seed = Seed::open("window-claude-tools").await;
         seed.session("claude", SESSION).await;
@@ -887,7 +904,13 @@ mod tests {
         let mut reply = record("claude", SESSION, 1, "assistant", "Looking at it.");
         reply.tool_names = Some("Read,Grep".to_owned());
         seed.message(reply).await;
-        let mut dispatch = record("claude", SESSION, 2, "assistant", "{\"path\": \"src/lib.rs\"}");
+        let mut dispatch = record(
+            "claude",
+            SESSION,
+            2,
+            "assistant",
+            r#"{"path":"src/lib.rs"}"#,
+        );
         dispatch.kind = Some("tool_invocation".to_owned());
         dispatch.tool_names = Some("Read".to_owned());
         seed.message(dispatch).await;
@@ -910,12 +933,55 @@ mod tests {
             window.messages[2].tool_calls,
             vec![SessionWindowToolCallV1 {
                 name: "Read".to_owned(),
-                argument_excerpt: Some(r#"{"path": "src/lib.rs"}"#.to_owned()),
+                argument_excerpt: Some(r#"{"path":"src/lib.rs"}"#.to_owned()),
             }]
         );
     }
 
-    #[tokio::test]
+    /// Hermes and Codex project a tool-only turn as a `tool_invocation` row
+    /// whose text is the argument payload and whose `tool_names` holds the
+    /// tool (`terminal` / `exec_command`), as asserted by the ingest suites
+    /// `transcript_ingest_suite/hermes.rs` and `codex_response_items.rs`.
+    #[asupersync::test]
+    async fn hermes_and_codex_tool_invocation_rows_become_tool_calls() {
+        for (provider, tool, payload) in [
+            ("hermes", "terminal", "cargo test billing"),
+            ("codex", "exec_command", "gh pr merge 366 --squash"),
+        ] {
+            let seed = Seed::open(&format!("window-{provider}-tools")).await;
+            seed.session(provider, SESSION).await;
+            seed.message(record(provider, SESSION, 0, "user", "run the tests"))
+                .await;
+            let mut invocation = record(provider, SESSION, 1, "assistant", payload);
+            invocation.kind = Some("tool_invocation".to_owned());
+            invocation.tool_names = Some(tool.to_owned());
+            seed.message(invocation).await;
+            seed.message(record(provider, SESSION, 2, "assistant", "Done."))
+                .await;
+
+            let mut host = request(limits());
+            host.provider = provider;
+            let window = ready(read_session_window(seed.db(), &host).await);
+            assert_eq!(window.messages.len(), 3, "{provider}");
+            assert_eq!(window.messages[1].text, "", "{provider}");
+            assert_eq!(
+                window.messages[1].tool_calls,
+                vec![SessionWindowToolCallV1 {
+                    name: tool.to_owned(),
+                    argument_excerpt: Some(payload.to_owned()),
+                }],
+                "{provider}"
+            );
+            assert!(window.messages[2].tool_calls.is_empty(), "{provider}");
+            assert!(
+                render_window_state(&window, None, 4096)
+                    .contains(&format!("Tool {tool}({payload})")),
+                "{provider}"
+            );
+        }
+    }
+
+    #[asupersync::test]
     async fn freshness_follows_the_newest_message_age() {
         let seed = Seed::open("window-freshness").await;
         seed_conversation(&seed).await;
@@ -960,7 +1026,10 @@ mod tests {
     fn timestamps_normalize_seconds_and_milliseconds_to_micros() {
         assert_eq!(timestamp_micros(1_800_000_000), 1_800_000_000_000_000);
         assert_eq!(timestamp_micros(1_800_000_000_123), 1_800_000_000_123_000);
-        assert_eq!(freshness(None, 10, Some(1)), SessionWindowFreshnessV1::Unknown);
+        assert_eq!(
+            freshness(None, 10, Some(1)),
+            SessionWindowFreshnessV1::Unknown
+        );
         // A timestamp in the future is not stale.
         assert_eq!(
             freshness(Some(2_000_000), 1_000_000, Some(1)),
@@ -968,7 +1037,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[asupersync::test]
     async fn the_digest_is_stable_and_tracks_content_and_identity() {
         let seed = Seed::open("window-digest").await;
         seed_conversation(&seed).await;
