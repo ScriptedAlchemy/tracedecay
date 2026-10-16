@@ -51,9 +51,6 @@ pub struct StoreCensusEntry {
     pub canonical_root: PathBuf,
     /// Registry display root, when distinct from the canonical root.
     pub display_root: Option<PathBuf>,
-    /// Git common directory recorded for the project. A linked worktree shares
-    /// it with the primary checkout, so it keeps the identity live.
-    pub git_common_dir: Option<PathBuf>,
     /// Every registered alias path for the project. Any live alias keeps the
     /// store live even when the canonical root is gone.
     pub alias_roots: Vec<PathBuf>,
@@ -132,14 +129,15 @@ pub struct OrphanStoreFinding {
     pub expected_manifest_bytes: Option<Vec<u8>>,
 }
 
-/// Every root that can keep this store's identity alive: the registry roots,
-/// the git common directory shared with linked worktrees, and every registered
-/// alias path. Collecting a store because one checkout vanished, while another
-/// checkout of the same repository is still enrolled, destroys live data.
+/// Every root that can keep this store's identity alive: the registry roots
+/// and every registered alias path, which includes each enrolled checkout of
+/// the repository. Collecting a store because one checkout vanished, while
+/// another enrolled checkout is still live, destroys live data. The shared git
+/// common directory is not a root: it outlives every deleted linked worktree,
+/// so counting it kept their stores forever (docs/plans/storage).
 fn identity_roots(entry: &StoreCensusEntry) -> impl Iterator<Item = &Path> {
     std::iter::once(entry.canonical_root.as_path())
         .chain(entry.display_root.as_deref())
-        .chain(entry.git_common_dir.as_deref())
         .chain(entry.alias_roots.iter().map(PathBuf::as_path))
 }
 

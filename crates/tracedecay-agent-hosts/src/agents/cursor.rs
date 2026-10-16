@@ -593,7 +593,7 @@ mod tests {
         );
         assert!(
             install_dir
-                .join("commands/tracedecay-map-architecture.md")
+                .join("commands/tracedecay-port-code.md")
                 .exists(),
             "a representative native slash command should be embedded"
         );

@@ -258,12 +258,18 @@ async fn build_store_census_for_projects(
             return Ok(None);
         }
         let project = &context.project;
+        // Checkout paths only: the git-common-dir alias names the repository's
+        // shared git directory, which is not a checkout that can use the store.
         let alias_roots = context
             .aliases
             .iter()
+            .filter(|alias| {
+                !alias
+                    .alias_path
+                    .starts_with(tracedecay_global_db::GIT_COMMON_DIR_ALIAS_PREFIX)
+            })
             .map(|alias| PathBuf::from(&alias.alias_path))
             .collect::<Vec<_>>();
-        let git_common_dir = project.git_common_dir.as_deref().map(PathBuf::from);
         let stores = match control {
             Some(control) => match control
                 .race(db.try_list_store_instances_for_project(&project.project_id))
@@ -310,7 +316,6 @@ async fn build_store_census_for_projects(
                 canonical_root: PathBuf::from(&project.canonical_root),
                 display_root: (project.display_root != project.canonical_root)
                     .then(|| PathBuf::from(&project.display_root)),
-                git_common_dir: git_common_dir.clone(),
                 alias_roots: alias_roots.clone(),
                 manifest_readable: cheap.manifest_readable,
                 data_root,

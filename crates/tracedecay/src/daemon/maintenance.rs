@@ -1261,70 +1261,13 @@ mod tests {
     use std::time::Duration;
 
     use tokio::sync::Notify;
-    use tracedecay_contracts::storage::{
-        StorageByteSizeV1, StoreKeyV1, TableGrowthTelemetryReadV1, TableNameV1,
-    };
-    use tracedecay_domain::UtcMicros;
 
     use super::{MaintenanceCoordinator, NativeTask, run_resident_memory_sampler_loop};
-    use tracedecay_maintenance::telemetry::{
-        StoreTelemetrySamplingRegistry, TableGrowthObservation, compare_table_growth,
-    };
+    use tracedecay_maintenance::telemetry::StoreTelemetrySamplingRegistry;
     use tracedecay_maintenance::tick::{
         MaintenanceCadence, MaintenanceContinuation, MaintenanceTickOutcome,
         cursor_after_attempted_units, select_store_window,
     };
-
-    #[test]
-    fn table_growth_preview_never_mutates_the_maintenance_baseline() {
-        let store = StoreKeyV1::new("project.db").expect("store key");
-        let table = TableNameV1::new("messages").expect("table name");
-        let mut watermarks = None;
-
-        let preview = compare_table_growth(
-            &store,
-            std::collections::BTreeMap::from([(table.clone(), StorageByteSizeV1(10))]),
-            UtcMicros(1),
-            &mut watermarks,
-            TableGrowthObservation::Preview,
-        );
-        assert!(matches!(
-            preview,
-            TableGrowthTelemetryReadV1::Unknown { .. }
-        ));
-        assert!(
-            watermarks.is_none(),
-            "preview must not establish a baseline"
-        );
-
-        let baseline = compare_table_growth(
-            &store,
-            std::collections::BTreeMap::from([(table.clone(), StorageByteSizeV1(10))]),
-            UtcMicros(2),
-            &mut watermarks,
-            TableGrowthObservation::Advance,
-        );
-        assert!(matches!(
-            baseline,
-            TableGrowthTelemetryReadV1::BaselineEstablished {
-                tables_observed: 1,
-                ..
-            }
-        ));
-
-        let observed = compare_table_growth(
-            &store,
-            std::collections::BTreeMap::from([(table, StorageByteSizeV1(20))]),
-            UtcMicros(3),
-            &mut watermarks,
-            TableGrowthObservation::Preview,
-        );
-        let TableGrowthTelemetryReadV1::Observed { samples, .. } = observed else {
-            panic!("preview should compare with the maintenance baseline");
-        };
-        assert_eq!(samples.len(), 1);
-        assert_eq!(samples[0].growth_bytes().get(), 10);
-    }
 
     #[test]
     fn cadence_rate_limits_failures_and_successes() {

@@ -512,6 +512,21 @@ fn append_analytics_automation(md: &mut Md, automation: &Value) {
         "records_in_window",
         &render::field_i64(automation, "records_in_window").to_string(),
     );
+    // The ledger read is bounded to the newest rows; a frequent no-op job can
+    // push the window's older runs past that bound, so say the counts are partial.
+    if automation
+        .get("records_truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        md.field(
+            "records_truncated",
+            &format!(
+                "true (newest {} ledger rows only)",
+                render::field_i64(automation, "records_considered")
+            ),
+        );
+    }
     let Some(by_job) = automation.get("by_job").and_then(Value::as_array) else {
         md.empty_note("No automation jobs recorded.");
         return;
@@ -529,5 +544,35 @@ fn append_analytics_automation(md: &mut Md, automation: &Value) {
             render::field_i64(job, "skipped"),
             render::field_i64(job, "other"),
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    fn automation_md(records_truncated: bool) -> String {
+        super::analytics_md(&json!({
+            "scope": "project",
+            "window_days": 14,
+            "event_count": 0,
+            "automation": {
+                "available": true,
+                "records_considered": 200,
+                "records_in_window": 200,
+                "records_truncated": records_truncated,
+                "by_job": [{"job": "memory_curator", "succeeded": 0, "failed": 0, "skipped": 200, "other": 0}],
+            },
+        }))
+    }
+
+    #[test]
+    fn automation_markdown_flags_a_ledger_bounded_window() {
+        assert!(
+            automation_md(true).contains("records_truncated:** true (newest 200 ledger rows only)"),
+            "{}",
+            automation_md(true)
+        );
+        assert!(!automation_md(false).contains("records_truncated"));
     }
 }

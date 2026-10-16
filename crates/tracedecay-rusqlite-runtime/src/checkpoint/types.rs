@@ -117,7 +117,7 @@ pub(crate) trait CheckpointBlockerSource: Send + Sync {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CheckpointMode {
-    Passive,
+    Restart,
     Truncate,
 }
 
@@ -155,14 +155,14 @@ pub enum CheckpointInterruption {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CheckpointKind {
-    Passive,
+    Restart,
     Truncate,
 }
 
 impl CheckpointKind {
     fn from_internal(mode: CheckpointMode) -> Self {
         match mode {
-            CheckpointMode::Passive => Self::Passive,
+            CheckpointMode::Restart => Self::Restart,
             CheckpointMode::Truncate => Self::Truncate,
         }
     }

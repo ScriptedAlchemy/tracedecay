@@ -246,12 +246,12 @@ pub fn table_growth_finding(
             "denied".to_string(),
             "table payload growth measurement was denied",
         ),
-        TableGrowthDoctorEvidenceV1::Unknown { store } => (
+        TableGrowthDoctorEvidenceV1::Unknown { store, reason } => (
             store,
             DoctorEvidenceStateV1::Unknown,
             DoctorCoverageCompletenessV1::Unknown,
-            "unknown".to_string(),
-            "table payload growth measurement is unavailable",
+            format!("unknown.{}", reason.as_str()),
+            reason.statement(),
         ),
     };
     let finding = DoctorFindingV1::new(
@@ -562,7 +562,9 @@ mod tests {
     use super::*;
     use crate::storage::debris::{IncidentDebrisArtifactV1, IncidentDebrisScanV1};
     use crate::storage::identity::{RelativeArtifactPathV1, StorageByteSizeV1, TableNameV1};
-    use crate::storage::telemetry::{StoreSizeSampleV1, TableGrowthDoctorEvidenceV1};
+    use crate::storage::telemetry::{
+        StoreSizeSampleV1, TableGrowthDoctorEvidenceV1, TableGrowthUnavailableReasonV1,
+    };
     use tracedecay_domain::UtcMicros;
 
     fn store() -> StoreKeyV1 {
@@ -626,11 +628,18 @@ mod tests {
         assert_eq!(baseline.finding().state(), DoctorEvidenceStateV1::Partial);
         assert!(only_evidence(&baseline).contains("baseline-pending"));
 
-        let unknown =
-            table_growth_finding(&TableGrowthDoctorEvidenceV1::Unknown { store: store() })
-                .expect("unknown finding");
+        let unknown = table_growth_finding(&TableGrowthDoctorEvidenceV1::Unknown {
+            store: store(),
+            reason: TableGrowthUnavailableReasonV1::StorageCorrupt,
+        })
+        .expect("unknown finding");
         assert_eq!(unknown.finding().state(), DoctorEvidenceStateV1::Unknown);
         assert!(!only_evidence(&unknown).contains("0b"));
+        assert!(only_evidence(&unknown).ends_with("unknown.storage_corrupt"));
+        assert_eq!(
+            unknown.finding().coverage().statement(),
+            "table payload growth is unmeasured: the store reported corruption"
+        );
     }
 
     #[test]

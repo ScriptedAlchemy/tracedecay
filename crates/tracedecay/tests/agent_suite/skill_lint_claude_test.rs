@@ -265,6 +265,27 @@ fn stepped_skills_number_their_steps_and_name_the_skip_convention() {
     }
 }
 
+/// Claude, Cursor, and Kimi invoke any skill by name, so plugin commands exist
+/// only for workflows no skill covers. OpenCode exposes a skill as `/name`
+/// only when its metadata opts in.
+#[test]
+fn every_skill_is_a_slash_command_on_opencode() {
+    for skill in load_all_skill_docs() {
+        let opted_in = matches!(
+            skill.frontmatter.get("metadata"),
+            Some(SkillFrontmatterValue::Block(lines))
+                if lines.iter().any(|line| line == "opencode/slash: \"true\"")
+        );
+        assert!(
+            opted_in,
+            "{} must set `metadata: opencode/slash: \"true\"` so OpenCode offers it as \
+             /{}",
+            skill.path.display(),
+            skill.name
+        );
+    }
+}
+
 /// The session-start mandate routes by skill name, so every backticked name it
 /// gives must be a bundled skill.
 #[test]
