@@ -651,3 +651,111 @@ fn repeated_reader_waits_from_one_site_are_counted_but_logged_once() {
         "the first hit logs at WARN and later hits log nothing"
     );
 }
+
+fn job_count(handle: &ExactSqlHandle) -> i64 {
+    match crate::native_runtime::block_on(handle.query_async(
+        statement("SELECT COUNT(*) FROM job_rows", vec![]),
+        Duration::from_secs(5),
+    ))
+    .unwrap()
+    .unwrap()
+    .rows[0]
+        .values[0]
+    {
+        ExactSqlValue::Integer(count) => count,
+        ref other => panic!("count is an integer, got {other:?}"),
+    }
+}
+
+fn job_fixture() -> (Fixture, ExactSqlHandle) {
+    let fixture = fixture('a', 'a');
+    let handle = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    crate::native_runtime::block_on(
+        handle.execute_batch_async("CREATE TABLE job_rows (value INTEGER NOT NULL)".to_owned()),
+    )
+    .unwrap()
+    .unwrap();
+    (fixture, handle)
+}
+
+#[test]
+fn a_write_job_and_an_awaited_read_on_a_native_worker_park_no_native_thread() {
+    let _serial = NATIVE_WAIT_COUNTER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (_fixture, handle) = job_fixture();
+    let writer_waits = native_thread_writer_waits();
+    let reader_waits = native_thread_reader_waits();
+    let worker_handle = handle.clone();
+    let task = crate::native_runtime::NativeTask::spawn(async move {
+        let committed = worker_handle
+            .transact(|transaction| {
+                transaction.execute(statement(
+                    "INSERT INTO job_rows (value) VALUES (?1)",
+                    vec![ExactSqlValue::Integer(7)],
+                ))?;
+                transaction
+                    .query(statement("SELECT COUNT(*) FROM job_rows", vec![]))
+                    .map(|rows| rows.rows.len())
+            })
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error: ExactSqlError| error.to_string())?;
+        let read = worker_handle
+            .query_async(
+                statement("SELECT value FROM job_rows", vec![]),
+                Duration::from_secs(5),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok::<_, String>((committed, read.rows.len()))
+    })
+    .unwrap();
+    let outcome = crate::native_runtime::block_on(task.wait()).unwrap();
+    assert_eq!(
+        outcome,
+        crate::native_runtime::NativeTaskOutcome::Completed(Ok((1, 1)))
+    );
+    assert_eq!(
+        native_thread_writer_waits() - writer_waits,
+        0,
+        "the job ran on the writer thread without parking the worker"
+    );
+    assert_eq!(
+        native_thread_reader_waits() - reader_waits,
+        0,
+        "the awaited read ran on the blocking pool"
+    );
+}
+
+#[test]
+fn a_write_job_commits_on_ok_and_rolls_back_on_err() {
+    let (_fixture, handle) = job_fixture();
+    let insert = |value| {
+        statement(
+            "INSERT INTO job_rows (value) VALUES (?1)",
+            vec![ExactSqlValue::Integer(value)],
+        )
+    };
+
+    let refused = crate::native_runtime::block_on(handle.transact(move |transaction| {
+        transaction
+            .execute(insert(1))
+            .map_err(|error| error.to_string())?;
+        Err::<(), _>("refused after its write".to_owned())
+    }))
+    .unwrap()
+    .unwrap();
+    assert_eq!(refused, Err("refused after its write".to_owned()));
+    assert_eq!(job_count(&handle), 0, "a refused job leaves no row");
+
+    let committed = crate::native_runtime::block_on(handle.transact(move |transaction| {
+        transaction
+            .execute(insert(2))
+            .map(|result| result.changed_rows)
+    }))
+    .unwrap()
+    .unwrap();
+    assert_eq!(committed, Ok(1));
+    assert_eq!(job_count(&handle), 1, "an accepted job commits its row");
+}

@@ -657,13 +657,14 @@ pub struct HandoffOpenListingV1 {
     pub consumed_at: Option<UtcMicros>,
 }
 
+/// Every method is awaited and never parks the caller's thread.
 pub trait HandoffOpenAuthorityPort: Send + Sync {
     /// Commits a grant or returns the byte-authoritative grant already
     /// committed for the same request identity.
     fn issue(
         &self,
         grant: &HandoffOpenGrantV1,
-    ) -> Result<HandoffOpenGrantV1, HandoffOpenAuthorityError>;
+    ) -> impl Future<Output = Result<HandoffOpenGrantV1, HandoffOpenAuthorityError>> + Send;
 
     /// Enumerates the grants matching `filter`, newest issuance first, capped
     /// at `limit`.
@@ -676,14 +677,14 @@ pub trait HandoffOpenAuthorityPort: Send + Sync {
         &self,
         filter: &HandoffOpenListFilterV1,
         limit: u32,
-    ) -> Result<Vec<HandoffOpenListingV1>, HandoffOpenAuthorityError>;
+    ) -> impl Future<Output = Result<Vec<HandoffOpenListingV1>, HandoffOpenAuthorityError>> + Send;
 
     fn resolve(
         &self,
         token_digest: &ManifestDigest,
         expected: &HandoffOpenExpectationV1,
         observed_at: UtcMicros,
-    ) -> Result<Option<HandoffOpenGrantV1>, HandoffOpenAuthorityError>;
+    ) -> impl Future<Output = Result<Option<HandoffOpenGrantV1>, HandoffOpenAuthorityError>> + Send;
 
     fn consume(
         &self,
@@ -692,7 +693,7 @@ pub trait HandoffOpenAuthorityPort: Send + Sync {
         request_id: &RequestId,
         input_digest: &ManifestDigest,
         consumed_at: UtcMicros,
-    ) -> Result<HandoffOpenConsumeOutcomeV1, HandoffOpenAuthorityError>;
+    ) -> impl Future<Output = Result<HandoffOpenConsumeOutcomeV1, HandoffOpenAuthorityError>> + Send;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1087,7 +1088,7 @@ where
             issued_at,
             expires_at,
         )?;
-        self.authority.issue(&grant).map_err(authority_error)
+        self.authority.issue(&grant).await.map_err(authority_error)
     }
 
     /// Enumerates the handoff tokens this caller could redeem.
@@ -1109,6 +1110,7 @@ where
         let mut listings = self
             .authority
             .list(&filter, MAX_HANDOFF_LIST_RESULTS_V1.saturating_add(1))
+            .await
             .map_err(authority_error)?;
         let more_existed = listings.len() > MAX_HANDOFF_LIST_RESULTS_V1 as usize;
         listings.truncate(MAX_HANDOFF_LIST_RESULTS_V1 as usize);
@@ -1201,6 +1203,7 @@ where
         let Some(grant) = self
             .authority
             .resolve(&token_digest, &expected, observed_at)
+            .await
             .map_err(authority_error)?
         else {
             return Err(HandoffOpenError::NotFoundOrNotAuthorized);
@@ -1233,6 +1236,7 @@ where
                 &input_digest,
                 observed_at,
             )
+            .await
             .map_err(authority_error)?
         {
             HandoffOpenConsumeOutcomeV1::Consumed(consumption) => *consumption,

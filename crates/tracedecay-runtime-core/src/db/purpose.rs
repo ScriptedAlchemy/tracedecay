@@ -68,12 +68,13 @@ impl Database {
     }
 
     /// Owner-bound single-use handoff-open authority.
-    pub fn handoff_open_storage(
+    pub async fn handoff_open_storage(
         &self,
     ) -> Result<tracedecay_rusqlite_runtime::handoff::HandoffOpenSqliteAuthority> {
         tracedecay_rusqlite_runtime::handoff::HandoffOpenSqliteAuthority::from_retained_exact_sql(
             self.retained_exact_sql_for_purpose("attach handoff-open storage")?,
         )
+        .await
         .map_err(|error| TraceDecayError::Database {
             message: format!("failed to validate handoff-open storage schema: {error:?}"),
             operation: "attach handoff-open storage".to_owned(),
