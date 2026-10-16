@@ -142,6 +142,7 @@ pub(super) async fn commit_fact(
                 runtime,
                 FactCurrentQuery::new(batch.owner().clone(), batch.fact_id().clone())?,
             )
+            .await
             .ok()
             .flatten()
             .map(|fact| fact.last_event_id().clone());
@@ -172,7 +173,8 @@ pub(super) async fn commit_fact(
     let current = query_fact_current(
         runtime,
         FactCurrentQuery::new(batch.owner().clone(), batch.fact_id().clone())?,
-    )?;
+    )
+    .await?;
     finish_commit_outcome(&batch, last_event_id, current, replay)
 }
 
@@ -210,7 +212,7 @@ fn finish_commit_outcome(
     })
 }
 
-pub(super) fn query_fact_current(
+pub(super) async fn query_fact_current(
     runtime: &DatabaseRuntimeClientV1,
     query: FactCurrentQuery,
 ) -> FactStoreResult<Option<StoredFactV1>> {
@@ -219,7 +221,9 @@ pub(super) fn query_fact_current(
         runtime,
         FactReadOperationV1::Current(query),
         CURRENT_OPERATION,
-    )? {
+    )
+    .await?
+    {
         FactReadResultV1::Current(fact) => Ok(*fact),
         other @ FactReadResultV1::Lineage(_) => Err(runtime_error(
             CURRENT_OPERATION,
@@ -228,7 +232,7 @@ pub(super) fn query_fact_current(
     }
 }
 
-pub(super) fn query_fact_lineage(
+pub(super) async fn query_fact_lineage(
     runtime: &DatabaseRuntimeClientV1,
     query: FactLineageQuery,
 ) -> FactStoreResult<Vec<tracedecay_domain::FactLineageEventV1>> {
@@ -237,7 +241,9 @@ pub(super) fn query_fact_lineage(
         runtime,
         FactReadOperationV1::Lineage(query),
         LINEAGE_OPERATION,
-    )? {
+    )
+    .await?
+    {
         FactReadResultV1::Lineage(events) => Ok(events),
         other @ FactReadResultV1::Current(_) => Err(runtime_error(
             LINEAGE_OPERATION,
@@ -246,15 +252,16 @@ pub(super) fn query_fact_lineage(
     }
 }
 
-fn dispatch_fact_read(
+async fn dispatch_fact_read(
     runtime: &DatabaseRuntimeClientV1,
     operation: FactReadOperationV1,
     operation_name: &'static str,
 ) -> FactStoreResult<FactReadResultV1> {
     let request = build_read_request(runtime.binding(), operation, operation_name)?;
-    let probe = RuntimeFactProbe::for_read(request.control());
+    let probe = Arc::new(RuntimeFactProbe::for_read(request.control()));
     let outcome = runtime
-        .dispatch_read(request, &probe)
+        .dispatch_read(request, probe)
+        .await
         .map_err(|error| runtime_error(operation_name, format!("{error:?}")))?;
     if !matches!(
         outcome.coverage(),
@@ -709,8 +716,8 @@ mod tests {
             CURRENT_OPERATION,
         )
         .unwrap();
-        let read_probe = RuntimeFactProbe::for_read(read.control());
-        assert!(runtime.dispatch_read(read, &read_probe).is_ok());
+        let read_probe = Arc::new(RuntimeFactProbe::for_read(read.control()));
+        assert!(runtime.dispatch_read(read, read_probe).await.is_ok());
     }
 
     #[test]

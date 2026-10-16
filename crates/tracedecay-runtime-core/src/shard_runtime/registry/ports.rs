@@ -593,18 +593,21 @@ impl PhysicalRuntimeAttachment for RepositoryRuntimePhysicalAttachment {
     fn dispatch_read(
         &self,
         request: RuntimeReadRequestV1,
-        probe: &dyn RuntimeRequestProbeV1,
-    ) -> Result<RuntimeReadOutcomeV1, StoreRuntimeRegistryFailure> {
-        RepositoryRuntimePhysicalAttachment::dispatch_read(self, request, probe).map_err(|error| {
-            match error {
-                RepositoryDispatchError::Reader(ReaderAcquireError::Saturated { .. }) => {
-                    StoreRuntimeRegistryFailure::ReaderSaturated
-                }
-                error => StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                    operation: "dispatch repository read",
-                    message: error.to_string(),
-                },
-            }
+        probe: Arc<dyn RuntimeRequestProbeV1>,
+    ) -> StoreRuntimeRegistryFuture<'_, Result<RuntimeReadOutcomeV1, StoreRuntimeRegistryFailure>>
+    {
+        Box::pin(async move {
+            RepositoryRuntimePhysicalAttachment::dispatch_read_async(self, request, probe)
+                .await
+                .map_err(|error| match error {
+                    RepositoryDispatchError::Reader(ReaderAcquireError::Saturated { .. }) => {
+                        StoreRuntimeRegistryFailure::ReaderSaturated
+                    }
+                    error => StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                        operation: "dispatch repository read",
+                        message: error.to_string(),
+                    },
+                })
         })
     }
 }

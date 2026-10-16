@@ -105,12 +105,12 @@ impl DatabaseRuntimeClientV1 {
             .await
     }
 
-    pub fn dispatch_read(
+    pub async fn dispatch_read(
         &self,
         request: tracedecay_store::RuntimeReadRequestV1,
-        probe: &dyn tracedecay_store::RuntimeRequestProbeV1,
+        probe: Arc<dyn tracedecay_store::RuntimeRequestProbeV1>,
     ) -> Result<tracedecay_store::RuntimeReadOutcomeV1, StoreRuntimeRegistryFailure> {
-        self.guard.runtime().dispatch_read(request, probe)
+        self.guard.runtime().dispatch_read(request, probe).await
     }
 
     /// Exact rusqlite writer/reader telemetry for this guarded client.

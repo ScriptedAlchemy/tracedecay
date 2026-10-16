@@ -133,9 +133,11 @@ impl RemoteExactObservationQueryReadPortV1 for DaemonRemoteExactObservationQuery
             decision: Mutex::new(None),
             commit_started: AtomicBool::new(false),
         };
-        let outcome = target
-            .dispatch_read(request.clone(), &probe)
-            .map_err(|_| RemoteExactObservationQueryErrorV1::AuthorityUnavailable)?;
+        let outcome = tracedecay_runtime_core::native_runtime::block_on(
+            target.dispatch_read(request.clone(), Arc::new(probe)),
+        )
+        .map_err(|_| RemoteExactObservationQueryErrorV1::AuthorityUnavailable)?
+        .map_err(|_| RemoteExactObservationQueryErrorV1::AuthorityUnavailable)?;
         outcome
             .validate_for(&request)
             .map_err(|_| RemoteExactObservationQueryErrorV1::ReceiptMismatch)?;

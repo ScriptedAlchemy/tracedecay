@@ -540,30 +540,42 @@ impl RepositoryRuntimePhysicalAttachment {
             .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))
     }
 
+    /// Typed read that parks the calling thread on reader admission, the
+    /// reader's replies and the snapshot end. For blocking-pool and dedicated
+    /// threads; async code calls [`Self::dispatch_read_async`].
     pub fn dispatch_read(
         &self,
         request: RuntimeReadRequestV1,
         probe: &dyn RuntimeRequestProbeV1,
     ) -> Result<RuntimeReadOutcomeV1, RepositoryDispatchError> {
-        let readers = {
-            let state = self.lock_state();
-            if !state.admission_open || state.closed {
-                return Err(RepositoryDispatchError::Closed);
-            }
-            state
-                .readers
-                .clone()
-                .ok_or(RepositoryDispatchError::Closed)?
-        };
-        let mut reader = readers
-            .acquire_for_dispatch(&request, probe)
-            .map_err(RepositoryDispatchError::Reader)?;
-        let mut snapshot = reader
-            .begin_snapshot()
-            .map_err(|error| RepositoryDispatchError::ReaderWorker(error.to_string()))?;
-        snapshot
-            .execute(request, probe)
-            .map_err(RepositoryDispatchError::Reader)
+        read_admitted(&self.admitted_readers()?, request, probe)
+    }
+
+    /// Typed read from async code. Its waits run on one blocking-pool thread,
+    /// inline when the caller already is one, so a native worker never parks
+    /// on a reader.
+    pub async fn dispatch_read_async(
+        &self,
+        request: RuntimeReadRequestV1,
+        probe: Arc<dyn RuntimeRequestProbeV1>,
+    ) -> Result<RuntimeReadOutcomeV1, RepositoryDispatchError> {
+        let readers = self.admitted_readers()?;
+        let span = tracing::Span::current();
+        crate::native_runtime::spawn_blocking(move || {
+            span.in_scope(|| read_admitted(&readers, request, probe.as_ref()))
+        })
+        .await
+        .map_err(RepositoryDispatchError::BlockingPool)?
+    }
+
+    fn admitted_readers(
+        &self,
+    ) -> Result<ReaderPool<RepositoryRuntimeReadExecutor>, RepositoryDispatchError> {
+        let state = self.lock_state();
+        if !state.admission_open || state.closed {
+            return Err(RepositoryDispatchError::Closed);
+        }
+        state.readers.clone().ok_or(RepositoryDispatchError::Closed)
     }
 
     #[tracing::instrument(name = "rusqlite.attachment.drain", level = "trace", skip_all)]
@@ -675,6 +687,22 @@ impl Drop for RepositoryRuntimePhysicalAttachment {
     }
 }
 
+fn read_admitted(
+    readers: &ReaderPool<RepositoryRuntimeReadExecutor>,
+    request: RuntimeReadRequestV1,
+    probe: &dyn RuntimeRequestProbeV1,
+) -> Result<RuntimeReadOutcomeV1, RepositoryDispatchError> {
+    let mut reader = readers
+        .acquire_for_dispatch(&request, probe)
+        .map_err(RepositoryDispatchError::Reader)?;
+    let mut snapshot = reader
+        .begin_snapshot()
+        .map_err(|error| RepositoryDispatchError::ReaderWorker(error.to_string()))?;
+    snapshot
+        .execute(request, probe)
+        .map_err(RepositoryDispatchError::Reader)
+}
+
 #[derive(Debug)]
 pub enum RepositoryDispatchError {
     Closed,
@@ -682,6 +710,8 @@ pub enum RepositoryDispatchError {
     ReaderWorker(String),
     Writer(String),
     WriterRuntime(StorageRuntimeErrorV1),
+    /// The native blocking pool could not run the read.
+    BlockingPool(String),
 }
 
 impl fmt::Display for RepositoryDispatchError {
@@ -692,6 +722,7 @@ impl fmt::Display for RepositoryDispatchError {
             Self::ReaderWorker(error) => write!(formatter, "repository snapshot failed: {error}"),
             Self::Writer(error) => write!(formatter, "repository write failed: {error}"),
             Self::WriterRuntime(error) => write!(formatter, "repository write failed: {error}"),
+            Self::BlockingPool(error) => write!(formatter, "repository read not run: {error}"),
         }
     }
 }
@@ -700,7 +731,7 @@ impl Error for RepositoryDispatchError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Reader(error) => Some(error),
-            Self::Closed | Self::ReaderWorker(_) | Self::Writer(_) => None,
+            Self::Closed | Self::ReaderWorker(_) | Self::Writer(_) | Self::BlockingPool(_) => None,
             Self::WriterRuntime(error) => Some(error),
         }
     }

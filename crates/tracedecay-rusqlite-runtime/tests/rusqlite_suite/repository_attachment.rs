@@ -157,6 +157,62 @@ fn temporal_health_dispatch_uses_the_reserved_reader_lane() {
 }
 
 #[test]
+fn an_async_dispatch_read_from_a_native_task_never_parks_the_worker() {
+    use tracedecay_rusqlite_runtime::{exact_sql::native_thread_reader_waits, native_runtime};
+
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().join("sessions.db");
+    Connection::open(&path).unwrap();
+    let path = path.canonicalize().unwrap();
+    let binding = binding();
+    let locator = VerifiedStoreLocatorV1::new(
+        binding.shard_id.clone(),
+        StoreIncarnationV1::new(1).unwrap(),
+        LocatorDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
+    );
+    let attachment = std::sync::Arc::new(
+        RepositoryPhysicalAttachmentFactory
+            .attach(
+                &native_runtime::handle().expect("native runtime"),
+                binding.clone(),
+                locator,
+                path,
+                AdmissionConfigV1::default(),
+            )
+            .unwrap(),
+    );
+    let (request, probe) = health_request(binding, ConsistencyModeV1::LatestAvailable);
+    let before = native_thread_reader_waits();
+
+    let reader = std::sync::Arc::clone(&attachment);
+    let task = native_runtime::NativeTask::spawn(async move {
+        reader
+            .dispatch_read_async(request, std::sync::Arc::new(probe))
+            .await
+            .map(|outcome| {
+                matches!(
+                    outcome.value(),
+                    Some(RuntimeReadResultV1::TemporalHealth { healthy: true })
+                )
+            })
+            .map_err(|error| error.to_string())
+    })
+    .unwrap();
+
+    assert_eq!(
+        native_runtime::block_on(task.wait()).unwrap(),
+        native_runtime::NativeTaskOutcome::Completed(Ok(true))
+    );
+    assert_eq!(
+        native_thread_reader_waits() - before,
+        0,
+        "the read waited on a native worker"
+    );
+    attachment.drain().unwrap();
+    attachment.close_and_join().unwrap();
+}
+
+#[test]
 fn at_least_reads_refuse_coverage_without_a_committed_watermark() {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("sessions.db");
