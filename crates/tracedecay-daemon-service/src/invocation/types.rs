@@ -395,6 +395,7 @@ impl BoundedHookOrchestratorV1 {
                 let superseded = operation
                     .superseded
                     .load(std::sync::atomic::Ordering::Acquire);
+                drop(permit);
                 Self::settle_operation(&in_flight, &address, &operation, superseded);
                 return;
             }
@@ -455,8 +456,12 @@ impl BoundedHookOrchestratorV1 {
                         .load(std::sync::atomic::Ordering::Acquire)
                 }
             };
-            Self::settle_operation(&in_flight, &address, &operation, emit_terminal);
+            // Free the permit before the operation leaves the in-flight maps.
+            // An admission that no longer finds this operation must not be
+            // backpressured by it, and a completion fires only once the next
+            // admission can run.
             drop(permit);
+            Self::settle_operation(&in_flight, &address, &operation, emit_terminal);
         });
         let Ok(task) = task else {
             Self::settle_operation(
