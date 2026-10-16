@@ -1277,29 +1277,19 @@ mod tests {
         let lifecycle = DaemonLifecycle::default();
         let prepare_lock = Arc::new(tokio::sync::Mutex::new(()));
         let held_lock = prepare_lock.lock().await;
-        let prepare_started = Arc::new(tokio::sync::Notify::new());
         let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let deadline = Instant::now() + Duration::from_millis(200);
 
-        let first_lifecycle = lifecycle.clone();
+        // The deadline may pass before the runner first polls the prepare, so
+        // the guard lives in the prepare future itself, not in its first poll.
+        let prepare_guard = Dropped(Arc::clone(&dropped));
         let first_lock = Arc::clone(&prepare_lock);
-        let first_started = Arc::clone(&prepare_started);
-        let first_dropped = Arc::clone(&dropped);
-        let first = tokio::spawn(async move {
-            coordinate_daemon_shutdown(&first_lifecycle, deadline, async move {
-                let _dropped = Dropped(first_dropped);
-                first_started.notify_one();
-                let _lock = first_lock.lock().await;
-                DaemonShutdownPlan::new(Vec::new(), |_| async { ShutdownTaskReceipt::default() })
-            })
-            .await
-        });
-        prepare_started.notified().await;
-
-        let receipt = tokio::time::timeout(Duration::from_secs(10), first)
-            .await
-            .expect("the shutdown deadline bounds a contended prepare")
-            .expect("shutdown prepare timeout receipt");
+        let receipt = coordinate_daemon_shutdown(&lifecycle, deadline, async move {
+            let _dropped = prepare_guard;
+            let _lock = first_lock.lock().await;
+            DaemonShutdownPlan::new(Vec::new(), |_| async { ShutdownTaskReceipt::default() })
+        })
+        .await;
         assert!(
             Instant::now() >= deadline,
             "the prepare is cut off at the shutdown deadline, not before it"
