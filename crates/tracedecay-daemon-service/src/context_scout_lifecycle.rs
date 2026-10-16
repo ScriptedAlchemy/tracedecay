@@ -25,21 +25,29 @@ const CONTEXT_SCOUT_LIFECYCLE_QUERY: &str = "SELECT observation_json
      ORDER BY sequence DESC
      LIMIT ?2";
 
-const NATIVE_SESSION_IDS_QUERY: &str = "SELECT json_extract(
-            observation_json,
-            '$.identity.source.session_id'
-        ) AS session_id
-     FROM observations
-     WHERE json_extract(
-            observation_json,
-            '$.__retention_released'
-        ) IS NULL
-       AND json_type(
-            observation_json,
-            '$.identity.source.session_id'
-        ) = 'text'
-     GROUP BY session_id
-     ORDER BY MAX(sequence) DESC";
+/// Every distinct native session id, one session-index seek per session.
+///
+/// A plain DISTINCT or GROUP BY visits every observation, and a GROUP BY
+/// also sorts each row's `observation_json` into a TEMP b-tree, which spilled
+/// gigabytes into `/var/tmp` per replay sweep (#4152). Retention is not
+/// filtered here: [`lookup_context_scout_lifecycle`] re-reads the matched
+/// session without released observations.
+const NATIVE_SESSION_IDS_QUERY: &str = "WITH RECURSIVE session_ids(session_id) AS (
+         SELECT MIN(json_extract(observation_json, '$.identity.source.session_id'))
+         FROM observations
+         WHERE json_valid(observation_json)
+         UNION ALL
+         SELECT (
+             SELECT MIN(json_extract(observation_json, '$.identity.source.session_id'))
+             FROM observations
+             WHERE json_valid(observation_json)
+               AND json_extract(observation_json, '$.identity.source.session_id')
+                   > session_ids.session_id
+         )
+         FROM session_ids
+         WHERE session_ids.session_id IS NOT NULL
+     )
+     SELECT session_id FROM session_ids WHERE typeof(session_id) = 'text'";
 
 type ContextScoutLifecycleKeyV1 = ([u8; 16], [u8; 16]);
 
