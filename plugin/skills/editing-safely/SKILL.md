@@ -1,6 +1,6 @@
 ---
 name: editing-safely
-description: Make structural code edits with TraceDecay preview and mutation operations.
+description: Use when the user asks to rename, move, extract, replace, or insert code across symbols or files and wants the edit previewed and applied safely. Load this skill before the first tool call.
 ---
 
 # Editing safely

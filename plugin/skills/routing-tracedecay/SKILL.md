@@ -1,6 +1,6 @@
 ---
 name: routing-tracedecay
-description: Pick the one TraceDecay tool for the moment you are in, then stop.
+description: Use when you know the kind of code question but not which TraceDecay tool answers it; names the one call to make. Load this skill before the first tool call.
 ---
 
 # Routing TraceDecay

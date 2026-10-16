@@ -1,6 +1,6 @@
 ---
 name: discovering-tracedecay
-description: Find the supported TraceDecay operation for a code-intelligence, memory, or administration task.
+description: Use when you know the task but not which TraceDecay tool or operation covers it, including memory and administration tasks. Load this skill before the first tool call.
 ---
 
 # Discovering TraceDecay

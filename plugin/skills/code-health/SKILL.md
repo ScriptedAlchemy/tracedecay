@@ -1,6 +1,6 @@
 ---
 name: code-health
-description: Assess project or directory architecture, coupling, and structural test risk using TraceDecay evidence.
+description: Use when the user asks for a quality, architecture, coupling, or complexity read on a project or directory, or where its structural risks are. Load this skill before the first tool call.
 ---
 
 # Code health
