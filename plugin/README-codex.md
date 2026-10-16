@@ -80,9 +80,8 @@ TraceDecay adapts the graph server to that host:
 - The server lists every tool with its full input schema
   (`--full-tool-list`). Codex finds tools through its own `ALL_TOOLS` and
   `tools.tool_search`, and it builds each tool's TypeScript declaration from
-  the input schema. In the agent-adoption eval this cut uncached input by
-  about 4,000 tokens per task against the stub list, with the same task
-  success.
+  the input schema. In the agent-adoption eval the full list used fewer input
+  tokens per task than the stub list, with the same task success.
 - Results keep the default Markdown rendering. Programs print results rather
   than parse them, and `format: "json"` returns the full typed envelope,
   which is several times larger. Ask for `format: "json"` only when the
