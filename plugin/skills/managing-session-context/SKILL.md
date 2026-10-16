@@ -29,3 +29,6 @@ commits; workflow recovery reads `wf_*` session runs through
 For refresh lifecycle and read-only LCM health, see
 [refresh and health](references/refresh-and-health.md). For Hermes native alias
 schemas, see [Hermes aliases](references/hermes-aliases.md).
+
+**Report:** the messages quoted with their session id and timestamp, and the
+coverage of the search. Do not present a summary as the exact message.

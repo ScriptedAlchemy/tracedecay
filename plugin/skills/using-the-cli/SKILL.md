@@ -27,3 +27,6 @@ Apply and rollback consume returned identities and expected state unchanged.
 Correct deterministic argument errors once. Preserve typed availability failures
 and use bounded native evidence when appropriate; private database queries are
 not an alternate public transport.
+
+**Report:** the command that ran, its result, and why the CLI replaced MCP. Do
+not start or restart the daemon to make the CLI work.

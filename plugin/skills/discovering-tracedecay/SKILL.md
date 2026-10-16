@@ -23,3 +23,6 @@ does not establish daemon failure; see `using-the-cli` when transport matters.
 For project and multi-root identity, configuration changes, Context Scout
 controls, or storage recovery, read
 [administration authority](references/administration-authority.md).
+
+**Report:** the skill or operation that covers the task and the one call to make
+next. Do not list the catalog.

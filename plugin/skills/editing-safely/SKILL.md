@@ -37,3 +37,7 @@ Structural rewrite (`tracedecay_ast_grep_rewrite`) uses the same in-process
 ast-grep engine and grammars as structural search.
 Verify the actual changed behavior and use `assessing-impact` for structural
 test selection.
+
+**Report:** what changed, the operation identity of each applied mutation, the
+references inspected, and the verification that ran. Do not report a preview as
+an applied edit.

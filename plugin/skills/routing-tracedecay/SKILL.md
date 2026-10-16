@@ -30,3 +30,6 @@ not already located.
 
 A name you already have is a lookup, not a tour of the repository. A question
 one `grep` in a file you can already name would answer does not need the graph.
+
+**Report:** the answer the one call returned, plus its freshness line when it is
+not `fresh`. Do not chain calls the row did not name.

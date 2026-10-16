@@ -90,7 +90,10 @@ cleanly on Claude, Codex, *and* Cursor:
 - **Description budget.** 50–320 characters, ≤45 words, trigger-first ("Use
   …"), ends with a period, no angle brackets, unique across the set.
 - **Body rules.** Exactly one plain-title H1 (never `# /slug`), no skipped
-  heading levels, no body-only `## When to Use` section, ≤500 lines.
+  heading levels, no body-only `## When to Use` section, ≤500 lines. The
+  last paragraph is the reply contract: `**Report:**`, what to return and
+  which evidence to quote, then what not to do
+  (`bundled_skills_close_with_a_report_contract`).
 - **Hygiene + layout.** No BOM/CRLF/tabs/trailing whitespace, one trailing
   newline, balanced fences, non-empty body; a skill dir holds only `SKILL.md`
   plus the supported resource dirs (`agents/`, `scripts/`, `references/`,
@@ -272,7 +275,8 @@ not hand-register `include_str!` entries.
    `plugin/skills/<skill-name>/SKILL.md` with `name` and `description`
    frontmatter. Start the description with the trigger ("Use when …") and end
    it with "Load this skill before the first tool call.", under 320 characters
-   and 45 words; keep the body under 500 lines. Use only allowed
+   and 45 words; keep the body under 500 lines and close it with a
+   `**Report:**` paragraph (see layer 2). Use only allowed
    frontmatter keys (see layer 2 above). A skill directory may also
    carry `scripts/`, `references/`, and `assets/` support files, these are
    embedded automatically by the recursive `build.rs` codegen

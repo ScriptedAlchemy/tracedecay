@@ -27,3 +27,7 @@ Broad curation (`tracedecay_fact_store_curate`) is an agent-managed run, not a
 caller-authored batch of arbitrary operations. See
 [curation](references/curation.md) for admission, terminal effects, and
 verification. Inspectors can supply evidence without gaining write authority.
+
+**Report:** each fact used with its id, trust, and provenance, or the id of the
+fact stored or changed. Say when no fact matched; do not fill the gap from this
+session's context.

@@ -39,3 +39,7 @@ For multi-root Work queries, use a saved scope set with `multi_root_execute`.
 Do not silently substitute the active project's scope. Use live metadata for
 available controls and their arguments. Named Workflow lifecycle belongs to
 `managing-workflows`; session recovery is read-only history, not Work execution.
+
+**Report:** each task, attempt, placement, or run identity with its state and
+the receipt or typed refusal that set it. Do not retry a refused step without
+reading its state.

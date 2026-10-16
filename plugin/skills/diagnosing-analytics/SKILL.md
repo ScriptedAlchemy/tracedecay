@@ -22,3 +22,7 @@ Invocation counts measure use, not task success. Compare outcomes, unnecessary
 calls, false triggers, and missed useful routing before recommending more skill
 or hint exposure. Trace a discrepancy to its capture, import, attribution, or
 read scope before changing configuration.
+
+**Report:** each count with the source it came from (analytics, hook JSONL, or
+session archive) and its included and total rows. Do not present one source's
+count as the complete history.

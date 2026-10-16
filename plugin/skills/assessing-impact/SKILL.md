@@ -19,3 +19,7 @@ indexed callers does not establish that a public API is unused.
 `run_affected_tests` runs the supported Rust selection; other languages use their
 native runner. Check the reported selection and nonzero executed count. A passing
 selection supports only the behavior it exercised, not every possible consumer.
+
+**Report:** the dependents and the tests to run, each with its file, plus the
+freshness line when it is not `fresh` and the consumers the graph cannot see. Do
+not call a caller safe because the index shows no edge to it.

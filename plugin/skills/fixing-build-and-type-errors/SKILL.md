@@ -27,3 +27,7 @@ LSP server inspection is informational: listing a server neither installs nor
 starts it. Preserve unavailable producer states instead of reporting an empty
 successful diagnostic result. Verify the root error first, then the affected
 behavior rather than repeatedly running a broad build for every dependent error.
+
+**Report:** the root error, the fix, and the fresh native build or typecheck
+that passed, or why none could run. Do not cite retained diagnostics as
+verification.

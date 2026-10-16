@@ -25,3 +25,7 @@ For type/trait questions, see [types and traits](references/types-and-traits.md)
 For cross-branch reads, see [other branches](references/other-branches.md).
 Call relationships belong to `tracing-functions`; changed consumers and tests
 belong to `assessing-impact`.
+
+**Report:** the answer with the file and symbol behind each claim, plus the
+freshness line when it is not `fresh` and the coverage when it is partial. Do
+not claim absence from an empty or partial result.

@@ -32,3 +32,7 @@ than reconstructing a target from its name.
 Explain findings against the actual changed behavior and evidence. Structural
 test selection belongs to `assessing-impact`; structural mutation belongs to
 `editing-safely`.
+
+**Report:** actionable findings only, each with location, failure mode, and
+evidence, then the coverage the semantic context lacked. Do not post, resolve,
+or apply anything the review did not authorize.

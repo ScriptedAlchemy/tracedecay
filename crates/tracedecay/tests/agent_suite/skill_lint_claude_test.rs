@@ -199,6 +199,30 @@ fn bundled_skill_descriptions_tell_the_model_when_to_load_them() {
     }
 }
 
+/// Every skill closes with the reply contract an eval can grade: what to
+/// return, which evidence to quote, and what not to do.
+#[test]
+fn bundled_skills_close_with_a_report_contract() {
+    for skill in load_all_skill_docs() {
+        let last_paragraph = skill
+            .body
+            .trim_end()
+            .rsplit("\n\n")
+            .next()
+            .unwrap_or("")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            last_paragraph.starts_with("**Report:** ")
+                && last_paragraph.to_lowercase().contains(" do not "),
+            "{} must end with a `**Report:** ...` paragraph that names what to return and \
+             what not to do; got {last_paragraph:?}",
+            skill.path.display()
+        );
+    }
+}
+
 /// Strict Agent Skills spec conformance.
 ///
 /// The whole shared skill set must stay strictly Agent-Skills-spec conformant:

@@ -32,3 +32,7 @@ request. Use live operation schemas for available arguments.
 `tracedecay_workflows` retrieves historical `wf_*` session runs; it does not
 control Workflow definitions or execution. Use `managing-session-context` for
 that history and `managing-work` for task/attempt/placement operations.
+
+**Report:** the definition or run identity, the lifecycle state it reached, and
+any typed refusal with its detail. Do not resend a `stale` or `conflict` request
+unchanged.

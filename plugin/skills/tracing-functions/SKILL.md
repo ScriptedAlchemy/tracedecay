@@ -13,10 +13,13 @@ chain. Batch independent known nodes when the operation supports it.
 Inspect trait-dispatch attribution and implementation bodies when the call passes
 through an interface. Indexed resolution is not universal runtime coverage:
 macros, dynamic dispatch, string-keyed calls, and public users outside the index
-may need source or runtime evidence. Report the coverage gap instead of claiming
-an empty graph proves no callers.
+may need source or runtime evidence.
 
 Call chains connect specified endpoints; rename preview provides broader
 reference evidence for a proposed rename without applying it. Hand actual
 mutations to `editing-safely`, and test/blast-radius questions to
 `assessing-impact`. Keep returned node identities for scoped follow-up.
+
+**Report:** the callers or callees with their files, the depth searched, and the
+coverage gap (macros, dynamic dispatch, users outside the index). Do not call an
+empty result proof that nothing calls the symbol.
