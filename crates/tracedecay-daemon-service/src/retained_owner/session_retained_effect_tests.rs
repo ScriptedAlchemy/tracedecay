@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::time::Duration;
 
 use tempfile::TempDir;
 use tracedecay_contracts::retained_surfaces::{
@@ -320,13 +319,12 @@ async fn reopen_and_settle(
         .registered_database_arc(HostAdmissionScope::Project)
         .expect("reopened project database");
     let registry = SessionTemporalRefreshSchedulerRegistry::default();
-    let wake = registry
-        .ensure_project(owner_for(&database, project_id), database.clone())
+    let owner = owner_for(&database, project_id);
+    registry
+        .ensure_project(owner.clone(), database.clone())
         .await;
-    assert!(
-        wake.wake_and_wait_until_idle(Duration::from_secs(2)).await,
-        "restarted scheduler must settle persisted recovery"
-    );
+    // The mount wakes the worker; idle means its recovery pass finished.
+    registry.wait_project_idle(&owner).await;
     let receipt = SessionTemporalStore::new(database.as_ref())
         .session_refresh_receipt(SessionRefreshReceiptRequestV1::new(
             SessionRefreshOperationIdV1::new(operation_id.to_owned())
