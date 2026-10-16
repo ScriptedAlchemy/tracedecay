@@ -312,6 +312,35 @@ impl RegisteredWorkApplicationServicesV1 {
             })
     }
 
+    /// Records one leak adjudication as a single writer transaction: the
+    /// command replay check, the verdict over `evidence` and the
+    /// revision-compared append commit together. `evidence` is collected
+    /// before the job, outside the writer.
+    pub async fn adjudicate_leak<E>(
+        &self,
+        context: tracedecay_contracts::RequestContext,
+        command: tracedecay_contracts::AdjudicateWorkLeakCommandV1,
+        evidence: E,
+        scan_started_at: tracedecay_domain::UtcMicros,
+        scan_deadline: tracedecay_domain::UtcMicros,
+    ) -> Result<
+        tracedecay_contracts::WorkLeakAdjudicationOutcomeV1,
+        tracedecay_contracts::ApplicationProblem,
+    >
+    where
+        E: tracedecay_contracts::WorkLeakEvidencePortV1 + Clone + 'static,
+    {
+        self.storage
+            .transact(move |storage| {
+                tracedecay_contracts::WorkLeakAdjudicationServiceV1::new(storage, evidence.clone())
+                    .adjudicate(&context, command.clone(), scan_started_at, scan_deadline)
+            })
+            .await
+            .unwrap_or_else(|_| {
+                Err(tracedecay_contracts::WorkLeakAdjudicationStorageErrorV1::Unavailable.into())
+            })
+    }
+
     pub fn attempts(
         &self,
     ) -> &tracedecay_contracts::WorkAttemptService<
