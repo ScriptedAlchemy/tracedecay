@@ -45,6 +45,105 @@ pub(crate) enum WriterCommand {
         reply: async_channel::Sender<Result<ExactSqlRows, ExactSqlError>>,
         authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
     },
+    /// One whole write transaction, run on this thread without a round trip
+    /// per statement. The job answers whether to commit.
+    Job {
+        job: WriterJob,
+        reply: async_channel::Sender<Result<(), ExactSqlError>>,
+        authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
+    },
+}
+
+pub(crate) type WriterJob = Box<dyn FnOnce(&ExactSqlJobTransaction<'_>) -> bool + Send>;
+
+/// The statements a write job may run inside its transaction, on the writer
+/// thread. Each statement gets the same guard, authority check and deadline as
+/// a statement of an interactive transaction.
+pub struct ExactSqlJobTransaction<'transaction> {
+    transaction: &'transaction Transaction<'transaction>,
+    shutdown_requested: &'transaction Arc<AtomicBool>,
+    authority: Option<&'transaction dyn ExactSqlWriteAuthority>,
+    deadline: Instant,
+}
+
+impl ExactSqlJobTransaction<'_> {
+    pub fn execute(
+        &self,
+        statement: ExactSqlStatement,
+    ) -> Result<super::ExactSqlExecuteResult, ExactSqlError> {
+        match self.dispatch(SqlRequest::Execute(statement))? {
+            SqlResult::Executed(result) => Ok(result),
+            _ => Err(ExactSqlError::TransactionClosed),
+        }
+    }
+
+    pub fn query(&self, statement: ExactSqlStatement) -> Result<ExactSqlRows, ExactSqlError> {
+        match self.dispatch(SqlRequest::Query(statement))? {
+            SqlResult::Queried(rows) => Ok(rows),
+            _ => Err(ExactSqlError::TransactionClosed),
+        }
+    }
+
+    fn dispatch(&self, request: SqlRequest) -> Result<SqlResult, ExactSqlError> {
+        if clock::now() >= self.deadline {
+            return Err(ExactSqlError::TransactionExpired);
+        }
+        verify_write_authority(self.authority, request.intent())?;
+        execute_request(
+            self.transaction,
+            request,
+            true,
+            Some(Arc::clone(self.shutdown_requested)),
+            Some(self.deadline),
+            true,
+            None,
+        )
+    }
+}
+
+/// Runs one write job: begin IMMEDIATE, the job's statements, then commit when
+/// the job asks for it and rollback otherwise.
+fn run_writer_job(
+    connection: &Connection,
+    job: WriterJob,
+    reply: &async_channel::Sender<Result<(), ExactSqlError>>,
+    authority: Option<&dyn ExactSqlWriteAuthority>,
+    shutdown_requested: &Arc<AtomicBool>,
+) -> Result<(), ExactSqlError> {
+    verify_write_authority(authority, ExactSqlWriteIntent::BeginTransaction)?;
+    let before = connection.total_changes();
+    let transaction = begin_transaction_with_busy_retry(
+        connection,
+        TransactionBehavior::Immediate,
+        shutdown_requested,
+        || reply.is_closed(),
+    )
+    .map_err(|error| sqlite_error("begin exact SQL job", error))?;
+    let _span = tracing::trace_span!("rusqlite.exact_sql.job").entered();
+    let commit = job(&ExactSqlJobTransaction {
+        transaction: &transaction,
+        shutdown_requested,
+        authority,
+        deadline: clock::now() + EXACT_SQL_TRANSACTION_LIMIT,
+    });
+    // An interrupted write statement already rolled the transaction back
+    // (see `discard_transaction`), so there is nothing left to commit.
+    if !commit || transaction.is_autocommit() || shutdown_requested.load(Ordering::Acquire) {
+        let rollback = discard_transaction(transaction, before);
+        if rollback.is_err() {
+            shutdown_requested.store(true, Ordering::Release);
+        }
+        return match (commit, rollback) {
+            (_, Err(error)) => Err(error),
+            (false, Ok(_)) => Ok(()),
+            (true, Ok(_)) => Err(ExactSqlError::TransactionClosed),
+        };
+    }
+    verify_write_authority(authority, ExactSqlWriteIntent::Commit)?;
+    let _span = tracing::trace_span!("rusqlite.commit").entered();
+    transaction
+        .commit()
+        .map_err(|error| sqlite_error("commit exact SQL job", error))
 }
 
 /// Pause between busy-begin attempts so the acquire deadline is the real bound.
@@ -411,6 +510,20 @@ pub(crate) fn run_writer_command(
             };
             DeferredReply::new(reply, result)
         }
+        WriterCommand::Job {
+            job,
+            reply,
+            authority,
+        } => {
+            let result = run_writer_job(
+                connection,
+                job,
+                &reply,
+                authority.as_deref(),
+                shutdown_requested,
+            );
+            DeferredReply::new(reply, result)
+        }
     }
 }
 
@@ -423,6 +536,9 @@ pub(crate) fn reject_writer_command(command: WriterCommand) {
             let _ = reply.try_send(Err(ExactSqlError::WriterUnavailable));
         }
         WriterCommand::CheckpointWalTruncate { reply, .. } => {
+            let _ = reply.try_send(Err(ExactSqlError::WriterUnavailable));
+        }
+        WriterCommand::Job { reply, .. } => {
             let _ = reply.try_send(Err(ExactSqlError::WriterUnavailable));
         }
     }

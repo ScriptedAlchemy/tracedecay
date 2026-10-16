@@ -633,12 +633,12 @@ impl RegisteredGlobalDb {
         self.database.workflow_storage()
     }
 
-    pub fn handoff_open_storage(
+    pub async fn handoff_open_storage(
         &self,
     ) -> tracedecay_domain::errors::Result<
         tracedecay_rusqlite_runtime::handoff::HandoffOpenSqliteAuthority,
     > {
-        self.database.handoff_open_storage()
+        self.database.handoff_open_storage().await
     }
 
     pub fn storage_telemetry_handle(

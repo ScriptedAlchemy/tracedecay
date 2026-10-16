@@ -1083,7 +1083,7 @@ async fn handoff_open_storage_validates_mounted_schema_and_retains_one_client() 
         .await
         .unwrap();
     assert!(rows.next().await.unwrap().is_some());
-    let storage = database.handoff_open_storage().unwrap();
+    let storage = database.handoff_open_storage().await.unwrap();
     assert_retained_purpose_adapter_blocks_one_client!(owner, control, database, storage);
 }
 
@@ -1316,7 +1316,7 @@ async fn read_only_owner_issuance_preserves_the_published_access_policy() {
     assert!(database.work_storage().is_err());
     assert!(database.workflow_storage().is_err());
     assert!(database.authorized_scope_set_storage().is_err());
-    assert!(database.handoff_open_storage().is_err());
+    assert!(database.handoff_open_storage().await.is_err());
     assert!(
         database
             .remote_storage(purpose_test_remote_keyring())

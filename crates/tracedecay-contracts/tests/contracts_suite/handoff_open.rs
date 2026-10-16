@@ -33,7 +33,7 @@ struct MemoryAuthorityState {
 }
 
 impl HandoffOpenAuthorityPort for MemoryAuthority {
-    fn issue(
+    async fn issue(
         &self,
         grant: &HandoffOpenGrantV1,
     ) -> Result<HandoffOpenGrantV1, HandoffOpenAuthorityError> {
@@ -50,7 +50,7 @@ impl HandoffOpenAuthorityPort for MemoryAuthority {
         Ok(grant.clone())
     }
 
-    fn list(
+    async fn list(
         &self,
         filter: &HandoffOpenListFilterV1,
         limit: u32,
@@ -82,7 +82,7 @@ impl HandoffOpenAuthorityPort for MemoryAuthority {
         Ok(listings)
     }
 
-    fn resolve(
+    async fn resolve(
         &self,
         token_digest: &ManifestDigest,
         expected: &HandoffOpenExpectationV1,
@@ -96,7 +96,7 @@ impl HandoffOpenAuthorityPort for MemoryAuthority {
             .cloned())
     }
 
-    fn consume(
+    async fn consume(
         &self,
         token_digest: &ManifestDigest,
         expected: &HandoffOpenExpectationV1,

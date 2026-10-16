@@ -53,6 +53,7 @@ pub(crate) use column::{
 pub(crate) use json::{decode as decode_json, encode as encode_json};
 pub use types::*;
 
+pub use command::ExactSqlJobTransaction;
 pub(crate) use command::{WriterCommand, reject_writer_command, run_writer_command};
 
 use command::{TransactionCommand, TransactionLeaseState};
@@ -486,6 +487,61 @@ impl ExactSqlHandle {
         statement.validate()?;
         note_native_thread_reader_wait();
         (self.query)(statement, priority, max_wait)
+    }
+
+    /// Awaited interactive read. Reader admission and the query run as one
+    /// job on the blocking pool, so the awaiting task parks no runtime thread.
+    /// The storage executor replaces the hop (docs/plans/storage, step 7).
+    pub async fn query_async(
+        &self,
+        statement: ExactSqlStatement,
+        max_wait: Duration,
+    ) -> Result<ExactSqlRows, ExactSqlError> {
+        statement.validate()?;
+        let query = Arc::clone(&self.query);
+        crate::native_runtime::spawn_blocking(move || {
+            query(statement, OperationPriorityV1::Foreground, max_wait)
+        })
+        .await
+        .map_err(ExactSqlError::ReaderUnavailable)?
+    }
+
+    /// Runs `job` as one write transaction on the writer thread: begin
+    /// IMMEDIATE, the job's statements with no round trip between them, then
+    /// commit when the job returns `Ok` and rollback when it returns `Err`.
+    /// The outer error is the transaction's own failure; the inner result is
+    /// the job's verdict. A job is `Fn` over owned inputs so the storage
+    /// executor can run it again after an interrupted read fence.
+    pub async fn transact<R, E, F>(&self, job: F) -> Result<Result<R, E>, ExactSqlError>
+    where
+        F: Fn(&ExactSqlJobTransaction<'_>) -> Result<R, E> + Send + Sync + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        let (outcome, verdict) = async_channel::bounded(1);
+        let (reply, response) = async_channel::bounded(1);
+        let job: command::WriterJob = Box::new(move |transaction| {
+            let result = job(transaction);
+            let commit = result.is_ok();
+            let _ = outcome.try_send(result);
+            commit
+        });
+        self.writer
+            .as_ref()
+            .ok_or(ExactSqlError::WriterUnavailable)?
+            .try_send(WriterCommand::Job {
+                job,
+                reply,
+                authority: self.write_authority.clone(),
+            })
+            .map_err(map_writer_send_error)?;
+        response
+            .recv()
+            .await
+            .map_err(|_| ExactSqlError::WriterUnavailable)??;
+        verdict
+            .try_recv()
+            .map_err(|_| ExactSqlError::WriterUnavailable)
     }
 
     /// Checkpoints and truncates the WAL on the serialized writer connection.

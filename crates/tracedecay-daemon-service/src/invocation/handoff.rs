@@ -223,7 +223,7 @@ pub(super) async fn execute_handoff_application(
             );
         }
     };
-    let authority = match registered.database.handoff_open_storage() {
+    let authority = match registered.database.handoff_open_storage().await {
         Ok(authority) => authority,
         Err(_) => {
             return DaemonInvocationResponse::problem(
