@@ -151,6 +151,31 @@ pub fn native_thread_writer_waits() -> u64 {
     NATIVE_THREAD_WRITER_WAITS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Logs and counts a synchronous read that is about to park a native runtime
+/// thread on reader admission or a reader worker's reply, as
+/// `recv_writer_reply` does for writer waits.
+#[track_caller]
+pub(crate) fn note_native_thread_reader_wait() {
+    if asupersync::runtime::Runtime::current_handle().is_some() {
+        NATIVE_THREAD_READER_WAITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tracing::error!(
+            call_site = %std::panic::Location::caller(),
+            backtrace = %std::backtrace::Backtrace::force_capture(),
+            "synchronous storage read parked a native runtime thread waiting on a reader"
+        );
+    }
+}
+
+static NATIVE_THREAD_READER_WAITS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Synchronous reads this process ran on a native runtime thread. Each one
+/// parked that thread; zero is the only healthy value.
+#[must_use]
+pub fn native_thread_reader_waits() -> u64 {
+    NATIVE_THREAD_READER_WAITS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 impl ExactSqlHandle {
     pub fn attach<E: ReaderQueryExecutor>(
         writer: &PersistentWriter,
@@ -401,6 +426,7 @@ impl ExactSqlHandle {
     }
 
     /// Interactive read. Admits against the whole general reader lane.
+    #[track_caller]
     pub fn query(
         &self,
         statement: ExactSqlStatement,
@@ -414,6 +440,7 @@ impl ExactSqlHandle {
     /// Callers that know they are bulk or maintenance work pass `Background`
     /// so the reader pool keeps a slice of the general lane free for
     /// interactive reads.
+    #[track_caller]
     pub fn query_with_priority(
         &self,
         statement: ExactSqlStatement,
@@ -421,6 +448,7 @@ impl ExactSqlHandle {
         max_wait: Duration,
     ) -> Result<ExactSqlRows, ExactSqlError> {
         statement.validate()?;
+        note_native_thread_reader_wait();
         (self.query)(statement, priority, max_wait)
     }
 
@@ -526,6 +554,7 @@ impl ExactSqlHandle {
     }
 
     /// Interactive read snapshot. Admits against the whole general lane.
+    #[track_caller]
     pub fn begin_read_snapshot(
         &self,
         max_wait: Duration,
@@ -539,18 +568,22 @@ impl ExactSqlHandle {
     /// Read snapshot under an explicit priority. A pinned snapshot holds its
     /// worker for its whole lifetime, so declaring bulk work `Background` here
     /// matters more than for a one-shot query.
+    #[track_caller]
     pub fn begin_read_snapshot_with_priority(
         &self,
         priority: OperationPriorityV1,
         max_wait: Duration,
     ) -> Result<ExactSqlReadSnapshot, ExactSqlError> {
+        note_native_thread_reader_wait();
         (self.snapshot)(priority, max_wait)
     }
 
+    #[track_caller]
     pub fn begin_health_read_snapshot(
         &self,
         max_wait: Duration,
     ) -> Result<ExactSqlReadSnapshot, ExactSqlError> {
+        note_native_thread_reader_wait();
         (self.health_snapshot)(max_wait)
     }
 
@@ -753,16 +786,19 @@ impl ExactSqlReadSnapshot {
         }
     }
 
+    #[track_caller]
     pub fn query(&self, statement: ExactSqlStatement) -> Result<ExactSqlRows, ExactSqlError> {
         self.query_with_budget(statement, ExactSqlStatementBudget::Request)
     }
 
+    #[track_caller]
     pub fn query_with_budget(
         &self,
         statement: ExactSqlStatement,
         budget: ExactSqlStatementBudget,
     ) -> Result<ExactSqlRows, ExactSqlError> {
         statement.validate()?;
+        note_native_thread_reader_wait();
         self.query
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)(statement, budget)

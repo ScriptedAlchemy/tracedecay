@@ -211,11 +211,13 @@ impl WorkerClient {
             .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))
     }
 
+    #[track_caller]
     pub fn execute(
         &self,
         request: RuntimeReadRequestV1,
         probe: &dyn RuntimeRequestProbeV1,
     ) -> Result<RuntimeReadOutcomeV1, ReaderWorkerError> {
+        crate::exact_sql::note_native_thread_reader_wait();
         let sender = self.snapshot_sender()?;
         let (reply, receive) = mpsc::sync_channel(1);
         sender
