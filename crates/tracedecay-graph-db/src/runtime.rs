@@ -249,6 +249,14 @@ pub enum GraphDbRuntimeState {
     DurabilityUncertain,
 }
 
+/// Least uncheckpointed WAL history at which a commit checkpoints.
+///
+/// A checkpoint rewrites the whole container, so the trigger is the larger of
+/// this floor and the container's size: the WAL stays within one container's
+/// worth of history and rewrites cost at most one container per container of
+/// writes.
+const GRAFEO_WAL_CHECKPOINT_BYTES: u64 = 128 * 1024 * 1024;
+
 impl std::fmt::Debug for GraphDb {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -1370,16 +1378,66 @@ impl GraphDb {
         // would short-circuit as exact publication replay without ever
         // repairing it. Settlement failures instead poison the handle and
         // surface as typed DurabilityUncertain.
-        if self.inner.durability == GraphDurability::WalSync
-            && let Err(error) = {
+        if self.inner.durability == GraphDurability::WalSync {
+            if let Err(error) = {
                 let _span = tracing::trace_span!("graph_db.wal.sync").entered();
                 sync_wal(database)
+            } {
+                self.inner.poisoned.store(true, Ordering::Release);
+                return Err(error);
             }
-        {
-            self.inner.poisoned.store(true, Ordering::Release);
-            return Err(error);
+            self.checkpoint_wal_past_container(database)?;
         }
         Ok(commit)
+    }
+
+    /// Checkpoints the WAL once its uncheckpointed history passes the larger
+    /// of [`GRAFEO_WAL_CHECKPOINT_BYTES`] and the container's size. The
+    /// caller holds the exclusive snapshot claim and the database lock, as
+    /// every commit does.
+    fn checkpoint_wal_past_container(&self, database: &GrafeoDB) -> Result<(), GraphDbError> {
+        let status = database.wal_status();
+        let Some(file_manager) = database.file_manager().filter(|_| status.enabled) else {
+            return Ok(());
+        };
+        let wal_bytes = u64::try_from(status.size_bytes).unwrap_or(u64::MAX);
+        if wal_bytes <= GRAFEO_WAL_CHECKPOINT_BYTES {
+            return Ok(());
+        }
+        let sidecar = file_manager.sidecar_wal_path();
+        let threshold = file_manager
+            .file_size()
+            .map_or(GRAFEO_WAL_CHECKPOINT_BYTES, |container| {
+                container.max(GRAFEO_WAL_CHECKPOINT_BYTES)
+            });
+        if crate::recovery::uncheckpointed_wal_bytes(&sidecar) <= threshold {
+            return Ok(());
+        }
+        self.inner.markers.mark_container_mutated();
+        self.inner.invalidate_store_epoch_caches();
+        if let Err(error) = {
+            let _span = tracing::trace_span!("graph_db.wal.checkpoint").entered();
+            database.wal_checkpoint()
+        } {
+            // Grafeo persists the checkpoint record before it rewrites the
+            // container, so a failed rewrite can leave recovery skipping WAL
+            // history the container never received.
+            self.inner.poisoned.store(true, Ordering::Release);
+            return Err(GraphDbError::DurabilityUncertain {
+                message: format!(
+                    "Grafeo WAL checkpoint failed; durable outcome cannot be established: {error}"
+                ),
+            });
+        }
+        tracing::info!(
+            event = "graph_wal_checkpoint",
+            phase = "commit",
+            container = %self.container_label(),
+            wal_bytes,
+            wal_bytes_after = database.wal_status().size_bytes,
+            "checkpointed WAL history into the graph container"
+        );
+        Ok(())
     }
 
     /// Runs `read` against the open database and refuses its answer as
