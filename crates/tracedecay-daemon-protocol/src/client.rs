@@ -1357,6 +1357,60 @@ mod tests {
         daemon.await.expect("fake daemon completes");
     }
 
+    /// A request larger than the socket buffer keeps the client writing after
+    /// the daemon has refused the preface and closed, which is the state a
+    /// client stalled past the daemon's drain window reaches.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn refusal_queued_before_a_failed_request_write_is_still_reported() {
+        let isolation = tempfile::TempDir::new().expect("socket isolation");
+        let socket = isolation.path().join("daemon.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).expect("bind fake daemon");
+        let refusal_line = crate::handshake::DaemonHandshakeRefusal::for_rejected_authentication(
+            "0.1.0-beta.36+hhhh",
+        )
+        .to_line()
+        .expect("refusal line");
+        let daemon = tokio::spawn(async move {
+            use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+            let (stream, _) = listener.accept().await.expect("accept client");
+            let (reader, mut writer) = stream.into_split();
+            let mut lines = tokio::io::BufReader::new(reader).lines();
+            let _ = lines.next_line().await.expect("read auth preface");
+            writer
+                .write_all(format!("{refusal_line}\n").as_bytes())
+                .await
+                .expect("write refusal");
+            writer.flush().await.expect("flush refusal");
+        });
+
+        let client = super::DaemonInvocationClient::new(
+            crate::connection::DaemonConnection::new(
+                crate::transport::DaemonEndpoint::Unix(socket),
+                "rejected-token".to_owned(),
+            ),
+            test_skew_handshake(),
+        );
+        let observed_at = now_micros();
+        let error = client
+            .invoke(crate::contract::DaemonInvocationRequest::feedback(
+                "request.refused-mid-write",
+                ApplicationSurfaceOperation::FeedbackList,
+                "f".repeat(4 * 1024 * 1024),
+                observed_at,
+                Deadline::new(UtcMicros(observed_at.0 + 5_000_000)).expect("deadline"),
+                CancellationContext::active("cancel.refused-mid-write").expect("cancellation"),
+            ))
+            .await
+            .expect_err("a refused preface must not look like an answered request");
+        let (code, retryable, _) = error
+            .project_route_context()
+            .unwrap_or_else(|| panic!("the queued refusal must be reported, got: {error:?}"));
+        assert_eq!(code, super::DAEMON_AUTHENTICATION_REJECTED);
+        assert!(retryable);
+        daemon.await.expect("fake daemon completes");
+    }
+
     fn test_skew_handshake() -> crate::handshake::DaemonHandshake {
         crate::handshake::DaemonHandshake {
             project_path: None,

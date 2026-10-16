@@ -972,3 +972,82 @@ async fn saturated_daemon_refuses_wire_drifted_handshake_instead_of_resetting() 
 
     server_task.await.expect("saturation server task");
 }
+
+/// A daemon that refused the auth preface and closed while the client was
+/// still writing. A request larger than the socket buffer keeps the client
+/// writing past the close, the state a client stalled past the daemon's drain
+/// window reaches. The refusal frame was queued before the close.
+#[cfg(unix)]
+async fn refusing_daemon_closing_mid_write(
+    socket: &std::path::Path,
+) -> tokio::task::JoinHandle<()> {
+    let listener = tokio::net::UnixListener::bind(socket).expect("bind daemon socket");
+    let refusal_line =
+        tracedecay_daemon_protocol::DaemonHandshakeRefusal::for_rejected_authentication("9.9.9")
+            .to_line()
+            .expect("refusal line");
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept client");
+        let (reader, mut writer) = stream.into_split();
+        let mut lines = tokio::io::BufReader::new(reader).lines();
+        lines
+            .next_line()
+            .await
+            .expect("read auth preface")
+            .expect("auth preface line");
+        writer
+            .write_all(format!("{refusal_line}\n").as_bytes())
+            .await
+            .expect("write refusal");
+        writer.flush().await.expect("flush refusal");
+    })
+}
+
+#[cfg(unix)]
+fn assert_authentication_refused(error: &tracedecay_domain::errors::TraceDecayError) {
+    let (code, retryable, _) = error
+        .project_route_context()
+        .unwrap_or_else(|| panic!("the queued refusal must be reported, got: {error:?}"));
+    assert_eq!(
+        code,
+        tracedecay_daemon_protocol::DAEMON_AUTHENTICATION_REJECTED
+    );
+    assert!(retryable);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn one_shot_clients_report_a_refusal_queued_before_their_write_failed() {
+    let temp = TempDir::new().expect("temp dir");
+    let socket = temp.path().join("daemon.sock");
+    let _authority = seed_socket_authority(&socket);
+    let handshake = test_handshake_defaults();
+    let oversized = "x".repeat(4 * 1024 * 1024);
+
+    let daemon = refusing_daemon_closing_mid_write(&socket).await;
+    let error = super::super::call_tool(
+        &socket,
+        &handshake,
+        "tracedecay_status",
+        json!({ "padding": oversized }),
+    )
+    .await
+    .expect_err("a refused tool call must fail");
+    assert_authentication_refused(&error);
+    daemon.await.expect("refusing daemon");
+
+    std::fs::remove_file(&socket).expect("unbind daemon socket");
+    let daemon = refusing_daemon_closing_mid_write(&socket).await;
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": { "name": "tracedecay_status", "arguments": { "padding": oversized } },
+    })
+    .to_string();
+    let error = super::super::send_daemon_request_line(&socket, &handshake, &request)
+        .await
+        .expect_err("a refused proxied request must fail");
+    assert_authentication_refused(&error);
+    daemon.await.expect("refusing daemon");
+}
