@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::Notify;
 use tracedecay_contracts::{
     CancellationSignal, NativeIntegrationPreflightOutcomeV1, NativeIntegrationPreflightRequestV1,
     ResolvedScope,
@@ -16,6 +17,7 @@ use tracedecay_domain::{
     RetrievalAnchorId, StackSignalId, StackSignalKindV1, UtcMicros, WorkStackDriftObservedV1,
     canonical_sha256, derive_git_topology_anchor_id,
 };
+use tracedecay_runtime_core::native_runtime;
 
 mod transition;
 pub use transition::*;
@@ -53,7 +55,7 @@ struct PreflightKey {
 
 struct InFlight {
     result: Mutex<Option<Result<OptionalPreflightDispositionV1, StackCoordinatorErrorV1>>>,
-    complete: Condvar,
+    complete: Notify,
 }
 
 #[derive(Default)]
@@ -498,7 +500,7 @@ impl DaemonGitHubStackCoordinatorV1 {
         }
     }
 
-    pub fn optional_preflight<P: OptionalStackPreflightPort>(
+    pub async fn optional_preflight<P: OptionalStackPreflightPort>(
         &self,
         preflight: &P,
         request: &NativeIntegrationPreflightRequestV1,
@@ -558,43 +560,42 @@ impl DaemonGitHubStackCoordinatorV1 {
                     .or_default() += 1;
                 let flight = Arc::new(InFlight {
                     result: Mutex::new(None),
-                    complete: Condvar::new(),
+                    complete: Notify::new(),
                 });
                 state.in_flight.insert(key.clone(), Arc::clone(&flight));
                 (flight, true)
             }
         };
         if !owner {
-            let mut result = flight.result.lock().map_err(lock_error)?;
             let deadline = Instant::now() + PREFLIGHT_JOIN_TIMEOUT;
-            while result.is_none() {
+            loop {
+                // Registered before the result is read, so a publication
+                // between the read and the wait still wakes this joiner.
+                let completed = flight.complete.notified();
+                if let Some(result) = flight.result.lock().map_err(lock_error)?.clone() {
+                    return result;
+                }
                 if cancellation.is_cancelled() {
                     return Err(StackCoordinatorErrorV1::Cancelled);
                 }
                 let now_instant = Instant::now();
                 if now_instant >= deadline {
-                    drop(result);
                     self.fail_circuit(&circuit_key, &policy, now)?;
                     return Err(StackCoordinatorErrorV1::Unavailable);
                 }
-                result = flight
-                    .complete
-                    .wait_timeout(
-                        result,
-                        PREFLIGHT_JOIN_WAIT_SLICE.min(deadline - now_instant),
-                    )
-                    .map_err(lock_error)?
-                    .0;
+                let _ = native_runtime::timeout(
+                    PREFLIGHT_JOIN_WAIT_SLICE.min(deadline - now_instant),
+                    completed,
+                )
+                .await;
             }
-            return result.clone().ok_or_else(|| {
-                StackCoordinatorErrorV1::Invalid("missing joined preflight result".to_owned())
-            })?;
         }
         let result = preflight
             .preflight(request, cancellation)
+            .await
             .map(classify_preflight);
         *flight.result.lock().map_err(lock_error)? = Some(result.clone());
-        flight.complete.notify_all();
+        flight.complete.notify_waiters();
         let mut state = self.preflights.lock().map_err(lock_error)?;
         state.in_flight.remove(&key);
         state.daemon_active = state.daemon_active.saturating_sub(1);

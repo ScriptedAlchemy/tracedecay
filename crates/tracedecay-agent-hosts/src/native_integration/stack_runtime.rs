@@ -43,7 +43,7 @@ use tracedecay_global_db::{
 use tracedecay_runtime_core::native_runtime::{self, NativeTask};
 
 use super::registry::DaemonProjectNativeIntegrationService;
-use super::store::SharedDaemonNativeIntegrationStore;
+use super::store::DaemonNativeIntegrationStore;
 
 const STACK_DELIVERY_STORE_ACTOR_CAPACITY: usize = 64;
 const STACK_DELIVERY_STORE_ACTOR_TIMEOUT: Duration = Duration::from_secs(5);
@@ -332,7 +332,7 @@ struct StackRuntimePortsV1 {
     access: Arc<Mutex<ProjectSourceAccessSnapshot>>,
     store: Arc<DaemonStackDeliveryStoreV1>,
     native_service: Arc<DaemonProjectNativeIntegrationService>,
-    native_store: SharedDaemonNativeIntegrationStore,
+    native_store: DaemonNativeIntegrationStore,
     authorizations: Arc<Mutex<BTreeMap<StackSignalId, DeliveryAuthorizationEvidenceV1>>>,
     preflight_outcomes: Arc<Mutex<BTreeMap<ManifestDigest, NativeIntegrationPreflightOutcomeV1>>>,
 }
@@ -734,7 +734,7 @@ fn map_native_preflight_error(error: NativeIntegrationContractError) -> StackCoo
 }
 
 impl OptionalStackPreflightPort for StackRuntimePortsV1 {
-    fn preflight(
+    async fn preflight(
         &self,
         request: &NativeIntegrationPreflightRequestV1,
         cancellation: &CancellationSignal,
@@ -744,6 +744,7 @@ impl OptionalStackPreflightPort for StackRuntimePortsV1 {
         let outcome = self
             .native_service
             .preflight(request.clone(), cancellation)
+            .await
             .map_err(map_native_preflight_error)?;
         self.preflight_outcomes
             .lock()
@@ -825,7 +826,7 @@ impl DaemonGitHubStackRuntimeV1 {
         database: RegisteredGlobalDbLeaseV1,
         coordinator: Arc<DaemonGitHubStackCoordinatorV1>,
         native_service: Arc<DaemonProjectNativeIntegrationService>,
-        native_store: SharedDaemonNativeIntegrationStore,
+        native_store: DaemonNativeIntegrationStore,
     ) -> Result<Arc<Self>, StackCoordinatorErrorV1> {
         if project_id != scope.project_id || access.scope != scope {
             return Err(StackCoordinatorErrorV1::Stale);
@@ -894,15 +895,15 @@ impl DaemonGitHubStackRuntimeV1 {
     /// Executes preflight through the coordinator's circuit and bounded
     /// admission path. The port stores the exact outcome produced by that
     /// invocation so callers do not bypass the circuit with a second Git run.
-    pub fn preflight(
+    pub async fn preflight(
         &self,
         request: &NativeIntegrationPreflightRequestV1,
         cancellation: &CancellationSignal,
     ) -> Result<NativeIntegrationPreflightOutcomeV1, StackCoordinatorErrorV1> {
-        self.preflight_via_circuit(request, cancellation)
+        self.preflight_via_circuit(request, cancellation).await
     }
 
-    fn preflight_via_circuit(
+    async fn preflight_via_circuit(
         &self,
         request: &NativeIntegrationPreflightRequestV1,
         cancellation: &CancellationSignal,
@@ -915,16 +916,20 @@ impl DaemonGitHubStackRuntimeV1 {
                 .ports
                 .native_service
                 .preflight(request.clone(), cancellation)
+                .await
                 .map_err(map_native_preflight_error);
         }
         let request_digest = canonical_sha256(request)
             .map_err(|error| StackCoordinatorErrorV1::Invalid(error.to_string()))?;
-        let disposition = self.coordinator.optional_preflight(
-            &self.ports,
-            request,
-            cancellation,
-            StackRuntimePortsV1::now()?,
-        )?;
+        let disposition = self
+            .coordinator
+            .optional_preflight(
+                &self.ports,
+                request,
+                cancellation,
+                StackRuntimePortsV1::now()?,
+            )
+            .await?;
         let outcome = self
             .ports
             .preflight_outcomes
@@ -959,7 +964,7 @@ impl DaemonGitHubStackRuntimeV1 {
         self.ports.pending_host_for_scope()
     }
 
-    fn expand_request(
+    async fn expand_request(
         &self,
         request: GitHubStackSignalExpandRequestV1,
         cancellation: &CancellationSignal,
@@ -1021,6 +1026,7 @@ impl DaemonGitHubStackRuntimeV1 {
             .ports
             .native_store
             .read_preview_by_digest(&signal.state_digest)
+            .await
             .map_err(|_| GitHubStackSignalExpandPortError::Unavailable)?;
         let (preview, terminal) = match preview_by_state {
             Some(preview) => (preview, None),
@@ -1029,12 +1035,14 @@ impl DaemonGitHubStackRuntimeV1 {
                     .ports
                     .native_store
                     .read_receipt_by_digest(&signal.state_digest)
+                    .await
                     .map_err(|_| GitHubStackSignalExpandPortError::Unavailable)?
                     .ok_or(GitHubStackSignalExpandPortError::NativeEvidenceUnavailable)?;
                 let preview = self
                     .ports
                     .native_store
                     .read_preview_by_digest(&receipt.status.preview_digest)
+                    .await
                     .map_err(|_| GitHubStackSignalExpandPortError::Unavailable)?
                     .ok_or(GitHubStackSignalExpandPortError::NativeEvidenceUnavailable)?;
                 if preview.preview_id != receipt.status.preview_id
@@ -1149,12 +1157,12 @@ impl DaemonGitHubStackRuntimeV1 {
 }
 
 impl GitHubStackSignalExpandPort for DaemonGitHubStackRuntimeV1 {
-    fn expand(
+    async fn expand(
         &self,
         request: GitHubStackSignalExpandRequestV1,
         cancellation: &CancellationSignal,
     ) -> Result<GitHubStackSignalExpandSurfaceResultV1, GitHubStackSignalExpandPortError> {
-        self.expand_request(request, cancellation)
+        self.expand_request(request, cancellation).await
     }
 }
 

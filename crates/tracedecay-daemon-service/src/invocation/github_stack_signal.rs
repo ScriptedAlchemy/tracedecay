@@ -16,7 +16,7 @@ use tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationOwner;
 /// payload: the daemon mints a context from the admitted project route and
 /// the runtime settles only that context actor's durable host-pending row.
 #[tracing::instrument(name = "daemon.service.github_stack.expand", level = "trace", skip_all)]
-pub(super) fn execute_github_stack_signal_expand(
+pub(super) async fn execute_github_stack_signal_expand(
     wire_request_id: String,
     registered: Option<RegisteredConfigurationRuntime>,
     owner: Option<DaemonNativeIntegrationOwner>,
@@ -63,9 +63,23 @@ pub(super) fn execute_github_stack_signal_expand(
             Ok(signal) => signal,
             Err(problem) => return application_problem(wire_request_id, problem),
         };
-    let result = match runtime.expand(request.into_application_request(context), &signal) {
-        Ok(result) => result,
-        Err(error) => error.into_surface_result(),
+    // Expansion interleaves native-store awaits with synchronous delivery-store
+    // waits, so it runs on the blocking pool.
+    let expansion = tracedecay_runtime_core::native_runtime::on_blocking_pool(async move {
+        runtime
+            .expand(request.into_application_request(context), &signal)
+            .await
+    })
+    .await;
+    let result = match expansion {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => error.into_surface_result(),
+        Err(_) => {
+            return DaemonInvocationResponse::problem(
+                wire_request_id,
+                DaemonInvocationProblem::Unavailable,
+            );
+        }
     };
     let Ok(payload) = serde_json::to_value(result) else {
         return DaemonInvocationResponse::problem(

@@ -236,7 +236,9 @@ pub trait GitHubStackSignalExpandPort: Send + Sync {
         &self,
         request: GitHubStackSignalExpandRequestV1,
         cancellation: &CancellationSignal,
-    ) -> Result<GitHubStackSignalExpandSurfaceResultV1, GitHubStackSignalExpandPortError>;
+    ) -> impl Future<
+        Output = Result<GitHubStackSignalExpandSurfaceResultV1, GitHubStackSignalExpandPortError>,
+    > + Send;
 }
 
 /// Typed adapter failures that never disclose whether a signal exists.

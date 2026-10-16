@@ -229,7 +229,7 @@ pub trait OptionalStackPreflightPort: Send + Sync {
         &self,
         request: &NativeIntegrationPreflightRequestV1,
         cancellation: &CancellationSignal,
-    ) -> Result<NativeIntegrationPreflightOutcomeV1, StackCoordinatorErrorV1>;
+    ) -> impl Future<Output = Result<NativeIntegrationPreflightOutcomeV1, StackCoordinatorErrorV1>> + Send;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
