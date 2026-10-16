@@ -330,8 +330,9 @@ what is listed, never what a call may do. With \
 TRACEDECAY_MCP_REPEAT_READ_POINTERS=1, a repeated identical source, context, \
 or file-listing read whose answer is unchanged returns a short pointer to \
 the earlier result, and repeating the call once more returns it in full. \
-Set it only for hosts that give each agent its own connection, as the Codex \
-install does.";
+Set it only for hosts that give each agent its own connection and show it \
+every result directly; a host that runs model-written programs, like Codex \
+`exec`, hands the pointer to a program that cannot act on it.";
 
 pub(crate) const SERVE_AFTER_HELP: &str = "\
 Examples:
