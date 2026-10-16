@@ -94,7 +94,7 @@ fn record(
     // persist and carries that checkpoint. Every commit makes one bounded pass
     // so a backlog converges; the record inserted below sits at the persisted
     // epoch and is never eligible.
-    prune::prune_superseded(transaction, &submission, &checkpoint)?;
+    prune::prune_unreachable(transaction, &submission, &checkpoint)?;
     if replay == ReplayAuthority::Ledger {
         idempotency::insert(transaction, &submission, &receipt)?;
     }
