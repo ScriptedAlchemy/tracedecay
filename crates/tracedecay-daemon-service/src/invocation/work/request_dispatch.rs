@@ -979,27 +979,27 @@ pub(super) async fn dispatch_work_application(
             }
         }
         WorkApplicationInvocationV1::AdmitPlacement(command) => {
-            let _span = tracing::trace_span!("daemon.service.work.admit_placement").entered();
-            {
-                let placement_root = project_root.clone();
-                complete_work_effect(
-                    &registered,
-                    request_id,
-                    &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case,
-                    input_digest,
-                    services
-                        .placement()
-                        .admit_placement(&context, command, |target| {
-                            observe_placement_target(placement_root.as_deref(), target, observed_at)
-                        }),
-                    observed_at,
-                    deadline,
-                    WorkApplicationOutcomeV1::AdmitPlacement,
-                )
-            }
+            let placement_root = project_root.clone();
+            let admitted = tracing::Instrument::instrument(
+                services.admit_placement(context.clone(), command, |target| {
+                    observe_placement_target(placement_root.as_deref(), target, observed_at)
+                }),
+                tracing::trace_span!("daemon.service.work.admit_placement"),
+            )
+            .await;
+            complete_work_effect(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                admitted,
+                observed_at,
+                deadline,
+                WorkApplicationOutcomeV1::AdmitPlacement,
+            )
         }
         WorkApplicationInvocationV1::PlacementStatus(request) => {
             let _span = tracing::trace_span!("daemon.service.work.placement_status").entered();
@@ -1020,25 +1020,27 @@ pub(super) async fn dispatch_work_application(
             }
         }
         WorkApplicationInvocationV1::ReleasePlacement(command) => {
-            let _span = tracing::trace_span!("daemon.service.work.release_placement").entered();
-            {
-                let placement_root = project_root.clone();
-                complete_work_effect(
-                    &registered,
-                    request_id,
-                    &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case,
-                    input_digest,
-                    services.placement().release(&context, command, |target| {
-                        observe_placement_target(placement_root.as_deref(), target, observed_at)
-                    }),
-                    observed_at,
-                    deadline,
-                    WorkApplicationOutcomeV1::ReleasePlacement,
-                )
-            }
+            let placement_root = project_root.clone();
+            let released = tracing::Instrument::instrument(
+                services.release_placement(context.clone(), command, |target| {
+                    observe_placement_target(placement_root.as_deref(), target, observed_at)
+                }),
+                tracing::trace_span!("daemon.service.work.release_placement"),
+            )
+            .await;
+            complete_work_effect(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                released,
+                observed_at,
+                deadline,
+                WorkApplicationOutcomeV1::ReleasePlacement,
+            )
         }
         WorkApplicationInvocationV1::AdvanceJob(request) => {
             let advanced = match preparation::repository_selection(&context) {

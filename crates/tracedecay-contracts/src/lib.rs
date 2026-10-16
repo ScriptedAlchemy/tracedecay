@@ -434,7 +434,9 @@ pub use surface_contracts::{
     CodeSymbolSearchSurfaceRequest, CodeTimelineSurfaceRequest, CodeTypeHierarchySurfaceRequest,
     NativeIntegrationSurfaceRequest, PrimitiveCodeSurfaceRequest, primitive_code_into_primitive,
 };
-pub use work::{WorkRoutingSnapshotErrorV1, WorkRoutingSnapshotPortV1, WorkRoutingSnapshotV1};
+pub use work::{
+    WorkRoutingSnapshotErrorV1, WorkRoutingSnapshotPortV1, WorkRoutingSnapshotV1, work_authority,
+};
 pub use work_artifact_hydration::{
     WorkArtifactHydrationRequestV1, WorkArtifactHydrationService, WorkArtifactHydrationV1,
     WorkAttemptArtifactsV1, WorkAttemptEvidencePageV1, WorkAttemptEvidenceReadPort,
@@ -527,8 +529,8 @@ pub use work_owner_observation::{
 };
 pub use work_placement::{
     AdmitWorkPlacementCommand, ReleaseWorkPlacementCommand, WorkPlacementPreflightRequestV1,
-    WorkPlacementReadingV1, WorkPlacementService, WorkPlacementStatusRequestV1,
-    WorkPlacementStorageError, WorkPlacementStoragePort,
+    WorkPlacementPublicationPort, WorkPlacementReadingV1, WorkPlacementService,
+    WorkPlacementStatusRequestV1, WorkPlacementStorageError, WorkPlacementStoragePort,
 };
 pub use work_product::{
     AcceptWorkProposalDispositionV1, AcceptWorkProposalRequestV1, AcceptWorkTaskRequestV1,

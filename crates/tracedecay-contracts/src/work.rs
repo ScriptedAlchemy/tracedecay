@@ -58,9 +58,7 @@ pub trait WorkRoutingSnapshotPortV1: Send + Sync {
     ) -> Result<WorkRoutingSnapshotV1, WorkRoutingSnapshotErrorV1>;
 }
 
-pub(crate) fn work_authority(
-    context: &RequestContext,
-) -> Result<WorkAuthority, ApplicationProblem> {
+pub fn work_authority(context: &RequestContext) -> Result<WorkAuthority, ApplicationProblem> {
     WorkAuthority::new(
         context.scope().project_id.clone(),
         context.scope().repository_id.clone(),

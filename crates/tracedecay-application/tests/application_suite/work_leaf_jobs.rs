@@ -1,17 +1,23 @@
+use std::sync::{Arc, Mutex};
 use tracedecay_application::work::RegisteredWorkApplicationServicesV1;
+
 use tracedecay_contracts::{
-    AdjudicateWorkLeakCommandV1, VerifiedWorkLeakEvidenceV1, WorkAttemptStoragePort,
+    AdjudicateWorkLeakCommandV1, AdmitWorkPlacementCommand, ApplicationProblem,
+    ReleaseWorkPlacementCommand, VerifiedWorkLeakEvidenceV1, WorkAttemptStoragePort,
     WorkDuplicateAdjudicationAppendOutcomeV1, WorkDuplicateAdjudicationPortV1,
     WorkDuplicateAdjudicationStorageErrorV1, WorkLeakAdjudicationOutcomeV1,
     WorkLeakAdjudicationStorageErrorV1, WorkLeakEvidenceErrorV1, WorkLeakEvidencePortV1,
+    WorkPlacementStorageError, WorkPlacementStoragePort,
 };
-use tracedecay_domain::test_fixtures::id;
+use tracedecay_domain::test_fixtures::{fixture_abs_root, id};
 use tracedecay_domain::{
     CoverageStateV1, DuplicateEffectOutcomeV1, DuplicateEffortKindV1, LeakOwnerClassV1, ProjectId,
     ProjectionGenerationId, QuantityEvidenceClassV1, RunId, UtcMicros, WorkAttemptIdentityV1,
     WorkAuthority, WorkCommandId, WorkDuplicateAdjudicationCommandV1,
     WorkDuplicateAdjudicationEvidenceV1, WorkDuplicateAdjudicationQuantitiesV1,
-    WorkExecutionLeakKindV1, WorkExecutionLeakRecoveryV1, WorkTopologyGenerationRefV1,
+    WorkExecutionLeakKindV1, WorkExecutionLeakRecoveryV1, WorkPlacementIdentityV1,
+    WorkPlacementKindV1, WorkPlacementObservationV1, WorkPlacementStateV1, WorkPlacementTargetV1,
+    WorkTopologyGenerationRefV1,
 };
 use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
 use tracedecay_rusqlite_runtime::exact_sql::native_thread_reader_waits;
@@ -19,7 +25,7 @@ use tracedecay_rusqlite_runtime::native_runtime::{
     NativeTask, NativeTaskOutcome, native_thread_writer_waits,
 };
 
-use crate::work_run_control_jobs::{authority, context, leased_attempt_of};
+use crate::work_run_control_jobs::{authority, context, leased_attempt_of, task};
 
 const PROJECT: &str = "project.run-control-jobs";
 
@@ -244,5 +250,202 @@ async fn leak_adjudication_awaited_on_a_native_worker_parks_no_native_thread() {
         conflicting,
         Err(WorkLeakAdjudicationStorageErrorV1::RevisionConflict.into()),
         "a second command at no revision is refused by the revision compare"
+    );
+}
+
+fn placement_target() -> WorkPlacementTargetV1 {
+    WorkPlacementTargetV1::new(
+        WorkPlacementKindV1::LinkedWorktree,
+        Some(fixture_abs_root("/workspace/leaf-jobs-placement")),
+        false,
+        true,
+    )
+    .unwrap()
+}
+
+/// A Git observer stand-in that reports a clean target and records the name
+/// of every thread it ran on.
+#[derive(Clone, Default)]
+struct RecordingObserver {
+    threads: Arc<Mutex<Vec<Option<String>>>>,
+}
+
+impl RecordingObserver {
+    fn observe(
+        &self,
+        _target: &WorkPlacementTargetV1,
+    ) -> Result<WorkPlacementObservationV1, ApplicationProblem> {
+        self.threads
+            .lock()
+            .unwrap()
+            .push(std::thread::current().name().map(str::to_owned));
+        Ok(WorkPlacementObservationV1 {
+            dirty_tracked_paths: 0,
+            untracked_paths: 0,
+            unique_commits: Some(0),
+            readable: true,
+            active_holder: false,
+            network_required: false,
+            observed_at: UtcMicros(50_000),
+        })
+    }
+
+    fn observer(
+        &self,
+    ) -> impl Fn(&WorkPlacementTargetV1) -> Result<WorkPlacementObservationV1, ApplicationProblem>
+    + Send
+    + Sync
+    + 'static {
+        let recorder = self.clone();
+        move |target| recorder.observe(target)
+    }
+
+    fn threads(&self) -> Vec<Option<String>> {
+        self.threads.lock().unwrap().clone()
+    }
+}
+
+fn admit_command(run: &str) -> AdmitWorkPlacementCommand {
+    AdmitWorkPlacementCommand {
+        task_id: task(),
+        run_id: id::<RunId>(run),
+        target: placement_target(),
+        retention_eligible_at: None,
+        occurred_at: UtcMicros(50_000),
+    }
+}
+
+fn release_command(run: &str, expected_authority_version: u64) -> ReleaseWorkPlacementCommand {
+    ReleaseWorkPlacementCommand {
+        task_id: task(),
+        run_id: id::<RunId>(run),
+        expected_authority_version,
+        occurred_at: UtcMicros(60_000),
+    }
+}
+
+#[tokio::test]
+async fn placement_admit_and_release_awaited_on_a_native_worker_observe_off_the_writer() {
+    let profile = tempfile::tempdir().expect("profile");
+    let project = tempfile::tempdir().expect("project");
+    let runtime = project_runtime(profile.path(), project.path()).await;
+    let database = runtime.project_database().expect("project database");
+    let work = RegisteredWorkApplicationServicesV1::attach(database).expect("Work services");
+    let observer = RecordingObserver::default();
+    let (admit_observer, release_observer) = (observer.observer(), observer.observer());
+    let (outcome, writer_waits, reader_waits) = on_native_worker(async move {
+        let admitted = work
+            .admit_placement(
+                context(),
+                admit_command("run.leaf-jobs.placement"),
+                admit_observer,
+            )
+            .await?;
+        let released = work
+            .release_placement(
+                context(),
+                release_command("run.leaf-jobs.placement", admitted.authority_version()),
+                release_observer,
+            )
+            .await?;
+        Ok::<_, ApplicationProblem>((admitted.state(), released.state()))
+    })
+    .await;
+    assert_eq!(
+        writer_waits, 0,
+        "the placement parked no native worker on the writer"
+    );
+    assert_eq!(
+        reader_waits, 0,
+        "the placement parked no native worker on a reader"
+    );
+    assert_eq!(
+        outcome,
+        Ok((
+            WorkPlacementStateV1::Admitted,
+            WorkPlacementStateV1::Released
+        ))
+    );
+    let threads = observer.threads();
+    assert_eq!(
+        threads.len(),
+        2,
+        "admit and release each observed the target once"
+    );
+    assert!(
+        threads
+            .iter()
+            .all(|name| name.as_deref() != Some("tracedecay-rusqlite-writer")),
+        "the Git observation never ran on the writer thread: {threads:?}"
+    );
+    assert_eq!(
+        database
+            .work_storage()
+            .expect("Work storage")
+            .load_placement(
+                &authority(),
+                &WorkPlacementIdentityV1::new(task(), id::<RunId>("run.leaf-jobs.placement")),
+            )
+            .expect("the placement reads")
+            .map(|placement| placement.state()),
+        Some(WorkPlacementStateV1::Released),
+        "the release committed"
+    );
+}
+
+#[tokio::test]
+async fn placement_release_refuses_a_placement_that_changed_after_its_observation() {
+    let profile = tempfile::tempdir().expect("profile");
+    let project = tempfile::tempdir().expect("project");
+    let runtime = project_runtime(profile.path(), project.path()).await;
+    let database = runtime.project_database().expect("project database");
+    let work = RegisteredWorkApplicationServicesV1::attach(database).expect("Work services");
+    let interloper = RegisteredWorkApplicationServicesV1::attach(database).expect("Work services");
+    let clean = RecordingObserver::default();
+    let observer = clean.observer();
+    let outcome = NativeTask::spawn(async move {
+        let admitted = work
+            .admit_placement(context(), admit_command("run.leaf-jobs.raced"), observer)
+            .await
+            .map_err(|problem| format!("admit: {problem:?}"))?;
+        let version = admitted.authority_version();
+        work.release_placement(
+            context(),
+            release_command("run.leaf-jobs.raced", version),
+            move |target| {
+                // Another release of the same placement commits while this
+                // one is observing its target.
+                let target = target.clone();
+                std::thread::spawn(move || {
+                    let observer = RecordingObserver::default();
+                    tracedecay_rusqlite_runtime::native_runtime::block_on(
+                        interloper.release_placement(
+                            context(),
+                            release_command("run.leaf-jobs.raced", version),
+                            move |_| observer.observe(&target),
+                        ),
+                    )
+                })
+                .join()
+                .expect("the interloper joins")
+                .expect("native runtime")
+                .expect("the interloping release commits");
+                clean.observe(&placement_target())
+            },
+        )
+        .await
+        .map_err(|problem| format!("release: {problem:?}"))
+    })
+    .expect("native task spawns");
+    let NativeTaskOutcome::Completed(outcome) = outcome.wait().await else {
+        panic!("the native task completes");
+    };
+    assert_eq!(
+        outcome,
+        Err(format!(
+            "release: {:?}",
+            ApplicationProblem::from(WorkPlacementStorageError::AuthorityConflict)
+        )),
+        "the job refuses with the authority conflict instead of publishing over the newer release"
     );
 }

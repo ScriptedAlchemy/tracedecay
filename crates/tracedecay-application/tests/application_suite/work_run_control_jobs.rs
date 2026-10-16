@@ -31,7 +31,7 @@ const REPOSITORY: &str = "repository.run-control-jobs";
 const WORKTREE: &str = "worktree.run-control-jobs";
 const ACTOR: &str = "actor.run-control-jobs";
 
-fn task() -> TaskId {
+pub(crate) fn task() -> TaskId {
     id::<TaskId>("task.run-control-jobs")
 }
 

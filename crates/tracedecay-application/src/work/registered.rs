@@ -341,6 +341,84 @@ impl RegisteredWorkApplicationServicesV1 {
             })
     }
 
+    /// Admits one placement as a single writer transaction: the replay check,
+    /// the exclusivity read and the publication commit together. `observe`
+    /// reads the target (Git) before the job, never on the writer.
+    pub async fn admit_placement(
+        &self,
+        context: tracedecay_contracts::RequestContext,
+        command: tracedecay_contracts::AdmitWorkPlacementCommand,
+        observe: impl FnOnce(
+            &tracedecay_domain::WorkPlacementTargetV1,
+        ) -> Result<
+            tracedecay_domain::WorkPlacementObservationV1,
+            tracedecay_contracts::ApplicationProblem,
+        >,
+    ) -> Result<tracedecay_domain::WorkPlacementV1, tracedecay_contracts::ApplicationProblem> {
+        let observation = observe(&command.target)?;
+        self.storage
+            .transact(move |storage| {
+                tracedecay_contracts::WorkPlacementService::new(storage).admit_placement(
+                    &context,
+                    command.clone(),
+                    |_| Ok(observation),
+                )
+            })
+            .await
+            .unwrap_or_else(|_| Err(placement_unavailable()))
+    }
+
+    /// Releases one placement. The placement is read on a reader and its
+    /// target observed before the job; the job then publishes only while the
+    /// placement still has the observed target and the expected authority
+    /// version, so the Git observation never runs on the writer.
+    pub async fn release_placement(
+        &self,
+        context: tracedecay_contracts::RequestContext,
+        command: tracedecay_contracts::ReleaseWorkPlacementCommand,
+        observe: impl FnOnce(
+            &tracedecay_domain::WorkPlacementTargetV1,
+        ) -> Result<
+            tracedecay_domain::WorkPlacementObservationV1,
+            tracedecay_contracts::ApplicationProblem,
+        >,
+    ) -> Result<tracedecay_domain::WorkPlacementV1, tracedecay_contracts::ApplicationProblem> {
+        let authority = tracedecay_contracts::work_authority(&context)?;
+        let identity = tracedecay_domain::WorkPlacementIdentityV1::new(
+            command.task_id.clone(),
+            command.run_id.clone(),
+        );
+        let current = self
+            .storage
+            .load_placement_async(&authority, &identity)
+            .await?
+            .ok_or(tracedecay_contracts::WorkPlacementStorageError::NotFoundOrNotAuthorized)?;
+        if current.authority_version() != command.expected_authority_version {
+            return Err(tracedecay_contracts::WorkPlacementStorageError::AuthorityConflict.into());
+        }
+        let observation = observe(current.target())?;
+        let observed_target = current.target().clone();
+        self.storage
+            .transact(move |storage| {
+                tracedecay_contracts::WorkPlacementService::new(storage).release(
+                    &context,
+                    command.clone(),
+                    |target| {
+                        if target == &observed_target {
+                            Ok(observation)
+                        } else {
+                            Err(
+                                tracedecay_contracts::WorkPlacementStorageError::AuthorityConflict
+                                    .into(),
+                            )
+                        }
+                    },
+                )
+            })
+            .await
+            .unwrap_or_else(|_| Err(placement_unavailable()))
+    }
+
     pub fn attempts(
         &self,
     ) -> &tracedecay_contracts::WorkAttemptService<
@@ -478,6 +556,10 @@ pub fn authorized_work_intelligence_service(
         storage,
         binding,
     ))
+}
+
+fn placement_unavailable() -> tracedecay_contracts::ApplicationProblem {
+    tracedecay_contracts::WorkPlacementStorageError::Unavailable.into()
 }
 
 fn run_control_unavailable() -> tracedecay_contracts::ApplicationProblem {
