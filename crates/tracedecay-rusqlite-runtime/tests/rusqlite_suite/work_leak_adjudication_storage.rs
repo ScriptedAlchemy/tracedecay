@@ -25,6 +25,7 @@ use tracedecay_domain::{
 };
 
 use common::fixture_abs_root;
+use tracedecay_rusqlite_runtime::native_runtime::block_on;
 use work_registered_store::RegisteredWorkStore;
 
 use tracedecay_domain::test_fixtures::id;
@@ -186,6 +187,39 @@ fn leak_receipt(attempt: &WorkAttemptV1) -> WorkLeakAdjudicationReceiptV1 {
     }
 }
 
+fn record(
+    store: &RegisteredWorkStore,
+    authority: &WorkAuthority,
+    receipt: &WorkLeakAdjudicationReceiptV1,
+) -> Result<WorkLeakAdjudicationOutcomeV1, WorkLeakAdjudicationStorageErrorV1> {
+    let (authority, receipt) = (authority.clone(), receipt.clone());
+    block_on(store.storage().transact(move |storage| {
+        storage.compare_and_record_leak(
+            &authority,
+            &WorkLeakAdjudicationWriteV1 {
+                receipt: receipt.clone(),
+            },
+        )
+    }))
+    .expect("native runtime")
+    .expect("the writer runs the job")
+}
+
+fn replay(
+    store: &RegisteredWorkStore,
+    authority: &WorkAuthority,
+    receipt: &WorkLeakAdjudicationReceiptV1,
+) -> Result<Option<WorkLeakAdjudicationReceiptV1>, WorkLeakAdjudicationStorageErrorV1> {
+    let (authority, command_id) = (authority.clone(), receipt.command.command_id.clone());
+    block_on(
+        store
+            .storage()
+            .transact(move |storage| storage.leak_by_command(&authority, &command_id)),
+    )
+    .expect("native runtime")
+    .expect("the writer runs the job")
+}
+
 #[test]
 fn leak_adjudication_replays_exact_receipt_across_restart() {
     let mut store = RegisteredWorkStore::start("leak-adjudication-replay");
@@ -193,15 +227,7 @@ fn leak_adjudication_replays_exact_receipt_across_restart() {
     let attempt = terminal_attempt();
     store.storage().insert(&authority, &attempt).unwrap();
     let receipt = leak_receipt(&attempt);
-    let outcome = store
-        .storage()
-        .compare_and_record_leak(
-            &authority,
-            &WorkLeakAdjudicationWriteV1 {
-                receipt: receipt.clone(),
-            },
-        )
-        .unwrap();
+    let outcome = record(&store, &authority, &receipt).unwrap();
     assert_eq!(
         outcome,
         WorkLeakAdjudicationOutcomeV1::Appended(receipt.clone())
@@ -209,13 +235,7 @@ fn leak_adjudication_replays_exact_receipt_across_restart() {
     assert_eq!(store.count("work_leak_adjudications_v1"), 1);
 
     store = store.restart("leak-adjudication-replay");
-    assert_eq!(
-        store
-            .storage()
-            .leak_by_command(&authority, &receipt.command.command_id)
-            .unwrap(),
-        Some(receipt),
-    );
+    assert_eq!(replay(&store, &authority, &receipt).unwrap(), Some(receipt),);
 }
 
 #[test]
@@ -238,19 +258,9 @@ fn leak_adjudication_replay_rejects_corrupted_scalar_truth() {
     let attempt = terminal_attempt();
     store.storage().insert(&authority, &attempt).unwrap();
     let receipt = leak_receipt(&attempt);
-    store
-        .storage()
-        .compare_and_record_leak(
-            &authority,
-            &WorkLeakAdjudicationWriteV1 {
-                receipt: receipt.clone(),
-            },
-        )
-        .unwrap();
+    record(&store, &authority, &receipt).unwrap();
     assert_eq!(
-        store
-            .storage()
-            .leak_by_command(&authority, &receipt.command.command_id),
+        replay(&store, &authority, &receipt),
         Err(WorkLeakAdjudicationStorageErrorV1::Unavailable),
     );
 }

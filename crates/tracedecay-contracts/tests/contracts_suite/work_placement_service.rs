@@ -20,8 +20,8 @@ use tracedecay_contracts::{
     AdmitWorkPlacementCommand, ApplicationProblem, ApplicationProblemKind, CancellationContext,
     CapabilityGrantSnapshot, Deadline, DisclosureClass, ReleaseWorkPlacementCommand,
     RequestContext, RequestId, ResolvedScope, WorkPlacementPreflightRequestV1,
-    WorkPlacementReadingV1, WorkPlacementService, WorkPlacementStatusRequestV1,
-    WorkPlacementStorageError, WorkPlacementStoragePort,
+    WorkPlacementPublicationPort, WorkPlacementReadingV1, WorkPlacementService,
+    WorkPlacementStatusRequestV1, WorkPlacementStorageError, WorkPlacementStoragePort,
 };
 use tracedecay_domain::{
     ActorId, ProjectId, RepositoryId, RunId, TaskId, UtcMicros, WorkAuthority,
@@ -146,7 +146,9 @@ impl WorkPlacementStoragePort for TestStore {
             })
             .map(|((_, identity), _)| identity.clone()))
     }
+}
 
+impl WorkPlacementPublicationPort for TestStore {
     fn publish_placement(
         &self,
         authority: &WorkAuthority,
