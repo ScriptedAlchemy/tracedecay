@@ -492,8 +492,8 @@ fn log_background_shutdown_receipt(receipt: &tracedecay_daemon_service::shutdown
 }
 
 /// The daemon's lifetime count of Tokio-only paths skipped for want of a Tokio
-/// runtime, and of writer waits that parked a native thread. Zero is the only
-/// healthy value for either.
+/// runtime, and of writer and reader waits that parked a native thread. Zero
+/// is the only healthy value for each.
 fn log_runtime_hazards() {
     log_daemon_event(
         "daemon_runtime_hazards",
@@ -505,6 +505,10 @@ fn log_runtime_hazards() {
             (
                 "native_thread_writer_waits",
                 native_runtime::native_thread_writer_waits().to_string(),
+            ),
+            (
+                "native_thread_reader_waits",
+                tracedecay_rusqlite_runtime::exact_sql::native_thread_reader_waits().to_string(),
             ),
         ],
     );
