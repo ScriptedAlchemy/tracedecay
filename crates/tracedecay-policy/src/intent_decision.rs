@@ -114,7 +114,7 @@ pub fn decide_intents(input: &IntentDecisionInputV1<'_>) -> IntentDecisionV1 {
 
     if !candidates.is_empty() {
         // Stable: equal relevance keeps fact priority, then question order.
-        candidates.sort_by(|left, right| right.relevance.cmp(&left.relevance));
+        candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.relevance));
         return IntentDecisionV1::Candidates(candidates);
     }
     let best = answered
