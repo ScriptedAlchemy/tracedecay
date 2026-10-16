@@ -284,14 +284,16 @@ not hand-register `include_str!` entries.
    it with "Load this skill before the first tool call.", under 320 characters
    and 45 words; keep the body under 500 lines and close it with a
    `**Report:**` paragraph (see layer 2). Use only allowed
-   frontmatter keys (see layer 2 above). A skill directory may also
+   frontmatter keys (see layer 2 above), and set `metadata:` with
+   `opencode/slash: "true"` so OpenCode offers the skill as `/<skill-name>`
+   like the other hosts do. A skill directory may also
    carry `scripts/`, `references/`, and `assets/` support files, these are
    embedded automatically by the recursive `build.rs` codegen
    (`GENERATED_SKILL_FILES`), so no table edit is needed.
-2. **Wire it into the model-invocable index (if model-invocable):** add the
-   slug to `hooks::CURSOR_PLUGIN_SKILLS` in `src/hooks/steering.rs`. Workflow
-   dispatch that should be explicit-invoke lives as a Cursor native command
-   under `plugin/overlays/cursor/commands/<slug>.md`, not as a skill.
+2. **Do not add a command for it.** Every host that ships commands invokes a
+   skill by name. A command (`plugin/commands/<slug>.md` plus
+   `plugin/overlays/cursor/commands/tracedecay-<slug>.md`) is only for a
+   workflow no skill triggers on.
 3. **Watch the metadata budget:** the summed name+description metadata must
    stay under 6,000 characters. If your addition tips it over, tighten
    descriptions rather than raising the budget.

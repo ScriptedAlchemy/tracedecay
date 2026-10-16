@@ -1,6 +1,8 @@
 ---
 name: diagnosing-analytics
 description: 'Use when the user asks how TraceDecay is used: tool or skill usage, hook capture, attribution, or adoption analytics. Load this skill before the first tool call.'
+metadata:
+  opencode/slash: "true"
 ---
 
 # Diagnosing analytics

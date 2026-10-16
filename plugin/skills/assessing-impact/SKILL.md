@@ -1,6 +1,8 @@
 ---
 name: assessing-impact
 description: Use when the user asks what breaks, what to re-test, or which tests cover code before changing a function, signature, type, field, or file. Load this skill before the first tool call.
+metadata:
+  opencode/slash: "true"
 ---
 
 # Assessing impact

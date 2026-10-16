@@ -1,6 +1,8 @@
 ---
 name: reviewing-changes
 description: Use when the user asks to review, summarize, or assess the risk of a PR, branch, or working-tree diff. Load this skill before the first tool call.
+metadata:
+  opencode/slash: "true"
 ---
 
 # Reviewing changes
