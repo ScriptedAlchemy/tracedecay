@@ -27,7 +27,12 @@ type CurrentCallableCodeAccess =
     dyn Fn(UtcMicros) -> CurrentCallableCodeAccessFuture<'static> + Send + Sync;
 
 const DAEMON_REQUESTER: &str = "actor.tracedecay-daemon.project-open";
-pub const GRANT_HORIZON: Duration = Duration::from_hours(24);
+/// Project open snapshots one access grant for every owner it registers
+/// (retained session and memory reads, configuration, Git, Work, LSP) and
+/// nothing renews it. A wall-clock horizon therefore refused every one of
+/// those owners a day after open on a long-running daemon. The grant lives as
+/// long as the project route.
+const GRANT_HORIZON: Duration = Duration::MAX;
 
 pub fn project_open_source_access_authority()
 -> Result<ProjectOpenSourceAccessAuthorityV1, ApplicationContractError> {

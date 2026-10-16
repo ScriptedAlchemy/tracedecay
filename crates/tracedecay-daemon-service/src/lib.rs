@@ -76,7 +76,7 @@ pub mod shutdown;
 mod shutdown_coordination;
 
 pub use callable_code_authorization::{
-    DaemonCallableCodeAuthorizationSource, DaemonCodeGraphReadAdmission, GRANT_HORIZON,
+    DaemonCallableCodeAuthorizationSource, DaemonCodeGraphReadAdmission,
     daemon_owned_project_source_access_at, project_open_source_access_authority,
 };
 #[cfg(any(test, feature = "test-helpers"))]
