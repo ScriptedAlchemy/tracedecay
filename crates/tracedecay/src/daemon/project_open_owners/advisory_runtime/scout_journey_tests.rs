@@ -3,17 +3,24 @@ use std::time::{Duration, Instant};
 
 use super::*;
 
+use tracedecay_agent_hosts::agents::context_scout::owner::ProjectContextScoutOwnerV1;
 use tracedecay_agent_hosts::agents::context_scout::{
     ContextScoutDurableClaimOutcomeV1, ContextScoutDurableStoreOutcomeV1,
-    ContextScoutEvidenceEnvelopeExt, context_scout_delivery_receipt_id,
+    ContextScoutEvidenceEnvelopeExt, ContextScoutMutationBindingV1,
+    ContextScoutMutationOperationV1, ContextScoutMutationResultV1,
+    ContextScoutMutationSettlementOutcomeV1, ContextScoutPublicMutationV1,
+    context_scout_delivery_receipt_id,
 };
 use tracedecay_contracts::context_scout::{
     ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1,
-    ContextScoutClaimHandleV1, ContextScoutClaimRequestV1, ContextScoutClaimWindowV1,
-    ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1, ContextScoutDeliveryWindowV1,
-    ContextScoutEvidenceEnvelopeV1, ContextScoutEvidenceSourceKindV1,
-    ContextScoutEvidenceSourceReceiptV1, ContextScoutFeedbackKindV1, ContextScoutFeedbackV1,
-    ContextScoutLeaseV1, ContextScoutRedactionReceiptV1,
+    ContextScoutClaimRequestV1, ContextScoutClaimWindowV1, ContextScoutDeliveryOutcomeV1,
+    ContextScoutDeliveryReceiptV1, ContextScoutDeliveryWindowV1, ContextScoutEvidenceEnvelopeV1,
+    ContextScoutEvidenceSourceKindV1, ContextScoutEvidenceSourceReceiptV1,
+    ContextScoutFeedbackKindV1, ContextScoutFeedbackV1, ContextScoutLeaseV1,
+    ContextScoutRedactionReceiptV1,
+};
+use tracedecay_contracts::request_identity::{
+    LogicalEffectIdempotencyDomain, derive_logical_effect_idempotency,
 };
 use tracedecay_contracts::{
     AuthorityReceipt, CoverageCompleteness, CoverageDomainState, DisclosureClass, EvidenceCoverage,
@@ -23,7 +30,8 @@ use tracedecay_contracts::{
 use tracedecay_domain::configuration::ConfigurationValueV1;
 use tracedecay_domain::feedback::FeedbackContentIdentityV1;
 use tracedecay_domain::{
-    CodeGenerationId, ComponentVersion, ProjectId, RefId, RetrievalAnchorId, TemporalModeV1,
+    ActorId, CodeGenerationId, ComponentVersion, ProjectId, RefId, RetrievalAnchorId,
+    TemporalModeV1,
 };
 use tracedecay_runtime_core::cancellation::CancellationToken;
 
@@ -241,6 +249,64 @@ async fn test_scout_owner(
     .expect("Scout owner")
 }
 
+/// Commits one public Scout mutation exactly as the daemon's Context Scout
+/// tools do: an idempotency-keyed binding over the mutation's input digest.
+async fn commit_public(
+    owner: &ProjectContextScoutOwnerV1,
+    operation: ContextScoutMutationOperationV1,
+    mutation: ContextScoutPublicMutationV1,
+    key: &str,
+) -> ContextScoutMutationResultV1 {
+    let actor = ActorId::new("actor.context-scout.journey").expect("actor");
+    let scope = ResolvedScope::new(
+        typed_id("project.scout.configured-model"),
+        typed_id("repository.scout.configured-model"),
+        typed_id("worktree.scout.configured-model"),
+        Some(typed_id::<RefId>("refs/heads/main")),
+    )
+    .expect("resolved scope");
+    let idempotency_key = IdempotencyKey::new(key).expect("idempotency key");
+    let binding = ContextScoutMutationBindingV1 {
+        effect_identity: derive_logical_effect_idempotency(
+            LogicalEffectIdempotencyDomain::ContextScoutEffect,
+            &(&actor, &scope, operation.as_str(), &idempotency_key),
+        )
+        .expect("effect identity"),
+        actor,
+        scope,
+        operation,
+        idempotency_key,
+        input_digest: mutation.input_digest().expect("mutation input digest"),
+    };
+    match owner.commit_public_mutation(binding, mutation).await {
+        ContextScoutMutationSettlementOutcomeV1::Reconciled(settlement) => settlement.result,
+        other => panic!("public Scout mutation {key} did not settle: {other:?}"),
+    }
+}
+
+async fn claim_public(
+    owner: &ProjectContextScoutOwnerV1,
+    request: &ContextScoutClaimRequestV1,
+    now: UtcMicros,
+    expires_at: UtcMicros,
+) -> ContextScoutDurableClaimOutcomeV1 {
+    let mutation = owner
+        .public_claim_mutation(request, now, expires_at)
+        .await
+        .expect("configured claim mutation");
+    match commit_public(
+        owner,
+        ContextScoutMutationOperationV1::Claim,
+        mutation,
+        request.idempotency_key.as_str(),
+    )
+    .await
+    {
+        ContextScoutMutationResultV1::Claim(outcome) => *outcome,
+        other => panic!("claim settled as {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn project_open_edit_stop_and_explicit_feedback_preserve_privacy_and_supersession() {
     use tracedecay_automation_runtime::automation::config::{AutomationBackend, AutomationConfig};
@@ -368,25 +434,25 @@ async fn project_open_edit_stop_and_explicit_feedback_preserve_privacy_and_super
         window: ContextScoutClaimWindowV1::IdleWindow,
         idempotency_key: IdempotencyKey::new("context-scout.claim.stop").expect("claim key"),
     };
-    let claim = match owner
-        .claim_delivery_request(
-            &claim_request,
-            UtcMicros(now.0 + 3),
-            UtcMicros(now.0 + 30_000_000),
-        )
-        .await
+    let claim = match claim_public(
+        &owner,
+        &claim_request,
+        UtcMicros(now.0 + 3),
+        UtcMicros(now.0 + 30_000_000),
+    )
+    .await
     {
         ContextScoutDurableClaimOutcomeV1::Claimed(claim) => claim,
         other => panic!("exact stop guidance must claim, got {other:?}"),
     };
     assert_eq!(
-        owner
-            .claim_delivery_request(
-                &claim_request,
-                UtcMicros(now.0 + 4),
-                UtcMicros(now.0 + 31_000_000),
-            )
-            .await,
+        claim_public(
+            &owner,
+            &claim_request,
+            UtcMicros(now.0 + 4),
+            UtcMicros(now.0 + 31_000_000),
+        )
+        .await,
         ContextScoutDurableClaimOutcomeV1::Claimed(claim.clone())
     );
     let competing_request = ContextScoutClaimRequestV1 {
@@ -395,13 +461,13 @@ async fn project_open_edit_stop_and_explicit_feedback_preserve_privacy_and_super
         ..claim_request.clone()
     };
     assert_eq!(
-        owner
-            .claim_delivery_request(
-                &competing_request,
-                UtcMicros(now.0 + 4),
-                UtcMicros(now.0 + 31_000_000),
-            )
-            .await,
+        claim_public(
+            &owner,
+            &competing_request,
+            UtcMicros(now.0 + 4),
+            UtcMicros(now.0 + 31_000_000),
+        )
+        .await,
         ContextScoutDurableClaimOutcomeV1::Empty
     );
     assert_eq!(claim.entry, *claimable);
@@ -425,17 +491,25 @@ async fn project_open_edit_stop_and_explicit_feedback_preserve_privacy_and_super
         delivered_at: UtcMicros(now.0 + 4),
         outcome: ContextScoutDeliveryOutcomeV1::Displayed,
     };
-    let claim_handle = ContextScoutClaimHandleV1 {
+    let delivery = ContextScoutPublicMutationV1::Delivery {
         work: claim.entry.work,
         envelope_id: claim.entry.envelope.envelope_id,
-        lease_id: claim.lease.lease_id,
-        lease_expires_at: claim.lease.expires_at,
+        lease: claim.lease,
+        configuration_revision: control.configuration_revision,
+        receipt: receipt.clone(),
     };
     assert_eq!(
-        owner
-            .record_delivery_by_handle(&claim_handle, &receipt)
-            .await,
-        ContextScoutDurableStoreOutcomeV1::Stored
+        commit_public(
+            &owner,
+            ContextScoutMutationOperationV1::Delivery,
+            delivery,
+            "context-scout.delivery.stop",
+        )
+        .await,
+        ContextScoutMutationResultV1::Delivery {
+            outcome: ContextScoutDurableStoreOutcomeV1::Stored,
+            receipt: receipt.clone(),
+        }
     );
     let before_feedback = owner
         .recent_exact(stop.address, 8)
@@ -447,11 +521,20 @@ async fn project_open_edit_stop_and_explicit_feedback_preserve_privacy_and_super
         receipt_id: receipt.receipt_id,
         kind: ContextScoutFeedbackKindV1::ExplicitlyAccepted,
     };
+    let explicit_feedback = ContextScoutPublicMutationV1::Feedback {
+        address: stop.address,
+        receipt: receipt.clone(),
+        feedback,
+    };
     assert_eq!(
-        owner
-            .record_feedback_exact(stop.address, &receipt, feedback)
-            .await,
-        ContextScoutDurableStoreOutcomeV1::Stored
+        commit_public(
+            &owner,
+            ContextScoutMutationOperationV1::Feedback,
+            explicit_feedback,
+            "context-scout.feedback.stop",
+        )
+        .await,
+        ContextScoutMutationResultV1::Feedback(ContextScoutDurableStoreOutcomeV1::Stored)
     );
     let recent = owner
         .recent_exact(stop.address, 8)
@@ -564,13 +647,13 @@ async fn claim_refuses_work_from_a_displaced_configuration_revision() {
         idempotency_key: IdempotencyKey::new("context-scout.claim.displaced").expect("claim key"),
     };
     assert_eq!(
-        owner
-            .claim_delivery_request(
-                &request,
-                UtcMicros(now.0 + 1),
-                UtcMicros(now.0 + 30_000_000)
-            )
-            .await,
+        claim_public(
+            &owner,
+            &request,
+            UtcMicros(now.0 + 1),
+            UtcMicros(now.0 + 30_000_000),
+        )
+        .await,
         ContextScoutDurableClaimOutcomeV1::Empty
     );
     assert!(matches!(
