@@ -731,18 +731,12 @@ async fn execute_context_scout_mutation(
         ),
         _ => return concealed_application_problem(wire_request_id),
     };
-    let operation_name = match operation {
-        ContextScoutMutationOperationV1::Cancel => "context_scout_cancel",
-        ContextScoutMutationOperationV1::Claim => "context_scout_claim",
-        ContextScoutMutationOperationV1::Delivery => "context_scout_delivery",
-        ContextScoutMutationOperationV1::Feedback => "context_scout_feedback",
-    };
     let effect_identity = match derive_logical_effect_idempotency(
         LogicalEffectIdempotencyDomain::ContextScoutEffect,
         &(
             &registered.actor,
             &registered.scope,
-            operation_name,
+            operation.as_str(),
             &idempotency_key,
         ),
     ) {

@@ -97,7 +97,7 @@ impl Wake for ThreadWake {
 /// thread's counters, and returns its output with the peak growth of live
 /// bytes over the run.
 fn measure_peak_live_bytes<F: Future>(future: F) -> (F::Output, usize) {
-    let mut future = Box::pin(future);
+    let mut future = std::pin::pin!(future);
     let waker = Waker::from(Arc::new(ThreadWake(thread::current())));
     let mut context = Context::from_waker(&waker);
     let start = LIVE_BYTES.with(Cell::get);

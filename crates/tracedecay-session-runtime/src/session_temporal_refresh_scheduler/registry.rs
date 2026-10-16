@@ -601,13 +601,12 @@ impl SessionTemporalRefreshSchedulerRegistry {
             return inert_session_temporal_refresh_wake();
         }
         let retired_owner = SessionTemporalRefreshOwner::Project(owner.clone());
-        if project
+        let finished = project
             .get(&owner)
             .is_some_and(SessionTemporalRefreshSchedulerEntry::supervisor_finished)
-        {
-            // Confirmed present by the check above while holding the lock.
-            #[allow(clippy::expect_used)]
-            let finished = project.remove(&owner).expect("finished entry disappeared");
+            .then(|| project.remove(&owner))
+            .flatten();
+        if let Some(finished) = finished {
             let route = finished.wake.clone();
             let extra_routes = finished.extra_routes.clone();
             let history = finished
@@ -655,15 +654,12 @@ impl SessionTemporalRefreshSchedulerRegistry {
             return inert_session_temporal_refresh_wake();
         }
         let retired_owner = SessionTemporalRefreshOwner::Profile(database_path.clone());
-        if profile
+        let finished = profile
             .get(&database_path)
             .is_some_and(SessionTemporalRefreshSchedulerEntry::supervisor_finished)
-        {
-            // Confirmed present by the check above while holding the lock.
-            #[allow(clippy::expect_used)]
-            let finished = profile
-                .remove(&database_path)
-                .expect("finished entry disappeared");
+            .then(|| profile.remove(&database_path))
+            .flatten();
+        if let Some(finished) = finished {
             let route = finished.wake.clone();
             let history = finished
                 .history
