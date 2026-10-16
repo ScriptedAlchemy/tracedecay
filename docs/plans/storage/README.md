@@ -638,6 +638,10 @@ changes a file that holds memory.
 11. Graph engine gate. Measure SQLite code packs against sealed Grafeo on this
     repository (activation RSS, traversal p50 and p95). Keep whichever wins; delete
     the other.
+12. Growth acceptance. Run a daemon on a fresh profile for 24 hours under a
+    recorded ingest and code-index load, and read `telemetry.storage_usage`. Proof:
+    every class stays within its budget, and the WAL of every file is at or under
+    its soft limit plus one batch at each sample.
 
 ## What this supersedes
 
@@ -674,13 +678,61 @@ changes a file that holds memory.
   in step 8. The additive-migration rule for memory ships with the first change to a
   memory table (the conversion in step 8), not as machinery with no migration to
   run. The class contract is unchanged.
-- Step 3 (2026-10-16, branch `refactor/storage-worktree-liveness`). The first
-  growth source is closed: orphan-store liveness no longer counts the shared git
-  common directory, so a deleted worktree's store becomes collectable while its
-  repository lives. Still open in step 3: a daemon-run collector for unregistered
-  `proj_*` directories, collecting a store's non-memory files when memory rows pin
-  it, per-tick response-handle sweeps, `hook_analytics.jsonl` rotation, and
-  age-pruned idempotency rows.
+- Step 3 (2026-10-16, done). Four PRs stopped the growth this step names:
+  - #4120. Orphan-store liveness no longer counts the shared git common
+    directory, so a deleted worktree's store becomes collectable while its
+    repository lives.
+  - #4126. The maintenance tick runs one bounded page (8 directories, 5 s) of the
+    unregistered-directory sweep, which only Doctor previewed before. The sweep
+    still refuses a directory that holds memory rows or a payload it cannot
+    inspect. Re-registering such a directory from a self-describing `project.json`
+    needs the step 8 layout, so until then it stays whole.
+  - #4128 (the #4099 lane). Every tick sweeps expired response handles, and a
+    fully imported `hook_analytics.jsonl` over 64 MiB is truncated under its
+    append lock.
+  - #4129. Each commit retires the idempotency rows of an incarnation (a daemon
+    generation) whose checkpoint on that shard has not moved for 7 days. The
+    committing incarnation is never aged out. This departs from the literal "7 d
+    of age". Pruning a live writer's rows by age needs an index on
+    `committed_at_micros`. That index changes the exact final schema shape, and
+    stores that hold memory have no migration path before step 8. Retiring
+    exited incarnations ends the stranding the design names, and the age rule
+    arrives with `journal.db`.
+  Collecting the non-memory files of a store whose memory rows pin it moves to
+  step 8, where memory gets its own file.
+- Step 5 (2026-10-16, in progress). Four decisions:
+  - The journal shape is "service inside the job". `ExactSqlHandle::transact`
+    runs one whole write transaction on the writer thread as a job (#4133). A
+    Work or Workflow operation runs its existing synchronous contracts decision
+    inside that job, over a storage scoped to the job's transaction, and that
+    storage holds no `ExactSqlHandle`. Effects outside storage (Git, providers,
+    other stores) stay outside the job.
+  - Shipped so far: handoff grants (#4133), pause and resume of a run (#4139),
+    and the git-index store, whose actor thread is deleted (#4140).
+  - `transact` has no operation-id ledger yet. The ledger is new schema on stores
+    with no migration path, so it ships with `journal.db` in step 8. Until then
+    each domain keeps its own idempotency.
+  - Reads use `query_async` and preview/apply use `on_blocking_pool`. Both are
+    blocking-pool hops that step 7 replaces.
+- #4138 (2026-10-16). Shutdown store close waits up to 3 s for leases to drain
+  before deciding a store's WAL cannot be truncated. Under load, owners joined
+  before store close could still be unwinding the tasks that held their leases,
+  and `graceful_stop_truncates_profile_and_project_store_wals` failed. This is an
+  interim remedy; the step 7 executor owns close.
+- Growth sources from #4099 still open, each with the step that closes it:
+  1. LCM payloads that no summary covers yet: step 10's evidence lever.
+  2. Session databases of unmounted projects get no retention: step 10, whose
+     retention covers every project in the catalog.
+  3. Observation projection history (active and unavailable skeleton rows):
+     step 8 makes it derived and step 10 trims it behind the evidence window.
+  4. The projection disposition ledger: step 8. Dispositions become derived rows
+     that cascade with evidence.
+  5. Generation staging release: step 9 (`scratch/`).
+  6. The 512 MiB response-handle cap on top of #4128's TTL sweep: step 10.
+  7. Hook events into `telemetry.hook_events`: step 8.
+  8. Closing a store's lane when its file is lost, instead of a daemon restart:
+     step 7's unlink probe. #4130 is the interim restart remedy.
+  9. A 24-hour acceptance run on a fresh profile showing bounded growth: step 12.
 - Step 4 merged into step 8 (2026-10-16). A dead-letter valve on today's global
   queue was built and then dropped: the projection code deliberately keeps corrupt
   projection authority (ghost or divergent provenance, divergent workflow state) a
@@ -708,5 +760,7 @@ changes a file that holds memory.
 
 ## Next implementation step
 
-The rest of step 3: a daemon-run collector for unregistered project directories
-that never deletes durable data, on top of the #4099 measurement lane.
+The rest of step 5, slice by slice: placement and the leaf Work ports, the
+native-integration and remote-replay actor threads, then the attempt chain together
+with run control and Workflow. After those, delete `off_native_thread` for Work and
+the native wait counters.

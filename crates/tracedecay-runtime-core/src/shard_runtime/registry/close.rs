@@ -15,6 +15,44 @@ use super::{
 use crate::db::DatabaseAuthority;
 use crate::shard_runtime::shard::ShardRuntimeEvictionBlocker;
 
+/// The store-close reserve is 12 s, so this leaves most of it for the
+/// shutdown checkpoints themselves.
+const SHUTDOWN_HOLD_DRAIN_LIMIT: Duration = Duration::from_secs(3);
+const SHUTDOWN_HOLD_DRAIN_POLL: Duration = Duration::from_millis(10);
+
+/// What still keeps one mounted runtime from closing at shutdown.
+struct RuntimeHold {
+    blockers: Vec<ShardRuntimeEvictionBlocker>,
+    profile_pins: usize,
+    graph_leases: usize,
+}
+
+impl RuntimeHold {
+    fn of(
+        state: &super::RegistryState,
+        key: &StoreRuntimeKey,
+        owner: &StoreRuntimeOwnerAttachment,
+    ) -> Self {
+        let mut blockers = owner
+            .runtime()
+            .eviction_eligibility(Duration::ZERO)
+            .blockers;
+        blockers.retain(|blocker| !matches!(blocker, ShardRuntimeEvictionBlocker::PinnedProfile));
+        Self {
+            blockers,
+            profile_pins: state.profile_pin_tokens.get(key).map_or(0, BTreeSet::len),
+            graph_leases: state
+                .graph_publications
+                .get(key)
+                .map_or(0, |retained| retained.lease_tokens.len()),
+        }
+    }
+
+    fn is_idle(&self) -> bool {
+        self.blockers.is_empty() && self.profile_pins == 0 && self.graph_leases == 0
+    }
+}
+
 /// Proof that one exact runtime reached `Closed` after all physical `SQLite`
 /// handles joined and before its registry entry was removed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -119,11 +157,16 @@ impl StoreRuntimeRegistry {
     /// checkpoint. The daemon process exits with this registry reachable, so
     /// no destructor closes these attachments otherwise. In-flight opens are
     /// cancelled and joined first, so none publishes or keeps a physical
-    /// handle after the scan. Held runtimes stay mounted and are logged with
-    /// their blockers. Each reserved runtime owns its own writer and readers,
-    /// so they close concurrently and the shutdown waits for the slowest
-    /// checkpoint rather than their sum. Returns the number of runtimes
-    /// closed.
+    /// handle after the scan. Each reserved runtime owns its own writer and
+    /// readers, so they close concurrently and the shutdown waits for the
+    /// slowest checkpoint rather than their sum.
+    ///
+    /// A held runtime is scanned again until its holders let go, for at most
+    /// [`SHUTDOWN_HOLD_DRAIN_LIMIT`]: owners joined before store close can
+    /// still be unwinding the tasks that hold their leases, and under load
+    /// that tail outlasts the owner join (#4138). A runtime still held at the
+    /// limit stays mounted and is logged with its blockers. Returns the number
+    /// of runtimes closed.
     #[tracing::instrument(
         name = "runtime_core.registry.close_idle_for_shutdown",
         level = "trace",
@@ -135,34 +178,55 @@ impl StoreRuntimeRegistry {
                 operation: "close idle registered runtimes for shutdown",
             })?;
         self.cancel_and_join_opens_for_shutdown(&cx).await?;
-        let (reservations, reserve_failure) = {
+        let deadline = std::time::Instant::now() + SHUTDOWN_HOLD_DRAIN_LIMIT;
+        let mut closed = 0;
+        loop {
+            let final_pass = std::time::Instant::now() >= deadline;
+            let (batch, held) = self.close_idle_batch(final_pass).await?;
+            closed += batch;
+            if !held || final_pass {
+                return Ok(closed);
+            }
+            if crate::native_runtime::sleep_until(
+                std::time::Instant::now() + SHUTDOWN_HOLD_DRAIN_POLL,
+            )
+            .await
+            .is_err()
+            {
+                return self
+                    .close_idle_batch(true)
+                    .await
+                    .map(|(batch, _)| closed + batch);
+            }
+        }
+    }
+
+    /// Closes every runtime idle right now and reports whether any stays
+    /// held. Only the final pass logs the held ones.
+    async fn close_idle_batch(
+        &self,
+        final_pass: bool,
+    ) -> Result<(usize, bool), StoreRuntimeRegistryFailure> {
+        let (reservations, held, reserve_failure) = {
             let mut state = self.lock_state();
             let mut idle = Vec::new();
+            let mut held = false;
             for (key, entry) in &state.entries {
                 let RegistryEntry::Ready(ready) = entry else {
                     continue;
                 };
-                let mut blockers = ready
-                    .owner
-                    .runtime()
-                    .eviction_eligibility(Duration::ZERO)
-                    .blockers;
-                blockers.retain(|blocker| {
-                    !matches!(blocker, ShardRuntimeEvictionBlocker::PinnedProfile)
-                });
-                let profile_pins = state.profile_pin_tokens.get(key).map_or(0, BTreeSet::len);
-                let graph_leases = state
-                    .graph_publications
-                    .get(key)
-                    .map_or(0, |retained| retained.lease_tokens.len());
-                if blockers.is_empty() && profile_pins == 0 && graph_leases == 0 {
+                let hold = RuntimeHold::of(&state, key, &ready.owner);
+                if hold.is_idle() {
                     idle.push(key.clone());
-                } else {
+                    continue;
+                }
+                held = true;
+                if final_pass {
                     tracing::warn!(
                         path = %ready.owner.locator().path().display(),
-                        ?blockers,
-                        profile_pins,
-                        graph_leases,
+                        blockers = ?hold.blockers,
+                        profile_pins = hold.profile_pins,
+                        graph_leases = hold.graph_leases,
                         "store runtime still held at shutdown; its WAL is not truncated"
                     );
                 }
@@ -178,7 +242,7 @@ impl StoreRuntimeRegistry {
                     }
                 }
             }
-            (reservations, reserve_failure)
+            (reservations, held, reserve_failure)
         };
         let closed = reservations.len();
         let mut first_failure = reserve_failure;
@@ -209,7 +273,7 @@ impl StoreRuntimeRegistry {
                 first_failure.get_or_insert(failure);
             }
         }
-        first_failure.map_or(Ok(closed), Err)
+        first_failure.map_or(Ok((closed, held)), Err)
     }
 
     #[tracing::instrument(name = "runtime_core.registry.close_path", level = "trace", skip_all)]
@@ -893,6 +957,28 @@ mod tests {
             registry.lookup(&binding),
             StoreRuntimeLookup::Missing { .. }
         ));
+        drop(profile);
+    }
+
+    /// A lease its owner releases moments after store close begins must not
+    /// leave the store's WAL behind (#4138).
+    #[asupersync::test]
+    async fn shutdown_close_waits_for_a_lease_released_while_it_runs() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("runtime.db");
+        let (registry, profile, code, _authority) = mount_code_runtime(path.clone()).await;
+        let binding = code.binding().clone();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            drop(code);
+        });
+
+        assert_eq!(registry.close_idle_for_shutdown().await.unwrap(), 1);
+        assert!(matches!(
+            registry.lookup(&binding),
+            StoreRuntimeLookup::Missing { .. }
+        ));
+        release.join().unwrap();
         drop(profile);
     }
 
