@@ -155,7 +155,7 @@ pub(crate) fn work_background_context(
     RequestContext::new(
         registered.actor.clone(),
         registered.grant.scope.clone(),
-        registered.grant.clone(),
+        registered.grant_at(now_micros()),
         request_id,
         deadline,
         cancellation,
@@ -178,7 +178,7 @@ pub(crate) fn work_blocked_interval_recovery_context(
     RequestContext::new(
         actor.clone(),
         grant.scope.clone(),
-        grant.clone(),
+        crate::callable_code_authorization::mounted_grant_at(grant, now_micros()),
         request_id,
         deadline,
         cancellation,
@@ -331,7 +331,7 @@ pub(crate) fn work_request_context(
     let context = RequestContext::new(
         registered.actor.clone(),
         registered.grant.scope.clone(),
-        registered.grant.clone(),
+        registered.grant_at(observed_at),
         canonical_request_id.clone(),
         deadline,
         cancellation,

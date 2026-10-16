@@ -1262,6 +1262,7 @@ fn admit(
     match context.admission_at(observed_at) {
         RequestAdmission::Cancelled => return Err(HandoffOpenError::Cancelled),
         RequestAdmission::TimedOut => return Err(HandoffOpenError::TimedOut),
+        RequestAdmission::GrantExpired => return Err(HandoffOpenError::AuthorityUnavailable),
         RequestAdmission::Admitted => {}
     }
     let operation = operation

@@ -305,6 +305,7 @@ fn interruption(context: &RequestContext) -> Option<UnavailableReasonV1> {
         RequestAdmission::Admitted => None,
         RequestAdmission::Cancelled => Some(UnavailableReasonV1::Cancelled),
         RequestAdmission::TimedOut => Some(UnavailableReasonV1::DeadlineExceeded),
+        RequestAdmission::GrantExpired => Some(UnavailableReasonV1::MissingAuthority),
     }
 }
 

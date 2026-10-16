@@ -23,6 +23,11 @@ fn retained_pre_reservation_admission_preserves_cancellation_and_timeout() {
             Some(CancellationStage::BeforeAdmission)
         );
     }
+    assert_eq!(
+        retained_request_admission_problem(RequestAdmission::GrantExpired),
+        Some(ApplicationProblem::grant_expired_before_admission()),
+        "an expired grant is its own refusal, not a timeout"
+    );
 }
 
 #[tokio::test]

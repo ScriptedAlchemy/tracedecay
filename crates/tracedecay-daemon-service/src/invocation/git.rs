@@ -358,7 +358,6 @@ pub(super) async fn execute_git_read(
     if initial.scope != terminal.scope
         || initial.requester != terminal.requester
         || initial.effective_capabilities != terminal.effective_capabilities
-        || initial.grant_expires_at != terminal.grant_expires_at
         || initial.policy_revision != terminal.policy_revision
         || initial.policy_digest != terminal.policy_digest
         || initial.configuration_digest != terminal.configuration_digest

@@ -151,7 +151,9 @@ fn post_admission_termination_problem(
                 .map(Some)
                 .map_err(contract_error)
         }
-        RequestAdmission::TimedOut => {
+        // The effect may already be in flight, so an expired grant keeps the
+        // unknown-outcome terminal rather than a pre-admission refusal.
+        RequestAdmission::TimedOut | RequestAdmission::GrantExpired => {
             ApplicationProblem::timed_out(CancellationStage::EffectInFlight)
                 .map(Some)
                 .map_err(contract_error)

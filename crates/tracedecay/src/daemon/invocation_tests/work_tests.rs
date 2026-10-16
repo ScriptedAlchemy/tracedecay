@@ -878,6 +878,49 @@ async fn a_views_read_before_any_task_is_absent_and_a_foreign_selection_stays_de
     );
 }
 
+/// Project open mints the Work grant once and nothing renews it, so a Work
+/// runtime registered one horizon and one hour ago must still admit requests.
+#[tokio::test]
+async fn work_requests_admit_past_the_registration_horizon() {
+    let now = tracedecay_contracts::now_micros();
+    let horizon = i64::try_from(GRANT_HORIZON.as_micros()).expect("grant horizon");
+    let opened_at = UtcMicros(now.0 - horizon - 3_600_000_000);
+    let fixture = RegisteredWorkFixture::start_with_grant(
+        "registration-horizon",
+        opened_at,
+        UtcMicros(opened_at.0 + horizon),
+    )
+    .await;
+
+    let outcome = invoke_registered(
+        fixture.service.clone(),
+        Arc::clone(&fixture.registry),
+        fixture.project.path().to_path_buf(),
+        DaemonInvocationRequest::work_application(
+            "request.work.registration-horizon",
+            WorkApplicationInvocationV1::Views(WorkGraphReadRequestV1::current(
+                WorkProductSelectionScopeV1::ProfileOwnedNoGit,
+                now,
+            )),
+            now,
+            Deadline::new(UtcMicros(now.0 + 30_000_000)).expect("deadline"),
+            CancellationContext::active("cancel.request.work.registration-horizon")
+                .expect("cancellation"),
+        ),
+    )
+    .await;
+    assert!(
+        matches!(
+            outcome,
+            DaemonInvocationOutcome::WorkApplication {
+                outcome: WorkApplicationOutcomeV1::Views(ApplicationOutcome::Evidence(_)),
+                ..
+            }
+        ),
+        "a mounted Work runtime must keep serving past the registration horizon: {outcome:?}"
+    );
+}
+
 /// One registered project with the Work runtime mounted and an empty proposal
 /// route table, invoked through the production daemon invocation service.
 struct RegisteredWorkFixture {
@@ -892,6 +935,13 @@ struct RegisteredWorkFixture {
 
 impl RegisteredWorkFixture {
     async fn start(name: &str) -> Self {
+        // Workflow dispatch admits at the wall clock, not the request's
+        // observed time.
+        let expires_at = UtcMicros(tracedecay_contracts::now_micros().0 + 3_600_000_000);
+        Self::start_with_grant(name, UtcMicros(1), expires_at).await
+    }
+
+    async fn start_with_grant(name: &str, issued_at: UtcMicros, expires_at: UtcMicros) -> Self {
         let profile = tempfile::tempdir().expect("profile root");
         let project = tempfile::tempdir().expect("project root");
         let project_id = ProjectId::new(format!("project.work.{name}")).expect("project id");
@@ -923,10 +973,8 @@ impl RegisteredWorkFixture {
             1,
             grant_digest.clone(),
             actor.clone(),
-            UtcMicros(1),
-            // Workflow dispatch admits at the wall clock, not the request's
-            // observed time.
-            UtcMicros(tracedecay_contracts::now_micros().0 + 3_600_000_000),
+            issued_at,
+            expires_at,
             scope.clone(),
             tracedecay_contracts::WORK_APPLICATION_OPERATION_IDS_V1
                 .iter()

@@ -83,7 +83,9 @@ impl DaemonNativeIntegrationAuthorization {
             RequestAdmission::Admitted => Ok(()),
             // An elapsed deadline or expired grant is a stale authorization,
             // not a denial: a fresh grant can legitimately retry.
-            RequestAdmission::TimedOut => Err(NativeIntegrationAuthorizationOutcomeV1::Stale),
+            RequestAdmission::TimedOut | RequestAdmission::GrantExpired => {
+                Err(NativeIntegrationAuthorizationOutcomeV1::Stale)
+            }
             RequestAdmission::Cancelled => {
                 Err(NativeIntegrationAuthorizationOutcomeV1::Unavailable)
             }

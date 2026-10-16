@@ -43,13 +43,15 @@ never a doubled `tracedecay`.
 ## Source layout
 
 - `skills/`: shared `SKILL.md` workflow instructions.
-- `commands/`: Claude/shared slash-command sources (numbered tool steps).
+- `commands/`: Claude/shared slash commands for workflows no skill triggers
+  on: a repository safety audit, dead-code cleanup, branch comparison, commit
+  and PR drafting, porting, and running the tests for a change. A workflow a
+  skill already covers has no command; hosts invoke the skill by name
+  (`/tracedecay:assessing-impact` on Claude, `/assessing-impact` on Cursor).
 - `overlays/cursor/commands/`: independently authored Cursor slash commands
-  (`tracedecay-*`). Install maps them into Cursor's command directory. They are
-  skill-handoff wrappers with Cursor approval notes, not generated copies of
-  `commands/`, and they may differ on purpose (for example Claude
-  `review-diff.md` hands off to `/tracedecay:test-changes` while the Cursor
-  twin hands off to `tracedecay:assessing-impact` and omits the metrics line).
+  (`tracedecay-*`), one per `commands/` file. Install maps them into Cursor's
+  command directory. They are skill-handoff wrappers with Cursor approval
+  notes, not generated copies of `commands/`, and they may differ on purpose.
 - `hooks/hooks-claude.json`: Claude Code lifecycle hooks for session, stop,
   and saved-edit admission. They do not route tools or run local follow-up
   work.

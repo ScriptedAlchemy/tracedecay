@@ -120,6 +120,11 @@ where
                 tracedecay_contracts::CancellationStage::BeforeEffect,
             ));
         }
+        RequestAdmission::GrantExpired => {
+            return Err(RetainedSurfaceExecutionErrorV1::ApplicationProblem(
+                tracedecay_contracts::ApplicationProblem::grant_expired_before_admission(),
+            ));
+        }
     }
     let remaining = effective_expiry(context).0.saturating_sub(now.0);
     let remaining = u64::try_from(remaining)

@@ -462,6 +462,9 @@ pub enum RequestAdmission {
     Admitted,
     Cancelled,
     TimedOut,
+    /// The deadline is live but the capability grant has expired. A new
+    /// request can recover from this authority refusal, so it is no timeout.
+    GrantExpired,
 }
 
 /// Transport-neutral request context required by every application use case.
@@ -546,9 +549,10 @@ impl RequestContext {
     pub fn admission_at(&self, observed_at: UtcMicros) -> RequestAdmission {
         if self.cancellation.is_cancelled() {
             RequestAdmission::Cancelled
-        } else if self.deadline.is_elapsed_at(observed_at) || self.grant.is_expired_at(observed_at)
-        {
+        } else if self.deadline.is_elapsed_at(observed_at) {
             RequestAdmission::TimedOut
+        } else if self.grant.is_expired_at(observed_at) {
+            RequestAdmission::GrantExpired
         } else {
             RequestAdmission::Admitted
         }

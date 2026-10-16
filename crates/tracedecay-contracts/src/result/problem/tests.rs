@@ -292,3 +292,82 @@ fn direct_serialization_rejects_an_invalid_terminal() {
         "reset-required terminal is inconsistent with the application contract"
     );
 }
+
+/// An expired capability grant is an authority refusal the caller can recover
+/// from with a new request, not a deadline: reporting it as `TimedOut` with
+/// `Retry: never` told agents the tool itself had given up.
+#[test]
+fn an_expired_grant_is_refused_as_an_authority_problem_not_a_timeout() {
+    use crate::{
+        CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+        RequestAdmission, RequestContext, RequestId, ResolvedScope,
+    };
+    use tracedecay_domain::{
+        ActorId, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
+    };
+    use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+
+    let scope = ResolvedScope::new(
+        ProjectId::new("project.grant-expiry").unwrap(),
+        RepositoryId::new("repository.grant-expiry").unwrap(),
+        WorktreeId::new("worktree.grant-expiry").unwrap(),
+        None,
+    )
+    .unwrap();
+    let actor = ActorId::new("actor.grant-expiry").unwrap();
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new("grant.grant-expiry").unwrap(),
+        1,
+        ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
+        actor.clone(),
+        UtcMicros(1),
+        UtcMicros(100),
+        scope.clone(),
+        [CapabilityId::new("capability.grant-expiry").unwrap()].into(),
+        [UseCaseId::new("use-case.grant-expiry").unwrap()].into(),
+        DisclosureClass::Sensitive,
+    )
+    .unwrap();
+    let context = RequestContext::new(
+        actor,
+        scope,
+        grant,
+        RequestId::new("request.grant-expiry").unwrap(),
+        Deadline::new(UtcMicros(1_000)).unwrap(),
+        CancellationContext::active("cancel.grant-expiry").unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        context.admission_at(UtcMicros(50)),
+        RequestAdmission::Admitted
+    );
+    assert_eq!(
+        context.admission_at(UtcMicros(100)),
+        RequestAdmission::GrantExpired
+    );
+    assert_eq!(
+        context.admission_at(UtcMicros(1_000)),
+        RequestAdmission::TimedOut,
+        "an elapsed deadline stays a timeout"
+    );
+
+    let problem = ApplicationProblem::ensure_admitted(&context, UtcMicros(100)).unwrap_err();
+    assert_eq!(
+        problem,
+        ApplicationProblem::grant_expired_before_admission()
+    );
+    assert_eq!(problem.kind(), ApplicationProblemKind::Unavailable);
+    assert_eq!(
+        problem.unavailable_classification(),
+        Some(ApplicationUnavailableClassV1::Authority)
+    );
+    assert_eq!(problem.reason_code(), super::GRANT_EXPIRED_REASON_CODE);
+    assert_eq!(problem.retry(), RetryDirective::AfterRevalidate);
+    assert_eq!(problem.terminality(), ProblemTerminality::PreAdmission);
+    let wire = serde_json::to_value(&problem).expect("grant expiry serializes");
+    assert_eq!(
+        serde_json::from_value::<ApplicationProblem>(wire).expect("grant expiry decodes"),
+        problem
+    );
+}

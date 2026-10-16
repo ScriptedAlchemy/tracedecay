@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use tracedecay_application::project_open_authorization::mounted_grant_expires_at;
 use tracedecay_application::source_authorization::ProjectSourceAccessSnapshot;
 use tracedecay_contracts::ApplicationContractError;
 use tracedecay_domain::{UtcMicros, canonical_sha256};
@@ -22,9 +23,7 @@ pub fn project_open_lsp_scope_grant(
             field: "project-open LSP workspace capability",
         }
     })?;
-    if observed_at >= access.grant_expires_at
-        || !access.effective_capabilities.contains(&capability)
-    {
+    if !access.effective_capabilities.contains(&capability) {
         return Err(ApplicationContractError::Inconsistent {
             field: "project-open LSP workspace capability grant",
         });
@@ -57,7 +56,7 @@ pub fn project_open_lsp_scope_grant(
         grant_digest,
         access.requester.clone(),
         observed_at,
-        access.grant_expires_at,
+        mounted_grant_expires_at(observed_at),
         access.scope.clone(),
         capabilities,
         use_cases,
@@ -128,15 +127,15 @@ mod tests {
             "project-open LSP workspace capability grant is inconsistent with the application contract"
         );
 
+        // The deferred owner upgrade mints from the project-open access long
+        // after open; that access's fixed expiry must not refuse it.
         access.effective_capabilities.insert(
             CapabilityId::new(crate::LSP_WORKSPACE_CAPABILITY_ID_V1).expect("LSP capability"),
         );
-        assert_eq!(
-            project_open_lsp_scope_grant(&access, access.grant_expires_at)
-                .unwrap_err()
-                .to_string(),
-            "project-open LSP workspace capability grant is inconsistent with the application contract"
-        );
+        let upgraded_at = UtcMicros(access.grant_expires_at.0 + 3_600_000_000);
+        let upgraded = project_open_lsp_scope_grant(&access, upgraded_at)
+            .expect("the deferred upgrade outlives the project-open access expiry");
+        assert!(!upgraded.is_expired_at(upgraded_at));
     }
 
     fn source_access() -> ProjectSourceAccessSnapshot {

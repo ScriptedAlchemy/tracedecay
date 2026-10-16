@@ -1,6 +1,8 @@
 ---
 name: managing-workflows
 description: Use when the user asks to register, validate, activate, or retire a TraceDecay Workflow, issue a handoff, or control a Workflow run. Load this skill before the first tool call.
+metadata:
+  opencode/slash: "true"
 ---
 
 # Managing Workflows

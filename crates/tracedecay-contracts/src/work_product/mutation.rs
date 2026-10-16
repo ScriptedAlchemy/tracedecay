@@ -847,6 +847,7 @@ fn authorize_and_admit(
         RequestAdmission::Admitted => Ok(()),
         RequestAdmission::Cancelled => Err(WorkProductApplicationErrorV1::Cancelled),
         RequestAdmission::TimedOut => Err(WorkProductApplicationErrorV1::TimedOut),
+        RequestAdmission::GrantExpired => Err(WorkProductApplicationErrorV1::NotAuthorized),
     }
 }
 
