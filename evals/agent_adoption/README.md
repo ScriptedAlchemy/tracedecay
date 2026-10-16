@@ -463,10 +463,9 @@ first-tool preferences are scenario-specific; native reads are not intrinsically
 failures. Review outcomes, first useful action, unnecessary calls, and routing
 errors together. Offline self-tests verify grading only, not live skill quality.
 
-Skill-routing counts currently cover Claude's explicit Skill invocation events.
-Codex native exec/read skill loading is not reliably normalized as invocation;
-Codex routing is reported as unmeasured and excluded from TP/FN/FP and no-skill
-denominators. Its task outcomes and tool efficiency remain measured.
+Skill-routing counts cover Claude's Skill tool calls and Codex shell reads of an
+installed TraceDecay `skills/<id>/SKILL.md`. A skill load is routing, so it does
+not count as the first tool or toward the tool budget.
 
 The evaluator uses its own isolation re-entry flag. An existing general daemon
 harness does not bypass evaluator HOME/XDG or working-directory isolation; the
