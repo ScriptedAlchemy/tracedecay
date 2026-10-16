@@ -11,7 +11,8 @@ use tracedecay_contracts::{
     storage::{
         StorageByteSizeV1, StorageTelemetryFuture, StorageTelemetryReadV1, StoreKeyV1,
         StoreSizeSampleV1, StoreSizeTelemetryPort, TableGrowthBaselinePendingV1,
-        TableGrowthSampleV1, TableGrowthTelemetryReadV1, TableNameV1,
+        TableGrowthSampleV1, TableGrowthTelemetryReadV1, TableGrowthUnavailableReasonV1,
+        TableNameV1,
     },
 };
 use tracedecay_domain::UtcMicros;
@@ -128,30 +129,28 @@ impl SqliteStoreSizeTelemetryPort {
                 };
             };
             let context = context.clone();
+            let unknown = |reason| TableGrowthTelemetryReadV1::Unknown {
+                store: store.clone(),
+                reason,
+            };
             let Ok(cx) = cx else {
-                return TableGrowthTelemetryReadV1::Unknown {
-                    store: store.clone(),
-                };
+                return unknown(TableGrowthUnavailableReasonV1::ReaderUnavailable);
             };
             let Ok(mut task) = cx.spawn_blocking(move |_| {
                 handle.table_size_telemetry(reader_wait, || interruption(&context))
             }) else {
-                return TableGrowthTelemetryReadV1::Unknown {
-                    store: store.clone(),
-                };
+                return unknown(TableGrowthUnavailableReasonV1::ReaderUnavailable);
             };
-            let Ok(Ok(current)) = task.join(&cx).await else {
-                return TableGrowthTelemetryReadV1::Unknown {
-                    store: store.clone(),
-                };
+            let current = match task.join(&cx).await {
+                Ok(Ok(current)) => current,
+                Ok(Err(error)) => return unknown(error.table_growth_unavailable_reason()),
+                Err(_) => return unknown(TableGrowthUnavailableReasonV1::StorageOther),
             };
             let observed_at = now_micros();
             let mut current_tables = BTreeMap::new();
             for sample in current {
                 let Ok(table) = TableNameV1::new(sample.table_name) else {
-                    return TableGrowthTelemetryReadV1::Unknown {
-                        store: store.clone(),
-                    };
+                    return unknown(TableGrowthUnavailableReasonV1::InvalidTableName);
                 };
                 current_tables.insert(table, StorageByteSizeV1(sample.bytes));
             }
@@ -241,6 +240,7 @@ fn compare_table_growth(
         if observation == TableGrowthObservation::Preview {
             return TableGrowthTelemetryReadV1::Unknown {
                 store: store.clone(),
+                reason: TableGrowthUnavailableReasonV1::NotYetMeasured,
             };
         }
         let tables_observed = u64::try_from(current_tables.len()).unwrap_or(u64::MAX);
@@ -272,6 +272,7 @@ fn compare_table_growth(
             if sample.validate().is_err() {
                 return TableGrowthTelemetryReadV1::Unknown {
                     store: store.clone(),
+                    reason: TableGrowthUnavailableReasonV1::ClockRegressed,
                 };
             }
             growth.push(sample);

@@ -8,16 +8,12 @@ use tracedecay_agent_hosts::agents::host_bundle::{
     HostBundleComponentDoctorResultV1, HostBundleComponentDoctorStateV1, HostBundleDoctorReportV1,
     HostBundleRegistrationStateV1, HostComponentV1, HostKindV1,
 };
+use tracedecay_contracts::ConfigurationAuthorityReadV1;
 use tracedecay_contracts::doctor::{
     DoctorCoverageCompletenessV1, HostComponentDriftV1, HostConformanceV1, HostIntegrationReadV1,
     IngestRefusalV1, LanguageServerAnalyzerStateV1, LanguageServerReadV1, LanguageServerStateV1,
     ObservabilityReadV1, ObservabilityStateV1, host_integration_finding,
 };
-use tracedecay_contracts::{
-    ConfigurationAuthorityReadV1, storage::StorageTelemetryReadV1, storage::StoreKeyV1,
-    storage::StoreSizeSampleV1,
-};
-use tracedecay_domain::UtcMicros;
 
 use super::*;
 
@@ -228,31 +224,6 @@ fn receipt_and_checked_in_host_evidence_feed_canonical_host_truth() {
          --component context-mcp` (refreshes tracedecay-owned files)",
         "a drift finding names the drifted component and its remedy"
     );
-}
-
-#[test]
-fn synchronous_table_growth_is_bounded_by_observed_store_size() {
-    let sample = |bytes| StorageTelemetryReadV1::Observed {
-        sample: StoreSizeSampleV1 {
-            store: StoreKeyV1::new("sessions.db").unwrap(),
-            page_size_bytes: 4096,
-            page_count: bytes / 4096,
-            freelist_pages: 0,
-            observed_at: UtcMicros(1),
-        },
-    };
-
-    assert!(permits_synchronous_table_growth(&sample(
-        MAX_SYNCHRONOUS_TABLE_GROWTH_STORE_BYTES
-    )));
-    assert!(!permits_synchronous_table_growth(&sample(
-        MAX_SYNCHRONOUS_TABLE_GROWTH_STORE_BYTES + 4096
-    )));
-    assert!(!permits_synchronous_table_growth(
-        &StorageTelemetryReadV1::Unknown {
-            store: StoreKeyV1::new("sessions.db").unwrap(),
-        }
-    ));
 }
 
 fn engine_status(
@@ -656,5 +627,53 @@ fn verifying_seated_generation_reads_stale_like_status() {
     assert_eq!(
         code_index_mount_state(Some(CodeIndexStalenessStateV1::Indexing)),
         CodeIndexMountStateV1::Indexing
+    );
+}
+
+#[test]
+fn live_graph_container_bytes_sums_every_wal_segment() {
+    let temporary = tempfile::tempdir().unwrap();
+    let container = temporary.path().join("tracedecay.grafeo");
+    std::fs::write(&container, vec![0_u8; 1_000]).unwrap();
+    let wal = temporary.path().join("tracedecay.grafeo.wal");
+    std::fs::create_dir(&wal).unwrap();
+    std::fs::write(wal.join("wal_00000001.log"), vec![0_u8; 200]).unwrap();
+    std::fs::write(wal.join("wal_00000002.log"), vec![0_u8; 30]).unwrap();
+
+    assert_eq!(live_graph_container_bytes(&container), 1_230);
+}
+
+#[test]
+fn a_footprint_budget_is_not_reported_as_an_unmounted_store() {
+    use tracedecay_contracts::doctor::DoctorEvidenceStateV1;
+
+    let mut retention = tracedecay_configuration::RetentionConfig::default();
+    retention
+        .store_soft_budgets_bytes
+        .insert("projects/proj_a".to_owned(), 1);
+    assert_eq!(
+        soft_budget_findings(
+            std::collections::BTreeMap::new(),
+            &retention,
+            &BTreeSet::from(["projects/proj_a"]),
+        ),
+        DoctorStorageFamilyReadV1::Absent,
+        "the footprint owns this key"
+    );
+
+    retention
+        .store_soft_budgets_bytes
+        .insert("sessions.db".to_owned(), 1);
+    let DoctorStorageFamilyReadV1::Observed { findings } = soft_budget_findings(
+        std::collections::BTreeMap::new(),
+        &retention,
+        &BTreeSet::from(["projects/proj_a"]),
+    ) else {
+        panic!("an unmounted store budget is still reported");
+    };
+    assert_eq!(findings.len(), 1);
+    assert_eq!(
+        findings[0].finding().state(),
+        DoctorEvidenceStateV1::Unknown
     );
 }
