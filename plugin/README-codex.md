@@ -45,10 +45,6 @@ neither client starts a missing or stopped service. If the daemon is
 unavailable or intentionally held, report that state and use scoped native
 tools without retrying or changing daemon lifecycle.
 
-For literal strings, regexes, and config keys inside indexed code, use
-`tracedecay_grep`; reserve `tracedecay_search` for symbol names and
-`tracedecay_context` for concept-level discovery.
-
 Before running `cargo check`/`tsc`/`clippy` in the shell, or when shell output
 shows compile errors, the injected steering routes the moment to tracedecay
 diagnostics: paste captured output into `tracedecay_diagnose`, or read the
