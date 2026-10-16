@@ -1,6 +1,6 @@
 ---
 name: managing-session-context
-description: Recover prior-session messages or summaries, including Git- or time-scoped history, and inspect LCM state.
+description: Use when the user asks what an earlier conversation or session said, or to recover prior-session context by time or Git history. Load this skill before the first tool call.
 ---
 
 # Managing session context

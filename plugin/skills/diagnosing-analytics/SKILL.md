@@ -1,6 +1,6 @@
 ---
 name: diagnosing-analytics
-description: 'Explain TraceDecay usage, hook capture, attribution, or adoption analytics using supported diagnostics and source coverage.'
+description: 'Use when the user asks how TraceDecay is used: tool or skill usage, hook capture, attribution, or adoption analytics. Load this skill before the first tool call.'
 ---
 
 # Diagnosing analytics

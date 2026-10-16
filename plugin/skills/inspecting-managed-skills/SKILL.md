@@ -1,6 +1,6 @@
 ---
 name: inspecting-managed-skills
-description: Inspect TraceDecay-managed skill proposals, activation, run evidence, or Hermes bridge health.
+description: Use when the user asks about TraceDecay-managed skill proposals, activation, run evidence, or Hermes bridge health. Load this skill before the first tool call.
 ---
 
 # Inspecting managed skills

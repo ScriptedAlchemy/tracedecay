@@ -26,7 +26,8 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 # Tools that do not count as a "meaningful" action for first-choice/efficiency.
-IGNORED_TOOLS = {"TodoWrite"}
+# Loading a skill is routing, which is scored separately.
+IGNORED_TOOLS = {"TodoWrite", "Skill"}
 
 # Per-subscore weights. Applicable subscores are selected per scenario, then the
 # weights are renormalized so each scenario score is 0..1.
@@ -258,15 +259,21 @@ class ToolCall:
 _TRACEDECAY_CLI = re.compile(
     r"(?:^|[\s;&|'\"])(?:\S*/)?tracedecay\s+tool\s+([a-zA-Z][a-zA-Z0-9_-]*)"
 )
+# Codex has no skill tool: it loads a skill by reading the installed SKILL.md.
+_SKILL_FILE_READ = re.compile(r"tracedecay[^\s'\"]*/skills/([a-z][a-z0-9-]*)/SKILL\.md")
 
 
 def tool_call(seq: int, raw_name: str, inp: dict) -> ToolCall:
-    """Build one normalized call, preserving TraceDecay CLI tool identity."""
+    """Build one normalized call, preserving TraceDecay CLI and skill identity."""
     call = ToolCall(seq, raw_name, canon_name(raw_name), inp)
     if call.canon == "Bash":
         match = _TRACEDECAY_CLI.search(call.command)
+        skills = _SKILL_FILE_READ.findall(call.command)
         if match:
             call.canon = "tracedecay_" + match.group(1).replace("-", "_")
+        elif skills:
+            call.canon = "Skill"
+            call.input = {**inp, "skill": " ".join("tracedecay:" + s for s in skills)}
     return call
 
 
@@ -836,17 +843,8 @@ def score_scenario(scn: dict, tr: Transcript, seeded_facts: dict, run_meta: dict
     if "expected_skill" in scn or "allowed_skills" in scn:
         expected = scn.get("expected_skill")
         allowed = scn.get("allowed_skills", [expected] if expected else [])
-        # Codex reads skill files through exec/read tools, without a reliable
-        # invocation event in the supported transcript normalizer. Absence of a
-        # Claude-style Skill event therefore cannot establish a Codex miss.
-        skills_available = run_meta.get("channel_condition", "full") not in {"no-skills", "bare"}
-        measured = tr.host == "claude" and skills_available
-        if not skills_available:
-            unmeasured_reason = "skills_unavailable_in_condition"
-        elif tr.host != "claude":
-            unmeasured_reason = "host_skill_evidence_unsupported"
-        else:
-            unmeasured_reason = None
+        measured = run_meta.get("channel_condition", "full") not in {"no-skills", "bare"}
+        unmeasured_reason = None if measured else "skills_unavailable_in_condition"
         selected = invoked_skills(tr) if measured else None
         details["skill_routing"] = {
             "measured": measured,

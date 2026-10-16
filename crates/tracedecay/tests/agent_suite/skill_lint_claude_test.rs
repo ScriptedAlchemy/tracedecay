@@ -182,6 +182,23 @@ fn bundled_skill_descriptions_satisfy_claude_description_rules() {
     }
 }
 
+/// Claude invoked none of the bundled skills while their descriptions only
+/// named a capability, and reached only 8 of 21 matching tasks with a bare
+/// "Use when" trigger. Both clauses together raised it to 21 of 21 (#4081).
+#[test]
+fn bundled_skill_descriptions_tell_the_model_when_to_load_them() {
+    for skill in load_all_skill_docs() {
+        let description = required_scalar(&skill, "description");
+        assert!(
+            description.starts_with("Use when ")
+                && description.ends_with(" Load this skill before the first tool call."),
+            "{} description must start with \"Use when\" and end with \"Load this skill \
+             before the first tool call.\"; got {description:?}",
+            skill.path.display()
+        );
+    }
+}
+
 /// Strict Agent Skills spec conformance.
 ///
 /// The whole shared skill set must stay strictly Agent-Skills-spec conformant:

@@ -32,7 +32,7 @@ tracedecay-contracts = { path = "../tracedecay-contracts" }
 tracedecay-store = { path = "../tracedecay-store" }
 tracing = "0.1"
 
-# Thread CPU time for the debug-build long-poll guard on native tasks.
+# Thread CPU time for the long-poll count on native tasks.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

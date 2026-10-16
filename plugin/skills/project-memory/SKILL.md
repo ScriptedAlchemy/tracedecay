@@ -1,6 +1,6 @@
 ---
 name: project-memory
-description: Recall or maintain durable TraceDecay project facts; use session context for raw transcript replay.
+description: Use when the user asks what was decided, agreed, or recorded about the project, or asks to remember a decision. Load this skill before the first tool call.
 ---
 
 # Project memory
