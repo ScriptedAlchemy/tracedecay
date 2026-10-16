@@ -211,9 +211,15 @@ pub struct RedundancySurfaceRequestV1 {
     pub match_classes: Vec<SimilarMatchClassV1>,
     pub scope: RedundancyScopeV1,
     pub include_generated_paths: bool,
-    /// Preferred family page size.
+    /// Preferred family page size, 1 through 100.
+    #[schemars(range(min = 1, max = MAX_REDUNDANCY_FAMILIES_V1))]
     pub family_limit: u32,
+    /// Members listed per family, at least 2.
+    #[schemars(range(min = 2))]
     pub member_limit: u32,
+    /// Clone-index work budget for this page, 3 through 10000. A page that
+    /// exhausts it reports partial coverage.
+    #[schemars(range(min = 3, max = MAX_REDUNDANCY_WORK_V1))]
     pub work_limit: u32,
     pub cursor: Option<String>,
 }
@@ -1199,6 +1205,25 @@ mod tests {
             }))
             .is_err(),
             "max_pairs is not an alias of family_limit"
+        );
+    }
+
+    #[test]
+    fn redundancy_schema_advertises_the_limits_the_executor_enforces() {
+        let schema = serde_json::to_value(schema_for!(RedundancySurfaceRequestV1))
+            .expect("redundancy request schema serializes");
+        let bounds = |field: &str| {
+            let property = &schema["properties"][field];
+            (property["minimum"].clone(), property["maximum"].clone())
+        };
+        assert_eq!(
+            bounds("family_limit"),
+            (json!(1), json!(super::MAX_REDUNDANCY_FAMILIES_V1))
+        );
+        assert_eq!(bounds("member_limit"), (json!(2), Value::Null));
+        assert_eq!(
+            bounds("work_limit"),
+            (json!(3), json!(super::MAX_REDUNDANCY_WORK_V1))
         );
     }
 }
