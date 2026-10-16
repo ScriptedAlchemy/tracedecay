@@ -25,6 +25,22 @@ const CONTEXT_SCOUT_LIFECYCLE_QUERY: &str = "SELECT observation_json
      ORDER BY sequence DESC
      LIMIT ?2";
 
+const NATIVE_SESSION_IDS_QUERY: &str = "SELECT json_extract(
+            observation_json,
+            '$.identity.source.session_id'
+        ) AS session_id
+     FROM observations
+     WHERE json_extract(
+            observation_json,
+            '$.__retention_released'
+        ) IS NULL
+       AND json_type(
+            observation_json,
+            '$.identity.source.session_id'
+        ) = 'text'
+     GROUP BY session_id
+     ORDER BY MAX(sequence) DESC";
+
 type ContextScoutLifecycleKeyV1 = ([u8; 16], [u8; 16]);
 
 struct RegisteredContextScoutLifecycleAuthorityV1 {
@@ -246,27 +262,7 @@ pub async fn lookup_registered_context_scout_native_session(
         resolve_authority(hook_project_id, hook_worktree_id)?;
     let session_id = {
         let snapshot = sessions.read_snapshot().await.ok()?;
-        let mut rows = snapshot
-            .query(
-                "SELECT json_extract(
-                        observation_json,
-                        '$.identity.source.session_id'
-                    ) AS session_id
-                 FROM observations
-                 WHERE json_extract(
-                        observation_json,
-                        '$.__retention_released'
-                    ) IS NULL
-                   AND json_type(
-                        observation_json,
-                        '$.identity.source.session_id'
-                    ) = 'text'
-                 GROUP BY session_id
-                 ORDER BY MAX(sequence) DESC",
-                (),
-            )
-            .await
-            .ok()?;
+        let mut rows = snapshot.query(NATIVE_SESSION_IDS_QUERY, ()).await.ok()?;
         let mut resolved: Option<SessionId> = None;
         while let Some(row) = rows.next().await.ok()? {
             let raw_session_id = row.get::<String>(0).ok()?;
