@@ -33,6 +33,15 @@ outputs:
 runs:
   using: composite
   steps:
+    # crate_universe's cargo checks out git dependencies under D:/b; asupersync
+    # carries paths past MAX_PATH there, which libgit2 refuses without this.
+    - name: Allow long git paths
+      if: runner.os == 'Windows'
+      shell: bash
+      run: |
+        git config --global core.longpaths true
+        git config --system core.longpaths true
+
     # Cache versions include the literal path. Keep setup-bazel's existing
     # directory and key prefix to restore previously compiled outputs.
     - name: Resolve action cache location
