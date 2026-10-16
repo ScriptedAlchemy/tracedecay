@@ -25,6 +25,7 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
 use std::time::Instant;
 
 use crate::code_index_task_support::spawn_detached;
+use tracedecay_runtime_core::native_runtime;
 
 use tracedecay_code_index::graph_projection::{
     CodeGraphCatalogReleaseV1, CodeGraphEngineReleaseV1,
@@ -69,6 +70,10 @@ pub(super) struct WorktreeResidencyV1 {
     park_release_after_pass_armed: AtomicBool,
     park_release_after_reads_drain_retrying: AtomicBool,
     pub(super) park_headroom: ParkHeadroomV1,
+    /// CPU the next park release spends first, and who hears it finish.
+    #[cfg(test)]
+    pub(super) injected_park_release_cpu:
+        Mutex<Option<(std::time::Duration, tokio::sync::oneshot::Sender<()>)>>,
 }
 
 /// The owner-headroom epochs a worktree's own park releases advanced.
@@ -131,6 +136,8 @@ impl WorktreeResidencyV1 {
             park_release_after_pass_armed: AtomicBool::new(false),
             park_release_after_reads_drain_retrying: AtomicBool::new(false),
             park_headroom: ParkHeadroomV1::default(),
+            #[cfg(test)]
+            injected_park_release_cpu: Mutex::new(None),
         }
     }
 
@@ -183,6 +190,25 @@ impl WorktreeResidencyV1 {
         }
     }
 
+    /// [`Self::release_decode_when_parked`] on the blocking pool. Its callers
+    /// are native tasks, and the release walks, frees, and unmaps a decode or
+    /// graph engine and rewrites its generation markers. Inside a native
+    /// task's poll that holds the worker, and past `LONG_POLL_CPU` a debug
+    /// build fails the task (#4066).
+    pub(super) async fn release_decode_when_parked_off_worker(
+        self: &Arc<Self>,
+        owners: &Arc<ResidentOwnersV1>,
+    ) {
+        let (residency, owners) = (Arc::clone(self), Arc::clone(owners));
+        if let Err(error) = native_runtime::spawn_blocking(move || {
+            residency.release_decode_when_parked(&owners);
+        })
+        .await
+        {
+            tracing::error!(%error, "the parked decode release did not run");
+        }
+    }
+
     /// Drop the seated decode, catalog, and engine once the worker parks.
     ///
     /// Exact and lexical serve from the sealed text artifact. Callers reseat
@@ -200,6 +226,8 @@ impl WorktreeResidencyV1 {
     /// re-decode. The decode is announced as this worktree's own park
     /// release: a retry re-decodes it (issue #3588).
     pub(super) fn release_decode_when_parked(self: &Arc<Self>, owners: &Arc<ResidentOwnersV1>) {
+        #[cfg(test)]
+        self.spin_injected_park_release_cpu();
         if self.busy() {
             self.arm_park_release_after_pass_settles(owners);
             return;
@@ -356,7 +384,9 @@ impl WorktreeResidencyV1 {
             let (residency, owners) = (Weak::clone(&residency), Weak::clone(&weak_owners));
             spawn_detached("code_index_park_release_after_reads", async move {
                 if let (Some(residency), Some(owners)) = (residency.upgrade(), owners.upgrade()) {
-                    residency.release_decode_when_parked(&owners);
+                    residency
+                        .release_decode_when_parked_off_worker(&owners)
+                        .await;
                 }
             });
         }));
@@ -386,7 +416,9 @@ impl WorktreeResidencyV1 {
                 residency
                     .park_release_after_pass_armed
                     .store(false, Ordering::Release);
-                residency.release_decode_when_parked(&owners);
+                residency
+                    .release_decode_when_parked_off_worker(&owners)
+                    .await;
             }
         });
     }
@@ -418,7 +450,9 @@ impl WorktreeResidencyV1 {
         let settled = text.catalog_warm_notify();
         spawn_detached("code_index_park_release_after_catalog_warm", async move {
             settled.notified().await;
-            retry();
+            if let Err(error) = native_runtime::spawn_blocking(move || retry()).await {
+                tracing::error!(%error, "the parked graph release retry did not run");
+            }
         });
     }
 
@@ -447,6 +481,22 @@ impl WorktreeResidencyV1 {
 
     fn busy(&self) -> bool {
         self.reconcile_in_progress.running()
+    }
+
+    #[cfg(test)]
+    fn spin_injected_park_release_cpu(&self) {
+        let injected = self
+            .injected_park_release_cpu
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some((cpu, spun)) = injected {
+            let started = Instant::now();
+            while started.elapsed() < cpu {
+                std::hint::spin_loop();
+            }
+            let _ = spun.send(());
+        }
     }
 
     /// Register every one of this worktree's owners with `owners`. The returned

@@ -781,6 +781,27 @@ impl CodeIndexSchedulerRegistryV1 {
             .release_decode_when_parked(&self.resident_owners);
     }
 
+    /// Make this worktree's next park release spend `cpu` first. The receiver
+    /// resolves once that CPU is spent.
+    #[cfg(test)]
+    pub async fn inject_park_release_cpu_for_test(
+        &self,
+        project_root: &Path,
+        cpu: std::time::Duration,
+    ) -> tokio::sync::oneshot::Receiver<()> {
+        let project_root = canonical_existing_identity(project_root).expect("canonical root");
+        let (spun, spent) = tokio::sync::oneshot::channel();
+        let mounted = self.mounted.lock().await;
+        *mounted
+            .get(&project_root)
+            .expect("mounted worktree")
+            .residency
+            .injected_park_release_cpu
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((cpu, spun));
+        spent
+    }
+
     /// Drop only the decoded seat, as a deferred serving decode does once a
     /// published graph head serves from the text owner.
     #[cfg(test)]

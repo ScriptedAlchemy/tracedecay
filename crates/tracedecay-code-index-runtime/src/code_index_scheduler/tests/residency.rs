@@ -2128,3 +2128,64 @@ async fn a_memory_activation_longer_than_one_native_poll_still_seats() {
     wait_for_live_complete_generation(&registry, fixture.path()).await;
     registry.shutdown().await;
 }
+
+async fn commit_and_index(
+    registry: &CodeIndexSchedulerRegistryV1,
+    fixture: &GitFixture,
+    source: &str,
+) {
+    let previous = registry
+        .latest_generation_id(fixture.path())
+        .await
+        .expect("a seated generation");
+    fixture.edit("src/lib.rs", source);
+    git(fixture.path(), &["commit", "-qam", source]);
+    assert!(matches!(
+        registry
+            .notify_path(fixture.path(), fixture.path().join("src/lib.rs"))
+            .await,
+        super::super::CodeIndexDemandAdmissionV1::Queued
+    ));
+    wait_for_generation_change(registry, fixture.path(), &previous).await;
+}
+
+/// A park release that outlasts the CPU one native poll may spend leaves the
+/// worker indexing. The release frees and unmaps decodes and graph engines
+/// synchronously: run inside the worker's poll, the debug long-poll guard
+/// fails the worker and no later edit is indexed (#4066).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_park_release_longer_than_one_native_poll_keeps_the_worker_indexing() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn before_park() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, _) = mounted_text_query_worktree_at(
+        CodeIndexSchedulerRegistryV1::new(1),
+        fixture.path(),
+        store.path().to_path_buf(),
+    )
+    .await;
+    let spent = registry
+        .inject_park_release_cpu_for_test(
+            fixture.path(),
+            tracedecay_runtime_core::native_runtime::LONG_POLL_CPU * 2,
+        )
+        .await;
+
+    commit_and_index(
+        &registry,
+        &fixture,
+        "pub fn parks_after_this() -> u32 { 2 }\n",
+    )
+    .await;
+    tokio::time::timeout(SERVING_SEAT_FAILURE_CEILING, spent)
+        .await
+        .expect("the worker parks after indexing the edit")
+        .expect("the injected release ran");
+    commit_and_index(
+        &registry,
+        &fixture,
+        "pub fn indexed_after_the_long_release() -> u32 { 3 }\n",
+    )
+    .await;
+
+    registry.shutdown().await;
+}
