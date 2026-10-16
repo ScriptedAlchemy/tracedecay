@@ -58,14 +58,18 @@ crate.annotation(
     version = "0.46.0",
 )
 
-# Dicklesworthstone/asupersync#83: a reactor leader that leaves epoll to run a
-# task promotes no parked follower, so one long poll delays every socket wake
-# and shared timer on the runtime. Delete this annotation and the patch once
-# the pinned or published asupersync contains the fix.
+# One long poll must not delay the rest of the runtime. Two upstream fixes:
+# Dicklesworthstone/asupersync#83, a reactor leader that leaves epoll to run a
+# task promotes no parked follower, so the poll delays every socket wake and
+# shared timer; Dicklesworthstone/asupersync#84, a task woken by the executing
+# task waits in that worker's unstealable LIFO slot for the whole poll while
+# other workers idle. One patch file holds both because crate_universe applies
+# an annotation's patches in sorted label order. Delete this annotation and the
+# patch once the pinned or published asupersync contains both fixes.
 crate.annotation(
     crate = "asupersync",
     patch_args = ["-p1"],
-    patches = ["//scripts:bazel/patches/asupersync-reactor-handoff.patch"],
+    patches = ["//scripts:bazel/patches/asupersync-scheduler.patch"],
     version = "0.6.0",
 )
 
