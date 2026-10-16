@@ -402,6 +402,15 @@ async fn lifecycle_less_boundary_settles_and_resumes_on_its_sessions_lifecycle()
         Some(([210; 16], true)),
         "only the session's hook that carries a lifecycle resumes the parked boundary"
     );
+    // The resumed cycle reports no terminal. Until it settles, the session's
+    // next boundary supersedes it and inherits its lifecycle.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while runtime.active_tasks() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the resumed cycle settles");
     session_hook(213, Some(lifecycle.clone()));
     let second = saved_edit(214);
     assert_eq!(

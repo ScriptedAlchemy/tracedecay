@@ -207,6 +207,7 @@ impl BoundedHookOrchestratorV1 {
         address: &HookOrchestrationAddressV1,
         operation: &Arc<HookOrchestrationInFlightEntryV1>,
         emit_terminal: bool,
+        permit: Option<tokio::sync::OwnedSemaphorePermit>,
     ) {
         let completions = {
             let mut in_flight = in_flight
@@ -235,6 +236,9 @@ impl BoundedHookOrchestratorV1 {
             }
             completions
         };
+        // A terminal is the host's cue to send the session's next boundary,
+        // which must find this cycle's permit free.
+        drop(permit);
         if emit_terminal {
             for completion in completions {
                 completion();
@@ -388,14 +392,14 @@ impl BoundedHookOrchestratorV1 {
                 let superseded = operation
                     .superseded
                     .load(std::sync::atomic::Ordering::Acquire);
-                Self::settle_operation(&in_flight, &address, &operation, superseded);
+                Self::settle_operation(&in_flight, &address, &operation, superseded, None);
                 return;
             };
             if cancellation.is_cancelled() || work_cancellation.is_cancelled() {
                 let superseded = operation
                     .superseded
                     .load(std::sync::atomic::Ordering::Acquire);
-                Self::settle_operation(&in_flight, &address, &operation, superseded);
+                Self::settle_operation(&in_flight, &address, &operation, superseded, Some(permit));
                 return;
             }
             let resumable = request.clone();
@@ -455,8 +459,13 @@ impl BoundedHookOrchestratorV1 {
                         .load(std::sync::atomic::Ordering::Acquire)
                 }
             };
-            Self::settle_operation(&in_flight, &address, &operation, emit_terminal);
-            drop(permit);
+            Self::settle_operation(
+                &in_flight,
+                &address,
+                &operation,
+                emit_terminal,
+                Some(permit),
+            );
         });
         let Ok(task) = task else {
             Self::settle_operation(
@@ -464,6 +473,7 @@ impl BoundedHookOrchestratorV1 {
                 &spawned_address,
                 &spawned_operation,
                 false,
+                None,
             );
             return Err(HookOrchestrationAdmissionV1::Unavailable);
         };
