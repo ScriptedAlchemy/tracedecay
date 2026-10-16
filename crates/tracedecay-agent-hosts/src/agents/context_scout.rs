@@ -31,8 +31,10 @@ use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline
 use tracedecay_tokenizer::o200k_base;
 
 pub mod address_registry;
+pub mod decision_engine;
 pub mod model;
 pub mod owner;
+pub mod session_window;
 
 const MAX_SCOUT_TEXT_BYTES: usize = 4 * 1024;
 const MAX_SCOUT_CANDIDATES: usize = 32;
