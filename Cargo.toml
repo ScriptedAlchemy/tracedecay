@@ -227,11 +227,12 @@ opt-level = 2
 opt-level = 3
 
 # The upstream Rust grammar rejects `#[cfg(...)]` attributes on
-# struct-destructuring fields (tree-sitter/tree-sitter-rust#301). Every
-# `tree-sitter-rust` consumer in the graph resolves to the PR author's fork,
-# pinned to the PR head commit, until the fix lands upstream.
+# struct-destructuring fields. Our fork carries tree-sitter/tree-sitter-rust#301
+# on top of upstream master (branch `tracedecay/struct-pattern-attrs-v2`), and
+# every `tree-sitter-rust` consumer in the graph resolves to it until upstream
+# merges #301 and releases it.
 [patch.crates-io]
-tree-sitter-rust = { git = "https://github.com/vanessa-rodrigues/tree-sitter-rust", rev = "877df9f82f320243ab23929589a940208faa9d15" }
+tree-sitter-rust = { git = "https://github.com/ScriptedAlchemy/tree-sitter-rust", rev = "d737577441bf238d18be428ee6207779a55140aa" }
 # Kotlin uses arborium-kotlin across all tiers; the medium bundle must not
 # link tree-sitter-kotlin-sg's duplicate parse table.
 tokensave-medium-treesitters = { path = "patches/tokensave-medium-treesitters" }
