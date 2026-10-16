@@ -163,9 +163,17 @@ impl RegisteredWorkProductServicesV1 {
         topology: tracedecay_domain::WorkTopologyPolicyV1,
         command: tracedecay_contracts::StartWorkAttemptCommand,
     ) -> Result<tracedecay_domain::WorkAttemptV1, tracedecay_contracts::ApplicationProblem> {
+        let prefetch_context = context.clone();
+        let observed_at = command.occurred_at;
         let graph = self
             .storage
-            .prefetch_attempt_admission_graph(&context, command.occurred_at)
+            .prefetch_graph(move |storage| {
+                tracedecay_contracts::PrefetchedWorkGraphReadV1::for_attempt_admission(
+                    storage,
+                    &prefetch_context,
+                    observed_at,
+                )
+            })
             .await;
         self.storage
             .transact_with_graph(graph, move |storage| {
@@ -185,6 +193,43 @@ impl RegisteredWorkProductServicesV1 {
             })
             .await
             .unwrap_or_else(|_| Err(attempt_unavailable()))
+    }
+
+    /// Commits one product graph mutation as a single writer transaction: the
+    /// revision check, the command replay check and the event append with its
+    /// verified version commit together. The current graph the mutation
+    /// checks its expected version against is read before the job, on a
+    /// reader; the append's graph-version compare-and-swap fences it.
+    pub async fn mutate(
+        &self,
+        context: tracedecay_contracts::RequestContext,
+        binding: tracedecay_contracts::WorkProductBindingV1,
+        request: tracedecay_contracts::WorkProductMutationRequestV1,
+        revisions: tracedecay_contracts::WorkProductRevisionPinsV1,
+    ) -> Result<
+        tracedecay_contracts::WorkProductMutationReceiptV1,
+        tracedecay_contracts::WorkProductApplicationErrorV1,
+    > {
+        let (prefetch_context, prefetch_request) = (context.clone(), request.clone());
+        let graph = self
+            .storage
+            .prefetch_graph(move |storage| {
+                tracedecay_contracts::PrefetchedWorkGraphReadV1::for_mutation(
+                    storage,
+                    &prefetch_context,
+                    &prefetch_request,
+                )
+            })
+            .await;
+        self.storage
+            .transact_with_graph(graph, move |storage| {
+                tracedecay_contracts::WorkProductMutationServiceV1::new(storage, storage, storage)
+                    .mutate(&context, &binding, request.clone(), &revisions)
+            })
+            .await
+            .unwrap_or(Err(
+                tracedecay_contracts::WorkProductApplicationErrorV1::EventAuthorityUnavailable,
+            ))
     }
 
     /// Admits one synthesis attempt as a single writer transaction: the
@@ -214,9 +259,17 @@ impl RegisteredWorkProductServicesV1 {
             + Sync
             + 'static,
     {
+        let prefetch_context = context.clone();
+        let observed_at = command.start.occurred_at;
         let graph = self
             .storage
-            .prefetch_attempt_admission_graph(&context, command.start.occurred_at)
+            .prefetch_graph(move |storage| {
+                tracedecay_contracts::PrefetchedWorkGraphReadV1::for_attempt_admission(
+                    storage,
+                    &prefetch_context,
+                    observed_at,
+                )
+            })
             .await;
         self.storage
             .transact_with_graph(graph, move |storage| {
@@ -257,9 +310,17 @@ impl RegisteredWorkProductServicesV1 {
         tracedecay_contracts::WorkRetryAttemptOutcomeV1,
         tracedecay_contracts::ApplicationProblem,
     > {
+        let prefetch_context = context.clone();
+        let observed_at = restarted_at;
         let graph = self
             .storage
-            .prefetch_attempt_admission_graph(&context, restarted_at)
+            .prefetch_graph(move |storage| {
+                tracedecay_contracts::PrefetchedWorkGraphReadV1::for_attempt_admission(
+                    storage,
+                    &prefetch_context,
+                    observed_at,
+                )
+            })
             .await;
         self.storage
             .transact_with_graph(graph, move |storage| {

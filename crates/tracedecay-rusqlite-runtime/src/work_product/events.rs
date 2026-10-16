@@ -12,11 +12,39 @@ use tracedecay_domain::{
 use super::{WORK_PRODUCT_EVENT_ID_DOMAIN, load_journal_tail, owner_params, selection_covers};
 use crate::exact_sql::ExactSqlValue;
 use crate::work::{
-    RegisteredWorkWrite, WorkSqliteStorage, exact_sql_statement, exact_sql_text,
-    registered_work_query,
+    RegisteredWorkQuery, RegisteredWorkWrite, WorkSqliteStorage, exact_sql_statement,
+    exact_sql_text, registered_work_query,
 };
 
+use crate::work_run_control::WorkSqliteJobStorage;
+
 type PortError = WorkProductEventPortErrorV1;
+
+/// The writer job commits the event and its verified version together, or
+/// rolls both back with any refusal the job returns.
+impl WorkProductEventPortV1 for WorkSqliteJobStorage<'_> {
+    fn replay(
+        &self,
+        context: &WorkProductPortContextV1,
+        command_id: &WorkCommandId,
+        canonical_input_digest: &ManifestDigest,
+    ) -> Result<Option<WorkProductEventCommitV1>, PortError> {
+        replay_from(
+            self.transaction,
+            context,
+            command_id,
+            canonical_input_digest,
+        )
+    }
+
+    fn append_atomically(
+        &self,
+        context: &WorkProductPortContextV1,
+        draft: &WorkProductEventDraftV1,
+    ) -> Result<WorkProductEventCommitOutcomeV1, PortError> {
+        append_in_transaction(self.transaction, context, draft)
+    }
+}
 
 impl WorkProductEventPortV1 for WorkSqliteStorage {
     fn replay(
@@ -25,44 +53,7 @@ impl WorkProductEventPortV1 for WorkSqliteStorage {
         command_id: &WorkCommandId,
         canonical_input_digest: &ManifestDigest,
     ) -> Result<Option<WorkProductEventCommitV1>, PortError> {
-        let scope = context.authorized_scope();
-        let rows = registered_work_query(
-            self.handle(),
-            "SELECT canonical_input_digest, event_payload FROM work_product_events_v1
-             WHERE owner_brain_id = ?1 AND owner_profile_id = ?2 AND command_id = ?3",
-            owner_params(scope)
-                .into_iter()
-                .chain([ExactSqlValue::Text(command_id.as_str().to_owned())])
-                .collect(),
-        )
-        .map_err(|_| PortError::Unavailable)?;
-        let Some(row) = rows.rows.first() else {
-            return Ok(None);
-        };
-        let stored_digest = exact_sql_text(&row.values, 0).ok_or(PortError::Unavailable)?;
-        if stored_digest != canonical_input_digest.as_str() {
-            // The same command id with different canonical input is a reused
-            // idempotency key, never a replay of this request.
-            return Err(PortError::IdempotencyConflict);
-        }
-        let event: WorkProductEventV1 =
-            serde_json::from_str(exact_sql_text(&row.values, 1).ok_or(PortError::Unavailable)?)
-                .map_err(|_| PortError::Unavailable)?;
-        // A replayed event must still be one this selection is authorized to
-        // see; otherwise its existence would leak through the idempotency
-        // channel.
-        if !selection_covers(scope.selection(), &event) {
-            return Err(PortError::NotFoundOrNotAuthorized);
-        }
-        let published = super::load_published_versions(self.handle(), scope)
-            .ok_or(PortError::Unavailable)?
-            .into_iter()
-            .find(|published| published.event_sequence == event.sequence())
-            .ok_or(PortError::Unavailable)?;
-        let verified = super::verified_version(&published, &event).ok_or(PortError::Unavailable)?;
-        WorkProductEventCommitV1::new(event, verified)
-            .map(Some)
-            .map_err(|_| PortError::Unavailable)
+        replay_from(self.handle(), context, command_id, canonical_input_digest)
     }
 
     fn append_atomically(
@@ -90,6 +81,51 @@ impl WorkProductEventPortV1 for WorkSqliteStorage {
             }
         }
     }
+}
+
+fn replay_from(
+    source: &impl RegisteredWorkQuery,
+    context: &WorkProductPortContextV1,
+    command_id: &WorkCommandId,
+    canonical_input_digest: &ManifestDigest,
+) -> Result<Option<WorkProductEventCommitV1>, PortError> {
+    let scope = context.authorized_scope();
+    let rows = registered_work_query(
+        source,
+        "SELECT canonical_input_digest, event_payload FROM work_product_events_v1
+         WHERE owner_brain_id = ?1 AND owner_profile_id = ?2 AND command_id = ?3",
+        owner_params(scope)
+            .into_iter()
+            .chain([ExactSqlValue::Text(command_id.as_str().to_owned())])
+            .collect(),
+    )
+    .map_err(|_| PortError::Unavailable)?;
+    let Some(row) = rows.rows.first() else {
+        return Ok(None);
+    };
+    let stored_digest = exact_sql_text(&row.values, 0).ok_or(PortError::Unavailable)?;
+    if stored_digest != canonical_input_digest.as_str() {
+        // The same command id with different canonical input is a reused
+        // idempotency key, never a replay of this request.
+        return Err(PortError::IdempotencyConflict);
+    }
+    let event: WorkProductEventV1 =
+        serde_json::from_str(exact_sql_text(&row.values, 1).ok_or(PortError::Unavailable)?)
+            .map_err(|_| PortError::Unavailable)?;
+    // A replayed event must still be one this selection is authorized to see;
+    // otherwise its existence would leak through the idempotency channel.
+    if !selection_covers(scope.selection(), &event) {
+        return Err(PortError::NotFoundOrNotAuthorized);
+    }
+    let published = super::load_published_versions(source, scope)
+        .ok_or(PortError::Unavailable)?
+        .into_iter()
+        .find(|published| published.event_sequence == event.sequence())
+        .ok_or(PortError::Unavailable)?;
+    let verified = super::verified_version(&published, &event).ok_or(PortError::Unavailable)?;
+    WorkProductEventCommitV1::new(event, verified)
+        .map(Some)
+        .map_err(|_| PortError::Unavailable)
 }
 
 pub(super) fn append_in_transaction(

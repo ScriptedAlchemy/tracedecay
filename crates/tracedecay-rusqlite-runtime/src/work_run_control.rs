@@ -91,25 +91,18 @@ impl WorkSqliteStorage {
             .await
     }
 
-    /// Reads the current product graph an attempt admission observed at
-    /// `observed_at` makes, on the blocking pool, so the awaiting task parks
-    /// no runtime thread and the replay never holds the writer.
-    pub async fn prefetch_attempt_admission_graph(
+    /// Makes the current product graph read a writer job's service will ask
+    /// for, on the blocking pool, so the awaiting task parks no runtime thread
+    /// and the journal replay never holds the writer. A read that cannot run
+    /// prefetches nothing, and the job's service refuses its read.
+    pub async fn prefetch_graph(
         &self,
-        context: &tracedecay_contracts::RequestContext,
-        observed_at: UtcMicros,
+        read: impl FnOnce(&Self) -> tracedecay_contracts::PrefetchedWorkGraphReadV1 + Send + 'static,
     ) -> tracedecay_contracts::PrefetchedWorkGraphReadV1 {
         let storage = self.clone();
-        let context = context.clone();
-        crate::native_runtime::spawn_blocking(move || {
-            tracedecay_contracts::PrefetchedWorkGraphReadV1::for_attempt_admission(
-                &storage,
-                &context,
-                observed_at,
-            )
-        })
-        .await
-        .unwrap_or_default()
+        crate::native_runtime::spawn_blocking(move || read(&storage))
+            .await
+            .unwrap_or_default()
     }
 }
 

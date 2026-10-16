@@ -78,17 +78,22 @@ fn selection() -> WorkProductSelectionScopeV1 {
     .unwrap()
 }
 
-fn mutate(
-    product: &RegisteredWorkProductServicesV1,
+/// Prepares one mutation from the current head, commits it as a writer job
+/// on a native worker, and adds the native waits the commit parked to
+/// `waits`.
+async fn mutate(
+    database: &RegisteredGlobalDb,
     change: WorkProductChangeDraftV1,
     command_id: &str,
     occurred_at: UtcMicros,
+    waits: &mut (u64, u64),
 ) -> WorkProductMutationReceiptV1 {
-    let context = product_context();
+    let product =
+        RegisteredWorkProductServicesV1::attach(database, binding()).expect("product services");
     let request = product
         .mutations()
         .prepare_mutation(
-            &context,
+            &product_context(),
             &binding(),
             PrepareWorkProductMutationRequestV1 {
                 selection: selection(),
@@ -101,17 +106,22 @@ fn mutate(
             revisions(),
         )
         .expect("the mutation prepares");
-    product
-        .mutations()
-        .mutate(&context, &binding(), request, &revisions())
-        .expect("the mutation commits")
+    let (receipt, writer_waits, reader_waits) = on_native_worker(async move {
+        product
+            .mutate(product_context(), binding(), request, revisions())
+            .await
+    })
+    .await;
+    waits.0 += writer_waits;
+    waits.1 += reader_waits;
+    receipt.expect("the mutation commits")
 }
 
 /// Publishes `task()` with an accepted proposal and admitted execution, the
-/// product graph every attempt admission is bound to.
-fn admit_task(database: &RegisteredGlobalDb) {
-    let product =
-        RegisteredWorkProductServicesV1::attach(database, binding()).expect("product services");
+/// product graph every attempt admission is bound to, and returns the native
+/// writer and reader waits its mutation jobs parked.
+async fn admit_task(database: &RegisteredGlobalDb) -> (u64, u64) {
+    let mut waits = (0, 0);
     let created_at = UtcMicros(10);
     let initiative_id = id::<InitiativeId>("initiative.attempt-jobs");
     let plan_id = id::<WorkPlanId>("plan.attempt-jobs");
@@ -136,7 +146,7 @@ fn admit_task(database: &RegisteredGlobalDb) {
     })
     .unwrap();
     let created = mutate(
-        &product,
+        database,
         WorkProductChangeDraftV1::CreateTask {
             initiative: WorkInitiativeV1::new(
                 initiative_id.clone(),
@@ -162,7 +172,9 @@ fn admit_task(database: &RegisteredGlobalDb) {
         },
         "command.attempt-jobs.create",
         UtcMicros(10_000),
-    );
+        &mut waits,
+    )
+    .await;
     let proposal = WorkProposalV1::new(
         id::<ProposalId>("proposal.attempt-jobs"),
         task(),
@@ -178,20 +190,25 @@ fn admit_task(database: &RegisteredGlobalDb) {
     )
     .unwrap();
     mutate(
-        &product,
+        database,
         WorkProductChangeDraftV1::DecideProposal {
             proposal,
             disposition: WorkProposalDispositionV1::Accepted,
         },
         "command.attempt-jobs.accept",
         UtcMicros(11_000),
-    );
+        &mut waits,
+    )
+    .await;
     mutate(
-        &product,
+        database,
         WorkProductChangeDraftV1::AdmitExecution { task_id: task() },
         "command.attempt-jobs.admit",
         UtcMicros(12_000),
-    );
+        &mut waits,
+    )
+    .await;
+    waits
 }
 
 fn start_command(
@@ -239,7 +256,7 @@ async fn attempt_admissions_awaited_on_a_native_worker_park_no_native_thread() {
     let project = tempfile::tempdir().expect("project");
     let runtime = project_runtime(profile.path(), project.path()).await;
     let database = runtime.project_database().expect("project database");
-    admit_task(database);
+    admit_task(database).await;
     let product =
         RegisteredWorkProductServicesV1::attach(database, binding()).expect("product services");
     let work = RegisteredWorkApplicationServicesV1::attach(database).expect("Work services");
@@ -348,7 +365,7 @@ async fn synthesis_awaited_on_a_native_worker_hydrates_sources_in_its_job() {
     let project = tempfile::tempdir().expect("project");
     let runtime = project_runtime(profile.path(), project.path()).await;
     let database = runtime.project_database().expect("project database");
-    admit_task(database);
+    admit_task(database).await;
     let product =
         RegisteredWorkProductServicesV1::attach(database, binding()).expect("product services");
     let source = identity("run.attempt-jobs.source", "attempt.attempt-jobs.source");
@@ -475,7 +492,7 @@ async fn a_pause_racing_a_start_never_lands_between_its_fence_and_its_reservatio
     let project = tempfile::tempdir().expect("project");
     let runtime = project_runtime(profile.path(), project.path()).await;
     let database = runtime.project_database().expect("project database");
-    admit_task(database);
+    admit_task(database).await;
     let run = "run.run-control-jobs";
     let storage = database.work_storage().expect("Work storage");
     let seed = crate::work_run_control_jobs::leased_attempt_of(id::<RunId>(run), "seed");
@@ -839,5 +856,43 @@ async fn cancellation_awaited_on_a_native_worker_parks_no_native_thread() {
             .expect("the attempt reads"),
         requested,
         "the job committed the cancellation request"
+    );
+}
+
+#[tokio::test]
+async fn product_mutations_awaited_on_a_native_worker_park_no_native_thread() {
+    let profile = tempfile::tempdir().expect("profile");
+    let project = tempfile::tempdir().expect("project");
+    let runtime = project_runtime(profile.path(), project.path()).await;
+    let database = runtime.project_database().expect("project database");
+    let (writer_waits, reader_waits) = admit_task(database).await;
+    assert_eq!(
+        writer_waits, 0,
+        "the create, proposal and admission jobs parked no native worker on the writer"
+    );
+    assert_eq!(
+        reader_waits, 0,
+        "the create, proposal and admission jobs parked no native worker on a reader"
+    );
+    let product =
+        RegisteredWorkProductServicesV1::attach(database, binding()).expect("product services");
+    let read = product
+        .reads()
+        .read_graph(
+            &product_context(),
+            tracedecay_contracts::WorkGraphReadRequestV1::current(selection(), UtcMicros(13_000)),
+        )
+        .expect("the graph reads")
+        .into_current_snapshot()
+        .expect("the graph has a head");
+    let item = read.graph().item(&task()).expect("the task is published");
+    assert!(
+        item.is_execution_admitted(),
+        "the admission job committed the execution admission"
+    );
+    assert_eq!(
+        item.accepted_proposal(),
+        Some(&id::<ProposalId>("proposal.attempt-jobs")),
+        "the proposal job committed the acceptance"
     );
 }

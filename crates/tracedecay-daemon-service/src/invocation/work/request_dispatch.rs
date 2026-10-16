@@ -118,193 +118,133 @@ pub(super) async fn dispatch_work_application(
             )
         }
         WorkApplicationInvocationV1::Create(command) => {
-            let _span = tracing::trace_span!("daemon.service.work.create").entered();
-            {
-                let Ok(capability_id) = CapabilityId::new(*capability) else {
-                    return DaemonInvocationResponse::problem(
-                        request_id,
-                        DaemonInvocationProblem::Unavailable,
-                    );
-                };
-                let binding = tracedecay_contracts::WorkProductBindingV1::new(
-                    capability_id,
-                    use_case.clone(),
-                );
-                let created = tracedecay_application::work::RegisteredWorkProductServicesV1::attach(
-                    &registered.database,
-                    binding.clone(),
-                )
-                .map_err(|_| {
-                    tracedecay_contracts::WorkProductApplicationErrorV1::GraphAuthorityUnavailable
-                })
-                .and_then(|product| {
-                    preparation::current_work_product_revision_pins(&registered)
-                        .map_err(|_| {
-                            tracedecay_contracts::WorkProductApplicationErrorV1::GraphAuthorityUnavailable
-                        })
-                        .and_then(|revisions| {
-                            if command.mutation.revisions != revisions {
-                                return Err(
-                                    tracedecay_contracts::WorkProductApplicationErrorV1::RevisionConflict,
-                                );
-                            }
-                            product
-                                .mutations()
-                                .create_task(&context, &binding, command)
-                        })
-                })
-                .map_err(work_product_problem);
-                complete_work_effect(
+            let created = tracing::Instrument::instrument(
+                preparation::mutate_product(
                     &registered,
-                    request_id,
                     &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case,
-                    input_digest,
-                    created,
-                    observed_at,
-                    deadline,
-                    WorkApplicationOutcomeV1::Create,
-                )
-            }
+                    capability,
+                    &use_case,
+                    tracedecay_contracts::WorkProductMutationRequestV1::CreateTask(Box::new(
+                        command,
+                    )),
+                ),
+                tracing::trace_span!("daemon.service.work.create"),
+            )
+            .await;
+            complete_work_effect(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                created,
+                observed_at,
+                deadline,
+                WorkApplicationOutcomeV1::Create,
+            )
         }
         WorkApplicationInvocationV1::ReviewProposal(request) => {
-            let _span = tracing::trace_span!("daemon.service.work.review_proposal").entered();
-            {
-                let proposal_ref = request.proposal.proposal_id().as_str().to_owned();
-                let command_ref = request.mutation.command_id.as_str().to_owned();
-                let disposition = request.disposition;
-                let occurred_at = request.mutation.occurred_at;
-                let result = preparation::decide_product_proposal(
+            let proposal_ref = request.proposal.proposal_id().as_str().to_owned();
+            let command_ref = request.mutation.command_id.as_str().to_owned();
+            let disposition = request.disposition;
+            let occurred_at = request.mutation.occurred_at;
+            let result = tracing::Instrument::instrument(
+                preparation::mutate_product(
                     &registered,
                     &context,
                     capability,
                     &use_case,
-                    request.into(),
+                    tracedecay_contracts::WorkProductMutationRequestV1::DecideProposal(
+                        request.into(),
+                    ),
+                ),
+                tracing::trace_span!("daemon.service.work.review_proposal"),
+            )
+            .await;
+            if result.is_ok() {
+                let _ = tracedecay_application::observability::record_reliance_decision(
+                    observability_producer.as_deref(),
+                    &proposal_ref,
+                    &command_ref,
+                    Some(disposition),
+                    occurred_at,
                 );
-                if result.is_ok() {
-                    let _ = tracedecay_application::observability::record_reliance_decision(
-                        observability_producer.as_deref(),
-                        &proposal_ref,
-                        &command_ref,
-                        Some(disposition),
-                        occurred_at,
-                    );
-                }
-                complete_work_effect(
-                    &registered,
-                    request_id,
-                    &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case,
-                    input_digest,
-                    result,
-                    observed_at,
-                    deadline,
-                    WorkApplicationOutcomeV1::ReviewProposal,
-                )
             }
+            complete_work_effect(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                result,
+                observed_at,
+                deadline,
+                WorkApplicationOutcomeV1::ReviewProposal,
+            )
         }
         WorkApplicationInvocationV1::AcceptProposal(command) => {
-            let _span = tracing::trace_span!("daemon.service.work.accept_proposal").entered();
-            {
-                let proposal_ref = command.proposal.proposal_id().as_str().to_owned();
-                let command_ref = command.mutation.command_id.as_str().to_owned();
-                let occurred_at = command.mutation.occurred_at;
-                let result = preparation::decide_product_proposal(
+            let proposal_ref = command.proposal.proposal_id().as_str().to_owned();
+            let command_ref = command.mutation.command_id.as_str().to_owned();
+            let occurred_at = command.mutation.occurred_at;
+            let result = tracing::Instrument::instrument(
+                preparation::mutate_product(
                     &registered,
                     &context,
                     capability,
                     &use_case,
-                    command.into(),
+                    tracedecay_contracts::WorkProductMutationRequestV1::DecideProposal(
+                        command.into(),
+                    ),
+                ),
+                tracing::trace_span!("daemon.service.work.accept_proposal"),
+            )
+            .await;
+            if result.is_ok() {
+                let _ = tracedecay_application::observability::record_reliance_decision(
+                    observability_producer.as_deref(),
+                    &proposal_ref,
+                    &command_ref,
+                    None,
+                    occurred_at,
                 );
-                if result.is_ok() {
-                    let _ = tracedecay_application::observability::record_reliance_decision(
-                        observability_producer.as_deref(),
-                        &proposal_ref,
-                        &command_ref,
-                        None,
-                        occurred_at,
-                    );
-                }
-                complete_work_effect(
-                    &registered,
-                    request_id,
-                    &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case,
-                    input_digest,
-                    result,
-                    observed_at,
-                    deadline,
-                    WorkApplicationOutcomeV1::AcceptProposal,
-                )
             }
+            complete_work_effect(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                result,
+                observed_at,
+                deadline,
+                WorkApplicationOutcomeV1::AcceptProposal,
+            )
         }
         WorkApplicationInvocationV1::AdmitExecution(command) => {
-            let _span = tracing::trace_span!("daemon.service.work.admit_execution").entered();
-            {
-                let result = CapabilityId::new(*capability)
-                .map_err(|_| {
-                    work_product_problem(
-                        tracedecay_contracts::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
-                    )
-                })
-                .and_then(|capability| {
-                    let binding = tracedecay_contracts::WorkProductBindingV1::new(
-                        capability,
-                        use_case.clone(),
-                    );
-                    tracedecay_application::work::RegisteredWorkProductServicesV1::attach(
-                        &registered.database,
-                        binding.clone(),
-                    )
-                        .map_err(|_| {
-                            work_product_problem(
-                                tracedecay_contracts::WorkProductApplicationErrorV1::GraphAuthorityUnavailable,
-                            )
-                        })
-                        .and_then(|product| {
-                            let revisions =
-                                preparation::current_work_product_revision_pins(&registered)?;
-                            if command.mutation.revisions != revisions {
-                                return Err(work_product_problem(
-                                    tracedecay_contracts::WorkProductApplicationErrorV1::RevisionConflict,
-                                ));
-                            }
-                            let execution_snapshot = preparation::prepare_execution_snapshot(
-                                &registered,
-                                &context,
-                                &binding,
-                                &command,
-                            )?;
-                            let mutation = product
-                                .mutations()
-                                .admit_execution(&context, &binding, command)
-                                .map_err(work_product_problem)?;
-                            Ok(tracedecay_contracts::AdmittedWorkExecutionV1 {
-                                mutation,
-                                execution_snapshot,
-                            })
-                        })
-                });
-                complete_work_effect(
-                    &registered,
-                    request_id,
-                    &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case,
-                    input_digest,
-                    result,
-                    observed_at,
-                    deadline,
-                    WorkApplicationOutcomeV1::AdmitExecution,
-                )
-            }
+            let result = tracing::Instrument::instrument(
+                preparation::admit_execution(&registered, &context, capability, &use_case, command),
+                tracing::trace_span!("daemon.service.work.admit_execution"),
+            )
+            .await;
+            complete_work_effect(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                result,
+                observed_at,
+                deadline,
+                WorkApplicationOutcomeV1::AdmitExecution,
+            )
         }
         WorkApplicationInvocationV1::StartAttempt(command) => {
             let Ok(capability) = CapabilityId::new(*capability) else {
@@ -838,50 +778,24 @@ pub(super) async fn dispatch_work_application(
             }
         }
         WorkApplicationInvocationV1::MutateGraph(request) => {
-            let _span = tracing::trace_span!("daemon.service.work.mutate_graph").entered();
-            {
-                let Ok(capability) = CapabilityId::new(*capability) else {
-                    return DaemonInvocationResponse::problem(
-                        request_id,
-                        DaemonInvocationProblem::Unavailable,
-                    );
-                };
-                let binding =
-                    tracedecay_contracts::WorkProductBindingV1::new(capability, use_case.clone());
-                let product_services =
-                    match tracedecay_application::work::RegisteredWorkProductServicesV1::attach(
-                        &registered.database,
-                        binding.clone(),
-                    ) {
-                        Ok(services) => services,
-                        Err(_) => {
-                            return DaemonInvocationResponse::problem(
-                                request_id,
-                                DaemonInvocationProblem::Unavailable,
-                            );
-                        }
-                    };
-                let mutated = preparation::current_work_product_revision_pins(&registered)
-                    .and_then(|revisions| {
-                        product_services
-                            .mutations()
-                            .mutate(&context, &binding, request, &revisions)
-                            .map_err(work_product_problem)
-                    });
-                complete_work_effect(
-                    &registered,
-                    request_id,
-                    &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case,
-                    input_digest,
-                    mutated,
-                    observed_at,
-                    deadline,
-                    WorkApplicationOutcomeV1::MutateGraph,
-                )
-            }
+            let mutated = tracing::Instrument::instrument(
+                preparation::mutate_product(&registered, &context, capability, &use_case, request),
+                tracing::trace_span!("daemon.service.work.mutate_graph"),
+            )
+            .await;
+            complete_work_effect(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                mutated,
+                observed_at,
+                deadline,
+                WorkApplicationOutcomeV1::MutateGraph,
+            )
         }
         WorkApplicationInvocationV1::PauseRun(command) => {
             let transition = tracing::Instrument::instrument(

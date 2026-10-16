@@ -22,6 +22,26 @@ pub use contracts::*;
 const WORK_PRODUCT_MUTATION_DIGEST_DOMAIN: &str =
     "tracedecay.application.work-product-mutation.final-v2";
 
+impl super::PrefetchedWorkGraphReadV1 {
+    /// The current graph read a submitted mutation checks its expected version
+    /// against, read before its writer job.
+    pub fn for_mutation<S>(
+        storage: &S,
+        context: &RequestContext,
+        request: &WorkProductMutationRequestV1,
+    ) -> Self
+    where
+        S: WorkGraphReadPortV1 + WorkProductOwnerAuthorizationPortV1,
+    {
+        Self::current(
+            storage,
+            context,
+            request.selection(),
+            request.mutation_identity().occurred_at,
+        )
+    }
+}
+
 pub struct WorkProductMutationServiceV1<G, A, E> {
     graph: G,
     owner_authority: A,
