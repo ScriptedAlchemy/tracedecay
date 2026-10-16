@@ -93,7 +93,7 @@ impl RusqliteCheckpointDriver {
             let _span = tracing::trace_span!("rusqlite.wal_checkpoint").entered();
             {
                 let sql = match mode {
-                    CheckpointMode::Passive => "PRAGMA wal_checkpoint(PASSIVE)",
+                    CheckpointMode::Restart => "PRAGMA wal_checkpoint(RESTART)",
                     CheckpointMode::Truncate => "PRAGMA wal_checkpoint(TRUNCATE)",
                 };
                 let row = self.checkpoint_row(sql)?;
