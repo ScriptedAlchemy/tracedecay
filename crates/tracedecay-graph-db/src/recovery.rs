@@ -211,10 +211,7 @@ pub(crate) fn collapse_replayed_wal(database: &GrafeoDB) {
     let Some(newest_segment) = newest_wal_segment_sequence(&sidecar) else {
         return;
     };
-    let checkpointed_sequence = grafeo_storage::wal::WalRecovery::new(&sidecar)
-        .checkpoint()
-        .map(|metadata| metadata.log_sequence);
-    if let Some(sequence) = checkpointed_sequence
+    if let Some(sequence) = checkpointed_wal_sequence(&sidecar)
         && sequence >= newest_segment
     {
         let removed_segments = remove_checkpoint_covered_segments(&sidecar, sequence);
@@ -235,11 +232,9 @@ pub(crate) fn collapse_replayed_wal(database: &GrafeoDB) {
     };
     match match_result {
         Ok(()) => {
-            let removed_segments = grafeo_storage::wal::WalRecovery::new(&sidecar)
-                .checkpoint()
-                .map_or(0, |metadata| {
-                    remove_checkpoint_covered_segments(&sidecar, metadata.log_sequence)
-                });
+            let removed_segments = checkpointed_wal_sequence(&sidecar).map_or(0, |sequence| {
+                remove_checkpoint_covered_segments(&sidecar, sequence)
+            });
             tracing::info!(
                 event = "graph_wal_checkpoint",
                 phase = "open",
@@ -258,24 +253,31 @@ pub(crate) fn collapse_replayed_wal(database: &GrafeoDB) {
     }
 }
 
+/// Bytes of WAL history the durable checkpoint does not cover: every segment
+/// numbered after the checkpointed one, or the whole sidecar when no
+/// checkpoint exists. Covered segments the retention rule keeps are excluded,
+/// so a checkpoint brings this to zero instead of re-triggering itself.
+pub(crate) fn uncheckpointed_wal_bytes(sidecar: &Path) -> u64 {
+    let covered = checkpointed_wal_sequence(sidecar);
+    wal_segments(sidecar)
+        .filter(|(sequence, _)| covered.is_none_or(|covered| *sequence > covered))
+        .filter_map(|(_, entry)| entry.metadata().ok())
+        .map(|metadata| metadata.len())
+        .sum()
+}
+
+fn checkpointed_wal_sequence(sidecar: &Path) -> Option<u64> {
+    grafeo_storage::wal::WalRecovery::new(sidecar)
+        .checkpoint()
+        .map(|metadata| metadata.log_sequence)
+}
+
 /// Delete segments that recovery skips because their sequence precedes the
 /// durable checkpoint. Keep the checkpoint segment and two preceding files,
 /// matching Grafeo's own rotation safety margin.
 fn remove_checkpoint_covered_segments(sidecar: &Path, covered_below: u64) -> u64 {
-    let Ok(entries) = std::fs::read_dir(sidecar) else {
-        return 0;
-    };
     let mut removed = 0;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(sequence) = name
-            .to_str()
-            .and_then(|name| name.strip_prefix("wal_"))
-            .and_then(|name| name.strip_suffix(".log"))
-            .and_then(|name| name.parse::<u64>().ok())
-        else {
-            continue;
-        };
+    for (sequence, entry) in wal_segments(sidecar) {
         if sequence + 2 < covered_below && std::fs::remove_file(entry.path()).is_ok() {
             removed += 1;
         }
@@ -284,19 +286,27 @@ fn remove_checkpoint_covered_segments(sidecar: &Path, covered_below: u64) -> u64
 }
 
 fn newest_wal_segment_sequence(sidecar: &Path) -> Option<u64> {
-    let entries = std::fs::read_dir(sidecar).ok()?;
-    entries
+    wal_segments(sidecar)
+        .filter(|(_, entry)| entry.metadata().is_ok_and(|metadata| metadata.len() > 0))
+        .map(|(sequence, _)| sequence)
+        .max()
+}
+
+fn wal_segments(sidecar: &Path) -> impl Iterator<Item = (u64, std::fs::DirEntry)> {
+    std::fs::read_dir(sidecar)
+        .into_iter()
         .flatten()
-        .filter(|entry| entry.metadata().is_ok_and(|metadata| metadata.len() > 0))
+        .flatten()
         .filter_map(|entry| {
-            let name = entry.file_name();
-            let name = name.to_str()?;
-            name.strip_prefix("wal_")?
+            let sequence = entry
+                .file_name()
+                .to_str()?
+                .strip_prefix("wal_")?
                 .strip_suffix(".log")?
                 .parse::<u64>()
-                .ok()
+                .ok()?;
+            Some((sequence, entry))
         })
-        .max()
 }
 
 fn close_recovered_after_error<T>(
