@@ -77,10 +77,6 @@ pub(super) struct RegisteredSchemaConvergenceMaintenance {
     execution_count: Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(any(test, feature = "test-helpers"))]
     gate: StdMutex<Option<Arc<RegisteredSchemaConvergenceTestGateState>>>,
-    /// CPU time spent beside the allocator trim, standing in for a trim of
-    /// a large heap.
-    #[cfg(any(test, feature = "test-helpers"))]
-    trim_cpu: StdMutex<Option<std::time::Duration>>,
 }
 
 enum SchemaConvergenceTarget {
@@ -183,8 +179,6 @@ impl RegisteredSchemaConvergenceMaintenance {
             execution_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(any(test, feature = "test-helpers"))]
             gate: StdMutex::new(None),
-            #[cfg(any(test, feature = "test-helpers"))]
-            trim_cpu: StdMutex::new(None),
         }
     }
 
@@ -317,11 +311,6 @@ impl RegisteredSchemaConvergenceMaintenance {
             .lock()
             .expect("registered schema convergence test gate lock remains healthy")
             .clone();
-        #[cfg(any(test, feature = "test-helpers"))]
-        let trim_cpu = *self
-            .trim_cpu
-            .lock()
-            .expect("registered schema convergence trim cost lock remains healthy");
         let statuses = Arc::clone(&self.statuses);
         let foreground_project_opens = Arc::clone(&self.foreground_project_opens);
         let concurrency = Arc::clone(&self.concurrency);
@@ -372,17 +361,7 @@ impl RegisteredSchemaConvergenceMaintenance {
             }
             // `malloc_trim` walks every glibc arena: up to 0.8 s of CPU on a
             // large heap, which would stall this native worker's I/O.
-            let _ = native_runtime::spawn_blocking(move || {
-                #[cfg(any(test, feature = "test-helpers"))]
-                if let Some(cpu) = trim_cpu {
-                    let spun = std::time::Instant::now();
-                    while spun.elapsed() < cpu {
-                        std::hint::spin_loop();
-                    }
-                }
-                release_process_allocator_memory_v1()
-            })
-            .await;
+            let _ = native_runtime::spawn_blocking(release_process_allocator_memory_v1).await;
             drop(permit);
             let status = match result {
                 Ok(()) => {
@@ -505,14 +484,6 @@ impl RegisteredSchemaConvergenceMaintenance {
         } else {
             Err(failures.join("; "))
         }
-    }
-
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub(super) fn inject_trim_cpu(&self, cpu: std::time::Duration) {
-        *self
-            .trim_cpu
-            .lock()
-            .expect("registered schema convergence trim cost lock remains healthy") = Some(cpu);
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
@@ -781,11 +752,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         &self,
     ) -> RegisteredSchemaConvergenceTestGate {
         self.registered_schema_convergence.install_gate()
-    }
-
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub fn inject_registered_schema_convergence_trim_cpu_for_test(&self, cpu: std::time::Duration) {
-        self.registered_schema_convergence.inject_trim_cpu(cpu);
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
