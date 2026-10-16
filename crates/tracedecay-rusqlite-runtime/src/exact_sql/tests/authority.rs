@@ -75,10 +75,9 @@ fn writer_actor_allows_only_product_schema_pragmas() {
     }
 }
 
-/// The projection output-state cache is derived, per-connection scratch
-/// rebuilt from `observation_projection_provenance` whenever
-/// `PRAGMA data_version` moves. It must be able to exist on this channel;
-/// denying it made every projection rebuild fail.
+/// The projection rebuild keeps its output sets in per-connection TEMP
+/// scratch. It must be able to exist on this channel; denying it made every
+/// projection rebuild fail.
 #[test]
 fn writer_actor_allows_temp_tables_and_indexes_but_not_temp_triggers_or_views() {
     let fixture = fixture('a', 'a');
@@ -87,23 +86,6 @@ fn writer_actor_allows_temp_tables_and_indexes_but_not_temp_triggers_or_views() 
         .execute_batch("CREATE TABLE durable (value INTEGER NOT NULL)".to_owned())
         .expect("durable table remains available");
 
-    // The exact shape the projection output-state cache creates.
-    channel
-        .execute_batch(
-            "CREATE TEMP TABLE IF NOT EXISTS observation_projection_output_state (
-                    projector_version TEXT NOT NULL,
-                    output_provider TEXT NOT NULL,
-                    output_message_id TEXT NOT NULL,
-                    canonical_observation_id TEXT NOT NULL,
-                    latest_observation_id TEXT NOT NULL,
-                    latest_sequence INTEGER NOT NULL CHECK(latest_sequence >= 0),
-                    projector_owned INTEGER NOT NULL CHECK(projector_owned IN (0, 1)),
-                    owner_count INTEGER NOT NULL CHECK(owner_count > 0),
-                    PRIMARY KEY(projector_version, output_provider, output_message_id)
-                 ) WITHOUT ROWID;"
-                .to_owned(),
-        )
-        .expect("projection output-state cache must be creatable");
     channel
         .execute_batch(
             "CREATE TEMP TABLE scratch (value INTEGER NOT NULL);

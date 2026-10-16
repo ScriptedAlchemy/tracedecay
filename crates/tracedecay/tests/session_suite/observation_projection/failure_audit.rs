@@ -854,67 +854,6 @@ async fn projected_message_delete_is_restored_from_the_immutable_projection() {
 }
 
 #[tokio::test]
-async fn corrupt_projection_output_state_cache_is_discarded_and_the_head_projects() {
-    let tmp = TempDir::new().unwrap();
-    let runtime = profile_runtime(&tmp).await;
-    let store = runtime
-        .observation_store(HostAdmissionScope::Profile)
-        .unwrap();
-    let candidate = observation(
-        "session-corrupt-output-cache",
-        0,
-        100,
-        "receipt.corrupt-output-cache",
-        conversational_payload("message-corrupt-output-cache", "corrupt cache canary"),
-    );
-    persist(&store, candidate.clone(), None).await;
-
-    // The output-state cache is a TEMP table on the writer connection, so the
-    // poison must go through that same writer. A failing CHECK named after the
-    // SQLITE_CORRUPT message reproduces the production fault: every cache
-    // write fails as "disk image malformed" while the database file is sound.
-    let database = runtime
-        .registered_database(HostAdmissionScope::Profile)
-        .unwrap();
-    let poison = database.begin_write_transaction().await.unwrap();
-    poison
-        .execute_batch(
-            "DROP TABLE IF EXISTS temp.observation_projection_output_state;
-             CREATE TEMP TABLE observation_projection_output_state (
-                projector_version TEXT NOT NULL,
-                output_provider TEXT NOT NULL,
-                output_message_id TEXT NOT NULL,
-                canonical_observation_id TEXT NOT NULL,
-                latest_observation_id TEXT NOT NULL,
-                latest_sequence INTEGER NOT NULL,
-                projector_owned INTEGER NOT NULL,
-                owner_count INTEGER NOT NULL,
-                PRIMARY KEY(projector_version, output_provider, output_message_id),
-                CONSTRAINT \"database disk image is malformed\" CHECK (0)
-             ) WITHOUT ROWID;",
-        )
-        .await
-        .unwrap();
-    poison.commit().await.unwrap();
-
-    let projected = store
-        .project_observation(candidate.observation_id())
-        .await
-        .unwrap();
-    assert!(
-        matches!(projected, ProjectionPersistOutcome::Projected(_)),
-        "a corrupt per-connection cache must not block the head: {projected:?}"
-    );
-    assert_eq!(table_count(&tmp, "projection_queue").await, 0);
-    assert_eq!(
-        search_session_messages(&tmp, "corrupt cache canary", 10)
-            .await
-            .len(),
-        1
-    );
-}
-
-#[tokio::test]
 async fn persistent_store_corruption_surfaces_without_skipping_the_observation() {
     let tmp = TempDir::new().unwrap();
     let runtime = profile_runtime(&tmp).await;
@@ -950,7 +889,7 @@ async fn persistent_store_corruption_surfaces_without_skipping_the_observation()
     let error = store
         .project_observation(candidate.observation_id())
         .await
-        .expect_err("corruption that survives the cache discard must surface");
+        .expect_err("store corruption must surface");
     assert!(
         error.is_sqlite_disk_image_corrupt(),
         "persistent corruption surfaced as {error:?}"

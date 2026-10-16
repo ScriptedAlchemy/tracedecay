@@ -16,7 +16,7 @@ use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
 use tracedecay_store::{ProjectionStoreError, ProjectionStoreResult};
 
 use super::RegisteredGlobalDb;
-use super::observation_projection::{ensure_projection_output_state_cache, retire_source_record};
+use super::observation_projection::retire_source_record;
 
 /// Unoffered-record reads are keyset-paginated at this page size. The exact-
 /// SQL engine refuses a query that materializes more rows than its hard cap,
@@ -213,7 +213,6 @@ impl RegisteredGlobalDb {
                 .map_err(|error| storage("release source rewrite completion", error))?;
             return Ok(0);
         }
-        ensure_projection_output_state_cache(&transaction).await?;
         let mut retired = 0_u64;
         // Keyset-paginate the unoffered ids instead of materializing the whole
         // set in one statement: a single rewritten source can hold more
