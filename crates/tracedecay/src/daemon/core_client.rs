@@ -338,6 +338,7 @@ pub(crate) async fn call_tool_with_liveness_poll(
     };
     attach_stateless_request_context(&mut request);
 
+    let mut reader = BoundedLineReader::new(asupersync::io::BufReader::new(reader));
     let write = async {
         write_daemon_preamble(&mut writer, &connection, handshake).await?;
         writer
@@ -347,9 +348,10 @@ pub(crate) async fn call_tool_with_liveness_poll(
         writer.flush().await?;
         Ok(())
     };
-    DaemonClientDeadline::run_optional(client_deadline, "write", tool_name, write).await?;
+    let written = DaemonClientDeadline::run_optional(client_deadline, "write", tool_name, write);
+    tracedecay_daemon_protocol::refusal_behind_failed_write(written.await, &mut reader, handshake)
+        .await?;
 
-    let mut reader = BoundedLineReader::new(asupersync::io::BufReader::new(reader));
     loop {
         let read =
             next_daemon_response_line(&mut reader, &connection, tool_name, liveness_poll_interval);

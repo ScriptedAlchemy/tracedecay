@@ -642,7 +642,8 @@ impl DaemonInvocationClient {
                 )
                 .await?;
                 let (reader, mut writer) = stream.into_split();
-                tracing::Instrument::instrument(
+                let mut reader = BoundedLineReader::new(BufReader::new(reader));
+                let written = tracing::Instrument::instrument(
                     crate::connection::write_daemon_preamble(
                         &mut writer,
                         &self.connection,
@@ -650,11 +651,9 @@ impl DaemonInvocationClient {
                     ),
                     tracing::trace_span!("daemon.invocation.client.preamble"),
                 )
-                .await?;
-                DaemonInvocationConnection {
-                    reader: BoundedLineReader::new(BufReader::new(reader)),
-                    writer,
-                }
+                .await;
+                refusal_behind_failed_write(written, &mut reader, &self.handshake).await?;
+                DaemonInvocationConnection { reader, writer }
             }
         };
         Ok((
@@ -698,7 +697,7 @@ impl DaemonInvocationClient {
             let _span = tracing::trace_span!("daemon.invocation.client.request.encode").entered();
             serde_json::to_string(&request)
         }?;
-        tracing::Instrument::instrument(
+        let written = tracing::Instrument::instrument(
             async {
                 connection.writer.write_all(request_json.as_bytes()).await?;
                 connection.writer.write_all(b"\n").await?;
@@ -706,7 +705,9 @@ impl DaemonInvocationClient {
             },
             tracing::trace_span!("daemon.invocation.client.request.write"),
         )
-        .await?;
+        .await
+        .map_err(Into::into);
+        refusal_behind_failed_write(written, &mut connection.reader, &self.handshake).await?;
 
         let Some(line) = tracing::Instrument::instrument(
             crate::connection::next_daemon_response_line(
@@ -1048,6 +1049,39 @@ fn invocation_error_from_problem(problem: &ApplicationProblem) -> InvocationErro
         ApplicationProblemKind::Unavailable
         | ApplicationProblemKind::Unsupported
         | ApplicationProblemKind::Saturated => InvocationError::Unavailable,
+    }
+}
+
+/// The outcome of a write to the daemon, with a failed write replaced by the
+/// refusal the daemon queued before it closed.
+///
+/// A daemon refusing the preamble queues one refusal frame, drains pipelined
+/// input until it idles for 100 ms, then closes. A client that stalls longer
+/// between writes gets a broken pipe or reset while that refusal waits in its
+/// receive buffer.
+pub async fn refusal_behind_failed_write<T, R>(
+    written: tracedecay_domain::errors::Result<T>,
+    reader: &mut BoundedLineReader<R>,
+    handshake: &crate::handshake::DaemonHandshake,
+) -> tracedecay_domain::errors::Result<T>
+where
+    R: asupersync::io::AsyncBufRead + Unpin,
+{
+    let Err(tracedecay_domain::errors::TraceDecayError::Io(io)) = &written else {
+        return written;
+    };
+    if !matches!(
+        io.kind(),
+        std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+    ) {
+        return written;
+    }
+    match reader.read_mcp_line().await {
+        Ok(Some(line)) => crate::handshake::DaemonHandshakeRefusal::from_line(&line)
+            .map_or(written, |refusal| {
+                Err(handshake_refusal_error(&refusal, handshake))
+            }),
+        _ => written,
     }
 }
 

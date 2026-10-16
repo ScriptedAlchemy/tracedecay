@@ -76,7 +76,7 @@ pub use client::{
     DaemonInvocationExecutorFuture, DaemonInvocationResult, DaemonLspSessionClient, DispatchError,
     DispatchInput, DispatchedInvocation, InvocationCancellationPolicy, InvocationControls,
     ResolvedBinding, ScopeSelector, deadline_remaining, handshake_refusal_error,
-    map_invocation_error, resolve_dispatch, wait_for_cancellation,
+    map_invocation_error, refusal_behind_failed_write, resolve_dispatch, wait_for_cancellation,
 };
 pub use client_identity::DaemonClientIdentity;
 pub use connection::{
