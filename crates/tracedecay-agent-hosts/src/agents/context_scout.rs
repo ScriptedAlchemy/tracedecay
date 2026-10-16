@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_contracts::context_scout::{
-    ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1,
-    ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1, ContextScoutDeliveryWindowV1,
+    ContextScoutAddressV1, ContextScoutCandidateEvidenceV1, ContextScoutCandidateV1,
+    ContextScoutCategoryV1, ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1, ContextScoutDeliveryWindowV1,
     ContextScoutDurableClaimV1, ContextScoutDurableQueueEntryV1,
     ContextScoutEvidenceAvailabilityV1, ContextScoutFeedbackKindV1, ContextScoutFeedbackV1,
     ContextScoutLeaseV1, ContextScoutModelBackendV1, ContextScoutModelOutcomeV1,
@@ -49,7 +49,10 @@ mod store;
 #[cfg(test)]
 mod store_tests;
 
-pub use evidence::ContextScoutEvidenceEnvelopeExt;
+pub use evidence::{
+    ContextScoutCandidateEvidenceExt, ContextScoutEvidenceEnvelopeExt,
+    ContextScoutSessionClaimInputV1, ContextScoutSessionEvidenceExt,
+};
 pub use store::ProjectContextScoutDurableStoreV1;
 
 pub(crate) trait ContextScoutAddressExt {
@@ -80,11 +83,18 @@ pub(crate) trait ContextScoutCandidateExt {
 
 impl ContextScoutCandidateExt for ContextScoutCandidateV1 {
     fn validate(&self, limits: ContextScoutLimitsV1) -> Result<(), ContextScoutErrorV1> {
+        // Code evidence cites at least one anchor; session evidence cites
+        // none, its window digest is the citation.
+        let anchors_in_bounds = match &self.evidence {
+            ContextScoutCandidateEvidenceV1::Code(_) => {
+                (1..=limits.max_evidence).contains(&self.evidence.anchor_count())
+            }
+            ContextScoutCandidateEvidenceV1::Session(_) => self.evidence.anchor_count() == 0,
+        };
         if self.dedupe_key == [0; 32]
             || !safe_suggestion_text(&self.suggestion_text)
             || self.suggestion_text.len() > limits.max_text_bytes
-            || self.evidence.anchor_count() == 0
-            || self.evidence.anchor_count() > limits.max_evidence
+            || !anchors_in_bounds
             || self.expires_at.0 <= 0
         {
             return Err(ContextScoutErrorV1::InvalidCandidate);
@@ -150,6 +160,8 @@ pub enum ContextScoutTriggerV1 {
     SavedEdit,
     StopBoundary,
     ExplicitRequest,
+    /// A session intent pass at a user-prompt boundary.
+    IntentBoundary,
 }
 
 /// Content-free daemon receptivity state. The selector owns delivery timing;
@@ -185,7 +197,9 @@ pub const fn select_context_scout_delivery_window(
     }
     match input.trigger {
         ContextScoutTriggerV1::SavedEdit => ContextScoutDeliveryWindowV1::NextBoundary,
-        ContextScoutTriggerV1::StopBoundary => ContextScoutDeliveryWindowV1::Immediate,
+        ContextScoutTriggerV1::StopBoundary | ContextScoutTriggerV1::IntentBoundary => {
+            ContextScoutDeliveryWindowV1::Immediate
+        }
         ContextScoutTriggerV1::ExplicitRequest => ContextScoutDeliveryWindowV1::OnRequest,
     }
 }
@@ -205,6 +219,8 @@ pub enum ContextScoutSuppressionV1 {
     EvidencePartial,
     EvidenceStale,
     EvidenceUnavailable,
+    /// A suggestion for the same session is already pending delivery.
+    PendingSibling,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -393,7 +409,7 @@ pub fn select_deterministic_context_scout(
             saw_unavailable = true;
             continue;
         }
-        match candidate.evidence.availability {
+        match candidate.evidence.availability() {
             ContextScoutEvidenceAvailabilityV1::Complete => {}
             ContextScoutEvidenceAvailabilityV1::Partial
                 if input.delivery_window == ContextScoutDeliveryWindowV1::OnRequest => {}
@@ -1226,6 +1242,9 @@ fn validate_durable_envelope(
         || envelope.configuration_revision == [0; 32]
         || envelope.delivery_window == ContextScoutDeliveryWindowV1::Suppressed
         || !envelope.candidate.durable()
+        // The public projection pins a content generation, so session
+        // evidence must carry the generation it was judged against.
+        || envelope.candidate.evidence.code_generation_id().is_none()
     {
         return Err(ContextScoutErrorV1::DirtyOverlayDurabilityViolation);
     }
@@ -1262,7 +1281,22 @@ impl ContextScoutDurableQueueEntryExt for ContextScoutDurableQueueEntryV1 {
                 | ContextScoutModelOutcomeV1::InvalidOutput,
                 None,
             ) => {}
+            // The intent pass records its engine outcome in the session
+            // evidence's decision receipt, never in a Codex model receipt.
+            (ContextScoutRouteV1::DecisionEngine, outcome, None)
+                if self
+                    .envelope
+                    .candidate
+                    .evidence
+                    .as_session()
+                    .is_some_and(|evidence| evidence.decision.outcome == outcome) => {}
             _ => return Err(ContextScoutErrorV1::InvalidCandidate),
+        }
+        // Session evidence is produced only by the intent pass.
+        if self.envelope.candidate.evidence.as_session().is_some()
+            != (self.route == ContextScoutRouteV1::DecisionEngine)
+        {
+            return Err(ContextScoutErrorV1::InvalidCandidate);
         }
         validate_durable_envelope(&self.envelope)?;
         if self.work.address != self.envelope.address
@@ -1345,6 +1379,18 @@ pub struct ContextScoutControlV1 {
     pub mode: ContextScoutRuntimeModeV1,
     pub model_path: Option<ContextScoutModelBackendV1>,
     pub limits: ContextScoutLimitsV1,
+    /// Pinned session intent pass, absent when none is configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<ContextScoutIntentControlV1>,
+}
+
+/// Behavior pin of the configured intent pass: whether it runs and the digest
+/// of its whole settings block (engine, window, questions, lifecycle bounds).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextScoutIntentControlV1 {
+    pub enabled: bool,
+    pub settings_digest: [u8; 32],
 }
 
 impl ContextScoutControlV1 {
@@ -1356,6 +1402,9 @@ impl ContextScoutControlV1 {
                     | (ContextScoutRuntimeModeV1::ConfiguredModel, None)
             )
             || self.model_path == Some(ContextScoutModelBackendV1::Disabled)
+            || self
+                .intent
+                .is_some_and(|intent| intent.settings_digest == [0; 32])
         {
             return Err(ContextScoutErrorV1::InvalidLimits);
         }
@@ -1669,7 +1718,7 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
     use tempfile::TempDir;
-    use tracedecay_contracts::context_scout::ContextScoutEvidenceEnvelopeV1;
+    use tracedecay_contracts::context_scout::ContextScoutCandidateEvidenceV1;
 
     fn address() -> ContextScoutAddressV1 {
         ContextScoutAddressV1 {
@@ -1739,8 +1788,8 @@ mod tests {
         );
     }
 
-    fn evidence() -> ContextScoutEvidenceEnvelopeV1 {
-        super::evidence::fixture_context_scout_evidence()
+    fn evidence() -> ContextScoutCandidateEvidenceV1 {
+        super::evidence::fixture_context_scout_evidence().into()
     }
 
     fn candidate(key: u8, score: u16) -> ContextScoutCandidateV1 {
@@ -1942,7 +1991,7 @@ mod tests {
     #[test]
     fn dirty_overlay_never_crosses_durable_checkpoint_or_receipt_boundary() {
         let mut overlay = candidate(1, 10);
-        overlay.evidence.content =
+        overlay.evidence.as_code_mut().unwrap().content =
             tracedecay_domain::feedback::FeedbackContentIdentityV1::EphemeralOverlay {
                 session_id: tracedecay_domain::SessionId::new("session.overlay").unwrap(),
                 owner_client_id: tracedecay_domain::HostInstanceId::new("client.overlay").unwrap(),
@@ -2315,11 +2364,11 @@ mod tests {
 
     #[cfg(feature = "token-counting")]
     fn stale_candidate(key: u8, score: u16) -> ContextScoutCandidateV1 {
-        let fresh = evidence();
+        let fresh = super::evidence::fixture_context_scout_evidence();
         let mut sources = fresh.sources.clone();
         sources[0].contribution_state = tracedecay_contracts::RetrieverContributionState::Stale;
         sources[0].temporal.freshness = tracedecay_contracts::FreshnessState::Stale;
-        let evidence = ContextScoutEvidenceEnvelopeV1::claim(
+        let evidence = tracedecay_contracts::context_scout::ContextScoutEvidenceEnvelopeV1::claim(
             fresh.scope,
             fresh.authorized_scope,
             fresh.content,
@@ -2335,7 +2384,7 @@ mod tests {
             ContextScoutEvidenceAvailabilityV1::Stale
         );
         ContextScoutCandidateV1 {
-            evidence,
+            evidence: evidence.into(),
             ..candidate(key, score)
         }
     }
@@ -2733,6 +2782,7 @@ mod tests {
                 mode: ContextScoutRuntimeModeV1::ConfiguredModel,
                 model_path: Some(ContextScoutModelBackendV1::CodexAppServer),
                 limits: ContextScoutLimitsV1::bounded_defaults(),
+                intent: None,
             })
             .unwrap();
         assert_eq!(
@@ -2853,6 +2903,7 @@ mod tests {
             mode: ContextScoutRuntimeModeV1::ConfiguredModel,
             model_path: Some(ContextScoutModelBackendV1::CodexAppServer),
             limits,
+            intent: None,
         };
         let widened_execution = ContextScoutModelExecutionV1 {
             deadline: MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
@@ -2903,6 +2954,7 @@ mod tests {
                 mode: ContextScoutRuntimeModeV1::ConfiguredModel,
                 model_path: Some(ContextScoutModelBackendV1::CodexAppServer),
                 limits: ContextScoutLimitsV1::bounded_defaults(),
+                intent: None,
             })
             .unwrap();
         assert_eq!(
@@ -2982,6 +3034,7 @@ mod tests {
                 mode: ContextScoutRuntimeModeV1::Deterministic,
                 model_path: None,
                 limits: ContextScoutLimitsV1::bounded_defaults(),
+                intent: None,
             })
             .unwrap();
         assert_eq!(
@@ -3008,7 +3061,7 @@ mod tests {
             },
         );
         let mut dirty = candidate(2, 10);
-        dirty.evidence.content =
+        dirty.evidence.as_code_mut().unwrap().content =
             tracedecay_domain::feedback::FeedbackContentIdentityV1::EphemeralOverlay {
                 session_id: tracedecay_domain::SessionId::new("session.overlay").unwrap(),
                 owner_client_id: tracedecay_domain::HostInstanceId::new("client.overlay").unwrap(),

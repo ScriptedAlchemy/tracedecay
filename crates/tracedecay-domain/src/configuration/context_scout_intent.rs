@@ -21,17 +21,7 @@ const INTENT_SETTINGS_DIGEST_DOMAIN: &str = "tracedecay.context-scout.intent-set
 /// historical hook hint category keys, so persisted hint analytics, hint
 /// settlement, and evals keep one vocabulary.
 #[derive(
-    Clone,
-    Copy,
-    Debug,
-    Serialize,
-    Deserialize,
-    JsonSchema,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum ContextScoutIntentKindV1 {
@@ -110,6 +100,18 @@ impl ContextScoutIntentKindV1 {
     pub fn from_key(key: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|kind| kind.as_key() == key)
     }
+}
+
+/// What made an intent a candidate: the decision engine's answer, a
+/// deterministic action fact observed in the turn, or both.
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum IntentDecisionSourceV1 {
+    Model,
+    ActionFact,
+    Both,
 }
 
 /// Bounds on the decision-engine round trip. `timeout_ms` bounds one request;
@@ -383,7 +385,10 @@ mod tests {
         for kind in ContextScoutIntentKindV1::ALL {
             let encoded = serde_json::to_value(kind).unwrap();
             assert_eq!(encoded, serde_json::Value::String(kind.as_key().to_owned()));
-            assert_eq!(ContextScoutIntentKindV1::from_key(kind.as_key()), Some(kind));
+            assert_eq!(
+                ContextScoutIntentKindV1::from_key(kind.as_key()),
+                Some(kind)
+            );
         }
         assert_eq!(ContextScoutIntentKindV1::from_key("unknown"), None);
         let unique = ContextScoutIntentKindV1::ALL
@@ -397,13 +402,9 @@ mod tests {
         let settings = settings();
         settings.validate().unwrap();
         assert_eq!(settings.questions.len(), 10);
-        assert!(
-            settings
-                .questions
-                .iter()
-                .all(|question| question.threshold_permille == 600
-                    && question.margin_permille.is_none())
-        );
+        assert!(settings.questions.iter().all(
+            |question| question.threshold_permille == 600 && question.margin_permille.is_none()
+        ));
     }
 
     #[test]

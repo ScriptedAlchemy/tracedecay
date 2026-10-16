@@ -8,419 +8,26 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use tracedecay_domain::HostIntegrationIdV1;
+use tracedecay_domain::configuration::ContextScoutIntentKindV1;
 use tracedecay_policy::hint_delivery::{
     HintDeliveryDecisionV1, HintDeliveryInputV1, decide_hint_delivery,
 };
+use tracedecay_policy::intent_action_facts::{ActionFactInputV1, first_action_fact};
+use tracedecay_policy::intent_catalog;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum HintCategory {
-    Search,
-    SemanticSearch,
-    FileRead,
-    ToolDescriptorRead,
-    BroadRead,
-    CallGraph,
-    Impact,
-    SymbolLookup,
-    FileLookup,
-    ProjectContext,
-    SessionRecall,
-    AtomicEdit,
-    TypeOrientation,
-    ExploreSubagent,
-    SubagentStartContext,
-    BuildDiagnostics,
-    ReviewChanges,
-    MemoryStore,
-    EditRedundancy,
-    UnexpectedChanges,
-}
+/// A hook hint category is a Context Scout intent: one vocabulary for hints,
+/// hint analytics, hint settlement, and Scout suggestions. The catalog text
+/// lives in [`tracedecay_policy::intent_catalog`].
+pub type HintCategory = ContextScoutIntentKindV1;
 
-impl HintCategory {
-    fn spec(self) -> &'static HintCategorySpec {
-        match CATEGORY_SPECS.iter().find(|spec| spec.category == self) {
-            Some(spec) => spec,
-            None => unreachable!("every HintCategory has a spec"),
-        }
-    }
-
-    pub(crate) fn as_key(self) -> &'static str {
-        self.spec().key
-    }
-
-    /// Human-readable name used in the escalation message prefix
-    /// ("Repeated native <label> usage this session, ...").
-    fn label(self) -> &'static str {
-        self.spec().label
-    }
-
-    fn from_key(key: &str) -> Option<Self> {
-        CATEGORY_SPECS
-            .iter()
-            .find(|spec| spec.key == key)
-            .map(|spec| spec.category)
-    }
-
-    /// The tracedecay MCP tools this category steers toward. Used by the
-    /// hint-outcome correlator (`super::hint_outcomes`) to decide whether a
-    /// fired tool satisfied a hint.
-    pub(crate) fn expected_tools(self) -> &'static [&'static str] {
-        self.spec().expected_tools
-    }
-}
-
-/// Machine-readable expected-tool list for a hint-category `key` (the value
-/// stored in `analytics_events.hint_category`), or `None` when the key is
-/// unknown. Lets the hint-outcome correlator map an emitted hint to the tools
-/// that would satisfy it without re-parsing hint prose.
-pub(crate) fn expected_tools_for_key(key: &str) -> Option<&'static [&'static str]> {
-    HintCategory::from_key(key).map(HintCategory::expected_tools)
-}
-
-struct HintCategorySpec {
-    category: HintCategory,
-    key: &'static str,
-    label: &'static str,
-    skill: &'static str,
-    message: &'static str,
-    context: &'static str,
-    /// Tools a later call credits as acting on this hint. Each name must be an
-    /// exact token in `message` or `context`; [`HintCategorySpec::checked`]
-    /// refuses the spec otherwise, so a slash-joined shorthand such as
-    /// `tracedecay_context/search` cannot silently drop `tracedecay_search`.
-    expected_tools: &'static [&'static str],
-    nonblocking: bool,
-}
-
-const fn is_tool_token_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_'
-}
-
-/// True when `needle` appears in `haystack` as a whole tool token, not as a
-/// slash-joined shorthand or a prefix of a longer name.
-const fn contains_tool_token(haystack: &str, needle: &str) -> bool {
-    let haystack = haystack.as_bytes();
-    let needle = needle.as_bytes();
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return false;
-    }
-    let mut start = 0;
-    while start + needle.len() <= haystack.len() {
-        let mut offset = 0;
-        while offset < needle.len() && haystack[start + offset] == needle[offset] {
-            offset += 1;
-        }
-        if offset == needle.len() {
-            let preceded = start > 0 && is_tool_token_byte(haystack[start - 1]);
-            let followed = start + needle.len() < haystack.len()
-                && is_tool_token_byte(haystack[start + needle.len()]);
-            if !preceded && !followed {
-                return true;
-            }
-        }
-        start += 1;
-    }
-    false
-}
-
-impl HintCategorySpec {
-    const fn names_every_expected_tool(&self) -> bool {
-        let mut index = 0;
-        while index < self.expected_tools.len() {
-            let tool = self.expected_tools[index];
-            if !contains_tool_token(self.message, tool) && !contains_tool_token(self.context, tool)
-            {
-                return false;
-            }
-            index += 1;
-        }
-        true
-    }
-
-    const fn checked(self) -> Self {
-        assert!(
-            self.names_every_expected_tool(),
-            "hint expected_tools must appear as exact tool tokens in message or context"
-        );
-        self
-    }
-}
+// Machine-readable expected-tool list for a hint-category `key` (the value
+// stored in `analytics_events.hint_category`), or `None` when the key is
+// unknown. Lets the hint-outcome correlator map an emitted hint to the tools
+// that would satisfy it without re-parsing hint prose.
+pub(crate) use tracedecay_policy::intent_catalog::expected_tools_for_key;
 
 #[cfg(test)]
-mod expected_tool_token_tests {
-    use super::contains_tool_token;
-
-    #[test]
-    fn slash_joined_shorthand_does_not_name_the_second_tool() {
-        let prose =
-            "pass project_path to tracedecay_context/search before scanning parent directories";
-        assert!(contains_tool_token(prose, "tracedecay_context"));
-        assert!(
-            !contains_tool_token(prose, "tracedecay_search"),
-            "a slash-joined shorthand must not count as naming tracedecay_search"
-        );
-    }
-}
-
-const CATEGORY_SPECS: &[HintCategorySpec] = &[
-    HintCategorySpec {
-        category: HintCategory::Search,
-        key: "search",
-        label: "search",
-        skill: "exploring-code",
-        message: "For codebase search, route by what you're matching: literal/regex text -> tracedecay_grep; a code structure like a call shape or argument order -> tracedecay_ast_grep_search; symbol name -> tracedecay_search; concept -> tracedecay_context.",
-        context: "tracedecay_grep runs a literal or regex content search over the indexed tree (pattern, fixed_strings, path_glob) and enriches each hit with its enclosing symbol; tracedecay_ast_grep_search matches a syntax-tree pattern in-process (e.g. `foo($$$)`, `if ($C) { $$$ }`) when a text regex cannot express the call/argument shape, then pair it with tracedecay_ast_grep_rewrite to change matches; tracedecay_search ranks symbols by name; tracedecay_context answers concept-level questions. Grep/ripgrep still fit prose and un-indexed files.",
-        expected_tools: &[
-            "tracedecay_grep",
-            "tracedecay_ast_grep_search",
-            "tracedecay_search",
-            "tracedecay_context",
-        ],
-        nonblocking: false,
-    }.checked(),
-    HintCategorySpec {
-        category: HintCategory::SemanticSearch,
-        key: "semantic_search",
-        label: "semantic search",
-        skill: "exploring-code",
-        message: "For conceptual codebase questions, consider tracedecay_context.",
-        context: "tracedecay_context answers concept-level queries from the pre-built code graph (add keywords to expand synonyms); tracedecay_search ranks symbols by name/keyword; tracedecay_grep matches a literal or regex string when you want exact text, not a concept.",
-        expected_tools: &["tracedecay_context", "tracedecay_search", "tracedecay_grep"],
-        nonblocking: true,
-    }.checked(),
-    HintCategorySpec {
-        category: HintCategory::FileRead,
-        key: "file_read",
-        label: "file read",
-        skill: "exploring-code",
-        message: "Before reading whole files, consider tracedecay_source_outline or tracedecay_source_body.",
-        context: "tracedecay_source_outline gives a file's table of contents, and tracedecay_source_body returns one symbol's source for a node ID from tracedecay_find_exact_symbol or tracedecay_search, usually far cheaper than a full-file read. If you are opening the file only to find a string in it, tracedecay_grep locates the literal or regex match with its enclosing symbol instead.",
-        expected_tools: &[
-            "tracedecay_source_outline",
-            "tracedecay_source_body",
-            "tracedecay_find_exact_symbol",
-            "tracedecay_grep",
-        ],
-        nonblocking: true,
-    }.checked(),
-    HintCategorySpec {
-        category: HintCategory::ToolDescriptorRead,
-        key: "tool_descriptor_read",
-        label: "tool descriptor read",
-        skill: "tracing-functions",
-        message: "This looks like a TraceDecay MCP tool descriptor; use the tool surface instead of reading schema JSON.",
-        context: "Call the named tracedecay_* MCP tool directly when available, or use tool discovery for its schema; for function tracing that usually means tracedecay_find_exact_symbol plus tracedecay_callers/tracedecay_callees.",
-        expected_tools: &[
-            "tracedecay_find_exact_symbol",
-            "tracedecay_callers",
-            "tracedecay_callees",
-        ],
-        nonblocking: true,
-    }.checked(),
-    HintCategorySpec {
-        category: HintCategory::BroadRead,
-        key: "broad_read",
-        label: "broad read",
-        skill: "exploring-code",
-        message: "For broad codebase reading, consider starting with focused tracedecay context.",
-        context: "tracedecay_context gathers relevant code slices without reading entire directories or the whole repository; tracedecay_grep sweeps the indexed tree for a literal or regex string when you are hunting for exact text rather than a concept.",
-        expected_tools: &["tracedecay_context", "tracedecay_grep"],
-        nonblocking: false,
-    }.checked(),
-    HintCategorySpec {
-        category: HintCategory::CallGraph,
-        key: "call_graph",
-        label: "call-graph",
-        skill: "tracing-functions",
-        message: "For function tracing, use the indexed call graph before grep/file reads.",
-        context: "Resolve the symbol with tracedecay_find_exact_symbol or tracedecay_search, then use tracedecay_callers for who depends on it and tracedecay_callees for what it calls; use tracedecay_impact for broader dependents before opening files.",
-        expected_tools: &[
-            "tracedecay_find_exact_symbol",
-            "tracedecay_search",
-            "tracedecay_callers",
-            "tracedecay_callees",
-            "tracedecay_impact",
-        ],
-        nonblocking: false,
-    }.checked(),
-    HintCategorySpec {
-        category: HintCategory::Impact,
-        key: "impact",
-        label: "impact",
-        skill: "assessing-impact",
-        message: "For impact, affected-test, or blast-radius questions, use TraceDecay's dependency tools.",
-        context: "Start with tracedecay_diff_context when you have changed files, tracedecay_impact for a resolved symbol, tracedecay_affected for affected tests, and tracedecay_test_map when you need direct test attribution.",
-        expected_tools: &[
-            "tracedecay_diff_context",
-            "tracedecay_impact",
-            "tracedecay_affected",
-            "tracedecay_test_map",
-        ],
-        nonblocking: false,
-    }.checked(),
-    HintCategorySpec {
-        category: HintCategory::SymbolLookup,
-        key: "symbol_lookup",
-        label: "symbol lookup",
-        skill: "exploring-code",
-        message: "For symbol lookup, consider using tracedecay indexed symbol tools.",
-        context: "tracedecay_context and tracedecay_node can locate definitions and nearby relationships from the code graph.",
-        expected_tools: &["tracedecay_context", "tracedecay_node"],
-        nonblocking: false,
-    }.checked(),
-    HintCategorySpec {
-        category: HintCategory::FileLookup,
-        key: "file_lookup",
-        label: "file lookup",
-        skill: "exploring-code",
-        message: "For finding files by role or path, consider using tracedecay_files.",
-        context: "tracedecay_files can list indexed files and narrow file lookup before opening individual files.",
-        expected_tools: &["tracedecay_files"],
-        nonblocking: false,
-    }.checked(),
-    HintCategorySpec {
-        category: HintCategory::ProjectContext,
-        key: "project_context",
-        label: "project context",
-        skill: "code-health",
-        message: "For other repos or registered projects, consider TraceDecay project registry tools.",
-        context: "tracedecay_project_list shows known projects; tracedecay_project_search can find a sibling repo by name/path/remote; pass project_path or project_id to tracedecay_context or tracedecay_search for cross-project code context before scanning parent directories.",
-        expected_tools: &[
-            "tracedecay_project_list",
-            "tracedecay_project_search",
-            "tracedecay_context",
-            "tracedecay_search",
-        ],
-        nonblocking: false,
-    }.checked(),
-    HintCategorySpec {
-        category: HintCategory::SessionRecall,
-        key: "session_recall",
-        label: "session recall",
-        skill: "managing-session-context",
-        message: "For prior conversation context, consider TraceDecay session search.",
-        context: "tracedecay_message_search searches ingested agent transcripts across providers; tracedecay_lcm_grep can search bounded raw-message snippets and summaries when you need session-level recall before re-discovering context.",
-        expected_tools: &["tracedecay_message_search", "tracedecay_lcm_grep"],
-        nonblocking: false,
-    }.checked(),
-    HintCategorySpec {
-        category: HintCategory::AtomicEdit,
-        key: "atomic_edit",
-        label: "atomic edit",
-        skill: "editing-safely",
-        message: "For safe mechanical edits, use TraceDecay's anchored edit tools.",
-        context: "Use tracedecay_str_replace for one exact swap, tracedecay_multi_str_replace for an all-or-nothing batch, tracedecay_insert_at or tracedecay_insert_at_symbol for anchored insertion, tracedecay_replace_symbol for one resolved symbol, tracedecay_move_symbol to relocate one resolved symbol, and tracedecay_ast_grep_rewrite for structural rewrites.",
-        expected_tools: &[
-            "tracedecay_str_replace",
-            "tracedecay_multi_str_replace",
-            "tracedecay_insert_at",
-            "tracedecay_insert_at_symbol",
-            "tracedecay_ast_grep_rewrite",
-            "tracedecay_replace_symbol",
-            "tracedecay_move_symbol",
-        ],
-        nonblocking: false,
-    }.checked(),
-    HintCategorySpec {
-        category: HintCategory::TypeOrientation,
-        key: "type_orientation",
-        label: "type orientation",
-        skill: "exploring-code",
-        message: "For type, constructor, field, trait, or duplicate-logic questions, use TraceDecay's AST orientation tools.",
-        context: "Use tracedecay_constructors for struct literal sites, tracedecay_field_sites for reads/writes, tracedecay_implementations for a trait's implementors or every body of a method name, and tracedecay_type_hierarchy for a trait/interface/class's full recursive implementor/extender tree.",
-        expected_tools: &[
-            "tracedecay_constructors",
-            "tracedecay_field_sites",
-            "tracedecay_implementations",
-            "tracedecay_type_hierarchy",
-        ],
-        nonblocking: false,
-    }.checked(),
-    HintCategorySpec {
-        category: HintCategory::ExploreSubagent,
-        key: "explore_subagent",
-        label: "explore subagent",
-        skill: "discovering-tracedecay",
-        message: "For code research subagents, consider adding tracedecay MCP context before broad exploration.",
-        context: "tracedecay_context can gather focused code context, while tracedecay_search, tracedecay_callers, and tracedecay_impact can answer common research questions without a broad scan.",
-        expected_tools: &[
-            "tracedecay_context",
-            "tracedecay_search",
-            "tracedecay_callers",
-            "tracedecay_impact",
-        ],
-        nonblocking: true,
-    }.checked(),
-    HintCategorySpec {
-        category: HintCategory::SubagentStartContext,
-        key: "subagent_start_context",
-        label: "subagent start context",
-        skill: "discovering-tracedecay",
-        message: "For subagent handoff, include focused TraceDecay context instead of broad repo instructions.",
-        context: "Use tracedecay_context, tracedecay_search, and tracedecay_impact to provide only the code graph slices the subagent needs; keep workflow depth in bundled skills.",
-        expected_tools: &[
-            "tracedecay_context",
-            "tracedecay_search",
-            "tracedecay_impact",
-        ],
-        nonblocking: true,
-    }.checked(),
-    HintCategorySpec {
-        category: HintCategory::BuildDiagnostics,
-        key: "build_diagnostics",
-        label: "build diagnostics",
-        skill: "fixing-build-and-type-errors",
-        message: "For build/type-check errors, use TraceDecay's diagnostics tools instead of parsing raw compiler output.",
-        context: "tracedecay_diagnostics reads the diagnostics published for the current indexed generation and maps each error to its enclosing symbol; a TypeScript project's own tsc is run for it automatically, other toolchains publish by pasting compiler output into tracedecay_diagnose, which also adds caller/impact context so you fix the root cause, not just the line the compiler points at.",
-        expected_tools: &["tracedecay_diagnostics", "tracedecay_diagnose"],
-        nonblocking: false,
-    }.checked(),
-    HintCategorySpec {
-        category: HintCategory::ReviewChanges,
-        key: "review_changes",
-        label: "review changes",
-        skill: "reviewing-changes",
-        message: "For reviewing diffs or PR changes, use TraceDecay's change-context tools before raw diff reading.",
-        context: "tracedecay_diff_context maps local changed files to touched symbols, dependents, and tests; tracedecay_pr_context does the same for a PR branch when available, so use GitHub only for review comments, metadata, and CI state.",
-        expected_tools: &["tracedecay_diff_context", "tracedecay_pr_context"],
-        nonblocking: false,
-    }.checked(),
-    HintCategorySpec {
-        category: HintCategory::MemoryStore,
-        key: "memory_store",
-        label: "memory store",
-        skill: "project-memory",
-        message: "For durable facts, prefer tracedecay_fact_store_add over hand-editing harness memory files.",
-        context: "tracedecay_fact_store_add persists a trust-ranked project/user fact that survives across sessions and is recalled by tracedecay_context and tracedecay_fact_store_search; a memory markdown edit is only visible to the current harness. Keep secrets and unnecessary PII out of stored facts.",
-        expected_tools: &["tracedecay_fact_store_add"],
-        nonblocking: false,
-    }.checked(),
-    HintCategorySpec {
-        category: HintCategory::EditRedundancy,
-        key: "edit_redundancy",
-        label: "new-function edit",
-        skill: "editing-safely",
-        message: "You just added a new function-sized block. Search for an existing helper and continue; do not stop to ask whether the new block is acceptable.",
-        context: "tracedecay_search finds existing helpers by name, signature, or body text and tracedecay_similar finds similarly named symbols; if a match exists, reuse or refactor the existing helper instead of keeping a second copy.",
-        expected_tools: &["tracedecay_search", "tracedecay_similar"],
-        nonblocking: true,
-    }.checked(),
-    HintCategorySpec {
-        category: HintCategory::UnexpectedChanges,
-        key: "unexpected_changes",
-        label: "unexpected changes",
-        skill: "investigating-unexpected-changes",
-        message: "Unexpected commits or edits on your branch? Attribute them with the session-git index before reacting.",
-        context: "tracedecay_sessions_for (git_ref commit/branch/worktree) names the sessions that produced or observed the change; tracedecay_commit_context and tracedecay_branch_diff show what moved; tracedecay_message_search recovers the acting session's intent. Do not force-push over another agent's work or theorize from blind git log.",
-        expected_tools: &[
-            "tracedecay_sessions_for",
-            "tracedecay_commit_context",
-            "tracedecay_branch_diff",
-            "tracedecay_message_search",
-        ],
-        nonblocking: false,
-    }.checked(),
-];
+use tracedecay_policy::intent_catalog::INTENT_CATALOG as CATEGORY_SPECS;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolHintInput {
@@ -479,11 +86,7 @@ impl ToolHint {
     pub fn escalated(&self) -> ToolHint {
         ToolHint {
             category: self.category,
-            message: format!(
-                "Repeated native {} usage this session. {}",
-                self.category.label(),
-                self.message
-            ),
+            message: intent_catalog::escalated_message(self.category, &self.message),
             context: self.context.clone(),
             nonblocking: self.nonblocking,
         }
@@ -706,214 +309,43 @@ pub fn decide_hint(input: &ToolHintInput) -> Option<ToolHint> {
 
 #[tracing::instrument(name = "hosts.hooks.tool_hints.classify", level = "trace", skip_all)]
 fn classify_hint(input: &ToolHintInput) -> Option<HintCategory> {
-    let facts = HintRequestFacts::new(input);
-    CLASSIFICATION_RULES
-        .iter()
-        .find(|rule| (rule.matches)(&facts))
-        .map(|rule| rule.category)
+    first_action_fact(&input.action_fact_input())
 }
 
-struct HintRequestFacts<'a> {
-    input: &'a ToolHintInput,
-    text: String,
-    prompt_text: String,
-    command: Option<&'a str>,
-    tool_name: Option<&'a str>,
-    command_is_shell_search: bool,
-    prompt_has_diagnostic: bool,
-    captured_output_has_diagnostic: bool,
-    trusted_build_failure: bool,
-}
-
-impl<'a> HintRequestFacts<'a> {
-    fn new(input: &'a ToolHintInput) -> Self {
-        let text = combined_text(input);
-        let prompt_text = input
-            .prompt
-            .as_deref()
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        let command = input.command.as_deref();
-        let prompt_has_diagnostic = looks_like_pasted_diagnostic(&prompt_text);
-        let captured_output_has_diagnostic = input
-            .captured_output
-            .as_deref()
-            .map(str::to_ascii_lowercase)
-            .as_deref()
-            .is_some_and(looks_like_pasted_diagnostic);
-        let trusted_build_failure =
-            input.trusted_failure && command.is_some_and(is_build_or_typecheck_command);
-        Self {
-            input,
-            text,
-            prompt_text,
-            command,
-            tool_name: input.tool_name.as_deref(),
-            command_is_shell_search: command.is_some_and(is_shell_text_search_command),
-            prompt_has_diagnostic,
-            captured_output_has_diagnostic,
-            trusted_build_failure,
+impl ToolHintInput {
+    /// Borrowed action-fact view of this hook event.
+    pub(crate) fn action_fact_input(&self) -> ActionFactInputV1<'_> {
+        ActionFactInputV1 {
+            tool_name: self.tool_name.as_deref(),
+            command: self.command.as_deref(),
+            prompt: self.prompt.as_deref(),
+            file_path: self.file_path.as_deref(),
+            subagent_type: self.subagent_type.as_deref(),
+            captured_output: self.captured_output.as_deref(),
+            trusted_failure: self.trusted_failure,
+            edit_text: self.edit_text.as_deref(),
         }
     }
 }
 
-type ClassificationPredicate = fn(&HintRequestFacts<'_>) -> bool;
-
-struct ClassificationRule {
-    category: HintCategory,
-    matches: ClassificationPredicate,
-}
-
-const CLASSIFICATION_RULES: &[ClassificationRule] = &[
-    ClassificationRule {
-        category: HintCategory::ExploreSubagent,
-        matches: |facts| is_explore_subagent(facts.input),
-    },
-    ClassificationRule {
-        category: HintCategory::SubagentStartContext,
-        matches: |facts| is_subagent_context_handoff(facts.input),
-    },
-    ClassificationRule {
-        category: HintCategory::SemanticSearch,
-        matches: |facts| is_semantic_search_tool(facts.input),
-    },
-    ClassificationRule {
-        category: HintCategory::UnexpectedChanges,
-        matches: |facts| signals_unexpected_change(&facts.text),
-    },
-    ClassificationRule {
-        category: HintCategory::SessionRecall,
-        matches: |facts| asks_for_session_recall(&facts.text),
-    },
-    ClassificationRule {
-        category: HintCategory::ProjectContext,
-        matches: |facts| {
-            asks_for_project_context(&facts.text)
-                || facts.command.is_some_and(is_project_discovery_command)
-        },
-    },
-    ClassificationRule {
-        category: HintCategory::CallGraph,
-        matches: |facts| asks_for_call_graph(&facts.text),
-    },
-    ClassificationRule {
-        category: HintCategory::Impact,
-        matches: |facts| asks_for_impact(&facts.text),
-    },
-    ClassificationRule {
-        category: HintCategory::BuildDiagnostics,
-        matches: |facts| {
-            (!facts.command_is_shell_search && asks_for_build_diagnostics(&facts.prompt_text))
-                || facts.prompt_has_diagnostic
-                || facts.captured_output_has_diagnostic
-                || facts.trusted_build_failure
-        },
-    },
-    ClassificationRule {
-        category: HintCategory::AtomicEdit,
-        matches: |facts| asks_for_atomic_edit(&facts.text),
-    },
-    ClassificationRule {
-        category: HintCategory::ReviewChanges,
-        matches: |facts| {
-            asks_for_review_changes(&facts.text)
-                || facts
-                    .command
-                    .is_some_and(|command| is_diff_review_command(command, &facts.text))
-        },
-    },
-    ClassificationRule {
-        category: HintCategory::TypeOrientation,
-        matches: |facts| asks_for_type_orientation(&facts.text),
-    },
-    ClassificationRule {
-        category: HintCategory::Search,
-        matches: |facts| asks_for_text_search(&facts.text),
-    },
-    ClassificationRule {
-        category: HintCategory::MemoryStore,
-        matches: |facts| is_memory_store_edit(facts.input),
-    },
-    ClassificationRule {
-        category: HintCategory::EditRedundancy,
-        matches: |facts| is_redundancy_candidate_edit(facts.input),
-    },
-    ClassificationRule {
-        category: HintCategory::FileLookup,
-        matches: |facts| {
-            facts
-                .tool_name
-                .is_some_and(|name| matches_normalized(name, &["glob", "listdir", "list_dir"]))
-                || facts.command.is_some_and(is_file_lookup_command)
-        },
-    },
-    ClassificationRule {
-        category: HintCategory::FileRead,
-        matches: |facts| facts.command.is_some_and(is_shell_file_read_command),
-    },
-    ClassificationRule {
-        category: HintCategory::Search,
-        matches: |facts| facts.command.is_some_and(is_shell_search_command),
-    },
-    ClassificationRule {
-        category: HintCategory::Search,
-        matches: |facts| {
-            facts
-                .tool_name
-                .is_some_and(|name| matches_normalized(name, &["grep", "search"]))
-        },
-    },
-    ClassificationRule {
-        category: HintCategory::ToolDescriptorRead,
-        matches: |facts| is_tracedecay_tool_descriptor_read(facts.input),
-    },
-    ClassificationRule {
-        category: HintCategory::FileRead,
-        matches: |facts| is_single_file_read(facts.input),
-    },
-    ClassificationRule {
-        category: HintCategory::BroadRead,
-        matches: |facts| asks_for_broad_read(&facts.text),
-    },
-    ClassificationRule {
-        category: HintCategory::SymbolLookup,
-        matches: |facts| asks_for_symbol_lookup(&facts.text),
-    },
-    ClassificationRule {
-        category: HintCategory::FileLookup,
-        matches: |facts| asks_for_file_lookup(&facts.text),
-    },
-];
-
 fn hint_for_category(category: HintCategory) -> ToolHint {
-    let spec = category.spec();
+    let entry = intent_catalog::entry(category);
     ToolHint {
         category,
-        message: spec.message.to_string(),
-        context: format!("{}\nSkill: tracedecay:{}.", spec.context, spec.skill),
-        nonblocking: spec.nonblocking,
+        message: entry.message.to_string(),
+        context: intent_catalog::suggestion_context(category),
+        nonblocking: entry.nonblocking,
     }
 }
 
 #[cfg(test)]
 fn category_skill(category: HintCategory) -> &'static str {
-    category.spec().skill
+    intent_catalog::entry(category).skill
 }
 
 mod classifiers;
 #[cfg(test)]
 pub(super) use classifiers::is_harness_memory_path;
-use classifiers::{
-    asks_for_atomic_edit, asks_for_broad_read, asks_for_build_diagnostics, asks_for_call_graph,
-    asks_for_file_lookup, asks_for_impact, asks_for_project_context, asks_for_review_changes,
-    asks_for_session_recall, asks_for_symbol_lookup, asks_for_text_search,
-    asks_for_type_orientation, combined_text, is_build_or_typecheck_command,
-    is_diff_review_command, is_explore_subagent, is_file_lookup_command, is_memory_store_edit,
-    is_project_discovery_command, is_redundancy_candidate_edit, is_semantic_search_tool,
-    is_shell_file_read_command, is_shell_search_command, is_shell_text_search_command,
-    is_single_file_read, is_subagent_context_handoff, is_tracedecay_tool_descriptor_read,
-    looks_like_pasted_diagnostic, matches_normalized, signals_unexpected_change,
-};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]

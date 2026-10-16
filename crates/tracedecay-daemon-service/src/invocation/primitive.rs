@@ -966,7 +966,10 @@ async fn execute_context_scout_mutation(
         }
         ContextScoutMutationResultV1::Claim(outcome) => match outcome.as_ref() {
             ContextScoutDurableClaimOutcomeV1::Claimed(claim) => {
-                serde_json::to_value(public_context_scout_claim(claim))
+                let Some(claimed) = public_context_scout_claim(claim) else {
+                    return context_scout_mutation_unavailable(wire_request_id);
+                };
+                serde_json::to_value(claimed)
             }
             ContextScoutDurableClaimOutcomeV1::Empty => {
                 serde_json::to_value(ContextScoutClaimResultV1::Empty)
@@ -1076,26 +1079,28 @@ fn context_scout_mutation_unavailable(wire_request_id: String) -> DaemonInvocati
 
 fn public_context_scout_claim(
     claim: &tracedecay_contracts::context_scout::ContextScoutDurableClaimV1,
-) -> ContextScoutClaimResultV1 {
+) -> Option<ContextScoutClaimResultV1> {
     let entry = &claim.entry;
     let envelope = &entry.envelope;
-    ContextScoutClaimResultV1::Claimed {
+    Some(ContextScoutClaimResultV1::Claimed {
         claim: Box::new(ContextScoutClaimHandleV1 {
             work: entry.work,
             envelope_id: envelope.envelope_id,
             lease_id: claim.lease.lease_id,
             lease_expires_at: claim.lease.expires_at,
         }),
-        suggestion: Box::new(public_context_scout_suggestion(entry)),
-    }
+        suggestion: Box::new(public_context_scout_suggestion(entry)?),
+    })
 }
 
+/// Public projection of one durable entry. `None` only for session evidence
+/// that pins no code generation, which durable validation already refuses.
 fn public_context_scout_suggestion(
     entry: &tracedecay_contracts::context_scout::ContextScoutDurableQueueEntryV1,
-) -> ContextScoutSuggestionProjectionV1 {
+) -> Option<ContextScoutSuggestionProjectionV1> {
     let envelope = &entry.envelope;
     let candidate = &envelope.candidate;
-    ContextScoutSuggestionProjectionV1 {
+    Some(ContextScoutSuggestionProjectionV1 {
         work: entry.work,
         envelope_id: envelope.envelope_id,
         configuration_revision: envelope.configuration_revision,
@@ -1108,41 +1113,53 @@ fn public_context_scout_suggestion(
         relevance_score: candidate.relevance_score,
         suggestion_text: candidate.suggestion_text.clone(),
         evidence: ContextScoutEvidenceProjectionV1 {
-            content_generation: candidate.evidence.code_generation_id.clone(),
-            availability: candidate.evidence.availability,
+            content_generation: candidate.evidence.code_generation_id()?.clone(),
+            availability: candidate.evidence.availability(),
             anchor_ids: candidate
                 .evidence
-                .sources
-                .iter()
+                .as_code()
+                .into_iter()
+                .flat_map(|evidence| evidence.sources.iter())
                 .flat_map(|source| source.anchors.iter().cloned())
                 .collect(),
-            claim_digest: candidate.evidence.claim_digest.clone(),
+            claim_digest: candidate.evidence.claim_digest().clone(),
+            session_window: candidate
+                .evidence
+                .as_session()
+                .map(|evidence| evidence.window.clone()),
         },
         expires_at: candidate.expires_at,
-    }
+    })
 }
 
 fn public_context_scout_recent(recent: ContextScoutRecentStateV1) -> ContextScoutRecentResultV1 {
-    ContextScoutRecentResultV1 {
-        configuration_revision: recent.configuration_revision,
-        observed_at: recent.observed_at,
-        pending: recent
-            .pending
-            .iter()
-            .map(public_context_scout_suggestion)
-            .collect(),
-        deliveries: recent
-            .deliveries
-            .iter()
-            .map(
-                |delivery| tracedecay_contracts::context_scout::ContextScoutRecentDeliveryV1 {
-                    suggestion: public_context_scout_suggestion(&delivery.entry),
+    let pending = recent
+        .pending
+        .iter()
+        .filter_map(public_context_scout_suggestion)
+        .collect::<Vec<_>>();
+    let deliveries = recent
+        .deliveries
+        .iter()
+        .filter_map(|delivery| {
+            Some(
+                tracedecay_contracts::context_scout::ContextScoutRecentDeliveryV1 {
+                    suggestion: public_context_scout_suggestion(&delivery.entry)?,
                     receipt: delivery.receipt.clone(),
                     feedback: delivery.feedback,
                 },
             )
-            .collect(),
-        omitted: recent.omitted,
+        })
+        .collect::<Vec<_>>();
+    // An entry without a public projection is counted, never silently lost.
+    let unprojected =
+        (recent.pending.len() - pending.len()) + (recent.deliveries.len() - deliveries.len());
+    ContextScoutRecentResultV1 {
+        configuration_revision: recent.configuration_revision,
+        observed_at: recent.observed_at,
+        pending,
+        deliveries,
+        omitted: recent.omitted.saturating_add(unprojected),
     }
 }
 

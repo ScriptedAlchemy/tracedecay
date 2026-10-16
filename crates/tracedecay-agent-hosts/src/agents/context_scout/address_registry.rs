@@ -37,8 +37,8 @@ use tracedecay_hooks::{HookEventEnvelopeV2, HookScopeBindingV1};
 
 use super::{
     ContextScoutControlV1, ContextScoutDeliverySelectionInputV1, ContextScoutEvidenceEnvelopeExt,
-    ContextScoutLimitsV1, ContextScoutRuntimeModeV1, ContextScoutSelectionInputV1,
-    ContextScoutServiceStateV1, select_context_scout_delivery_window,
+    ContextScoutIntentControlV1, ContextScoutLimitsV1, ContextScoutRuntimeModeV1,
+    ContextScoutSelectionInputV1, ContextScoutServiceStateV1, select_context_scout_delivery_window,
 };
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::db::engine::params;
@@ -145,6 +145,13 @@ impl ContextScoutConfigurationPinV1 {
                 ContextScoutModelBackendV1::CodexAppServer
             }
         });
+        let intent = match &settings.intent {
+            Some(intent) => Some(ContextScoutIntentControlV1 {
+                enabled: intent.enabled,
+                settings_digest: digest_bytes(&intent.settings_digest().ok()?)?,
+            }),
+            None => None,
+        };
         let configuration_digest = current.snapshot.effective_behavior_digest.clone();
         let control = ContextScoutControlV1 {
             configuration_revision: digest_bytes(&configuration_digest)?,
@@ -152,6 +159,7 @@ impl ContextScoutConfigurationPinV1 {
             mode,
             model_path,
             limits,
+            intent,
         };
         Some(Self {
             revision_id: current.revision_id.clone(),
@@ -1009,7 +1017,7 @@ pub fn context_scout_candidates_from_publication(
                 category,
                 relevance_score: u16::MAX,
                 suggestion_text: text,
-                evidence,
+                evidence: evidence.into(),
                 expires_at: UtcMicros(observed_at.0.saturating_add(CANDIDATE_TTL_MICROS_V1)),
             })
         })
@@ -1255,6 +1263,33 @@ mod tests {
             model_path: Some(ContextScoutConfiguredModelPathV1::CodexAppServer),
             model_id: Some("gpt-5.6-mini".to_owned()),
             model_timeout_secs: Some(60),
+            intent: None,
+        };
+        let with_intent = ContextScoutSettingsV1 {
+            intent: Some(tracedecay_domain::configuration::ContextScoutIntentSettingsV1 {
+                enabled: true,
+                engine: tracedecay_domain::configuration::DecisionEngineSettingsV1 {
+                    base_url: "http://127.0.0.1:8088".to_owned(),
+                    model: None,
+                    timeout_ms: 250,
+                    max_concurrent: 2,
+                    max_state_bytes: 64 * 1024,
+                },
+                window: tracedecay_domain::configuration::IntentWindowSettingsV1 {
+                    max_user_turns: 3,
+                    max_messages: 12,
+                    max_bytes: 16 * 1024,
+                    max_age_secs: 1_800,
+                    freshen_budget_ms: 150,
+                },
+                questions:
+                    tracedecay_domain::configuration::ContextScoutIntentSettingsV1::reference_questions(),
+                action_fact_score_permille: 700,
+                ttl_secs: 600,
+                min_delivery_gap_secs: 30,
+                prompt_lookup_deadline_ms: 200,
+            }),
+            ..configured.clone()
         };
         let configured = ContextScoutConfigurationPinV1::from_current(&configuration(
             "revision.scout.model",
@@ -1264,6 +1299,30 @@ mod tests {
         assert_eq!(
             configured.control().model_path,
             Some(ContextScoutModelBackendV1::CodexAppServer)
+        );
+        assert_eq!(configured.control().intent, None);
+
+        let expected_digest = with_intent
+            .intent
+            .as_ref()
+            .unwrap()
+            .settings_digest()
+            .unwrap();
+        let with_intent = ContextScoutConfigurationPinV1::from_current(&configuration(
+            "revision.scout.intent",
+            with_intent,
+        ))
+        .unwrap();
+        assert_eq!(
+            with_intent.control().intent,
+            Some(ContextScoutIntentControlV1 {
+                enabled: true,
+                settings_digest: digest_bytes(&expected_digest).unwrap(),
+            })
+        );
+        assert_ne!(
+            with_intent.control().configuration_revision,
+            configured.control().configuration_revision
         );
     }
 

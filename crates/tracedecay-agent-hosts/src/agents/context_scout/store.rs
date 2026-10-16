@@ -327,6 +327,9 @@ fn document_needs_provenance_reset(encoded: &str, project_id: [u8; 16]) -> bool 
     if stored_project != project_id {
         return false;
     }
+    if has_untagged_candidate_evidence(object) {
+        return true;
+    }
     if !object.contains_key("delivery_addresses")
         || !object.contains_key("delivery_provenance_complete")
     {
@@ -338,6 +341,25 @@ fn document_needs_provenance_reset(encoded: &str, project_id: [u8; 16]) -> bool 
         }
         Err(_) => false,
     }
+}
+
+/// A queued candidate written before candidate evidence became the tagged
+/// code/session union carries a bare evidence object with no `kind`. Such a
+/// document cannot decode into the current shape, so startup resets it
+/// instead of reporting the durable state unavailable forever.
+fn has_untagged_candidate_evidence(object: &serde_json::Map<String, serde_json::Value>) -> bool {
+    let untagged = |stored: &serde_json::Value| {
+        stored
+            .pointer("/entry/envelope/candidate/evidence")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|evidence| !evidence.contains_key("kind"))
+    };
+    ["entries", "delivery_addresses"].into_iter().any(|field| {
+        object
+            .get(field)
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|rows| rows.iter().any(untagged))
+    })
 }
 
 fn decode_mutation_settlement(encoded: &str) -> Option<ContextScoutMutationSettlementV1> {

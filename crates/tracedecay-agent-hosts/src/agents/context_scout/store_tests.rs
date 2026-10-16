@@ -58,7 +58,7 @@ pub(super) fn entry(project_id: [u8; 16], generation: u64) -> ContextScoutDurabl
                 category: ContextScoutCategoryV1::Retrieval,
                 relevance_score: 10,
                 suggestion_text: "Use the saved diagnostic anchor.".to_owned(),
-                evidence: super::evidence::fixture_context_scout_evidence(),
+                evidence: super::evidence::fixture_context_scout_evidence().into(),
                 expires_at: UtcMicros(1_000),
             },
         },
@@ -695,18 +695,23 @@ async fn exact_project_scope_and_durable_generation_are_enforced() {
     );
 
     let mut dirty = entry(project_id, 1);
-    dirty.envelope.candidate.evidence.content =
-        tracedecay_domain::feedback::FeedbackContentIdentityV1::EphemeralOverlay {
-            session_id: tracedecay_domain::SessionId::new("session.overlay").unwrap(),
-            owner_client_id: tracedecay_domain::HostInstanceId::new("client.overlay").unwrap(),
-            agent_id: None,
-            document_version: 1,
-            overlay_digest: tracedecay_domain::ManifestDigest::new(format!(
-                "sha256:{}",
-                "f".repeat(64)
-            ))
-            .unwrap(),
-        };
+    dirty
+        .envelope
+        .candidate
+        .evidence
+        .as_code_mut()
+        .unwrap()
+        .content = tracedecay_domain::feedback::FeedbackContentIdentityV1::EphemeralOverlay {
+        session_id: tracedecay_domain::SessionId::new("session.overlay").unwrap(),
+        owner_client_id: tracedecay_domain::HostInstanceId::new("client.overlay").unwrap(),
+        agent_id: None,
+        document_version: 1,
+        overlay_digest: tracedecay_domain::ManifestDigest::new(format!(
+            "sha256:{}",
+            "f".repeat(64)
+        ))
+        .unwrap(),
+    };
     assert_eq!(
         store.enqueue(dirty).await,
         ContextScoutDurableStoreOutcomeV1::Unavailable
@@ -916,6 +921,62 @@ async fn legacy_delivery_provenance_resets_without_replaying_receipts() {
             deliveries: Vec::new(),
             omitted: 0,
         })
+    );
+}
+
+#[tokio::test]
+async fn untagged_candidate_evidence_resets_instead_of_failing_decode() {
+    let (_temporary, database) = database().await;
+    let project_id = [8; 16];
+    let store =
+        ProjectContextScoutDurableStoreV1::from_project_database(database.clone(), project_id)
+            .expect("owned project store");
+    let queued = entry(project_id, 1);
+    assert_eq!(
+        store.enqueue(queued.clone()).await,
+        ContextScoutDurableStoreOutcomeV1::Stored
+    );
+    let current = database
+        .get_metadata("agents.context-scout.durable.v1")
+        .await
+        .expect("current metadata read")
+        .expect("current document");
+    let mut legacy = serde_json::from_str::<serde_json::Value>(&current).expect("current json");
+    let evidence = legacy
+        .pointer_mut("/entries/0/entry/envelope/candidate/evidence")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("tagged evidence");
+    assert_eq!(
+        evidence.remove("kind"),
+        Some(serde_json::Value::String("code".to_owned()))
+    );
+    let legacy_json = legacy.to_string();
+    assert!(
+        serde_json::from_value::<ContextScoutDurableQueueEntryV1>(
+            legacy["entries"][0]["entry"].clone()
+        )
+        .is_err(),
+        "the pre-union shape must not decode into the current entry"
+    );
+    database
+        .set_metadata("agents.context-scout.durable.v1", &legacy_json)
+        .await
+        .expect("legacy Context Scout state");
+
+    assert_eq!(
+        store.startup(UtcMicros(31), 8).await,
+        ContextScoutDurableStartupOutcomeV1::Reset
+    );
+    assert_eq!(
+        store.startup(UtcMicros(32), 8).await,
+        ContextScoutDurableStartupOutcomeV1::Ready {
+            entries: Vec::new(),
+            truncated: false,
+        }
+    );
+    assert_eq!(
+        store.enqueue(entry(project_id, 2)).await,
+        ContextScoutDurableStoreOutcomeV1::Stored
     );
 }
 

@@ -153,7 +153,7 @@ fn configured_model_input_at(
             category: ContextScoutCategoryV1::Retrieval,
             relevance_score: 10,
             suggestion_text: "Use the admitted evidence.".to_owned(),
-            evidence: configured_model_evidence(marker),
+            evidence: configured_model_evidence(marker).into(),
             expires_at: UtcMicros(now.0.saturating_add(60 * 1_000_000)),
         }],
     }
@@ -180,6 +180,7 @@ fn configured_model_pin_with_timeout(
         ),
         model_id: Some("gpt-5.6-mini".to_owned()),
         model_timeout_secs: Some(model_timeout_secs),
+        intent: None,
     };
     settings.validate().expect("configured-model settings");
     let snapshot = tracedecay_domain::configuration::ConfigurationSnapshotV1::new(
@@ -410,8 +411,8 @@ async fn project_open_edit_stop_and_explicit_feedback_preserve_privacy_and_super
         "Use the admitted evidence."
     );
     assert_eq!(
-        claim.entry.envelope.candidate.evidence.redaction,
-        ContextScoutRedactionReceiptV1::MetadataOnly {
+        claim.entry.envelope.candidate.evidence.redaction(),
+        &ContextScoutRedactionReceiptV1::MetadataOnly {
             disclosure: DisclosureClass::Evidence,
         }
     );

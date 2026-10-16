@@ -365,6 +365,7 @@ pub async fn patch_project_settings(
                 auto_track_pr_poll_secs: sync.auto_track_pr_poll_secs,
             }),
             context_scout: patch.context_scout,
+            context_scout_intent: None,
         },
     )
     .map_err(project_preview_error)?;

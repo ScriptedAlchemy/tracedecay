@@ -1068,6 +1068,7 @@ fn context_scout_state_transition_is_exact(
         && current.mode == next.mode
         && current.model_path == next.model_path
         && current.limits == next.limits
+        && current.intent == next.intent
         && matches!(
             (current.state, next.state),
             (
@@ -1237,6 +1238,7 @@ mod tests {
             mode: super::super::ContextScoutRuntimeModeV1::ConfiguredModel,
             model_path: Some(ContextScoutModelBackendV1::CodexAppServer),
             limits: super::super::ContextScoutLimitsV1::bounded_defaults(),
+            intent: None,
         };
         let paused = ContextScoutControlV1 {
             configuration_revision: [2; 32],
@@ -1264,6 +1266,18 @@ mod tests {
         assert!(!context_scout_state_transition_is_exact(
             current,
             changed_limits
+        ));
+
+        let changed_intent = ContextScoutControlV1 {
+            intent: Some(super::super::ContextScoutIntentControlV1 {
+                enabled: true,
+                settings_digest: [9; 32],
+            }),
+            ..paused
+        };
+        assert!(!context_scout_state_transition_is_exact(
+            current,
+            changed_intent
         ));
     }
 
@@ -1901,7 +1915,7 @@ mod tests {
                         tracedecay_contracts::context_scout::ContextScoutCategoryV1::Retrieval,
                     relevance_score: 10,
                     suggestion_text: "Use the saved diagnostic anchor.".to_owned(),
-                    evidence: super::super::evidence::fixture_context_scout_evidence(),
+                    evidence: super::super::evidence::fixture_context_scout_evidence().into(),
                     expires_at: UtcMicros(1_000),
                 },
             },
