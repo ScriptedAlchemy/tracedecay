@@ -15,6 +15,12 @@ filegroup(
 )
 
 filegroup(
+    name = "hooks",
+    srcs = glob(["hooks/**"]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
     name = "opencode",
     srcs = glob(["opencode/**"]),
     visibility = ["//visibility:public"],
