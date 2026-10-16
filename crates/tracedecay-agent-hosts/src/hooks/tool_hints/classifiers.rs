@@ -566,7 +566,6 @@ pub(super) fn asks_for_broad_read(text: &str) -> bool {
 
 pub(super) fn asks_for_project_context(text: &str) -> bool {
     mentions_external_project_scope(text)
-        || mentions_project_path(text)
         || asks_for_repo_discovery(text)
         || asks_for_project_architecture(text)
 }
@@ -607,10 +606,6 @@ pub(super) fn asks_for_project_architecture(text: &str) -> bool {
             "system",
         ],
     )
-}
-
-pub(super) fn mentions_project_path(text: &str) -> bool {
-    contains_any(text, &["/projects/", "~/projects/", "$home/projects/"])
 }
 
 pub(super) fn mentions_external_project_scope(text: &str) -> bool {
