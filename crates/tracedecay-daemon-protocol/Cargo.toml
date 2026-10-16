@@ -13,7 +13,7 @@ doctest = false
 [features]
 # Repo-wide `test-helpers` convention: exposes this crate's test-only helper
 # surfaces to dependent crates' test builds only. Never gates production code.
-test-helpers = ["tracedecay-framing/test-helpers", "tokio/net"]
+test-helpers = ["tokio/net"]
 
 [dependencies]
 asupersync.workspace = true

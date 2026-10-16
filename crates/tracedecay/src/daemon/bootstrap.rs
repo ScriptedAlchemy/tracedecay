@@ -496,9 +496,9 @@ fn log_background_shutdown_receipt(receipt: &tracedecay_daemon_service::shutdown
 }
 
 /// The daemon's lifetime count of Tokio-only paths skipped for want of a Tokio
-/// runtime, and of writer waits that parked a native thread. Zero is the only
-/// healthy value for either. Long native polls are listed by spawn site, and
-/// the lateness canary reports timer wakes that ran late.
+/// runtime, and of writer and reader waits that parked a native thread. Zero
+/// is the only healthy value for each. Long native polls are listed by spawn
+/// site, and the lateness canary reports timer wakes that ran late.
 fn log_runtime_hazards() {
     let long_native_polls = native_runtime::long_native_polls()
         .into_iter()
@@ -516,6 +516,10 @@ fn log_runtime_hazards() {
             (
                 "native_thread_writer_waits",
                 native_runtime::native_thread_writer_waits().to_string(),
+            ),
+            (
+                "native_thread_reader_waits",
+                tracedecay_rusqlite_runtime::exact_sql::native_thread_reader_waits().to_string(),
             ),
             ("long_native_polls", long_native_polls),
             ("late_timer_wakes", lateness.late_ticks.to_string()),

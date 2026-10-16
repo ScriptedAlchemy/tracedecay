@@ -349,58 +349,12 @@ where
     }
 }
 
-// Only the `read_bounded_line` test helper still reads through Tokio.
-#[cfg(any(test, feature = "test-helpers"))]
-impl<R> BoundedLineReader<R>
-where
-    R: tokio::io::AsyncBufRead + Unpin,
-{
-    #[tracing::instrument(name = "sessions.admission.read_line", level = "trace", skip_all)]
-    async fn read_bounded_tokio(&mut self, max_bytes: usize) -> FrameOutcome {
-        std::future::poll_fn(|cx| {
-            loop {
-                let chunk = ready!(Pin::new(&mut self.inner).poll_fill_buf(cx))?;
-                let (used, outcome) = self.frame.step(chunk, max_bytes);
-                Pin::new(&mut self.inner).consume(used);
-                if let Some(outcome) = outcome {
-                    return Poll::Ready(outcome);
-                }
-            }
-        })
-        .await
-    }
-}
-
 fn mcp_line(outcome: FrameOutcome) -> io::Result<Option<String>> {
     match outcome? {
         BoundedLineOutcome::Ready(line) => Ok(line),
         BoundedLineOutcome::Oversized { inspect_prefix } => {
             Err(wire_oversized_io_error_with_prefix(inspect_prefix))
         }
-    }
-}
-
-/// Read one newline-delimited frame, retaining at most `max_bytes` of content
-/// (excluding the terminating newline). On overflow, discards until newline or
-/// EOF and returns [`WireReadOutcome::Oversized`].
-///
-/// The returned future owns the partial-frame accumulator: dropping it mid-frame
-/// loses whatever it consumed. Use [`BoundedLineReader`] when the read races
-/// other futures.
-#[cfg(any(test, feature = "test-helpers"))]
-pub async fn read_bounded_line<R>(
-    reader: &mut R,
-    max_bytes: usize,
-) -> io::Result<WireReadOutcome<Option<String>>>
-where
-    R: tokio::io::AsyncBufRead + Unpin,
-{
-    match BoundedLineReader::new(reader)
-        .read_bounded_tokio(max_bytes)
-        .await?
-    {
-        BoundedLineOutcome::Ready(line) => Ok(WireReadOutcome::Ready(line)),
-        BoundedLineOutcome::Oversized { .. } => Ok(WireReadOutcome::Oversized),
     }
 }
 
@@ -412,15 +366,6 @@ fn take_line_string(mut bytes: Vec<u8>) -> io::Result<String> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "wire_input_not_utf8"))
 }
 
-/// Map a bounded line read into the historical `Option<String>` transport shape.
-#[cfg(any(test, feature = "test-helpers"))]
-pub fn line_outcome_to_io(outcome: WireReadOutcome<Option<String>>) -> io::Result<Option<String>> {
-    match outcome {
-        WireReadOutcome::Ready(line) => Ok(line),
-        WireReadOutcome::Oversized => Err(wire_oversized_io_error()),
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -429,7 +374,7 @@ mod tests {
     use std::io::Cursor;
     use std::task::{Context, Waker};
 
-    use tokio::io::{AsyncRead, BufReader, ReadBuf};
+    use asupersync::io::{AsyncRead, BufReader, ReadBuf};
 
     /// Generates `total` bytes in small chunks without pre-materializing the
     /// full hostile value for the product reader to copy from.
@@ -502,8 +447,7 @@ mod tests {
 
     /// Buffered source that replays scripted chunks; `None` is one `Pending`
     /// poll, standing in for a socket whose next bytes have not arrived yet.
-    /// EOF follows the last step. Implements both async buffered traits so the
-    /// native and Tokio front ends run the same script.
+    /// EOF follows the last step.
     struct Script {
         steps: VecDeque<Option<&'static [u8]>>,
         current: &'static [u8],
@@ -540,27 +484,6 @@ mod tests {
         }
     }
 
-    impl asupersync::io::AsyncRead for Script {
-        fn poll_read(
-            self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-            buf: &mut asupersync::io::ReadBuf<'_>,
-        ) -> Poll<io::Result<()>> {
-            buf.put_slice(ready!(self.get_mut().read_chunk(buf.remaining())));
-            Poll::Ready(Ok(()))
-        }
-    }
-
-    impl asupersync::io::AsyncBufRead for Script {
-        fn poll_fill_buf(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
-            self.get_mut().fill().map(Ok)
-        }
-
-        fn consume(self: Pin<&mut Self>, amount: usize) {
-            self.get_mut().take(amount);
-        }
-    }
-
     impl AsyncRead for Script {
         fn poll_read(
             self: Pin<&mut Self>,
@@ -572,7 +495,7 @@ mod tests {
         }
     }
 
-    impl tokio::io::AsyncBufRead for Script {
+    impl asupersync::io::AsyncBufRead for Script {
         fn poll_fill_buf(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
             self.get_mut().fill().map(Ok)
         }
@@ -725,27 +648,13 @@ mod tests {
     }
 
     #[test]
-    fn tokio_line_reader_preserves_valid_line_under_cap() {
-        let mut reader = BufReader::new(Cursor::new(b"{\"hello\":1}\n".to_vec()));
-        let line = ready_now(read_bounded_line(&mut reader, MAX_WIRE_MESSAGE_BYTES)).unwrap();
-        assert_eq!(
-            line,
-            WireReadOutcome::Ready(Some(r#"{"hello":1}"#.to_string()))
-        );
-        let eof = ready_now(read_bounded_line(&mut reader, MAX_WIRE_MESSAGE_BYTES)).unwrap();
-        assert_eq!(eof, WireReadOutcome::Ready(None));
-    }
-
-    #[test]
-    fn tokio_mcp_line_reader_accepts_exact_cap_rejects_one_over_and_recovers_next() {
+    fn native_mcp_line_reader_accepts_exact_cap_rejects_one_over_and_recovers_next() {
         let mut exact = vec![b'a'; MAX_MCP_JSONRPC_FRAME_BYTES];
         exact.push(b'\n');
-        let mut exact_reader = BoundedLineReader::new(BufReader::new(Cursor::new(exact)));
-        let line = mcp_line(ready_now(
-            exact_reader.read_bounded_tokio(MAX_MCP_JSONRPC_FRAME_BYTES),
-        ))
-        .expect("exact cap accepted")
-        .expect("line");
+        let mut exact_reader = BoundedLineReader::new(BufReader::new(&exact[..]));
+        let line = ready_now(exact_reader.read_mcp_line())
+            .expect("exact cap accepted")
+            .expect("line");
         assert_eq!(line.len(), MAX_MCP_JSONRPC_FRAME_BYTES);
 
         let stream = AsyncHostileThenSuffix::new(
@@ -755,10 +664,7 @@ mod tests {
             b"\n{\"jsonrpc\":\"2.0\",\"method\":\"ping\"}\n",
         );
         let mut oversized_reader = BoundedLineReader::new(BufReader::new(stream));
-        let error = mcp_line(ready_now(
-            oversized_reader.read_bounded_tokio(MAX_MCP_JSONRPC_FRAME_BYTES),
-        ))
-        .expect_err("one over rejected");
+        let error = ready_now(oversized_reader.read_mcp_line()).expect_err("one over rejected");
         assert!(is_wire_oversized_io_error(&error));
         assert_eq!(
             wire_oversized_inspect_prefix(&error).len(),
@@ -771,11 +677,9 @@ mod tests {
         );
 
         assert_eq!(
-            mcp_line(ready_now(
-                oversized_reader.read_bounded_tokio(MAX_MCP_JSONRPC_FRAME_BYTES)
-            ))
-            .expect("next frame")
-            .as_deref(),
+            ready_now(oversized_reader.read_mcp_line())
+                .expect("next frame")
+                .as_deref(),
             Some(r#"{"jsonrpc":"2.0","method":"ping"}"#)
         );
     }
@@ -853,21 +757,6 @@ mod tests {
         ));
         assert_eq!(
             ready_line(ready_now(reader.read_bounded(16))).as_deref(),
-            Some(r#"{"ok":true}"#)
-        );
-    }
-
-    #[test]
-    fn tokio_reader_keeps_the_oversized_verdict_across_a_dropped_read() {
-        let mut reader = BoundedLineReader::new(oversized_half_frame_then_rest());
-        assert!(poll_once(reader.read_bounded_tokio(16)).is_pending());
-        assert!(reader.has_partial_frame());
-        assert!(matches!(
-            ready_now(reader.read_bounded_tokio(16)).unwrap(),
-            BoundedLineOutcome::Oversized { inspect_prefix } if inspect_prefix == [b'y'; 20]
-        ));
-        assert_eq!(
-            ready_line(ready_now(reader.read_bounded_tokio(16))).as_deref(),
             Some(r#"{"ok":true}"#)
         );
     }

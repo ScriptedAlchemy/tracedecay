@@ -511,6 +511,44 @@ impl<T: Clone + Send + Sync + 'static> NativeTask<T> {
         })
     }
 
+    /// [`Self::spawn`] for work that calls synchronous storage ports: `work`
+    /// is polled on one blocking-pool thread, as [`off_native_thread`] does,
+    /// so a writer wait parks only that thread. [`Self::abort`] drops it there
+    /// at its next poll.
+    pub fn spawn_off_native_thread<F>(work: F) -> Result<Self, String>
+    where
+        F: Future<Output = T> + Send + 'static,
+    {
+        let (work, abort) = abortable(work);
+        let (sender, receiver) = async_channel::bounded(1);
+        handle()
+            .ok_or("native execution runtime unavailable")?
+            .spawn_blocking(move || {
+                let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    poll_on_current_thread(work)
+                }));
+                let _ = sender.send_blocking(polled);
+            })
+            .ok_or("native blocking pool unavailable")?;
+        let outcome = async move {
+            match receiver.recv().await {
+                Ok(Ok(Ok(value))) => NativeTaskOutcome::Completed(value),
+                Ok(Err(panic)) => NativeTaskOutcome::Panicked(PanicPayload::new(
+                    panic
+                        .downcast_ref::<&str>()
+                        .map(|message| (*message).to_owned())
+                        .or_else(|| panic.downcast_ref::<String>().cloned())
+                        .unwrap_or_default(),
+                )),
+                Ok(Ok(Err(Aborted))) | Err(_) => NativeTaskOutcome::Cancelled,
+            }
+        };
+        Ok(Self {
+            outcome: outcome.boxed().shared(),
+            abort,
+        })
+    }
+
     /// Drops the work at its next poll. Work inside a synchronous call runs on
     /// until it yields.
     pub fn abort(&self) {
@@ -566,12 +604,25 @@ impl<T: Clone + Send + Sync + 'static> NativeTaskSet<T> {
     pub async fn join_next(&mut self) -> Option<NativeTaskOutcome<T>> {
         futures_util::StreamExt::next(&mut self.0).await
     }
+
+    /// A task that has already ended, without waiting for one that has not.
+    pub fn try_join_next(&mut self) -> Option<NativeTaskOutcome<T>> {
+        futures_util::StreamExt::next(&mut self.0)
+            .now_or_never()
+            .flatten()
+    }
 }
 
 impl<T: Clone> NativeTaskSet<T> {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    /// Tasks not yet joined, including ended ones.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
     }
 
     pub fn abort_all(&self) {
@@ -859,6 +910,40 @@ mod tests {
     }
 
     #[test]
+    fn try_join_next_returns_only_tasks_that_already_ended() {
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let mut set = NativeTaskSet::default();
+        set.spawn(async move {
+            let _ = released.await;
+            1
+        })
+        .expect("live task");
+        set.spawn(async { 2 }).expect("finished task");
+
+        let deadline = Instant::now() + HANG_GUARD;
+        let finished = loop {
+            if let Some(outcome) = set.try_join_next() {
+                break outcome;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the finished task was never reaped"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert_eq!(finished, NativeTaskOutcome::Completed(2));
+        assert_eq!(set.try_join_next(), None, "the live task is not awaited");
+        assert_eq!(set.len(), 1);
+
+        release.send(()).expect("release the live task");
+        let live = block_on(timeout(HANG_GUARD, set.join_next()))
+            .expect("native root")
+            .expect("the live task ends");
+        assert_eq!(live, Some(NativeTaskOutcome::Completed(1)));
+        assert!(set.is_empty());
+    }
+
+    #[test]
     fn a_missing_tokio_runtime_is_counted_per_site_and_a_present_one_is_not() {
         const SITE: &str = "native_runtime.tests.tokio_handle";
         let before = tokio_runtime_missing_count(SITE);
@@ -1055,6 +1140,60 @@ mod tests {
             panic!("expected a panic outcome, got {outcome:?}");
         };
         assert!(payload.message().contains("native task failure"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn work_spawned_off_native_threads_runs_on_the_blocking_pool_and_aborts_there() {
+        let finished = NativeTask::spawn_off_native_thread(async {
+            sleep_until(Instant::now() + Duration::from_millis(5))
+                .await
+                .expect("native timer from the blocking pool");
+            Runtime::current_handle().is_none()
+        })
+        .expect("blocking-pool task");
+        assert_eq!(
+            tokio::time::timeout(HANG_GUARD, finished.wait()).await,
+            Ok(NativeTaskOutcome::Completed(true)),
+            "the work must not run on a native worker"
+        );
+
+        struct SignalOnDrop(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for SignalOnDrop {
+            fn drop(&mut self) {
+                if let Some(signal) = self.0.take() {
+                    let _ = signal.send(());
+                }
+            }
+        }
+        let (started, running) = tokio::sync::oneshot::channel();
+        let (dropping, dropped) = tokio::sync::oneshot::channel();
+        let pending = NativeTask::spawn_off_native_thread(async move {
+            let _signal = SignalOnDrop(Some(dropping));
+            let _ = started.send(());
+            std::future::pending::<()>().await;
+        })
+        .expect("blocking-pool task");
+        running.await.expect("work started");
+        pending.abort();
+        assert_eq!(
+            tokio::time::timeout(HANG_GUARD, pending.wait()).await,
+            Ok(NativeTaskOutcome::Cancelled)
+        );
+        tokio::time::timeout(HANG_GUARD, dropped)
+            .await
+            .expect("abort must drop the work on its pool thread")
+            .expect("the work signals its drop");
+
+        let panicked = NativeTask::<()>::spawn_off_native_thread(async { panic!("pool failure") })
+            .expect("blocking-pool task");
+        let NativeTaskOutcome::Panicked(payload) =
+            tokio::time::timeout(HANG_GUARD, panicked.wait())
+                .await
+                .expect("a panicked task must settle")
+        else {
+            panic!("expected a panic outcome");
+        };
+        assert!(payload.message().contains("pool failure"));
     }
 
     #[test]

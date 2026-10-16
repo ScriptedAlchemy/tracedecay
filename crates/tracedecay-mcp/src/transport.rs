@@ -406,7 +406,7 @@ mod tests {
     #[tokio::test]
     async fn channel_transport_rejects_oversized_line_without_returning_payload() {
         // ChannelTransport receives already-allocated Strings (test harness).
-        // Product stdio/daemon paths use read_bounded_line before allocation;
+        // Product stdio/daemon paths use BoundedLineReader before allocation;
         // this asserts the harness still maps oversized to the typed IO error
         // without returning payload bytes on the Result::Ok path.
         let (mut transport, tx, _rx) = ChannelTransport::new();
@@ -429,11 +429,11 @@ mod tests {
         use std::pin::Pin;
         use std::task::{Context, Poll};
 
-        use tokio::io::{AsyncRead, BufReader, ReadBuf};
+        use asupersync::io::{AsyncRead, BufReader, ReadBuf};
 
         use tracedecay_framing::{
-            MAX_MCP_JSONRPC_FRAME_BYTES, WIRE_RECORD_TOO_LARGE, line_outcome_to_io,
-            read_bounded_line, wire_oversized_io_error,
+            BoundedLineReader, MAX_MCP_JSONRPC_FRAME_BYTES, WIRE_RECORD_TOO_LARGE,
+            wire_oversized_io_error,
         };
 
         /// Streams `total` hostile bytes in chunks, then a fixed suffix, without
@@ -467,29 +467,20 @@ mod tests {
             }
         }
 
-        let max = 64;
         let stream = AsyncHostileThenSuffix {
-            remaining: max + 256 * 1024,
-            chunk: vec![b'z'; 1024],
+            remaining: MAX_MCP_JSONRPC_FRAME_BYTES + 256 * 1024,
+            chunk: vec![b'z'; 64 * 1024],
             suffix: b"\n{\"jsonrpc\":\"2.0\",\"method\":\"ping\"}\n",
             suffix_offset: 0,
         };
-        let mut reader = BufReader::new(stream);
+        let mut reader = BoundedLineReader::new(BufReader::new(stream));
 
-        // Exercises the shared bounded-line primitive at a small cap; the
-        // dedicated MCP helper's exact production cap is covered in wire tests.
-        let first = line_outcome_to_io(read_bounded_line(&mut reader, max).await.unwrap());
-        let err = first.unwrap_err();
+        let err = reader.read_mcp_line().await.unwrap_err();
         assert!(tracedecay_framing::is_wire_oversized_io_error(&err));
         assert_eq!(err.to_string(), WIRE_RECORD_TOO_LARGE);
         assert!(!err.to_string().contains('z'));
 
-        let second = line_outcome_to_io(
-            read_bounded_line(&mut reader, MAX_MCP_JSONRPC_FRAME_BYTES)
-                .await
-                .unwrap(),
-        )
-        .unwrap();
+        let second = reader.read_mcp_line().await.unwrap();
         assert_eq!(
             second.as_deref(),
             Some(r#"{"jsonrpc":"2.0","method":"ping"}"#)

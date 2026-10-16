@@ -82,7 +82,6 @@ tracedecay-daemon-protocol = { path = "../tracedecay-daemon-protocol", features 
 # The dashboard LCM adapter's unit tests build request controls through the
 # dashboard-api test-transport constructor.
 tracedecay-dashboard-api = { path = "../tracedecay-dashboard-api", features = ["test-transport"] }
-tracedecay-framing = { path = "../tracedecay-framing", features = ["test-helpers"] }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", features = ["test-helpers"] }
 tracedecay-global-db = { path = "../tracedecay-global-db", features = ["test-helpers"] }
 tracedecay-graph-db = { path = "../tracedecay-graph-db" }

@@ -147,7 +147,7 @@ pub(super) fn spawn(
         ));
         return false;
     }
-    owner.spawn_background_task(tracing::Instrument::instrument(
+    let mount = tracing::Instrument::instrument(
         async move {
             // Project-open schedules this owner before code-index activation,
             // and sealing announces durable source before its text owner is
@@ -191,7 +191,27 @@ pub(super) fn spawn(
             publisher.publish(settled);
         },
         tracing::trace_span!("daemon.project.owners.advisory_deferred"),
-    ))
+    );
+    // Mounting runs CPU-heavy owner registration and blocking credential
+    // probes inside single polls, so the mount runs on a blocking-pool
+    // thread. Dropping the background task, or a refused one, aborts it there.
+    let Ok(mount) =
+        tracedecay_runtime_core::native_runtime::NativeTask::spawn_off_native_thread(mount)
+    else {
+        return false;
+    };
+    let mount = AbortOnDrop(mount);
+    owner.spawn_background_task(async move {
+        let _ = mount.0.wait().await;
+    })
+}
+
+struct AbortOnDrop(tracedecay_runtime_core::native_runtime::NativeTask<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// A retained generation's pending source proof, or the successor it finds
