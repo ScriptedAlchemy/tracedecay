@@ -160,7 +160,8 @@ where
 
 thread_local! {
     /// Set for good once a blocking-pool thread runs work [`queue_blocking`]
-    /// queued; such a thread serves the pool for its whole life.
+    /// or [`NativeTask::spawn_off_native_thread`] queued; such a thread serves
+    /// the pool for its whole life.
     static ON_BLOCKING_POOL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -524,6 +525,7 @@ impl<T: Clone + Send + Sync + 'static> NativeTask<T> {
         handle()
             .ok_or("native execution runtime unavailable")?
             .spawn_blocking(move || {
+                ON_BLOCKING_POOL.set(true);
                 let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     poll_on_current_thread(work)
                 }));
@@ -1521,6 +1523,26 @@ mod tests {
         .expect("process runtime")
         .expect("outer blocking work");
         assert_eq!(inner, Some(Ok(outer)));
+    }
+
+    /// A fresh one-thread pool, so the thread has run no other queued work.
+    #[test]
+    fn blocking_work_from_a_task_spawned_off_native_threads_runs_on_its_thread() {
+        let runtime = RuntimeBuilder::multi_thread()
+            .worker_threads(1)
+            .blocking_threads(1, 1)
+            .build()
+            .expect("test runtime");
+        let outcome = runtime.block_on(async {
+            NativeTask::spawn_off_native_thread(async {
+                spawn_blocking(|| std::thread::current().id()).now_or_never()
+                    == Some(Ok(std::thread::current().id()))
+            })
+            .expect("blocking-pool task")
+            .wait()
+            .await
+        });
+        assert_eq!(outcome, NativeTaskOutcome::Completed(true));
     }
 
     #[cfg(target_os = "linux")]
