@@ -1,6 +1,6 @@
 ---
 name: routing-tracedecay
-description: Use when you know the kind of code question but not which TraceDecay tool answers it; names the one call to make. Load this skill before the first tool call.
+description: Use when you know the kind of code question but not which TraceDecay tool answers it; names the one call to make. Skip when the task administers TraceDecay itself (projects, configuration, storage). Load this skill before the first tool call.
 ---
 
 # Routing TraceDecay

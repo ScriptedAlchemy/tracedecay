@@ -1,6 +1,6 @@
 ---
 name: using-the-cli
-description: Use when TraceDecay MCP tools are unavailable or failing, or a call must run from the shell with the same arguments and scope. Load this skill before the first tool call.
+description: Use when TraceDecay MCP tools are unavailable or failing, or a call must run from the shell with the same arguments and scope. Skip when the daemon itself is down, since the CLI needs it too. Load this skill before the first tool call.
 ---
 
 # Using the CLI

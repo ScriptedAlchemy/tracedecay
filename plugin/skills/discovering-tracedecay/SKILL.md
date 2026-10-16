@@ -1,6 +1,6 @@
 ---
 name: discovering-tracedecay
-description: Use when you know the task but not which TraceDecay tool or operation covers it, including memory and administration tasks. Load this skill before the first tool call.
+description: Use when you know the task but not which TraceDecay tool or operation covers it, including memory and administration tasks. Skip when routing-tracedecay already names a call for the question. Load this skill before the first tool call.
 ---
 
 # Discovering TraceDecay

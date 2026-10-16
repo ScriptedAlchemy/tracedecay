@@ -185,17 +185,29 @@ fn bundled_skill_descriptions_satisfy_claude_description_rules() {
 /// Claude invoked none of the bundled skills while their descriptions only
 /// named a capability, and reached only 8 of 21 matching tasks with a bare
 /// "Use when" trigger. Both clauses together raised it to 21 of 21 (#4081).
+/// A skill that can misfire may add one "Skip when" sentence between them.
 #[test]
 fn bundled_skill_descriptions_tell_the_model_when_to_load_them() {
+    const LOAD: &str = " Load this skill before the first tool call.";
     for skill in load_all_skill_docs() {
         let description = required_scalar(&skill, "description");
         assert!(
-            description.starts_with("Use when ")
-                && description.ends_with(" Load this skill before the first tool call."),
+            description.starts_with("Use when ") && description.ends_with(LOAD),
             "{} description must start with \"Use when\" and end with \"Load this skill \
              before the first tool call.\"; got {description:?}",
             skill.path.display()
         );
+        let trigger = &description[..description.len() - LOAD.len()];
+        if let Some((_, exclusion)) = trigger.split_once(" Skip when ") {
+            assert!(
+                exclusion.ends_with('.')
+                    && !exclusion.contains(". ")
+                    && !exclusion.contains("Skip when "),
+                "{} may add one \"Skip when ...\" sentence, directly before the load \
+                 clause; got {description:?}",
+                skill.path.display()
+            );
+        }
     }
 }
 

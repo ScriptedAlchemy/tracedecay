@@ -1,6 +1,6 @@
 ---
 name: exploring-code
-description: Use when the user asks how a feature or flow works, where something is implemented, or to walk through code end to end; a known file can be read directly. Load this skill before the first tool call.
+description: Use when the user asks how a feature or flow works, where something is implemented, or to walk through code end to end. Skip when the user names the file to read or the text to find. Load this skill before the first tool call.
 ---
 
 # Exploring code

@@ -88,7 +88,9 @@ cleanly on Claude, Codex, *and* Cursor:
   Cursor-only key (`disable-model-invocation`/`paths`) would break Codex/Claude,
   so it fails here, that surface belongs in the native commands overlay.
 - **Description budget.** 50–320 characters, ≤45 words, trigger-first ("Use
-  …"), ends with a period, no angle brackets, unique across the set.
+  when …"), ends with "Load this skill before the first tool call.", no angle
+  brackets, unique across the set. A skill that can misfire adds one "Skip
+  when …" sentence directly before the load clause, as pstack's `tdd` does.
 - **Body rules.** Exactly one plain-title H1 (never `# /slug`), no skipped
   heading levels, no body-only `## When to Use` section, ≤500 lines. The
   last paragraph is the reply contract: `**Report:**`, what to return and

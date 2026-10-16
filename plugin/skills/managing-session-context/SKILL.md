@@ -1,6 +1,6 @@
 ---
 name: managing-session-context
-description: Use when the user asks what an earlier conversation or session said, or to recover prior-session context by time or Git history. Load this skill before the first tool call.
+description: Use when the user asks what an earlier conversation or session said, or to recover prior-session context by time or Git history. Skip when the user asks for a recorded decision or durable fact. Load this skill before the first tool call.
 ---
 
 # Managing session context

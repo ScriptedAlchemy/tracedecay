@@ -1,6 +1,6 @@
 ---
 name: editing-safely
-description: Use when the user asks to rename, move, extract, replace, or insert code across symbols or files and wants the edit previewed and applied safely. Load this skill before the first tool call.
+description: Use when the user asks to rename, move, extract, replace, or insert code across symbols or files. Skip when the edit stays inside one function body and keeps its signature. Load this skill before the first tool call.
 ---
 
 # Editing safely
