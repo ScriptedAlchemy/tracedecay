@@ -1,6 +1,6 @@
 ---
 name: managing-workflows
-description: 'Register, validate, activate, or retire TraceDecay Workflow definitions; issue handoffs or control an existing Workflow run.'
+description: Use when the user asks to register, validate, activate, or retire a TraceDecay Workflow, issue a handoff, or control a Workflow run. Load this skill before the first tool call.
 ---
 
 # Managing Workflows

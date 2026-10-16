@@ -1,6 +1,6 @@
 ---
 name: assessing-impact
-description: Assess dependents and relevant tests for a proposed symbol, signature, file, or working-tree change.
+description: Use when the user asks what breaks, what to re-test, or which tests cover code before changing a function, signature, type, field, or file. Load this skill before the first tool call.
 ---
 
 # Assessing impact

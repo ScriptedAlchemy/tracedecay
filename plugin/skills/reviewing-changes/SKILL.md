@@ -1,6 +1,6 @@
 ---
 name: reviewing-changes
-description: 'Review semantic risk in a PR, branch, or working-tree diff, including changed callers, coverage gaps, and unsafe or redundant code.'
+description: Use when the user asks to review, summarize, or assess the risk of a PR, branch, or working-tree diff. Load this skill before the first tool call.
 ---
 
 # Reviewing changes

@@ -270,8 +270,9 @@ not hand-register `include_str!` entries.
 
 1. **Create the source skill:** a new directory
    `plugin/skills/<skill-name>/SKILL.md` with `name` and `description`
-   frontmatter. Keep the description trigger-first ("Use when …"), under 320
-   characters and 45 words; keep the body under 500 lines. Use only allowed
+   frontmatter. Start the description with the trigger ("Use when …") and end
+   it with "Load this skill before the first tool call.", under 320 characters
+   and 45 words; keep the body under 500 lines. Use only allowed
    frontmatter keys (see layer 2 above). A skill directory may also
    carry `scripts/`, `references/`, and `assets/` support files, these are
    embedded automatically by the recursive `build.rs` codegen

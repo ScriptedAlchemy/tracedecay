@@ -1,6 +1,6 @@
 ---
 name: investigating-unexpected-changes
-description: "Attribute unexpected working-tree, branch, or commit changes using Git evidence and correlated sessions while preserving other agents' work."
+description: 'Use when the user finds working-tree, branch, or commit changes they did not expect and asks who made them or why, while preserving other agents'' work. Load this skill before the first tool call.'
 ---
 
 # Investigating unexpected changes

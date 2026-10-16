@@ -1,6 +1,6 @@
 ---
 name: exploring-code
-description: Locate symbols or explain cross-file behavior in an indexed repository; known-file reads can proceed directly.
+description: Use when the user asks how a feature or flow works, where something is implemented, or to walk through code end to end; a known file can be read directly. Load this skill before the first tool call.
 ---
 
 # Exploring code

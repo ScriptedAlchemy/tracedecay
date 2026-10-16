@@ -1,6 +1,6 @@
 ---
 name: fixing-build-and-type-errors
-description: Diagnose build and type errors that span symbols or files with TraceDecay dependency evidence.
+description: Use when a build, compile, or type check fails and the error spans several symbols or files. Load this skill before the first tool call.
 ---
 
 # Fixing build and type errors

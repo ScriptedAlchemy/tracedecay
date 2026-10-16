@@ -1,6 +1,6 @@
 ---
 name: using-the-cli
-description: 'Use TraceDecay through its generic CLI when MCP is unavailable or intentionally absent, or preserve exact arguments and scope across transports.'
+description: Use when TraceDecay MCP tools are unavailable or failing, or a call must run from the shell with the same arguments and scope. Load this skill before the first tool call.
 ---
 
 # Using the CLI

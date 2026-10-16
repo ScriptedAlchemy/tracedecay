@@ -1,6 +1,6 @@
 ---
 name: tracing-functions
-description: Trace callers, callees, or a call path between symbols, accounting for ambiguous names and indexed coverage.
+description: Use when the user asks who calls a function, what it calls, or how one function reaches another. Load this skill before the first tool call.
 ---
 
 # Tracing functions
