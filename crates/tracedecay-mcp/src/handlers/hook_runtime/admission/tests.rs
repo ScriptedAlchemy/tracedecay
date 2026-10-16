@@ -109,6 +109,115 @@ fn producer_work_commits_with_its_admission_and_redrives_until_completed() {
     );
 }
 
+fn envelope_is_prompt(event: &tracedecay_hooks::HookEventV2) -> bool {
+    matches!(event, tracedecay_hooks::HookEventV2::PromptBoundary)
+}
+
+/// Prompt and completed-tool boundaries owe no durable producer work, yet
+/// each admission enqueues the session intent pass on the project's
+/// registered orchestrator; a started tool call is not a boundary.
+#[tokio::test]
+async fn prompt_and_tool_admissions_enqueue_an_intent_orchestration_without_owed_work() {
+    let data_root = tempfile::tempdir().unwrap();
+    let binding = admission_test_binding(7);
+    // Kiro admits prompt boundaries natively today; Claude gains them when
+    // it registers its prompt hook.
+    let kiro = tracedecay_domain::NativeHostIdentityV1::Kiro;
+    let kiro_binding = tracedecay_hooks::HookScopeBindingV1 {
+        host: kiro,
+        capabilities: vec![tracedecay_hooks::HookCapabilityV1 {
+            family: tracedecay_hooks::HookEventFamily::PromptBoundary,
+            support: tracedecay_hooks::stock_event_support(
+                kiro,
+                tracedecay_hooks::HookEventFamily::PromptBoundary,
+            ),
+        }],
+        ..binding.clone()
+    };
+    let (ran, mut runs) = tokio::sync::mpsc::unbounded_channel();
+    let runtime = tracedecay_daemon_service::BoundedHookOrchestratorV1::new(
+        1,
+        move |request: tracedecay_daemon_service::HookOrchestrationRequestV1, _| {
+            let ran = ran.clone();
+            async move {
+                ran.send((
+                    request.hook.envelope().event_id[0],
+                    request.trigger,
+                    request.lifecycle.is_some(),
+                ))
+                .unwrap();
+            }
+        },
+    )
+    .unwrap();
+    assert!(
+        tracedecay_daemon_service::register_hook_orchestration_runtime([1; 16], [3; 16], &runtime)
+    );
+    let tool = |phase| tracedecay_hooks::HookEventV2::ToolLifecycle {
+        tool_id: [9; 16],
+        phase,
+        effect_receipt_id: None,
+    };
+    for (event_id, event) in [
+        (41, tracedecay_hooks::HookEventV2::PromptBoundary),
+        (42, tool(tracedecay_hooks::HookLifecyclePhaseV1::Completed)),
+        (43, tool(tracedecay_hooks::HookLifecyclePhaseV1::Failed)),
+    ] {
+        let mut envelope = admission_test_envelope(event_id, 7);
+        let prompt = envelope_is_prompt(&event);
+        envelope.event = event;
+        if prompt {
+            envelope.producer = kiro;
+        }
+        assert!(!hook_v2_requires_producer_work(&envelope));
+        let staged = stage_hook_v2_admission(data_root.path(), &envelope, None, UtcMicros(1_000))
+            .expect("ledger available");
+        staged.commit.wait().unwrap();
+        assert_eq!(
+            tracedecay_daemon_service::admit_registered_hook_orchestration(
+                envelope,
+                if prompt {
+                    kiro_binding.clone()
+                } else {
+                    binding.clone()
+                },
+                None,
+                1,
+                false,
+                None,
+            ),
+            tracedecay_contracts::HookOrchestrationAdmissionV1::Enqueued
+        );
+        assert_eq!(
+            runs.recv().await,
+            Some((
+                event_id,
+                tracedecay_daemon_service::HookOrchestrationTriggerV1::IntentBoundary,
+                false
+            ))
+        );
+    }
+    assert!(
+        pending_work(data_root.path()).is_empty(),
+        "an intent pass is best-effort and owes no redriven producer work"
+    );
+    let mut started = admission_test_envelope(44, 7);
+    started.event = tool(tracedecay_hooks::HookLifecyclePhaseV1::Started);
+    assert_eq!(
+        tracedecay_daemon_service::admit_registered_hook_orchestration(
+            started,
+            binding.clone(),
+            None,
+            1,
+            false,
+            None,
+        ),
+        tracedecay_contracts::HookOrchestrationAdmissionV1::UnsupportedTrigger
+    );
+    tracedecay_daemon_service::unregister_hook_orchestration_runtime([1; 16], [3; 16], &runtime);
+    assert!(runtime.shutdown().await);
+}
+
 /// A native re-delivery carries the same event at a later `observed_at`. It
 /// must converge on the first admission's pending work, not be refused as a
 /// second record the drain could never settle.

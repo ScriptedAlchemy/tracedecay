@@ -161,7 +161,9 @@ pub(crate) use tracedecay_daemon_protocol::{
     LspSessionCredential, LspSessionId, WorkApplicationInvocationV1, WorkApplicationOutcomeV1,
 };
 use tracedecay_domain::errors::TraceDecayError;
-use tracedecay_hooks::{HookBoundaryV1, HookEventEnvelopeV2, HookEventV2, HookScopeBindingV1};
+use tracedecay_hooks::{
+    HookBoundaryV1, HookEventEnvelopeV2, HookEventV2, HookLifecyclePhaseV1, HookScopeBindingV1,
+};
 use tracedecay_runtime_core::db::Database;
 
 // Structural split: production logic now lives in the child modules below;

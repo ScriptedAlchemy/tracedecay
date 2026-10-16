@@ -21,7 +21,7 @@ use super::{ContextScoutErrorV1, MAX_SCOUT_EVIDENCE};
 const EVIDENCE_CLAIM_DIGEST_DOMAIN: &str = "tracedecay.context-scout.evidence-claim.v1";
 const SESSION_EVIDENCE_CLAIM_DIGEST_DOMAIN: &str =
     "tracedecay.context-scout.session-evidence-claim.v1";
-const MAX_DECISION_ENGINE_MODEL_BYTES: usize = 256;
+pub(super) const MAX_DECISION_ENGINE_MODEL_BYTES: usize = 256;
 
 trait ContextScoutRedactionReceiptExt {
     fn validate(&self, authority: &AuthorityReceipt) -> Result<(), ContextScoutErrorV1>;

@@ -22,7 +22,7 @@ use tracedecay_contracts::{
 use tracedecay_domain::configuration::{
     CONTEXT_SCOUT_SETTINGS_SETTING_KEY, ConfigurationRevisionId, ConfigurationValueV1,
     ContextScoutConfigurationModeV1, ContextScoutConfigurationStateV1,
-    ContextScoutConfiguredModelPathV1, SettingKey,
+    ContextScoutConfiguredModelPathV1, ContextScoutIntentSettingsV1, SettingKey,
 };
 use tracedecay_domain::feedback::{
     FeedbackContentIdentityV1, FeedbackDiagnosticProducerV1, FeedbackFindingLifecycleV1,
@@ -80,7 +80,35 @@ impl ContextScoutLifecycleAddressV1 {
     fn session_key(&self) -> (&ProjectId, &WorktreeId, &SessionId) {
         (&self.project_id, &self.worktree_id, &self.session_id)
     }
+
+    /// The session-scoped address every intent-pass suggestion of this
+    /// routed session shares. It keeps the session key (so the registry binds
+    /// it beside the session's native lifecycles without conflict) and
+    /// replaces the per-turn identities with fixed intent identities, so a
+    /// rebind returns the same address and a newer pass supersedes the older
+    /// one by generation instead of accumulating one address per turn.
+    pub fn intent_scoped(&self) -> Option<Self> {
+        Some(Self {
+            profile_id: self.profile_id.clone(),
+            provider_id: self.provider_id.clone(),
+            project_id: self.project_id.clone(),
+            worktree_id: self.worktree_id.clone(),
+            session_id: self.session_id.clone(),
+            thread_id: ThreadId::new(INTENT_LIFECYCLE_IDENTITY).ok()?,
+            turn_id: TurnId::new(INTENT_LIFECYCLE_IDENTITY).ok()?,
+            agent_id: AgentInstanceId::new(INTENT_LIFECYCLE_IDENTITY).ok()?,
+            logical_message_id: MessageId::new(INTENT_LIFECYCLE_IDENTITY).ok()?,
+        })
+    }
+
+    /// Whether this is a session's intent-scoped lifecycle.
+    pub fn is_intent_scoped(&self) -> bool {
+        self.intent_scoped().is_some_and(|scoped| scoped == *self)
+    }
 }
+
+/// Per-turn identity of every intent-scoped lifecycle.
+const INTENT_LIFECYCLE_IDENTITY: &str = "tracedecay.context-scout.intent";
 
 /// Hook envelope whose exact daemon-issued binding has already been checked.
 #[derive(Clone, Debug)]
@@ -106,6 +134,8 @@ pub struct ContextScoutConfigurationPinV1 {
     revision_id: ConfigurationRevisionId,
     configuration_digest: ManifestDigest,
     control: ContextScoutControlV1,
+    /// The intent-pass settings `control.intent` digests.
+    intent: Option<ContextScoutIntentSettingsV1>,
 }
 
 impl ContextScoutConfigurationPinV1 {
@@ -165,6 +195,7 @@ impl ContextScoutConfigurationPinV1 {
             revision_id: current.revision_id.clone(),
             configuration_digest,
             control,
+            intent: settings.intent.clone(),
         })
     }
 
@@ -178,6 +209,11 @@ impl ContextScoutConfigurationPinV1 {
 
     pub const fn control(&self) -> ContextScoutControlV1 {
         self.control
+    }
+
+    /// The pinned intent-pass settings, absent when none are configured.
+    pub fn intent_settings(&self) -> Option<&ContextScoutIntentSettingsV1> {
+        self.intent.as_ref()
     }
 
     /// Revalidates this pin against the authoritative current configuration.

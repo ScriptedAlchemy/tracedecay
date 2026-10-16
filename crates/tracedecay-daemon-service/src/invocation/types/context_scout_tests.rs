@@ -1,5 +1,6 @@
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use tracedecay_hooks::{HookEventFamily, HookEventSupportV1};
 use tracedecay_runtime_core::cancellation::{CancellationToken, MonotonicDeadline};
 
 fn native_request(marker: u8) -> HookOrchestrationRequestV1 {
@@ -405,4 +406,337 @@ fn admission_without_a_tokio_runtime_runs_the_cycle_natively() {
         assert!(runtime.shutdown().await);
     })
     .expect("native runtime");
+}
+
+/// Prompt and completed-tool boundaries run the session intent pass in its
+/// own lane. A newer boundary supersedes only older intent work of the
+/// session, a stop boundary owes its feedback cycle and an intent pass, intent
+/// work never holds the permit the feedback producer needs, and an intent
+/// boundary that carries the session's lifecycle resumes a parked feedback
+/// boundary exactly as any other lifecycle-bearing hook does.
+#[tokio::test]
+async fn intent_boundaries_run_in_their_own_lane_and_supersede_only_intent_work() {
+    let saved = native_request(221);
+    let lifecycle = saved.lifecycle.clone().unwrap();
+    let envelope = saved.hook.envelope().clone();
+    let binding = HookScopeBindingV1 {
+        host: envelope.producer,
+        project_id: envelope.project_id,
+        repository_id: envelope.repository_id,
+        worktree_id: envelope.worktree_id,
+        worktree_epoch: envelope.worktree_epoch,
+        binding_token: envelope.binding_token,
+        capabilities: [
+            HookEventFamily::SessionBoundary,
+            HookEventFamily::PromptBoundary,
+            HookEventFamily::ToolLifecycle,
+            HookEventFamily::SavedEdit,
+            HookEventFamily::TestLifecycle,
+        ]
+        .into_iter()
+        .map(|family| tracedecay_hooks::HookCapabilityV1 {
+            family,
+            support: tracedecay_hooks::stock_event_support(envelope.producer, family),
+        })
+        .collect(),
+    };
+    let boundary = |event_id: u8, event: HookEventV2| {
+        let mut boundary = envelope.clone();
+        boundary.event_id = [event_id; 16];
+        boundary.event = event;
+        boundary
+    };
+    let tool = |phase| HookEventV2::ToolLifecycle {
+        tool_id: [9; 16],
+        phase,
+        effect_receipt_id: None,
+    };
+    let stop = HookEventV2::SessionBoundary {
+        boundary: HookBoundaryV1::TurnComplete,
+    };
+    // Kiro admits prompt boundaries natively today; every other host gains
+    // them when it registers its prompt hook.
+    let kiro = tracedecay_domain::NativeHostIdentityV1::Kiro;
+    let kiro_binding = HookScopeBindingV1 {
+        host: kiro,
+        capabilities: vec![tracedecay_hooks::HookCapabilityV1 {
+            family: HookEventFamily::PromptBoundary,
+            support: HookEventSupportV1::Native,
+        }],
+        ..binding.clone()
+    };
+    let mut kiro_prompt = boundary(229, HookEventV2::PromptBoundary);
+    kiro_prompt.producer = kiro;
+    assert_eq!(
+        HookOrchestrationRequestV1::from_envelope(kiro_prompt, &kiro_binding, None, 1, false)
+            .map(|request| request.trigger),
+        Some(HookOrchestrationTriggerV1::IntentBoundary)
+    );
+    for (event, expected) in [
+        (
+            tool(HookLifecyclePhaseV1::Completed),
+            Some(HookOrchestrationTriggerV1::IntentBoundary),
+        ),
+        (
+            tool(HookLifecyclePhaseV1::Failed),
+            Some(HookOrchestrationTriggerV1::IntentBoundary),
+        ),
+        (tool(HookLifecyclePhaseV1::Started), None),
+        (tool(HookLifecyclePhaseV1::Cancelled), None),
+        (
+            HookEventV2::SessionBoundary {
+                boundary: HookBoundaryV1::Start,
+            },
+            None,
+        ),
+        (stop.clone(), Some(HookOrchestrationTriggerV1::Stop)),
+    ] {
+        assert_eq!(
+            HookOrchestrationRequestV1::from_envelope(
+                boundary(230, event.clone()),
+                &binding,
+                None,
+                1,
+                false
+            )
+            .map(|request| request.trigger),
+            expected,
+            "{event:?}"
+        );
+    }
+    let stop_request = HookOrchestrationRequestV1::from_envelope(
+        boundary(230, stop.clone()),
+        &binding,
+        None,
+        1,
+        false,
+    )
+    .unwrap();
+    let companion = stop_request
+        .intent_companion()
+        .expect("stop owes an intent pass");
+    assert_eq!(
+        companion.trigger,
+        HookOrchestrationTriggerV1::IntentBoundary
+    );
+    assert!(companion.completion.is_none());
+    assert!(saved.intent_companion().is_none());
+    assert!(companion.intent_companion().is_none());
+
+    let (events, mut observed) = tokio::sync::mpsc::unbounded_channel();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let runtime = BoundedHookOrchestratorV1::new(1, {
+        let release = Arc::clone(&release);
+        move |request: HookOrchestrationRequestV1, cancellation: CancellationToken| {
+            let events = events.clone();
+            let release = Arc::clone(&release);
+            async move {
+                let event = (
+                    request.hook.envelope().event_id[0],
+                    request.trigger,
+                    request.lifecycle.is_some(),
+                );
+                events.send((event, "started")).unwrap();
+                match request.trigger {
+                    HookOrchestrationTriggerV1::IntentBoundary => {
+                        tokio::select! {
+                            () = cancellation.cancelled() => {
+                                events.send((event, "superseded")).unwrap();
+                                HookOrchestrationWorkOutcomeV1::RetryableFailure
+                            }
+                            () = release.notified() => HookOrchestrationWorkOutcomeV1::Completed,
+                        }
+                    }
+                    _ if request.lifecycle.is_none() => {
+                        HookOrchestrationWorkOutcomeV1::AwaitingLifecycle
+                    }
+                    _ => HookOrchestrationWorkOutcomeV1::Completed,
+                }
+            }
+        }
+    })
+    .unwrap();
+    assert!(register_hook_orchestration_runtime(
+        envelope.project_id,
+        envelope.worktree_id,
+        &runtime
+    ));
+    let intent = HookOrchestrationTriggerV1::IntentBoundary;
+    // Work runs on the native runtime; wait for exactly `remaining` running
+    // cycles so no admission races a permit that is still being released.
+    let settle_to = |remaining: usize| {
+        for _ in 0..5_000 {
+            if runtime.active_tasks() == remaining {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("orchestrator never settled to {remaining} running cycles");
+    };
+    let in_session = |event_id: u8, event: HookEventV2, session: u8| {
+        let mut envelope = boundary(event_id, event);
+        envelope.protected_session_id = [session; 32];
+        envelope
+    };
+
+    // A saved edit without a lifecycle settles and parks in the feedback lane.
+    let (parked, parked_completion) = tokio::sync::oneshot::channel();
+    let parked = StdMutex::new(Some(parked));
+    assert_eq!(
+        admit_registered_hook_orchestration(
+            in_session(231, saved.hook.envelope().event.clone(), 1),
+            binding.clone(),
+            None,
+            1,
+            false,
+            Some(Arc::new(move || {
+                if let Some(parked) = parked.lock().unwrap().take() {
+                    let _ = parked.send(());
+                }
+            })),
+        ),
+        HookOrchestrationAdmissionV1::Enqueued
+    );
+    assert_eq!(
+        observed.recv().await,
+        Some((
+            (231, HookOrchestrationTriggerV1::SavedEdit, false),
+            "started"
+        ))
+    );
+    parked_completion.await.unwrap();
+    settle_to(0);
+
+    // A completed tool call bearing the session's lifecycle runs its intent
+    // pass and, like any lifecycle-bearing hook, resumes the parked boundary.
+    assert_eq!(
+        admit_registered_hook_orchestration(
+            in_session(232, tool(HookLifecyclePhaseV1::Completed), 1),
+            binding.clone(),
+            Some(lifecycle.clone()),
+            1,
+            false,
+            None,
+        ),
+        HookOrchestrationAdmissionV1::Enqueued
+    );
+    let started = [
+        observed.recv().await.unwrap(),
+        observed.recv().await.unwrap(),
+    ];
+    for expected in [
+        (
+            (231, HookOrchestrationTriggerV1::SavedEdit, true),
+            "started",
+        ),
+        ((232, intent, true), "started"),
+    ] {
+        assert!(started.contains(&expected), "{expected:?} in {started:?}");
+    }
+    settle_to(1);
+
+    // With that intent pass still running, another session's saved edit is
+    // admitted at once: intent work holds only intent permits.
+    assert_eq!(
+        admit_registered_hook_orchestration(
+            in_session(233, saved.hook.envelope().event.clone(), 2),
+            binding.clone(),
+            Some(lifecycle.clone()),
+            1,
+            false,
+            None,
+        ),
+        HookOrchestrationAdmissionV1::Enqueued
+    );
+    assert_eq!(
+        observed.recv().await,
+        Some((
+            (233, HookOrchestrationTriggerV1::SavedEdit, true),
+            "started"
+        ))
+    );
+    settle_to(1);
+    // The intent lane is bounded on its own: another session's intent pass
+    // is backpressured while the first one runs.
+    assert_eq!(
+        admit_registered_hook_orchestration(
+            in_session(236, tool(HookLifecyclePhaseV1::Failed), 2),
+            binding.clone(),
+            Some(lifecycle.clone()),
+            1,
+            false,
+            None,
+        ),
+        HookOrchestrationAdmissionV1::Backpressured
+    );
+
+    // A failed tool call of the first session supersedes its running
+    // intent pass and inherits the session's admitted lifecycle.
+    assert_eq!(
+        admit_registered_hook_orchestration(
+            in_session(234, tool(HookLifecyclePhaseV1::Failed), 1),
+            binding.clone(),
+            None,
+            1,
+            false,
+            None,
+        ),
+        HookOrchestrationAdmissionV1::Enqueued
+    );
+    let transitions = [
+        observed.recv().await.unwrap(),
+        observed.recv().await.unwrap(),
+    ];
+    for expected in [
+        ((232, intent, true), "superseded"),
+        ((234, intent, true), "started"),
+    ] {
+        assert!(
+            transitions.contains(&expected),
+            "{expected:?} in {transitions:?}"
+        );
+    }
+
+    // A stop boundary reports its owed feedback admission and also runs an
+    // intent pass that supersedes the tool boundary's.
+    let (stopped, stop_completion) = tokio::sync::oneshot::channel();
+    let stopped = StdMutex::new(Some(stopped));
+    assert_eq!(
+        admit_registered_hook_orchestration(
+            in_session(235, stop, 1),
+            binding.clone(),
+            Some(lifecycle),
+            1,
+            false,
+            Some(Arc::new(move || {
+                if let Some(stopped) = stopped.lock().unwrap().take() {
+                    let _ = stopped.send(());
+                }
+            })),
+        ),
+        HookOrchestrationAdmissionV1::Enqueued
+    );
+    let transitions = [
+        observed.recv().await.unwrap(),
+        observed.recv().await.unwrap(),
+        observed.recv().await.unwrap(),
+    ];
+    for expected in [
+        ((234, intent, true), "superseded"),
+        ((235, HookOrchestrationTriggerV1::Stop, true), "started"),
+        ((235, intent, true), "started"),
+    ] {
+        assert!(
+            transitions.contains(&expected),
+            "{expected:?} in {transitions:?}"
+        );
+    }
+    stop_completion
+        .await
+        .expect("the stop boundary's feedback completion fires");
+    release.notify_one();
+    settle_to(0);
+
+    unregister_hook_orchestration_runtime(envelope.project_id, envelope.worktree_id, &runtime);
+    assert!(runtime.shutdown().await);
 }

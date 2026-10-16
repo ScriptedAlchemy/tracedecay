@@ -16,8 +16,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_contracts::context_scout::{
     ContextScoutAddressV1, ContextScoutCandidateEvidenceV1, ContextScoutCandidateV1,
-    ContextScoutCategoryV1, ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1, ContextScoutDeliveryWindowV1,
-    ContextScoutDurableClaimV1, ContextScoutDurableQueueEntryV1,
+    ContextScoutCategoryV1, ContextScoutDeliveryOutcomeV1, ContextScoutDeliveryReceiptV1,
+    ContextScoutDeliveryWindowV1, ContextScoutDurableClaimV1, ContextScoutDurableQueueEntryV1,
     ContextScoutEvidenceAvailabilityV1, ContextScoutFeedbackKindV1, ContextScoutFeedbackV1,
     ContextScoutLeaseV1, ContextScoutModelBackendV1, ContextScoutModelOutcomeV1,
     ContextScoutModelReceiptV1, ContextScoutRouteV1, ContextScoutSuggestionEnvelopeV1,
@@ -32,6 +32,7 @@ use tracedecay_tokenizer::o200k_base;
 
 pub mod address_registry;
 pub mod decision_engine;
+pub mod intent_pass;
 pub mod model;
 pub mod owner;
 pub mod session_window;
@@ -160,7 +161,7 @@ pub enum ContextScoutTriggerV1 {
     SavedEdit,
     StopBoundary,
     ExplicitRequest,
-    /// A session intent pass at a user-prompt boundary.
+    /// A session intent pass at a prompt, completed-tool, or stop boundary.
     IntentBoundary,
 }
 
@@ -1602,16 +1603,28 @@ where
         mode: ContextScoutRuntimeModeV1,
         model_execution: ContextScoutModelExecutionV1,
     ) -> Result<ContextScoutRuntimeOutcomeV1, ContextScoutErrorV1> {
-        let selection = match mode {
-            ContextScoutRuntimeModeV1::Deterministic => ContextScoutSelectionV1 {
-                route: ContextScoutRouteV1::Deterministic,
+        let selection = if let Some(model_outcome) = intent_pass_model_outcome(input)? {
+            // Intent-pass candidates were judged by the decision engine when
+            // they were built; selection among them is deterministic, and the
+            // route records the engine outcome their receipts carry.
+            ContextScoutSelectionV1 {
+                route: ContextScoutRouteV1::DecisionEngine,
                 decision: select_deterministic_context_scout(input, limits)?,
-                model_outcome: ContextScoutModelOutcomeV1::NotRequested,
+                model_outcome,
                 model_receipt: None,
-            },
-            ContextScoutRuntimeModeV1::ConfiguredModel => {
-                select_model_assisted_context_scout(input, limits, &self.model, model_execution)
-                    .await?
+            }
+        } else {
+            match mode {
+                ContextScoutRuntimeModeV1::Deterministic => ContextScoutSelectionV1 {
+                    route: ContextScoutRouteV1::Deterministic,
+                    decision: select_deterministic_context_scout(input, limits)?,
+                    model_outcome: ContextScoutModelOutcomeV1::NotRequested,
+                    model_receipt: None,
+                },
+                ContextScoutRuntimeModeV1::ConfiguredModel => {
+                    select_model_assisted_context_scout(input, limits, &self.model, model_execution)
+                        .await?
+                }
             }
         };
         self.last_route = Some(selection.route);
@@ -1709,6 +1722,27 @@ where
         }
         Ok(outcome)
     }
+}
+
+/// The engine outcome of an intent-pass selection, `None` for code-evidence
+/// selections. One intent pass offers session evidence only, all of it from
+/// one engine exchange; mixing evidence kinds is a malformed input.
+fn intent_pass_model_outcome(
+    input: &ContextScoutSelectionInputV1,
+) -> Result<Option<ContextScoutModelOutcomeV1>, ContextScoutErrorV1> {
+    let mut outcomes = input.candidates.iter().map(|candidate| {
+        candidate
+            .evidence
+            .as_session()
+            .map(|evidence| evidence.decision.outcome)
+    });
+    let Some(first) = outcomes.next() else {
+        return Ok(None);
+    };
+    if outcomes.any(|outcome| outcome != first) {
+        return Err(ContextScoutErrorV1::InvalidCandidate);
+    }
+    Ok(first)
 }
 
 #[cfg(test)]

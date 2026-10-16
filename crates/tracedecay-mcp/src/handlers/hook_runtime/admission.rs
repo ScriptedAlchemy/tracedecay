@@ -715,12 +715,27 @@ async fn admit_hook_v2_envelope_with_lifecycle_inner(
                     .await
                 {
                     Some(authority) => Some(authority),
-                    None => {
-                        cg.resolve_current_context_scout_session_claim_authority(
+                    None => match cg
+                        .resolve_current_context_scout_session_claim_authority(
                             &hook, lifecycle, now,
                         )
                         .await
-                    }
+                    {
+                        Some(authority) => Some(authority),
+                        // The session's intent-pass suggestion lives at its
+                        // own intent-scoped address, resolved exactly.
+                        None => match lifecycle.intent_scoped() {
+                            Some(intent_lifecycle) => {
+                                cg.resolve_current_context_scout_claim_authority(
+                                    &hook,
+                                    &intent_lifecycle,
+                                    now,
+                                )
+                                .await
+                            }
+                            None => None,
+                        },
+                    },
                 }
             }
             _ => None,
