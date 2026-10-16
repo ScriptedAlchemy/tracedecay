@@ -65,21 +65,26 @@ async fn rejected_token_reads_typed_refusal_and_daemon_keeps_serving() {
     let preface = DaemonAuthPreface::new("not-the-daemon-token")
         .to_line()
         .expect("preface json");
-    writer
-        .write_all(format!("{preface}\n").as_bytes())
-        .await
-        .expect("write bad auth preface");
     let handshake = projectless_handshake(&profile_root, "auth-refusal-raw-client")
         .to_line()
         .expect("handshake json");
-    writer
-        .write_all(format!("{handshake}\n").as_bytes())
-        .await
-        .expect("write handshake");
-    writer
-        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"tracedecay_status\",\"arguments\":{}}}\n")
-        .await
-        .expect("write pipelined request");
+    let request = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"tracedecay_status","arguments":{}}}"#;
+    // The daemon refuses on the preface alone and closes once its drain of
+    // pipelined input goes idle, so a client that stalls between writes
+    // finds the socket closed. The refusal frame was queued before that
+    // close and must still be readable.
+    for line in [preface.as_str(), handshake.as_str(), request] {
+        if let Err(error) = writer.write_all(format!("{line}\n").as_bytes()).await {
+            assert!(
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+                ),
+                "a pipelined write may only fail because the daemon closed: {error}"
+            );
+            break;
+        }
+    }
 
     let mut lines = tokio::io::BufReader::new(reader).lines();
     let refusal_line = tokio::time::timeout(RESPONSE_TIMEOUT, lines.next_line())
