@@ -381,16 +381,8 @@ fn cursor_tool_hint_input(parsed: &Value) -> ToolHintInput {
         tool_name: text_field(parsed, &["tool_name", "toolName", "name"]),
         command: text_field(tool_input, &["command", "cmd"])
             .or_else(|| text_field(parsed, &["command", "cmd"])),
-        prompt: text_field(
-            tool_input,
-            &["prompt", "query", "pattern", "task", "description"],
-        )
-        .or_else(|| {
-            text_field(
-                parsed,
-                &["prompt", "query", "pattern", "task", "description"],
-            )
-        }),
+        prompt: text_field(tool_input, &["prompt", "query", "pattern", "task"])
+            .or_else(|| text_field(parsed, &["prompt", "query", "pattern", "task"])),
         subagent_type: text_field(parsed, &["subagent_type", "subagentType", "agent_type"]),
         file_path: text_field(tool_input, CURSOR_FILE_PATH_FIELDS)
             .or_else(|| text_field(parsed, CURSOR_FILE_PATH_FIELDS)),
