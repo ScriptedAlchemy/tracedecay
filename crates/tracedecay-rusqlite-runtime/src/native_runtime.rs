@@ -1256,7 +1256,9 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     const SPIN: Duration = Duration::from_millis(150);
+    #[cfg(unix)]
     const WAKE_BOUND: Duration = Duration::from_millis(40);
 
     fn spin(duration: Duration) {
@@ -1270,6 +1272,7 @@ mod tests {
     /// leader runs it, then spins for [`SPIN`], inline in that poll or on the
     /// blocking pool. Task B's socket becomes readable 10 ms into the spin.
     /// Returns how long after that B woke.
+    #[cfg(unix)]
     fn socket_wake_behind_a_spinning_task(spin_on_blocking_pool: bool) -> Duration {
         use asupersync::io::AsyncReadExt;
         use asupersync::net::unix::UnixStream;
@@ -1315,6 +1318,7 @@ mod tests {
         woke_at.duration_since(readable)
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_long_poll_does_not_delay_another_tasks_socket_wake() {
         let latency = socket_wake_behind_a_spinning_task(false);
@@ -1324,6 +1328,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn work_on_the_blocking_pool_does_not_delay_another_tasks_socket_wake() {
         let latency = socket_wake_behind_a_spinning_task(true);
