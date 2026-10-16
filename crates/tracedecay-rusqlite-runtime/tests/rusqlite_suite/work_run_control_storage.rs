@@ -16,7 +16,7 @@ use std::collections::BTreeSet;
 
 use tracedecay_contracts::{
     WorkAttemptStorageError, WorkAttemptStoragePort, WorkRunControlStorageError,
-    WorkRunControlStoragePort,
+    WorkRunControlStoragePort, WorkRunControlTransitionPort,
 };
 use tracedecay_domain::{
     ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ProjectId,
@@ -394,6 +394,73 @@ fn publication_refuses_an_attempt_frontier_changed_after_snapshot() {
             .load_run_control(&authority, &task(), &run())
             .unwrap(),
         None
+    );
+}
+
+#[test]
+fn a_run_control_job_publishes_with_its_frontier_read_or_not_at_all() {
+    use tracedecay_rusqlite_runtime::native_runtime::block_on;
+
+    let store = RegisteredWorkStore::start_with_setup("run-control-job", |connection| {
+        install_workflow_schema(connection).unwrap();
+    });
+    let authority = authority("actor.run-control.job");
+    store
+        .storage()
+        .insert(&authority, &attempt("attempt.job.1"))
+        .unwrap();
+    let pause_in_job = |verdict: Result<(), &'static str>| {
+        let authority = authority.clone();
+        block_on(store.storage().transact(move |storage| {
+            let frontier = storage
+                .run_control_frontier(&authority, &task(), &run())
+                .map_err(|error| format!("{error:?}"))?
+                .ok_or("the run has an attempt")?;
+            let bound = storage
+                .workflow_bound_live_attempts(&authority, &task(), &run())
+                .map_err(|error| format!("{error:?}"))?;
+            let control = paused(
+                WorkRunControlReasonV1::OperatorRequest,
+                UtcMicros(400),
+                bound
+                    .into_iter()
+                    .map(|attempt| attempt.attempt_id)
+                    .collect(),
+            );
+            storage
+                .publish_run_control_at_frontier(&authority, &frontier, &control, &[])
+                .map_err(|error| format!("{error:?}"))?;
+            verdict.map(|()| control).map_err(str::to_owned)
+        }))
+        .expect("native runtime")
+        .expect("the writer runs the job")
+    };
+
+    assert_eq!(
+        pause_in_job(Err("refused after publishing")),
+        Err("refused after publishing".to_owned())
+    );
+    assert_eq!(
+        store
+            .storage()
+            .load_run_control(&authority, &task(), &run())
+            .unwrap(),
+        None,
+        "a refused job leaves no control row"
+    );
+
+    let control = pause_in_job(Ok(())).expect("the accepted job commits");
+    assert_eq!(
+        control.fenced_attempts(),
+        [id::<AttemptId>("attempt.job.1")]
+    );
+    assert_eq!(
+        store
+            .storage()
+            .load_run_control(&authority, &task(), &run())
+            .unwrap(),
+        Some(control),
+        "an accepted job commits its control row"
     );
 }
 

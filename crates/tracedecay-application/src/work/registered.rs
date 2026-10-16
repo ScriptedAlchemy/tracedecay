@@ -75,6 +75,7 @@ pub struct RegisteredWorkApplicationServicesV1 {
     duplicate_adjudications: tracedecay_contracts::WorkDuplicateAdjudicationServiceV1<
         tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
     >,
+    storage: tracedecay_rusqlite_runtime::work::WorkSqliteStorage,
 }
 
 /// The Work product graph authority: its verified reads and its journaled
@@ -241,7 +242,45 @@ impl RegisteredWorkApplicationServicesV1 {
             duplicate_adjudications: tracedecay_contracts::WorkDuplicateAdjudicationServiceV1::new(
                 storage.clone(),
             ),
+            storage,
         })
+    }
+
+    /// Pauses one run as a single writer transaction: the frontier read, the
+    /// decision and the publication commit together or not at all.
+    pub async fn pause_run(
+        &self,
+        context: tracedecay_contracts::RequestContext,
+        command: tracedecay_contracts::PauseWorkRunCommand,
+    ) -> Result<
+        tracedecay_contracts::WorkRunControlTransitionReceiptV1,
+        tracedecay_contracts::ApplicationProblem,
+    > {
+        self.storage
+            .transact(move |storage| {
+                tracedecay_contracts::WorkRunControlService::new(storage)
+                    .pause_with_receipt(&context, command.clone())
+            })
+            .await
+            .unwrap_or_else(|_| Err(run_control_unavailable()))
+    }
+
+    /// Resumes one run as a single writer transaction.
+    pub async fn resume_run(
+        &self,
+        context: tracedecay_contracts::RequestContext,
+        command: tracedecay_contracts::ResumeWorkRunCommand,
+    ) -> Result<
+        tracedecay_contracts::WorkRunControlTransitionReceiptV1,
+        tracedecay_contracts::ApplicationProblem,
+    > {
+        self.storage
+            .transact(move |storage| {
+                tracedecay_contracts::WorkRunControlService::new(storage)
+                    .resume_with_receipt(&context, command.clone())
+            })
+            .await
+            .unwrap_or_else(|_| Err(run_control_unavailable()))
     }
 
     pub fn attempts(
@@ -381,6 +420,10 @@ pub fn authorized_work_intelligence_service(
         storage,
         binding,
     ))
+}
+
+fn run_control_unavailable() -> tracedecay_contracts::ApplicationProblem {
+    tracedecay_contracts::WorkRunControlStorageError::Unavailable.into()
 }
 
 fn attach_error(operation: &str, error: impl std::fmt::Display) -> TraceDecayError {

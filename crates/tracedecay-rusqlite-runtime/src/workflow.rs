@@ -20,6 +20,7 @@ use crate::exact_sql::{
     ExactSqlValue, integer_column as sql_integer, text_column as sql_text,
 };
 use crate::repository::RetainedExactSqlCapability;
+use crate::work::RegisteredWorkQuery;
 mod census;
 mod disposition;
 mod effect_holder;
@@ -277,8 +278,8 @@ pub enum WorkflowSqliteAuthorityBuildError {
     Unavailable,
 }
 
-fn require_workflow_schema(
-    handle: &ExactSqlHandle,
+pub(crate) fn require_workflow_schema(
+    source: &impl RegisteredWorkQuery,
 ) -> Result<(), WorkflowSqliteAuthorityBuildError> {
     let table_parameters = WORKFLOW_TABLE_CONTRACTS_V1
         .iter()
@@ -286,8 +287,8 @@ fn require_workflow_schema(
         .map(|(index, _)| format!("?{}", index + 1))
         .collect::<Vec<_>>()
         .join(", ");
-    let rows = handle
-        .query(
+    let rows = source
+        .work_query(
             ExactSqlStatement::new(
                 format!(
                     "SELECT name, sql FROM sqlite_master
@@ -301,7 +302,6 @@ fn require_workflow_schema(
                     .collect(),
             )
             .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)?,
-            Duration::from_secs(5),
         )
         .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)?;
     let actual = rows
@@ -323,8 +323,8 @@ fn require_workflow_schema(
     {
         return Err(WorkflowSqliteAuthorityBuildError::ResetRequired);
     }
-    let schema = handle
-        .query(
+    let schema = source
+        .work_query(
             ExactSqlStatement::new(
                 "SELECT singleton, schema_version, definition_digest FROM workflow_schema
                  ORDER BY singleton"
@@ -332,7 +332,6 @@ fn require_workflow_schema(
                 Vec::new(),
             )
             .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)?,
-            Duration::from_secs(5),
         )
         .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)?;
     let valid_schema = schema.rows.len() == 1
@@ -352,20 +351,19 @@ fn require_workflow_schema(
         return Err(WorkflowSqliteAuthorityBuildError::ResetRequired);
     }
     for table in WORKFLOW_TABLE_CONTRACTS_V1 {
-        require_columns(handle, table)?;
+        require_columns(source, table)?;
     }
     Ok(())
 }
 
 fn require_columns(
-    handle: &ExactSqlHandle,
+    source: &impl RegisteredWorkQuery,
     table: &WorkflowTableContractV1,
 ) -> Result<(), WorkflowSqliteAuthorityBuildError> {
-    let columns = handle
-        .query(
+    let columns = source
+        .work_query(
             ExactSqlStatement::new(format!("PRAGMA table_info({})", table.name), Vec::new())
                 .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)?,
-            Duration::from_secs(5),
         )
         .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)?;
     let exact = columns.rows.len() == table.columns.len()

@@ -21,6 +21,7 @@ use super::{
     ExactSqlTransaction, ExactSqlValue, WorkflowSqliteAuthority, encode_json, execute_tx, query_tx,
     sql_text,
 };
+use crate::work::{RegisteredWorkQuery, registered_work_query};
 
 fn run_journal_unavailable<E>(_: E) -> WorkflowRunStorageError {
     WorkflowRunStorageError::Unavailable
@@ -35,11 +36,11 @@ fn decode_event(
 }
 
 fn history_tx(
-    transaction: &ExactSqlTransaction,
+    source: &impl RegisteredWorkQuery,
     run_id: &RunId,
 ) -> Result<Vec<WorkflowRunEvent>, WorkflowRunStorageError> {
-    let rows = query_tx(
-        transaction,
+    let rows = registered_work_query(
+        source,
         "SELECT event_payload, event_digest FROM workflow_run_journal
          WHERE run_id = ?1 ORDER BY sequence",
         vec![ExactSqlValue::Text(run_id.as_str().to_owned())],
@@ -58,6 +59,19 @@ fn history_tx(
 
 fn rebuild(history: &[WorkflowRunEvent]) -> Result<WorkflowRunProjection, WorkflowRunStorageError> {
     WorkflowRunProjection::rebuild(history).map_err(|_| WorkflowRunStorageError::InvalidHistory)
+}
+
+/// Replays one run's journal from a single statement, so the projection is a
+/// consistent snapshot whatever `source` is.
+pub(crate) fn projection_from(
+    source: &impl RegisteredWorkQuery,
+    run_id: &RunId,
+) -> Result<WorkflowRunProjection, WorkflowRunStorageError> {
+    let history = history_tx(source, run_id)?;
+    if history.is_empty() {
+        return Err(WorkflowRunStorageError::NotFound);
+    }
+    rebuild(&history)
 }
 
 pub(crate) fn append_in_transaction(
@@ -108,12 +122,9 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
             .handle()
             .begin_deferred()
             .map_err(run_journal_unavailable)?;
-        let history = history_tx(&transaction, run_id)?;
+        let projection = projection_from(&transaction, run_id);
         let _ = transaction.rollback();
-        if history.is_empty() {
-            return Err(WorkflowRunStorageError::NotFound);
-        }
-        rebuild(&history)
+        projection
     }
 
     fn append(

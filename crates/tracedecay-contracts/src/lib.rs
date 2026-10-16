@@ -566,8 +566,8 @@ pub use work_retry::{
 pub use work_run_control::{
     PauseWorkRunCommand, ResumeWorkRunCommand, WorkRunAdmissionV1, WorkRunControlFrontierV1,
     WorkRunControlReadingV1, WorkRunControlRequestV1, WorkRunControlService,
-    WorkRunControlStorageError, WorkRunControlStoragePort, WorkRunControlTransitionReceiptV1,
-    WorkRunLiveAttemptV1,
+    WorkRunControlStorageError, WorkRunControlStoragePort, WorkRunControlTransitionPort,
+    WorkRunControlTransitionReceiptV1, WorkRunLiveAttemptV1,
 };
 pub use work_synthesis::{
     AdmitWorkSynthesisCommand, WorkSynthesisAdmissionRecordV1, WorkSynthesisAdmissionV1,

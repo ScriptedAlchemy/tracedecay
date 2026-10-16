@@ -21,9 +21,10 @@ use tracedecay_contracts::{
     WorkAttemptStoragePort, WorkOwnerObservationMarkOutcomeV1, WorkOwnerObservationStoragePortV1,
     WorkRetryAttemptOutcomeV1, WorkRetryCauseV1, WorkRetryFailureSelectorV1, WorkRetryReceiptV1,
     WorkRetrySourceV1, WorkRetryStoragePortV1, WorkRetryWriteV1, WorkRunControlStoragePort,
-    WorkSynthesisAdmissionRecordV1, WorkSynthesisAdmissionStoragePort, WorkSynthesisAdmissionV1,
-    WorkSynthesisEvidenceGroupV1, WorkSynthesisInsertOutcome, WorkSynthesisSourceEnvelopeV1,
-    WorkSynthesisSourceOutcomeV1, WorkSynthesisSourceSetV1, WorkflowSynthesisDraft,
+    WorkRunControlTransitionPort, WorkSynthesisAdmissionRecordV1,
+    WorkSynthesisAdmissionStoragePort, WorkSynthesisAdmissionV1, WorkSynthesisEvidenceGroupV1,
+    WorkSynthesisInsertOutcome, WorkSynthesisSourceEnvelopeV1, WorkSynthesisSourceOutcomeV1,
+    WorkSynthesisSourceSetV1, WorkflowSynthesisDraft,
 };
 use tracedecay_domain::configuration::TopologyConcurrencyPolicyV1;
 use tracedecay_domain::{

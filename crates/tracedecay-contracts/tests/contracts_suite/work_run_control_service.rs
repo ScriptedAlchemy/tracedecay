@@ -21,7 +21,7 @@ use tracedecay_contracts::{
     DisclosureClass, PauseWorkRunCommand, RequestContext, RequestId, ResolvedScope,
     ResumeWorkRunCommand, WorkRunAdmissionV1, WorkRunControlFrontierV1, WorkRunControlReadingV1,
     WorkRunControlRequestV1, WorkRunControlService, WorkRunControlStorageError,
-    WorkRunControlStoragePort, WorkRunLiveAttemptV1,
+    WorkRunControlStoragePort, WorkRunControlTransitionPort, WorkRunLiveAttemptV1,
 };
 use tracedecay_domain::{
     ActorId, AttemptId, ProjectId, RepositoryId, RunId, TaskId, UtcMicros, WorkAuthority,
@@ -128,7 +128,7 @@ impl TestStore {
     }
 }
 
-impl WorkRunControlStoragePort for TestStore {
+impl WorkRunControlTransitionPort for TestStore {
     fn run_control_frontier(
         &self,
         authority: &WorkAuthority,
@@ -153,34 +153,6 @@ impl WorkRunControlStoragePort for TestStore {
                     .cloned()
                     .collect(),
             }))
-    }
-
-    fn run_admission(
-        &self,
-        authority: &WorkAuthority,
-        task_id: &TaskId,
-        run_id: &RunId,
-    ) -> Result<Option<WorkRunAdmissionV1>, WorkRunControlStorageError> {
-        Ok(self
-            .admissions
-            .lock()
-            .unwrap()
-            .get(&(authority.clone(), task_id.clone(), run_id.clone()))
-            .cloned())
-    }
-
-    fn load_run_control(
-        &self,
-        authority: &WorkAuthority,
-        task_id: &TaskId,
-        run_id: &RunId,
-    ) -> Result<Option<WorkRunControlV1>, WorkRunControlStorageError> {
-        Ok(self
-            .controls
-            .lock()
-            .unwrap()
-            .get(&(authority.clone(), task_id.clone(), run_id.clone()))
-            .cloned())
     }
 
     fn workflow_bound_live_attempts(
@@ -221,6 +193,57 @@ impl WorkRunControlStoragePort for TestStore {
         Ok(attempts)
     }
 
+    fn publish_run_control_at_frontier(
+        &self,
+        authority: &WorkAuthority,
+        expected: &WorkRunControlFrontierV1,
+        next: &WorkRunControlV1,
+        blocked_intervals: &[WorkBlockedIntervalReceiptV1],
+    ) -> Result<(), WorkRunControlStorageError> {
+        let current = self
+            .run_control_frontier(authority, next.task_id(), next.run_id())?
+            .ok_or(WorkRunControlStorageError::AuthorityConflict)?;
+        if &current != expected {
+            return Err(WorkRunControlStorageError::AuthorityConflict);
+        }
+        self.publish_run_control(
+            authority,
+            expected.control.as_ref().map(WorkRunControlV1::authority),
+            next,
+            blocked_intervals,
+        )
+    }
+}
+
+impl WorkRunControlStoragePort for TestStore {
+    fn run_admission(
+        &self,
+        authority: &WorkAuthority,
+        task_id: &TaskId,
+        run_id: &RunId,
+    ) -> Result<Option<WorkRunAdmissionV1>, WorkRunControlStorageError> {
+        Ok(self
+            .admissions
+            .lock()
+            .unwrap()
+            .get(&(authority.clone(), task_id.clone(), run_id.clone()))
+            .cloned())
+    }
+
+    fn load_run_control(
+        &self,
+        authority: &WorkAuthority,
+        task_id: &TaskId,
+        run_id: &RunId,
+    ) -> Result<Option<WorkRunControlV1>, WorkRunControlStorageError> {
+        Ok(self
+            .controls
+            .lock()
+            .unwrap()
+            .get(&(authority.clone(), task_id.clone(), run_id.clone()))
+            .cloned())
+    }
+
     fn publish_run_control(
         &self,
         authority: &WorkAuthority,
@@ -259,27 +282,6 @@ impl WorkRunControlStoragePort for TestStore {
             }
         }
         Ok(())
-    }
-
-    fn publish_run_control_at_frontier(
-        &self,
-        authority: &WorkAuthority,
-        expected: &WorkRunControlFrontierV1,
-        next: &WorkRunControlV1,
-        blocked_intervals: &[WorkBlockedIntervalReceiptV1],
-    ) -> Result<(), WorkRunControlStorageError> {
-        let current = self
-            .run_control_frontier(authority, next.task_id(), next.run_id())?
-            .ok_or(WorkRunControlStorageError::AuthorityConflict)?;
-        if &current != expected {
-            return Err(WorkRunControlStorageError::AuthorityConflict);
-        }
-        self.publish_run_control(
-            authority,
-            expected.control.as_ref().map(WorkRunControlV1::authority),
-            next,
-            blocked_intervals,
-        )
     }
 
     fn open_blocked_intervals(

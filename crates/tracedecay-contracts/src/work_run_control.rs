@@ -104,9 +104,11 @@ pub struct WorkRunControlTransitionReceiptV1 {
     pub blocked_intervals: Vec<WorkBlockedIntervalReceiptV1>,
 }
 
-/// The durable run-control rows and the attempt evidence they are derived
-/// from.
-pub trait WorkRunControlStoragePort: Send + Sync {
+/// The reads and the publication one pause or resume transition makes.
+///
+/// It carries no `Send + Sync` bound so a storage scoped to one writer
+/// transaction can implement it and run the whole transition atomically.
+pub trait WorkRunControlTransitionPort {
     /// Reads all mutable evidence needed by a pause or resume from one storage
     /// snapshot. `None` means the run has no durable attempt.
     fn run_control_frontier(
@@ -115,16 +117,6 @@ pub trait WorkRunControlStoragePort: Send + Sync {
         task_id: &TaskId,
         run_id: &RunId,
     ) -> Result<Option<WorkRunControlFrontierV1>, WorkRunControlStorageError>;
-
-    /// The admitted deadline and live attempt frontier for one run, or `None`
-    /// when the run holds no durable attempt at all. Retry-superseded recovery
-    /// records still count toward history, but are absent from the frontier.
-    fn run_admission(
-        &self,
-        authority: &WorkAuthority,
-        task_id: &TaskId,
-        run_id: &RunId,
-    ) -> Result<Option<WorkRunAdmissionV1>, WorkRunControlStorageError>;
 
     /// Resolves the canonical workflow journal binding for every active
     /// attempt of one run. Journal replay happens only while a pause is about
@@ -135,6 +127,31 @@ pub trait WorkRunControlStoragePort: Send + Sync {
         task_id: &TaskId,
         run_id: &RunId,
     ) -> Result<Vec<WorkRunLiveAttemptV1>, WorkRunControlStorageError>;
+
+    /// Publishes only while the complete mutable frontier is still identical
+    /// to `expected`. Implementations must perform the comparison and control
+    /// CAS in the same write transaction.
+    fn publish_run_control_at_frontier(
+        &self,
+        authority: &WorkAuthority,
+        expected: &WorkRunControlFrontierV1,
+        next: &WorkRunControlV1,
+        blocked_intervals: &[WorkBlockedIntervalReceiptV1],
+    ) -> Result<(), WorkRunControlStorageError>;
+}
+
+/// The durable run-control rows and the attempt evidence they are derived
+/// from.
+pub trait WorkRunControlStoragePort: Send + Sync {
+    /// The admitted deadline and live attempt frontier for one run, or `None`
+    /// when the run holds no durable attempt at all. Retry-superseded recovery
+    /// records still count toward history, but are absent from the frontier.
+    fn run_admission(
+        &self,
+        authority: &WorkAuthority,
+        task_id: &TaskId,
+        run_id: &RunId,
+    ) -> Result<Option<WorkRunAdmissionV1>, WorkRunControlStorageError>;
 
     /// The published control row for one run, or `None` when the run has never
     /// been controlled.
@@ -151,17 +168,6 @@ pub trait WorkRunControlStoragePort: Send + Sync {
         &self,
         authority: &WorkAuthority,
         expected: Option<WorkRunControlAuthorityV1>,
-        next: &WorkRunControlV1,
-        blocked_intervals: &[WorkBlockedIntervalReceiptV1],
-    ) -> Result<(), WorkRunControlStorageError>;
-
-    /// Publishes only while the complete mutable frontier is still identical
-    /// to `expected`. Implementations must perform the comparison and control
-    /// CAS in the same write transaction.
-    fn publish_run_control_at_frontier(
-        &self,
-        authority: &WorkAuthority,
-        expected: &WorkRunControlFrontierV1,
         next: &WorkRunControlV1,
         blocked_intervals: &[WorkBlockedIntervalReceiptV1],
     ) -> Result<(), WorkRunControlStorageError>;
@@ -274,14 +280,16 @@ pub struct WorkRunControlService<S> {
     storage: S,
 }
 
-impl<S> WorkRunControlService<S>
-where
-    S: WorkRunControlStoragePort,
-{
+impl<S> WorkRunControlService<S> {
     pub const fn new(storage: S) -> Self {
         Self { storage }
     }
+}
 
+impl<S> WorkRunControlService<S>
+where
+    S: WorkRunControlTransitionPort,
+{
     /// Fences new reservations for one run.
     pub fn pause(
         &self,
@@ -305,7 +313,7 @@ where
         let frontier = self
             .storage
             .run_control_frontier(&authority, &command.task_id, &command.run_id)
-            .map_err(storage_problem)?
+            .map_err(ApplicationProblem::from)?
             .ok_or_else(not_found_problem)?;
         check_expected(
             frontier.control.as_ref(),
@@ -317,7 +325,7 @@ where
         let workflow_attempts = self
             .storage
             .workflow_bound_live_attempts(&authority, &command.task_id, &command.run_id)
-            .map_err(storage_problem)?;
+            .map_err(ApplicationProblem::from)?;
         let workflow_steps =
             workflow_steps_for_live_attempts(&frontier.admission.live_attempts, workflow_attempts)?;
         let current = match frontier.control.clone() {
@@ -360,7 +368,7 @@ where
             .map_err(contract_problem)?;
         self.storage
             .publish_run_control_at_frontier(&authority, &frontier, &next, &blocked_intervals)
-            .map_err(storage_problem)?;
+            .map_err(ApplicationProblem::from)?;
         Ok(WorkRunControlTransitionReceiptV1 {
             control: next,
             blocked_intervals,
@@ -394,7 +402,7 @@ where
         let frontier = self
             .storage
             .run_control_frontier(&authority, &command.task_id, &command.run_id)
-            .map_err(storage_problem)?
+            .map_err(ApplicationProblem::from)?
             .ok_or_else(not_found_problem)?;
         let current = frontier.control.clone().ok_or_else(|| {
             // A run that was never paused has nothing to resume, and
@@ -428,13 +436,18 @@ where
             .map_err(contract_problem)?;
         self.storage
             .publish_run_control_at_frontier(&authority, &frontier, &next, &blocked_intervals)
-            .map_err(storage_problem)?;
+            .map_err(ApplicationProblem::from)?;
         Ok(WorkRunControlTransitionReceiptV1 {
             control: next,
             blocked_intervals,
         })
     }
+}
 
+impl<S> WorkRunControlService<S>
+where
+    S: WorkRunControlStoragePort,
+{
     /// Reads the published control state for one run.
     #[tracing::instrument(name = "application.work.run_control.read", level = "trace", skip_all)]
     pub fn read(
@@ -447,7 +460,7 @@ where
         let control = self
             .storage
             .load_run_control(&authority, &request.task_id, &request.run_id)
-            .map_err(storage_problem)?;
+            .map_err(ApplicationProblem::from)?;
         Ok(match control {
             Some(control) => WorkRunControlReadingV1::Controlled {
                 control,
@@ -482,7 +495,7 @@ where
         let control = self
             .storage
             .load_run_control(&authority, task_id, run_id)
-            .map_err(storage_problem)?;
+            .map_err(ApplicationProblem::from)?;
         match control {
             Some(control) if !control.admits_reservation() => Err(ApplicationProblem::conflict(
                 "application.work-run-control.paused",
@@ -511,7 +524,7 @@ where
                 let authority = work_authority(context)?;
                 self.storage
                     .next_settled_blocked_intervals_for_observation(&authority, limit)
-                    .map_err(storage_problem)
+                    .map_err(ApplicationProblem::from)
             }
         }
     }
@@ -533,7 +546,7 @@ where
                 let authority = work_authority(context)?;
                 self.storage
                     .mark_settled_blocked_interval_durable(&authority, receipt)
-                    .map_err(storage_problem)
+                    .map_err(ApplicationProblem::from)
             }
         }
     }
@@ -546,7 +559,7 @@ where
     ) -> Result<WorkRunAdmissionV1, ApplicationProblem> {
         self.storage
             .run_admission(authority, task_id, run_id)
-            .map_err(storage_problem)?
+            .map_err(ApplicationProblem::from)?
             .ok_or_else(not_found_problem)
     }
 }
@@ -572,15 +585,15 @@ fn check_expected(
     }
 }
 
-fn storage_problem(error: WorkRunControlStorageError) -> ApplicationProblem {
-    match error {
-        WorkRunControlStorageError::NotFoundOrNotAuthorized => not_found_problem(),
-        WorkRunControlStorageError::AuthorityConflict => authority_conflict_problem(),
-        WorkRunControlStorageError::Unavailable => {
-            ApplicationProblem::unavailable(SafeDiagnostic {
+impl From<WorkRunControlStorageError> for ApplicationProblem {
+    fn from(error: WorkRunControlStorageError) -> Self {
+        match error {
+            WorkRunControlStorageError::NotFoundOrNotAuthorized => not_found_problem(),
+            WorkRunControlStorageError::AuthorityConflict => authority_conflict_problem(),
+            WorkRunControlStorageError::Unavailable => Self::unavailable(SafeDiagnostic {
                 code: "application.work-run-control.storage-unavailable".to_owned(),
                 message: "The Work run control authority is unavailable.".to_owned(),
-            })
+            }),
         }
     }
 }
@@ -631,15 +644,17 @@ fn workflow_steps_for_live_attempts(
             .insert(attempt.attempt_id.clone(), attempt)
             .is_some()
         {
-            return Err(storage_problem(WorkRunControlStorageError::Unavailable));
+            return Err(ApplicationProblem::from(
+                WorkRunControlStorageError::Unavailable,
+            ));
         }
     }
     live_attempts
         .iter()
         .map(|attempt_id| {
-            by_attempt
-                .remove(attempt_id)
-                .ok_or_else(|| storage_problem(WorkRunControlStorageError::AuthorityConflict))
+            by_attempt.remove(attempt_id).ok_or_else(|| {
+                ApplicationProblem::from(WorkRunControlStorageError::AuthorityConflict)
+            })
         })
         .collect()
 }

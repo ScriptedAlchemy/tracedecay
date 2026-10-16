@@ -44,8 +44,4 @@ impl WorkSqliteStorage {
     pub(crate) fn handle(&self) -> &ExactSqlHandle {
         self.retained.handle()
     }
-
-    pub(crate) fn retained_exact_sql(&self) -> RetainedExactSqlCapability {
-        self.retained.clone()
-    }
 }
