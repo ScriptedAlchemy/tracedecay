@@ -429,14 +429,32 @@ async fn provision_remote_node(
     let Some(runtime) = registry.remote_runtime() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    match tracing::Instrument::instrument(
-        runtime.provision_remote_node(request.grant, request.admission),
-        tracing::trace_span!("daemon.http.application.remote_node_provision"),
-    )
-    .await
-    {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(error) => remote_node_operator_refusal(error),
+    // This listener serves on Tokio workers, and provisioning writes the node
+    // store through synchronous storage ports that park their thread on the
+    // writer, so it runs on a blocking-pool thread.
+    let provision =
+        native_runtime::NativeTask::spawn_off_native_thread(tracing::Instrument::instrument(
+            async move {
+                runtime
+                    .provision_remote_node(request.grant, request.admission)
+                    .await
+            },
+            tracing::trace_span!("daemon.http.application.remote_node_provision"),
+        ));
+    let Ok(provision) = provision else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    match provision.wait().await {
+        native_runtime::NativeTaskOutcome::Completed(Ok(())) => {
+            StatusCode::NO_CONTENT.into_response()
+        }
+        native_runtime::NativeTaskOutcome::Completed(Err(error)) => {
+            remote_node_operator_refusal(error)
+        }
+        native_runtime::NativeTaskOutcome::Cancelled
+        | native_runtime::NativeTaskOutcome::Panicked(_) => {
+            StatusCode::SERVICE_UNAVAILABLE.into_response()
+        }
     }
 }
 

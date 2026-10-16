@@ -100,39 +100,22 @@ pub struct ExactSqlHandle {
     write_authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
 }
 
-/// Waits for the serialized writer actor's reply without stalling the async
-/// worker that issued the command.
+/// Waits for the serialized writer actor's reply by parking the calling
+/// thread.
 ///
 /// Every synchronous storage port in this workspace (`WorkAttemptStoragePort`,
 /// `WorkflowRunStoragePort`, and their siblings) reaches the writer through
-/// these one-shot replies. The daemon's loopback HTTP application still serves
-/// on Tokio workers, because its `/remote-deletions` route reaches the project
-/// server lifecycle, and its Remote Brain handlers (node provisioning among
-/// them) call those ports there. A plain `recv_blocking` would park a whole
-/// worker for as long as the writer's command queue takes to reach this
-/// command. On a small runtime two
-/// concurrent waits starve every other task on it, including the HTTP reads
-/// whose admitted deadline then expires. `block_in_place` hands the worker's
-/// run queue to another thread for the wait; it panics outside a multi-thread
-/// runtime, so the flavor is checked first and everything else
-/// (current-thread runtimes, plain threads) keeps the previous inline
-/// behavior. The remaining `block_in_place` panic case is a `LocalSet` on a
-/// multi-thread runtime, which this workspace does not use.
-///
-/// Asupersync has no `block_in_place`, so a wait on a native runtime thread
-/// (a worker or a `block_on` caller; its blocking pool carries no runtime
-/// handle) still parks that thread. Each such wait is logged and counted in
-/// [`native_thread_writer_waits`] so the caller can be moved onto
-/// `native_runtime::off_native_thread` or `native_runtime::spawn_blocking`.
+/// these one-shot replies, so its caller must run where a thread may park: a
+/// blocking-pool thread (`native_runtime::spawn_blocking`,
+/// `native_runtime::off_native_thread`, `NativeTask::spawn_off_native_thread`)
+/// or a dedicated thread. A wait on a native runtime thread (a worker or a
+/// `block_on` caller; its blocking pool carries no runtime handle) parks that
+/// thread and every task queued on it, so each one is logged and counted in
+/// [`native_thread_writer_waits`].
 #[track_caller]
 fn recv_writer_reply<T>(
     response: async_channel::Receiver<T>,
 ) -> Result<T, async_channel::RecvError> {
-    if let Ok(handle) = tokio::runtime::Handle::try_current()
-        && handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
-    {
-        return tokio::task::block_in_place(|| response.recv_blocking());
-    }
     if asupersync::runtime::Runtime::current_handle().is_some() {
         NATIVE_THREAD_WRITER_WAITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         tracing::error!(
