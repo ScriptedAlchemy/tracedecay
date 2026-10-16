@@ -984,8 +984,8 @@ mod tests {
         let profile_root = temp.path().join("profile");
         std::fs::create_dir_all(&profile_root).unwrap();
         let registry = ProfileHostAdmissionReplayRegistry::with_bootstrap_cache_for(
-            Duration::from_millis(20),
-            Duration::from_millis(20),
+            Duration::ZERO,
+            Duration::ZERO,
         );
         let attempts = Arc::new(AtomicUsize::new(0));
         let operation_attempts = Arc::clone(&attempts);
@@ -1006,7 +1006,6 @@ mod tests {
                 .await,
             BootstrapCompletion::Completed,
         );
-        tokio::time::sleep(Duration::from_millis(30)).await;
         registry.ensure_bootstrap(&profile_root, operation).await;
         assert_eq!(
             registry
@@ -1024,9 +1023,9 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let profile_root = temp.path().join("profile");
         std::fs::create_dir_all(&profile_root).unwrap();
-        let registry = ProfileHostAdmissionReplayRegistry::with_bootstrap_cache_for(
-            Duration::from_secs(1),
-            Duration::from_millis(20),
+        let mut registry = ProfileHostAdmissionReplayRegistry::with_bootstrap_cache_for(
+            Duration::MAX,
+            Duration::MAX,
         );
         let attempts = Arc::new(AtomicUsize::new(0));
         let operation_attempts = Arc::clone(&attempts);
@@ -1056,7 +1055,7 @@ mod tests {
             .await;
         assert_eq!(attempts.load(Ordering::Acquire), 1);
 
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        registry.bootstrap_terminal_cache_for = Duration::ZERO;
         registry.ensure_bootstrap(&profile_root, operation).await;
         assert_eq!(
             registry
@@ -1240,7 +1239,17 @@ mod tests {
         );
         let observed = attempts.load(Ordering::Acquire);
         assert!(observed >= 2, "the budget must allow real retries first");
-        tokio::time::sleep(Duration::from_millis(120)).await;
+        while !registry
+            .bootstrap_workers
+            .lock()
+            .await
+            .get(&bootstrap_key(&profile_root))
+            .expect("bootstrap worker")
+            .task
+            .is_finished()
+        {
+            tokio::task::yield_now().await;
+        }
         assert_eq!(
             attempts.load(Ordering::Acquire),
             observed,
@@ -1318,10 +1327,7 @@ mod tests {
             });
         }
         while kick_tasks.join_next().await.is_some() {}
-        assert!(
-            registry.wait_idle(&db_path, Duration::from_secs(2)).await,
-            "coalesced worker must become idle"
-        );
+        settled(&registry, &db_path).await;
         let observed = registry.pass_count(&db_path).await;
         assert!(
             observed <= 3,
@@ -1353,10 +1359,7 @@ mod tests {
         ));
 
         registry.ensure(&db_path, &profile_root, &broker).await;
-        assert!(
-            registry.wait_idle(&db_path, Duration::from_secs(2)).await,
-            "installed pass must complete a replay worker"
-        );
+        settled(&registry, &db_path).await;
         assert_eq!(passes.load(Ordering::Acquire), 1);
         registry.shutdown().await;
     }
@@ -1394,10 +1397,7 @@ mod tests {
         registry
             .ensure_with_pass_override(&db_path, &profile_root, &broker, pass_override)
             .await;
-        assert!(
-            registry.wait_idle(&db_path, Duration::from_secs(2)).await,
-            "retryable worker must become idle after success"
-        );
+        settled(&registry, &db_path).await;
         let elapsed = started.elapsed();
         assert!(
             registry.backoff_count(&db_path).await >= 2,
@@ -1429,14 +1429,19 @@ mod tests {
         registry
             .ensure_with_pass_override(&db_path, &profile_root, &broker, pass_override)
             .await;
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while registry.backoff_count(&db_path).await < 2 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("pending no-progress replay must back off instead of spinning");
-        assert!(registry.pass_count(&db_path).await <= 3);
+        let worker = worker(&registry, &db_path).await;
+        while worker.backoff_count.load(Ordering::Acquire) < 2
+            && worker.pass_count.load(Ordering::Acquire) <= 3
+        {
+            tokio::task::yield_now().await;
+        }
+        let passes = worker.pass_count.load(Ordering::Acquire);
+        let backoffs = worker.backoff_count.load(Ordering::Acquire);
+        assert!(
+            backoffs >= 2 && passes <= backoffs + 1,
+            "pending no-progress replay must back off before every retry instead of spinning; \
+             passes={passes} backoffs={backoffs}"
+        );
         registry.shutdown().await;
     }
 
@@ -1451,29 +1456,46 @@ mod tests {
         let broker = Arc::new(tracedecay_host_admission::HostAdmissionBroker::new(runtime));
         broker.admit("test:pending", b"pending").await.unwrap();
         let registry = ProfileHostAdmissionReplayRegistry::default();
-        let pass_override = Arc::new(|| {
-            Box::pin(async { HostAdmissionOutcome::not_applicable("code_index_not_applicable") })
-                as std::pin::Pin<Box<dyn std::future::Future<Output = HostAdmissionOutcome> + Send>>
-        });
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let pass_override: ReplayPassOverride = {
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            Arc::new(move || {
+                let started = Arc::clone(&started);
+                let release = Arc::clone(&release);
+                Box::pin(async move {
+                    started.notify_one();
+                    release.notified().await;
+                    HostAdmissionOutcome::not_applicable("code_index_not_applicable")
+                })
+            })
+        };
 
         registry
             .ensure_with_pass_override(&db_path, &profile_root, &broker, pass_override)
             .await;
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while registry.pass_count(&db_path).await == 0 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("profile replay must attempt the not-applicable record");
-        tokio::time::sleep(Duration::from_millis(150)).await;
-        let passes = registry.pass_count(&db_path).await;
-        assert!(passes >= 1);
-        assert_eq!(registry.backoff_count(&db_path).await, 0);
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        started.notified().await;
+        // The admission and the ensure each raised a replay request before
+        // this pass began. One left pending wakes the idle worker into a
+        // second pass over the same not-applicable record.
+        let stale_request = std::pin::pin!(broker.wait_for_replay_request())
+            .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+            .is_ready();
+        assert!(
+            !stale_request,
+            "a running pass must answer every replay request raised before it began"
+        );
+        release.notify_one();
 
-        assert_eq!(registry.pass_count(&db_path).await, passes);
-        assert_eq!(registry.backoff_count(&db_path).await, 0);
+        let worker = worker(&registry, &db_path).await;
+        while worker.busy.load(Ordering::Acquire)
+            && worker.backoff_count.load(Ordering::Acquire) == 0
+        {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(worker.backoff_count.load(Ordering::Acquire), 0);
+        assert_eq!(worker.pass_count.load(Ordering::Acquire), 1);
         registry.shutdown().await;
     }
 
@@ -1602,20 +1624,15 @@ mod tests {
         );
         probe_started.notified().await;
 
-        let started = Instant::now();
+        // The probe never answers and nothing cancels before shutdown, so
+        // only the caller's grace can end this wait.
         assert!(
             !registry
                 .wait_idle(&db_path, Duration::from_millis(20))
                 .await,
             "blocked pending probe must respect the caller's replay grace"
         );
-        assert!(
-            started.elapsed() < Duration::from_millis(250),
-            "blocked pending probe exceeded its bounded grace"
-        );
-        tokio::time::timeout(Duration::from_secs(1), registry.shutdown())
-            .await
-            .expect("shutdown must cancel and join a blocked pending probe");
+        registry.shutdown().await;
         assert_eq!(registry.worker_count().await, 0);
     }
 
@@ -1774,13 +1791,32 @@ mod tests {
         registry
             .ensure_with_pass_override(&db_path, &profile_root, &broker, pass_override)
             .await;
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while registry.worker_count().await != 0 {
-                tokio::task::yield_now().await;
+        while registry.worker_count().await != 0 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    async fn worker(
+        registry: &ProfileHostAdmissionReplayRegistry,
+        broker_path: &Path,
+    ) -> Arc<ProfileHostAdmissionReplayWorker> {
+        let workers = registry.workers.lock().await;
+        Arc::clone(&workers.get(broker_path).expect("replay worker").worker)
+    }
+
+    /// `wait_idle` without its grace: the worker's idle transition is the
+    /// signal, and a worker that never settles fails at the harness timeout.
+    async fn settled(registry: &ProfileHostAdmissionReplayRegistry, broker_path: &Path) {
+        let worker = worker(registry, broker_path).await;
+        loop {
+            let idle = worker.idle.notified();
+            tokio::pin!(idle);
+            idle.as_mut().enable();
+            if worker.is_idle().await {
+                return;
             }
-        })
-        .await
-        .expect("idle replay worker must be evicted");
+            idle.await;
+        }
     }
 
     fn open_test_broker(profile_root: &Path) -> (PathBuf, SharedHostAdmissionBroker) {
