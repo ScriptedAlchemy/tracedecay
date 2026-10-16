@@ -231,7 +231,12 @@ pub enum WorkLeakAdjudicationStorageErrorV1 {
     Unavailable,
 }
 
-pub trait WorkLeakAdjudicationStoragePortV1: Send + Sync {
+/// The replay read and the revision-compared append of one leak adjudication.
+///
+/// It carries no `Send + Sync` bound so a storage scoped to one writer
+/// transaction can implement it and run the replay check and the append
+/// atomically.
+pub trait WorkLeakAdjudicationStoragePortV1 {
     fn leak_by_command(
         &self,
         authority: &WorkAuthority,
@@ -279,14 +284,12 @@ where
         if let Some(receipt) = self
             .storage
             .leak_by_command(&authority, &command.command_id)
-            .map_err(storage_problem)?
+            .map_err(ApplicationProblem::from)?
         {
             return if receipt.command == command {
                 Ok(WorkLeakAdjudicationOutcomeV1::Replayed(receipt))
             } else {
-                Err(storage_problem(
-                    WorkLeakAdjudicationStorageErrorV1::IdempotencyConflict,
-                ))
+                Err(WorkLeakAdjudicationStorageErrorV1::IdempotencyConflict.into())
             };
         }
         let evidence = self
@@ -320,7 +323,7 @@ where
                     },
                 },
             )
-            .map_err(storage_problem)
+            .map_err(ApplicationProblem::from)
     }
 }
 
@@ -360,24 +363,28 @@ fn evidence_problem(error: WorkLeakEvidenceErrorV1) -> ApplicationProblem {
     }
 }
 
-fn storage_problem(error: WorkLeakAdjudicationStorageErrorV1) -> ApplicationProblem {
-    match error {
-        WorkLeakAdjudicationStorageErrorV1::NotFoundOrNotAuthorized => {
-            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
-        }
-        WorkLeakAdjudicationStorageErrorV1::RevisionConflict => ApplicationProblem::conflict(
-            "application.work-leak.revision-conflict",
-            "The Work leak adjudication changed before publication.",
-        ),
-        WorkLeakAdjudicationStorageErrorV1::IdempotencyConflict => ApplicationProblem::conflict(
-            "application.work-leak.idempotency-conflict",
-            "The Work leak command identity was already used with different input.",
-        ),
-        WorkLeakAdjudicationStorageErrorV1::Unavailable => {
-            ApplicationProblem::unavailable(SafeDiagnostic {
-                code: "application.work-leak.unavailable".to_owned(),
-                message: "The Work leak adjudication authority is unavailable.".to_owned(),
-            })
+impl From<WorkLeakAdjudicationStorageErrorV1> for ApplicationProblem {
+    fn from(error: WorkLeakAdjudicationStorageErrorV1) -> Self {
+        match error {
+            WorkLeakAdjudicationStorageErrorV1::NotFoundOrNotAuthorized => {
+                ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
+            }
+            WorkLeakAdjudicationStorageErrorV1::RevisionConflict => ApplicationProblem::conflict(
+                "application.work-leak.revision-conflict",
+                "The Work leak adjudication changed before publication.",
+            ),
+            WorkLeakAdjudicationStorageErrorV1::IdempotencyConflict => {
+                ApplicationProblem::conflict(
+                    "application.work-leak.idempotency-conflict",
+                    "The Work leak command identity was already used with different input.",
+                )
+            }
+            WorkLeakAdjudicationStorageErrorV1::Unavailable => {
+                ApplicationProblem::unavailable(SafeDiagnostic {
+                    code: "application.work-leak.unavailable".to_owned(),
+                    message: "The Work leak adjudication authority is unavailable.".to_owned(),
+                })
+            }
         }
     }
 }

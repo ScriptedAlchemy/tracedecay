@@ -4,6 +4,7 @@ use tracedecay_contracts::clock::now_micros;
 use tracedecay_contracts::{ApplicationProblem, Deadline, RequestContext, SafeDiagnostic};
 use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
 
+#[derive(Clone)]
 pub(super) struct DaemonWorkLeakEvidenceV1 {
     pub(super) attempt: tracedecay_domain::WorkAttemptV1,
     pub(super) has_live_owner: bool,
@@ -222,9 +223,15 @@ pub(super) async fn adjudicate_leak(
         &storage,
     )
     .await?;
-    let service =
-        tracedecay_contracts::WorkLeakAdjudicationServiceV1::new(storage.clone(), evidence);
-    service.adjudicate(context, command, observed_at, scan_deadline)
+    services
+        .adjudicate_leak(
+            context.clone(),
+            command,
+            evidence,
+            observed_at,
+            scan_deadline,
+        )
+        .await
 }
 
 #[tracing::instrument(

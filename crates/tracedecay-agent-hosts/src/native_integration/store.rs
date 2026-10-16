@@ -1,16 +1,14 @@
-//! Bounded synchronous bridge to the registered session-store runtime.
+//! Native integration transaction store over the registered project session
+//! database.
 //!
-//! The native-integration transaction coordinator is deliberately synchronous
-//! because its native Git mechanics are synchronous. Calling an async database
-//! through `block_on` on a Tokio worker would pin that worker while an
-//! `IMMEDIATE` writer waits, so this adapter owns one bounded actor thread;
-//! the actor owns the async rusqlite-runtime calls and every synchronous port
-//! call receives exactly one reply. It has no filesystem path and cannot
-//! create a side-file authority.
+//! Every call awaits the async global-db store directly. Each mutation there
+//! is one `IMMEDIATE` SQLite transaction (one-use approval consumption and
+//! every phase compare-and-swap included), so concurrent callers need no actor
+//! to serialize them; per-transaction ordering comes from the coordinator
+//! awaiting each step in turn under its repository lock. It has no filesystem
+//! path and cannot create a side-file authority.
 
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use tracedecay_domain::{
     CodeGenerationId, ManifestDigest, NativeIntegrationApprovalId, NativeIntegrationApprovalV1,
@@ -24,164 +22,46 @@ use tracedecay_store::{
 };
 
 use tracedecay_global_db::{GlobalDbNativeIntegrationStore, RegisteredGlobalDbLeaseV1};
-use tracedecay_runtime_core::native_runtime;
 
-/// The actor queue is intentionally finite: saturation fails closed instead of
-/// accumulating unbounded mutation work while a durable writer is stalled.
-const NATIVE_INTEGRATION_STORE_ACTOR_CAPACITY: usize = 64;
-// Keep the sync port bounded by the same five-second writer wait used by
-// `RegisteredGlobalDb`; callers can reconcile durable state after an
-// unavailable result instead of pinning a daemon worker forever.
-const NATIVE_INTEGRATION_STORE_ACTOR_TIMEOUT: Duration = Duration::from_secs(5);
-
-type Reply<T> = SyncSender<NativeIntegrationStoreResult<T>>;
-
-enum StoreCommand {
-    SavePreview(Box<NativeIntegrationPreviewV1>, Reply<()>),
-    ReadPreview(
-        NativeIntegrationPreviewId,
-        Reply<Option<NativeIntegrationPreviewV1>>,
-    ),
-    ReadPreviewByDigest(ManifestDigest, Reply<Option<NativeIntegrationPreviewV1>>),
-    SaveApproval(Box<NativeIntegrationApprovalV1>, Reply<()>),
-    ReadApproval(
-        NativeIntegrationApprovalId,
-        Reply<Option<NativeIntegrationApprovalV1>>,
-    ),
-    BeginOrReplay(
-        Box<NativeIntegrationRecordV1>,
-        Reply<NativeIntegrationBeginResultV1>,
-    ),
-    ReadStatus(
-        NativeIntegrationTransactionId,
-        Reply<Option<NativeIntegrationTransactionStatusV1>>,
-    ),
-    ReadRecord(
-        NativeIntegrationTransactionId,
-        Reply<Option<NativeIntegrationRecordV1>>,
-    ),
-    ReadReceipt(
-        NativeIntegrationTransactionId,
-        Reply<Option<NativeIntegrationReceiptV1>>,
-    ),
-    ReadReceiptByDigest(ManifestDigest, Reply<Option<NativeIntegrationReceiptV1>>),
-    CompareAndSwapStatus(
-        NativeIntegrationTransactionId,
-        u64,
-        Box<NativeIntegrationTransactionStatusV1>,
-        Reply<NativeIntegrationTransactionStatusV1>,
-    ),
-    WriteTerminal(
-        NativeIntegrationTransactionId,
-        u64,
-        Box<NativeIntegrationReceiptV1>,
-        Reply<NativeIntegrationReceiptV1>,
-    ),
-    PendingTransactions(Option<RepositoryId>, Reply<Vec<NativeIntegrationRecordV1>>),
-    LiveCandidateGenerationBindings(RepositoryId, UtcMicros, Reply<Vec<CodeGenerationId>>),
-    ApprovalConsumed(NativeIntegrationApprovalId, Reply<bool>),
-    QuarantineRepository(RepositoryId, NativeIntegrationTransactionId, Reply<()>),
-    BeginWorktreeCleanup(
-        Box<NativeWorktreeCleanupTransactionV1>,
-        Reply<NativeWorktreeCleanupBeginResultV1>,
-    ),
-    ReadWorktreeCleanup(
-        ManifestDigest,
-        Reply<Option<NativeWorktreeCleanupTransactionV1>>,
-    ),
-    PendingWorktreeCleanups(
-        RepositoryId,
-        u32,
-        Reply<Vec<NativeWorktreeCleanupTransactionV1>>,
-    ),
-    CompareAndSwapWorktreeCleanup(
-        ManifestDigest,
-        u64,
-        Box<NativeWorktreeCleanupTransactionV1>,
-        Reply<NativeWorktreeCleanupTransactionV1>,
-    ),
-    WriteWorktreeCleanupTerminal(
-        ManifestDigest,
-        u64,
-        Box<NativeWorktreeCleanupReceiptV1>,
-        Reply<NativeWorktreeCleanupReceiptV1>,
-    ),
-}
-
-enum ActorDatabase {
-    Registered(RegisteredGlobalDbLeaseV1),
-}
-
-impl ActorDatabase {
-    fn native_integration_store(&self) -> GlobalDbNativeIntegrationStore<'_> {
-        match self {
-            Self::Registered(database) => GlobalDbNativeIntegrationStore::new(database),
-        }
-    }
-}
-
-/// Synchronous `tracedecay-store` contract adapter over one already-open,
-/// canonical registered project session database.
+/// Shared handle to the one daemon-owned store for a project database.
 ///
-/// Dropping the last adapter closes the command channel and lets the dedicated
-/// actor exit. It intentionally has no `Clone` implementation: one daemon
-/// owner holds one bounded queue and actor for its transaction authority;
-/// sharing goes through [`SharedDaemonNativeIntegrationStore`].
-pub(crate) struct DaemonNativeIntegrationStore {
-    commands: Mutex<Option<SyncSender<StoreCommand>>>,
-    worker: Mutex<Option<std::thread::JoinHandle<()>>>,
+/// Clones share the lease. `shutdown`, or dropping the last clone, releases
+/// it; calls after shutdown fail closed as unavailable, while a call already
+/// in flight finishes on the lease it holds.
+#[derive(Clone)]
+pub struct DaemonNativeIntegrationStore {
+    database: Arc<Mutex<Option<RegisteredGlobalDbLeaseV1>>>,
 }
 
 impl DaemonNativeIntegrationStore {
-    pub(crate) fn open(database: RegisteredGlobalDbLeaseV1) -> NativeIntegrationStoreResult<Self> {
-        Self::open_actor(ActorDatabase::Registered(database))
-    }
-
     #[tracing::instrument(
         name = "daemon.native_integration.store_open",
         level = "trace",
         skip_all
     )]
-    fn open_actor(database: ActorDatabase) -> NativeIntegrationStoreResult<Self> {
-        let (commands, receiver) = sync_channel(NATIVE_INTEGRATION_STORE_ACTOR_CAPACITY);
-        let worker = std::thread::Builder::new()
-            .name("tracedecay-native-integration-store".to_owned())
-            .spawn(move || run_store_actor(&database, &receiver))
-            .map_err(NativeIntegrationStoreError::unavailable)?;
-        Ok(Self {
-            commands: Mutex::new(Some(commands)),
-            worker: Mutex::new(Some(worker)),
-        })
+    pub(crate) fn open(database: RegisteredGlobalDbLeaseV1) -> Self {
+        Self {
+            database: Arc::new(Mutex::new(Some(database))),
+        }
     }
 
-    fn submit(&self, command: StoreCommand) -> NativeIntegrationStoreResult<()> {
-        self.commands
+    /// Releases the lease. Returns whether this call closed the store.
+    pub(crate) fn shutdown(&self) -> bool {
+        self.database
             .lock()
-            .map_err(NativeIntegrationStoreError::unavailable)?
-            .as_ref()
-            .ok_or_else(|| {
-                NativeIntegrationStoreError::unavailable(
-                    "native integration store actor is shut down",
-                )
-            })?
-            .try_send(command)
-            .map_err(|error| match error {
-                TrySendError::Full(_) | TrySendError::Disconnected(_) => {
-                    NativeIntegrationStoreError::unavailable(error)
-                }
-            })
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+            .is_some()
     }
 
-    fn await_reply<T>(
-        receiver: &Receiver<NativeIntegrationStoreResult<T>>,
-    ) -> NativeIntegrationStoreResult<T> {
-        receiver
-            .recv_timeout(NATIVE_INTEGRATION_STORE_ACTOR_TIMEOUT)
-            .map_err(|error| match error {
-                RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected => {
-                    NativeIntegrationStoreError::unavailable(error)
-                }
-            })?
+    fn database(&self) -> NativeIntegrationStoreResult<RegisteredGlobalDbLeaseV1> {
+        self.database
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .ok_or_else(|| {
+                NativeIntegrationStoreError::unavailable("native integration store is shut down")
+            })
     }
 
     /// Persists one issued approval commitment (approval issuance operation).
@@ -190,13 +70,14 @@ impl DaemonNativeIntegrationStore {
         level = "trace",
         skip_all
     )]
-    pub(crate) fn save_approval(
+    pub async fn save_approval(
         &self,
         approval: NativeIntegrationApprovalV1,
     ) -> NativeIntegrationStoreResult<()> {
-        let (reply, receiver) = sync_channel(1);
-        self.submit(StoreCommand::SaveApproval(Box::new(approval), reply))?;
-        Self::await_reply(&receiver)
+        let database = self.database()?;
+        GlobalDbNativeIntegrationStore::new(&database)
+            .save_approval(approval)
+            .await
     }
 
     /// Reads one issued approval commitment for apply resolution.
@@ -205,13 +86,14 @@ impl DaemonNativeIntegrationStore {
         level = "trace",
         skip_all
     )]
-    pub(crate) fn read_approval(
+    pub async fn read_approval(
         &self,
         approval_id: &NativeIntegrationApprovalId,
     ) -> NativeIntegrationStoreResult<Option<NativeIntegrationApprovalV1>> {
-        let (reply, receiver) = sync_channel(1);
-        self.submit(StoreCommand::ReadApproval(approval_id.clone(), reply))?;
-        Self::await_reply(&receiver)
+        let database = self.database()?;
+        GlobalDbNativeIntegrationStore::new(&database)
+            .read_approval(approval_id)
+            .await
     }
 
     #[tracing::instrument(
@@ -219,16 +101,14 @@ impl DaemonNativeIntegrationStore {
         level = "trace",
         skip_all
     )]
-    pub(crate) fn read_preview_by_digest(
+    pub async fn read_preview_by_digest(
         &self,
         preview_digest: &ManifestDigest,
     ) -> NativeIntegrationStoreResult<Option<NativeIntegrationPreviewV1>> {
-        let (reply, receiver) = sync_channel(1);
-        self.submit(StoreCommand::ReadPreviewByDigest(
-            preview_digest.clone(),
-            reply,
-        ))?;
-        Self::await_reply(&receiver)
+        let database = self.database()?;
+        GlobalDbNativeIntegrationStore::new(&database)
+            .read_preview_by_digest(preview_digest)
+            .await
     }
 
     #[tracing::instrument(
@@ -236,41 +116,14 @@ impl DaemonNativeIntegrationStore {
         level = "trace",
         skip_all
     )]
-    pub(crate) fn read_receipt_by_digest(
+    pub async fn read_receipt_by_digest(
         &self,
         receipt_digest: &ManifestDigest,
     ) -> NativeIntegrationStoreResult<Option<NativeIntegrationReceiptV1>> {
-        let (reply, receiver) = sync_channel(1);
-        self.submit(StoreCommand::ReadReceiptByDigest(
-            receipt_digest.clone(),
-            reply,
-        ))?;
-        Self::await_reply(&receiver)
-    }
-
-    pub(crate) fn shutdown(&self) -> NativeIntegrationStoreResult<bool> {
-        self.commands
-            .lock()
-            .map_err(NativeIntegrationStoreError::unavailable)?
-            .take();
-        let worker = self
-            .worker
-            .lock()
-            .map_err(NativeIntegrationStoreError::unavailable)?
-            .take();
-        let Some(worker) = worker else {
-            return Ok(false);
-        };
-        worker.join().map_err(|_| {
-            NativeIntegrationStoreError::unavailable("native integration store worker panicked")
-        })?;
-        Ok(true)
-    }
-}
-
-impl Drop for DaemonNativeIntegrationStore {
-    fn drop(&mut self) {
-        let _ = self.shutdown();
+        let database = self.database()?;
+        GlobalDbNativeIntegrationStore::new(&database)
+            .read_receipt_by_digest(receipt_digest)
+            .await
     }
 }
 
@@ -280,13 +133,14 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         level = "trace",
         skip_all
     )]
-    fn save_preview(
+    async fn save_preview(
         &self,
         preview: NativeIntegrationPreviewV1,
     ) -> NativeIntegrationStoreResult<()> {
-        let (reply, receiver) = sync_channel(1);
-        self.submit(StoreCommand::SavePreview(Box::new(preview), reply))?;
-        Self::await_reply(&receiver)
+        let database = self.database()?;
+        GlobalDbNativeIntegrationStore::new(&database)
+            .save_preview(preview)
+            .await
     }
 
     #[tracing::instrument(
@@ -294,13 +148,14 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         level = "trace",
         skip_all
     )]
-    fn read_preview(
+    async fn read_preview(
         &self,
         preview_id: &NativeIntegrationPreviewId,
     ) -> NativeIntegrationStoreResult<Option<NativeIntegrationPreviewV1>> {
-        let (reply, receiver) = sync_channel(1);
-        self.submit(StoreCommand::ReadPreview(preview_id.clone(), reply))?;
-        Self::await_reply(&receiver)
+        let database = self.database()?;
+        GlobalDbNativeIntegrationStore::new(&database)
+            .read_preview(preview_id)
+            .await
     }
 
     #[tracing::instrument(
@@ -308,13 +163,14 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         level = "trace",
         skip_all
     )]
-    fn begin_or_replay(
+    async fn begin_or_replay(
         &self,
         record: NativeIntegrationRecordV1,
     ) -> NativeIntegrationStoreResult<NativeIntegrationBeginResultV1> {
-        let (reply, receiver) = sync_channel(1);
-        self.submit(StoreCommand::BeginOrReplay(Box::new(record), reply))?;
-        Self::await_reply(&receiver)
+        let database = self.database()?;
+        GlobalDbNativeIntegrationStore::new(&database)
+            .begin_or_replay(record)
+            .await
     }
 
     #[tracing::instrument(
@@ -322,13 +178,14 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         level = "trace",
         skip_all
     )]
-    fn read_status(
+    async fn read_status(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
     ) -> NativeIntegrationStoreResult<Option<NativeIntegrationTransactionStatusV1>> {
-        let (reply, receiver) = sync_channel(1);
-        self.submit(StoreCommand::ReadStatus(transaction_id.clone(), reply))?;
-        Self::await_reply(&receiver)
+        let database = self.database()?;
+        GlobalDbNativeIntegrationStore::new(&database)
+            .read_status(transaction_id)
+            .await
     }
 
     #[tracing::instrument(
@@ -336,13 +193,14 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         level = "trace",
         skip_all
     )]
-    fn read_record(
+    async fn read_record(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
     ) -> NativeIntegrationStoreResult<Option<NativeIntegrationRecordV1>> {
-        let (reply, receiver) = sync_channel(1);
-        self.submit(StoreCommand::ReadRecord(transaction_id.clone(), reply))?;
-        Self::await_reply(&receiver)
+        let database = self.database()?;
+        GlobalDbNativeIntegrationStore::new(&database)
+            .read_record(transaction_id)
+            .await
     }
 
     #[tracing::instrument(
@@ -350,13 +208,14 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         level = "trace",
         skip_all
     )]
-    fn read_receipt(
+    async fn read_receipt(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
     ) -> NativeIntegrationStoreResult<Option<NativeIntegrationReceiptV1>> {
-        let (reply, receiver) = sync_channel(1);
-        self.submit(StoreCommand::ReadReceipt(transaction_id.clone(), reply))?;
-        Self::await_reply(&receiver)
+        let database = self.database()?;
+        GlobalDbNativeIntegrationStore::new(&database)
+            .read_receipt(transaction_id)
+            .await
     }
 
     #[tracing::instrument(
@@ -364,20 +223,16 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         level = "trace",
         skip_all
     )]
-    fn compare_and_swap_status(
+    async fn compare_and_swap_status(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
         expected_phase_revision: u64,
         replacement: NativeIntegrationTransactionStatusV1,
     ) -> NativeIntegrationStoreResult<NativeIntegrationTransactionStatusV1> {
-        let (reply, receiver) = sync_channel(1);
-        self.submit(StoreCommand::CompareAndSwapStatus(
-            transaction_id.clone(),
-            expected_phase_revision,
-            Box::new(replacement),
-            reply,
-        ))?;
-        Self::await_reply(&receiver)
+        let database = self.database()?;
+        GlobalDbNativeIntegrationStore::new(&database)
+            .compare_and_swap_status(transaction_id, expected_phase_revision, replacement)
+            .await
     }
 
     #[tracing::instrument(
@@ -385,20 +240,16 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         level = "trace",
         skip_all
     )]
-    fn write_terminal(
+    async fn write_terminal(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
         expected_phase_revision: u64,
         receipt: NativeIntegrationReceiptV1,
     ) -> NativeIntegrationStoreResult<NativeIntegrationReceiptV1> {
-        let (reply, receiver) = sync_channel(1);
-        self.submit(StoreCommand::WriteTerminal(
-            transaction_id.clone(),
-            expected_phase_revision,
-            Box::new(receipt),
-            reply,
-        ))?;
-        Self::await_reply(&receiver)
+        let database = self.database()?;
+        GlobalDbNativeIntegrationStore::new(&database)
+            .write_terminal(transaction_id, expected_phase_revision, receipt)
+            .await
     }
 
     #[tracing::instrument(
@@ -406,30 +257,25 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         level = "trace",
         skip_all
     )]
-    fn pending_transactions(
+    async fn pending_transactions(
         &self,
         repository_id: Option<&RepositoryId>,
     ) -> NativeIntegrationStoreResult<Vec<NativeIntegrationRecordV1>> {
-        let (reply, receiver) = sync_channel(1);
-        self.submit(StoreCommand::PendingTransactions(
-            repository_id.cloned(),
-            reply,
-        ))?;
-        Self::await_reply(&receiver)
+        let database = self.database()?;
+        GlobalDbNativeIntegrationStore::new(&database)
+            .pending_transactions(repository_id)
+            .await
     }
 
-    fn live_candidate_generation_bindings(
+    async fn live_candidate_generation_bindings(
         &self,
         repository_id: &RepositoryId,
         observed_at: UtcMicros,
     ) -> NativeIntegrationStoreResult<Vec<CodeGenerationId>> {
-        let (reply, receiver) = sync_channel(1);
-        self.submit(StoreCommand::LiveCandidateGenerationBindings(
-            repository_id.clone(),
-            observed_at,
-            reply,
-        ))?;
-        Self::await_reply(&receiver)
+        let database = self.database()?;
+        GlobalDbNativeIntegrationStore::new(&database)
+            .live_candidate_generation_bindings(repository_id, observed_at)
+            .await
     }
 
     #[tracing::instrument(
@@ -437,13 +283,14 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         level = "trace",
         skip_all
     )]
-    fn approval_consumed(
+    async fn approval_consumed(
         &self,
         approval_id: &NativeIntegrationApprovalId,
     ) -> NativeIntegrationStoreResult<bool> {
-        let (reply, receiver) = sync_channel(1);
-        self.submit(StoreCommand::ApprovalConsumed(approval_id.clone(), reply))?;
-        Self::await_reply(&receiver)
+        let database = self.database()?;
+        GlobalDbNativeIntegrationStore::new(&database)
+            .approval_consumed(approval_id)
+            .await
     }
 
     #[tracing::instrument(
@@ -451,18 +298,15 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         level = "trace",
         skip_all
     )]
-    fn quarantine_repository(
+    async fn quarantine_repository(
         &self,
         repository_id: &RepositoryId,
         transaction_id: &NativeIntegrationTransactionId,
     ) -> NativeIntegrationStoreResult<()> {
-        let (reply, receiver) = sync_channel(1);
-        self.submit(StoreCommand::QuarantineRepository(
-            repository_id.clone(),
-            transaction_id.clone(),
-            reply,
-        ))?;
-        Self::await_reply(&receiver)
+        let database = self.database()?;
+        GlobalDbNativeIntegrationStore::new(&database)
+            .quarantine_repository(repository_id, transaction_id)
+            .await
     }
 
     #[tracing::instrument(
@@ -470,16 +314,14 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         level = "trace",
         skip_all
     )]
-    fn begin_worktree_cleanup(
+    async fn begin_worktree_cleanup(
         &self,
         transaction: NativeWorktreeCleanupTransactionV1,
     ) -> NativeIntegrationStoreResult<NativeWorktreeCleanupBeginResultV1> {
-        let (reply, receiver) = sync_channel(1);
-        self.submit(StoreCommand::BeginWorktreeCleanup(
-            Box::new(transaction),
-            reply,
-        ))?;
-        Self::await_reply(&receiver)
+        let database = self.database()?;
+        GlobalDbNativeIntegrationStore::new(&database)
+            .begin_worktree_cleanup(transaction)
+            .await
     }
 
     #[tracing::instrument(
@@ -487,16 +329,14 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         level = "trace",
         skip_all
     )]
-    fn read_worktree_cleanup(
+    async fn read_worktree_cleanup(
         &self,
         confirmation_digest: &ManifestDigest,
     ) -> NativeIntegrationStoreResult<Option<NativeWorktreeCleanupTransactionV1>> {
-        let (reply, receiver) = sync_channel(1);
-        self.submit(StoreCommand::ReadWorktreeCleanup(
-            confirmation_digest.clone(),
-            reply,
-        ))?;
-        Self::await_reply(&receiver)
+        let database = self.database()?;
+        GlobalDbNativeIntegrationStore::new(&database)
+            .read_worktree_cleanup(confirmation_digest)
+            .await
     }
 
     #[tracing::instrument(
@@ -504,18 +344,15 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         level = "trace",
         skip_all
     )]
-    fn pending_worktree_cleanups(
+    async fn pending_worktree_cleanups(
         &self,
         repository_id: &RepositoryId,
         limit: u32,
     ) -> NativeIntegrationStoreResult<Vec<NativeWorktreeCleanupTransactionV1>> {
-        let (reply, receiver) = sync_channel(1);
-        self.submit(StoreCommand::PendingWorktreeCleanups(
-            repository_id.clone(),
-            limit,
-            reply,
-        ))?;
-        Self::await_reply(&receiver)
+        let database = self.database()?;
+        GlobalDbNativeIntegrationStore::new(&database)
+            .pending_worktree_cleanups(repository_id, limit)
+            .await
     }
 
     #[tracing::instrument(
@@ -523,20 +360,20 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         level = "trace",
         skip_all
     )]
-    fn compare_and_swap_worktree_cleanup(
+    async fn compare_and_swap_worktree_cleanup(
         &self,
         confirmation_digest: &ManifestDigest,
         expected_phase_revision: u64,
         replacement: NativeWorktreeCleanupTransactionV1,
     ) -> NativeIntegrationStoreResult<NativeWorktreeCleanupTransactionV1> {
-        let (reply, receiver) = sync_channel(1);
-        self.submit(StoreCommand::CompareAndSwapWorktreeCleanup(
-            confirmation_digest.clone(),
-            expected_phase_revision,
-            Box::new(replacement),
-            reply,
-        ))?;
-        Self::await_reply(&receiver)
+        let database = self.database()?;
+        GlobalDbNativeIntegrationStore::new(&database)
+            .compare_and_swap_worktree_cleanup(
+                confirmation_digest,
+                expected_phase_revision,
+                replacement,
+            )
+            .await
     }
 
     #[tracing::instrument(
@@ -544,327 +381,104 @@ impl NativeIntegrationStore for DaemonNativeIntegrationStore {
         level = "trace",
         skip_all
     )]
-    fn write_worktree_cleanup_terminal(
+    async fn write_worktree_cleanup_terminal(
         &self,
         confirmation_digest: &ManifestDigest,
         expected_phase_revision: u64,
         receipt: NativeWorktreeCleanupReceiptV1,
     ) -> NativeIntegrationStoreResult<NativeWorktreeCleanupReceiptV1> {
-        let (reply, receiver) = sync_channel(1);
-        self.submit(StoreCommand::WriteWorktreeCleanupTerminal(
-            confirmation_digest.clone(),
-            expected_phase_revision,
-            Box::new(receipt),
-            reply,
-        ))?;
-        Self::await_reply(&receiver)
+        let database = self.database()?;
+        GlobalDbNativeIntegrationStore::new(&database)
+            .write_worktree_cleanup_terminal(confirmation_digest, expected_phase_revision, receipt)
+            .await
     }
 }
 
-fn settle<T>(
-    operation: impl Future<Output = NativeIntegrationStoreResult<T>>,
-) -> NativeIntegrationStoreResult<T> {
-    native_runtime::block_on(operation)
-        .unwrap_or_else(|error| Err(NativeIntegrationStoreError::unavailable(error)))
-}
+#[cfg(test)]
+mod tests {
+    use tracedecay_domain::test_fixtures::digest;
+    use tracedecay_domain::{ActorId, CapabilityId};
+    use tracedecay_global_db::tests::harness::RegisteredGlobalDbHarness;
+    use tracedecay_runtime_core::native_runtime::{self, NativeTask, NativeTaskOutcome};
 
-fn run_store_actor(database: &ActorDatabase, receiver: &Receiver<StoreCommand>) {
-    while let Ok(command) = receiver.recv() {
-        let store = database.native_integration_store();
-        match command {
-            StoreCommand::SavePreview(preview, reply) => {
-                let _ = reply.send(settle(store.save_preview(*preview)));
-            }
-            StoreCommand::ReadPreview(preview_id, reply) => {
-                let _ = reply.send(settle(store.read_preview(&preview_id)));
-            }
-            StoreCommand::ReadPreviewByDigest(preview_digest, reply) => {
-                let _ = reply.send(settle(store.read_preview_by_digest(&preview_digest)));
-            }
-            StoreCommand::SaveApproval(approval, reply) => {
-                let _ = reply.send(settle(store.save_approval(*approval)));
-            }
-            StoreCommand::ReadApproval(approval_id, reply) => {
-                let _ = reply.send(settle(store.read_approval(&approval_id)));
-            }
-            StoreCommand::BeginOrReplay(record, reply) => {
-                let _ = reply.send(settle(store.begin_or_replay(*record)));
-            }
-            StoreCommand::ReadStatus(transaction_id, reply) => {
-                let _ = reply.send(settle(store.read_status(&transaction_id)));
-            }
-            StoreCommand::ReadRecord(transaction_id, reply) => {
-                let _ = reply.send(settle(store.read_record(&transaction_id)));
-            }
-            StoreCommand::ReadReceipt(transaction_id, reply) => {
-                let _ = reply.send(settle(store.read_receipt(&transaction_id)));
-            }
-            StoreCommand::ReadReceiptByDigest(receipt_digest, reply) => {
-                let _ = reply.send(settle(store.read_receipt_by_digest(&receipt_digest)));
-            }
-            StoreCommand::CompareAndSwapStatus(
-                transaction_id,
-                expected_phase_revision,
-                replacement,
-                reply,
-            ) => {
-                let _ = reply.send(settle(store.compare_and_swap_status(
-                    &transaction_id,
-                    expected_phase_revision,
-                    *replacement,
-                )));
-            }
-            StoreCommand::WriteTerminal(
-                transaction_id,
-                expected_phase_revision,
-                receipt,
-                reply,
-            ) => {
-                let _ = reply.send(settle(store.write_terminal(
-                    &transaction_id,
-                    expected_phase_revision,
-                    *receipt,
-                )));
-            }
-            StoreCommand::PendingTransactions(repository_id, reply) => {
-                let _ = reply.send(settle(store.pending_transactions(repository_id.as_ref())));
-            }
-            StoreCommand::LiveCandidateGenerationBindings(repository_id, observed_at, reply) => {
-                let _ = reply.send(settle(
-                    store.live_candidate_generation_bindings(&repository_id, observed_at),
-                ));
-            }
-            StoreCommand::ApprovalConsumed(approval_id, reply) => {
-                let _ = reply.send(settle(store.approval_consumed(&approval_id)));
-            }
-            StoreCommand::QuarantineRepository(repository_id, transaction_id, reply) => {
-                let _ = reply.send(settle(
-                    store.quarantine_repository(&repository_id, &transaction_id),
-                ));
-            }
-            StoreCommand::BeginWorktreeCleanup(transaction, reply) => {
-                let _ = reply.send(settle(store.begin_worktree_cleanup(*transaction)));
-            }
-            StoreCommand::ReadWorktreeCleanup(confirmation_digest, reply) => {
-                let _ = reply.send(settle(store.read_worktree_cleanup(&confirmation_digest)));
-            }
-            StoreCommand::PendingWorktreeCleanups(repository_id, limit, reply) => {
-                let _ = reply.send(settle(
-                    store.pending_worktree_cleanups(&repository_id, limit),
-                ));
-            }
-            StoreCommand::CompareAndSwapWorktreeCleanup(
-                confirmation_digest,
-                expected_phase_revision,
-                replacement,
-                reply,
-            ) => {
-                let _ = reply.send(settle(store.compare_and_swap_worktree_cleanup(
-                    &confirmation_digest,
-                    expected_phase_revision,
-                    *replacement,
-                )));
-            }
-            StoreCommand::WriteWorktreeCleanupTerminal(
-                confirmation_digest,
-                expected_phase_revision,
-                receipt,
-                reply,
-            ) => {
-                let _ = reply.send(settle(store.write_worktree_cleanup_terminal(
-                    &confirmation_digest,
-                    expected_phase_revision,
-                    *receipt,
-                )));
-            }
+    use super::*;
+
+    fn approval(approval_id: &str) -> NativeIntegrationApprovalV1 {
+        NativeIntegrationApprovalV1 {
+            approval_id: NativeIntegrationApprovalId::new(approval_id).expect("approval id"),
+            preview_id: NativeIntegrationPreviewId::new("preview.native-store").expect("preview"),
+            preview_digest: digest('1'),
+            principal: ActorId::new("actor.native-store").expect("principal"),
+            delegated_agent: None,
+            capability: CapabilityId::new("capability.git.native-integration-apply")
+                .expect("capability"),
+            grant_digest: digest('2'),
+            issued_at: UtcMicros(1),
+            expires_at: UtcMicros(2_000_000),
+            approval_digest: digest('3'),
         }
-    }
-}
-
-/// Cloneable handle over the one retained store actor for a project database.
-#[derive(Clone)]
-pub struct SharedDaemonNativeIntegrationStore {
-    inner: Arc<DaemonNativeIntegrationStore>,
-}
-
-impl SharedDaemonNativeIntegrationStore {
-    pub(crate) fn from_arc(inner: Arc<DaemonNativeIntegrationStore>) -> Self {
-        Self { inner }
+        .seal()
+        .expect("sealed approval")
     }
 
-    pub(crate) fn shutdown(&self) -> NativeIntegrationStoreResult<bool> {
-        self.inner.shutdown()
+    #[tokio::test]
+    async fn store_awaited_on_a_native_worker_never_parks_it() {
+        let database = RegisteredGlobalDbHarness::open("native-integration-native-worker").await;
+        let registered = database.registered.clone();
+        let writer_waits = native_runtime::native_thread_writer_waits();
+        let reader_waits = native_runtime::native_thread_reader_waits();
+
+        let task = NativeTask::spawn(async move {
+            assert!(
+                native_runtime::Runtime::current_handle().is_some(),
+                "the store must be awaited on a native worker"
+            );
+            let store = DaemonNativeIntegrationStore::open(registered);
+            let approval = approval("approval.native-store.worker");
+            store.save_approval(approval.clone()).await?;
+            let read = store.read_approval(&approval.approval_id).await;
+            store.shutdown();
+            read.map(|read| (read, approval))
+        })
+        .expect("native task admitted");
+
+        let NativeTaskOutcome::Completed(read) = task.wait().await else {
+            panic!("store task did not complete");
+        };
+        let (read, approval) = read.expect("store calls settle on a native worker");
+        assert_eq!(read, Some(approval));
+        assert_eq!(
+            native_runtime::native_thread_writer_waits(),
+            writer_waits,
+            "no writer wait parked a native worker"
+        );
+        assert_eq!(
+            native_runtime::native_thread_reader_waits(),
+            reader_waits,
+            "no reader wait parked a native worker"
+        );
     }
 
-    pub fn save_approval(
-        &self,
-        approval: NativeIntegrationApprovalV1,
-    ) -> NativeIntegrationStoreResult<()> {
-        self.inner.save_approval(approval)
-    }
+    #[tokio::test]
+    async fn shutdown_closes_every_clone_once_and_fails_later_calls_closed() {
+        let database = RegisteredGlobalDbHarness::open("native-integration-shutdown").await;
+        let store = DaemonNativeIntegrationStore::open(database.registered.clone());
+        let clone = store.clone();
+        let approval = approval("approval.native-store.shutdown");
+        clone
+            .save_approval(approval.clone())
+            .await
+            .expect("open store accepts writes");
 
-    pub fn read_approval(
-        &self,
-        approval_id: &NativeIntegrationApprovalId,
-    ) -> NativeIntegrationStoreResult<Option<NativeIntegrationApprovalV1>> {
-        self.inner.read_approval(approval_id)
-    }
-
-    pub fn read_preview_by_digest(
-        &self,
-        preview_digest: &ManifestDigest,
-    ) -> NativeIntegrationStoreResult<Option<NativeIntegrationPreviewV1>> {
-        self.inner.read_preview_by_digest(preview_digest)
-    }
-
-    pub fn read_receipt_by_digest(
-        &self,
-        receipt_digest: &ManifestDigest,
-    ) -> NativeIntegrationStoreResult<Option<NativeIntegrationReceiptV1>> {
-        self.inner.read_receipt_by_digest(receipt_digest)
-    }
-}
-
-impl NativeIntegrationStore for SharedDaemonNativeIntegrationStore {
-    fn save_preview(
-        &self,
-        preview: NativeIntegrationPreviewV1,
-    ) -> NativeIntegrationStoreResult<()> {
-        self.inner.save_preview(preview)
-    }
-
-    fn read_preview(
-        &self,
-        preview_id: &NativeIntegrationPreviewId,
-    ) -> NativeIntegrationStoreResult<Option<NativeIntegrationPreviewV1>> {
-        self.inner.read_preview(preview_id)
-    }
-
-    fn begin_or_replay(
-        &self,
-        record: NativeIntegrationRecordV1,
-    ) -> NativeIntegrationStoreResult<NativeIntegrationBeginResultV1> {
-        self.inner.begin_or_replay(record)
-    }
-
-    fn read_status(
-        &self,
-        transaction_id: &NativeIntegrationTransactionId,
-    ) -> NativeIntegrationStoreResult<Option<NativeIntegrationTransactionStatusV1>> {
-        self.inner.read_status(transaction_id)
-    }
-
-    fn read_record(
-        &self,
-        transaction_id: &NativeIntegrationTransactionId,
-    ) -> NativeIntegrationStoreResult<Option<NativeIntegrationRecordV1>> {
-        self.inner.read_record(transaction_id)
-    }
-
-    fn read_receipt(
-        &self,
-        transaction_id: &NativeIntegrationTransactionId,
-    ) -> NativeIntegrationStoreResult<Option<NativeIntegrationReceiptV1>> {
-        self.inner.read_receipt(transaction_id)
-    }
-
-    fn compare_and_swap_status(
-        &self,
-        transaction_id: &NativeIntegrationTransactionId,
-        expected_phase_revision: u64,
-        replacement: NativeIntegrationTransactionStatusV1,
-    ) -> NativeIntegrationStoreResult<NativeIntegrationTransactionStatusV1> {
-        self.inner
-            .compare_and_swap_status(transaction_id, expected_phase_revision, replacement)
-    }
-
-    fn write_terminal(
-        &self,
-        transaction_id: &NativeIntegrationTransactionId,
-        expected_phase_revision: u64,
-        receipt: NativeIntegrationReceiptV1,
-    ) -> NativeIntegrationStoreResult<NativeIntegrationReceiptV1> {
-        self.inner
-            .write_terminal(transaction_id, expected_phase_revision, receipt)
-    }
-
-    fn pending_transactions(
-        &self,
-        repository_id: Option<&RepositoryId>,
-    ) -> NativeIntegrationStoreResult<Vec<NativeIntegrationRecordV1>> {
-        self.inner.pending_transactions(repository_id)
-    }
-
-    fn live_candidate_generation_bindings(
-        &self,
-        repository_id: &RepositoryId,
-        observed_at: UtcMicros,
-    ) -> NativeIntegrationStoreResult<Vec<CodeGenerationId>> {
-        self.inner
-            .live_candidate_generation_bindings(repository_id, observed_at)
-    }
-
-    fn approval_consumed(
-        &self,
-        approval_id: &NativeIntegrationApprovalId,
-    ) -> NativeIntegrationStoreResult<bool> {
-        self.inner.approval_consumed(approval_id)
-    }
-
-    fn quarantine_repository(
-        &self,
-        repository_id: &RepositoryId,
-        transaction_id: &NativeIntegrationTransactionId,
-    ) -> NativeIntegrationStoreResult<()> {
-        self.inner
-            .quarantine_repository(repository_id, transaction_id)
-    }
-
-    fn begin_worktree_cleanup(
-        &self,
-        transaction: NativeWorktreeCleanupTransactionV1,
-    ) -> NativeIntegrationStoreResult<NativeWorktreeCleanupBeginResultV1> {
-        self.inner.begin_worktree_cleanup(transaction)
-    }
-
-    fn read_worktree_cleanup(
-        &self,
-        confirmation_digest: &ManifestDigest,
-    ) -> NativeIntegrationStoreResult<Option<NativeWorktreeCleanupTransactionV1>> {
-        self.inner.read_worktree_cleanup(confirmation_digest)
-    }
-
-    fn pending_worktree_cleanups(
-        &self,
-        repository_id: &RepositoryId,
-        limit: u32,
-    ) -> NativeIntegrationStoreResult<Vec<NativeWorktreeCleanupTransactionV1>> {
-        self.inner.pending_worktree_cleanups(repository_id, limit)
-    }
-
-    fn compare_and_swap_worktree_cleanup(
-        &self,
-        confirmation_digest: &ManifestDigest,
-        expected_phase_revision: u64,
-        replacement: NativeWorktreeCleanupTransactionV1,
-    ) -> NativeIntegrationStoreResult<NativeWorktreeCleanupTransactionV1> {
-        self.inner.compare_and_swap_worktree_cleanup(
-            confirmation_digest,
-            expected_phase_revision,
-            replacement,
-        )
-    }
-
-    fn write_worktree_cleanup_terminal(
-        &self,
-        confirmation_digest: &ManifestDigest,
-        expected_phase_revision: u64,
-        receipt: NativeWorktreeCleanupReceiptV1,
-    ) -> NativeIntegrationStoreResult<NativeWorktreeCleanupReceiptV1> {
-        self.inner.write_worktree_cleanup_terminal(
-            confirmation_digest,
-            expected_phase_revision,
-            receipt,
-        )
+        assert!(store.shutdown(), "the first shutdown closes the store");
+        assert!(!clone.shutdown(), "a clone shares the one closed lease");
+        assert!(matches!(
+            clone.read_approval(&approval.approval_id).await,
+            Err(NativeIntegrationStoreError::Unavailable(reason)) if reason.contains("shut down")
+        ));
+        assert!(matches!(
+            clone.pending_transactions(None).await,
+            Err(NativeIntegrationStoreError::Unavailable(_))
+        ));
     }
 }

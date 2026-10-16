@@ -521,14 +521,14 @@ pub trait NativeWorktreePort: Send + Sync {
         request: &WorktreeCleanupRemoveRequestV1,
         scope_set: &AuthorizedScopeSet,
         cancellation: &CancellationSignal,
-    ) -> Result<WorktreeCleanupRemovalV1, WorktreeContractError>;
+    ) -> impl Future<Output = Result<WorktreeCleanupRemovalV1, WorktreeContractError>> + Send;
 
     fn reconcile(
         &self,
         request: &WorktreeCleanupReconcileRequestV1,
         scope_set: &AuthorizedScopeSet,
         cancellation: &CancellationSignal,
-    ) -> Result<WorktreeCleanupReconciliationV1, WorktreeContractError>;
+    ) -> impl Future<Output = Result<WorktreeCleanupReconciliationV1, WorktreeContractError>> + Send;
 }
 
 /// Application service that makes persisted scope-set identity the sole
@@ -612,25 +612,25 @@ where
     }
 
     #[tracing::instrument(name = "application.git.worktree.remove", level = "trace", skip_all)]
-    pub fn remove(
+    pub async fn remove(
         &self,
         request: &WorktreeCleanupRemoveRequestV1,
         cancellation: &CancellationSignal,
     ) -> Result<WorktreeCleanupRemovalV1, WorktreeContractError> {
         request.validate()?;
         let scope_set = self.authorize(&request.binding())?;
-        self.port.remove(request, &scope_set, cancellation)
+        self.port.remove(request, &scope_set, cancellation).await
     }
 
     #[tracing::instrument(name = "application.git.worktree.reconcile", level = "trace", skip_all)]
-    pub fn reconcile(
+    pub async fn reconcile(
         &self,
         request: &WorktreeCleanupReconcileRequestV1,
         cancellation: &CancellationSignal,
     ) -> Result<WorktreeCleanupReconciliationV1, WorktreeContractError> {
         request.validate()?;
         let scope_set = self.authorize(&request.binding())?;
-        self.port.reconcile(request, &scope_set, cancellation)
+        self.port.reconcile(request, &scope_set, cancellation).await
     }
 }
 

@@ -32,7 +32,7 @@ use crate::work::{
 /// running the job.
 #[derive(Clone, Copy)]
 pub struct WorkSqliteJobStorage<'job> {
-    transaction: &'job ExactSqlJobTransaction<'job>,
+    pub(crate) transaction: &'job ExactSqlJobTransaction<'job>,
 }
 
 impl WorkSqliteStorage {

@@ -1482,6 +1482,46 @@ mod recent_first_discovery_tests {
         assert!(released.has_changed());
     }
 
+    /// An idle scan one consumer ran is queued for every other consumer. A
+    /// consumer polling after a rollout grew must see that growth, not the
+    /// empty pass a scan from before the growth left in its queue.
+    #[tokio::test]
+    async fn a_poll_after_growth_is_not_answered_by_an_earlier_empty_scan() {
+        crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let rollout = write_dated_rollout(home, ("2026", "08", "23"), "streamed");
+        let hub = CodexDiscoveryHub::default();
+        hub.register("profile", Some(home));
+        hub.register("project", Some(home));
+        let source = CodexSource::with_home(home);
+        let bounds = TranscriptDiscoveryBounds::from_discovered_units(128);
+        let initial = CodexDiscoveryFrontier::initial();
+
+        let (project_paths, converged) =
+            drain_hub_consumer(&hub, "project", &source, bounds, initial).await;
+        assert_eq!(project_paths, vec![rollout.clone()]);
+        let (profile_paths, _) =
+            drain_hub_consumer(&hub, "profile", &source, bounds, initial).await;
+        assert_eq!(profile_paths, vec![rollout.clone()]);
+        let (idle_paths, _) = drain_hub_consumer(&hub, "profile", &source, bounds, converged).await;
+        assert!(idle_paths.is_empty(), "nothing changed before the growth");
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&rollout)
+            .unwrap();
+        std::io::Write::write_all(&mut file, b"{}\n").unwrap();
+        drop(file);
+        spin_until_jsonl_change_settled(&rollout);
+
+        let (grown, _) = drain_hub_consumer(&hub, "project", &source, bounds, converged).await;
+        assert!(
+            grown.contains(&rollout),
+            "the grown rollout must be rediscovered: {grown:?}"
+        );
+    }
+
     #[tokio::test]
     async fn unacknowledged_budget_delivery_reuses_the_exact_immutable_generation() {
         crate::runtime::jsonl_observation_admission::install_test_shared_jsonl_preparation_authority();
