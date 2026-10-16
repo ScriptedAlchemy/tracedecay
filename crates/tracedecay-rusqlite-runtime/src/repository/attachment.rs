@@ -540,10 +540,14 @@ impl RepositoryRuntimePhysicalAttachment {
             .map_err(|error| RepositoryDispatchError::Writer(error.to_string()))
     }
 
-    pub fn dispatch_read(
+    /// Runs one typed read as a job on the blocking pool, so the awaiting
+    /// task's thread never parks on reader admission or a reader reply. The
+    /// probe bounds the job: its deadline or cancellation interrupts the
+    /// reader connection.
+    pub async fn dispatch_read(
         &self,
         request: RuntimeReadRequestV1,
-        probe: &dyn RuntimeRequestProbeV1,
+        probe: Arc<dyn RuntimeRequestProbeV1>,
     ) -> Result<RuntimeReadOutcomeV1, RepositoryDispatchError> {
         let readers = {
             let state = self.lock_state();
@@ -555,15 +559,19 @@ impl RepositoryRuntimePhysicalAttachment {
                 .clone()
                 .ok_or(RepositoryDispatchError::Closed)?
         };
-        let mut reader = readers
-            .acquire_for_dispatch(&request, probe)
-            .map_err(RepositoryDispatchError::Reader)?;
-        let mut snapshot = reader
-            .begin_snapshot()
-            .map_err(|error| RepositoryDispatchError::ReaderWorker(error.to_string()))?;
-        snapshot
-            .execute(request, probe)
-            .map_err(RepositoryDispatchError::Reader)
+        crate::native_runtime::spawn_blocking(move || {
+            let mut reader = readers
+                .acquire_for_dispatch(&request, probe.as_ref())
+                .map_err(RepositoryDispatchError::Reader)?;
+            let mut snapshot = reader
+                .begin_snapshot()
+                .map_err(|error| RepositoryDispatchError::ReaderWorker(error.to_string()))?;
+            snapshot
+                .execute(request, probe.as_ref())
+                .map_err(RepositoryDispatchError::Reader)
+        })
+        .await
+        .map_err(RepositoryDispatchError::ReaderWorker)?
     }
 
     #[tracing::instrument(name = "rusqlite.attachment.drain", level = "trace", skip_all)]

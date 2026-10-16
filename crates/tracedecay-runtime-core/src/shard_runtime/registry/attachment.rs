@@ -180,12 +180,20 @@ pub trait PhysicalRuntimeAttachment: Send + Sync {
     fn dispatch_read(
         &self,
         request: RuntimeReadRequestV1,
-        probe: &dyn RuntimeRequestProbeV1,
-    ) -> Result<RuntimeReadOutcomeV1, StoreRuntimeRegistryFailure> {
+        probe: Arc<dyn RuntimeRequestProbeV1>,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<RuntimeReadOutcomeV1, StoreRuntimeRegistryFailure>>
+                + Send
+                + '_,
+        >,
+    > {
         let _ = (request, probe);
-        Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-            operation: "dispatch read",
-            message: "physical runtime has no read data port".to_owned(),
+        Box::pin(async {
+            Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "dispatch read",
+                message: "physical runtime has no read data port".to_owned(),
+            })
         })
     }
 }

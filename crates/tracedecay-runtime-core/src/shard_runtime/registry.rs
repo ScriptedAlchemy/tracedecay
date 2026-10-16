@@ -1114,10 +1114,10 @@ impl StoreRuntimeClientLease {
         self.inner.validate_opened_file_identity(operation)
     }
 
-    pub fn dispatch_read(
+    pub async fn dispatch_read(
         &self,
         request: tracedecay_store::RuntimeReadRequestV1,
-        probe: &dyn tracedecay_store::RuntimeRequestProbeV1,
+        probe: Arc<dyn tracedecay_store::RuntimeRequestProbeV1>,
     ) -> Result<tracedecay_store::RuntimeReadOutcomeV1, StoreRuntimeRegistryFailure> {
         if request.binding() != self.binding() {
             return Err(StoreRuntimeRegistryFailure::RuntimeBindingMismatch {
@@ -1126,7 +1126,7 @@ impl StoreRuntimeClientLease {
             });
         }
         self.validate_opened_file_identity("authorize registered runtime read")?;
-        self.inner.attachment.dispatch_read(request, probe)
+        self.inner.attachment.dispatch_read(request, probe).await
     }
 }
 

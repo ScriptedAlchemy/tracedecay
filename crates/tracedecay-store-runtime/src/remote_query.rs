@@ -120,7 +120,7 @@ impl RemoteExactObservationQueryReadPortV1 for DaemonRemoteExactObservationQuery
             .and_then(|micros| u64::try_from(micros).ok())
             .ok_or(RemoteExactObservationQueryErrorV1::DeadlineElapsed)?;
         let started = Instant::now();
-        let probe = QueryProbe {
+        let probe = Arc::new(QueryProbe {
             cancellation: control.cancellation,
             deadline: control.deadline,
             started,
@@ -132,10 +132,15 @@ impl RemoteExactObservationQueryReadPortV1 for DaemonRemoteExactObservationQuery
             ),
             decision: Mutex::new(None),
             commit_started: AtomicBool::new(false),
-        };
-        let outcome = target
-            .dispatch_read(request.clone(), &probe)
-            .map_err(|_| RemoteExactObservationQueryErrorV1::AuthorityUnavailable)?;
+        });
+        // The remote protocol ports are synchronous and run on the blocking
+        // pool (`tracedecay-api` remote routes), where `block_on` may wait; it
+        // refuses on a native runtime thread.
+        let outcome = tracedecay_runtime_core::native_runtime::block_on(
+            target.dispatch_read(request.clone(), probe),
+        )
+        .map_err(|_| RemoteExactObservationQueryErrorV1::AuthorityUnavailable)?
+        .map_err(|_| RemoteExactObservationQueryErrorV1::AuthorityUnavailable)?;
         outcome
             .validate_for(&request)
             .map_err(|_| RemoteExactObservationQueryErrorV1::ReceiptMismatch)?;

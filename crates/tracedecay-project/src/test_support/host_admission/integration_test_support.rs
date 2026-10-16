@@ -279,7 +279,7 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    pub fn external_source_receipt_for_test(
+    pub async fn external_source_receipt_for_test(
         &self,
         scope: HostAdmissionScope,
         observation: &tracedecay_store::ObservationCommitReceipt,
@@ -307,9 +307,12 @@ impl HostAdmissionTestRuntimeV1 {
                 idempotency_key,
             },
         )?;
-        let probe = ExternalSourceRuntimeReadProbe::from_control(request.control());
+        let probe = std::sync::Arc::new(ExternalSourceRuntimeReadProbe::from_control(
+            request.control(),
+        ));
         let outcome = runtime
-            .dispatch_read(request, &probe)
+            .dispatch_read(request, probe)
+            .await
             .map_err(|_| external_source_read_failed("runtime read dispatch failed"))?;
         if !matches!(
             outcome.coverage(),

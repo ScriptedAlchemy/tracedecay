@@ -165,7 +165,7 @@ impl FactStore for DatabaseFactStore<'_> {
         query: FactCurrentQuery,
     ) -> FactStoreResult<Option<StoredFactV1>> {
         if let Some(runtime) = runtime::retained_fact_runtime(self.db)? {
-            return runtime::query_fact_current(&runtime, query);
+            return runtime::query_fact_current(&runtime, query).await;
         }
         let snapshot = self
             .db
@@ -186,7 +186,7 @@ impl FactStore for DatabaseFactStore<'_> {
             // measured from the retained client with the database's exact
             // binding and verified locator, rather than reported as constants
             // that no read ever observed.
-            let fact = runtime::query_fact_current(&runtime, query.clone())?;
+            let fact = runtime::query_fact_current(&runtime, query.clone()).await?;
             let snapshot = self
                 .db
                 .begin_memory_read_transaction(QUERY_OPERATION)
@@ -239,7 +239,7 @@ impl FactStore for DatabaseFactStore<'_> {
         query: FactLineageQuery,
     ) -> FactStoreResult<Vec<FactLineageEventV1>> {
         if let Some(runtime) = runtime::retained_fact_runtime(self.db)? {
-            return runtime::query_fact_lineage(&runtime, query);
+            return runtime::query_fact_lineage(&runtime, query).await;
         }
         let snapshot = self
             .db
@@ -263,7 +263,7 @@ impl FactStore for DatabaseFactStore<'_> {
             // As in `query_fact_current_response`: the runtime answers the
             // lineage page, and the accompanying coverage and contradiction are
             // measured from the retained authority rather than fabricated.
-            let events = runtime::query_fact_lineage(&runtime, query.clone())?;
+            let events = runtime::query_fact_lineage(&runtime, query.clone()).await?;
             let snapshot = self
                 .db
                 .begin_memory_read_transaction(QUERY_OPERATION)

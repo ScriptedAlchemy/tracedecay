@@ -777,10 +777,11 @@ impl RuntimeExternalSourceStore {
             runtime_control(suffix, runtime_now()?)?,
         )
         .map_err(invalid)?;
-        let probe = ExternalSourceRuntimeProbe::from_control(request.control());
+        let probe = Arc::new(ExternalSourceRuntimeProbe::from_control(request.control()));
         let outcome = self
             .runtime
-            .dispatch_read(request, &probe)
+            .dispatch_read(request, probe)
+            .await
             .map_err(|failure| dispatch_error("host observation", failure))?;
         if !matches!(
             outcome.coverage(),
@@ -815,10 +816,11 @@ impl RuntimeExternalSourceStore {
             idempotency_key,
         };
         let request = runtime_read_request(self.runtime.binding(), operation)?;
-        let probe = ExternalSourceRuntimeProbe::from_control(request.control());
+        let probe = Arc::new(ExternalSourceRuntimeProbe::from_control(request.control()));
         let outcome = self
             .runtime
-            .dispatch_read(request, &probe)
+            .dispatch_read(request, probe)
+            .await
             .map_err(|failure| dispatch_error("commit receipt", failure))?;
         if !matches!(
             outcome.coverage(),
@@ -843,10 +845,11 @@ impl RuntimeExternalSourceStore {
     ) -> Result<Option<SourcePendingProjectionV1>, RuntimeExternalSourceErrorV1> {
         let operation = ExternalSourceReadOperationV1::NextPendingProjection { binding };
         let request = runtime_read_request(self.runtime.binding(), operation)?;
-        let probe = ExternalSourceRuntimeProbe::from_control(request.control());
+        let probe = Arc::new(ExternalSourceRuntimeProbe::from_control(request.control()));
         let outcome = self
             .runtime
-            .dispatch_read(request, &probe)
+            .dispatch_read(request, probe)
+            .await
             .map_err(|failure| dispatch_error("pending projection", failure))?;
         if !matches!(
             outcome.coverage(),
@@ -908,10 +911,11 @@ impl RuntimeExternalSourceStore {
     ) -> Result<Option<SourceStoreStateV1>, RuntimeExternalSourceErrorV1> {
         let operation = ExternalSourceReadOperationV1::State { binding, objects };
         let request = runtime_read_request(self.runtime.binding(), operation)?;
-        let probe = ExternalSourceRuntimeProbe::from_control(request.control());
+        let probe = Arc::new(ExternalSourceRuntimeProbe::from_control(request.control()));
         let outcome = self
             .runtime
-            .dispatch_read(request, &probe)
+            .dispatch_read(request, probe)
+            .await
             .map_err(|failure| dispatch_error("source state", failure))?;
         if !matches!(
             outcome.coverage(),
