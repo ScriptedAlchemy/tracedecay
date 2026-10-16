@@ -1004,3 +1004,39 @@ async fn historical_ingest_commits_every_record_on_one_worker() {
     assert_eq!(second.observations_committed, 0);
     assert_eq!(fixture.admission.observations().len(), SESSIONS * RECORDS);
 }
+
+#[tokio::test]
+async fn same_stem_transcripts_in_two_projects_keep_separate_cursors() {
+    let fixture = Fixture::new("shared-stem");
+    let other = fixture
+        .home
+        .join(".claude/projects/other-project/shared-stem.jsonl");
+    fs::create_dir_all(other.parent().unwrap()).unwrap();
+    for (path, uuid) in [(&fixture.transcript, "first-copy"), (&other, "second-copy")] {
+        let record = json!({
+            "type": "user",
+            "sessionId": "shared-stem",
+            "uuid": uuid,
+            "timestamp": "2026-07-15T00:00:00Z",
+            "cwd": fixture.temp.path(),
+            "message": {"role": "user", "content": format!("{uuid} body")}
+        });
+        fs::write(path, format!("{record}\n")).unwrap();
+    }
+    let source = fixture.source("shared-stem");
+
+    let first = fixture
+        .ingest(&source, None, ObservationCancellation::default())
+        .await
+        .expect("first pass over two same-stem transcripts");
+    assert_eq!(first.observations_committed, 2);
+
+    let second = fixture
+        .ingest(&source, None, ObservationCancellation::default())
+        .await
+        .expect("an unchanged second pass must not fight over one cursor");
+    assert_eq!(second.observations_committed, 0);
+    assert_eq!(second.cursor_advances, 0);
+    assert_eq!(second.source_bytes_scanned, 0);
+    assert_eq!(fixture.admission.observations().len(), 2);
+}
