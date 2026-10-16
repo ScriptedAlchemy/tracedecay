@@ -327,6 +327,68 @@ struct CachedStoreTelemetryPort {
     scope: ResolvedScope,
     store: StoreKeyV1,
     port: GuardedStoreTelemetryPort,
+    /// The file the store path named when the port was mounted; `None` when
+    /// it could not be read then.
+    file_identity: Option<StoreFileIdentityV1>,
+}
+
+/// Whether a mounted store path still names the file the daemon opened.
+///
+/// A store deleted or replaced while the daemon holds it open keeps taking
+/// writes into the unlinked inode: no size census sees them and the space is
+/// never freed until the daemon closes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StoreFileIdentityStateV1 {
+    Current,
+    Missing,
+    Replaced,
+    Unverifiable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StoreFileIdentityV1 {
+    device: u64,
+    file: u64,
+}
+
+#[cfg(unix)]
+fn store_file_identity(path: &Path) -> std::io::Result<StoreFileIdentityV1> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = std::fs::metadata(path)?;
+    Ok(StoreFileIdentityV1 {
+        device: metadata.dev(),
+        file: metadata.ino(),
+    })
+}
+
+#[cfg(windows)]
+fn store_file_identity(path: &Path) -> std::io::Result<StoreFileIdentityV1> {
+    let information =
+        tracedecay_private_fs::windows_file::information(&std::fs::File::open(path)?)?;
+    Ok(StoreFileIdentityV1 {
+        device: u64::from(information.volume_serial_number),
+        file: information.file_index,
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn store_file_identity(_path: &Path) -> std::io::Result<StoreFileIdentityV1> {
+    Err(std::io::ErrorKind::Unsupported.into())
+}
+
+fn store_file_identity_state(
+    path: &Path,
+    mounted: Option<StoreFileIdentityV1>,
+) -> StoreFileIdentityStateV1 {
+    match (mounted, store_file_identity(path)) {
+        (_, Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            StoreFileIdentityStateV1::Missing
+        }
+        (None, _) | (_, Err(_)) => StoreFileIdentityStateV1::Unverifiable,
+        (Some(mounted), Ok(current)) if mounted == current => StoreFileIdentityStateV1::Current,
+        (Some(_), Ok(_)) => StoreFileIdentityStateV1::Replaced,
+    }
 }
 
 /// Daemon-owned table-growth baseline authority shared by maintenance and
@@ -413,6 +475,7 @@ impl StoreTelemetrySamplingRegistry {
             cached.scope = scope.clone();
             cached.store = store;
             cached.port = cached.port.rebind(handle, scope.clone());
+            cached.file_identity = store_file_identity(path).ok();
             return true;
         }
         let persisted = self
@@ -434,9 +497,30 @@ impl StoreTelemetrySamplingRegistry {
                 scope: scope.clone(),
                 store,
                 port,
+                file_identity: store_file_identity(path).ok(),
             },
         );
         true
+    }
+
+    /// Stat every mounted store path now and compare it with the file mounted
+    /// there: one `stat` per store.
+    #[must_use]
+    pub fn check_store_identities(&self) -> Vec<(PathBuf, StoreFileIdentityStateV1)> {
+        let mounted: Vec<_> = self
+            .ports
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|(path, cached)| (path.clone(), cached.file_identity))
+            .collect();
+        mounted
+            .into_iter()
+            .map(|(path, identity)| {
+                let state = store_file_identity_state(&path, identity);
+                (path, state)
+            })
+            .collect()
     }
 
     pub fn registered_port(
@@ -1003,6 +1087,66 @@ mod table_growth_restart_tests {
             samples
                 .iter()
                 .all(|sample| sample.previous_observed_at == observed_at)
+        );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod store_file_identity_tests {
+    use std::path::{Path, PathBuf};
+
+    use super::{StoreFileIdentityStateV1, StoreTelemetrySamplingRegistry};
+
+    fn state_of(
+        registry: &StoreTelemetrySamplingRegistry,
+        path: &Path,
+    ) -> Vec<(PathBuf, StoreFileIdentityStateV1)> {
+        registry
+            .check_store_identities()
+            .into_iter()
+            .filter(|(checked, _)| checked == path)
+            .collect()
+    }
+
+    #[asupersync::test]
+    async fn a_mounted_store_path_reports_replacement_and_removal() {
+        let temporary = tempfile::tempdir().expect("identity fixture root");
+        let database_path = temporary.path().join("project.db");
+        let (database, scope) = super::table_growth_tests::growth_fixture(&database_path).await;
+        let registry = StoreTelemetrySamplingRegistry::default();
+        assert!(registry.register_port(&database_path, &scope, || {
+            database.storage_telemetry_handle()
+        }));
+        assert_eq!(
+            state_of(&registry, &database_path),
+            [(database_path.clone(), StoreFileIdentityStateV1::Current)]
+        );
+
+        let replacement = temporary.path().join("replacement.db");
+        std::fs::write(&replacement, b"replacement").expect("replacement file");
+        std::fs::rename(&replacement, &database_path).expect("rename over the store");
+        assert_eq!(
+            state_of(&registry, &database_path),
+            [(database_path.clone(), StoreFileIdentityStateV1::Replaced)]
+        );
+
+        // Profile-wide stores rebind on every project open; the held database
+        // refuses to issue a reader over the replacement, so the port keeps
+        // the identity it mounted.
+        registry.register_port(&database_path, &scope, || {
+            database.storage_telemetry_handle()
+        });
+        assert_eq!(
+            state_of(&registry, &database_path),
+            [(database_path.clone(), StoreFileIdentityStateV1::Replaced)],
+            "a rebind through the held handle must not adopt the replacement"
+        );
+
+        std::fs::remove_file(&database_path).expect("remove the store file");
+        assert_eq!(
+            state_of(&registry, &database_path),
+            [(database_path.clone(), StoreFileIdentityStateV1::Missing)]
         );
     }
 }
