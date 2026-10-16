@@ -16,7 +16,7 @@ use tracedecay_agent_hosts::native_integration::DaemonNativeIntegrationOwner;
 /// payload: the daemon mints a context from the admitted project route and
 /// the runtime settles only that context actor's durable host-pending row.
 #[tracing::instrument(name = "daemon.service.github_stack.expand", level = "trace", skip_all)]
-pub(super) fn execute_github_stack_signal_expand(
+pub(super) async fn execute_github_stack_signal_expand(
     wire_request_id: String,
     registered: Option<RegisteredConfigurationRuntime>,
     owner: Option<DaemonNativeIntegrationOwner>,
@@ -63,7 +63,10 @@ pub(super) fn execute_github_stack_signal_expand(
             Ok(signal) => signal,
             Err(problem) => return application_problem(wire_request_id, problem),
         };
-    let result = match runtime.expand(request.into_application_request(context), &signal) {
+    let result = match runtime
+        .expand(request.into_application_request(context), &signal)
+        .await
+    {
         Ok(result) => result,
         Err(error) => error.into_surface_result(),
     };
