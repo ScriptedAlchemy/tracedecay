@@ -4,7 +4,8 @@
 //! module exposes owned values, never a SQLite connection or filesystem path.
 
 use std::{
-    sync::{Arc, atomic::AtomicBool, mpsc},
+    collections::BTreeMap,
+    sync::{Arc, Mutex, atomic::AtomicBool, mpsc},
     time::{Duration, Instant},
 };
 
@@ -110,25 +111,72 @@ pub struct ExactSqlHandle {
 /// `native_runtime::off_native_thread`, `NativeTask::spawn_off_native_thread`)
 /// or a dedicated thread. A wait on a native runtime thread (a worker or a
 /// `block_on` caller; its blocking pool carries no runtime handle) parks that
-/// thread and every task queued on it, so each one is logged and counted in
-/// [`native_thread_writer_waits`].
+/// thread and every task queued on it, so each one is counted in
+/// [`native_thread_writer_waits`] and the first at each call site is logged.
 #[track_caller]
 fn recv_writer_reply<T>(
     response: async_channel::Receiver<T>,
 ) -> Result<T, async_channel::RecvError> {
     if asupersync::runtime::Runtime::current_handle().is_some() {
         NATIVE_THREAD_WRITER_WAITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        tracing::error!(
-            call_site = %std::panic::Location::caller(),
-            backtrace = %std::backtrace::Backtrace::force_capture(),
-            "synchronous storage port parked a native runtime thread waiting on the writer"
-        );
+        if record_native_thread_wait("writer", std::panic::Location::caller()) {
+            tracing::warn!(
+                call_site = %std::panic::Location::caller(),
+                backtrace = %std::backtrace::Backtrace::force_capture(),
+                "synchronous storage port parked a native runtime thread waiting on the writer; later hits at this call site are counted only (native_thread_writer_waits)"
+            );
+        }
     }
     response.recv_blocking()
 }
 
 static NATIVE_THREAD_WRITER_WAITS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
+
+type WaitSiteKey = (&'static str, &'static std::panic::Location<'static>);
+
+static NATIVE_THREAD_WAIT_SITES: Mutex<BTreeMap<WaitSiteKey, u64>> = Mutex::new(BTreeMap::new());
+
+/// Counts one native-thread storage wait at its call site and reports whether
+/// it is the first there. Only that first hit is logged, so a hot site cannot
+/// flood the journal.
+fn record_native_thread_wait(
+    kind: &'static str,
+    site: &'static std::panic::Location<'static>,
+) -> bool {
+    let mut sites = NATIVE_THREAD_WAIT_SITES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let hits = sites.entry((kind, site)).or_insert(0);
+    *hits += 1;
+    *hits == 1
+}
+
+/// One call site that parked a native runtime thread on storage, with its hit
+/// count.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StorageWaitSite {
+    /// `"reader"` or `"writer"`.
+    pub kind: &'static str,
+    pub call_site: String,
+    pub hits: u64,
+}
+
+/// Per-call-site breakdown of [`native_thread_reader_waits`] and
+/// [`native_thread_writer_waits`].
+#[must_use]
+pub fn native_thread_storage_wait_sites() -> Vec<StorageWaitSite> {
+    NATIVE_THREAD_WAIT_SITES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .map(|((kind, site), hits)| StorageWaitSite {
+            kind,
+            call_site: site.to_string(),
+            hits: *hits,
+        })
+        .collect()
+}
 
 /// Synchronous writer waits this process ran on a native runtime thread. Each
 /// one parked that thread; zero is the only healthy value.
@@ -137,18 +185,20 @@ pub fn native_thread_writer_waits() -> u64 {
     NATIVE_THREAD_WRITER_WAITS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Logs and counts a synchronous read that is about to park a native runtime
+/// Counts a synchronous read that is about to park a native runtime
 /// thread on reader admission or a reader worker's reply, as
 /// `recv_writer_reply` does for writer waits.
 #[track_caller]
 pub(crate) fn note_native_thread_reader_wait() {
     if asupersync::runtime::Runtime::current_handle().is_some() {
         NATIVE_THREAD_READER_WAITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        tracing::error!(
-            call_site = %std::panic::Location::caller(),
-            backtrace = %std::backtrace::Backtrace::force_capture(),
-            "synchronous storage read parked a native runtime thread waiting on a reader"
-        );
+        if record_native_thread_wait("reader", std::panic::Location::caller()) {
+            tracing::warn!(
+                call_site = %std::panic::Location::caller(),
+                backtrace = %std::backtrace::Backtrace::force_capture(),
+                "synchronous storage read parked a native runtime thread waiting on a reader; later hits at this call site are counted only (native_thread_reader_waits)"
+            );
+        }
     }
 }
 
