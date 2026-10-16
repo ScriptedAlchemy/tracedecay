@@ -24,10 +24,11 @@ use super::apply::{
 };
 use super::state::{
     canonicalize_session_project_paths, consume_projection_queue_item, decode_observation_row,
-    decode_sequence, ensure_projection_output_state_cache, projected_stored_message,
-    projection_retry_state, queued_sequence, read_checkpoint, read_message, read_observation,
-    read_session, reaggregate_output_state_for_output, reconcile_session_rows_detailed,
-    schedule_projection_retry, storage, storage_message, stored_output_digest, write_checkpoint,
+    decode_sequence, discard_projection_output_state_cache, ensure_projection_output_state_cache,
+    projected_stored_message, projection_retry_state, queued_sequence, read_checkpoint,
+    read_message, read_observation, read_session, reaggregate_output_state_for_output,
+    reconcile_session_rows_detailed, schedule_projection_retry, storage, storage_message,
+    stored_output_digest, write_checkpoint,
 };
 use super::transition::{
     MessageTransition, MessageTransitionState, WorkflowFactTarget, WorkflowFactTransition,
@@ -113,6 +114,29 @@ fn records_transient_projection_retry(error: &ProjectionStoreError) -> bool {
     skip_all
 )]
 pub async fn project_observation(
+    database: &Database,
+    observation_id: &CanonicalObservationIdV1,
+) -> ProjectionStoreResult<ProjectionPersistOutcome> {
+    match project_observation_once(database, observation_id).await {
+        Err(error) if error.is_sqlite_disk_image_corrupt() => {
+            // The per-writer TEMP output-state cache can go corrupt while the
+            // file stays sound; that fault lives until the process restarts.
+            // Rebuild the cache and retry once. Corruption that survives is
+            // the real store and surfaces unchanged.
+            tracing::warn!(
+                error = %error.durable_detail(),
+                observation = observation_id.as_str(),
+                database = %database.database_path().display(),
+                "projection hit SQLite corruption; discarding the output state cache and retrying"
+            );
+            discard_projection_output_state_cache(database).await?;
+            project_observation_once(database, observation_id).await
+        }
+        result => result,
+    }
+}
+
+async fn project_observation_once(
     database: &Database,
     observation_id: &CanonicalObservationIdV1,
 ) -> ProjectionStoreResult<ProjectionPersistOutcome> {
