@@ -24,7 +24,9 @@ Codex.
   `hooks` field): `SessionStart`, `UserPromptSubmit`, `SubagentStart`,
   `PostToolUse`, `PostCompact`, and `Stop`. `SessionStart` and `PostToolUse`
   can return daemon-approved guidance through Codex's documented
-  `additionalContext` response. The other events are capture-only or bounded
+  `additionalContext` response. In a registered project, `SessionStart` leads
+  with the skill mandate from `plugin/hooks/session-start-context.md`, as on
+  Claude and Cursor. The other events are capture-only or bounded
   pressure probes. The daemon owns capture, preflight, compaction, and any
   model work.
 
