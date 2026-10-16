@@ -29,6 +29,18 @@ type CurrentCallableCodeAccess =
 const DAEMON_REQUESTER: &str = "actor.tracedecay-daemon.project-open";
 pub const GRANT_HORIZON: Duration = Duration::from_hours(24);
 
+/// The grant expiry of one request observed at `observed_at` under a mounted
+/// project-open owner. The owner's authority lasts as long as it is mounted,
+/// so the expiry is measured from each request: one fixed at registration
+/// would refuse every request from one horizon after the project opened.
+pub(crate) fn mounted_grant_expires_at(observed_at: UtcMicros) -> UtcMicros {
+    UtcMicros(
+        observed_at
+            .0
+            .saturating_add(i64::try_from(GRANT_HORIZON.as_micros()).unwrap_or(i64::MAX)),
+    )
+}
+
 pub fn project_open_source_access_authority()
 -> Result<ProjectOpenSourceAccessAuthorityV1, ApplicationContractError> {
     let requester = ActorId::new(DAEMON_REQUESTER.to_owned()).map_err(|_| {

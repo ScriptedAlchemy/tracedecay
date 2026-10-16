@@ -941,16 +941,16 @@ fn native_integration_authority(
     deadline: Deadline,
     cancellation: CancellationContext,
 ) -> Result<(RequestContext, AuthorityReceipt), ApplicationProblem> {
-    if observed_at >= registered.grants.expires_at {
-        return Err(ApplicationProblem::not_found_or_not_authorized(
-            RetryDirective::Never,
-        ));
-    }
     let invalid = invalid_native_integration_request;
     let application_operation = native_integration_surface_operation(operation.as_str())
         .map_err(|_| invalid())?
         .ok_or_else(invalid)?;
-    let expires_at = UtcMicros(deadline.expires_at.0.min(registered.grants.expires_at.0));
+    let expires_at = UtcMicros(
+        deadline
+            .expires_at
+            .0
+            .min(mounted_grant_expires_at(observed_at).0),
+    );
     // The grant digest is the grant *lineage* identity, deliberately stable
     // per (scope, policy revision) rather than per request or per operation:
     // the authorization port and the apply validator bind previews and

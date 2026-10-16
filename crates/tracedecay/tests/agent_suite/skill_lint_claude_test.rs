@@ -286,6 +286,52 @@ fn every_skill_is_a_slash_command_on_opencode() {
     }
 }
 
+/// The session-start mandate routes by skill name, so every backticked name it
+/// gives must be a bundled skill.
+#[test]
+fn session_start_mandate_names_only_bundled_skills() {
+    let mandate = std::fs::read_to_string(crate::plugin_validation_support::repo_path(
+        "plugin/hooks/session-start-context.md",
+    ))
+    .unwrap();
+    let bundled = load_all_skill_docs()
+        .into_iter()
+        .map(|skill| skill.name)
+        .collect::<Vec<_>>();
+    let named = mandate
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|token| is_kebab_case_skill_name(token))
+        .collect::<Vec<_>>();
+    assert!(
+        named.contains(&"routing-tracedecay"),
+        "the mandate must name the routing-tracedecay entry skill"
+    );
+    let unknown = named
+        .iter()
+        .filter(|name| !bundled.iter().any(|skill| skill == *name))
+        .collect::<Vec<_>>();
+    assert!(
+        unknown.is_empty(),
+        "plugin/hooks/session-start-context.md names skills that are not bundled: {unknown:?}"
+    );
+}
+
+/// Cursor's sessionStart context is best-effort, so its always-applied rule
+/// carries the mandate. One source keeps the two hosts' routing identical.
+#[test]
+fn cursor_rule_carries_the_skill_mandate() {
+    let read = |relative: &str| {
+        std::fs::read_to_string(crate::plugin_validation_support::repo_path(relative)).unwrap()
+    };
+    let mandate = read("plugin/hooks/session-start-context.md");
+    assert!(
+        read("plugin/rules/tracedecay.mdc").contains(mandate.trim_end()),
+        "plugin/rules/tracedecay.mdc must contain plugin/hooks/session-start-context.md verbatim"
+    );
+}
+
 /// Strict Agent Skills spec conformance.
 ///
 /// The whole shared skill set must stay strictly Agent-Skills-spec conformant:

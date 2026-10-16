@@ -11,6 +11,7 @@ use tracedecay_contracts::retrieval::HookRuntimeSurfaceRequestV1;
 use crate::ports::hook_runtime::HookRuntimeV1;
 
 use super::post_tool_use::is_post_tool_use_failure_event;
+use super::steering::session_start_context;
 use super::{
     additional_context_json, event_project_root_with_identity, read_hook_event,
     record_hook_invoked_parsed,
@@ -180,7 +181,7 @@ async fn claude_guidance_hook(runtime: &HookRuntimeV1, hook_name: &'static str) 
         &event,
         &parsed,
     );
-    let output = super::dispatch::dispatch_for_scope(
+    let guidance = super::dispatch::dispatch_for_scope(
         runtime,
         tracedecay_domain::NativeHostIdentityV1::ClaudeCode,
         &event,
@@ -190,8 +191,12 @@ async fn claude_guidance_hook(runtime: &HookRuntimeV1, hook_name: &'static str) 
     )
     .await
     .into_recorded_guidance(&hook_telemetry)
-    .flatten()
-    .map_or_else(
+    .flatten();
+    let guidance = match hook_name {
+        "SessionStart" => session_start_context(root.as_deref(), guidance),
+        _ => guidance,
+    };
+    let output = guidance.map_or_else(
         || serde_json::json!({}).to_string(),
         |guidance| additional_context_json(hook_name, &guidance),
     );

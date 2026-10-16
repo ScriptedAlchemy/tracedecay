@@ -92,15 +92,15 @@ fn github_stack_signal_authority(
     deadline: Deadline,
     cancellation: CancellationContext,
 ) -> Result<RequestContext, ApplicationProblem> {
-    if observed_at >= registered.grants.expires_at {
-        return Err(ApplicationProblem::not_found_or_not_authorized(
-            RetryDirective::Never,
-        ));
-    }
     let operation = git_surface_operation(GITHUB_STACK_SIGNAL_EXPAND_OPERATION)
         .map_err(|_| invalid_github_stack_signal_request())?
         .ok_or_else(invalid_github_stack_signal_request)?;
-    let expires_at = UtcMicros(deadline.expires_at.0.min(registered.grants.expires_at.0));
+    let expires_at = UtcMicros(
+        deadline
+            .expires_at
+            .0
+            .min(mounted_grant_expires_at(observed_at).0),
+    );
     let grant_digest = canonical_sha256(&(
         "tracedecay.daemon.github-stack-signal-expand-route-grant.v1",
         &registered.scope,

@@ -48,14 +48,15 @@ pub(super) async fn execute_retained_application(
     cancellation: CancellationContext,
     request_cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
 ) -> DaemonInvocationResponse {
+    let grant = registered.grant_at(observed_at);
     let effective_deadline = Deadline {
-        expires_at: UtcMicros(deadline.expires_at.0.min(registered.grant.expires_at.0)),
+        expires_at: UtcMicros(deadline.expires_at.0.min(grant.expires_at.0)),
     };
     let context = match RequestId::new(request_id.clone()).and_then(|request_id| {
         RequestContext::new(
             registered.actor.clone(),
             registered.scope.clone(),
-            registered.grant.clone(),
+            grant,
             request_id,
             effective_deadline,
             cancellation,

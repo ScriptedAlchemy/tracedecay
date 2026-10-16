@@ -24,7 +24,9 @@ Codex.
   `hooks` field): `SessionStart`, `UserPromptSubmit`, `SubagentStart`,
   `PostToolUse`, `PostCompact`, and `Stop`. `SessionStart` and `PostToolUse`
   can return daemon-approved guidance through Codex's documented
-  `additionalContext` response. The other events are capture-only or bounded
+  `additionalContext` response. In a registered project, `SessionStart` leads
+  with the skill mandate from `plugin/hooks/session-start-context.md`, as on
+  Claude. The other events are capture-only or bounded
   pressure probes. The daemon owns capture, preflight, compaction, and any
   model work.
 
@@ -44,10 +46,6 @@ The CLI uses the same daemon authority and is not an availability guarantee;
 neither client starts a missing or stopped service. If the daemon is
 unavailable or intentionally held, report that state and use scoped native
 tools without retrying or changing daemon lifecycle.
-
-For literal strings, regexes, and config keys inside indexed code, use
-`tracedecay_grep`; reserve `tracedecay_search` for symbol names and
-`tracedecay_context` for concept-level discovery.
 
 Before running `cargo check`/`tsc`/`clippy` in the shell, or when shell output
 shows compile errors, the injected steering routes the moment to tracedecay

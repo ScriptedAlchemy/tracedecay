@@ -73,6 +73,7 @@ use tracedecay_policy::{
 };
 use tracedecay_tool_catalog::{CapabilityId, EffectClass, SortContractId, UseCaseId};
 
+use crate::callable_code_authorization::mounted_grant_expires_at;
 use crate::project_runtime::{
     FeedbackCyclePublicationError, ProjectRuntimeAlreadyRegistered,
     ProjectRuntimePublicationStateV1, ProjectRuntimeRegistryError, ProjectRuntimeRegistryV1,
@@ -585,13 +586,14 @@ impl DaemonInvocationService {
                     message: "automation retained application authority is unavailable".to_owned(),
                 })
             })?;
+        let grant = registered.grant_at(observed_at);
         let effective_deadline = Deadline {
-            expires_at: UtcMicros(deadline.expires_at.0.min(registered.grant.expires_at.0)),
+            expires_at: UtcMicros(deadline.expires_at.0.min(grant.expires_at.0)),
         };
         let context = RequestContext::new(
             registered.actor,
             registered.scope,
-            registered.grant,
+            grant,
             request_id,
             effective_deadline,
             cancellation,
