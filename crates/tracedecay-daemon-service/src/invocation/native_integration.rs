@@ -415,6 +415,7 @@ async fn execute_with_owner(
                     {
                         runtime
                             .enqueue_from_preflight(stack_signal, &signal_context)
+                            .await
                             .map_err(stack_coordinator_contract_error)?;
                     }
                     outcome
@@ -607,6 +608,7 @@ async fn execute_with_owner(
                                         &signal_approval,
                                         &signal_context,
                                     )
+                                    .await
                                     .map_err(|_| unavailable_native_integration())?;
                             }
                             NativeIntegrationReceiptProjectionV1::project(&receipt)

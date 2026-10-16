@@ -196,7 +196,11 @@ pub struct DaemonGitHubStackCoordinatorV1 {
     policies: Mutex<BTreeMap<ManifestDigest, GitHubStackedPullRequestPolicyV1>>,
     observations: Mutex<BTreeMap<ManifestDigest, GitHubStackObservationV1>>,
     circuit_policies: Mutex<BTreeMap<ManifestDigest, StackCircuitPolicyV1>>,
-    dedupe: Mutex<BTreeMap<(ManifestDigest, StackSignalKindV1, ManifestDigest), UtcMicros>>,
+    /// Held across the append so a duplicate debounced signal racing the
+    /// first one cannot append twice.
+    dedupe: tokio::sync::Mutex<
+        BTreeMap<(ManifestDigest, StackSignalKindV1, ManifestDigest), UtcMicros>,
+    >,
     circuits: Mutex<BTreeMap<CircuitKey, Circuit>>,
     preflights: Mutex<PreflightState>,
     drift_intervals: Mutex<BTreeMap<ManifestDigest, Vec<DriftInterval>>>,
@@ -342,7 +346,7 @@ impl DaemonGitHubStackCoordinatorV1 {
     }
 
     #[tracing::instrument(name = "usecases.stack.enqueue", level = "trace", skip_all)]
-    pub fn enqueue_transition<S: StackCoordinatorStore, A: StackDeliveryAuthorizationPort>(
+    pub async fn enqueue_transition<S: StackCoordinatorStore, A: StackDeliveryAuthorizationPort>(
         &self,
         store: &S,
         authorization: &A,
@@ -359,7 +363,7 @@ impl DaemonGitHubStackCoordinatorV1 {
         let mut stale = false;
         for recipient in recipients {
             recipient.validate().map_err(invalid)?;
-            match authorization.authorize(&recipient, &signal) {
+            match authorization.authorize(&recipient, &signal).await {
                 StackDeliveryAuthorizationV1::Authorized => authorized.push(recipient),
                 StackDeliveryAuthorizationV1::Denied => denied = true,
                 StackDeliveryAuthorizationV1::Stale => stale = true,
@@ -377,25 +381,25 @@ impl DaemonGitHubStackCoordinatorV1 {
             }
         }
         if signal.kind.is_material() {
-            return store.append_signal(signal, authorized);
+            return store.append_signal(signal, authorized).await;
         }
         let key = (
             signal.scope_digest.clone(),
             signal.kind,
             signal.state_digest.clone(),
         );
-        let mut dedupe = self.dedupe.lock().map_err(lock_error)?;
+        let mut dedupe = self.dedupe.lock().await;
         dedupe.retain(|_, seen| signal.observed_at.0.saturating_sub(seen.0) <= DEDUPE_TTL_MICROS);
         if dedupe.contains_key(&key) {
             return Ok(());
         }
-        store.append_signal(signal.clone(), authorized)?;
+        store.append_signal(signal.clone(), authorized).await?;
         dedupe.insert(key, signal.observed_at);
         Ok(())
     }
 
     #[tracing::instrument(name = "usecases.stack.drain", level = "trace", skip_all)]
-    pub fn drain_due<
+    pub async fn drain_due<
         S: StackCoordinatorStore,
         A: StackDeliveryAuthorizationPort,
         D: StackDeliveryPort,
@@ -406,7 +410,7 @@ impl DaemonGitHubStackCoordinatorV1 {
         delivery: &D,
         now: UtcMicros,
     ) -> Result<usize, StackCoordinatorErrorV1> {
-        let mut pending = store.pending_deliveries()?;
+        let mut pending = store.pending_deliveries().await?;
         pending.retain(|(_, signal)| {
             signal.kind.is_material()
                 || signal
@@ -441,7 +445,7 @@ impl DaemonGitHubStackCoordinatorV1 {
                     break;
                 }
                 consumed += 1;
-                match authorization.authorize(&item.recipient, signal) {
+                match authorization.authorize(&item.recipient, signal).await {
                     StackDeliveryAuthorizationV1::Authorized => {
                         recipients.insert(item.recipient.clone());
                         signal_ids.insert(item.signal_id.clone());
@@ -453,7 +457,9 @@ impl DaemonGitHubStackCoordinatorV1 {
                     }
                     outcome @ (StackDeliveryAuthorizationV1::Denied
                     | StackDeliveryAuthorizationV1::Stale) => {
-                        store.record_authorization_loss(signal, &item.recipient, outcome)?;
+                        store
+                            .record_authorization_loss(signal, &item.recipient, outcome)
+                            .await?;
                         acknowledged.push(item.clone())
                     }
                     StackDeliveryAuthorizationV1::Unavailable => {}
@@ -472,27 +478,27 @@ impl DaemonGitHubStackCoordinatorV1 {
                 partial: consumed < pending.len(),
             };
             if !batch.recipients.is_empty() {
-                delivery.deliver(&batch)?;
+                delivery.deliver(&batch).await?;
                 delivered += batch.deliveries.len();
             }
-            store.acknowledge(&watermark, &acknowledged)?;
+            store.acknowledge(&watermark, &acknowledged).await?;
             pending.drain(..consumed);
         }
         Ok(delivered)
     }
 
     #[tracing::instrument(name = "usecases.stack.expand", level = "trace", skip_all)]
-    pub fn expand_transition<S: StackCoordinatorStore, A: StackDeliveryAuthorizationPort>(
+    pub async fn expand_transition<S: StackCoordinatorStore, A: StackDeliveryAuthorizationPort>(
         &self,
         store: &S,
         authorization: &A,
         recipient: &ActorId,
         signal_id: &StackSignalId,
     ) -> Result<Option<StackSignalV1>, StackCoordinatorErrorV1> {
-        let Some(signal) = store.signal(signal_id)? else {
+        let Some(signal) = store.signal(signal_id).await? else {
             return Ok(None);
         };
-        match authorization.authorize(recipient, &signal) {
+        match authorization.authorize(recipient, &signal).await {
             StackDeliveryAuthorizationV1::Authorized => Ok(Some(signal)),
             StackDeliveryAuthorizationV1::Denied => Err(StackCoordinatorErrorV1::Denied),
             StackDeliveryAuthorizationV1::Stale => Err(StackCoordinatorErrorV1::Stale),

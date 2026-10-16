@@ -858,17 +858,21 @@ async fn checked_out_declared_stack_conflict_enqueues_without_moving_refs() {
     .expect("other recipient signal");
     stack_runtime
         .enqueue_from_preflight(other_signal.clone(), &other_context)
+        .await
         .expect("enqueue older other-recipient signal");
     stack_runtime
         .enqueue_from_preflight(signal.clone(), &live_context)
+        .await
         .expect("enqueue actual conflict");
     stack_runtime
         .enqueue_from_preflight(occupied_signal.clone(), &live_context)
+        .await
         .expect("enqueue destination-occupied dependency-ready signal");
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             if stack_runtime
                 .pending_host_deliveries()
+                .await
                 .is_ok_and(|pending| pending.len() == 3)
             {
                 break;
@@ -1305,11 +1309,13 @@ async fn independent_pair_applies_supported_modes_and_survives_daemon_restart() 
             .await;
             stack_runtime
                 .enqueue_from_preflight(stack_signal.clone(), &live_context)
+                .await
                 .expect("enqueue terminal signal");
             tokio::time::timeout(Duration::from_secs(3), async {
                 loop {
                     if stack_runtime
                         .pending_host_deliveries()
+                        .await
                         .is_ok_and(|pending| pending.len() == 1)
                     {
                         break;

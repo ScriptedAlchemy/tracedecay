@@ -309,7 +309,7 @@ impl DaemonNativeIntegrationOwner {
 
     /// Mounts exactly one stack-delivery runtime for one exact project scope.
     /// Re-opening the project refreshes its source-access expiry but never
-    /// creates a second queue actor or a second background drain task.
+    /// creates a second delivery store or a second background drain task.
     pub fn mount_github_stack_runtime(
         &self,
         database: RegisteredGlobalDbLeaseV1,
