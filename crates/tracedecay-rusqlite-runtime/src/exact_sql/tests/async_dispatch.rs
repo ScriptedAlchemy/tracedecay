@@ -543,3 +543,111 @@ fn a_reader_wait_on_the_native_blocking_pool_is_not_counted() {
     assert_eq!(rows.rows.len(), 1);
     assert_eq!(native_thread_reader_waits() - before, 0);
 }
+
+/// Collects the `call_site` of every storage-wait log record, process-wide,
+/// because the records are emitted from native worker threads.
+struct WaitLogCapture {
+    call_sites: Mutex<Vec<(tracing::Level, String)>>,
+}
+
+impl WaitLogCapture {
+    fn install() -> &'static Self {
+        static CAPTURE: std::sync::OnceLock<&'static WaitLogCapture> = std::sync::OnceLock::new();
+        CAPTURE.get_or_init(|| {
+            let capture: &'static WaitLogCapture = Box::leak(Box::new(WaitLogCapture {
+                call_sites: Mutex::new(Vec::new()),
+            }));
+            tracing::dispatcher::set_global_default(tracing::Dispatch::new(CaptureHandle(capture)))
+                .expect("no other test installs a global tracing subscriber");
+            capture
+        })
+    }
+
+    fn records_for(&self, call_site: &str) -> Vec<tracing::Level> {
+        self.call_sites
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, site)| site == call_site)
+            .map(|(level, _)| *level)
+            .collect()
+    }
+}
+
+struct CaptureHandle(&'static WaitLogCapture);
+
+struct CallSiteVisitor(Option<String>);
+
+impl tracing::field::Visit for CallSiteVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "call_site" {
+            self.0 = Some(format!("{value:?}"));
+        }
+    }
+}
+
+impl tracing::Subscriber for CaptureHandle {
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut visitor = CallSiteVisitor(None);
+        event.record(&mut visitor);
+        if let Some(site) = visitor.0 {
+            self.0
+                .call_sites
+                .lock()
+                .unwrap()
+                .push((*event.metadata().level(), site));
+        }
+    }
+}
+
+#[test]
+fn repeated_reader_waits_from_one_site_are_counted_but_logged_once() {
+    let _serial = NATIVE_WAIT_COUNTER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let capture = WaitLogCapture::install();
+    let fixture = fixture('a', 'a');
+    let handle = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let before = native_thread_reader_waits();
+    let sites_before = native_thread_storage_wait_sites();
+    const READS: u64 = 5;
+    let task = crate::native_runtime::NativeTask::spawn(async move {
+        let mut rows = 0;
+        for _ in 0..READS {
+            rows += handle
+                .query(statement("SELECT 1", vec![]), Duration::from_secs(5))
+                .unwrap()
+                .rows
+                .len();
+        }
+        rows
+    })
+    .unwrap();
+    let outcome = crate::native_runtime::block_on(task.wait()).unwrap();
+    assert_eq!(
+        outcome,
+        crate::native_runtime::NativeTaskOutcome::Completed(READS as usize)
+    );
+    assert_eq!(native_thread_reader_waits() - before, READS);
+    let new_sites: Vec<_> = native_thread_storage_wait_sites()
+        .into_iter()
+        .filter(|site| !sites_before.contains(site))
+        .collect();
+    assert_eq!(new_sites.len(), 1, "one call site made every read");
+    assert_eq!(new_sites[0].hits, READS);
+    assert_eq!(
+        capture.records_for(&new_sites[0].call_site),
+        vec![tracing::Level::WARN],
+        "the first hit logs at WARN and later hits log nothing"
+    );
+}
