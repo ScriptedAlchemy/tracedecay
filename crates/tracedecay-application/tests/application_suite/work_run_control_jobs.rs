@@ -39,7 +39,7 @@ fn run() -> RunId {
     id::<RunId>("run.run-control-jobs")
 }
 
-fn context() -> RequestContext {
+pub(crate) fn context() -> RequestContext {
     let scope = ResolvedScope::new(
         id::<ProjectId>(PROJECT),
         id::<RepositoryId>(REPOSITORY),
@@ -71,7 +71,7 @@ fn context() -> RequestContext {
     .unwrap()
 }
 
-fn authority() -> WorkAuthority {
+pub(crate) fn authority() -> WorkAuthority {
     WorkAuthority::new(
         id::<ProjectId>(PROJECT),
         id::<RepositoryId>(REPOSITORY),
@@ -91,9 +91,18 @@ fn route() -> WorkProviderRouteV1 {
 }
 
 fn leased_attempt() -> WorkAttemptV1 {
-    let identity =
-        WorkAttemptIdentityV1::new(task(), run(), id::<AttemptId>("attempt.run-control-jobs"))
-            .unwrap();
+    leased_attempt_of(run(), "run-control-jobs")
+}
+
+/// A leased attempt of `task()` in `run_id` whose attempt and lease ids end
+/// in `suffix`.
+pub(crate) fn leased_attempt_of(run_id: RunId, suffix: &str) -> WorkAttemptV1 {
+    let identity = WorkAttemptIdentityV1::new(
+        task(),
+        run_id,
+        id::<AttemptId>(&format!("attempt.{suffix}")),
+    )
+    .unwrap();
     let binding = WorkAttemptProjectionBindingV1::new(
         WorkGraphVersionV1::new(3).unwrap(),
         WorkProductEventSequenceV1::new(7).unwrap(),
@@ -149,7 +158,7 @@ fn leased_attempt() -> WorkAttemptV1 {
         binding,
         envelope,
         WorkLeaseFenceV1::new(
-            id::<WorkLeaseId>("lease.run-control-jobs"),
+            id::<WorkLeaseId>(&format!("lease.{suffix}")),
             WorkFenceEpochV1::new(1).unwrap(),
         )
         .unwrap(),

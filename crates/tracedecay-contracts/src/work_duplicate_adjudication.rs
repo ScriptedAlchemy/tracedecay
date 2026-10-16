@@ -158,13 +158,19 @@ impl WorkDuplicateAdjudicationAppendOutcomeV1 {
     }
 }
 
-pub trait WorkDuplicateAdjudicationPortV1: Send + Sync {
+/// The replay check, revision compare and append of one adjudication.
+///
+/// It carries no `Send + Sync` bound so a storage scoped to one writer
+/// transaction can implement it and run the whole record atomically.
+pub trait WorkDuplicateAdjudicationRecordPortV1 {
     fn compare_and_record_duplicate_adjudication(
         &self,
         authority: &WorkAuthority,
         write: &WorkDuplicateAdjudicationWriteV1,
     ) -> Result<WorkDuplicateAdjudicationAppendOutcomeV1, WorkDuplicateAdjudicationStorageErrorV1>;
+}
 
+pub trait WorkDuplicateAdjudicationPortV1: Send + Sync {
     fn latest_duplicate_adjudications_for_attempts(
         &self,
         authority: &WorkAuthority,
@@ -185,14 +191,16 @@ pub struct WorkDuplicateAdjudicationServiceV1<S> {
     storage: S,
 }
 
-impl<S> WorkDuplicateAdjudicationServiceV1<S>
-where
-    S: WorkDuplicateAdjudicationPortV1,
-{
+impl<S> WorkDuplicateAdjudicationServiceV1<S> {
     pub const fn new(storage: S) -> Self {
         Self { storage }
     }
+}
 
+impl<S> WorkDuplicateAdjudicationServiceV1<S>
+where
+    S: WorkDuplicateAdjudicationRecordPortV1,
+{
     #[tracing::instrument(
         name = "application.work.duplicate.adjudicate",
         level = "trace",
@@ -221,10 +229,15 @@ where
                     current_evidence,
                 },
             )
-            .map_err(storage_problem)?;
+            .map_err(ApplicationProblem::from)?;
         Ok(outcome)
     }
+}
 
+impl<S> WorkDuplicateAdjudicationServiceV1<S>
+where
+    S: WorkDuplicateAdjudicationPortV1,
+{
     #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(name = "application.work.duplicate.prepare", level = "trace", skip_all)]
     pub fn prepare_adjudication(
@@ -248,7 +261,7 @@ where
         let latest = self
             .storage
             .latest_duplicate_adjudication_for_pair(&authority, first_attempt, second_attempt)
-            .map_err(storage_problem)?;
+            .map_err(ApplicationProblem::from)?;
         prepare_work_duplicate_adjudication(
             request,
             evidence,
@@ -290,7 +303,7 @@ where
                 &request.topology_generation,
                 &attempts,
             )
-            .map_err(storage_problem)?;
+            .map_err(ApplicationProblem::from)?;
         Ok(classify_complete_attempt_relations(
             &authority,
             request.work_generation,
@@ -386,32 +399,30 @@ fn invalid_problem() -> ApplicationProblem {
     )
 }
 
-fn storage_problem(error: WorkDuplicateAdjudicationStorageErrorV1) -> ApplicationProblem {
-    match error {
-        WorkDuplicateAdjudicationStorageErrorV1::NotFoundOrNotAuthorized => {
-            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
-        }
-        WorkDuplicateAdjudicationStorageErrorV1::RevisionConflict => ApplicationProblem::conflict(
-            "application.work.duplicate-adjudication.revision-conflict",
-            "The duplicate Work adjudication changed after this command was prepared.",
-        ),
-        WorkDuplicateAdjudicationStorageErrorV1::IdempotencyConflict => {
-            ApplicationProblem::conflict(
+impl From<WorkDuplicateAdjudicationStorageErrorV1> for ApplicationProblem {
+    fn from(error: WorkDuplicateAdjudicationStorageErrorV1) -> Self {
+        match error {
+            WorkDuplicateAdjudicationStorageErrorV1::NotFoundOrNotAuthorized => {
+                Self::not_found_or_not_authorized(RetryDirective::Never)
+            }
+            WorkDuplicateAdjudicationStorageErrorV1::RevisionConflict => Self::conflict(
+                "application.work.duplicate-adjudication.revision-conflict",
+                "The duplicate Work adjudication changed after this command was prepared.",
+            ),
+            WorkDuplicateAdjudicationStorageErrorV1::IdempotencyConflict => Self::conflict(
                 "application.work.duplicate-adjudication.idempotency-conflict",
                 "The duplicate Work adjudication command identity was already used with different input.",
-            )
-        }
-        WorkDuplicateAdjudicationStorageErrorV1::EvidenceStale => {
-            ApplicationProblem::stale(SafeDiagnostic {
+            ),
+            WorkDuplicateAdjudicationStorageErrorV1::EvidenceStale => Self::stale(SafeDiagnostic {
                 code: "application.work.duplicate-adjudication.evidence-stale".to_owned(),
                 message: "The duplicate Work adjudication cites evidence that is not the current Work and topology generation; prepare it again.".to_owned(),
-            })
-        }
-        WorkDuplicateAdjudicationStorageErrorV1::Unavailable => {
-            ApplicationProblem::unavailable(SafeDiagnostic {
-                code: "application.work.duplicate-adjudication.unavailable".to_owned(),
-                message: "The duplicate Work adjudication authority is unavailable.".to_owned(),
-            })
+            }),
+            WorkDuplicateAdjudicationStorageErrorV1::Unavailable => {
+                Self::unavailable(SafeDiagnostic {
+                    code: "application.work.duplicate-adjudication.unavailable".to_owned(),
+                    message: "The duplicate Work adjudication authority is unavailable.".to_owned(),
+                })
+            }
         }
     }
 }

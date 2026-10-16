@@ -283,6 +283,35 @@ impl RegisteredWorkApplicationServicesV1 {
             .unwrap_or_else(|_| Err(run_control_unavailable()))
     }
 
+    /// Records one duplicate adjudication as a single writer transaction: the
+    /// replay check, the revision compare and the append commit together.
+    /// `current_evidence` is read before the job, outside the writer.
+    pub async fn adjudicate_duplicate(
+        &self,
+        context: tracedecay_contracts::RequestContext,
+        command: tracedecay_domain::WorkDuplicateAdjudicationCommandV1,
+        current_evidence: tracedecay_domain::WorkDuplicateAdjudicationEvidenceV1,
+    ) -> Result<
+        tracedecay_contracts::WorkDuplicateAdjudicationAppendOutcomeV1,
+        tracedecay_contracts::ApplicationProblem,
+    > {
+        self.storage
+            .transact(move |storage| {
+                tracedecay_contracts::WorkDuplicateAdjudicationServiceV1::new(storage).adjudicate(
+                    &context,
+                    command.clone(),
+                    current_evidence.clone(),
+                )
+            })
+            .await
+            .unwrap_or_else(|_| {
+                Err(
+                    tracedecay_contracts::WorkDuplicateAdjudicationStorageErrorV1::Unavailable
+                        .into(),
+                )
+            })
+    }
+
     pub fn attempts(
         &self,
     ) -> &tracedecay_contracts::WorkAttemptService<

@@ -619,58 +619,59 @@ pub(super) async fn dispatch_work_application(
             }
         }
         WorkApplicationInvocationV1::AdjudicateDuplicate(command) => {
-            let _span = tracing::trace_span!("daemon.service.work.adjudicate_duplicate").entered();
-            {
-                let authority = match tracedecay_domain::WorkAuthority::new(
-                    context.scope().project_id.clone(),
-                    context.scope().repository_id.clone(),
-                    context.scope().worktree_id.clone(),
-                    context.actor().clone(),
-                    context.grant().digest.clone(),
-                ) {
-                    Ok(authority) => authority,
-                    Err(_) => {
-                        return DaemonInvocationResponse::problem(
-                            request_id,
-                            DaemonInvocationProblem::InvalidRequest,
-                        );
-                    }
-                };
-                let adjudicated = preparation::current_duplicate_adjudication_evidence(
-                    &registered,
-                    &context,
-                    capability,
-                    &use_case,
-                    observed_at,
-                )
-                .and_then(|evidence| {
-                    services
-                        .duplicate_adjudications()
-                        .adjudicate(&context, command, evidence)
-                });
-                if let Ok(outcome) = &adjudicated {
-                    let _observation =
-                        tracedecay_application::observability::record_work_duplicate_observation(
-                            observability_producer.as_deref(),
-                            context.scope().project_id.as_str(),
-                            &authority,
-                            outcome.receipt(),
-                        );
+            let authority = match tracedecay_domain::WorkAuthority::new(
+                context.scope().project_id.clone(),
+                context.scope().repository_id.clone(),
+                context.scope().worktree_id.clone(),
+                context.actor().clone(),
+                context.grant().digest.clone(),
+            ) {
+                Ok(authority) => authority,
+                Err(_) => {
+                    return DaemonInvocationResponse::problem(
+                        request_id,
+                        DaemonInvocationProblem::InvalidRequest,
+                    );
                 }
-                complete_work_effect(
-                    &registered,
-                    request_id,
-                    &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case,
-                    input_digest,
-                    adjudicated,
-                    observed_at,
-                    deadline,
-                    WorkApplicationOutcomeV1::AdjudicateDuplicate,
-                )
+            };
+            let adjudicated = tracing::Instrument::instrument(
+                async {
+                    let evidence = preparation::current_duplicate_adjudication_evidence(
+                        &registered,
+                        &context,
+                        capability,
+                        &use_case,
+                        observed_at,
+                    )?;
+                    services
+                        .adjudicate_duplicate(context.clone(), command, evidence)
+                        .await
+                },
+                tracing::trace_span!("daemon.service.work.adjudicate_duplicate"),
+            )
+            .await;
+            if let Ok(outcome) = &adjudicated {
+                let _observation =
+                    tracedecay_application::observability::record_work_duplicate_observation(
+                        observability_producer.as_deref(),
+                        context.scope().project_id.as_str(),
+                        &authority,
+                        outcome.receipt(),
+                    );
             }
+            complete_work_effect(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                adjudicated,
+                observed_at,
+                deadline,
+                WorkApplicationOutcomeV1::AdjudicateDuplicate,
+            )
         }
         WorkApplicationInvocationV1::AdjudicateLeak(command) => {
             let adjudicated: Pin<
