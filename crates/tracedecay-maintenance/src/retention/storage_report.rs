@@ -46,6 +46,7 @@ use tracedecay_runtime_core::config::GLOBAL_DB_FILENAME;
 use tracedecay_runtime_core::native_runtime;
 use tracedecay_runtime_core::storage::{SESSIONS_DB_FILENAME, USER_SESSIONS_DB_FILENAME};
 
+use super::footprint::{WalkedEntryV1, walk_regular_files};
 use crate::store_maintenance::{CodeGenerationProtectionUnavailableV1, code_generation_protection};
 
 pub const MAX_STORAGE_REPORT_PAGE_LIMIT: usize = 64;
@@ -54,6 +55,8 @@ const CODE_GENERATIONS_DIRECTORY: &str = "code-generations-v1";
 const CODE_INDEX_DIRECTORY: &str = "code-index-v1";
 const SEALED_GRAPH_DIRECTORY: &str = "tracedecay.sealed";
 const GRAPH_REPLAY_POOL_DIRECTORY: &str = "tracedecay.graph-replay";
+pub(crate) const GRAPH_CONTAINER_SUFFIX: &str = ".grafeo";
+pub(crate) const GRAPH_CONTAINER_WAL_SUFFIX: &str = ".grafeo.wal";
 /// Why a report without the daemon's scheduler authority cannot plan a
 /// retention dry run.
 pub const RETENTION_PROTECTION_UNRESOLVED: &str =
@@ -92,10 +95,17 @@ pub struct StoreKindBytesV1 {
     pub sealed_graph: u64,
     /// Completed text artifacts and each scope's text-artifact staging.
     pub text_artifacts: u64,
-    /// The rest of `code-index-v1/` (generation manifests and segments,
-    /// publication pointers, retention evidence) and the
-    /// `tracedecay.graph-replay/` pool of retired generations.
+    /// The rest of `code-index-v1/`: generation manifests and segments,
+    /// publication pointers, retention evidence.
     pub generation_artifacts: u64,
+    /// Every `*.grafeo` container at the store root and its `*.grafeo.wal/`
+    /// segment directory. Opening a container replays its whole block log
+    /// into heap, so these bytes are resident memory at open.
+    #[serde(default)]
+    pub graph_container: u64,
+    /// `tracedecay.graph-replay/`: retired generations kept for replay.
+    #[serde(default)]
+    pub graph_replay_pool: u64,
     /// `sessions.db` with its sidecars and spools.
     pub sessions: u64,
     /// Everything else: hook spools, dashboard state, locks, manifests.
@@ -103,7 +113,7 @@ pub struct StoreKindBytesV1 {
 }
 
 impl StoreKindBytesV1 {
-    fn add(&mut self, relative: &Path, bytes: u64) {
+    pub(crate) fn add(&mut self, relative: &Path, bytes: u64) {
         let mut components = relative
             .components()
             .map(|component| component.as_os_str().to_string_lossy());
@@ -118,7 +128,11 @@ impl StoreKindBytesV1 {
         } else if first == SEALED_GRAPH_DIRECTORY {
             &mut self.sealed_graph
         } else if first == GRAPH_REPLAY_POOL_DIRECTORY {
-            &mut self.generation_artifacts
+            &mut self.graph_replay_pool
+        } else if first.ends_with(GRAPH_CONTAINER_WAL_SUFFIX)
+            || (first.ends_with(GRAPH_CONTAINER_SUFFIX) && components.next().is_none())
+        {
+            &mut self.graph_container
         } else if first == CODE_INDEX_DIRECTORY {
             let second = components.next().unwrap_or_default();
             let third = components.next().unwrap_or_default();
@@ -141,12 +155,14 @@ impl StoreKindBytesV1 {
         *family = family.saturating_add(bytes);
     }
 
-    fn total(self) -> u64 {
+    pub(crate) fn total(self) -> u64 {
         [
             self.graph_database,
             self.sealed_graph,
             self.text_artifacts,
             self.generation_artifacts,
+            self.graph_container,
+            self.graph_replay_pool,
             self.sessions,
             self.other,
         ]
@@ -873,10 +889,14 @@ fn append_project_report(
     let data_root = profile_root.join("projects").join(project_id);
     if data_root.is_dir() {
         let mut kinds = StoreKindBytesV1::default();
-        let unavailable_entry_count = walk_regular_files(&data_root, &mut |path, bytes| {
-            if let Ok(relative) = path.strip_prefix(&data_root) {
-                kinds.add(relative, bytes);
+        let mut unavailable_entry_count = 0usize;
+        walk_regular_files(&data_root, usize::MAX, &mut |path, walked| match walked {
+            WalkedEntryV1::File { bytes } => {
+                if let Ok(relative) = path.strip_prefix(&data_root) {
+                    kinds.add(relative, bytes);
+                }
             }
+            WalkedEntryV1::Unavailable => unavailable_entry_count += 1,
         });
         let (free_bytes, free_page_ratio) =
             sample_free_pages(&data_root.join(tracedecay_runtime_core::config::DB_FILENAME))
@@ -1124,49 +1144,6 @@ fn scan_unregistered_dirs(profile_root: &Path, registered_ids: &HashSet<String>)
     (count, bytes)
 }
 
-/// Visit every regular file under `root` with its byte length, without
-/// following symlinks, and return how many entries could not be read or were
-/// neither regular files nor directories. Those make any total built from the
-/// visits a lower bound instead of a successful zero-size family.
-fn walk_regular_files(root: &Path, visit: &mut dyn FnMut(&Path, u64)) -> usize {
-    let mut unavailable_entry_count = 0usize;
-    let mut pending = vec![root.to_path_buf()];
-    while let Some(directory) = pending.pop() {
-        let Ok(entries) = std::fs::read_dir(&directory) else {
-            unavailable_entry_count = unavailable_entry_count.saturating_add(1);
-            continue;
-        };
-        for entry in entries {
-            let Ok(entry) = entry else {
-                unavailable_entry_count = unavailable_entry_count.saturating_add(1);
-                continue;
-            };
-            let Ok(file_type) = entry.file_type() else {
-                unavailable_entry_count = unavailable_entry_count.saturating_add(1);
-                continue;
-            };
-            // A socket (the running daemon's endpoint) holds no bytes.
-            #[cfg(unix)]
-            if std::os::unix::fs::FileTypeExt::is_socket(&file_type) {
-                continue;
-            }
-            if file_type.is_dir() {
-                pending.push(entry.path());
-            } else if file_type.is_file() {
-                match entry.metadata() {
-                    Ok(metadata) => visit(&entry.path(), metadata.len()),
-                    Err(_) => {
-                        unavailable_entry_count = unavailable_entry_count.saturating_add(1);
-                    }
-                }
-            } else {
-                unavailable_entry_count = unavailable_entry_count.saturating_add(1);
-            }
-        }
-    }
-    unavailable_entry_count
-}
-
 /// Count every regular file under a profile root without following symlinks.
 /// Failures remain visible as a partial lower bound instead of a successful
 /// zero-size family.
@@ -1177,8 +1154,10 @@ fn walk_regular_files(root: &Path, visit: &mut dyn FnMut(&Path, u64)) -> usize {
 )]
 pub fn scan_full_profile_size(profile_root: &Path) -> FullProfileSizeV1 {
     let mut total_bytes = 0u64;
-    let unavailable_entry_count = walk_regular_files(profile_root, &mut |_, bytes| {
-        total_bytes = total_bytes.saturating_add(bytes);
+    let mut unavailable_entry_count = 0usize;
+    walk_regular_files(profile_root, usize::MAX, &mut |_, walked| match walked {
+        WalkedEntryV1::File { bytes } => total_bytes = total_bytes.saturating_add(bytes),
+        WalkedEntryV1::Unavailable => unavailable_entry_count += 1,
     });
     FullProfileSizeV1 {
         state: if unavailable_entry_count == 0 {
@@ -1938,6 +1917,8 @@ mod tests {
                 300,
             ),
             ("tracedecay.graph-replay/generation.json", 40),
+            ("tracedecay.grafeo", 500),
+            ("tracedecay.grafeo.wal/wal_00000001.log", 60),
             ("sessions.db", 900),
             ("sessions.db-wal", 10),
             (".sessions.db.host-admission/claim", 5),
@@ -1975,12 +1956,14 @@ mod tests {
                 graph_database: 4_196,
                 sealed_graph: 3_000,
                 text_artifacts: 2_050,
-                generation_artifacts: 1_040,
+                generation_artifacts: 1_000,
+                graph_container: 560,
+                graph_replay_pool: 40,
                 sessions: 915,
                 other: 7,
             }
         );
-        assert_eq!(store.total_bytes, 11_208);
+        assert_eq!(store.total_bytes, 11_768);
         assert_eq!(store.total_bytes, walked_bytes);
         assert_eq!(store.unavailable_entry_count, 0);
     }
