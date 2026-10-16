@@ -49,6 +49,7 @@ pub enum ProfileFamilyV1 {
     HookAnalytics,
     ResponseHandles,
     Maintenance,
+    SqliteTempSpill,
     Other,
 }
 
@@ -83,6 +84,9 @@ pub const fn default_bound_bytes(family: ProfileFamilyV1) -> u64 {
         ProfileFamilyV1::ResponseHandles => GIB,
         // Maintenance cursors, inventories, and receipts only.
         ProfileFamilyV1::Maintenance => 64 * MIB,
+        // A healthy daemon's TEMP databases and sort spills are tens of
+        // megabytes; past this a statement sorts bulk rows without an index.
+        ProfileFamilyV1::SqliteTempSpill => GIB,
         // An entry no TraceDecay family owns.
         ProfileFamilyV1::Other => GIB,
     }
@@ -341,6 +345,46 @@ fn census_with_entry_ceiling(
     }
 }
 
+/// Footprint key of a process's unlinked `SQLite` temp files.
+pub const SQLITE_TEMP_SPILL_KEY: &str = "sqlite_temp_spill";
+
+/// Size the unlinked `SQLite` temp files (`etilqs_*` TEMP databases and sort
+/// spills) a process holds open, read through its fd directory, normally
+/// `/proc/self/fd`. They live outside the profile, so the profile walk never
+/// sees them (#4152). `None` when the directory cannot be read, as off Linux.
+#[must_use]
+pub fn census_sqlite_temp_spill(
+    fd_directory: &Path,
+    bound_overrides: &BTreeMap<String, u64>,
+) -> Option<ProfileFootprintEntryV1> {
+    let mut bytes = 0u64;
+    for fd in std::fs::read_dir(fd_directory).ok()?.flatten() {
+        let Ok(target) = std::fs::read_link(fd.path()) else {
+            continue;
+        };
+        let unlinked_temp = target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("etilqs_") && name.ends_with(" (deleted)"));
+        // An fd closed since the listing no longer holds bytes.
+        if let (true, Ok(metadata)) = (unlinked_temp, std::fs::metadata(fd.path())) {
+            bytes = bytes.saturating_add(metadata.len());
+        }
+    }
+    Some(ProfileFootprintEntryV1 {
+        key: SQLITE_TEMP_SPILL_KEY.to_owned(),
+        family: ProfileFamilyV1::SqliteTempSpill,
+        bytes,
+        unavailable_entry_count: 0,
+        bound_bytes: bound_overrides
+            .get(SQLITE_TEMP_SPILL_KEY)
+            .copied()
+            .unwrap_or_else(|| default_bound_bytes(ProfileFamilyV1::SqliteTempSpill)),
+        project: None,
+        kinds: None,
+    })
+}
+
 fn tally(entry: &mut EntryTally, walked: WalkedEntryV1) {
     match walked {
         WalkedEntryV1::File { bytes } => entry.bytes = entry.bytes.saturating_add(bytes),
@@ -477,6 +521,7 @@ fn entry_statement(entry: &ProfileFootprintEntryV1) -> String {
         ProfileFamilyV1::HookAnalytics => "hook analytics",
         ProfileFamilyV1::ResponseHandles => "response handles",
         ProfileFamilyV1::Maintenance => "maintenance state",
+        ProfileFamilyV1::SqliteTempSpill => "unlinked SQLite temp files",
         ProfileFamilyV1::Other => "profile entry",
     };
     let root =
@@ -586,6 +631,47 @@ mod tests {
                 (key, finding)
             })
             .collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temp_spill_census_sums_only_unlinked_sqlite_temp_files() {
+        let temporary = tempfile::TempDir::new().expect("temporary directory");
+        let fd_directory = temporary.path().join("fd");
+        std::fs::create_dir(&fd_directory).expect("fd directory");
+        for (fd, name, bytes) in [
+            ("3", "etilqs_5e598e639aa4c638 (deleted)", 1_900 * MIB),
+            ("4", "etilqs_8564432688f1581f (deleted)", 24 * MIB),
+            ("5", "etilqs_c7305d0bad417a83", 7 * MIB),
+            ("6", "sessions.db (deleted)", 11 * MIB),
+        ] {
+            let target = temporary.path().join(name);
+            sized(&target, bytes);
+            std::os::unix::fs::symlink(&target, fd_directory.join(fd)).expect("fd link");
+        }
+
+        let entry = census_sqlite_temp_spill(&fd_directory, &BTreeMap::new())
+            .expect("a readable fd directory");
+
+        assert_eq!(entry.key, SQLITE_TEMP_SPILL_KEY);
+        assert_eq!(entry.bytes, 1_924 * MIB);
+        assert_eq!(entry.bound_bytes, GIB);
+        let footprint = ProfileFootprintV1 {
+            entries: vec![entry],
+            total_bytes: 0,
+            unavailable_entry_count: 0,
+            truncated: false,
+            total_bound_bytes: PROFILE_TOTAL_BOUND_BYTES,
+        };
+        assert_eq!(
+            findings(&footprint)[SQLITE_TEMP_SPILL_KEY]
+                .finding()
+                .state(),
+            DoctorEvidenceStateV1::Degraded,
+        );
+        assert!(
+            census_sqlite_temp_spill(&temporary.path().join("absent"), &BTreeMap::new()).is_none()
+        );
     }
 
     fn entry<'a>(footprint: &'a ProfileFootprintV1, key: &str) -> &'a ProfileFootprintEntryV1 {
