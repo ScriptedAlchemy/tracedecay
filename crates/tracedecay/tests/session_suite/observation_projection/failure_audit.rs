@@ -852,3 +852,137 @@ async fn projected_message_delete_is_restored_from_the_immutable_projection() {
         "profile reopen admitted the store without putting the deleted rendering back"
     );
 }
+
+#[tokio::test]
+async fn corrupt_projection_output_state_cache_is_discarded_and_the_head_projects() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let candidate = observation(
+        "session-corrupt-output-cache",
+        0,
+        100,
+        "receipt.corrupt-output-cache",
+        conversational_payload("message-corrupt-output-cache", "corrupt cache canary"),
+    );
+    persist(&store, candidate.clone(), None).await;
+
+    // The output-state cache is a TEMP table on the writer connection, so the
+    // poison must go through that same writer. A failing CHECK named after the
+    // SQLITE_CORRUPT message reproduces the production fault: every cache
+    // write fails as "disk image malformed" while the database file is sound.
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .unwrap();
+    let poison = database.begin_write_transaction().await.unwrap();
+    poison
+        .execute_batch(
+            "DROP TABLE IF EXISTS temp.observation_projection_output_state;
+             CREATE TEMP TABLE observation_projection_output_state (
+                projector_version TEXT NOT NULL,
+                output_provider TEXT NOT NULL,
+                output_message_id TEXT NOT NULL,
+                canonical_observation_id TEXT NOT NULL,
+                latest_observation_id TEXT NOT NULL,
+                latest_sequence INTEGER NOT NULL,
+                projector_owned INTEGER NOT NULL,
+                owner_count INTEGER NOT NULL,
+                PRIMARY KEY(projector_version, output_provider, output_message_id),
+                CONSTRAINT \"database disk image is malformed\" CHECK (0)
+             ) WITHOUT ROWID;",
+        )
+        .await
+        .unwrap();
+    poison.commit().await.unwrap();
+
+    let projected = store
+        .project_observation(candidate.observation_id())
+        .await
+        .unwrap();
+    assert!(
+        matches!(projected, ProjectionPersistOutcome::Projected(_)),
+        "a corrupt per-connection cache must not block the head: {projected:?}"
+    );
+    assert_eq!(table_count(&tmp, "projection_queue").await, 0);
+    assert_eq!(
+        search_session_messages(&tmp, "corrupt cache canary", 10)
+            .await
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn persistent_store_corruption_surfaces_without_skipping_the_observation() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
+    let candidate = observation(
+        "session-persistent-corruption",
+        0,
+        100,
+        "receipt.persistent-corruption",
+        conversational_payload(
+            "message-persistent-corruption",
+            "persistent corruption canary",
+        ),
+    );
+    persist(&store, candidate.clone(), None).await;
+
+    let raw_conn = rusqlite::Connection::open(&database_path).unwrap();
+    raw_conn
+        .execute_batch(
+            "CREATE TRIGGER fail_projection_corrupt
+             BEFORE INSERT ON lcm_raw_messages BEGIN
+                SELECT RAISE(ABORT, 'database disk image is malformed');
+             END;",
+        )
+        .unwrap();
+
+    let error = store
+        .project_observation(candidate.observation_id())
+        .await
+        .expect_err("corruption that survives the cache discard must surface");
+    assert!(
+        error.is_sqlite_disk_image_corrupt(),
+        "persistent corruption surfaced as {error:?}"
+    );
+    assert_eq!(
+        store.projection_checkpoint().await.unwrap().last_sequence(),
+        0
+    );
+    assert_eq!(
+        table_count(&tmp, "observation_projection_dispositions").await,
+        0,
+        "store-wide corruption must never become a per-item skip"
+    );
+    let attempt_count = raw_conn
+        .query_row(
+            "SELECT attempt_count FROM projection_queue WHERE observation_id = ?1",
+            [candidate.observation_id().as_str()],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert_eq!(attempt_count, 0, "corruption must not schedule a retry");
+
+    raw_conn
+        .execute_batch("DROP TRIGGER fail_projection_corrupt;")
+        .unwrap();
+    drop(raw_conn);
+    assert!(matches!(
+        store
+            .project_observation(candidate.observation_id())
+            .await
+            .unwrap(),
+        ProjectionPersistOutcome::Projected(_)
+    ));
+    assert_eq!(table_count(&tmp, "projection_queue").await, 0);
+}
