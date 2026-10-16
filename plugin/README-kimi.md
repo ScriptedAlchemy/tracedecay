@@ -70,10 +70,6 @@ neither client starts a missing or stopped service. If the daemon is
 unavailable or intentionally held, report that state and use scoped native
 tools without retrying or changing daemon lifecycle.
 
-For literal strings, regexes, and config keys inside indexed code, use
-`tracedecay_grep`; reserve `tracedecay_search` for symbol names and
-`tracedecay_context` for concept-level discovery.
-
 The shared skills ship in the standard `SKILL.md` format under `skills/`.
 The shared workflow slash commands ship as Markdown with YAML frontmatter under
 `commands/` and are namespaced by the plugin id: `/tracedecay:map-architecture`,
