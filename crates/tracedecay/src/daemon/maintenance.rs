@@ -70,6 +70,7 @@ async fn registered_project_stores(
 
 /// Starts one maintenance owner on the native runtime. A refusal is logged
 /// with the owner it leaves unstarted.
+#[track_caller]
 fn spawn_maintenance_task(
     owner: &'static str,
     work: impl std::future::Future<Output = ()> + Send + 'static,

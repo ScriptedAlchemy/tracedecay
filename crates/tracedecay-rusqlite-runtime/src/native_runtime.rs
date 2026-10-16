@@ -24,8 +24,10 @@ use asupersync::types::PanicPayload;
 use asupersync::{Budget, Cx};
 use futures_util::future::{AbortHandle, Aborted, BoxFuture, FutureExt, Shared, abortable};
 
-/// Tokio's default blocking-pool ceiling. Shard closes and SQL reads park a
-/// blocking thread for their whole duration.
+/// The native blocking pool's thread ceiling. Shard closes, SQL reads, and
+/// [`off_native_thread`] handlers each hold a pool thread for their whole
+/// duration, mostly parked, so this bounds concurrent waits rather than CPU
+/// use. The value matches Tokio's `max_blocking_threads` default.
 pub const MAX_BLOCKING_THREADS: usize = 512;
 
 static PROCESS_RUNTIME: OnceLock<Result<Runtime, String>> = OnceLock::new();
@@ -73,6 +75,11 @@ pub fn block_on<F: Future>(future: F) -> Result<F::Output, String> {
 /// be cancelled with that region before it starts, which would strand anything
 /// the caller had already queued for it.
 ///
+/// Called on a blocking-pool thread that already runs work queued here (an
+/// [`off_native_thread`] handler, say), it runs `work` inline at the call:
+/// queuing would hold this pool thread while waiting for another, and a full
+/// pool would deadlock on that wait.
+///
 /// Boxed so callers prove the context and channel wait `Send` once, here,
 /// instead of inside every future that awaits blocking work
 /// (rust-lang/rust#159228).
@@ -81,6 +88,11 @@ where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
+    if ON_BLOCKING_POOL.get() {
+        let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+            .map_err(|_| "native blocking work panicked".to_owned());
+        return Box::pin(std::future::ready(ran));
+    }
     let queued = queue_blocking(work);
     Box::pin(async move {
         let (cx, mut receiver) = queued?;
@@ -139,10 +151,18 @@ where
     let (sender, receiver) = asupersync::channel::oneshot::channel();
     runtime
         .spawn_blocking(move || {
+            ON_BLOCKING_POOL.set(true);
             let _ = sender.send_blocking(work());
         })
         .ok_or("native blocking pool unavailable")?;
     Ok((cx, receiver))
+}
+
+thread_local! {
+    /// Set for good once a blocking-pool thread runs work [`queue_blocking`]
+    /// or [`NativeTask::spawn_off_native_thread`] queued; such a thread serves
+    /// the pool for its whole life.
+    static ON_BLOCKING_POOL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Drives `settlement` on the caller's executor. A caller that stops waiting
@@ -281,46 +301,77 @@ impl<F: Future> Future for Timeout<F> {
     }
 }
 
-/// The most CPU time one poll of a [`NativeTask`] may take in a debug build.
+/// The wall time past which one poll of a [`NativeTask`] counts as long.
 ///
-/// A one-worker runtime has no follower to take the reactor while its worker
-/// is inside a poll, and a `block_on` root never turns the reactor. Every
-/// socket wake and timer on that runtime waits for the poll to return (#3994,
-/// upstream Dicklesworthstone/asupersync#83, whose multi-worker half Bazel
-/// patches in).
-pub const LONG_POLL_CPU: Duration = Duration::from_millis(250);
+/// While a worker is inside a poll, no other task queued on that worker runs.
+/// A one-worker runtime also has no follower to take the reactor, and a
+/// `block_on` root never turns it, so there every socket wake and timer waits
+/// for the poll to return (#3994, upstream Dicklesworthstone/asupersync#83,
+/// whose multi-worker half Bazel patches in). The waiters see wall time,
+/// whether the poll computed, parked on a lock or a writer reply, or was
+/// descheduled, so wall time decides what counts; thread CPU time is logged
+/// beside it on unix to tell computing from parking.
+///
+/// 100 ms is where a reply delayed behind the poll becomes noticeable to the
+/// person waiting on a hook or MCP call. A poll's cost moves with host load
+/// and opt level (a 7 ms fastbuild dispatch measured 490-590 ms of CPU at load
+/// average ~1000), so this bound sets the floor of a latency report, not a
+/// correctness line: a long poll is logged and counted, never failed.
+pub const LONG_POLL: Duration = Duration::from_millis(100);
 
-/// Fails a debug build's native task when one poll exceeds [`LONG_POLL_CPU`]
-/// of thread CPU time. CPU time, not wall time, so a worker descheduled on a
-/// loaded host does not trip it.
-#[cfg(all(debug_assertions, unix))]
+static LONG_POLLS: Mutex<BTreeMap<&'static std::panic::Location<'static>, u64>> =
+    Mutex::new(BTreeMap::new());
+
+/// Long native-task polls this process ran, by the site that spawned the
+/// task. Each entry names work that held a native worker past [`LONG_POLL`]
+/// and is a candidate for [`spawn_blocking`] when its latency matters.
+#[must_use]
+pub fn long_native_polls() -> BTreeMap<&'static std::panic::Location<'static>, u64> {
+    LONG_POLLS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
+
+/// Times every poll of a [`NativeTask`] and counts the ones past
+/// [`LONG_POLL`] against the task's spawn site. It never alters the poll's
+/// result. Per poll it reads the monotonic clock twice and the thread CPU
+/// clock once, plus once more after a long poll.
 struct LongPollGuard<F> {
     work: F,
     site: &'static std::panic::Location<'static>,
 }
 
-#[cfg(all(debug_assertions, unix))]
 impl<F: Future + Unpin> Future for LongPollGuard<F> {
     type Output = F::Output;
 
     fn poll(mut self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<F::Output> {
-        let started = thread_cpu_time();
+        let started = Instant::now();
+        let cpu_started = thread_cpu_time();
         let poll = Pin::new(&mut self.work).poll(task);
-        if let (Some(started), Some(ended)) = (started, thread_cpu_time()) {
-            let spent = ended.saturating_sub(started);
-            assert!(
-                spent <= LONG_POLL_CPU,
-                "native task spawned at {} spent {spent:?} of CPU in one poll, past \
-                 {LONG_POLL_CPU:?}; move its synchronous work to native_runtime::spawn_blocking \
-                 (#3994)",
-                self.site,
+        let wall = started.elapsed();
+        if wall >= LONG_POLL {
+            let cpu = cpu_started
+                .zip(thread_cpu_time())
+                .map(|(started, ended)| ended.saturating_sub(started));
+            *LONG_POLLS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(self.site)
+                .or_default() += 1;
+            tracing::warn!(
+                spawn_site = %self.site,
+                ?wall,
+                ?cpu,
+                "native task held its worker for one poll past {LONG_POLL:?}; \
+                 native_runtime::spawn_blocking keeps that work off the worker"
             );
         }
         poll
     }
 }
 
-#[cfg(all(debug_assertions, unix))]
+#[cfg(unix)]
 fn thread_cpu_time() -> Option<Duration> {
     let mut now = libc::timespec {
         tv_sec: 0,
@@ -333,6 +384,68 @@ fn thread_cpu_time() -> Option<Duration> {
             u64::try_from(now.tv_sec).unwrap_or(0),
             u32::try_from(now.tv_nsec).unwrap_or(0),
         )
+    })
+}
+
+#[cfg(not(unix))]
+fn thread_cpu_time() -> Option<Duration> {
+    None
+}
+
+/// How long the scheduling-lateness canary sleeps between wakes.
+const CANARY_TICK: Duration = Duration::from_millis(100);
+
+/// What the scheduling-lateness canary measured in this process.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SchedulingLateness {
+    pub ticks: u64,
+    /// Wakes that ran [`LONG_POLL`] or more past their deadline.
+    pub late_ticks: u64,
+    pub worst: Duration,
+}
+
+static SCHEDULING_LATENESS: Mutex<SchedulingLateness> = Mutex::new(SchedulingLateness {
+    ticks: 0,
+    late_ticks: 0,
+    worst: Duration::ZERO,
+});
+
+#[must_use]
+pub fn scheduling_lateness() -> SchedulingLateness {
+    *SCHEDULING_LATENESS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Starts a native task that sleeps on a native timer again and again and
+/// records how late each wake runs. A wake runs late when no worker turns the
+/// timer or picks up the woken task: a long poll on a one-worker runtime, or
+/// every worker busy. That is the delay a socket reply waits behind, measured
+/// directly rather than inferred from [`long_native_polls`]. A wake
+/// [`LONG_POLL`] late or worse is logged. Abort the task to stop it.
+#[track_caller]
+pub fn spawn_lateness_canary() -> Result<NativeTask<()>, String> {
+    NativeTask::spawn(async {
+        loop {
+            let deadline = Instant::now() + CANARY_TICK;
+            if let Err(error) = sleep_until(deadline).await {
+                tracing::warn!(%error, "scheduling-lateness canary stopped");
+                return;
+            }
+            let late = deadline.elapsed();
+            let mut lateness = SCHEDULING_LATENESS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            lateness.ticks += 1;
+            lateness.worst = lateness.worst.max(late);
+            if late >= LONG_POLL {
+                lateness.late_ticks += 1;
+                tracing::warn!(
+                    ?late,
+                    "native runtime woke a timer late; a long poll or busy workers held it"
+                );
+            }
+        }
     })
 }
 
@@ -362,8 +475,9 @@ impl<T: Clone + Send + Sync + 'static> NativeTask<T> {
     /// runtime. The runtime owns it, not the caller's region, so it outlives
     /// the request that started it.
     ///
-    /// `work` must not run CPU-heavy synchronous code inside one poll; see
-    /// [`LONG_POLL_CPU`]. Queue that part with [`spawn_blocking`].
+    /// A poll of `work` past [`LONG_POLL`] is logged and counted against the
+    /// caller's location in [`long_native_polls`]. Queue blocking or
+    /// CPU-heavy parts with [`spawn_blocking`] when their latency matters.
     #[track_caller]
     pub fn spawn<F>(work: F) -> Result<Self, String>
     where
@@ -373,7 +487,6 @@ impl<T: Clone + Send + Sync + 'static> NativeTask<T> {
         // Boxed so the runtime's own spawn wrappers do not nest `work` in
         // their `Send` proof (rust-lang/rust#159228).
         let work: BoxFuture<'static, T> = Box::pin(work);
-        #[cfg(all(debug_assertions, unix))]
         let work = LongPollGuard {
             work,
             site: std::panic::Location::caller(),
@@ -412,6 +525,7 @@ impl<T: Clone + Send + Sync + 'static> NativeTask<T> {
         handle()
             .ok_or("native execution runtime unavailable")?
             .spawn_blocking(move || {
+                ON_BLOCKING_POOL.set(true);
                 let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     poll_on_current_thread(work)
                 }));
@@ -699,10 +813,6 @@ fn start(builder: RuntimeBuilder) -> Result<Runtime, String> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "tests run on an ambient Tokio runtime"
-)]
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1292,7 +1402,6 @@ mod tests {
     #[cfg(unix)]
     const WAKE_BOUND: Duration = Duration::from_millis(40);
 
-    #[cfg(unix)]
     fn spin(duration: Duration) {
         let spun = Instant::now();
         while spun.elapsed() < duration {
@@ -1370,34 +1479,133 @@ mod tests {
         );
     }
 
-    #[cfg(all(debug_assertions, unix))]
+    #[track_caller]
+    fn spawned_here<T: Clone + Send + Sync + 'static>(
+        work: impl Future<Output = T> + Send + 'static,
+    ) -> (NativeTask<T>, &'static std::panic::Location<'static>) {
+        (
+            NativeTask::spawn(work).expect("native task"),
+            std::panic::Location::caller(),
+        )
+    }
+
+    /// The guard's window encloses the spin, so a descheduled worker only
+    /// lengthens the measured poll.
     #[test]
-    fn a_native_task_poll_past_the_cpu_bound_fails_in_debug_builds() {
+    fn a_long_native_poll_completes_and_is_counted_at_its_spawn_site() {
         let runtime = RuntimeBuilder::multi_thread()
             .worker_threads(1)
             .build()
             .expect("test runtime");
+        let (long, short) = runtime.block_on(async {
+            let (task, site) = spawned_here(async {
+                spin(LONG_POLL + Duration::from_millis(50));
+                7
+            });
+            let long = (task.wait().await, site);
+            let (task, site) = spawned_here(async { 8 });
+            (long, (task.wait().await, site))
+        });
+        assert_eq!(long.0, NativeTaskOutcome::Completed(7));
+        assert_eq!(long_native_polls().get(long.1), Some(&1), "{}", long.1);
+        assert_eq!(short.0, NativeTaskOutcome::Completed(8));
+        assert_eq!(long_native_polls().get(short.1), None, "{}", short.1);
+    }
+
+    /// Queued instead, the inner work would wait for a second pool thread
+    /// while the outer one holds the first; a full pool never frees one.
+    #[test]
+    fn blocking_work_spawned_from_the_blocking_pool_runs_on_the_same_thread() {
+        let (outer, inner) = block_on(spawn_blocking(|| {
+            let inner = spawn_blocking(|| std::thread::current().id()).now_or_never();
+            (std::thread::current().id(), inner)
+        }))
+        .expect("process runtime")
+        .expect("outer blocking work");
+        assert_eq!(inner, Some(Ok(outer)));
+    }
+
+    /// A fresh one-thread pool, so the thread has run no other queued work.
+    #[test]
+    fn blocking_work_from_a_task_spawned_off_native_threads_runs_on_its_thread() {
+        let runtime = RuntimeBuilder::multi_thread()
+            .worker_threads(1)
+            .blocking_threads(1, 1)
+            .build()
+            .expect("test runtime");
         let outcome = runtime.block_on(async {
-            // Spins on the thread's CPU clock, the one the guard reads, so a
-            // descheduled worker on a loaded host still crosses the bound.
-            NativeTask::spawn(async {
-                let started = thread_cpu_time().expect("thread CPU clock");
-                while thread_cpu_time().expect("thread CPU clock") - started
-                    <= LONG_POLL_CPU + Duration::from_millis(50)
-                {
-                    std::hint::spin_loop();
-                }
+            NativeTask::spawn_off_native_thread(async {
+                spawn_blocking(|| std::thread::current().id()).now_or_never()
+                    == Some(Ok(std::thread::current().id()))
             })
-            .expect("native task")
+            .expect("blocking-pool task")
             .wait()
             .await
         });
-        let NativeTaskOutcome::Panicked(payload) = outcome else {
-            panic!("a {LONG_POLL_CPU:?} poll must fail the task, got {outcome:?}");
-        };
+        assert_eq!(outcome, NativeTaskOutcome::Completed(true));
+    }
+
+    #[cfg(target_os = "linux")]
+    fn current_thread_stack_size() -> usize {
+        let mut attributes = std::mem::MaybeUninit::<libc::pthread_attr_t>::uninit();
+        let mut size = 0;
+        // SAFETY: `pthread_getattr_np` initializes `attributes` for the calling
+        // thread before `pthread_attr_getstacksize` reads it, and they are
+        // destroyed once, after that read.
+        unsafe {
+            assert_eq!(
+                libc::pthread_getattr_np(libc::pthread_self(), attributes.as_mut_ptr()),
+                0
+            );
+            assert_eq!(
+                libc::pthread_attr_getstacksize(attributes.as_ptr(), &raw mut size),
+                0
+            );
+            libc::pthread_attr_destroy(attributes.as_mut_ptr());
+        }
+        size
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn blocking_pool_threads_get_the_runtime_thread_stack_size() {
+        const STACK: usize = 16 * 1024 * 1024;
+        let runtime = RuntimeBuilder::multi_thread()
+            .worker_threads(1)
+            .thread_stack_size(STACK)
+            .blocking_threads(1, 2)
+            .build()
+            .expect("test runtime");
+        let stack = runtime
+            .block_on(async { spawn_blocking(current_thread_stack_size).await })
+            .expect("blocking work");
+        assert!(stack >= STACK, "pool thread stack is {stack} bytes");
+    }
+
+    #[test]
+    fn the_lateness_canary_records_a_wake_held_behind_a_long_poll() {
+        let runtime = RuntimeBuilder::multi_thread()
+            .worker_threads(1)
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let canary = spawn_lateness_canary().expect("canary");
+            sleep_until(Instant::now() + Duration::from_millis(20))
+                .await
+                .expect("let the canary arm its first timer");
+            NativeTask::spawn(async { spin(CANARY_TICK + LONG_POLL * 3) })
+                .expect("spinning task")
+                .wait()
+                .await;
+            sleep_until(Instant::now() + CANARY_TICK)
+                .await
+                .expect("let the canary record its overdue wake");
+            canary.abort();
+        });
+        let lateness = scheduling_lateness();
         assert!(
-            payload.to_string().contains("spawn_blocking"),
-            "the failure names the remedy: {payload}"
+            lateness.late_ticks >= 1 && lateness.worst >= LONG_POLL,
+            "{lateness:?}"
         );
     }
 

@@ -286,6 +286,7 @@ where
 /// A daemon round trip running on the native runtime beside the blocking
 /// checks. The result travels over a channel because a `NativeTask` output
 /// must be `Clone`, and the doctor's error type is not.
+#[track_caller]
 fn spawn_doctor_task<T: Send + 'static>(
     work: impl Future<Output = T> + Send + 'static,
 ) -> DoctorCheck<T> {

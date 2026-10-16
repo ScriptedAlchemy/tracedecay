@@ -66,10 +66,16 @@ crate.annotation(
 # other workers idle. One patch file holds both because crate_universe applies
 # an annotation's patches in sorted label order. Delete this annotation and the
 # patch once the pinned or published asupersync contains both fixes.
+# The blocking-pool stack patch touches other files, so its order does not
+# matter: it gives pool threads the runtime's thread_stack_size (16 MiB in the
+# CLI) instead of the standard library's 2 MiB.
 crate.annotation(
     crate = "asupersync",
     patch_args = ["-p1"],
-    patches = ["//scripts:bazel/patches/asupersync-scheduler.patch"],
+    patches = [
+        "//scripts:bazel/patches/asupersync-blocking-pool-stack.patch",
+        "//scripts:bazel/patches/asupersync-scheduler.patch",
+    ],
     version = "0.6.0",
 )
 

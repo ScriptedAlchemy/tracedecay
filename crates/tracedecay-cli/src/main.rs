@@ -233,6 +233,7 @@ impl Drop for Spinner {
 /// an explicit stack size gives every platform the same headroom.
 const ASYNC_STACK_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ASYNC_WORKER_THREADS: usize = 16;
+const MIN_LONG_LIVED_WORKER_THREADS: usize = 2;
 /// The runtimes a command's process owns. The native runtime drives every
 /// command's future.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,9 +257,14 @@ fn async_worker_threads(command: Option<&Commands>) -> usize {
     if is_one_shot_daemon_client(command) {
         return 1;
     }
+    // At least two, even on a one-CPU host: the reactor handoff patch
+    // (asupersync-scheduler.patch) promotes a parked follower only when
+    // the runtime has two or more parkers (`count < 2` returns early), so on
+    // one worker a long poll in `daemon run` or `serve` holds every socket
+    // wake and timer until it returns.
     std::thread::available_parallelism()
         .map_or(1, usize::from)
-        .clamp(1, MAX_ASYNC_WORKER_THREADS)
+        .clamp(MIN_LONG_LIVED_WORKER_THREADS, MAX_ASYNC_WORKER_THREADS)
 }
 
 /// Every command but `daemon run` is a daemon client or a local store tool
@@ -572,10 +578,7 @@ fn async_main() -> tracedecay_domain::errors::Result<CommandOutcome> {
                 .thread_name_prefix("tracedecay-native")
                 .worker_threads(worker_threads)
                 .thread_stack_size(ASYNC_STACK_BYTES)
-                .blocking_threads(
-                    1,
-                    blocking_threads.max(native_runtime::MAX_BLOCKING_THREADS),
-                ),
+                .blocking_threads(1, native_runtime::MAX_BLOCKING_THREADS),
         )
         .map_err(|error| tracedecay_domain::errors::TraceDecayError::Config {
             message: error.to_string(),

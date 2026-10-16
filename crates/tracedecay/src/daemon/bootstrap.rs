@@ -193,6 +193,7 @@ async fn run_foreground_loopback(
         },
     )
     .await;
+    let lateness_canary = spawn_lateness_canary();
     let spooled_hook_opener = hook_v2_replay_consumer::spawn_spooled_hook_opener(
         hook_v2_replay_consumer::PortableSpoolOpenerOwners {
             lifecycle: lifecycle.clone(),
@@ -278,6 +279,9 @@ async fn run_foreground_loopback(
     drop(listener);
     if let Some(opener) = spooled_hook_opener {
         opener.abort();
+    }
+    if let Some(canary) = lateness_canary {
+        canary.abort();
     }
     cancel_retained_session_history(&store_administration).await;
     let shutdown_deadline = Instant::now() + DAEMON_SHUTDOWN_COORDINATION_DEADLINE;
@@ -493,8 +497,15 @@ fn log_background_shutdown_receipt(receipt: &tracedecay_daemon_service::shutdown
 
 /// The daemon's lifetime count of Tokio-only paths skipped for want of a Tokio
 /// runtime, and of writer and reader waits that parked a native thread. Zero
-/// is the only healthy value for each.
+/// is the only healthy value for each. Long native polls are listed by spawn
+/// site, and the lateness canary reports timer wakes that ran late.
 fn log_runtime_hazards() {
+    let long_native_polls = native_runtime::long_native_polls()
+        .into_iter()
+        .map(|(site, polls)| format!("{site}={polls}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let lateness = native_runtime::scheduling_lateness();
     log_daemon_event(
         "daemon_runtime_hazards",
         &[
@@ -510,8 +521,26 @@ fn log_runtime_hazards() {
                 "native_thread_reader_waits",
                 tracedecay_rusqlite_runtime::exact_sql::native_thread_reader_waits().to_string(),
             ),
+            ("long_native_polls", long_native_polls),
+            ("late_timer_wakes", lateness.late_ticks.to_string()),
+            (
+                "worst_timer_lateness_ms",
+                lateness.worst.as_millis().to_string(),
+            ),
         ],
     );
+}
+
+/// Measures, for the daemon's lifetime, how late native timer wakes run.
+fn spawn_lateness_canary() -> Option<native_runtime::NativeTask<()>> {
+    native_runtime::spawn_lateness_canary()
+        .inspect_err(|error| {
+            log_daemon_event(
+                "daemon_lateness_canary_unavailable",
+                &[("error", error.clone())],
+            );
+        })
+        .ok()
 }
 
 fn log_project_server_shutdown_receipt(receipt: &tracedecay_store_runtime::ShutdownTaskReceipt) {
@@ -774,6 +803,7 @@ async fn run_foreground_unix(
         .with_pr_autotrack_task(pr_autotrack_task)
         .await;
     let mut shutdown_signals = ShutdownSignals::listen()?;
+    let lateness_canary = spawn_lateness_canary();
     let spooled_hook_opener =
         hook_v2_replay_consumer::spawn_spooled_hook_opener(engine.clone(), profile.clone());
     let admission = DaemonClientAdmission::new(MAX_CONCURRENT_DAEMON_CLIENTS);
@@ -853,6 +883,9 @@ async fn run_foreground_unix(
     }
     if let Some(rotation) = stderr_log_rotation {
         rotation.abort();
+    }
+    if let Some(canary) = lateness_canary {
+        canary.abort();
     }
     // Stop accepting and unlink the socket before draining so clients that
     // connect during shutdown get NotFound/ConnectionRefused (which they retry
