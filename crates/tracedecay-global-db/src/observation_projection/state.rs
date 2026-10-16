@@ -559,6 +559,31 @@ async fn projection_cache_tokens(conn: &impl Executor) -> ProjectionStoreResult<
     Ok((data_version, provenance_rowid))
 }
 
+/// Drops the writer connection's output-state cache so the next
+/// [`ensure_projection_output_state_cache`] rebuilds it from durable
+/// provenance. The cache is TEMP (heap-resident), so a corrupt copy is
+/// connection state, not database state.
+pub(super) async fn discard_projection_output_state_cache(
+    database: &Database,
+) -> ProjectionStoreResult<()> {
+    const OPERATION: &str = "discard projection output state cache";
+    let transaction = database
+        .begin_write_transaction(OPERATION)
+        .await
+        .map_err(|error| storage(OPERATION, error))?;
+    transaction
+        .execute_batch(
+            "DROP TABLE IF EXISTS temp.observation_projection_output_state;
+             DROP TABLE IF EXISTS temp.observation_projection_output_state_meta;",
+        )
+        .await
+        .map_err(|error| storage(OPERATION, error))?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| storage(OPERATION, error))
+}
+
 pub(in super::super) async fn ensure_projection_output_state_cache(
     conn: &impl Executor,
 ) -> ProjectionStoreResult<()> {
