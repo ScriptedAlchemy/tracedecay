@@ -19,6 +19,8 @@ pub mod runtime_ledger {
     pub use crate::ledger::{RETIRE_RUNTIME_EFFECTS_V1, RUNTIME_LEDGER_SCHEMA};
 }
 pub mod native_runtime;
+#[cfg(test)]
+mod native_runtime_wake_tests;
 mod operation;
 mod persistence;
 pub mod reader;
