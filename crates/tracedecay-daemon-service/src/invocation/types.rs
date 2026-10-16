@@ -207,6 +207,7 @@ impl BoundedHookOrchestratorV1 {
         address: &HookOrchestrationAddressV1,
         operation: &Arc<HookOrchestrationInFlightEntryV1>,
         emit_terminal: bool,
+        permit: Option<tokio::sync::OwnedSemaphorePermit>,
     ) {
         let completions = {
             let mut in_flight = in_flight
@@ -233,6 +234,12 @@ impl BoundedHookOrchestratorV1 {
             {
                 in_flight.events.remove(&operation.event);
             }
+            // Admission checks the in-flight maps and takes a permit under
+            // this lock, so the cycle leaves both in one step: no admission
+            // sees it gone yet still holding its permit, or sees its permit
+            // free while it still looks in flight. Its terminals, the host's
+            // cue to send the session's next boundary, follow.
+            drop(permit);
             completions
         };
         if emit_terminal {
@@ -388,15 +395,14 @@ impl BoundedHookOrchestratorV1 {
                 let superseded = operation
                     .superseded
                     .load(std::sync::atomic::Ordering::Acquire);
-                Self::settle_operation(&in_flight, &address, &operation, superseded);
+                Self::settle_operation(&in_flight, &address, &operation, superseded, None);
                 return;
             };
             if cancellation.is_cancelled() || work_cancellation.is_cancelled() {
                 let superseded = operation
                     .superseded
                     .load(std::sync::atomic::Ordering::Acquire);
-                drop(permit);
-                Self::settle_operation(&in_flight, &address, &operation, superseded);
+                Self::settle_operation(&in_flight, &address, &operation, superseded, Some(permit));
                 return;
             }
             let resumable = request.clone();
@@ -456,12 +462,13 @@ impl BoundedHookOrchestratorV1 {
                         .load(std::sync::atomic::Ordering::Acquire)
                 }
             };
-            // Free the permit before the operation leaves the in-flight maps.
-            // An admission that no longer finds this operation must not be
-            // backpressured by it, and a completion fires only once the next
-            // admission can run.
-            drop(permit);
-            Self::settle_operation(&in_flight, &address, &operation, emit_terminal);
+            Self::settle_operation(
+                &in_flight,
+                &address,
+                &operation,
+                emit_terminal,
+                Some(permit),
+            );
         });
         let Ok(task) = task else {
             Self::settle_operation(
@@ -469,6 +476,7 @@ impl BoundedHookOrchestratorV1 {
                 &spawned_address,
                 &spawned_operation,
                 false,
+                None,
             );
             return Err(HookOrchestrationAdmissionV1::Unavailable);
         };
