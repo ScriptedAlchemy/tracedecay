@@ -4302,6 +4302,124 @@ async fn production_composition_harness_reads_retained_profile_analytics_authori
     harness.shutdown().await;
 }
 
+/// #4110: `tracedecay_analytics` counted 618 `tracedecay_retrieve` calls where
+/// the transcripts held about 30. A CLI command such as `tracedecay sessions
+/// search` sends its tool and then one `tracedecay_retrieve` per page of a
+/// truncated reply, each on a one-shot daemon connection, and every one of
+/// those requests was recorded as a host MCP call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_host_tool_call_records_one_analytics_event_and_one_shot_clients_none() {
+    let temp = TempDir::new().expect("temp dir");
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(project.join("src")).expect("source dir");
+    let source: String = (0..400)
+        .map(|index| {
+            format!(
+                "pub const ATTRIBUTION_PROBE_{index}: &str = \"{}\";\n",
+                "x".repeat(400)
+            )
+        })
+        .collect();
+    std::fs::write(project.join("src/lib.rs"), source).expect("source file");
+    commit_production_composition_project(&project);
+
+    let harness = ProductionProjectCompositionHarnessV1::open(temp.path(), vec![project.clone()])
+        .await
+        .expect("production composition");
+    harness
+        .call_tool(
+            &project,
+            "tracedecay_search",
+            json!({"query": "ATTRIBUTION_PROBE_7", "format": "json"}),
+        )
+        .await
+        .expect("host search");
+
+    let one_shot = |tool_name: &str, arguments: serde_json::Value| {
+        crate::daemon::one_shot_tool_call_params(
+            tool_name,
+            arguments,
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(60)),
+        )
+    };
+    let reply_payload = |response: JsonRpcResponse, tool_name: &str| {
+        let result = response
+            .result
+            .unwrap_or_else(|| panic!("{tool_name} failed: {:?}", response.error));
+        crate::daemon::tool_json_payload(&result, tool_name).expect("tool JSON payload")
+    };
+    let grep_arguments = json!({
+        "pattern": "ATTRIBUTION_PROBE_",
+        "context_lines": 3,
+        "format": "json",
+    });
+    let grep = harness
+        .call_tool_with_params(
+            &project,
+            "tracedecay_grep",
+            one_shot("tracedecay_grep", grep_arguments),
+        )
+        .await
+        .expect("one-shot grep");
+    let envelope = reply_payload(grep, "tracedecay_grep");
+    assert!(
+        crate::daemon::is_truncation_envelope(&envelope),
+        "the fixture must truncate so the recovery pages are exercised: {envelope}"
+    );
+    let handle = envelope["handle"].as_str().expect("retrieval handle");
+    let mut offset = 0_u64;
+    let mut pages = 0;
+    loop {
+        let retrieved = harness
+            .call_tool_with_params(
+                &project,
+                "tracedecay_retrieve",
+                one_shot(
+                    "tracedecay_retrieve",
+                    json!({"handle": handle, "format": "json", "offset": offset}),
+                ),
+            )
+            .await
+            .expect("one-shot retrieve");
+        let page = reply_payload(retrieved, "tracedecay_retrieve");
+        pages += 1;
+        if page["has_more"] != json!(true) {
+            break;
+        }
+        offset = page["next_offset"].as_u64().expect("next offset");
+    }
+    assert!(pages >= 1, "recovery fetched no pages");
+
+    harness
+        .server(&project)
+        .expect("production server")
+        .ledger_writes_settled()
+        .await;
+    let events = harness
+        .read_profile_analytics_events(&tracedecay_global_db::AnalyticsEventQuery {
+            provider: Some("mcp".to_owned()),
+            project_id: None,
+            session_id: None,
+            event_kind: Some("mcp_tool_call".to_owned()),
+            since: None,
+            until: None,
+            before_id: None,
+            limit: 100,
+        })
+        .await
+        .expect("read profile analytics");
+    let recorded: Vec<&str> = events
+        .iter()
+        .filter_map(|event| event.tool_name.as_deref())
+        .collect();
+    assert_eq!(
+        recorded,
+        ["tracedecay_search"],
+        "one host call is one analytics event; the one-shot grep and its {pages} retrieve pages are not host calls"
+    );
+    harness.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn production_composition_harness_shutdown_allows_immediate_profile_reopen() {
     let temp = TempDir::new().expect("temp dir");
