@@ -177,10 +177,16 @@ async fn in_process_read_observes_admitted_outer_cancellation_after_start() {
         .register(REQUEST_ID)
         .expect("register invocation cancellation");
     let admitted_cancellation = lease.token();
+    let invocation_cancellation = admitted_cancellation.clone();
     let (started, started_rx) = tokio::sync::oneshot::channel::<()>();
+    let (alive, ended) = tokio::sync::oneshot::channel::<()>();
     let invocation = NativeTask::spawn(async move {
-        let _admission = admission;
+        let _alive = alive;
         started.send(()).expect("report invocation start");
+        // The read gives up its project lease once it observes the admitted
+        // cancellation, but never returns: only settlement ends it.
+        invocation_cancellation.cancelled().await;
+        drop(admission);
         std::future::pending::<DaemonInvocationResponse>().await
     })
     .expect("native invocation task");
@@ -205,32 +211,33 @@ async fn in_process_read_observes_admitted_outer_cancellation_after_start() {
     );
 
     admitted_cancellation.cancel();
-    let response = tokio::time::timeout(
-        Duration::from_secs(2),
-        settle_in_process_invocation(
-            &request_cancellations,
-            REQUEST_ID,
-            invocation,
-            Duration::from_secs(10),
-            CancellationSignal::active("cancel.in-process-independent")
-                .expect("independent cancellation signal"),
-            Some(admitted_cancellation),
-            InvocationCancellationPolicy::ReadOnly,
-            DAEMON_TOOL_RESPONSE_GRACE,
-        ),
+    // Without the admitted cancellation the read would settle `TimedOut`
+    // only once the ten second deadline passed.
+    let response = settle_in_process_invocation(
+        &request_cancellations,
+        REQUEST_ID,
+        invocation,
+        Duration::from_secs(10),
+        CancellationSignal::active("cancel.in-process-independent")
+            .expect("independent cancellation signal"),
+        Some(admitted_cancellation),
+        InvocationCancellationPolicy::ReadOnly,
+        DAEMON_TOOL_RESPONSE_GRACE,
     )
-    .await
-    .expect("admitted cancellation settles the nested read");
+    .await;
 
     assert!(matches!(
         response,
         Err(tracedecay_daemon_protocol::DaemonInvocationError::Cancelled { .. })
     ));
-    let guard = tokio::time::timeout(Duration::from_secs(1), quiescence)
+    assert!(
+        ended.await.is_err(),
+        "settlement aborts the read that never returns"
+    );
+    let guard = quiescence
         .await
-        .expect("nested settlement releases the project lease")
         .expect("quiescence task")
-        .expect("quiescence drains the runtime");
+        .expect("the released lease lets quiescence drain");
     assert!(registry.is_empty());
     drop(guard);
     drop(lease);
