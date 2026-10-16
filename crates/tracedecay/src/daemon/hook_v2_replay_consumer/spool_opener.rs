@@ -16,6 +16,7 @@ use tracedecay_hooks::{
     HookDeliveryReceiptSpoolV1, HookSpoolV1, hook_delivery_receipt_spool_root, hook_v2_spool_root,
 };
 use tracedecay_runtime_core::config::ProfileRoot;
+use tracedecay_runtime_core::native_runtime::NativeTask;
 
 use super::spool_watch::{SpooledProject, consumer_attached, install_opener, watch_project};
 #[cfg(not(unix))]
@@ -92,7 +93,7 @@ fn has_spooled_records(data_root: &Path) -> bool {
 pub(in crate::daemon) fn spawn_spooled_hook_opener(
     engine: DaemonEngine,
     profile: ProfileRoot,
-) -> Option<tokio::task::JoinHandle<()>> {
+) -> Option<NativeTask<()>> {
     spawn_spool_opener(
         engine.store_administration.clone(),
         engine.lifecycle.clone(),
@@ -108,7 +109,7 @@ pub(in crate::daemon) fn spawn_spooled_hook_opener(
 pub(in crate::daemon) fn spawn_spooled_hook_opener(
     owners: PortableSpoolOpenerOwners,
     profile: ProfileRoot,
-) -> Option<tokio::task::JoinHandle<()>> {
+) -> Option<NativeTask<()>> {
     spawn_spool_opener(
         owners.store_administration.clone(),
         owners.lifecycle.clone(),
@@ -122,16 +123,12 @@ fn spawn_spool_opener(
     lifecycle: DaemonLifecycle,
     opener: SpoolOpener,
     profile: ProfileRoot,
-) -> Option<tokio::task::JoinHandle<()>> {
-    // Project opens spawn on Tokio, so the opener runs there too. Without a
-    // Tokio runtime nothing opens for spooled hooks until a client opens the
-    // project.
-    let runtime = tracedecay_runtime_core::native_runtime::tokio_handle(
-        "daemon.hook_v2_replay_consumer.spool_opener",
-    )?;
+) -> Option<NativeTask<()>> {
     let (wakes, mut requests) = mpsc::unbounded_channel();
     install_opener(wakes.clone());
-    Some(runtime.spawn(async move {
+    // Without a runtime nothing opens for spooled hooks until a client opens
+    // the project.
+    let opener = NativeTask::spawn(async move {
         let work = async {
             match registered_projects(&store_administration, &profile).await {
                 Ok(projects) => {
@@ -164,7 +161,10 @@ fn spawn_spool_opener(
             () = work => {}
             () = lifecycle.wait_for_draining() => {}
         }
-    }))
+    });
+    opener
+        .inspect_err(|error| tracing::warn!(%error, "spooled hook opener not admitted"))
+        .ok()
 }
 
 async fn registered_projects(

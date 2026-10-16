@@ -401,7 +401,7 @@ struct RegisteredReplayConsumer {
     graph: Weak<tracedecay_project::project::TraceDecay>,
     delivery_settlements:
         Weak<tracedecay_application::observability::DeliverySettlementAuthorityV1>,
-    task: Option<tokio::task::JoinHandle<()>>,
+    task: Option<tracedecay_runtime_core::native_runtime::NativeTask<()>>,
     /// This registration's spool wake; its identity is the registration's.
     wake: Arc<tokio::sync::Notify>,
     /// The failures of the last finished sweep; `None` before the first.
@@ -463,52 +463,25 @@ pub(crate) fn register_hook_v2_replay_consumer(
     project_sessions: tracedecay_global_db::RegisteredGlobalDbLeaseV1,
     background_cpu: Arc<tracedecay_runtime_core::background_cpu::ProcessBackgroundCpuV1>,
 ) -> ReplayConsumerStart {
-    // The drain has not been traced Tokio-free, so it stays on Tokio. The
-    // runtime is resolved before the registry changes, so a miss leaves the
-    // data root's running consumer in place.
-    let Some(runtime) =
-        tracedecay_runtime_core::native_runtime::tokio_handle("daemon.hook_v2_replay_consumer")
-    else {
-        return ReplayConsumerStart::NoTokioRuntime;
-    };
     let data_root = graph.hook_store_layout().data_root.clone();
     let project_root = graph.project_root().to_path_buf();
     let graph = Arc::downgrade(&graph);
     let delivery_settlements = Arc::downgrade(&delivery_settlements);
     let wake = Arc::new(tokio::sync::Notify::new());
-    let displaced = match registered_replay_roots().lock() {
-        Ok(mut roots) => {
-            if roots.get(&data_root).is_some_and(|consumer| {
-                Weak::ptr_eq(&consumer.graph, &graph)
-                    && consumer.graph.upgrade().is_some()
-                    && consumer.delivery_settlements.upgrade().is_some()
-            }) {
-                return ReplayConsumerStart::AlreadyRunning;
-            }
-            roots.insert(
-                data_root.clone(),
-                RegisteredReplayConsumer {
-                    graph: graph.clone(),
-                    delivery_settlements: delivery_settlements.clone(),
-                    task: None,
-                    wake: Arc::clone(&wake),
-                    last_sweep: None,
-                },
-            )
-        }
-        Err(_) => return ReplayConsumerStart::RegistryPoisoned,
-    };
-    if let Some(task) = displaced.and_then(|consumer| consumer.task) {
-        task.abort();
-    }
     let task_data_root = data_root.clone();
     let task_graph = graph.clone();
     let task_delivery_settlements = delivery_settlements.clone();
     let task_project_sessions = project_sessions;
     let task_background_cpu = background_cpu;
-    spool_watch::attach_consumer(&data_root, &project_root, Arc::clone(&wake));
     let task_wake = Arc::clone(&wake);
+    // The task is spawned before the registry changes and held at `start`
+    // until it is registered, so a runtime that refuses it leaves the data
+    // root's running consumer in place.
+    let (start, started) = tokio::sync::oneshot::channel::<()>();
     let consumer = async move {
+        if started.await.is_err() {
+            return;
+        }
         loop {
             let (Some(graph_owner), Some(delivery_settlements)) =
                 (task_graph.upgrade(), task_delivery_settlements.upgrade())
@@ -557,16 +530,40 @@ pub(crate) fn register_hook_v2_replay_consumer(
         }
         release_replay_registration(&task_data_root, &task_wake);
     };
-    let task = runtime.spawn(consumer);
-    match registered_replay_roots().lock() {
-        Ok(mut roots) => match roots.get_mut(&data_root) {
-            Some(registered) if Arc::ptr_eq(&registered.wake, &wake) => {
-                registered.task = Some(task);
+    let task = match tracedecay_runtime_core::native_runtime::NativeTask::spawn(consumer) {
+        Ok(task) => task,
+        Err(error) => {
+            tracing::warn!(%error, data_root = %data_root.display(), "hook replay consumer not admitted");
+            return ReplayConsumerStart::RuntimeUnavailable;
+        }
+    };
+    let displaced = match registered_replay_roots().lock() {
+        Ok(mut roots) => {
+            if roots.get(&data_root).is_some_and(|consumer| {
+                Weak::ptr_eq(&consumer.graph, &graph)
+                    && consumer.graph.upgrade().is_some()
+                    && consumer.delivery_settlements.upgrade().is_some()
+            }) {
+                return ReplayConsumerStart::AlreadyRunning;
             }
-            _ => task.abort(),
-        },
-        Err(_) => task.abort(),
+            roots.insert(
+                data_root.clone(),
+                RegisteredReplayConsumer {
+                    graph,
+                    delivery_settlements,
+                    task: Some(task),
+                    wake: Arc::clone(&wake),
+                    last_sweep: None,
+                },
+            )
+        }
+        Err(_) => return ReplayConsumerStart::RegistryPoisoned,
+    };
+    if let Some(task) = displaced.and_then(|consumer| consumer.task) {
+        task.abort();
     }
+    spool_watch::attach_consumer(&data_root, &project_root, Arc::clone(&wake));
+    let _ = start.send(());
     ReplayConsumerStart::Started
 }
 
@@ -575,8 +572,8 @@ pub(crate) enum ReplayConsumerStart {
     Started,
     /// `graph`'s own consumer already drains the data root.
     AlreadyRunning,
-    /// A counted `tokio_handle` miss; the registry is unchanged.
-    NoTokioRuntime,
+    /// The native runtime refused the consumer; the registry is unchanged.
+    RuntimeUnavailable,
     RegistryPoisoned,
 }
 
@@ -838,22 +835,22 @@ mod tests {
         assert_owner_keeps_replay(&data_root, &newer).await;
     }
 
-    /// A registration with no Tokio runtime must not strip the running
-    /// consumer of the data root it would have taken over.
+    /// Project opens register from native workers, which have no Tokio
+    /// runtime; the reopened owner must still take the data root over.
     #[tokio::test]
-    async fn a_registration_without_tokio_leaves_the_running_consumer_in_place() {
+    async fn a_registration_off_tokio_takes_over_replay() {
         let (fixture, older, newer) = replay_owner_fixture().await;
         let data_root = older.hook_store_layout().data_root.clone();
         assert_eq!(fixture.register(&older), ReplayConsumerStart::Started);
 
-        let refused = std::thread::scope(|scope| {
+        let registered = std::thread::scope(|scope| {
             scope
                 .spawn(|| fixture.register(&newer))
                 .join()
                 .expect("registration thread")
         });
 
-        assert_eq!(refused, ReplayConsumerStart::NoTokioRuntime);
-        assert_owner_keeps_replay(&data_root, &older).await;
+        assert_eq!(registered, ReplayConsumerStart::Started);
+        assert_owner_keeps_replay(&data_root, &newer).await;
     }
 }
