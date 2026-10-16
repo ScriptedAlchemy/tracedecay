@@ -588,8 +588,10 @@ changes a file that holds memory.
    it, and no read parks a native worker. Proof: a native task awaiting a typed read
    leaves the native reader-wait counter unchanged (a mutation that reads inline
    fails the test).
-2. Memory durability. The memory tables get additive migrations instead of
-   `ResetRequired`, and run at FULL. Proof: a schema change test keeps facts.
+2. Memory durability. The stores that hold memory run at FULL; the memory tables
+   get additive migrations instead of `ResetRequired` with their first schema
+   change. Proof: those stores' writers report `synchronous=FULL` and the others
+   `NORMAL`.
 3. Growth stops now. Worktree liveness by root instead of the shared `.git`, a
    collector for unregistered directories that never deletes durable data,
    response-handle sweeps every tick, `hook_analytics.jsonl` rotation, age-pruned
@@ -661,6 +663,15 @@ changes a file that holds memory.
   native thread; step 5 makes that port async. Accepted by the storage lane under
   the autonomy grant; the shared contract is unchanged.
 
+- Step 2 (2026-10-16, branch `refactor/storage-memory-durability`). The stores
+  that hold durable memory today, the project store (`tracedecay.db`) and the
+  profile memory store (`user-memory.db`), commit at `synchronous=FULL`; every other
+  store keeps `NORMAL`. `global.db` stays `NORMAL` although the catalog class is
+  FULL, because it still takes per-hook analytics writes until telemetry splits out
+  in step 8. The additive-migration rule for memory ships with the first change to a
+  memory table (the conversion in step 8), not as machinery with no migration to
+  run. The class contract is unchanged.
+
 ## Open questions and risks
 
 - Do dependency-bearing graph generations need staging rows? If so, the fallback is
@@ -678,5 +689,5 @@ changes a file that holds memory.
 
 ## Next implementation step
 
-Step 2: replace `ResetRequired` for the memory tables with additive migrations and
-run memory at FULL.
+Step 3: collect worktree data by worktree-root liveness instead of the shared
+`.git`, on top of the #4099 measurement lane.

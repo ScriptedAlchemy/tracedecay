@@ -345,6 +345,7 @@ impl Worker {
             &self.path,
             self._opened_database.as_deref(),
             canonical_path,
+            connection::Durability::for_scope(&self.binding.shard_id.scope),
         ) {
             Ok(connection) => connection,
             Err(connection::WriterOpenError::Identity(error)) => {
