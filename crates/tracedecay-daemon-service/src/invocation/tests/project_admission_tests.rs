@@ -491,6 +491,225 @@ async fn same_authority_routes_alias_one_retained_runtime() {
     );
 }
 
+async fn fixture_configuration_runtime(
+    profile_root: &Path,
+    project_root: &Path,
+    project_id: &ProjectId,
+) -> (
+    tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime,
+    Arc<ProjectConfigurationRuntime>,
+) {
+    let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
+        profile_root,
+        project_root,
+        project_id.clone(),
+    )
+    .await
+    .expect("registered runtime");
+    let resolution = tracedecay_global_db::configuration::resolver::resolve_configuration(
+        &tracedecay_global_db::configuration::registry::ConfigurationRegistry::core()
+            .expect("configuration registry"),
+        &[],
+    )
+    .expect("configuration resolution");
+    let pinned = tracedecay_configuration::config::PinnedRuntimeConfiguration::new(
+        tracedecay_configuration::config::RuntimeConfigurationTarget {
+            profile_root: profile_root.to_path_buf(),
+            project_id: project_id.clone(),
+            project_root: project_root.to_path_buf(),
+        },
+        ConfigurationRevisionId::new(format!("configuration-revision.{project_id}"))
+            .expect("revision id"),
+        resolution.snapshot,
+    )
+    .expect("pinned configuration");
+    let (configuration, _) = ProjectConfigurationRuntime::open(
+        tracedecay_configuration::config::OpenedRuntimeConfiguration::new(
+            pinned,
+            runtime.project_database_arc().expect("project database"),
+        ),
+    )
+    .expect("configuration runtime");
+    (runtime, Arc::new(configuration))
+}
+
+fn grant_horizon_micros() -> i64 {
+    i64::try_from(crate::GRANT_HORIZON.as_micros()).expect("grant horizon")
+}
+
+/// The instant a project opened one horizon and one hour ago: every grant
+/// expiry fixed at that open has elapsed.
+fn opened_past_the_horizon(now: UtcMicros) -> UtcMicros {
+    UtcMicros(now.0 - grant_horizon_micros() - 3_600_000_000)
+}
+
+/// A project-open owner's authority lasts as long as the owner is mounted.
+/// A retained grant whose expiry was fixed at registration refused every
+/// retained request, the automation scheduler's included, from one horizon
+/// after the project opened until it was reopened.
+#[tokio::test]
+async fn retained_requests_admit_past_the_registration_horizon() {
+    let service = DaemonInvocationService::default();
+    let project_root = PathBuf::from("/projects/retained-horizon");
+    let publication =
+        admit_project_without_retained_runtime(&service, &project_root, "retained-horizon").await;
+    let scope = retained_scope("project.retained.horizon");
+    let actor = ActorId::new("actor.retained.horizon").expect("retained actor");
+    let operation = tracedecay_contracts::retained_surface_application_operation(
+        tracedecay_contracts::RetainedSurfaceOperation::MemoryStatus,
+    )
+    .expect("memory status operation");
+    let now = now_micros();
+    let opened_at = opened_past_the_horizon(now);
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new("grant.retained.horizon").expect("grant id"),
+        1,
+        ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).expect("grant digest"),
+        actor.clone(),
+        opened_at,
+        UtcMicros(opened_at.0 + grant_horizon_micros()),
+        scope.clone(),
+        std::collections::BTreeSet::from([operation.capability_id().clone()]),
+        std::collections::BTreeSet::from([operation.use_case_id().clone()]),
+        DisclosureClass::Sensitive,
+    )
+    .expect("retained grant");
+    DaemonRetainedRuntimeRegistrar::new(&service)
+        .register(
+            project_root.clone(),
+            scope,
+            actor,
+            grant,
+            Arc::new(tracedecay_contracts::retained_surfaces::RetainedSurfacePortsV1::default()),
+        )
+        .await
+        .expect("register retained runtime");
+    assert!(
+        service
+            .project_runtimes
+            .mark_publication_ready(&publication)
+    );
+    let deadline = Deadline::new(UtcMicros(now.0 + 30_000_000)).expect("deadline");
+    let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
+
+    let response = service
+        .invoke(
+            &registry,
+            Some(&project_root),
+            None,
+            None,
+            None,
+            DaemonInvocationRequest::retained_application(
+                "request.retained.horizon",
+                tracedecay_contracts::retained_surfaces::RetainedSurfaceRequestV1::MemoryStatus(
+                    tracedecay_contracts::retained_surfaces::MemoryStatusRequestV1 {
+                        memory_scope: None,
+                        project_selector: None,
+                    },
+                ),
+                now,
+                deadline.clone(),
+                CancellationContext::active("cancel.retained.horizon").expect("cancellation"),
+            ),
+        )
+        .await;
+    let DaemonInvocationOutcome::RetainedApplicationProblem { problem, .. } = response.outcome
+    else {
+        panic!("expected the unmounted memory port's problem, got {response:?}");
+    };
+    assert!(
+        problem.diagnostic().is_some_and(|diagnostic| diagnostic
+            .message
+            .contains("retained memory authority is not mounted")),
+        "the request must pass admission and reach the memory port: {problem:?}"
+    );
+
+    let context = service
+        .registered_retained_request_context(
+            &project_root,
+            RequestId::new("request.retained.horizon.scheduler").expect("request id"),
+            deadline.clone(),
+            CancellationContext::active("cancel.retained.horizon.scheduler").expect("cancellation"),
+            now,
+            &operation,
+        )
+        .await
+        .expect("the scheduler's retained request must be admitted");
+    assert_eq!(context.admission_at(now), RequestAdmission::Admitted);
+    assert!(
+        context.grant().expires_at > now
+            && context.grant().expires_at <= UtcMicros(now.0 + grant_horizon_micros()),
+        "an admitted request keeps a finite grant expiry: {:?}",
+        context.grant().expires_at
+    );
+    assert_eq!(context.deadline(), &deadline);
+}
+
+/// Configuration and context-scout routes admit under the project's mounted
+/// configuration authority, not under an expiry fixed when it registered.
+#[tokio::test]
+async fn configuration_requests_admit_past_the_registration_horizon() {
+    let profile = tempfile::TempDir::new().expect("profile directory");
+    let directory = tempfile::TempDir::new().expect("project directory");
+    let project_root = directory.path().to_path_buf();
+    let project_id = ProjectId::new("project.configuration.horizon").expect("project id");
+    let (_runtime, configuration) =
+        fixture_configuration_runtime(profile.path(), &project_root, &project_id).await;
+    let now = now_micros();
+    let grants = DaemonConfigurationGrantAuthority::for_test([ConfigurationLayerIdV1::Project {
+        project_id: project_id.clone(),
+    }])
+    .expect("configuration grant authority");
+    let service = DaemonInvocationService::default();
+    service
+        .project_runtimes
+        .publish(
+            project_root.clone(),
+            RegisteredConfigurationRuntime {
+                runtime: configuration,
+                scope: retained_scope("project.configuration.horizon"),
+                project_identity: InvocationProjectRuntimeIdentityV1::new(
+                    UserProfileId::new("profile.configuration.horizon").expect("profile"),
+                    project_id,
+                    project_root.clone(),
+                ),
+                actor: ActorId::new("actor.configuration.test").expect("actor"),
+                grants,
+                feedback_refresh: Arc::new(RwLock::new(None)),
+            },
+        )
+        .await
+        .expect("publish configuration runtime");
+    let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
+
+    let response = service
+        .invoke(
+            &registry,
+            Some(&project_root),
+            None,
+            None,
+            None,
+            DaemonInvocationRequest::configuration(
+                "request.configuration.horizon",
+                ApplicationSurfaceOperation::ConfigurationList,
+                ConfigurationWireRequestV1::List(
+                    tracedecay_contracts::ConfigurationListRequestV1::default(),
+                ),
+                now,
+                Deadline::new(UtcMicros(now.0 + 30_000_000)).expect("deadline"),
+                CancellationContext::active("cancel.configuration.horizon").expect("cancellation"),
+            ),
+        )
+        .await;
+    assert!(
+        matches!(
+            response.outcome,
+            DaemonInvocationOutcome::Configuration { .. }
+        ),
+        "a mounted configuration owner must keep serving past the registration horizon: {response:?}"
+    );
+}
+
 struct FixtureSourceEditRuntime {
     project_root: PathBuf,
     store_layout: tracedecay_runtime_core::storage::StoreLayout,
@@ -539,38 +758,8 @@ async fn same_authority_source_edit_owners_alias_one_incumbent() {
     let project_root = directory.path().to_path_buf();
     let profile_root = profile.path().to_path_buf();
     let project_id = ProjectId::new("project.source-edit.alias").expect("project id");
-    let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
-        &profile_root,
-        &project_root,
-        project_id.clone(),
-    )
-    .await
-    .expect("registered runtime");
-    let resolution = tracedecay_global_db::configuration::resolver::resolve_configuration(
-        &tracedecay_global_db::configuration::registry::ConfigurationRegistry::core()
-            .expect("configuration registry"),
-        &[],
-    )
-    .expect("configuration resolution");
-    let pinned = tracedecay_configuration::config::PinnedRuntimeConfiguration::new(
-        tracedecay_configuration::config::RuntimeConfigurationTarget {
-            profile_root: profile_root.clone(),
-            project_id: project_id.clone(),
-            project_root: project_root.clone(),
-        },
-        ConfigurationRevisionId::new("configuration-revision.source-edit.alias")
-            .expect("revision id"),
-        resolution.snapshot,
-    )
-    .expect("pinned configuration");
-    let (configuration, _) = ProjectConfigurationRuntime::open(
-        tracedecay_configuration::config::OpenedRuntimeConfiguration::new(
-            pinned,
-            runtime.project_database_arc().expect("project database"),
-        ),
-    )
-    .expect("configuration runtime");
-    let configuration = Arc::new(configuration);
+    let (_runtime, configuration) =
+        fixture_configuration_runtime(&profile_root, &project_root, &project_id).await;
     let catalog = Arc::new(
         tracedecay_contracts::catalog_composition::build_application_catalog_snapshot()
             .expect("catalog"),

@@ -15,7 +15,6 @@ pub struct DaemonConfigurationGrantAuthority {
     actor: ActorId,
     pub(super) policy_epoch: u64,
     pub(super) policy_digest: AccessPolicyDigest,
-    pub(super) expires_at: UtcMicros,
     direct_layers: Arc<BTreeMap<ManifestDigest, ConfigurationLayerIdV1>>,
     grants: Arc<RwLock<BTreeMap<ConfigurationGrantId, ConfigurationMutationGrantSnapshotV1>>>,
 }
@@ -52,12 +51,10 @@ impl DaemonConfigurationGrantAuthority {
         )
     }
 
-    /// A grant authority for direct writes to exactly `layer`, valid until
-    /// `expires_at`.
+    /// A grant authority for direct writes to exactly `layer`.
     pub fn for_layer(
         actor: ActorId,
         policy_digest: AccessPolicyDigest,
-        expires_at: UtcMicros,
         layer: ConfigurationLayerIdV1,
     ) -> Result<Self, DaemonInvocationProblem> {
         let digest = configuration_layer_scope_digest(&layer)
@@ -66,22 +63,17 @@ impl DaemonConfigurationGrantAuthority {
             actor,
             policy_epoch: 1,
             policy_digest,
-            expires_at,
             direct_layers: Arc::new(BTreeMap::from([(digest, layer)])),
             grants: Arc::new(RwLock::new(BTreeMap::new())),
         })
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    pub fn for_test(
-        layers: impl IntoIterator<Item = ConfigurationLayerIdV1>,
-        expires_at: UtcMicros,
-    ) -> Option<Self> {
+    pub fn for_test(layers: impl IntoIterator<Item = ConfigurationLayerIdV1>) -> Option<Self> {
         Some(Self {
             actor: ActorId::new("actor.configuration.test").ok()?,
             policy_epoch: 1,
             policy_digest: AccessPolicyDigest::new(format!("sha256:{}", "a".repeat(64))).ok()?,
-            expires_at,
             direct_layers: Arc::new(
                 layers
                     .into_iter()
@@ -108,7 +100,11 @@ impl DaemonConfigurationGrantAuthority {
         effective_deadline_at: UtcMicros,
         issued_at: UtcMicros,
     ) -> Result<ConfigurationMutationAuthority, DaemonInvocationProblem> {
-        let expires_at = UtcMicros(self.expires_at.0.min(effective_deadline_at.0));
+        let expires_at = UtcMicros(
+            mounted_grant_expires_at(issued_at)
+                .0
+                .min(effective_deadline_at.0),
+        );
         if issued_at >= expires_at {
             return Err(DaemonInvocationProblem::NotFoundOrNotAuthorized);
         }
@@ -866,7 +862,7 @@ impl DaemonConfigurationRuntimeRegistrar {
                 idempotency_key,
                 &mutation,
                 expected_revision.clone(),
-                registered.grants.expires_at,
+                mounted_grant_expires_at(observed_at),
                 observed_at,
             )
             .map_err(|_| TraceDecayError::Config {
@@ -891,7 +887,6 @@ impl DaemonConfigurationRuntimeRegistrar {
         scope: ResolvedScope,
         profile_id: UserProfileId,
         actor: ActorId,
-        expires_at: UtcMicros,
         membership_digest: Option<ManifestDigest>,
         policy_manifest_digest: ManifestDigest,
     ) -> Result<(), TraceDecayError> {
@@ -934,7 +929,6 @@ impl DaemonConfigurationRuntimeRegistrar {
             actor: actor.clone(),
             policy_epoch: 1,
             policy_digest,
-            expires_at,
             direct_layers: Arc::new(direct_layers),
             grants: Arc::new(RwLock::new(BTreeMap::new())),
         };

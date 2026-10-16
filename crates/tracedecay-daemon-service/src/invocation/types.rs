@@ -900,6 +900,16 @@ pub struct RegisteredRetainedRuntime {
     pub(super) ports: Arc<tracedecay_contracts::retained_surfaces::RetainedSurfacePortsV1<'static>>,
 }
 
+impl RegisteredRetainedRuntime {
+    /// The registered grant, bounded to one request observed at `observed_at`.
+    pub(super) fn grant_at(&self, observed_at: UtcMicros) -> CapabilityGrantSnapshot {
+        CapabilityGrantSnapshot {
+            expires_at: mounted_grant_expires_at(observed_at),
+            ..self.grant.clone()
+        }
+    }
+}
+
 pub struct RegisteredFeedbackRuntime {
     pub(super) project_id: ProjectId,
     pub(super) runtime: Arc<FeedbackRuntime>,
