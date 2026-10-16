@@ -373,17 +373,17 @@ pub trait GitIndexTransactionPort {
     fn preview(
         &self,
         request: &GitIndexPreviewRequestV1,
-    ) -> Result<GitIndexPreviewPortResultV1, GitIndexTransactionPortError>;
+    ) -> impl Future<Output = Result<GitIndexPreviewPortResultV1, GitIndexTransactionPortError>> + Send;
 
     fn apply(
         &self,
         request: &GitIndexApplyRequestV1,
-    ) -> Result<GitIndexApplyPortResultV1, GitIndexTransactionPortError>;
+    ) -> impl Future<Output = Result<GitIndexApplyPortResultV1, GitIndexTransactionPortError>> + Send;
 
     fn recover(
         &self,
         request: &GitIndexRecoveryRequestV1,
-    ) -> Result<GitIndexTransactionReceiptV1, GitIndexTransactionPortError>;
+    ) -> impl Future<Output = Result<GitIndexTransactionReceiptV1, GitIndexTransactionPortError>> + Send;
 }
 
 /// Stable, transport-neutral failure taxonomy for the daemon/native port.
@@ -424,12 +424,12 @@ where
     }
 
     #[tracing::instrument(name = "application.git.index.preview", level = "trace", skip_all)]
-    pub fn preview(
+    pub async fn preview(
         &self,
         request: GitIndexPreviewRequestV1,
     ) -> Result<PreviewResult<GitIndexPreviewV1>, GitIndexTransactionApplicationError> {
         request.validate()?;
-        let result = self.port.preview(&request)?;
+        let result = self.port.preview(&request).await?;
         result.validate_for(&request)?;
         let preview = result.preview;
         Ok(PreviewResult::new(
@@ -444,13 +444,13 @@ where
     }
 
     #[tracing::instrument(name = "application.git.index.apply", level = "trace", skip_all)]
-    pub fn apply(
+    pub async fn apply(
         &self,
         request: GitIndexApplyRequestV1,
     ) -> Result<EffectResult<GitIndexTransactionReceiptV1>, GitIndexTransactionApplicationError>
     {
         request.validate()?;
-        let result = self.port.apply(&request)?;
+        let result = self.port.apply(&request).await?;
         result.validate_for(&request)?;
         let input_digest = request.input_digest()?;
         let expected_state = result.receipt.old_snapshot_digest.clone();
@@ -492,7 +492,7 @@ where
     }
 
     #[tracing::instrument(name = "application.git.index.recover", level = "trace", skip_all)]
-    pub fn recover(
+    pub async fn recover(
         &self,
         request: GitIndexRecoveryRequestV1,
     ) -> Result<GitIndexTransactionReceiptV1, GitIndexTransactionApplicationError> {
@@ -504,7 +504,7 @@ where
             .transaction_id
             .validate()
             .map_err(ApplicationContractError::from)?;
-        let receipt = self.port.recover(&request)?;
+        let receipt = self.port.recover(&request).await?;
         receipt.validate().map_err(ApplicationContractError::from)?;
         Ok(receipt)
     }

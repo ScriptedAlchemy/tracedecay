@@ -1941,8 +1941,8 @@ async fn shutdown_fences_git_index_transactions_and_joins_store_actors() {
     ));
 
     // The idempotent receipt proves engine shutdown already closed the one
-    // mounted service and joined its store actor thread, so the registered
-    // session database Arc retained by the actor dropped with
+    // mounted service and closed its store, so the registered
+    // session database lease retained by the store dropped with
     // `shutdown_servers` rather than at process exit.
     let receipt = registry
         .shutdown()
