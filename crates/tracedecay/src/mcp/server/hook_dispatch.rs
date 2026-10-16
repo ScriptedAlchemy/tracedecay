@@ -164,18 +164,17 @@ impl McpServer {
         }
     }
 
-    /// Best-effort, and on Tokio until the daemon's reconcile is traced
-    /// Tokio-free. A miss skips it and is counted.
+    /// Best-effort: a reconcile the runtime does not admit is logged and skipped.
     fn spawn_automation_scheduler_reconcile(&self) {
-        if let Some(reconcile) = &self.automation_scheduler_reconciler
-            && let Some(runtime) = tracedecay_runtime_core::native_runtime::tokio_handle(
-                "mcp.hook_dispatch.automation_scheduler_reconcile",
-            )
-        {
+        if let Some(reconcile) = &self.automation_scheduler_reconciler {
             let reconcile = Arc::clone(reconcile);
-            runtime.spawn(async move {
-                let _ = reconcile().await;
-            });
+            if let Err(error) =
+                tracedecay_runtime_core::native_runtime::NativeTask::spawn(async move {
+                    let _ = reconcile().await;
+                })
+            {
+                tracing::warn!(%error, "hook automation scheduler reconcile not admitted");
+            }
         }
     }
 
