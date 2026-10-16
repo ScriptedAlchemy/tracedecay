@@ -415,6 +415,9 @@ mod tests {
 
     use tracedecay_runtime_core::config::ProfileRoot;
 
+    use super::super::tool_hints::HintCategory;
+    use super::{cursor_tool_hint_input, decide_hint};
+
     #[tokio::test]
     async fn transcript_ingest_forwards_its_byte_budget_to_the_daemon() {
         let daemon = crate::hooks::TestDaemonHookActionGuard::install([
@@ -455,5 +458,30 @@ mod tests {
                 "format": "json",
             })
         );
+    }
+
+    fn post_tool_use_category(event: serde_json::Value) -> Option<HintCategory> {
+        decide_hint(&cursor_tool_hint_input(&event)).map(|hint| hint.category)
+    }
+
+    #[test]
+    fn grep_pattern_text_does_not_override_search_classification() {
+        let category = post_tool_use_category(serde_json::json!({
+            "tool_name": "Grep",
+            "tool_input": { "pattern": "impact", "path": "src" },
+        }));
+        assert_eq!(category, Some(HintCategory::Search));
+    }
+
+    #[test]
+    fn shell_description_is_not_classified_as_a_prompt() {
+        let category = post_tool_use_category(serde_json::json!({
+            "tool_name": "Shell",
+            "tool_input": {
+                "command": "cargo test -p tracedecay-agent-hosts",
+                "description": "Run tests to see what breaks",
+            },
+        }));
+        assert_eq!(category, None);
     }
 }
