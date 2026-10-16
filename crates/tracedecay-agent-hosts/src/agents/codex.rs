@@ -752,8 +752,8 @@ impl CodexBundlePolicy {
     /// every host shares, plus this scope's own tail.
     fn mcp_args(self, serve_args: &ServeArgs) -> serde_json::Value {
         let scoped: &[&str] = match self.scope {
-            InstallScope::Global => &[],
-            InstallScope::ProjectLocal => &["--path", "."],
+            InstallScope::Global => CODEX_SERVE_TAIL,
+            InstallScope::ProjectLocal => &[CODEX_SERVE_TAIL[0], "--path", "."],
         };
         serve_args.json(scoped)
     }
@@ -913,11 +913,6 @@ fn codex_plugin_mcp(
     }
     let server = &mut mcp["mcpServers"]["graph"];
     server["args"] = policy.mcp_args(serve_args);
-    server["env"] = CODEX_MCP_SERVER_ENV
-        .iter()
-        .map(|(key, value)| ((*key).to_owned(), serde_json::json!(value)))
-        .collect::<serde_json::Map<_, _>>()
-        .into();
     server["startup_timeout_sec"] = CODEX_MCP_STARTUP_TIMEOUT_SECS.into();
     server["tool_timeout_sec"] = CODEX_MCP_TOOL_TIMEOUT_SECS.into();
     Ok(format!("{}\n", serde_json::to_string_pretty(&mcp)?))
@@ -978,11 +973,14 @@ const CODEX_GLOBAL_PLUGIN_SOURCE_PATH: &str = "./.codex/plugins/tracedecay";
 const CODEX_MCP_STARTUP_TIMEOUT_SECS: u64 = 120;
 const CODEX_MCP_TOOL_TIMEOUT_SECS: u64 = 900;
 
-/// Environment for the tracedecay MCP server under Codex, shared the same way
-/// as the launch args. Codex starts one server per thread, so each
-/// connection belongs to one agent and `serve` may answer a repeated identical
-/// read with a pointer to the result that agent already holds.
-const CODEX_MCP_SERVER_ENV: &[(&str, &str)] = &[("TRACEDECAY_MCP_REPEAT_READ_POINTERS", "1")];
+/// `serve` args every Codex launch appends. Codex runs model-written `exec`
+/// programs that find MCP tools through its own `ALL_TOOLS` and
+/// `tool_search` and types each tool from its input schema, so the stub
+/// list's accept-anything schemas would only hide the real parameters.
+///
+/// Repeat-read pointers stay off: a pointer tells the caller it already holds
+/// the earlier result, which is false for the `exec` program that receives it.
+const CODEX_SERVE_TAIL: &[&str] = &["--full-tool-list"];
 
 fn codex_mcp_timeouts_current(mcp: &serde_json::Value) -> bool {
     let Some(server) = mcp.pointer("/mcpServers/graph") else {

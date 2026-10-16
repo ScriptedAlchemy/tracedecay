@@ -209,8 +209,8 @@ async fn codex_plugin_artifact_exports_shareable_bundle_with_managed_skills() {
         serde_json::json!({
             "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
             "mcpServers": {
-                "graph": {"type": "stdio", "command": "tracedecay-bin", "args": ["serve"],
-                    "env": {"TRACEDECAY_MCP_REPEAT_READ_POINTERS": "1"},
+                "graph": {"type": "stdio", "command": "tracedecay-bin",
+                    "args": ["serve", "--full-tool-list"],
                     "startup_timeout_sec": 120, "tool_timeout_sec": 900},
                 "tracedecay-explorer": {"type": "stdio", "command": "node",
                     "args": ["chatgpt-extension/embedded/server.mjs", "--binary", "tracedecay-bin"],
