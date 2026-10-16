@@ -78,6 +78,57 @@ async fn sweep_collects_orphan_store_and_retires_row() {
     );
 }
 
+/// A store minted for a linked worktree outlives the worktree: the repository,
+/// and so the git common directory the registry recorded, stays live. The
+/// store has no enrolled checkout left, so the sweep plans it for collection.
+#[asupersync::test]
+async fn sweep_plans_a_deleted_worktrees_store_while_its_repository_lives() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let profile_root = tmp.path().join("profile");
+    std::fs::create_dir_all(&profile_root).unwrap();
+    let live_common_dir = tmp.path().join("repository/.git");
+    std::fs::create_dir_all(&live_common_dir).unwrap();
+    let deleted_worktree = tmp.path().join("linked-worktree");
+
+    let (_runtime, db) = open_registered_db(&profile_root).await;
+    let base = 1_700_000_000i64;
+    seed_store(
+        &db,
+        &profile_root,
+        "proj_worktree",
+        "store_worktree",
+        &deleted_worktree,
+        base - 100 * DAY,
+    )
+    .await;
+    let transaction = db.begin_write_transaction().await.unwrap();
+    transaction
+        .execute(
+            "UPDATE code_projects SET git_common_dir = ?1 WHERE project_id = 'proj_worktree'",
+            tracedecay_runtime_core::db::engine::params![
+                live_common_dir.to_string_lossy().into_owned()
+            ],
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    let report = sweep_orphan_stores(&db, &profile_root, 7 * DAY, base, false)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        report
+            .plan
+            .collect
+            .iter()
+            .map(|finding| finding.store_id.as_str())
+            .collect::<Vec<_>>(),
+        ["store_worktree"],
+        "a live shared git directory must not keep a deleted worktree's store"
+    );
+}
+
 /// The collection plan is only an inspection receipt.  Replacing its directory
 /// with byte-identical contents in the same timestamp second must still abort
 /// the apply rather than retire a newly-created store identity.
