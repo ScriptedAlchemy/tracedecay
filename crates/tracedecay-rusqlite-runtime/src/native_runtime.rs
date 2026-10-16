@@ -492,12 +492,25 @@ impl<T: Clone + Send + Sync + 'static> NativeTaskSet<T> {
     pub async fn join_next(&mut self) -> Option<NativeTaskOutcome<T>> {
         futures_util::StreamExt::next(&mut self.0).await
     }
+
+    /// A task that has already ended, without waiting for one that has not.
+    pub fn try_join_next(&mut self) -> Option<NativeTaskOutcome<T>> {
+        futures_util::StreamExt::next(&mut self.0)
+            .now_or_never()
+            .flatten()
+    }
 }
 
 impl<T: Clone> NativeTaskSet<T> {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    /// Tasks not yet joined, including ended ones.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
     }
 
     pub fn abort_all(&self) {
@@ -786,6 +799,40 @@ mod tests {
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
             "the dropped set must abort its task"
         );
+    }
+
+    #[test]
+    fn try_join_next_returns_only_tasks_that_already_ended() {
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let mut set = NativeTaskSet::default();
+        set.spawn(async move {
+            let _ = released.await;
+            1
+        })
+        .expect("live task");
+        set.spawn(async { 2 }).expect("finished task");
+
+        let deadline = Instant::now() + HANG_GUARD;
+        let finished = loop {
+            if let Some(outcome) = set.try_join_next() {
+                break outcome;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the finished task was never reaped"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert_eq!(finished, NativeTaskOutcome::Completed(2));
+        assert_eq!(set.try_join_next(), None, "the live task is not awaited");
+        assert_eq!(set.len(), 1);
+
+        release.send(()).expect("release the live task");
+        let live = block_on(timeout(HANG_GUARD, set.join_next()))
+            .expect("native root")
+            .expect("the live task ends");
+        assert_eq!(live, Some(NativeTaskOutcome::Completed(1)));
+        assert!(set.is_empty());
     }
 
     #[test]
