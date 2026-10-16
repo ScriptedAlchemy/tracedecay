@@ -24,7 +24,7 @@
 //! fields are `None` rather than guessed at, and the store still reports its
 //! size.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use tracedecay_domain::errors::TraceDecayError;
@@ -46,7 +46,10 @@ use tracedecay_runtime_core::config::GLOBAL_DB_FILENAME;
 use tracedecay_runtime_core::native_runtime;
 use tracedecay_runtime_core::storage::{SESSIONS_DB_FILENAME, USER_SESSIONS_DB_FILENAME};
 
-use super::footprint::{WalkedEntryV1, walk_regular_files};
+use super::footprint::{
+    ProfileFootprintV1, ProjectRootStateV1, WalkedEntryV1, census_profile_footprint,
+    walk_regular_files,
+};
 use crate::store_maintenance::{CodeGenerationProtectionUnavailableV1, code_generation_protection};
 
 pub const MAX_STORAGE_REPORT_PAGE_LIMIT: usize = 64;
@@ -84,6 +87,9 @@ pub struct StoreSizeReportEntry {
     pub free_bytes: Option<u64>,
     /// Free pages as a fraction of total pages, or `None` when unsampled.
     pub free_page_ratio: Option<f64>,
+    /// Whether the registered canonical root still exists.
+    #[serde(default)]
+    pub root_state: Option<ProjectRootStateV1>,
 }
 
 /// On-disk bytes of one project store, by family.
@@ -194,6 +200,10 @@ pub struct StorageReport {
     /// explicit `storage report` command attaches it after paging completes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub full_profile_size: Option<FullProfileSizeV1>,
+    /// Every profile entry against its bound, from the same walk as
+    /// `full_profile_size`. The daemon's paged response leaves it absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub footprint: Option<ProfileFootprintV1>,
     pub coverage: StorageReportCoverage,
 }
 
@@ -387,20 +397,24 @@ pub async fn build_storage_report(
     profile_root: &Path,
 ) -> tracedecay_domain::errors::Result<StorageReport> {
     let global_db_path = profile_root.join(GLOBAL_DB_FILENAME);
-    // Capture the profile's physical footprint before opening any SQLite
-    // readers. A report must describe the profile supplied by its caller, not
-    // implementation-dependent SQLite sidecar churn caused while collecting
-    // the remaining diagnostic fields.
-    let full_profile_root = profile_root.to_path_buf();
-    let full_profile_size =
-        native_runtime::spawn_blocking(move || scan_full_profile_size(&full_profile_root))
-            .await
-            .map_err(|error| report_error("join full profile size scan", error))?;
+    // The registry rows come from an off-profile copy, so reading them first
+    // leaves the profile untouched.
     let registered_projects = if global_db_path.exists() {
         load_registered_project_rows(profile_root, &global_db_path).await?
     } else {
         Vec::new()
     };
+    // Capture the profile's physical footprint before opening any SQLite
+    // readers. A report must describe the profile supplied by its caller, not
+    // implementation-dependent SQLite sidecar churn caused while collecting
+    // the remaining diagnostic fields.
+    let full_profile_root = profile_root.to_path_buf();
+    let registered_roots: BTreeMap<String, String> = registered_projects.iter().cloned().collect();
+    let footprint = native_runtime::spawn_blocking(move || {
+        census_profile_footprint(&full_profile_root, &registered_roots, &BTreeMap::new())
+    })
+    .await
+    .map_err(|error| report_error("join profile footprint census", error))?;
     let profile_root_buf = profile_root.to_path_buf();
     let sampled = native_runtime::spawn_blocking(move || {
         sample_registered_storage(&profile_root_buf, &global_db_path, registered_projects)
@@ -417,7 +431,8 @@ pub async fn build_storage_report(
         unregistered_bytes: sampled.unregistered_bytes,
         global_db_bytes: sampled.global_db_bytes,
         user_sessions_db_bytes: sampled.user_sessions_db_bytes,
-        full_profile_size: Some(full_profile_size),
+        full_profile_size: Some(footprint.full_profile_size()),
+        footprint: Some(footprint),
         coverage: StorageReportCoverage::default(),
     })
 }
@@ -873,6 +888,7 @@ pub fn build_project_storage_report(
         global_db_bytes: database_family_bytes(&global_db_path),
         user_sessions_db_bytes: user_sessions_family_bytes(profile_root),
         full_profile_size: None,
+        footprint: None,
         coverage: StorageReportCoverage::default(),
     })
 }
@@ -911,6 +927,7 @@ fn append_project_report(
             unavailable_entry_count,
             free_bytes,
             free_page_ratio,
+            root_state: Some(ProjectRootStateV1::probe(Some(canonical_root))),
         });
     }
     let code_index_store_root =
@@ -1144,32 +1161,6 @@ fn scan_unregistered_dirs(profile_root: &Path, registered_ids: &HashSet<String>)
     (count, bytes)
 }
 
-/// Count every regular file under a profile root without following symlinks.
-/// Failures remain visible as a partial lower bound instead of a successful
-/// zero-size family.
-#[tracing::instrument(
-    name = "maintenance.storage_report.scan_profile_size",
-    level = "trace",
-    skip_all
-)]
-pub fn scan_full_profile_size(profile_root: &Path) -> FullProfileSizeV1 {
-    let mut total_bytes = 0u64;
-    let mut unavailable_entry_count = 0usize;
-    walk_regular_files(profile_root, usize::MAX, &mut |_, walked| match walked {
-        WalkedEntryV1::File { bytes } => total_bytes = total_bytes.saturating_add(bytes),
-        WalkedEntryV1::Unavailable => unavailable_entry_count += 1,
-    });
-    FullProfileSizeV1 {
-        state: if unavailable_entry_count == 0 {
-            ProfileTotalCoverageStateV1::Complete
-        } else {
-            ProfileTotalCoverageStateV1::Partial
-        },
-        total_bytes,
-        unavailable_entry_count,
-    }
-}
-
 fn report_error(
     operation: &'static str,
     error: impl std::fmt::Display,
@@ -1198,6 +1189,7 @@ mod tests {
             unavailable_entry_count: 0,
             free_bytes: None,
             free_page_ratio: None,
+            root_state: None,
         }
     }
 
@@ -1667,9 +1659,31 @@ mod tests {
         assert_eq!(report.stores.len(), 1);
         assert_eq!(report.stores[0].project_id, "proj_a");
         assert_eq!(report.stores[0].canonical_root, "/repos/a");
+        assert_eq!(
+            report.stores[0].root_state,
+            Some(ProjectRootStateV1::Missing)
+        );
         assert!(report.stores[0].total_bytes > 0);
         assert_eq!(report.unregistered_dir_count, 1);
         assert!(report.unregistered_bytes >= 2048);
+
+        let footprint = report.footprint.as_ref().expect("offline report footprint");
+        assert_eq!(
+            report.full_profile_size,
+            Some(footprint.full_profile_size())
+        );
+        let roots = footprint
+            .entries
+            .iter()
+            .filter_map(|entry| Some((entry.key.as_str(), entry.project.as_ref()?.state)))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            roots,
+            BTreeMap::from([
+                ("projects/proj_a", ProjectRootStateV1::Missing),
+                ("projects/proj_ghost", ProjectRootStateV1::Unregistered),
+            ])
+        );
     }
 
     #[asupersync::test]
@@ -2091,7 +2105,8 @@ mod tests {
             std::os::unix::net::UnixListener::bind(profile_root.join("daemon.sock")).unwrap();
 
         assert_eq!(
-            scan_full_profile_size(&profile_root),
+            census_profile_footprint(&profile_root, &BTreeMap::new(), &BTreeMap::new())
+                .full_profile_size(),
             FullProfileSizeV1 {
                 state: ProfileTotalCoverageStateV1::Complete,
                 total_bytes: 1_000,
