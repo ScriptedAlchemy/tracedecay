@@ -973,14 +973,12 @@ async fn saturated_daemon_refuses_wire_drifted_handshake_instead_of_resetting() 
     server_task.await.expect("saturation server task");
 }
 
-/// A daemon that refused the auth preface and closed while the client was
-/// still writing. A request larger than the socket buffer keeps the client
-/// writing past the close, the state a client stalled past the daemon's drain
-/// window reaches. The refusal frame was queued before the close.
+/// A daemon that reads `lines` lines, answers with an authentication refusal
+/// and closes. Reading only the preface while the client sends a request
+/// larger than the socket buffer keeps the client writing past the close, the
+/// state a client stalled past the daemon's drain window reaches.
 #[cfg(unix)]
-async fn refusing_daemon_closing_mid_write(
-    socket: &std::path::Path,
-) -> tokio::task::JoinHandle<()> {
+fn refusing_daemon(socket: &std::path::Path, lines: usize) -> tokio::task::JoinHandle<()> {
     let listener = tokio::net::UnixListener::bind(socket).expect("bind daemon socket");
     let refusal_line =
         tracedecay_daemon_protocol::DaemonHandshakeRefusal::for_rejected_authentication("9.9.9")
@@ -989,12 +987,14 @@ async fn refusing_daemon_closing_mid_write(
     tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("accept client");
         let (reader, mut writer) = stream.into_split();
-        let mut lines = tokio::io::BufReader::new(reader).lines();
-        lines
-            .next_line()
-            .await
-            .expect("read auth preface")
-            .expect("auth preface line");
+        let mut reader = tokio::io::BufReader::new(reader).lines();
+        for _ in 0..lines {
+            reader
+                .next_line()
+                .await
+                .expect("read client line")
+                .expect("client line");
+        }
         writer
             .write_all(format!("{refusal_line}\n").as_bytes())
             .await
@@ -1024,7 +1024,7 @@ async fn one_shot_clients_report_a_refusal_queued_before_their_write_failed() {
     let handshake = test_handshake_defaults();
     let oversized = "x".repeat(4 * 1024 * 1024);
 
-    let daemon = refusing_daemon_closing_mid_write(&socket).await;
+    let daemon = refusing_daemon(&socket, 1);
     let error = super::super::call_tool(
         &socket,
         &handshake,
@@ -1037,7 +1037,7 @@ async fn one_shot_clients_report_a_refusal_queued_before_their_write_failed() {
     daemon.await.expect("refusing daemon");
 
     std::fs::remove_file(&socket).expect("unbind daemon socket");
-    let daemon = refusing_daemon_closing_mid_write(&socket).await;
+    let daemon = refusing_daemon(&socket, 1);
     let request = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -1048,6 +1048,31 @@ async fn one_shot_clients_report_a_refusal_queued_before_their_write_failed() {
     let error = super::super::send_daemon_request_line(&socket, &handshake, &request)
         .await
         .expect_err("a refused proxied request must fail");
+    assert_authentication_refused(&error);
+    daemon.await.expect("refusing daemon");
+}
+
+/// The stdio proxy reports a refusal that arrives after its whole request
+/// was written, instead of a connection closed before any matching response.
+#[cfg(unix)]
+#[tokio::test]
+async fn proxied_request_reports_the_refusal_read_after_its_write() {
+    let temp = TempDir::new().expect("temp dir");
+    let socket = temp.path().join("daemon.sock");
+    let _authority = seed_socket_authority(&socket);
+    let daemon = refusing_daemon(&socket, 3);
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": { "name": "tracedecay_status", "arguments": {} },
+    })
+    .to_string();
+
+    let error =
+        super::super::send_daemon_request_line(&socket, &test_handshake_defaults(), &request)
+            .await
+            .expect_err("a refused proxied request must fail");
     assert_authentication_refused(&error);
     daemon.await.expect("refusing daemon");
 }
