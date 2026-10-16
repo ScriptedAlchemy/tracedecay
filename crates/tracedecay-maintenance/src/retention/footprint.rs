@@ -31,7 +31,8 @@ const MIB: u64 = 1024 * 1024;
 
 /// Bound for the whole profile, overridden by the `profile` budget key.
 pub const PROFILE_TOTAL_BOUND_BYTES: u64 = 64 * GIB;
-const PROFILE_TOTAL_KEY: &str = "profile";
+/// Footprint key of the profile total and its budget override.
+pub const PROFILE_TOTAL_KEY: &str = "profile";
 const PROJECTS_DIRECTORY: &str = "projects";
 
 /// What a profile entry holds, which decides its default bound.
