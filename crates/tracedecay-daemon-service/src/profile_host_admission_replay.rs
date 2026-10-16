@@ -166,7 +166,6 @@ struct ProfileHostAdmissionReplayWorker {
     pass_count: AtomicUsize,
     backoff_count: AtomicUsize,
     idle: Notify,
-    wake: Notify,
     cancellation: Arc<ProfileHostAdmissionCancellation>,
     replay_pass: Option<ProfileHostAdmissionReplayPass>,
     #[cfg(test)]
@@ -750,7 +749,6 @@ impl ProfileHostAdmissionReplayWorker {
             pass_count: AtomicUsize::new(0),
             backoff_count: AtomicUsize::new(0),
             idle: Notify::new(),
-            wake: Notify::new(),
             cancellation,
             replay_pass,
             #[cfg(test)]
@@ -762,7 +760,7 @@ impl ProfileHostAdmissionReplayWorker {
 
     fn kick(&self) {
         self.dirty.store(true, Ordering::Release);
-        self.wake.notify_one();
+        self.broker.request_replay();
     }
 
     async fn is_idle(&self) -> bool {
@@ -826,6 +824,7 @@ impl ProfileHostAdmissionReplayWorker {
                 }
                 self.busy.store(true, Ordering::Release);
                 let _ = self.dirty.swap(false, Ordering::AcqRel);
+                self.broker.clear_replay_request();
                 self.pass_count.fetch_add(1, Ordering::AcqRel);
                 let Some(pending_before) = self.pending_replay_count_or_cancelled().await else {
                     self.mark_idle();
@@ -889,7 +888,6 @@ impl ProfileHostAdmissionReplayWorker {
             self.mark_idle();
             tokio::select! {
                 () = self.wait_for_cancellation() => return,
-                () = self.wake.notified() => {}
                 () = self.broker.wait_for_replay_request() => {}
                 slept = native_runtime::sleep_until(Instant::now() + idle_eviction_after) => {
                     // Without a timer the idle wait cannot be bounded; exit so
