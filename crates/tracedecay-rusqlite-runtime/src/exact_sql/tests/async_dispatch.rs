@@ -533,3 +533,54 @@ fn a_writer_wait_on_the_native_blocking_pool_is_not_counted() {
     .unwrap();
     assert_eq!(native_thread_writer_waits() - before, 0);
 }
+
+#[test]
+fn a_reader_wait_on_a_native_worker_is_counted() {
+    let _serial = NATIVE_WAIT_COUNTER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fixture = fixture('a', 'a');
+    let handle = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let before = native_thread_reader_waits();
+    let task = crate::native_runtime::NativeTask::spawn(async move {
+        let rows = handle
+            .query(statement("SELECT 1", vec![]), Duration::from_secs(5))
+            .map(|rows| rows.rows.len())
+            .map_err(|error| error.to_string());
+        let snapshot = handle
+            .begin_read_snapshot(Duration::from_secs(5))
+            .and_then(|snapshot| snapshot.query(statement("SELECT 1", vec![])))
+            .map(|rows| rows.rows.len())
+            .map_err(|error| error.to_string());
+        (rows, snapshot)
+    })
+    .unwrap();
+    let outcome = crate::native_runtime::block_on(task.wait()).unwrap();
+    assert_eq!(
+        outcome,
+        crate::native_runtime::NativeTaskOutcome::Completed((Ok(1), Ok(1)))
+    );
+    assert_eq!(
+        native_thread_reader_waits() - before,
+        3,
+        "the query, the snapshot open and the snapshot query each parked the worker"
+    );
+}
+
+#[test]
+fn a_reader_wait_on_the_native_blocking_pool_is_not_counted() {
+    let _serial = NATIVE_WAIT_COUNTER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fixture = fixture('a', 'a');
+    let handle = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let before = native_thread_reader_waits();
+    let rows = crate::native_runtime::block_on(crate::native_runtime::spawn_blocking(move || {
+        handle.query(statement("SELECT 1", vec![]), Duration::from_secs(5))
+    }))
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    assert_eq!(rows.rows.len(), 1);
+    assert_eq!(native_thread_reader_waits() - before, 0);
+}
