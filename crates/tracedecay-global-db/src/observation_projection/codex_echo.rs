@@ -17,9 +17,7 @@ use tracedecay_store::{
 };
 
 use super::apply::retire_replaced_codex_output;
-use super::state::{
-    ensure_projection_output_state_cache, read_observation, storage, storage_message,
-};
+use super::state::{read_observation, storage, storage_message};
 
 const CODEX: &str = "codex";
 const OPERATION: &str = "retire Codex response echoes";
@@ -154,7 +152,6 @@ pub(crate) async fn converge_codex_response_echoes(
                 .await
                 .map_err(|error| storage(OPERATION, error));
         }
-        ensure_projection_output_state_cache(&transaction).await?;
         let sessions = codex_session_page(&transaction, &after).await?;
         for session_id in &sessions {
             retire_session_echoes(&transaction, session_id).await?;
