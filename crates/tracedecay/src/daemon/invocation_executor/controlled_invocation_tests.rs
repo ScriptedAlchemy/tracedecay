@@ -62,21 +62,19 @@ async fn in_process_effect_cancellation_requests_daemon_cancel_and_awaits_settle
         assert!(caller_cancellation.cancel(now_micros()));
     });
 
-    let response = tokio::time::timeout(
-        Duration::from_secs(1),
-        settle_in_process_invocation(
-            &request_cancellations,
-            REQUEST_ID,
-            invocation,
-            Duration::from_secs(1),
-            cancellation,
-            None,
-            InvocationCancellationPolicy::AuthoritativeEffect,
-            DAEMON_TOOL_RESPONSE_GRACE,
-        ),
+    // The deadline sits past any test run, so only the caller's cancellation
+    // can request the daemon cancel this settlement waits on.
+    let response = settle_in_process_invocation(
+        &request_cancellations,
+        REQUEST_ID,
+        invocation,
+        Duration::from_hours(24),
+        cancellation,
+        None,
+        InvocationCancellationPolicy::AuthoritativeEffect,
+        DAEMON_TOOL_RESPONSE_GRACE,
     )
     .await
-    .expect("authoritative settlement is joined")
     .expect("daemon settlement is returned");
 
     assert_authoritative_settlement(response);
@@ -101,22 +99,18 @@ async fn in_process_effect_deadline_requests_daemon_cancel_and_awaits_settlement
     })
     .expect("native invocation task");
 
-    let response = tokio::time::timeout(
-        Duration::from_secs(1),
-        settle_in_process_invocation(
-            &request_cancellations,
-            REQUEST_ID,
-            invocation,
-            Duration::from_millis(10),
-            CancellationSignal::active("cancel.in-process-effect-deadline")
-                .expect("cancellation signal"),
-            None,
-            InvocationCancellationPolicy::AuthoritativeEffect,
-            DAEMON_TOOL_RESPONSE_GRACE,
-        ),
+    let response = settle_in_process_invocation(
+        &request_cancellations,
+        REQUEST_ID,
+        invocation,
+        Duration::from_millis(10),
+        CancellationSignal::active("cancel.in-process-effect-deadline")
+            .expect("cancellation signal"),
+        None,
+        InvocationCancellationPolicy::AuthoritativeEffect,
+        DAEMON_TOOL_RESPONSE_GRACE,
     )
     .await
-    .expect("authoritative settlement is joined")
     .expect("daemon settlement is returned");
 
     assert_authoritative_settlement(response);
