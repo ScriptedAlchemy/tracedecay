@@ -194,13 +194,13 @@ struct WorkAttemptProcessHolderV1 {
     cancellation: Arc<Notify>,
     lifecycle: tracedecay_runtime_core::cancellation::CancellationToken,
     generation: u64,
-    handle: Option<tokio::task::JoinHandle<()>>,
+    task: Option<native_runtime::NativeTask<()>>,
 }
 
 impl Drop for WorkAttemptProcessHolderV1 {
     fn drop(&mut self) {
-        if let Some(handle) = &self.handle {
-            handle.abort();
+        if let Some(task) = &self.task {
+            task.abort();
         }
     }
 }
@@ -256,7 +256,7 @@ impl WorkAttemptProcessRegistryV1 {
                 cancellation: Arc::clone(&notify),
                 lifecycle: tracedecay_runtime_core::cancellation::CancellationToken::new(),
                 generation,
-                handle: None,
+                task: None,
             },
         );
         Some(notify)
@@ -272,14 +272,6 @@ impl WorkAttemptProcessRegistryV1 {
         F: FnOnce(Arc<Notify>) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
-        // The attempt calls synchronous Work storage ports (`mark_running`,
-        // the settle paths) whose writer wait needs Tokio's `block_in_place`;
-        // on a native worker each wait would park it.
-        let Some(runtime) =
-            native_runtime::tokio_handle("daemon-service.work_attempt.spawn_for_worktree")
-        else {
-            return false;
-        };
         let mut state = self
             .state
             .lock()
@@ -300,7 +292,10 @@ impl WorkAttemptProcessRegistryV1 {
         let task_key = key.clone();
         let (start, started) = tokio::sync::oneshot::channel();
         let future = task(Arc::clone(&cancellation));
-        let handle = runtime.spawn(async move {
+        // The attempt calls synchronous Work storage ports (`mark_running`,
+        // the settle paths) that park their thread on the writer, so it runs
+        // on a blocking-pool thread rather than a native worker.
+        let Ok(task) = native_runtime::NativeTask::spawn_off_native_thread(async move {
             let admitted = tokio::select! {
                 result = started => result.is_ok(),
                 () = task_lifecycle.cancelled() => false,
@@ -318,7 +313,9 @@ impl WorkAttemptProcessRegistryV1 {
             if let Some(registry) = task_registry.upgrade() {
                 registry.release_generation(&task_key, generation);
             }
-        });
+        }) else {
+            return false;
+        };
         state.processes.insert(
             key.clone(),
             WorkAttemptProcessHolderV1 {
@@ -326,7 +323,7 @@ impl WorkAttemptProcessRegistryV1 {
                 cancellation,
                 lifecycle,
                 generation,
-                handle: Some(handle),
+                task: Some(task),
             },
         );
         drop(state);
@@ -453,16 +450,16 @@ impl WorkAttemptProcessRegistryV1 {
         let deadline =
             std::time::Instant::now() + tracedecay_runtime_core::DAEMON_TASK_ABORT_DEADLINE;
         let mut clean = true;
-        for mut process in processes.into_values() {
-            let Some(handle) = process.handle.as_mut() else {
+        for process in processes.into_values() {
+            let Some(task) = process.task.as_ref() else {
                 continue;
             };
-            match native_runtime::timeout_at(deadline, &mut *handle).await {
-                Ok(Ok(())) => {}
-                Ok(Err(_)) => clean = false,
+            match native_runtime::timeout_at(deadline, task.wait()).await {
+                Ok(native_runtime::NativeTaskOutcome::Completed(())) => {}
+                Ok(_) => clean = false,
                 Err(_) => {
-                    handle.abort();
-                    let _ = handle.await;
+                    task.abort();
+                    let _ = task.wait().await;
                     clean = false;
                 }
             }
