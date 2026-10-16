@@ -7,16 +7,32 @@ use super::*;
 use tracedecay_runtime_core::logging::log_daemon_event;
 use tracedecay_runtime_core::path_safety::canonical_existing_identity;
 
-#[tracing::instrument(
-    name = "daemon.http.application.router_build",
-    level = "trace",
-    skip_all
-)]
-fn build_http_application_router(
+/// The router build is synchronous CPU work, about 100 ms in a loaded debug
+/// build. Inside a native task's poll it holds that worker's reactor, and
+/// past `LONG_POLL_CPU` a debug build fails the task (#4066).
+async fn build_http_application_router(
+    owner: tracedecay_runtime_core::config::ProfileRoot,
+    project_id: String,
+    project_path: PathBuf,
+) -> Result<axum::Router> {
+    let span = tracing::trace_span!("daemon.http.application.router_build");
+    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        let _span = span.entered();
+        build_http_application_router_now(&owner, &project_id, &project_path)
+    })
+    .await
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("daemon HTTP application router build did not run: {error}"),
+    })?
+}
+
+fn build_http_application_router_now(
     owner: &tracedecay_runtime_core::config::ProfileRoot,
     project_id: &str,
     project_path: &Path,
 ) -> Result<axum::Router> {
+    #[cfg(test)]
+    tests::spin_injected_router_build_cpu(project_id);
     let project_id = tracedecay_domain::ProjectId::new(project_id.to_owned()).map_err(|error| {
         TraceDecayError::Config {
             message: format!("daemon HTTP project identity is invalid: {error}"),
@@ -100,10 +116,11 @@ pub(super) fn install_http_application_cold_resolver(
                     });
                 }
                 build_http_application_router(
-                    store_administration.owner_profile()?,
-                    project_id.as_str(),
-                    &canonical_root,
+                    store_administration.owner_profile()?.clone(),
+                    project_id.as_str().to_owned(),
+                    canonical_root,
                 )
+                .await
                 .map(Some)
             },
             tracing::trace_span!("daemon.http.application.router_cold_resolve"),
@@ -162,6 +179,60 @@ pub(super) async fn mount_http_application_router(
     if !registry.is_active() {
         return Ok(());
     }
-    let router = build_http_application_router(owner, project_id, project_path)?;
+    let router = build_http_application_router(
+        owner.clone(),
+        project_id.to_owned(),
+        project_path.to_path_buf(),
+    )
+    .await?;
     registry.mount(project_id, router).await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::{Mutex, PoisonError};
+    use std::time::{Duration, Instant};
+
+    static INJECTED_ROUTER_BUILD_CPU: Mutex<BTreeMap<String, Duration>> =
+        Mutex::new(BTreeMap::new());
+
+    pub(super) fn spin_injected_router_build_cpu(project_id: &str) {
+        let cpu = INJECTED_ROUTER_BUILD_CPU
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(project_id);
+        if let Some(cpu) = cpu {
+            let spun = Instant::now();
+            while spun.elapsed() < cpu {
+                std::hint::spin_loop();
+            }
+        }
+    }
+
+    #[cfg(all(unix, debug_assertions))]
+    #[test]
+    fn a_router_build_longer_than_one_native_poll_does_not_fail_its_task() {
+        use tracedecay_runtime_core::native_runtime::{self, NativeTask, NativeTaskOutcome};
+
+        const PROJECT_ID: &str = "project.long-router-build";
+        INJECTED_ROUTER_BUILD_CPU
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(PROJECT_ID.to_owned(), native_runtime::LONG_POLL_CPU * 2);
+        let profile = tempfile::tempdir().expect("profile root");
+        let owner = tracedecay_runtime_core::config::ProfileRoot::new(profile.path().to_path_buf());
+        let project_path = profile.path().to_path_buf();
+        // The build may refuse this bare profile; only where it ran is under test.
+        let mount = NativeTask::spawn(async move {
+            let _ =
+                super::build_http_application_router(owner, PROJECT_ID.to_owned(), project_path)
+                    .await;
+        })
+        .expect("native mount task");
+        assert_eq!(
+            native_runtime::block_on(mount.wait()).expect("process runtime"),
+            NativeTaskOutcome::Completed(()),
+        );
+    }
 }
