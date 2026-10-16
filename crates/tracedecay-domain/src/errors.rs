@@ -247,6 +247,10 @@ pub const PROFILE_RESET_COMMAND: &str = "tracedecay wipe --all --yes";
 /// empty. Stores it cannot reset on their own name [`PROFILE_RESET_COMMAND`].
 pub const STALE_STORE_RESET_COMMAND: &str = "tracedecay wipe --stale --yes";
 
+/// Releases the handles a daemon holds on store files deleted or replaced
+/// under it; no reset can, because the space belongs to the unlinked inode.
+pub const DAEMON_RESTART_COMMAND: &str = "tracedecay daemon restart";
+
 /// A registered store [`STALE_STORE_RESET_COMMAND`] deletes on its own, named
 /// by the `store` label [`StoreResetRequiredV1`] carries.
 #[derive(Clone, Debug, PartialEq, Eq)]

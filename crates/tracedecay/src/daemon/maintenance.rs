@@ -16,7 +16,9 @@ use tracedecay_maintenance::generation::{
 use tracedecay_maintenance::lease::ProjectStoreMaintenanceLeaseV1;
 use tracedecay_maintenance::loop_run::{MaintenanceWake, run_maintenance_loop};
 use tracedecay_maintenance::store_maintenance::RegisteredProjectStoreV1;
-use tracedecay_maintenance::telemetry::StoreTelemetrySamplingOutcome;
+use tracedecay_maintenance::telemetry::{
+    StoreFileIdentityStateV1, StoreTelemetrySamplingOutcome, StoreTelemetrySamplingRegistry,
+};
 use tracedecay_maintenance::tick::{
     MaintenanceContinuation, MaintenanceTickOutcome, cursor_after_attempted_units,
     select_store_window,
@@ -64,6 +66,31 @@ async fn registered_project_stores(
         }
         if exhausted {
             return Ok(stores);
+        }
+    }
+}
+
+/// Holds every mounted store whose path no longer names the file this daemon
+/// opened in the reset-required state. A daemon writing into a deleted store
+/// fills an unlinked inode that no size census sees and no reset frees (#4099
+/// wrote 112 GB this way), so status and doctor name the restart instead.
+fn record_lost_store_files(
+    sampling: &StoreTelemetrySamplingRegistry,
+    registry: &tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1,
+) {
+    for (path, state) in sampling.check_store_identities() {
+        if matches!(
+            state,
+            StoreFileIdentityStateV1::Missing | StoreFileIdentityStateV1::Replaced
+        ) && registry.record_store_identity_lost(&path)
+        {
+            log_daemon_event(
+                "store_file_identity_lost",
+                &[
+                    ("path", path.display().to_string()),
+                    ("state", format!("{state:?}")),
+                ],
+            );
         }
     }
 }
@@ -900,6 +927,11 @@ impl MaintenanceCoordinator {
         } else {
             StoreTelemetrySamplingOutcome::default()
         };
+        if continuation.is_none()
+            && let Some(registry) = administration.mounted_session_runtime_registry().await
+        {
+            record_lost_store_files(&maintenance_observations, &registry);
+        }
 
         // Bounded, round-robin slice of mounted stores. Writer admission is
         // per unit so one busy store defers only itself, and the cursor
@@ -1495,6 +1527,73 @@ mod tests {
                 "count={count} budget={budget}: not every store reached within {ticks} ticks"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_mounted_store_deleted_under_the_daemon_requires_a_restart() {
+        let temporary = tempfile::tempdir().expect("store identity fixture root");
+        let profile_root = temporary.path().join("profile");
+        let identity = tracedecay_daemon_identity::profile_identity::load_or_create(&profile_root)
+            .expect("profile identity");
+        let _database_scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
+            &profile_root,
+            44,
+            "maintenance store identity",
+        )
+        .expect("daemon database scope");
+        let registry = tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("daemon session runtime registry");
+        let database_path = temporary.path().join("project.db");
+        tracedecay_global_db::register_registered_schema_installer();
+        let authority = tracedecay_runtime_core::db::DatabaseAuthority::acquire_test(
+            &database_path,
+            "maintenance store identity fixture",
+        )
+        .expect("store identity fixture authority");
+        let (database, _) = tracedecay_runtime_core::db::Database::publish_test_runtime(
+            &database_path,
+            &authority,
+            tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .expect("store identity fixture database");
+        let scope = tracedecay_contracts::ResolvedScope::new(
+            tracedecay_domain::ProjectId::new("project.store-identity").expect("project identity"),
+            tracedecay_domain::RepositoryId::new("repository.store-identity")
+                .expect("repository identity"),
+            tracedecay_domain::WorktreeId::new("worktree.store-identity")
+                .expect("worktree identity"),
+            None,
+        )
+        .expect("resolved scope");
+        let sampling = StoreTelemetrySamplingRegistry::default();
+        assert!(sampling.register_port(&database_path, &scope, || {
+            database.storage_telemetry_handle()
+        }));
+        let lost = |registry: &tracedecay_store_runtime::DaemonSessionRuntimeRegistryV1| {
+            registry
+                .reset_required_stores()
+                .into_iter()
+                .filter(|store| store.store == database_path.display().to_string())
+                .map(|store| store.remedy)
+                .collect::<Vec<_>>()
+        };
+
+        super::record_lost_store_files(&sampling, &registry);
+        assert_eq!(
+            lost(&registry),
+            Vec::<String>::new(),
+            "a live store is not lost"
+        );
+
+        std::fs::remove_file(&database_path).expect("delete the mounted store");
+        super::record_lost_store_files(&sampling, &registry);
+        assert_eq!(
+            lost(&registry),
+            [tracedecay_domain::errors::DAEMON_RESTART_COMMAND.to_owned()],
+            "a store deleted under the daemon must be reset-required, naming the restart"
+        );
     }
 
     #[tokio::test]
