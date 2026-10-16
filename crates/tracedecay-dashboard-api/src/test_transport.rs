@@ -9,9 +9,10 @@ use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 
 use crate::state::build_state_inner;
 use crate::{
-    DashboardAccessToken, DashboardApplicationRuntime, DashboardAutomationAuthorityV1,
-    DashboardAutomationWriter, DashboardDeliveryReadPortV1, DashboardGitCorrelationReadPortV1,
-    DashboardLcmReadPortV1, DashboardProfileCodeIndexWorkerSettingsPort, DashboardProjectContext,
+    ConnectionExecutor, DashboardAccessToken, DashboardApplicationRuntime,
+    DashboardAutomationAuthorityV1, DashboardAutomationWriter, DashboardDeliveryReadPortV1,
+    DashboardGitCorrelationReadPortV1, DashboardLcmReadPortV1,
+    DashboardProfileCodeIndexWorkerSettingsPort, DashboardProjectContext,
     DashboardSessionAuthoritiesV1, DashboardSessionMountV1, DashboardSessionResolutionV1,
     DashboardStateCompositionV1, PrAutoTrackManagedSummaryReader, bind_dashboard, code_read_api,
     router, serve_loopback, standalone_dashboard_automation_writer, with_dashboard_http_admission,
@@ -318,6 +319,6 @@ where
             .ok_or_else(|| {
                 crate::state::config_error("the test dashboard found no Tokio runtime")
             })?;
-    serve_loopback(runtime, listener, app, shutdown).await;
+    serve_loopback(ConnectionExecutor::Tokio(runtime), listener, app, shutdown).await;
     Ok(())
 }

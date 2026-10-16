@@ -43,7 +43,7 @@ use tracedecay_daemon_service::remote_http_transport::{
     RemoteBrainTlsDeadlines, RemoteBrainTlsEgressObserver, RemoteBrainTlsEgressSnapshot,
     RemoteBrainTlsIngressSnapshot,
 };
-use tracedecay_dashboard_api::serve_loopback;
+use tracedecay_dashboard_api::{ConnectionExecutor, serve_loopback};
 use tracedecay_domain::{BrainNodeId, EnrollmentGrantV1, ProjectId};
 use tracedecay_runtime_core::native_runtime::{self, TimeoutError};
 use tracedecay_rusqlite_runtime::remote::RemoteWriterPublicationErrorV1;
@@ -901,9 +901,14 @@ impl DaemonHttpApplicationService {
         let serve_runtime = runtime.clone();
         let task = runtime.spawn(tracing::Instrument::instrument(
             async move {
-                serve_loopback(serve_runtime, listener, app, async {
-                    let _ = shutdown_requested.await;
-                })
+                serve_loopback(
+                    ConnectionExecutor::Tokio(serve_runtime),
+                    listener,
+                    app,
+                    async {
+                        let _ = shutdown_requested.await;
+                    },
+                )
                 .await;
                 task_active.store(false, Ordering::Release);
             },
