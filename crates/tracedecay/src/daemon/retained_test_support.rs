@@ -163,20 +163,22 @@ impl tracedecay_daemon_protocol::DaemonInvocationExecutor for RetainedOwnerTestE
             }
             let request_id = request.request_id.clone();
             let executor = self.clone();
-            let invocation = tokio::spawn(async move {
-                executor
-                    .service
-                    .invoke_with_cancellation(
-                        &executor.lsp_registry,
-                        Some(&executor.project_root),
-                        None,
-                        None,
-                        None,
-                        request,
-                        None,
-                    )
-                    .await
-            });
+            let invocation =
+                tracedecay_runtime_core::native_runtime::NativeTask::spawn(async move {
+                    executor
+                        .service
+                        .invoke_with_cancellation(
+                            &executor.lsp_registry,
+                            Some(&executor.project_root),
+                            None,
+                            None,
+                            None,
+                            request,
+                            None,
+                        )
+                        .await
+                })
+                .map_err(|_| tracedecay_daemon_protocol::DaemonInvocationError::Unavailable)?;
             super::invocation_executor::settle_in_process_invocation(
                 self.service.request_cancellations(),
                 &request_id,

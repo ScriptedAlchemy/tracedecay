@@ -43,7 +43,7 @@ use tracedecay_daemon_service::remote_http_transport::{
     RemoteBrainTlsDeadlines, RemoteBrainTlsEgressObserver, RemoteBrainTlsEgressSnapshot,
     RemoteBrainTlsIngressSnapshot,
 };
-use tracedecay_dashboard_api::serve_loopback;
+use tracedecay_dashboard_api::{ConnectionExecutor, serve_loopback};
 use tracedecay_domain::{BrainNodeId, EnrollmentGrantV1, ProjectId};
 use tracedecay_runtime_core::native_runtime::{self, TimeoutError};
 use tracedecay_rusqlite_runtime::remote::RemoteWriterPublicationErrorV1;
@@ -429,14 +429,32 @@ async fn provision_remote_node(
     let Some(runtime) = registry.remote_runtime() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    match tracing::Instrument::instrument(
-        runtime.provision_remote_node(request.grant, request.admission),
-        tracing::trace_span!("daemon.http.application.remote_node_provision"),
-    )
-    .await
-    {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(error) => remote_node_operator_refusal(error),
+    // This listener serves on Tokio workers, and provisioning writes the node
+    // store through synchronous storage ports that park their thread on the
+    // writer, so it runs on a blocking-pool thread.
+    let provision =
+        native_runtime::NativeTask::spawn_off_native_thread(tracing::Instrument::instrument(
+            async move {
+                runtime
+                    .provision_remote_node(request.grant, request.admission)
+                    .await
+            },
+            tracing::trace_span!("daemon.http.application.remote_node_provision"),
+        ));
+    let Ok(provision) = provision else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    match provision.wait().await {
+        native_runtime::NativeTaskOutcome::Completed(Ok(())) => {
+            StatusCode::NO_CONTENT.into_response()
+        }
+        native_runtime::NativeTaskOutcome::Completed(Err(error)) => {
+            remote_node_operator_refusal(error)
+        }
+        native_runtime::NativeTaskOutcome::Cancelled
+        | native_runtime::NativeTaskOutcome::Panicked(_) => {
+            StatusCode::SERVICE_UNAVAILABLE.into_response()
+        }
     }
 }
 
@@ -901,9 +919,14 @@ impl DaemonHttpApplicationService {
         let serve_runtime = runtime.clone();
         let task = runtime.spawn(tracing::Instrument::instrument(
             async move {
-                serve_loopback(serve_runtime, listener, app, async {
-                    let _ = shutdown_requested.await;
-                })
+                serve_loopback(
+                    ConnectionExecutor::Tokio(serve_runtime),
+                    listener,
+                    app,
+                    async {
+                        let _ = shutdown_requested.await;
+                    },
+                )
                 .await;
                 task_active.store(false, Ordering::Release);
             },
