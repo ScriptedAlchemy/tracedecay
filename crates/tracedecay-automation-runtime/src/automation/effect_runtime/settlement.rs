@@ -1186,6 +1186,9 @@ impl AutomationEffectAuthority {
             RequestAdmission::Admitted => None,
             RequestAdmission::Cancelled => Some(ApplicationProblem::cancelled_before_admission()),
             RequestAdmission::TimedOut => Some(ApplicationProblem::timed_out_before_admission()),
+            RequestAdmission::GrantExpired => {
+                Some(ApplicationProblem::grant_expired_before_admission())
+            }
         } {
             let envelope = ApplicationProblemEnvelope::new(
                 operation.result_contract().clone(),

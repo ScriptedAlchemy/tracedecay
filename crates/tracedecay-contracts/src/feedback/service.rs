@@ -1510,6 +1510,10 @@ fn request_interruption(
             FeedbackCycleTerminationV1::BudgetExceeded,
             vec![ProviderEvaluationStateV1::TimedOut],
         )),
+        RequestAdmission::GrantExpired => Some((
+            FeedbackCycleTerminationV1::DaemonUnavailable,
+            vec![ProviderEvaluationStateV1::Unavailable],
+        )),
     }
 }
 

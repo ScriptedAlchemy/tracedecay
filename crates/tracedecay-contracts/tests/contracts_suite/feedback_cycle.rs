@@ -23,8 +23,7 @@ use tracedecay_contracts::{
     DiagnosticProviderPort, DiagnosticProviderResult, DiagnosticProviderState, FreshnessState,
     GenerationDiagnosticHistoryPort, GenerationDiagnosticHistoryRequest, ProviderCoverage,
     ProviderDocumentIdentity, ProviderFreshness, ProviderOrigin, ProviderProvenance,
-    ProviderSourceIdentity, RequestAdmission, RequestContext, RetryDirective, RevisionDigest,
-    SafeDiagnostic,
+    ProviderSourceIdentity, RequestContext, RetryDirective, RevisionDigest, SafeDiagnostic,
 };
 use tracedecay_domain::configuration::{
     AnalyzerExecutableId, AnalyzerExecutableReferenceV1, AnalyzerLanguageId,
@@ -416,15 +415,7 @@ impl FeedbackRouteAuthorizationPort for RouteAuthorizationFixture {
         operation: &ApplicationOperation,
         observed_at: UtcMicros,
     ) -> Result<AuthorityReceipt, ApplicationProblem> {
-        match context.admission_at(observed_at) {
-            RequestAdmission::Cancelled => {
-                return Err(ApplicationProblem::cancelled_before_admission());
-            }
-            RequestAdmission::TimedOut => {
-                return Err(ApplicationProblem::timed_out_before_admission());
-            }
-            RequestAdmission::Admitted => {}
-        }
+        ApplicationProblem::ensure_admitted(context, observed_at)?;
         if !context.allows(operation.capability_id(), operation.use_case_id()) {
             return Err(ApplicationProblem::not_found_or_not_authorized(
                 RetryDirective::Never,

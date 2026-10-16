@@ -394,6 +394,9 @@ fn read_store_size(
             RequestAdmission::TimedOut => {
                 Some(tracedecay_store::UnavailableReasonV1::DeadlineExceeded)
             }
+            RequestAdmission::GrantExpired => {
+                Some(tracedecay_store::UnavailableReasonV1::MissingAuthority)
+            }
         }
     });
     let Ok(sample) = sample else {

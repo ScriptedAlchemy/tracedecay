@@ -292,6 +292,9 @@ fn telemetry_interruption(
         RequestAdmission::Admitted => None,
         RequestAdmission::Cancelled => Some(tracedecay_store::UnavailableReasonV1::Cancelled),
         RequestAdmission::TimedOut => Some(tracedecay_store::UnavailableReasonV1::DeadlineExceeded),
+        RequestAdmission::GrantExpired => {
+            Some(tracedecay_store::UnavailableReasonV1::MissingAuthority)
+        }
     }
 }
 

@@ -955,6 +955,9 @@ impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
                     RequestAdmission::Admitted => {}
                     RequestAdmission::Cancelled => return FeedbackImpactPortOutcome::Cancelled,
                     RequestAdmission::TimedOut => return FeedbackImpactPortOutcome::TimedOut,
+                    RequestAdmission::GrantExpired => {
+                        return FeedbackImpactPortOutcome::Unavailable;
+                    }
                 }
                 if !self.authorization.allows(
                     context,
@@ -1024,6 +1027,9 @@ impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
                     RequestAdmission::Admitted => {}
                     RequestAdmission::Cancelled => return FeedbackImpactPortOutcome::Cancelled,
                     RequestAdmission::TimedOut => return FeedbackImpactPortOutcome::TimedOut,
+                    RequestAdmission::GrantExpired => {
+                        return FeedbackImpactPortOutcome::Unavailable;
+                    }
                 }
                 let affected_callers = evidence.affected_callers;
                 let seed_symbols = evidence.seed_symbols;
@@ -1040,6 +1046,9 @@ impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
                     RequestAdmission::Admitted => {}
                     RequestAdmission::Cancelled => return FeedbackImpactPortOutcome::Cancelled,
                     RequestAdmission::TimedOut => return FeedbackImpactPortOutcome::TimedOut,
+                    RequestAdmission::GrantExpired => {
+                        return FeedbackImpactPortOutcome::Unavailable;
+                    }
                 }
                 if !self.authorization.allows(
                     context,
@@ -1073,6 +1082,9 @@ impl FeedbackImpactPort for DirectFeedbackImpactAdapter {
                         RequestAdmission::Admitted => {}
                         RequestAdmission::Cancelled => return FeedbackImpactPortOutcome::Cancelled,
                         RequestAdmission::TimedOut => return FeedbackImpactPortOutcome::TimedOut,
+                        RequestAdmission::GrantExpired => {
+                            return FeedbackImpactPortOutcome::Unavailable;
+                        }
                     }
                     match affected_tests_outcome(tests) {
                         DirectAffectedTestsOutcome::Evidence { tests, state } => {

@@ -56,6 +56,7 @@ fn refuse_projection_wait(request: &CodeGraphReadRequest<'_>) -> Result<(), Code
         tracedecay_contracts::RequestAdmission::Admitted => Ok(()),
         tracedecay_contracts::RequestAdmission::Cancelled => Err(CodeGraphReadError::Cancelled),
         tracedecay_contracts::RequestAdmission::TimedOut => Err(CodeGraphReadError::TimedOut),
+        tracedecay_contracts::RequestAdmission::GrantExpired => Err(CodeGraphReadError::Denied),
     }
 }
 

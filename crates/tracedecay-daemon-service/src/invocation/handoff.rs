@@ -355,7 +355,7 @@ fn handoff_request_context(
     let context = RequestContext::new(
         registered.actor.clone(),
         registered.grant.scope.clone(),
-        registered.grant.clone(),
+        registered.grant_at(observed_at),
         canonical_request_id.clone(),
         deadline,
         cancellation,
@@ -366,6 +366,11 @@ fn handoff_request_context(
     match context.admission_at(observed_at) {
         RequestAdmission::Cancelled => return Err(HandoffRequestContextError::Cancelled),
         RequestAdmission::TimedOut => return Err(HandoffRequestContextError::TimedOut),
+        RequestAdmission::GrantExpired => {
+            return Err(HandoffRequestContextError::Problem(
+                DaemonInvocationProblem::NotFoundOrNotAuthorized,
+            ));
+        }
         RequestAdmission::Admitted => {}
     }
     if !context.allows(&capability, &use_case) {

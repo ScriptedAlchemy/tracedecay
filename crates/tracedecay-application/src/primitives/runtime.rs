@@ -644,6 +644,13 @@ fn admission_problem(
                 ApplicationProblem::timed_out_before_admission(),
             )?));
         }
+        RequestAdmission::GrantExpired => {
+            return Ok(Some(ApplicationProblemEnvelope::new(
+                operation.result_contract().clone(),
+                context.request_id().clone(),
+                ApplicationProblem::grant_expired_before_admission(),
+            )?));
+        }
         RequestAdmission::Admitted => {}
     }
     if !access.allows(context, operation, observed_at) {

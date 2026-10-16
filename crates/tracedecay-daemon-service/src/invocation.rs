@@ -73,7 +73,7 @@ use tracedecay_policy::{
 };
 use tracedecay_tool_catalog::{CapabilityId, EffectClass, SortContractId, UseCaseId};
 
-use crate::callable_code_authorization::mounted_grant_expires_at;
+use crate::callable_code_authorization::{mounted_grant_at, mounted_grant_expires_at};
 use crate::project_runtime::{
     FeedbackCyclePublicationError, ProjectRuntimeAlreadyRegistered,
     ProjectRuntimePublicationStateV1, ProjectRuntimeRegistryError, ProjectRuntimeRegistryV1,
@@ -303,6 +303,9 @@ fn retained_request_admission_problem(admission: RequestAdmission) -> Option<App
         RequestAdmission::Admitted => None,
         RequestAdmission::Cancelled => Some(ApplicationProblem::cancelled_before_admission()),
         RequestAdmission::TimedOut => Some(ApplicationProblem::timed_out_before_admission()),
+        RequestAdmission::GrantExpired => {
+            Some(ApplicationProblem::grant_expired_before_admission())
+        }
     }
 }
 

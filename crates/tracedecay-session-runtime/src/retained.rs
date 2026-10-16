@@ -60,6 +60,11 @@ where
                 tracedecay_contracts::CancellationStage::BeforeRead,
             ));
         }
+        RequestAdmission::GrantExpired => {
+            return Err(RetainedSurfaceExecutionErrorV1::ApplicationProblem(
+                tracedecay_contracts::ApplicationProblem::grant_expired_before_admission(),
+            ));
+        }
     }
     let remaining = context
         .request_context

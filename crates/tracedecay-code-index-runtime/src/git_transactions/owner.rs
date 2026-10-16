@@ -28,6 +28,7 @@ use super::{
     SharedDaemonGitIndexTransactionStore, canonicalize_repository_root,
 };
 use tracedecay_application::ProjectSourceAccessSnapshot;
+use tracedecay_application::project_open_authorization::mounted_grant_expires_at;
 use tracedecay_contracts::catalog_composition::CatalogCompositionError;
 use tracedecay_global_db::RegisteredGlobalDbLeaseV1;
 use tracedecay_global_db::configuration::OwnedGlobalDbConfigurationControlStore;
@@ -82,9 +83,6 @@ impl DaemonGitAuthoritySource for ProductionDaemonGitAuthoritySource {
         capability_id: &CapabilityId,
     ) -> Result<DaemonGitAuthorityStateV1, GitIndexTransactionPortError> {
         let evaluated_at = now_micros();
-        if evaluated_at >= self.access.grant_expires_at {
-            return Err(GitIndexTransactionPortError::PolicyDenied);
-        }
         // The Git transaction port is synchronous while the configuration
         // authority is asynchronous. Callers run on blocking threads, where
         // the native runtime may park the caller until the read settles.
@@ -189,7 +187,7 @@ impl DaemonGitAuthoritySource for ProductionDaemonGitAuthoritySource {
             scope: self.access.scope.clone(),
             requester: self.access.requester.clone(),
             effective_capabilities,
-            grant_expires_at: self.access.grant_expires_at,
+            grant_expires_at: mounted_grant_expires_at(evaluated_at),
             policy_revision: GIT_POLICY_REVISION,
             policy_digest,
             configuration_digest: current.snapshot.effective_behavior_digest,

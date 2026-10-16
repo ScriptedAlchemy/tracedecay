@@ -712,6 +712,9 @@ where
                 return Err(WorkProductApplicationErrorV1::Cancelled);
             }
             RequestAdmission::TimedOut => return Err(WorkProductApplicationErrorV1::TimedOut),
+            RequestAdmission::GrantExpired => {
+                return Err(WorkProductApplicationErrorV1::NotAuthorized);
+            }
         }
         request.validate()?;
         let authorized_scope = self
