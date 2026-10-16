@@ -879,64 +879,64 @@ pub(super) async fn dispatch_work_application(
             }
         }
         WorkApplicationInvocationV1::PauseRun(command) => {
-            let _span = tracing::trace_span!("daemon.service.work.pause_run").entered();
-            {
-                let transition = services.run_control().pause_with_receipt(&context, command);
-                let open_receipts = transition
-                    .as_ref()
-                    .map_or_default(|transition| transition.blocked_intervals.clone());
-                let response = complete_work_effect(
-                    &registered,
-                    request_id,
-                    &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case,
-                    input_digest,
-                    transition.map(|transition| transition.control),
-                    observed_at,
-                    deadline,
-                    WorkApplicationOutcomeV1::PauseRun,
-                );
-                offer_work_blocked_interval_receipts(
-                    &registered.durable_write_signal,
-                    observability_producer.as_deref(),
-                    context.scope().project_id.as_str(),
-                    &open_receipts,
-                );
-                response
-            }
+            let transition = tracing::Instrument::instrument(
+                services.pause_run(context.clone(), command),
+                tracing::trace_span!("daemon.service.work.pause_run"),
+            )
+            .await;
+            let open_receipts = transition
+                .as_ref()
+                .map_or_default(|transition| transition.blocked_intervals.clone());
+            let response = complete_work_effect(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                transition.map(|transition| transition.control),
+                observed_at,
+                deadline,
+                WorkApplicationOutcomeV1::PauseRun,
+            );
+            offer_work_blocked_interval_receipts(
+                &registered.durable_write_signal,
+                observability_producer.as_deref(),
+                context.scope().project_id.as_str(),
+                &open_receipts,
+            );
+            response
         }
         WorkApplicationInvocationV1::ResumeRun(command) => {
-            let _span = tracing::trace_span!("daemon.service.work.resume_run").entered();
-            {
-                let transition = services
-                    .run_control()
-                    .resume_with_receipt(&context, command);
-                let settled_receipts = transition
-                    .as_ref()
-                    .map_or_default(|transition| transition.blocked_intervals.clone());
-                let response = complete_work_effect(
-                    &registered,
-                    request_id,
-                    &context,
-                    canonical_request_id,
-                    operation_key,
-                    use_case,
-                    input_digest,
-                    transition.map(|transition| transition.control),
-                    observed_at,
-                    deadline,
-                    WorkApplicationOutcomeV1::ResumeRun,
-                );
-                offer_work_blocked_interval_receipts(
-                    &registered.durable_write_signal,
-                    observability_producer.as_deref(),
-                    context.scope().project_id.as_str(),
-                    &settled_receipts,
-                );
-                response
-            }
+            let transition = tracing::Instrument::instrument(
+                services.resume_run(context.clone(), command),
+                tracing::trace_span!("daemon.service.work.resume_run"),
+            )
+            .await;
+            let settled_receipts = transition
+                .as_ref()
+                .map_or_default(|transition| transition.blocked_intervals.clone());
+            let response = complete_work_effect(
+                &registered,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                transition.map(|transition| transition.control),
+                observed_at,
+                deadline,
+                WorkApplicationOutcomeV1::ResumeRun,
+            );
+            offer_work_blocked_interval_receipts(
+                &registered.durable_write_signal,
+                observability_producer.as_deref(),
+                context.scope().project_id.as_str(),
+                &settled_receipts,
+            );
+            response
         }
         WorkApplicationInvocationV1::RunControl(request) => {
             let _span = tracing::trace_span!("daemon.service.work.run_control").entered();
