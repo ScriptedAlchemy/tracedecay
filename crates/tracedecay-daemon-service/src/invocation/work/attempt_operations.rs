@@ -264,8 +264,7 @@ pub(super) fn attempt_status(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[tracing::instrument(name = "daemon.service.work.cancel_attempt", level = "trace", skip_all)]
-pub(super) fn cancel_attempt(
+pub(super) async fn cancel_attempt(
     registered: &RegisteredWorkRuntime,
     services: &RegisteredWorkApplicationServicesV1,
     attempt_processes: &Arc<WorkAttemptProcessRegistryV1>,
@@ -279,7 +278,11 @@ pub(super) fn cancel_attempt(
     deadline: Deadline,
     command: CancelWorkAttemptCommand,
 ) -> DaemonInvocationResponse {
-    let cancelled = services.attempts().request_cancellation(context, command);
+    let cancelled = tracing::Instrument::instrument(
+        services.cancel_attempt(context.clone(), command),
+        tracing::trace_span!("daemon.service.work.cancel_attempt"),
+    )
+    .await;
     if let Ok(attempt) = &cancelled {
         attempt_processes.signal_cancellation(&context.scope().worktree_id, attempt.identity());
     }

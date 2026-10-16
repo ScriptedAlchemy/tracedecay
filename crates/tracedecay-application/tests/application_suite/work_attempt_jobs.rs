@@ -773,3 +773,71 @@ async fn provider_driver_steps_awaited_on_a_native_worker_park_no_native_thread(
         );
     }
 }
+
+#[tokio::test]
+async fn cancellation_awaited_on_a_native_worker_parks_no_native_thread() {
+    let profile = tempfile::tempdir().expect("profile");
+    let project = tempfile::tempdir().expect("project");
+    let runtime = project_runtime(profile.path(), project.path()).await;
+    let database = runtime.project_database().expect("project database");
+    let storage = database.work_storage().expect("Work storage");
+    let attempt = crate::work_run_control_jobs::leased_attempt_of(
+        id::<RunId>("run.attempt-jobs.cancel"),
+        "attempt-jobs.cancel",
+    );
+    storage
+        .insert(&authority(), &attempt)
+        .expect("the attempt is stored");
+    let identity = attempt.identity().clone();
+    let command = |request_id: &str| tracedecay_contracts::CancelWorkAttemptCommand {
+        task_id: task(),
+        run_id: identity.run_id().clone(),
+        attempt_id: identity.attempt_id().clone(),
+        request_id: id(request_id),
+        occurred_at: UtcMicros(20_000),
+    };
+    let (first, replay, other) = (
+        command("cancellation.attempt-jobs.1"),
+        command("cancellation.attempt-jobs.1"),
+        command("cancellation.attempt-jobs.2"),
+    );
+    let work = RegisteredWorkApplicationServicesV1::attach(database).expect("Work services");
+    let (outcome, writer_waits, reader_waits) = on_native_worker(async move {
+        (
+            work.cancel_attempt(product_context(), first).await,
+            work.cancel_attempt(product_context(), replay).await,
+            work.cancel_attempt(product_context(), other).await,
+        )
+    })
+    .await;
+    assert_eq!(
+        writer_waits, 0,
+        "the cancellation parked no native worker on the writer"
+    );
+    assert_eq!(
+        reader_waits, 0,
+        "the cancellation parked no native worker on a reader"
+    );
+    let (requested, replayed, conflicting) = outcome;
+    let requested = requested.expect("the cancellation commits");
+    assert_eq!(requested.state(), WorkAttemptStateV1::CancellationRequested);
+    assert_eq!(
+        replayed.expect("the same request replays"),
+        requested,
+        "the same request replays the committed attempt"
+    );
+    assert_eq!(
+        conflicting
+            .expect_err("a different request conflicts")
+            .diagnostic()
+            .map(|diagnostic| diagnostic.code.clone()),
+        Some("application.work-attempt.cancellation-conflict".to_owned())
+    );
+    assert_eq!(
+        storage
+            .load(&authority(), &identity)
+            .expect("the attempt reads"),
+        requested,
+        "the job committed the cancellation request"
+    );
+}

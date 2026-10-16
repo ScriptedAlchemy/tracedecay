@@ -373,20 +373,23 @@ pub(super) async fn dispatch_work_application(
             deadline,
             request,
         ),
-        WorkApplicationInvocationV1::CancelAttempt(command) => attempt_operations::cancel_attempt(
-            &registered,
-            &services,
-            &attempt_processes,
-            request_id,
-            &context,
-            canonical_request_id,
-            operation_key,
-            use_case,
-            input_digest,
-            observed_at,
-            deadline,
-            command,
-        ),
+        WorkApplicationInvocationV1::CancelAttempt(command) => {
+            attempt_operations::cancel_attempt(
+                &registered,
+                &services,
+                &attempt_processes,
+                request_id,
+                &context,
+                canonical_request_id,
+                operation_key,
+                use_case,
+                input_digest,
+                observed_at,
+                deadline,
+                command,
+            )
+            .await
+        }
         WorkApplicationInvocationV1::RetryAttempt(command) => {
             let Ok(capability) = CapabilityId::new(*capability) else {
                 return DaemonInvocationResponse::problem(

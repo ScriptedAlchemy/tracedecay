@@ -422,6 +422,18 @@ impl RegisteredWorkApplicationServicesV1 {
             .unwrap_or_else(|_| Err(attempt_unavailable()))
     }
 
+    /// Records a cancellation request against an open attempt as a single
+    /// writer transaction: the load, the conflict check and the fenced update
+    /// commit together.
+    pub async fn cancel_attempt(
+        &self,
+        context: tracedecay_contracts::RequestContext,
+        command: tracedecay_contracts::CancelWorkAttemptCommand,
+    ) -> Result<tracedecay_domain::WorkAttemptV1, tracedecay_contracts::ApplicationProblem> {
+        self.attempt_step(move |attempts| attempts.request_cancellation(&context, command.clone()))
+            .await
+    }
+
     /// Marks the provider running under `actual_route`.
     pub async fn mark_running(
         &self,
