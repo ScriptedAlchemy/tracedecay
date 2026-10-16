@@ -369,33 +369,39 @@ pub struct NativeIntegrationRecoveryRequestV1 {
 /// Closed runtime boundary. Mutation, journal fsync, repository queues,
 /// one-use approval CAS, native object/ref writes, rollback, and restart
 /// recovery remain behind this port.
-pub trait NativeIntegrationPort {
+pub trait NativeIntegrationPort: Sync {
     fn preflight(
         &self,
         request: &NativeIntegrationPreflightRequestV1,
         cancellation: &CancellationSignal,
-    ) -> Result<NativeIntegrationPreflightOutcomeV1, NativeIntegrationPortError>;
+    ) -> impl Future<
+        Output = Result<NativeIntegrationPreflightOutcomeV1, NativeIntegrationPortError>,
+    > + Send;
 
     fn apply(
         &self,
         request: &NativeIntegrationApplyRequestV1,
         cancellation: &CancellationSignal,
-    ) -> Result<NativeIntegrationReceiptV1, NativeIntegrationPortError>;
+    ) -> impl Future<Output = Result<NativeIntegrationReceiptV1, NativeIntegrationPortError>> + Send;
 
     fn status(
         &self,
         request: &NativeIntegrationStatusRequestV1,
-    ) -> Result<Option<NativeIntegrationTransactionStatusV1>, NativeIntegrationPortError>;
+    ) -> impl Future<
+        Output = Result<Option<NativeIntegrationTransactionStatusV1>, NativeIntegrationPortError>,
+    > + Send;
 
     fn cancel(
         &self,
         request: &NativeIntegrationCancelRequestV1,
-    ) -> Result<NativeIntegrationCancelDispositionV1, NativeIntegrationPortError>;
+    ) -> impl Future<
+        Output = Result<NativeIntegrationCancelDispositionV1, NativeIntegrationPortError>,
+    > + Send;
 
     fn recover(
         &self,
         request: &NativeIntegrationRecoveryRequestV1,
-    ) -> Result<NativeIntegrationReceiptV1, NativeIntegrationPortError>;
+    ) -> impl Future<Output = Result<NativeIntegrationReceiptV1, NativeIntegrationPortError>> + Send;
 }
 
 /// Stable failure taxonomy. Read-only partial/unavailable is represented by a
@@ -450,13 +456,13 @@ impl<P: NativeIntegrationPort> NativeIntegrationService<P> {
         level = "trace",
         skip_all
     )]
-    pub fn preflight(
+    pub async fn preflight(
         &self,
         request: NativeIntegrationPreflightRequestV1,
         cancellation: &CancellationSignal,
     ) -> Result<NativeIntegrationPreflightOutcomeV1, NativeIntegrationContractError> {
         request.validate()?;
-        let outcome = self.port.preflight(&request, cancellation)?;
+        let outcome = self.port.preflight(&request, cancellation).await?;
         if let NativeIntegrationPreflightOutcomeV1::Preview(preview) = &outcome {
             preview.validate().map_err(ApplicationContractError::from)?;
         }
@@ -468,13 +474,13 @@ impl<P: NativeIntegrationPort> NativeIntegrationService<P> {
         level = "trace",
         skip_all
     )]
-    pub fn apply(
+    pub async fn apply(
         &self,
         request: NativeIntegrationApplyRequestV1,
         cancellation: &CancellationSignal,
     ) -> Result<NativeIntegrationReceiptV1, NativeIntegrationContractError> {
         request.validate()?;
-        let receipt = self.port.apply(&request, cancellation)?;
+        let receipt = self.port.apply(&request, cancellation).await?;
         receipt.validate().map_err(ApplicationContractError::from)?;
         Ok(receipt)
     }
@@ -484,12 +490,12 @@ impl<P: NativeIntegrationPort> NativeIntegrationService<P> {
         level = "trace",
         skip_all
     )]
-    pub fn status(
+    pub async fn status(
         &self,
         request: NativeIntegrationStatusRequestV1,
     ) -> Result<Option<NativeIntegrationTransactionStatusV1>, NativeIntegrationContractError> {
         request.validate()?;
-        let status = self.port.status(&request)?;
+        let status = self.port.status(&request).await?;
         if let Some(status) = &status {
             status.validate().map_err(ApplicationContractError::from)?;
         }
@@ -501,11 +507,11 @@ impl<P: NativeIntegrationPort> NativeIntegrationService<P> {
         level = "trace",
         skip_all
     )]
-    pub fn cancel(
+    pub async fn cancel(
         &self,
         request: NativeIntegrationCancelRequestV1,
     ) -> Result<NativeIntegrationCancelDispositionV1, NativeIntegrationContractError> {
         request.validate()?;
-        Ok(self.port.cancel(&request)?)
+        Ok(self.port.cancel(&request).await?)
     }
 }

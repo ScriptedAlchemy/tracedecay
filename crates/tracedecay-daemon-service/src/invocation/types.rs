@@ -234,11 +234,14 @@ impl BoundedHookOrchestratorV1 {
             {
                 in_flight.events.remove(&operation.event);
             }
+            // Admission checks the in-flight maps and takes a permit under
+            // this lock, so the cycle leaves both in one step: no admission
+            // sees it gone yet still holding its permit, or sees its permit
+            // free while it still looks in flight. Its terminals, the host's
+            // cue to send the session's next boundary, follow.
+            drop(permit);
             completions
         };
-        // A terminal is the host's cue to send the session's next boundary,
-        // which must find this cycle's permit free.
-        drop(permit);
         if emit_terminal {
             for completion in completions {
                 completion();

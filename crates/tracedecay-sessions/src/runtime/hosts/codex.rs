@@ -171,6 +171,9 @@ impl Default for CodexDiscoveryHub {
 struct CodexDiscoveryHubState {
     discovery: CodexDiscoveryState,
     discovery_scanning: bool,
+    /// Shared scans started so far. A queued pass carries the count of the
+    /// scan that produced it.
+    shared_scans: u64,
     /// A consumer was told to wait for a scan in progress; the next scan to
     /// finish releases it.
     scan_waited: bool,
@@ -191,7 +194,8 @@ struct CodexDiscoveryConsumerState {
 
 enum CodexDiscoveryConsumerMode {
     Shared {
-        queue: VecDeque<CodexQueuedDiscoveryPass>,
+        /// Each pass with the shared scan that produced it.
+        queue: VecDeque<(u64, CodexQueuedDiscoveryPass)>,
     },
     Replay {
         generation: u128,
@@ -502,6 +506,7 @@ impl CodexDiscoveryHub {
         bounds: TranscriptDiscoveryBounds,
         frontier: CodexDiscoveryFrontier,
     ) -> TranscriptIngestResult<CodexDiscoveryDelivery> {
+        let mut scans_before_poll = None;
         loop {
             let work = {
                 let mut inner = self.inner.lock().map_err(|_| {
@@ -509,6 +514,7 @@ impl CodexDiscoveryHub {
                         detail: "Codex discovery hub lock is poisoned",
                     }
                 })?;
+                let scans_before_poll = *scans_before_poll.get_or_insert(inner.shared_scans);
                 let source_key = source.discovery_key();
                 let replay = {
                     let consumer_state = inner.consumers.get_mut(consumer).ok_or(
@@ -660,7 +666,17 @@ impl CodexDiscoveryHub {
                         CodexDiscoveryConsumerMode::Shared { queue } => queue.pop_front(),
                         CodexDiscoveryConsumerMode::Replay { .. } => None,
                     };
-                    if let Some(queued) = queued {
+                    if let Some((scan, queued)) = queued {
+                        // An empty pass from a scan that began before this
+                        // poll proves nothing about changes since, so the
+                        // consumer scans again instead of converging on it.
+                        if scan <= scans_before_poll
+                            && queued.pass.report.paths.is_empty()
+                            && queued.pass.selected_sources.is_empty()
+                            && queued.pass.next_frontier == queued.base
+                        {
+                            continue;
+                        }
                         if queued.base == frontier {
                             consumer_state.awaiting_ack = Some(queued.clone());
                             return Ok(CodexDiscoveryDelivery::Ready(queued.pass));
@@ -692,6 +708,7 @@ impl CodexDiscoveryHub {
                         return Ok(CodexDiscoveryDelivery::Waiting);
                     }
                     inner.discovery_scanning = true;
+                    inner.shared_scans += 1;
                     CodexDiscoveryWork::Shared {
                         state: std::mem::take(&mut inner.discovery),
                         frontier: shared_frontier,
@@ -740,6 +757,7 @@ impl CodexDiscoveryHub {
                     indexed_ack: None,
                 };
                 let shared_source_key = inner.source_key.clone();
+                let scan = inner.shared_scans;
                 for state in inner.consumers.values_mut() {
                     let CodexDiscoveryConsumerMode::Shared { queue } = &mut state.mode else {
                         continue;
@@ -755,7 +773,7 @@ impl CodexDiscoveryHub {
                         };
                         state.awaiting_ack = None;
                     } else {
-                        queue.push_back(queued.clone());
+                        queue.push_back((scan, queued.clone()));
                     }
                 }
                 drop(inner);

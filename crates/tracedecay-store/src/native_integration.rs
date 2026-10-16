@@ -120,41 +120,45 @@ pub enum NativeWorktreeCleanupBeginResultV1 {
 
 /// Durable transaction authority.
 pub trait NativeIntegrationStore: Send + Sync {
-    fn save_preview(&self, preview: NativeIntegrationPreviewV1)
-    -> NativeIntegrationStoreResult<()>;
+    fn save_preview(
+        &self,
+        preview: NativeIntegrationPreviewV1,
+    ) -> impl Future<Output = NativeIntegrationStoreResult<()>> + Send;
 
     fn read_preview(
         &self,
         preview_id: &NativeIntegrationPreviewId,
-    ) -> NativeIntegrationStoreResult<Option<NativeIntegrationPreviewV1>>;
+    ) -> impl Future<Output = NativeIntegrationStoreResult<Option<NativeIntegrationPreviewV1>>> + Send;
 
     /// Atomically consumes the approval and inserts the `Prepared` record.
     fn begin_or_replay(
         &self,
         record: NativeIntegrationRecordV1,
-    ) -> NativeIntegrationStoreResult<NativeIntegrationBeginResultV1>;
+    ) -> impl Future<Output = NativeIntegrationStoreResult<NativeIntegrationBeginResultV1>> + Send;
 
     fn read_status(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
-    ) -> NativeIntegrationStoreResult<Option<NativeIntegrationTransactionStatusV1>>;
+    ) -> impl Future<
+        Output = NativeIntegrationStoreResult<Option<NativeIntegrationTransactionStatusV1>>,
+    > + Send;
 
     fn read_record(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
-    ) -> NativeIntegrationStoreResult<Option<NativeIntegrationRecordV1>>;
+    ) -> impl Future<Output = NativeIntegrationStoreResult<Option<NativeIntegrationRecordV1>>> + Send;
 
     fn read_receipt(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
-    ) -> NativeIntegrationStoreResult<Option<NativeIntegrationReceiptV1>>;
+    ) -> impl Future<Output = NativeIntegrationStoreResult<Option<NativeIntegrationReceiptV1>>> + Send;
 
     fn compare_and_swap_status(
         &self,
         transaction_id: &NativeIntegrationTransactionId,
         expected_phase_revision: u64,
         replacement: NativeIntegrationTransactionStatusV1,
-    ) -> NativeIntegrationStoreResult<NativeIntegrationTransactionStatusV1>;
+    ) -> impl Future<Output = NativeIntegrationStoreResult<NativeIntegrationTransactionStatusV1>> + Send;
 
     /// Atomically publishes the terminal status and its receipt.
     fn write_terminal(
@@ -162,12 +166,12 @@ pub trait NativeIntegrationStore: Send + Sync {
         transaction_id: &NativeIntegrationTransactionId,
         expected_phase_revision: u64,
         receipt: NativeIntegrationReceiptV1,
-    ) -> NativeIntegrationStoreResult<NativeIntegrationReceiptV1>;
+    ) -> impl Future<Output = NativeIntegrationStoreResult<NativeIntegrationReceiptV1>> + Send;
 
     fn pending_transactions(
         &self,
         repository_id: Option<&RepositoryId>,
-    ) -> NativeIntegrationStoreResult<Vec<NativeIntegrationRecordV1>>;
+    ) -> impl Future<Output = NativeIntegrationStoreResult<Vec<NativeIntegrationRecordV1>>> + Send;
 
     /// Candidate generations protected by an unexpired preview or unfinished
     /// transaction. Retention consumes this exact durable census; generation
@@ -176,18 +180,18 @@ pub trait NativeIntegrationStore: Send + Sync {
         &self,
         repository_id: &RepositoryId,
         observed_at: UtcMicros,
-    ) -> NativeIntegrationStoreResult<Vec<CodeGenerationId>>;
+    ) -> impl Future<Output = NativeIntegrationStoreResult<Vec<CodeGenerationId>>> + Send;
 
     fn approval_consumed(
         &self,
         approval_id: &NativeIntegrationApprovalId,
-    ) -> NativeIntegrationStoreResult<bool>;
+    ) -> impl Future<Output = NativeIntegrationStoreResult<bool>> + Send;
 
     fn quarantine_repository(
         &self,
         repository_id: &RepositoryId,
         transaction_id: &NativeIntegrationTransactionId,
-    ) -> NativeIntegrationStoreResult<()>;
+    ) -> impl Future<Output = NativeIntegrationStoreResult<()>> + Send;
 
     /// Durably records exact cleanup intent before native Git may mutate the
     /// registered worktree. Exact replay returns the terminal receipt or the
@@ -196,12 +200,14 @@ pub trait NativeIntegrationStore: Send + Sync {
     fn begin_worktree_cleanup(
         &self,
         transaction: NativeWorktreeCleanupTransactionV1,
-    ) -> NativeIntegrationStoreResult<NativeWorktreeCleanupBeginResultV1>;
+    ) -> impl Future<Output = NativeIntegrationStoreResult<NativeWorktreeCleanupBeginResultV1>> + Send;
 
     fn read_worktree_cleanup(
         &self,
         confirmation_digest: &ManifestDigest,
-    ) -> NativeIntegrationStoreResult<Option<NativeWorktreeCleanupTransactionV1>>;
+    ) -> impl Future<
+        Output = NativeIntegrationStoreResult<Option<NativeWorktreeCleanupTransactionV1>>,
+    > + Send;
 
     /// Bounded startup recovery census for unfinished cleanup journals in one
     /// exact repository. Implementations must fail rather than truncate.
@@ -209,10 +215,11 @@ pub trait NativeIntegrationStore: Send + Sync {
         &self,
         _repository_id: &RepositoryId,
         _limit: u32,
-    ) -> NativeIntegrationStoreResult<Vec<NativeWorktreeCleanupTransactionV1>> {
-        Err(NativeIntegrationStoreError::unavailable(
+    ) -> impl Future<Output = NativeIntegrationStoreResult<Vec<NativeWorktreeCleanupTransactionV1>>> + Send
+    {
+        std::future::ready(Err(NativeIntegrationStoreError::unavailable(
             "pending worktree cleanups are not implemented",
-        ))
+        )))
     }
 
     fn compare_and_swap_worktree_cleanup(
@@ -220,12 +227,12 @@ pub trait NativeIntegrationStore: Send + Sync {
         confirmation_digest: &ManifestDigest,
         expected_phase_revision: u64,
         replacement: NativeWorktreeCleanupTransactionV1,
-    ) -> NativeIntegrationStoreResult<NativeWorktreeCleanupTransactionV1>;
+    ) -> impl Future<Output = NativeIntegrationStoreResult<NativeWorktreeCleanupTransactionV1>> + Send;
 
     fn write_worktree_cleanup_terminal(
         &self,
         confirmation_digest: &ManifestDigest,
         expected_phase_revision: u64,
         receipt: NativeWorktreeCleanupReceiptV1,
-    ) -> NativeIntegrationStoreResult<NativeWorktreeCleanupReceiptV1>;
+    ) -> impl Future<Output = NativeIntegrationStoreResult<NativeWorktreeCleanupReceiptV1>> + Send;
 }

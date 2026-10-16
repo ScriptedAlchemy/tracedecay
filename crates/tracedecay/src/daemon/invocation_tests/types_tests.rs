@@ -161,6 +161,11 @@ async fn hook_orchestration_backpressures_without_waiting() {
     );
 }
 
+thread_local! {
+    /// Set while this thread is inside a hook admission call.
+    static ADMITTING_HOOK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 #[tokio::test]
 async fn hook_orchestration_runs_feedback_work_without_scout_lifecycle() {
     let ran_synchronously = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -171,7 +176,12 @@ async fn hook_orchestration_runs_feedback_work_without_scout_lifecycle() {
         let ran = Arc::clone(&work_ran);
         let ran_synchronously = Arc::clone(&work_ran_synchronously);
         async move {
-            ran_synchronously.store(true, std::sync::atomic::Ordering::Release);
+            // The work runs on a native worker and may start before the
+            // admitting thread resumes, so only a run on the admitting
+            // thread inside the call counts as synchronous.
+            if ADMITTING_HOOK.get() {
+                ran_synchronously.store(true, std::sync::atomic::Ordering::Release);
+            }
             ran.notify_one();
         }
     })
@@ -180,25 +190,25 @@ async fn hook_orchestration_runs_feedback_work_without_scout_lifecycle() {
         [3; 16], [5; 16], &runtime
     ));
 
-    assert_eq!(
-        admit_registered_hook_orchestration(
-            hook_envelope(HookEventV2::SavedEdit {
-                file_id: [7; 16],
-                changed_range_count: 1,
-            }),
-            hook_binding(),
-            None,
-            1,
-            false,
-            None,
-        ),
-        HookOrchestrationAdmissionV1::Enqueued
+    ADMITTING_HOOK.set(true);
+    let admission = admit_registered_hook_orchestration(
+        hook_envelope(HookEventV2::SavedEdit {
+            file_id: [7; 16],
+            changed_range_count: 1,
+        }),
+        hook_binding(),
+        None,
+        1,
+        false,
+        None,
     );
+    ADMITTING_HOOK.set(false);
+    assert_eq!(admission, HookOrchestrationAdmissionV1::Enqueued);
+    ran.notified().await;
     assert!(
         !ran_synchronously.load(std::sync::atomic::Ordering::Acquire),
         "hook admission must return before daemon-owned provider or model work begins"
     );
-    ran.notified().await;
     unregister_hook_orchestration_runtime([3; 16], [5; 16], &runtime);
 }
 

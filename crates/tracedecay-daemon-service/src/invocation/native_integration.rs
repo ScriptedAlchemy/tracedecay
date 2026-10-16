@@ -297,9 +297,8 @@ fn publish_transaction_status(
     }
 }
 
-/// Reads and publishes the durable status a mutation just advanced, from the
-/// same blocking context that ran the mutation.
-fn publish_current_transaction_status(
+/// Reads and publishes the durable status a mutation just advanced.
+async fn publish_current_transaction_status(
     broadcast: Option<&Arc<NativeIntegrationStatusBroadcastV1>>,
     owner: &DaemonNativeIntegrationOwner,
     transaction_id: &tracedecay_domain::NativeIntegrationTransactionId,
@@ -307,19 +306,23 @@ fn publish_current_transaction_status(
     if broadcast.is_none() {
         return;
     }
-    if let Ok(Some(status)) = owner.service().status(NativeIntegrationStatusRequestV1 {
-        transaction_id: transaction_id.clone(),
-    }) {
+    if let Ok(Some(status)) = owner
+        .service()
+        .status(NativeIntegrationStatusRequestV1 {
+            transaction_id: transaction_id.clone(),
+        })
+        .await
+    {
         publish_transaction_status(broadcast, &status);
     }
 }
 
 /// Runs one operation against the mounted per-project owner.
 ///
-/// The kernel and its store bridge are synchronous (native Git plus a bounded
-/// store actor), so every owner call crosses to a blocking thread; the
-/// coordinator's own cancellation map keeps a running apply cancellable
-/// through the separate cancel operation.
+/// Store-only operations await the async store in place. Operations that
+/// interleave store awaits with synchronous native Git run on the blocking
+/// pool; the coordinator's own cancellation map keeps a running apply
+/// cancellable through the separate cancel operation.
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(
     name = "daemon.service.native_integration.owner_execute",
@@ -379,7 +382,7 @@ async fn execute_with_owner(
             let signal_scope = context.scope().clone();
             let signal_context = context.clone();
             let outcome = tracing::Instrument::instrument(
-                tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+                tracedecay_runtime_core::native_runtime::on_blocking_pool(async move {
                     let stack_runtime = owner.github_stack_runtime(context.scope())?;
                     let topology =
                         registered_topology_request(&owner, preflight.snapshot, observed_at)?;
@@ -394,8 +397,14 @@ async fn execute_with_owner(
                     let outcome = match stack_runtime.as_ref() {
                         Some(runtime) => runtime
                             .preflight(&application_request, &signal)
+                            .await
                             .map_err(stack_coordinator_contract_error),
-                        None => owner.service().preflight(application_request, &signal),
+                        None => {
+                            owner
+                                .service()
+                                .preflight(application_request, &signal)
+                                .await
+                        }
                     };
                     if let (
                         Some(runtime),
@@ -406,6 +415,7 @@ async fn execute_with_owner(
                     {
                         runtime
                             .enqueue_from_preflight(stack_signal, &signal_context)
+                            .await
                             .map_err(stack_coordinator_contract_error)?;
                     }
                     outcome
@@ -456,9 +466,9 @@ async fn execute_with_owner(
             )
             .map_err(|_| invalid())?;
             tracing::Instrument::instrument(
-                tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+                async move {
                     let store = owner.store();
-                    let preview = match store.read_preview(&approve.preview_id) {
+                    let preview = match store.read_preview(&approve.preview_id).await {
                         Ok(Some(preview)) if preview.preview_digest == approve.preview_digest => {
                             preview
                         }
@@ -509,7 +519,7 @@ async fn execute_with_owner(
                     }
                     .seal()
                     .map_err(|_| invalid_native_integration_request())?;
-                    match store.save_approval(approval.clone()) {
+                    match store.save_approval(approval.clone()).await {
                         Ok(()) => Ok(NativeIntegrationSurfaceResultV1::Approval(
                             NativeIntegrationApprovalProjectionV1::project(
                                 &approval,
@@ -523,11 +533,10 @@ async fn execute_with_owner(
                         }
                         Err(_) => Err(unavailable_native_integration()),
                     }
-                }),
+                },
                 tracing::trace_span!("daemon.service.native_integration.approve"),
             )
             .await
-            .map_err(|_| unavailable_native_integration())?
             .map(NativeIntegrationExecutionV1::without_preview)
         }
         NativeIntegrationSurfaceRequest::Apply(apply) => {
@@ -537,13 +546,13 @@ async fn execute_with_owner(
             let signal_scope = context.scope().clone();
             let signal_context = context.clone();
             tracing::Instrument::instrument(
-                tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+                tracedecay_runtime_core::native_runtime::on_blocking_pool(async move {
                     // The caller names its preview and one-use approval by exact
                     // identity and digest; both must already be durable. A
                     // missing or mismatched fact is denied without disclosing
                     // whether the target was absent or denied.
                     let store = owner.store();
-                    let preview = match store.read_preview(&apply.preview_id) {
+                    let preview = match store.read_preview(&apply.preview_id).await {
                         Ok(Some(preview)) if preview.preview_digest == apply.preview_digest => {
                             preview
                         }
@@ -556,7 +565,7 @@ async fn execute_with_owner(
                         }
                         Err(_) => return Err(unavailable_native_integration()),
                     };
-                    let approval = match store.read_approval(&apply.approval_id) {
+                    let approval = match store.read_approval(&apply.approval_id).await {
                         Ok(Some(approval)) if approval.approval_digest == apply.approval_digest => {
                             approval
                         }
@@ -579,12 +588,13 @@ async fn execute_with_owner(
                         approval,
                         observed_at,
                     };
-                    let apply_outcome = owner.service().apply(application_request, &signal);
+                    let apply_outcome = owner.service().apply(application_request, &signal).await;
                     publish_current_transaction_status(
                         status_broadcast.as_ref(),
                         &owner,
                         &applied_transaction_id,
-                    );
+                    )
+                    .await;
                     match apply_outcome {
                         Ok(receipt) => {
                             if let Some(runtime) = stack_runtime.as_ref()
@@ -598,6 +608,7 @@ async fn execute_with_owner(
                                         &signal_approval,
                                         &signal_context,
                                     )
+                                    .await
                                     .map_err(|_| unavailable_native_integration())?;
                             }
                             NativeIntegrationReceiptProjectionV1::project(&receipt)
@@ -624,13 +635,10 @@ async fn execute_with_owner(
                 transaction_id: status.transaction_id,
             };
             let outcome = tracing::Instrument::instrument(
-                tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
-                    owner.service().status(application_request)
-                }),
+                async move { owner.service().status(application_request).await },
                 tracing::trace_span!("daemon.service.native_integration.status"),
             )
-            .await
-            .map_err(|_| unavailable_native_integration())?;
+            .await;
             match outcome {
                 Ok(Some(status)) => {
                     publish_transaction_status(status_broadcast.as_ref(), &status);
@@ -656,19 +664,19 @@ async fn execute_with_owner(
                 requested_at: observed_at,
             };
             let outcome = tracing::Instrument::instrument(
-                tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
-                    let disposition = owner.service().cancel(application_request);
+                async move {
+                    let disposition = owner.service().cancel(application_request).await;
                     publish_current_transaction_status(
                         status_broadcast.as_ref(),
                         &owner,
                         &cancelled_transaction_id,
-                    );
+                    )
+                    .await;
                     disposition
-                }),
+                },
                 tracing::trace_span!("daemon.service.native_integration.cancel"),
             )
-            .await
-            .map_err(|_| unavailable_native_integration())?;
+            .await;
             match outcome {
                 Ok(disposition) => Ok(NativeIntegrationExecutionV1::without_preview(
                     NativeIntegrationSurfaceResultV1::from_cancel(disposition),
@@ -723,7 +731,7 @@ async fn execute_worktree_with_owner(
             WorktreeUnavailableReasonV1::Unavailable,
         ));
     };
-    tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+    tracedecay_runtime_core::native_runtime::on_blocking_pool(async move {
         let outcome = match request {
             NativeWorktreeSurfaceRequest::Inventory(request) => service
                 .inventory(&request, &signal)
@@ -736,9 +744,11 @@ async fn execute_worktree_with_owner(
                 .map(NativeWorktreeSurfaceResultV1::Confirmation),
             NativeWorktreeSurfaceRequest::Remove(request) => service
                 .remove(&request, &signal)
+                .await
                 .map(NativeWorktreeSurfaceResultV1::Removal),
             NativeWorktreeSurfaceRequest::Reconcile(request) => service
                 .reconcile(&request, &signal)
+                .await
                 .map(NativeWorktreeSurfaceResultV1::Reconciliation),
         };
         outcome.or_else(|error| worktree_result_from_error(operation, error))

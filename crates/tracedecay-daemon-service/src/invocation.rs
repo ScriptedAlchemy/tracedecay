@@ -631,7 +631,7 @@ impl DaemonInvocationService {
         &self,
         owner: &DaemonNativeIntegrationOwner,
     ) -> Result<(), tracedecay_contracts::NativeIntegrationPortError> {
-        let roots = owner.cleanup_recovery_roots()?;
+        let roots = owner.cleanup_recovery_roots().await?;
         self.worktree_holder_admission
             .mark_recovery_required(roots)
             .await;

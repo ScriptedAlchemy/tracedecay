@@ -26,6 +26,12 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::{actor, digest};
 
+/// Drives one preflight on this dedicated test thread; the blocking fixture
+/// port parks the thread that polls it.
+fn run<F: Future>(future: F) -> F::Output {
+    tracedecay_runtime_core::native_runtime::block_on(future).expect("native block_on")
+}
+
 fn oid(seed: char) -> GitOidV1 {
     GitOidV1::new(seed.to_string().repeat(40)).unwrap()
 }
@@ -155,7 +161,7 @@ struct PreflightOutcomes {
 }
 
 impl OptionalStackPreflightPort for PreflightOutcomes {
-    fn preflight(
+    async fn preflight(
         &self,
         _request: &NativeIntegrationPreflightRequestV1,
         _cancellation: &CancellationSignal,
@@ -190,7 +196,7 @@ impl BlockingPreflight {
 }
 
 impl OptionalStackPreflightPort for BlockingPreflight {
-    fn preflight(
+    async fn preflight(
         &self,
         _request: &NativeIntegrationPreflightRequestV1,
         _cancellation: &CancellationSignal,
@@ -325,8 +331,8 @@ fn preflight_request(index: usize) -> NativeIntegrationPreflightRequestV1 {
     }
 }
 
-#[test]
-fn half_open_circuit_rejects_stale_and_denied_but_success_closes() {
+#[tokio::test]
+async fn half_open_circuit_rejects_stale_and_denied_but_success_closes() {
     let coordinator = DaemonGitHubStackCoordinatorV1::default();
     let request = preflight_request(1);
     let policy = StackCircuitPolicyV1 {
@@ -356,48 +362,56 @@ fn half_open_circuit_rejects_stale_and_denied_but_success_closes() {
     assert_eq!(
         coordinator
             .optional_preflight(&preflight, &request, &cancellation, UtcMicros(10))
+            .await
             .unwrap(),
         OptionalPreflightDispositionV1::Unavailable
     );
     assert_eq!(
         coordinator
             .optional_preflight(&preflight, &request, &cancellation, UtcMicros(11))
+            .await
             .unwrap(),
         OptionalPreflightDispositionV1::SuppressedOpenCircuit
     );
     assert_eq!(
         coordinator
             .optional_preflight(&preflight, &request, &cancellation, UtcMicros(110))
+            .await
             .unwrap(),
         OptionalPreflightDispositionV1::Stale
     );
     assert_eq!(
         coordinator
             .optional_preflight(&preflight, &request, &cancellation, UtcMicros(111))
+            .await
             .unwrap(),
         OptionalPreflightDispositionV1::SuppressedOpenCircuit
     );
     assert_eq!(
         coordinator
             .optional_preflight(&preflight, &request, &cancellation, UtcMicros(210))
+            .await
             .unwrap(),
         OptionalPreflightDispositionV1::Denied
     );
     assert_eq!(
         coordinator
             .optional_preflight(&preflight, &request, &cancellation, UtcMicros(211))
+            .await
             .unwrap(),
         OptionalPreflightDispositionV1::SuppressedOpenCircuit
     );
     assert_eq!(
         coordinator
             .optional_preflight(&preflight, &request, &cancellation, UtcMicros(310))
+            .await
             .unwrap(),
         OptionalPreflightDispositionV1::Complete
     );
     assert_eq!(
         coordinator
             .optional_preflight(&preflight, &request, &cancellation, UtcMicros(311))
+            .await
             .unwrap(),
         OptionalPreflightDispositionV1::Unavailable
     );
@@ -437,26 +451,25 @@ fn preflight_admission_enforces_repository_and_daemon_bounds() {
         let coordinator = Arc::clone(&coordinator);
         let preflight = Arc::clone(&preflight);
         handles.push(std::thread::spawn(move || {
-            coordinator.optional_preflight(
+            run(coordinator.optional_preflight(
                 preflight.as_ref(),
                 &admitted,
                 &CancellationSignal::active(format!("cancel.stack.repo-bound.{index}")).unwrap(),
                 UtcMicros(10),
-            )
+            ))
         }));
     }
     preflight.wait_for_active(MAX_REPOSITORY_PREFLIGHTS);
     let mut saturated = request.clone();
     saturated.preview_id = NativeIntegrationPreviewId::new("preview.stack.repo-saturated").unwrap();
     assert_eq!(
-        coordinator
-            .optional_preflight(
-                preflight.as_ref(),
-                &saturated,
-                &CancellationSignal::active("cancel.stack.repo-saturated").unwrap(),
-                UtcMicros(10),
-            )
-            .unwrap(),
+        run(coordinator.optional_preflight(
+            preflight.as_ref(),
+            &saturated,
+            &CancellationSignal::active("cancel.stack.repo-saturated").unwrap(),
+            UtcMicros(10),
+        ))
+        .unwrap(),
         OptionalPreflightDispositionV1::Saturated
     );
     preflight.release();
@@ -476,26 +489,25 @@ fn preflight_admission_enforces_repository_and_daemon_bounds() {
         let coordinator = Arc::clone(&coordinator);
         let preflight = Arc::clone(&preflight);
         handles.push(std::thread::spawn(move || {
-            coordinator.optional_preflight(
+            run(coordinator.optional_preflight(
                 preflight.as_ref(),
                 &request,
                 &CancellationSignal::active(format!("cancel.stack.daemon-bound.{index}")).unwrap(),
                 UtcMicros(20),
-            )
+            ))
         }));
     }
     preflight.wait_for_active(MAX_DAEMON_PREFLIGHTS);
     let saturated = preflight_request(100);
     register_policy(&coordinator, &saturated);
     assert_eq!(
-        coordinator
-            .optional_preflight(
-                preflight.as_ref(),
-                &saturated,
-                &CancellationSignal::active("cancel.stack.daemon-saturated").unwrap(),
-                UtcMicros(20),
-            )
-            .unwrap(),
+        run(coordinator.optional_preflight(
+            preflight.as_ref(),
+            &saturated,
+            &CancellationSignal::active("cancel.stack.daemon-saturated").unwrap(),
+            UtcMicros(20),
+        ))
+        .unwrap(),
         OptionalPreflightDispositionV1::Saturated
     );
     preflight.release();
@@ -517,23 +529,70 @@ fn joined_preflight_observes_cancellation_without_waiting_for_owner() {
     let owner_preflight = Arc::clone(&preflight);
     let owner_request = request.clone();
     let owner = std::thread::spawn(move || {
-        owner_coordinator.optional_preflight(
+        run(owner_coordinator.optional_preflight(
             owner_preflight.as_ref(),
             &owner_request,
             &CancellationSignal::active("cancel.stack.join-owner").unwrap(),
             UtcMicros(30),
-        )
+        ))
     });
     preflight.wait_for_active(1);
     let cancelled = CancellationSignal::active("cancel.stack.joiner").unwrap();
     cancelled.cancel(UtcMicros(31));
     assert_eq!(
-        coordinator.optional_preflight(preflight.as_ref(), &request, &cancelled, UtcMicros(30)),
+        run(coordinator.optional_preflight(
+            preflight.as_ref(),
+            &request,
+            &cancelled,
+            UtcMicros(30)
+        )),
         Err(StackCoordinatorErrorV1::Cancelled)
     );
     preflight.release();
     assert_eq!(
         owner.join().unwrap().unwrap(),
         OptionalPreflightDispositionV1::Unavailable
+    );
+}
+
+#[test]
+fn joined_preflight_returns_the_single_owner_result() {
+    let coordinator = Arc::new(DaemonGitHubStackCoordinatorV1::default());
+    let preflight = Arc::new(BlockingPreflight::default());
+    let request = preflight_request(300);
+    register_policy(&coordinator, &request);
+    let spawn = |suffix: &'static str| {
+        let coordinator = Arc::clone(&coordinator);
+        let preflight = Arc::clone(&preflight);
+        let request = request.clone();
+        std::thread::spawn(move || {
+            run(coordinator.optional_preflight(
+                preflight.as_ref(),
+                &request,
+                &CancellationSignal::active(format!("cancel.stack.single-flight.{suffix}"))
+                    .unwrap(),
+                UtcMicros(40),
+            ))
+        })
+    };
+    let owner = spawn("owner");
+    preflight.wait_for_active(1);
+    let joiner = spawn("joiner");
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    preflight.release();
+
+    assert_eq!(
+        owner.join().unwrap(),
+        Ok(OptionalPreflightDispositionV1::Unavailable)
+    );
+    assert_eq!(
+        joiner.join().unwrap(),
+        Ok(OptionalPreflightDispositionV1::Unavailable),
+        "a joiner returns the owner's published result"
+    );
+    assert_eq!(
+        preflight.state.lock().unwrap().0,
+        1,
+        "the joined request runs native preflight once"
     );
 }
