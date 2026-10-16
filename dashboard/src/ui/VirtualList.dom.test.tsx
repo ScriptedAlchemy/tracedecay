@@ -24,24 +24,29 @@ const MOUNT_CEILING = 250;
 /**
  * Give jsdom a viewport the virtualizer can measure.
  *
- * TanStack Virtual sizes the scroll element with `offsetWidth`/`offsetHeight`
- * (`getRect` in `@tanstack/virtual-core`), which jsdom always reports as zero,
- * not `clientHeight` or `getBoundingClientRect`. It also needs a
- * `ResizeObserver` to exist on the window, which jsdom does not provide.
+ * TanStack Virtual sizes the scroll element with `clientWidth`/`clientHeight`
+ * from virtual-core 3.19.6 (`offsetWidth`/`offsetHeight` before), which jsdom
+ * always reports as zero, not `getBoundingClientRect`. Both pairs are stubbed
+ * so the helper holds across that change. It also needs a `ResizeObserver` to
+ * exist on the window, which jsdom does not provide.
  */
 function installViewport(height: number, width = 900): () => void {
-  const names = ['offsetHeight', 'offsetWidth'] as const;
+  const sizes = {
+    offsetHeight: height,
+    clientHeight: height,
+    offsetWidth: width,
+    clientWidth: width,
+  } as const;
+  const names = Object.keys(sizes) as (keyof typeof sizes)[];
   const saved = names.map(
     (name) => [name, Object.getOwnPropertyDescriptor(HTMLElement.prototype, name)] as const,
   );
-  Object.defineProperty(HTMLElement.prototype, 'offsetHeight', {
-    configurable: true,
-    get: () => height,
-  });
-  Object.defineProperty(HTMLElement.prototype, 'offsetWidth', {
-    configurable: true,
-    get: () => width,
-  });
+  for (const name of names) {
+    Object.defineProperty(HTMLElement.prototype, name, {
+      configurable: true,
+      get: () => sizes[name],
+    });
+  }
 
   vi.stubGlobal(
     'ResizeObserver',
