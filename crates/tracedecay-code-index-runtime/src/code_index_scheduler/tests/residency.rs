@@ -2122,7 +2122,7 @@ async fn a_memory_activation_longer_than_one_native_poll_still_seats() {
         .expect("mounted scope");
     super::super::graph_activation::set_injected_activation_prewarm_cpu(
         &scope.worktree_id,
-        tracedecay_runtime_core::native_runtime::LONG_POLL_CPU * 4,
+        tracedecay_runtime_core::native_runtime::LONG_POLL * 4,
     );
     drop(first_pass);
     wait_for_live_complete_generation(&registry, fixture.path()).await;

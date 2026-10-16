@@ -1366,7 +1366,7 @@ async fn schema_convergence_completes_when_its_allocator_trim_outlasts_a_native_
         .await
         .expect("session runtime registry");
     registry.inject_registered_schema_convergence_trim_cpu_for_test(
-        tracedecay_runtime_core::native_runtime::LONG_POLL_CPU * 4,
+        tracedecay_runtime_core::native_runtime::LONG_POLL * 4,
     );
 
     registry
