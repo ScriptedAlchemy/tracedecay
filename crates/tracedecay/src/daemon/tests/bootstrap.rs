@@ -4312,14 +4312,11 @@ async fn one_host_tool_call_records_one_analytics_event_and_one_shot_clients_non
     let temp = TempDir::new().expect("temp dir");
     let project = temp.path().join("project");
     std::fs::create_dir_all(project.join("src")).expect("source dir");
-    let source: String = (0..400)
-        .map(|index| {
-            format!(
-                "pub const ATTRIBUTION_PROBE_{index}: &str = \"{}\";\n",
-                "x".repeat(400)
-            )
-        })
-        .collect();
+    let padding = "x".repeat(400);
+    let source = (0..400)
+        .map(|index| format!("pub const ATTRIBUTION_PROBE_{index}: &str = \"{padding}\";"))
+        .collect::<Vec<_>>()
+        .join("\n");
     std::fs::write(project.join("src/lib.rs"), source).expect("source file");
     commit_production_composition_project(&project);
 

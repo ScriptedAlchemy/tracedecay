@@ -53,26 +53,25 @@ fn wire_request_deadline_micros(request_deadline: Instant) -> tracedecay_domain:
     )
 }
 
-/// The `tools/call` params a one-shot TraceDecay client (CLI command, host
+/// The `tools/call` params a one-shot `tracedecay` client (CLI command, host
 /// hook, truncation recovery) sends on its own daemon connection.
 pub(crate) fn one_shot_tool_call_params(
     tool_name: &str,
     arguments: serde_json::Value,
     request_deadline: Option<Instant>,
 ) -> serde_json::Value {
-    let mut params = json!({
+    let mut meta = request_deadline.map_or_else(
+        || json!({}),
+        |deadline| tracedecay_mcp::tool_call_deadline_meta(wire_request_deadline_micros(deadline)),
+    );
+    if let Some(meta) = meta.as_object_mut() {
+        tracedecay_mcp::ToolCallInvoker::mark_one_shot_client(meta);
+    }
+    json!({
         "name": tool_name,
         "arguments": arguments,
-    });
-    if let Some(deadline) = request_deadline
-        && let Some(params) = params.as_object_mut()
-    {
-        params.insert(
-            "_meta".to_owned(),
-            tracedecay_mcp::tool_call_deadline_meta(wire_request_deadline_micros(deadline)),
-        );
-    }
-    params
+        "_meta": meta,
+    })
 }
 
 /// How long a liveness probe waits for the daemon endpoint to accept a
