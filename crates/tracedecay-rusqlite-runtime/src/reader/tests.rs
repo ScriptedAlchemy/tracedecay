@@ -819,6 +819,8 @@ fn a_snapshot_held_past_its_lifetime_releases_the_wal_and_stops_reading() {
     // The snapshot starts with frames in the WAL, so it holds a read mark the
     // log cannot restart behind.
     let writer = Connection::open(&store.path).unwrap();
+    // A busy checkpoint must answer at once, not wait out the lifetime.
+    writer.busy_timeout(Duration::ZERO).unwrap();
     writer
         .execute("INSERT INTO markers(value) VALUES (1)", [])
         .unwrap();
