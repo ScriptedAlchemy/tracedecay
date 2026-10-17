@@ -27,7 +27,7 @@ use crate::code_index_journey::{
 };
 use crate::common::{
     IsolatedHome, daemon_authority_path, daemon_socket_path, poll_until,
-    spawn_tracedecay_daemon_logged, spawn_tracedecay_daemon_with, tracedecay_command_with_home,
+    spawn_tracedecay_daemon_logged, tracedecay_command_with_home,
 };
 
 const ANCHOR: &str = "shutdown_checkpoint_anchor";
