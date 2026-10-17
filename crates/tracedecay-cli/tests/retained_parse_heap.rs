@@ -1,5 +1,5 @@
-//! The retained-parse pool is charged the pages its documents occupy in the
-//! shipped allocator, and releasing it returns those pages.
+//! Releasing the retained-parse pool returns the pages its documents
+//! occupied in the shipped allocator.
 //!
 //! One test in its own binary: it measures this process's anonymous RSS.
 
@@ -41,7 +41,7 @@ fn anon_bytes() -> u64 {
 }
 
 #[test]
-fn retained_parses_are_charged_what_releasing_them_returns() {
+fn releasing_retained_parses_returns_their_pages() {
     process_allocator::configure_process_allocator();
     let pool = SharedRetainedParsePool::default();
     let registry = LanguageRegistry::new();
@@ -78,24 +78,14 @@ fn retained_parses_are_charged_what_releasing_them_returns() {
     }
     let held = pool.holding().expect("retained documents");
     assert_eq!(held.documents, DOCUMENTS);
-    let charged = held.bytes.expect("the shipped allocator measures the pool");
 
     let before = anon_bytes();
-    assert_eq!(
-        pool.release(),
-        RetainedParsePoolReleaseV1::Released {
-            bytes: Some(charged)
-        }
-    );
+    assert_eq!(pool.release(), RetainedParsePoolReleaseV1::Released);
     let freed = before.saturating_sub(anon_bytes());
     assert_eq!(pool.holding(), None);
     assert!(
         freed >= 16 * MIB,
         "releasing {DOCUMENTS} retained documents returned {freed} bytes"
-    );
-    assert!(
-        charged * 10 >= freed * 8 && charged * 10 <= freed * 12,
-        "the pool was charged {charged} bytes and releasing it returned {freed}"
     );
 }
 

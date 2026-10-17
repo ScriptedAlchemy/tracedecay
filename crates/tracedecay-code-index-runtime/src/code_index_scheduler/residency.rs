@@ -645,8 +645,8 @@ impl ResidentOwnerV1 for SupersededDecodesOwnerV1 {
     }
 }
 
-/// The documents the worktree's increments retained for incremental reparse,
-/// charged by the pages of the pool's own heap.
+/// The documents the worktree's increments retained for incremental reparse.
+/// Nothing sizes their trees and artifacts, so the pool reports unmeasured.
 struct RetainedParsesOwnerV1(Arc<WorktreeResidencyV1>);
 
 impl ResidentOwnerV1 for RetainedParsesOwnerV1 {
@@ -654,10 +654,7 @@ impl ResidentOwnerV1 for RetainedParsesOwnerV1 {
         let held = self.0.retained_parses.holding()?;
         Some(ResidentOwnerSampleV1 {
             holding: ResidentHoldingV1::Worktree,
-            bytes: held.bytes.map_or(
-                ResidentOwnerBytesV1::Unmeasured,
-                ResidentOwnerBytesV1::Measured,
-            ),
+            bytes: ResidentOwnerBytesV1::Unmeasured,
             last_used: held.last_retained,
             serving: false,
             shared: None,
@@ -666,13 +663,9 @@ impl ResidentOwnerV1 for RetainedParsesOwnerV1 {
 
     fn release(&self) -> ResidentOwnerReleaseV1 {
         match self.0.retained_parses.release() {
-            RetainedParsePoolReleaseV1::Released { bytes } => ResidentOwnerReleaseV1::Released {
-                bytes: bytes.map_or(
-                    ResidentOwnerBytesV1::Unmeasured,
-                    ResidentOwnerBytesV1::Measured,
-                ),
+            RetainedParsePoolReleaseV1::Released => ResidentOwnerReleaseV1::Released {
+                bytes: ResidentOwnerBytesV1::Unmeasured,
             },
-            RetainedParsePoolReleaseV1::Busy => ResidentOwnerReleaseV1::Busy,
             RetainedParsePoolReleaseV1::Empty => ResidentOwnerReleaseV1::Empty,
         }
     }

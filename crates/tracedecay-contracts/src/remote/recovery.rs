@@ -15,8 +15,9 @@ mod service;
 pub use service::{
     REMOTE_PROMOTION_USE_CASE_ID_V1, RemoteRecoveryCallerV1, RemoteRecoveryCommittedV1,
     RemoteRecoveryControlPortV1, RemoteRecoveryInterruptionV1, RemoteRecoveryOperationErrorV1,
-    RemoteRecoveryOperationPortV1, RemoteRecoveryOperationReceiptV1, RemoteRecoveryProtocolOwnerV1,
-    RemoteRecoveryTerminationV1, remote_promotion_result_contract_v1,
+    RemoteRecoveryOperationPortV1, RemoteRecoveryOperationReceiptV1,
+    RemoteRecoveryPromotionFutureV1, RemoteRecoveryProtocolOwnerV1, RemoteRecoveryTerminationV1,
+    remote_promotion_result_contract_v1,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

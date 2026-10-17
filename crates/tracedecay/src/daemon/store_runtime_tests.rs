@@ -879,9 +879,10 @@ async fn remote_failover_reports_corrupt_fence_text_naming_cancel_as_corruption_
         .expect("corrupt the published writer fence");
     let promote_recovery = Arc::clone(&fixture.recovery);
     let promote_caller = fixture.caller.clone();
-    let corrupt_outcome = tokio::task::spawn_blocking(move || {
+    let corrupt_outcome = tracedecay_runtime_core::native_runtime::on_blocking_pool(async move {
         promote_recovery
-            .promote(&corrupt, &promote_caller, &PromotionControl(None))
+            .promote(&corrupt, &promote_caller, Arc::new(PromotionControl(None)))
+            .await
             .err()
     })
     .await
@@ -901,17 +902,21 @@ async fn remote_failover_reports_corrupt_fence_text_naming_cancel_as_corruption_
         .expect("repair writer fence");
     let promote_recovery = Arc::clone(&fixture.recovery);
     let promote_caller = fixture.caller.clone();
-    let interrupted_outcome = tokio::task::spawn_blocking(move || {
-        promote_recovery
-            .promote(
-                &interrupted,
-                &promote_caller,
-                &PromotionControl(Some(RemoteRecoveryInterruptionV1::Cancelled)),
-            )
-            .err()
-    })
-    .await
-    .expect("cancelled failover thread");
+    let interrupted_outcome =
+        tracedecay_runtime_core::native_runtime::on_blocking_pool(async move {
+            promote_recovery
+                .promote(
+                    &interrupted,
+                    &promote_caller,
+                    Arc::new(PromotionControl(Some(
+                        RemoteRecoveryInterruptionV1::Cancelled,
+                    ))),
+                )
+                .await
+                .err()
+        })
+        .await
+        .expect("cancelled failover thread");
 
     assert_eq!(
         (corrupt_outcome, interrupted_outcome),
@@ -938,9 +943,14 @@ async fn republishing_a_writer_restores_a_lost_project_writer_fence_before_failo
     let republished = fixture.publish().await;
     let promote_recovery = Arc::clone(&fixture.recovery);
     let promote_caller = fixture.caller.clone();
-    let failover = tokio::task::spawn_blocking(move || {
+    let failover = tracedecay_runtime_core::native_runtime::on_blocking_pool(async move {
         promote_recovery
-            .promote(&promotion, &promote_caller, &PromotionControl(None))
+            .promote(
+                &promotion,
+                &promote_caller,
+                Arc::new(PromotionControl(None)),
+            )
+            .await
             .map(|committed| {
                 (
                     committed.output.previous_epoch,
@@ -970,10 +980,15 @@ async fn remote_writer_publication_and_failover_settle_without_an_entered_tokio_
                     let promote_recovery = Arc::clone(&fixture.recovery);
                     let promote_caller = fixture.caller.clone();
                     let failover =
-                        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+                        tracedecay_runtime_core::native_runtime::on_blocking_pool(async move {
                             assert!(tokio::runtime::Handle::try_current().is_err());
                             promote_recovery
-                                .promote(&promotion, &promote_caller, &PromotionControl(None))
+                                .promote(
+                                    &promotion,
+                                    &promote_caller,
+                                    Arc::new(PromotionControl(None)),
+                                )
+                                .await
                                 .map(|committed| {
                                     (
                                         committed.output.previous_epoch,
@@ -1004,9 +1019,10 @@ async fn failover_names_the_promoted_node_credential_as_the_authority_credential
     let expected = (fixture.node_id.clone(), caller.enrollment_revision);
 
     let promote_recovery = Arc::clone(&fixture.recovery);
-    let authority = tokio::task::spawn_blocking(move || {
+    let authority = tracedecay_runtime_core::native_runtime::on_blocking_pool(async move {
         promote_recovery
-            .promote(&promotion, &caller, &PromotionControl(None))
+            .promote(&promotion, &caller, Arc::new(PromotionControl(None)))
+            .await
             .map(|committed| committed.authority)
     })
     .await
@@ -1160,24 +1176,13 @@ async fn daemon_admission_remains_ready_while_lcm_indexes_converge_in_background
         .expect("session runtime registry");
     let convergence_gate = registry.block_registered_schema_convergence_for_test();
 
-    let admission = registry.project_sessions(project_id, [project_root]);
-    tokio::pin!(admission);
-    let convergence_blocked = convergence_gate.wait_until_blocked();
-    tokio::pin!(convergence_blocked);
-    let database = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        tokio::select! {
-            result = &mut admission => {
-                let database = result.expect("registered project sessions");
-                convergence_blocked.await;
-                database
-            }
-            () = &mut convergence_blocked => {
-                admission.await.expect("registered project sessions")
-            }
-        }
-    })
-    .await
-    .expect("daemon admission and convergence scheduling must not stall");
+    // The gate holds convergence until the assertions below, so an admission
+    // that waited on convergence never returns.
+    let database = registry
+        .project_sessions(project_id, [project_root])
+        .await
+        .expect("registered project sessions");
+    convergence_gate.wait_until_blocked().await;
 
     assert_eq!(
         registry.registered_schema_convergence_status(&shard_id),

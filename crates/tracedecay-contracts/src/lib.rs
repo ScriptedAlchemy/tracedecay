@@ -458,8 +458,8 @@ pub use work_attempt::{
 };
 pub use work_attempt_effect::{
     WorkAttemptEffectDispatchOutcomeV1, WorkAttemptEffectHolderErrorV1, WorkAttemptEffectHolderV1,
-    WorkAttemptEffectResolutionV1, WorkAttemptEffectServiceV1, WorkAttemptEffectStorageErrorV1,
-    WorkAttemptEffectStoragePortV1,
+    WorkAttemptEffectReadPortV1, WorkAttemptEffectResolutionV1, WorkAttemptEffectServiceV1,
+    WorkAttemptEffectStorageErrorV1, WorkAttemptEffectStoragePortV1,
 };
 pub use work_catalog::{
     WORK_APPLICATION_OPERATION_IDS_V1, work_executable_binding, work_executable_binding_registry,
@@ -537,7 +537,7 @@ pub use work_product::{
     AddWorkTaskRequestV1, AdmitWorkExecutionRequestV1, AdmittedWorkExecutionV1,
     AuthorizedWorkProductScopeV1, CreateWorkProductRequestV1, CreateWorkTaskRequestV1,
     DecideWorkProposalRequestV1, MAX_WORK_EVIDENCE_SELECTION_V1,
-    MAX_WORK_GRAPH_TEMPORAL_ENTRIES_V1, MAX_WORK_HISTORY_EVENTS_V1,
+    MAX_WORK_GRAPH_TEMPORAL_ENTRIES_V1, MAX_WORK_HISTORY_EVENTS_V1, PrefetchedWorkGraphReadV1,
     PrepareWorkProductMutationRequestV1, ReviewWorkProposalDispositionV1,
     ReviewWorkProposalRequestV1, SelectedWorkEvidenceV1, VerifiedWorkEvidenceExpansionV1,
     VerifiedWorkGraphVersionV1, WorkEvidenceExpandRequestV1, WorkEvidenceExpansionV1,
@@ -569,7 +569,7 @@ pub use work_run_control::{
     PauseWorkRunCommand, ResumeWorkRunCommand, WorkRunAdmissionV1, WorkRunControlFrontierV1,
     WorkRunControlReadingV1, WorkRunControlRequestV1, WorkRunControlService,
     WorkRunControlStorageError, WorkRunControlStoragePort, WorkRunControlTransitionPort,
-    WorkRunControlTransitionReceiptV1, WorkRunLiveAttemptV1,
+    WorkRunControlTransitionReceiptV1, WorkRunLiveAttemptV1, WorkRunReservationPort,
 };
 pub use work_synthesis::{
     AdmitWorkSynthesisCommand, WorkSynthesisAdmissionRecordV1, WorkSynthesisAdmissionV1,

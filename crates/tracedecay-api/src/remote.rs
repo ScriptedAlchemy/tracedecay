@@ -404,12 +404,13 @@ where
         }
     };
     let execution = tracing::Instrument::instrument(
-        async move {
-            tracedecay_rusqlite_runtime::native_runtime::spawn_blocking(move || {
-                service.execute_controlled(request.request, credential, control)
-            })
-            .await
-        },
+        // The ports' persistence is synchronous exact SQL, so the operation
+        // runs on the blocking pool; its project-store effects await there.
+        tracedecay_rusqlite_runtime::native_runtime::on_blocking_pool(async move {
+            service
+                .execute_controlled(request.request, credential, control)
+                .await
+        }),
         tracing::trace_span!("api.http.handler"),
     )
     .await;

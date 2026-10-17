@@ -972,16 +972,27 @@ impl SessionTemporalRefreshSchedulerRegistry {
             .await
             .get(database_path)
             .map(|entry| Arc::clone(&entry.state));
-        let Some(state) = state else {
-            return;
-        };
-        loop {
-            let idle = enabled_idle_notification(&state);
-            if state.is_idle() {
-                return;
-            }
-            idle.await;
+        if let Some(state) = state {
+            wait_idle(&state).await;
         }
+    }
+
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn wait_project_idle(&self, owner: &StoreOwnerKey) {
+        if let Some(state) = self.project_state(owner).await {
+            wait_idle(&state).await;
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+async fn wait_idle(state: &SessionTemporalRefreshWakeState) {
+    loop {
+        let idle = enabled_idle_notification(state);
+        if state.is_idle() {
+            return;
+        }
+        idle.await;
     }
 }
 
