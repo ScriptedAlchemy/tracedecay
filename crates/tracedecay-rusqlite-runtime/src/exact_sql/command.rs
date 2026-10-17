@@ -21,7 +21,8 @@ use super::{
     ExactSqlCommitReceipt, ExactSqlError, ExactSqlRollbackReceipt, ExactSqlRows, ExactSqlStatement,
     ExactSqlWriteAuthority, ExactSqlWriteIntent, ExecutionPolicy, MAX_EXACT_SQL_ATTACHMENTS,
     SqlRequest, SqlResult, TransactionPolicy, attach_database, detach_database,
-    execute_query_unchecked, execute_request, sqlite_error, verify_write_authority,
+    execute_query_unchecked, execute_request, read_across_wal_recovery,
+    request_across_wal_recovery, sqlite_error, verify_write_authority,
 };
 use crate::connection::ConnectionMode;
 use crate::storage_pool::TaskTransaction;
@@ -357,57 +358,49 @@ pub(crate) async fn run_writer_command(
             // `rusqlite.exact_sql.transaction` and `rusqlite.exact_sql.vacuum`
             // split the pooled `rusqlite.writer.exact_sql` population, so a
             // slow exact-SQL lane is attributable to a specific command shape.
-            let result = {
-                let _span = tracing::trace_span!("rusqlite.exact_sql.execute").entered();
-                {
-                    let returning = matches!(&request, SqlRequest::ExecuteReturning(_));
-                    let execute = |connection: &Connection| {
-                        execute_request(
-                            connection,
-                            request,
-                            false,
-                            Some(Arc::clone(shutdown_requested)),
-                            None,
-                            true,
-                            None,
-                        )
-                    };
-                    if returning {
-                        let before = connection.total_changes();
-                        match Transaction::new_unchecked(connection, TransactionBehavior::Deferred)
-                        {
-                            Ok(transaction) => {
-                                let result = execute(&transaction).and_then(|result| {
-                                    transaction
-                                        .execute_batch("COMMIT")
-                                        .map(|()| result)
-                                        .map_err(|error| {
-                                            sqlite_error(
-                                                "commit returning write transaction",
-                                                error,
-                                            )
-                                        })
-                                });
-                                match result {
-                                    Ok(result) => Ok(result),
-                                    Err(error) => match discard_transaction(transaction, before) {
-                                        Ok(_) => Err(error),
-                                        Err(rollback_error) => {
-                                            shutdown_requested.store(true, Ordering::Release);
-                                            Err(rollback_error)
-                                        }
-                                    },
-                                }
-                            }
-                            Err(error) => {
-                                Err(sqlite_error("begin returning write transaction", error))
-                            }
-                        }
-                    } else {
-                        execute(connection)
-                    }
+            let returning = matches!(&request, SqlRequest::ExecuteReturning(_));
+            let result = request_across_wal_recovery(request, move |request| {
+                let execute = |connection: &Connection| {
+                    execute_request(
+                        connection,
+                        request,
+                        false,
+                        Some(Arc::clone(shutdown_requested)),
+                        None,
+                        true,
+                        None,
+                    )
+                };
+                if !returning {
+                    return execute(connection);
                 }
-            };
+                let before = connection.total_changes();
+                match Transaction::new_unchecked(connection, TransactionBehavior::Deferred) {
+                    Ok(transaction) => {
+                        let result = execute(&transaction).and_then(|result| {
+                            transaction
+                                .execute_batch("COMMIT")
+                                .map(|()| result)
+                                .map_err(|error| {
+                                    sqlite_error("commit returning write transaction", error)
+                                })
+                        });
+                        match result {
+                            Ok(result) => Ok(result),
+                            Err(error) => match discard_transaction(transaction, before) {
+                                Ok(_) => Err(error),
+                                Err(rollback_error) => {
+                                    shutdown_requested.store(true, Ordering::Release);
+                                    Err(rollback_error)
+                                }
+                            },
+                        }
+                    }
+                    Err(error) => Err(sqlite_error("begin returning write transaction", error)),
+                }
+            })
+            .instrument(tracing::trace_span!("rusqlite.exact_sql.execute"))
+            .await;
             DeferredReply::new(reply, result)
         }
         WriterCommand::BeginTransaction {
@@ -505,20 +498,19 @@ pub(crate) async fn run_writer_command(
                 Ok(statement) => statement,
                 Err(error) => return DeferredReply::new(reply, Err(error)),
             };
-            let result = {
-                let _span = tracing::trace_span!("rusqlite.wal_checkpoint").entered();
-                {
-                    with_exact_sql_guard(
-                        connection,
-                        ExactSqlAuthority::Canonical(ConnectionMode::Writer),
-                        Some(Arc::clone(shutdown_requested)),
-                        None,
-                        true,
-                        None,
-                        || execute_query_unchecked(connection, statement),
-                    )
-                }
-            };
+            let result = read_across_wal_recovery(move || {
+                with_exact_sql_guard(
+                    connection,
+                    ExactSqlAuthority::Canonical(ConnectionMode::Writer),
+                    Some(Arc::clone(shutdown_requested)),
+                    None,
+                    true,
+                    None,
+                    || execute_query_unchecked(connection, statement.clone()),
+                )
+            })
+            .instrument(tracing::trace_span!("rusqlite.wal_checkpoint"))
+            .await;
             DeferredReply::new(reply, result)
         }
         WriterCommand::Job {
@@ -600,7 +592,7 @@ fn release_rolled_back(
 
 #[allow(clippy::too_many_arguments)]
 async fn run_transaction(
-    transaction: TaskTransaction<'_>,
+    mut transaction: TaskTransaction<'_>,
     opened_at: Instant,
     receiver: crate::storage_pool::CommandReceiver<TransactionCommand>,
     before: u64,
@@ -793,15 +785,19 @@ async fn run_transaction(
                     };
                 let execution_deadline =
                     (execution_policy == ExecutionPolicy::Bounded).then_some(transaction_deadline);
-                let result = execute_request(
-                    &transaction,
-                    request,
-                    true,
-                    Some(Arc::clone(shutdown_requested)),
-                    execution_deadline,
-                    execution_policy == ExecutionPolicy::Bounded,
-                    repeated_authority,
-                );
+                let attempt = &mut transaction;
+                let result = request_across_wal_recovery(request, move |request| {
+                    execute_request(
+                        attempt,
+                        request,
+                        true,
+                        Some(Arc::clone(shutdown_requested)),
+                        execution_deadline,
+                        execution_policy == ExecutionPolicy::Bounded,
+                        repeated_authority.clone(),
+                    )
+                })
+                .await;
                 if shutdown_requested.load(Ordering::Acquire) || transaction.is_autocommit() {
                     // An interrupted write statement takes the whole
                     // transaction with it (see `discard_transaction`).

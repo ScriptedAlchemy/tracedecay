@@ -1433,11 +1433,12 @@ fn prepare_read_statement<'c>(
 /// Runs `read` again while it fails to prepare because the WAL is still being
 /// recovered, waiting between attempts without holding the thread.
 ///
-/// SQLite answers a reader that arrives during WAL recovery with
-/// `SQLITE_BUSY_RECOVERY`, which bypasses the connection's busy handler, so
-/// a reader started right after its writer could fail its very first
-/// statement with "database is locked" under load. The window is bounded by
-/// recovery itself; retry a few times before surfacing the error.
+/// SQLite answers a connection that starts a read while another connection
+/// recovers the WAL with `SQLITE_BUSY_RECOVERY`, which bypasses the busy
+/// handler, so a reader started right after its writer, or a writer whose
+/// file another process just opened, could fail a statement with "database
+/// is locked" under load. The window is bounded by recovery itself; retry a
+/// few times before surfacing the error.
 pub(crate) async fn read_across_wal_recovery<T>(
     mut read: impl FnMut() -> Result<T, ExactSqlError>,
 ) -> Result<T, ExactSqlError> {
@@ -1454,6 +1455,22 @@ pub(crate) async fn read_across_wal_recovery<T>(
         }
     }
     read()
+}
+
+/// Runs `run` on `request` as [`read_across_wal_recovery`] does. Only a query
+/// prepares through [`prepare_read_statement`], so only a query is cloned for
+/// another attempt.
+async fn request_across_wal_recovery<T>(
+    request: SqlRequest,
+    mut run: impl FnMut(SqlRequest) -> Result<T, ExactSqlError>,
+) -> Result<T, ExactSqlError> {
+    if !matches!(
+        request,
+        SqlRequest::Query(_) | SqlRequest::ExecuteReturning(_)
+    ) {
+        return run(request);
+    }
+    read_across_wal_recovery(|| run(request.clone())).await
 }
 
 fn execute_query_unchecked(
