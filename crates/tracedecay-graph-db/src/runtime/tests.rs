@@ -143,7 +143,6 @@ fn resident_engine_bytes_remeasures_after_a_write() {
     let database = guard.as_ref().unwrap();
     let fresh = u64::try_from(database.memory_usage().total_bytes)
         .unwrap_or(u64::MAX)
-        .max(db.inner.engine_heap_bytes())
         .saturating_add(u64::try_from(db.inner.store_epoch_cache_bytes()).unwrap_or(u64::MAX));
     assert!(
         measured > first,
@@ -187,7 +186,6 @@ fn resident_engine_bytes_is_recomputed_after_hibernation_and_reopen() {
     let database = guard.as_ref().unwrap();
     let fresh = u64::try_from(database.memory_usage().total_bytes)
         .unwrap_or(u64::MAX)
-        .max(db.inner.engine_heap_bytes())
         .saturating_add(u64::try_from(db.inner.store_epoch_cache_bytes()).unwrap_or(u64::MAX));
     assert_eq!(reopened, fresh);
 }
