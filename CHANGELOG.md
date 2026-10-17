@@ -5,6 +5,78 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-beta.89](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.88...v1.0.0-beta.89) (2026-10-17)
+
+
+### Features
+
+* **doctor:** census the daemon's unlinked SQLite temp files ([690a4df](https://github.com/ScriptedAlchemy/tracedecay/commit/690a4dfc3f617e7f785c6a14841237942cbc4aab))
+* **doctor:** census the daemon's unlinked SQLite temp files ([b25d76e](https://github.com/ScriptedAlchemy/tracedecay/commit/b25d76e30c3ee40b555c16c01aef16287bf8e2a3))
+* **maintenance:** check mounted store paths still name their file ([e130dbb](https://github.com/ScriptedAlchemy/tracedecay/commit/e130dbb0f59b6aed05ad41224265357dedcaa660))
+
+
+### Bug Fixes
+
+* **analytics:** count only host tool calls as MCP tool usage ([6fefdf3](https://github.com/ScriptedAlchemy/tracedecay/commit/6fefdf369229484f626f34893bec86f8b0134402))
+* **analytics:** count only host tool calls as MCP tool usage ([dc08532](https://github.com/ScriptedAlchemy/tracedecay/commit/dc08532df1b9551a062cff8de98424126a54f8c9)), closes [#4110](https://github.com/ScriptedAlchemy/tracedecay/issues/4110)
+* **automation:** show bounded ledger counts and starved activity gates ([f8149ae](https://github.com/ScriptedAlchemy/tracedecay/commit/f8149aeddddcb74d78f83dd262295608a79ffedf))
+* **bazel:** read arborium grammar manifest dir at build-script run time ([9161511](https://github.com/ScriptedAlchemy/tracedecay/commit/9161511068b037638344639acb5dcb9b91ab2d4a))
+* **bazel:** read arborium grammar manifest dir at build-script run time ([788bee0](https://github.com/ScriptedAlchemy/tracedecay/commit/788bee03489a6f0cae3e013ba61edec94b08bd4e))
+* **ci:** allow long git paths on Windows runners ([220b6ca](https://github.com/ScriptedAlchemy/tracedecay/commit/220b6ca91e19ab4e18c0e0f392deb5b17889effa))
+* **ci:** allow long git paths on Windows runners ([c36fae0](https://github.com/ScriptedAlchemy/tracedecay/commit/c36fae0caf7771ff295202eca9cafb7d604c0967))
+* **cli:** stop installing mimalloc owner heaps ([db5a6d9](https://github.com/ScriptedAlchemy/tracedecay/commit/db5a6d94f9fe59fa112baf045d4994f96242af65))
+* **context-scout:** seek native session ids instead of sorting bodies ([84faa48](https://github.com/ScriptedAlchemy/tracedecay/commit/84faa48ae6b794332b6df2287069afcdf5a9ca43))
+* **context-scout:** seek native session ids instead of sorting bodies ([44acc10](https://github.com/ScriptedAlchemy/tracedecay/commit/44acc10ed0309c75199426674a3b56a128207c18))
+* **daemon-service:** free a hook cycle's permit before its terminal ([21429c5](https://github.com/ScriptedAlchemy/tracedecay/commit/21429c5b17046748d662a9a1db0972a28dc4470e))
+* **daemon-service:** free a hook cycle's permit before its terminal ([51c99bb](https://github.com/ScriptedAlchemy/tracedecay/commit/51c99bbcec11f93d4207e7a5ff813f8e8bbe9330))
+* **daemon-service:** free hook capacity before settling the cycle ([2611abb](https://github.com/ScriptedAlchemy/tracedecay/commit/2611abb70581f414be05a8c65e3d64f5af3da999)), closes [#4135](https://github.com/ScriptedAlchemy/tracedecay/issues/4135)
+* **daemon:** read the queued refusal when a daemon write fails ([c2f1faf](https://github.com/ScriptedAlchemy/tracedecay/commit/c2f1faf31d0c0e5dbc02a0080f0baf6e68f5ba6d))
+* **daemon:** read the queued refusal when a daemon write fails ([a7d2afd](https://github.com/ScriptedAlchemy/tracedecay/commit/a7d2afd1e663d81ab26cc945b19616942739836c)), closes [#4145](https://github.com/ScriptedAlchemy/tracedecay/issues/4145)
+* **daemon:** root-cause seven load-only daemon test failures ([cd8c168](https://github.com/ScriptedAlchemy/tracedecay/commit/cd8c168a1b1c4a3ea685acaabf56b6dfcbc4ada6))
+* **daemon:** wait for restarted refresh worker idle, not a 2 s wall ([3c411cf](https://github.com/ScriptedAlchemy/tracedecay/commit/3c411cfce6aa9d1ced439c9c1ec4797663523b0b))
+* **graph-db:** checkpoint the Grafeo WAL during commits ([#4099](https://github.com/ScriptedAlchemy/tracedecay/issues/4099)) ([97970c8](https://github.com/ScriptedAlchemy/tracedecay/commit/97970c82a41b280d5f02e0192e08e2ee43136c62))
+* **graph-db:** checkpoint the Grafeo WAL from commits past a size bound ([cb41933](https://github.com/ScriptedAlchemy/tracedecay/commit/cb41933bfcef04a96efb758206e71cdedf73f964))
+* **hooks:** deliver edits from unbound linked worktrees ([4fbd0ff](https://github.com/ScriptedAlchemy/tracedecay/commit/4fbd0ff379e718ce1776302e171b361b80c4a48c))
+* **hooks:** deliver edits from unbound linked worktrees ([361fd62](https://github.com/ScriptedAlchemy/tracedecay/commit/361fd62e1b97f0106f5f5b76c59f0619df096251))
+* **host-admission:** answer replay requests when a pass starts ([84e58aa](https://github.com/ScriptedAlchemy/tracedecay/commit/84e58aa8f710cc962d73154a04ec2878ae4a5da9)), closes [#4149](https://github.com/ScriptedAlchemy/tracedecay/issues/4149)
+* **host-admission:** one wake per replay kick; signal-driven daemon tests ([2254620](https://github.com/ScriptedAlchemy/tracedecay/commit/2254620fddaf39afb6780610b35c1db4ece926a7))
+* **maintenance:** collect unregistered project dirs every tick ([7195f29](https://github.com/ScriptedAlchemy/tracedecay/commit/7195f29aecace2fbeed54b5d75c91683e19359ba))
+* **maintenance:** collect unregistered project dirs every tick ([3856249](https://github.com/ScriptedAlchemy/tracedecay/commit/38562495a201526d31c813d8cce890cf4641f939))
+* **maintenance:** require a restart for stores deleted under the daemon ([eb320ad](https://github.com/ScriptedAlchemy/tracedecay/commit/eb320ad5e90c9ee8929bdb0d5af254c865f80574))
+* **maintenance:** restart for stores deleted under the daemon ([#4099](https://github.com/ScriptedAlchemy/tracedecay/issues/4099)) ([12fba92](https://github.com/ScriptedAlchemy/tracedecay/commit/12fba9246efcc5ebaec85a40a656675e423cf573))
+* **maintenance:** stop the shared git dir keeping dead stores alive ([c3a0d36](https://github.com/ScriptedAlchemy/tracedecay/commit/c3a0d369fe0ab3ff313250dfcdda87c6a5392001))
+* **maintenance:** sweep response handles, rotate hook analytics ([d3a42fa](https://github.com/ScriptedAlchemy/tracedecay/commit/d3a42fac69862738e824d11e907ac31eaa348785))
+* **maintenance:** sweep response handles, rotate hook analytics ([#4099](https://github.com/ScriptedAlchemy/tracedecay/issues/4099)) ([3a04205](https://github.com/ScriptedAlchemy/tracedecay/commit/3a04205912e91f8a0e7a0670685bd633fcde7ff4))
+* **memory:** drop mimalloc owner heaps that crash on delete ([#4152](https://github.com/ScriptedAlchemy/tracedecay/issues/4152)) ([d541668](https://github.com/ScriptedAlchemy/tracedecay/commit/d54166818208e67ad779271c4ea1e5d5d4d62977))
+* **projection:** read output ownership from provenance, drop TEMP cache ([af76b41](https://github.com/ScriptedAlchemy/tracedecay/commit/af76b41650713bd41bd03b698dd53b346123cec1))
+* **projection:** read output ownership from provenance, drop TEMP cache ([f149ff0](https://github.com/ScriptedAlchemy/tracedecay/commit/f149ff04d210f803fff76f9865cb5177f6897e81))
+* **runtime-core:** let shutdown close wait for draining leases ([e4ccb3b](https://github.com/ScriptedAlchemy/tracedecay/commit/e4ccb3bf352d520b514dfa3d0fc2cc3ec22a5cbd))
+* **runtime-core:** let shutdown close wait for draining leases ([17580ca](https://github.com/ScriptedAlchemy/tracedecay/commit/17580ca845cf4ececb5102d878dc1620ddc4f92c))
+* **rusqlite-runtime:** checkpoint WAL pressure with RESTART ([4b9ad9d](https://github.com/ScriptedAlchemy/tracedecay/commit/4b9ad9d8694543355f16afa702a3f73666db7cc2))
+* **rusqlite-runtime:** retire ledger rows of exited daemon incarnations ([840d722](https://github.com/ScriptedAlchemy/tracedecay/commit/840d722086d34387cfac64efa7644a8e3b2469a0))
+* **rusqlite-runtime:** retire ledger rows of exited daemon incarnations ([7e4a5b0](https://github.com/ScriptedAlchemy/tracedecay/commit/7e4a5b0c6d96008b96ee5b84257b60d9982dcdc5))
+* **sessions:** key Claude sources by projects-relative path ([8565407](https://github.com/ScriptedAlchemy/tracedecay/commit/85654070b6076af61bfa313f6b64c437a2adcafa))
+* **sessions:** key Claude sources by projects-relative path ([38a7954](https://github.com/ScriptedAlchemy/tracedecay/commit/38a79549dbc1cc43837054d2f5161a818bdc0013))
+* **sessions:** rescan instead of serving a stale empty Codex pass ([186fa75](https://github.com/ScriptedAlchemy/tracedecay/commit/186fa75297f2ca65e10dbbb46163c1af794abb1e)), closes [#4135](https://github.com/ScriptedAlchemy/tracedecay/issues/4135)
+* **storage:** bound the hard WAL drain behind a stuck reader ([76b351c](https://github.com/ScriptedAlchemy/tracedecay/commit/76b351cf50af62c45ca2949bd705824d6747fb22))
+* **storage:** bound the hard WAL drain behind a stuck reader ([faa2a5a](https://github.com/ScriptedAlchemy/tracedecay/commit/faa2a5acd8be109f6a00ad965bae7a6adde255e2))
+* **storage:** measure every store and bound each family by purpose ([c9ac8b0](https://github.com/ScriptedAlchemy/tracedecay/commit/c9ac8b04e09bee3ad8c5ada7a50339663559f9a6))
+* **storage:** open convergence snapshots through the read connection ([1f3ff39](https://github.com/ScriptedAlchemy/tracedecay/commit/1f3ff3996f7519c5d8dd7b18c801621f51a1ad4e))
+* **storage:** satisfy clippy in the bounded drain ([dbd40fe](https://github.com/ScriptedAlchemy/tracedecay/commit/dbd40fecf1cefadfb1ce57c625d604c746754a93))
+* **storage:** size free pages from the header, not a reader ([5daa37d](https://github.com/ScriptedAlchemy/tracedecay/commit/5daa37d1a3db617238e4503e920cb823a5c28a08))
+* **storage:** size free pages from the header, not a reader ([8a0ee49](https://github.com/ScriptedAlchemy/tracedecay/commit/8a0ee49cd530e54367741444fd51ca600d7142d0))
+* **storage:** sync memory stores on every commit ([a253ab7](https://github.com/ScriptedAlchemy/tracedecay/commit/a253ab7dea82cfbc152c1dbf27cdff7e67422c14))
+* **telemetry:** stop re-walking stores too large for dbstat ([073c00a](https://github.com/ScriptedAlchemy/tracedecay/commit/073c00a674c67a5812bf0da047b17b8be8a019f4))
+* **telemetry:** stop re-walking stores too large for dbstat ([99c1a7d](https://github.com/ScriptedAlchemy/tracedecay/commit/99c1a7d388f22fa59afc204a010b7832c533d665))
+
+
+### Performance Improvements
+
+* **sessions:** pin Codex discovery pages outside the hub lock ([f2057f2](https://github.com/ScriptedAlchemy/tracedecay/commit/f2057f20882141d1ef5617f4b38411457d90f4d2))
+* **sessions:** pin Codex discovery pages outside the hub lock ([f9bfc82](https://github.com/ScriptedAlchemy/tracedecay/commit/f9bfc8205f035523e9a753670527fc7e107c9934)), closes [#4176](https://github.com/ScriptedAlchemy/tracedecay/issues/4176)
+* **sessions:** wait for git evidence reads off the native worker ([4ea3c25](https://github.com/ScriptedAlchemy/tracedecay/commit/4ea3c2518a9b8442ee5e59e7ec2f2e423c25a332))
+* **sessions:** wait for git evidence reads off the native worker ([c7b5505](https://github.com/ScriptedAlchemy/tracedecay/commit/c7b5505b395cf76d72bf3e53ef5ed90780a54933))
+
 ## [1.0.0-beta.88](https://github.com/ScriptedAlchemy/tracedecay/compare/v1.0.0-beta.87...v1.0.0-beta.88) (2026-10-16)
 
 
