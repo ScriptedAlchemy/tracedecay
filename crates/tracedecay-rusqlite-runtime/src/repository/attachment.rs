@@ -1331,4 +1331,107 @@ mod tests {
         attachment.drain().unwrap();
         attachment.close_and_join().unwrap();
     }
+
+    /// #4097: a reader that never releases its snapshot used to keep the hard
+    /// drain pending forever, with every general write refused. Past one read
+    /// deadline the fence revokes the snapshot, the log restarts, and the
+    /// queued write commits while the snapshot is still held.
+    #[test]
+    fn a_hard_drain_converges_behind_a_reader_that_never_releases() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("hard-pressure-revoke.sqlite3");
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let journal_mode: String = connection
+            .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode, "wal");
+        drop(connection);
+        let path = path.canonicalize().unwrap();
+        let binding = binding();
+        let mut admission = AdmissionConfigV1::default();
+        admission.wal.soft_limit_bytes = 8 * 1024;
+        admission.wal.hard_limit_bytes = 16 * 1024;
+        let attachment = RepositoryPhysicalAttachmentFactory
+            .attach(
+                &native_runtime(),
+                binding.clone(),
+                locator(&binding),
+                path,
+                admission,
+            )
+            .unwrap();
+        let handle = attachment.exact_sql_handle().unwrap();
+        handle
+            .execute_batch(
+                "CREATE TABLE hard_pressure (id INTEGER PRIMARY KEY, payload BLOB NOT NULL)"
+                    .to_owned(),
+            )
+            .unwrap();
+        let count = || statement("SELECT COUNT(*) FROM hard_pressure", vec![]);
+        let pinned = handle.begin_read_snapshot(Duration::from_secs(1)).unwrap();
+        pinned.query(count()).unwrap();
+        handle
+            .execute(statement(
+                "INSERT INTO hard_pressure (id, payload) VALUES (?, ?)",
+                vec![
+                    ExactSqlValue::Integer(1),
+                    ExactSqlValue::Blob(vec![7; 128 * 1024]),
+                ],
+            ))
+            .unwrap();
+        let checkpoint = attachment
+            .lock_state()
+            .writer
+            .as_ref()
+            .expect("writer remains attached")
+            .checkpoint_handle();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let mut pressure = checkpoint.pressure_subscription();
+        runtime
+            .block_on(wait_for(&cx(), &mut pressure, |pressure| {
+                matches!(pressure, crate::CheckpointPressure::BlockGeneral { .. })
+            }))
+            .expect("the over-hard-limit write must publish hard checkpoint pressure");
+
+        let queued = handle.clone();
+        let (completed_tx, completed_rx) = mpsc::sync_channel(1);
+        let writer = thread::spawn(move || {
+            let result = queued.execute(statement(
+                "INSERT INTO hard_pressure (id, payload) VALUES (?, ?)",
+                vec![ExactSqlValue::Integer(2), ExactSqlValue::Blob(vec![8; 32])],
+            ));
+            let _ = completed_tx.send(result);
+        });
+        completed_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the queued write is not held until the reader lets go")
+            .expect("the queued write commits while the reader still holds its snapshot");
+        writer.join().unwrap();
+        let mut status = checkpoint.status_subscription();
+        let context = cx();
+        let converged = wait_for(&context, &mut status, |status| {
+            matches!(checkpoint.pressure(), crate::CheckpointPressure::Open)
+                && status.latest.as_ref().is_some_and(|outcome| match outcome {
+                    crate::CheckpointOutcome::BelowSoft { wal }
+                    | crate::CheckpointOutcome::Complete { wal, .. } => wal.bytes <= 8 * 1024,
+                    crate::CheckpointOutcome::Pending { .. }
+                    | crate::CheckpointOutcome::Interrupted { .. } => false,
+                })
+        });
+        runtime
+            .block_on(async { tokio::time::timeout(Duration::from_secs(30), converged).await })
+            .expect("the drain converges while the reader still holds its snapshot")
+            .expect("the drain completes and the restarted log stays below the soft limit");
+        assert!(
+            pinned.query(count()).is_err(),
+            "the revoked snapshot no longer reads its old view"
+        );
+
+        drop(pinned);
+        attachment.drain().unwrap();
+        attachment.close_and_join().unwrap();
+    }
 }

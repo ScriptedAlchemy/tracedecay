@@ -41,7 +41,7 @@ pub use debris::{
 pub use findings::{
     code_generation_retention_finding, incident_debris_finding, orphan_store_finding,
     over_budget_finding, pending_schema_migration_finding, retention_backlog_finding,
-    table_growth_finding,
+    table_growth_finding, wal_checkpoint_pinned_finding,
 };
 pub use identity::{
     FreePageRatioV1, RelativeArtifactPathV1, StorageByteSizeV1, StoreKeyV1, TableNameV1,

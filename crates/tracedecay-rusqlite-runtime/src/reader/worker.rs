@@ -29,6 +29,58 @@ use super::{ExistingReaderLocator, ReaderStartError};
 
 const REPLY_POLL_QUANTUM: Duration = Duration::from_millis(5);
 
+/// How often an idle snapshot checks whether the checkpoint fence revoked it.
+const REVOCATION_POLL: Duration = Duration::from_millis(20);
+
+/// The checkpoint fence's claim on one worker's snapshot.
+///
+/// A held snapshot keeps its WAL read slot, so the writer cannot restart the
+/// log behind it. When a hard-pressure drain outlives the read deadline, the
+/// writer revokes the snapshots older than it: any running statement is
+/// interrupted, the worker rolls the read back, and the snapshot's later reads
+/// fail as expired.
+#[derive(Default)]
+pub(crate) struct SnapshotRevocation {
+    requested: AtomicBool,
+    rolled_back: AtomicBool,
+}
+
+impl SnapshotRevocation {
+    fn reset(&self) {
+        self.requested.store(false, Ordering::Release);
+        self.rolled_back.store(false, Ordering::Release);
+    }
+
+    fn requested(&self) -> bool {
+        self.requested.load(Ordering::Acquire)
+    }
+
+    /// The worker rolled the revoked snapshot back, so it no longer holds the
+    /// WAL even while its lease is still out.
+    pub(crate) fn rolled_back(&self) -> bool {
+        self.rolled_back.load(Ordering::Acquire)
+    }
+}
+
+/// What the checkpoint blockers keep for each open snapshot to revoke it.
+#[derive(Clone)]
+pub(crate) struct SnapshotRevoker {
+    revocation: Arc<SnapshotRevocation>,
+    interrupt: Arc<InterruptHandle>,
+}
+
+impl SnapshotRevoker {
+    pub(crate) fn revoke(&self) {
+        if !self.revocation.requested.swap(true, Ordering::AcqRel) {
+            self.interrupt.interrupt();
+        }
+    }
+
+    pub(crate) fn rolled_back(&self) -> bool {
+        self.revocation.rolled_back()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StoreSizeTelemetrySample {
     pub page_size_bytes: u32,
@@ -167,6 +219,7 @@ pub(crate) struct WorkerClient {
     /// loop returns, which can outlast the snapshot sender `begin_end` takes.
     in_snapshot: Arc<AtomicBool>,
     interrupt: Arc<InterruptHandle>,
+    revocation: Arc<SnapshotRevocation>,
 }
 
 pub(crate) struct SpawnedWorker {
@@ -176,6 +229,13 @@ pub(crate) struct SpawnedWorker {
 }
 
 impl WorkerClient {
+    pub(crate) fn revoker(&self) -> SnapshotRevoker {
+        SnapshotRevoker {
+            revocation: Arc::clone(&self.revocation),
+            interrupt: Arc::clone(&self.interrupt),
+        }
+    }
+
     pub fn begin(&self) -> Result<(), ReaderWorkerError> {
         let (reply, receive) = mpsc::sync_channel(1);
         self.sender
@@ -417,6 +477,8 @@ pub(crate) fn spawn<E: ReaderQueryExecutor>(
     let worker_snapshot_sender = Arc::clone(&snapshot_sender);
     let in_snapshot = Arc::new(AtomicBool::new(false));
     let worker_in_snapshot = Arc::clone(&in_snapshot);
+    let revocation = Arc::new(SnapshotRevocation::default());
+    let worker_revocation = Arc::clone(&revocation);
     let (started, startup) = mpsc::sync_channel(1);
     let join = thread::Builder::new()
         .name("tracedecay-rusqlite-reader".to_owned())
@@ -467,6 +529,7 @@ pub(crate) fn spawn<E: ReaderQueryExecutor>(
                 receiver,
                 worker_snapshot_sender,
                 &worker_in_snapshot,
+                &worker_revocation,
                 &mut executor,
                 admission,
             );
@@ -481,6 +544,7 @@ pub(crate) fn spawn<E: ReaderQueryExecutor>(
             snapshot_sender,
             in_snapshot,
             interrupt,
+            revocation,
         },
         join,
         opened_file_identity,
@@ -492,6 +556,7 @@ fn run<E: ReaderQueryExecutor>(
     receiver: Receiver<WorkerCommand>,
     published: Arc<Mutex<Option<Sender<SnapshotCommand>>>>,
     in_snapshot: &AtomicBool,
+    revocation: &SnapshotRevocation,
     executor: &mut E,
     admission: Arc<ReaderAdmissionRecorder>,
 ) {
@@ -502,6 +567,7 @@ fn run<E: ReaderQueryExecutor>(
                 let _ = reply.send(shrink_connection_memory(&connection));
             }
             WorkerCommand::Begin { reply } => {
+                revocation.reset();
                 let transaction = connection
                     .transaction_with_behavior(TransactionBehavior::Deferred)
                     .map_err(|error| {
@@ -519,7 +585,7 @@ fn run<E: ReaderQueryExecutor>(
                         if reply.send(Ok(())).is_err() {
                             return;
                         }
-                        if run_snapshot(transaction, commands, executor, &admission) {
+                        if run_snapshot(transaction, commands, executor, &admission, revocation) {
                             return;
                         }
                         // Clear the flag before the sender: a release that
@@ -558,8 +624,38 @@ fn run_snapshot<E: ReaderQueryExecutor>(
     commands: Receiver<SnapshotCommand>,
     executor: &mut E,
     admission: &ReaderAdmissionRecorder,
+    revocation: &SnapshotRevocation,
 ) -> bool {
-    while let Ok(command) = commands.recv() {
+    let mut active = Some(transaction);
+    loop {
+        let command = match commands.recv_timeout(REVOCATION_POLL) {
+            Ok(command) => command,
+            Err(RecvTimeoutError::Timeout) => {
+                end_revoked_snapshot(&mut active, revocation);
+                continue;
+            }
+            Err(RecvTimeoutError::Disconnected) => return false,
+        };
+        end_revoked_snapshot(&mut active, revocation);
+        let command = match command {
+            SnapshotCommand::End { reply } => {
+                let result = active.take().map_or(Ok(()), |transaction| {
+                    transaction.rollback().map_err(|error| {
+                        ReaderWorkerError::Storage(StorageRuntimeErrorV1::Infrastructure {
+                            operation: format!("close reader snapshot: {error}"),
+                        })
+                    })
+                });
+                let _ = reply.send(result);
+                return false;
+            }
+            SnapshotCommand::Shutdown => return true,
+            command => command,
+        };
+        let Some(transaction) = active.as_ref() else {
+            reject_revoked(command);
+            continue;
+        };
         match command {
             SnapshotCommand::Pin { reply } => {
                 // Any read starts the snapshot; counting the schema would
@@ -661,21 +757,51 @@ fn run_snapshot<E: ReaderQueryExecutor>(
                 let _ = reply.send(result);
             }
             SnapshotCommand::ReleaseMemory { reply } => {
-                let _ = reply.send(shrink_connection_memory(&transaction));
+                let _ = reply.send(shrink_connection_memory(transaction));
             }
-            SnapshotCommand::End { reply } => {
-                let result = transaction.rollback().map_err(|error| {
-                    ReaderWorkerError::Storage(StorageRuntimeErrorV1::Infrastructure {
-                        operation: format!("close reader snapshot: {error}"),
-                    })
-                });
-                let _ = reply.send(result);
-                return false;
-            }
-            SnapshotCommand::Shutdown => return true,
+            SnapshotCommand::End { .. } | SnapshotCommand::Shutdown => {}
         }
     }
-    false
+}
+
+/// Rolls back a snapshot the checkpoint fence revoked, so its WAL read slot
+/// is free while its lease is still out.
+fn end_revoked_snapshot(active: &mut Option<Transaction<'_>>, revocation: &SnapshotRevocation) {
+    if revocation.requested()
+        && let Some(transaction) = active.take()
+    {
+        // A failed rollback drops the transaction, which rolls back again.
+        let _ = transaction.rollback();
+        revocation.rolled_back.store(true, Ordering::Release);
+    }
+}
+
+/// Answers a command that reached a revoked snapshot.
+fn reject_revoked(command: SnapshotCommand) {
+    let expired = || ReaderWorkerError::Interrupted {
+        reason: UnavailableReasonV1::SnapshotExpired,
+    };
+    match command {
+        SnapshotCommand::Pin { reply } => {
+            let _ = reply.send(Err(expired()));
+        }
+        SnapshotCommand::Execute { reply, .. } => {
+            let _ = reply.send(Err(expired()));
+        }
+        SnapshotCommand::ExactSqlQuery { reply, .. } => {
+            let _ = reply.send(Err(ExactSqlError::ReaderUnavailable(expired().to_string())));
+        }
+        SnapshotCommand::StoreSize { reply } => {
+            let _ = reply.send(Err(expired()));
+        }
+        SnapshotCommand::TableSizes { reply } => {
+            let _ = reply.send(Err(expired()));
+        }
+        SnapshotCommand::ReleaseMemory { reply } => {
+            let _ = reply.send(Ok(()));
+        }
+        SnapshotCommand::End { .. } | SnapshotCommand::Shutdown => {}
+    }
 }
 
 fn shrink_connection_memory(connection: &Connection) -> Result<(), ReaderWorkerError> {
