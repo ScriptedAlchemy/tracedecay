@@ -2285,7 +2285,7 @@ async fn resolve_production_github_provider_access(
     let blocking_root = project_root.to_path_buf();
     let profile_id = state.session_db.binding().shard_id.profile_id.clone();
     let (owner, repository, credential) =
-        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        tracedecay_runtime_core::native_runtime::spawn_owned_blocking(move || {
             resolve_github_repository_read_credential(
                 &blocking_invocation,
                 &blocking_root,
@@ -2336,6 +2336,8 @@ async fn resolve_production_github_provider_access(
 ///
 /// Blocking: the remote lookup may spawn `git`, and the public-repository
 /// fallback probes `gh` and the git credential helper, each for seconds.
+/// It also mounts the credential authority process-wide, so the open owns it
+/// and is not drained until it returns.
 fn resolve_github_repository_read_credential(
     invocation: &DaemonInvocationState,
     project_root: &Path,

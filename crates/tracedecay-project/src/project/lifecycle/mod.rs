@@ -626,14 +626,15 @@ impl TraceDecay {
 
     /// Publishes this project's Hook bindings on the blocking pool: under
     /// contention the binding lock waits out the writer lease, which must not
-    /// park a native worker.
+    /// park a native worker. The open owns the writes, so an aborted open is
+    /// not drained until they return.
     async fn publish_hook_bindings(&self) -> Result<()> {
         let runtime =
             crate::runtime_ports::hook_runtime(tracedecay_runtime_core::config::ProfileRoot::new(
                 self.open_options.resolved_profile_root()?,
             ))?;
         let layout = self.store_layout.clone();
-        tracedecay_runtime_core::native_runtime::spawn_blocking(move || {
+        tracedecay_runtime_core::native_runtime::spawn_owned_blocking(move || {
             tracedecay_agent_hosts::hooks::publish_hook_bindings(&runtime, &layout)
         })
         .await
