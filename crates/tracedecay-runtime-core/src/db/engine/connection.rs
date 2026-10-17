@@ -53,6 +53,11 @@ impl ReadConnection {
         self.connection.read_snapshot().await
     }
 
+    /// A read snapshot that ends itself `lifetime` after it began.
+    pub(crate) async fn read_snapshot_for(&self, lifetime: Duration) -> Result<ReadSnapshot> {
+        self.connection.read_snapshot_for(lifetime).await
+    }
+
     /// Live reader-pool telemetry for this exact store.
     #[must_use]
     pub fn reader_pool_occupancy(&self) -> Option<ReaderPoolSnapshot> {
