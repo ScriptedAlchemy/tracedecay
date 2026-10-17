@@ -41,7 +41,7 @@ async fn project_runtime(
 
 /// Runs `job` on a native runtime worker and returns its output with the
 /// writer and reader waits it parked that worker on.
-async fn on_native_worker<T: Clone + Send + Sync + 'static>(
+pub(crate) async fn on_native_worker<T: Clone + Send + Sync + 'static>(
     job: impl Future<Output = T> + Send + 'static,
 ) -> (T, u64, u64) {
     let writer_waits = native_thread_writer_waits();

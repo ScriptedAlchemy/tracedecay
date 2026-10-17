@@ -84,21 +84,22 @@ fn daemon_tool_json<'a>(
 
 /// How long a host hook waits for the daemon to acknowledge its event before
 /// returning control to the agent. The daemon still applies an event whose
-/// acknowledgement arrives later.
+/// acknowledgement arrives later, but the hook cannot report it as delivered.
 const HOOK_EVENT_NOTIFY_TIMEOUT: Duration = Duration::from_millis(750);
 
 fn notify_hook_event<'a>(
     profile: &'a tracedecay_runtime_core::config::ProfileRoot,
     project_root: &'a Path,
     event: tracedecay_hooks::DaemonHookEvent,
-) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+) -> Pin<Box<dyn Future<Output = tracedecay_hooks::HookEventNotifyOutcomeV1> + Send + 'a>> {
     Box::pin(tracing::Instrument::instrument(
         async move {
-            let _ = tracedecay_runtime_core::native_runtime::timeout(
+            tracedecay_runtime_core::native_runtime::timeout(
                 HOOK_EVENT_NOTIFY_TIMEOUT,
                 crate::daemon::notify_hook_event(profile, project_root, event),
             )
-            .await;
+            .await
+            .unwrap_or(tracedecay_hooks::HookEventNotifyOutcomeV1::Unavailable)
         },
         tracing::trace_span!("runtime_ports.notify_hook"),
     ))

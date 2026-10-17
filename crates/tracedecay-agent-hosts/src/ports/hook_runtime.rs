@@ -31,7 +31,7 @@ use std::pin::Pin;
 use serde_json::Value;
 use tracedecay_contracts::ResolvedScope;
 use tracedecay_domain::ProjectId;
-use tracedecay_hooks::DaemonHookEvent;
+use tracedecay_hooks::{DaemonHookEvent, HookEventNotifyOutcomeV1};
 use tracedecay_runtime_core::config::ProfileRoot;
 
 use tracedecay_domain::errors::Result;
@@ -60,11 +60,12 @@ pub type HookScopeResolver = fn(&Path, &ProjectId) -> std::result::Result<Resolv
 
 /// Publishes one legacy daemon hook event of a profile through the root
 /// daemon runtime.
-pub type HookEventNotifier = for<'a> fn(
-    &'a ProfileRoot,
-    &'a Path,
-    DaemonHookEvent,
-) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+pub type HookEventNotifier =
+    for<'a> fn(
+        &'a ProfileRoot,
+        &'a Path,
+        DaemonHookEvent,
+    ) -> Pin<Box<dyn Future<Output = HookEventNotifyOutcomeV1> + Send + 'a>>;
 
 /// Reads the telemetry timing decision a profile's daemon published, without
 /// store I/O.
@@ -98,7 +99,7 @@ pub(crate) use test_runtime::crate_test_runtime;
 
 #[cfg(test)]
 mod test_runtime {
-    use super::{HookRuntimeV1, ProfileRoot, Result, Value};
+    use super::{HookEventNotifyOutcomeV1, HookRuntimeV1, ProfileRoot, Result, Value};
     use std::future::Future;
     use std::path::{Path, PathBuf};
     use std::pin::Pin;
@@ -138,8 +139,8 @@ mod test_runtime {
         _: &'a ProfileRoot,
         _: &'a Path,
         _: tracedecay_hooks::DaemonHookEvent,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-        Box::pin(async {})
+    ) -> Pin<Box<dyn Future<Output = HookEventNotifyOutcomeV1> + Send + 'a>> {
+        Box::pin(async { HookEventNotifyOutcomeV1::Unavailable })
     }
 
     fn timings(_: &ProfileRoot, _: &Path) -> Option<bool> {

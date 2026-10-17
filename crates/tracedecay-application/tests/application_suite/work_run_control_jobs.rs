@@ -40,6 +40,12 @@ fn run() -> RunId {
 }
 
 pub(crate) fn context() -> RequestContext {
+    context_for("pause_run")
+}
+
+/// A request context granted the `capability.work.{operation}` capability
+/// and use case, under the same authority as [`context`].
+pub(crate) fn context_for(operation: &str) -> RequestContext {
     let scope = ResolvedScope::new(
         id::<ProjectId>(PROJECT),
         id::<RepositoryId>(REPOSITORY),
@@ -55,8 +61,8 @@ pub(crate) fn context() -> RequestContext {
         UtcMicros(1),
         UtcMicros(100_000),
         scope.clone(),
-        BTreeSet::from([CapabilityId::new("capability.work.pause_run").unwrap()]),
-        BTreeSet::from([UseCaseId::new("use-case.work.pause_run").unwrap()]),
+        BTreeSet::from([CapabilityId::new(format!("capability.work.{operation}")).unwrap()]),
+        BTreeSet::from([UseCaseId::new(format!("use-case.work.{operation}")).unwrap()]),
         DisclosureClass::Sensitive,
     )
     .unwrap();
@@ -82,7 +88,7 @@ pub(crate) fn authority() -> WorkAuthority {
     .unwrap()
 }
 
-fn route() -> WorkProviderRouteV1 {
+pub(crate) fn route() -> WorkProviderRouteV1 {
     WorkProviderRouteV1::new(
         id::<ProviderId>("provider.work.claude-code-cli"),
         id::<WorkProviderRouteId>("route.run-control-jobs.claude-code.v1"),
@@ -111,37 +117,11 @@ pub(crate) fn leased_attempt_of(run_id: RunId, suffix: &str) -> WorkAttemptV1 {
         id::<ProposalId>("proposal.run-control-jobs"),
     )
     .unwrap();
-    let snapshot = WorkExecutionSnapshot::new(WorkExecutionSnapshotInput {
-        configuration_revision_id: id::<ConfigurationRevisionId>("configuration-revision.rcj.1"),
-        configuration_snapshot_id: id::<ConfigurationSnapshotId>("configuration-snapshot.rcj.1"),
-        effective_behavior_digest: digest('c'),
-        resolution_provenance_digest: digest('d'),
-        route: route(),
-        backend: WorkProviderBackendV1::ClaudeCodeCli,
-        protocol: WorkProviderProtocol::ClaudeStreamJson,
-        model: "claude-test".to_owned(),
-        executable: WorkExecutableReference::new(
-            "executable.claude.code-cli".to_owned(),
-            digest('e'),
-        )
-        .unwrap(),
-        sandbox: WorkSandboxPolicy::Required,
-        approval: WorkApprovalPolicy::Never,
-        filesystem: WorkFilesystemPolicy::WorkspaceWrite,
-        egress: WorkEgressPolicy::Deny,
-        environment_allowlist: BTreeSet::new(),
-        credential_references: BTreeSet::new(),
-        limits: WorkExecutionLimits::new(128_000, 8_192, 16_384, 16_384, 65_536, 1).unwrap(),
-        deadline: UtcMicros(1_000_000),
-        fallback: WorkFallbackTopology::Disabled,
-        topology: tracedecay_domain::safe_work_topology_policy_v1(),
-    })
-    .unwrap();
     let envelope = WorkExecutionEnvelopeV1::new(
         identity.clone(),
         binding.clone(),
         id::<WorkflowOperationRef>("operation.run-control-jobs.execute-provider"),
-        snapshot,
+        execution_snapshot(),
         id::<ProjectId>(PROJECT),
         id::<RepositoryId>(REPOSITORY),
         id::<WorktreeId>(WORKTREE),
@@ -171,6 +151,36 @@ pub(crate) fn leased_attempt_of(run_id: RunId, suffix: &str) -> WorkAttemptV1 {
         None,
         None,
     )
+    .unwrap()
+}
+
+/// The pinned execution snapshot every fixture attempt runs under.
+pub(crate) fn execution_snapshot() -> WorkExecutionSnapshot {
+    WorkExecutionSnapshot::new(WorkExecutionSnapshotInput {
+        configuration_revision_id: id::<ConfigurationRevisionId>("configuration-revision.rcj.1"),
+        configuration_snapshot_id: id::<ConfigurationSnapshotId>("configuration-snapshot.rcj.1"),
+        effective_behavior_digest: digest('c'),
+        resolution_provenance_digest: digest('d'),
+        route: route(),
+        backend: WorkProviderBackendV1::ClaudeCodeCli,
+        protocol: WorkProviderProtocol::ClaudeStreamJson,
+        model: "claude-test".to_owned(),
+        executable: WorkExecutableReference::new(
+            "executable.claude.code-cli".to_owned(),
+            digest('e'),
+        )
+        .unwrap(),
+        sandbox: WorkSandboxPolicy::Required,
+        approval: WorkApprovalPolicy::Never,
+        filesystem: WorkFilesystemPolicy::WorkspaceWrite,
+        egress: WorkEgressPolicy::Deny,
+        environment_allowlist: BTreeSet::new(),
+        credential_references: BTreeSet::new(),
+        limits: WorkExecutionLimits::new(128_000, 8_192, 16_384, 16_384, 65_536, 1).unwrap(),
+        deadline: UtcMicros(1_000_000),
+        fallback: WorkFallbackTopology::Disabled,
+        topology: tracedecay_domain::safe_work_topology_policy_v1(),
+    })
     .unwrap()
 }
 

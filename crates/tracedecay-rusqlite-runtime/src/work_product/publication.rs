@@ -11,12 +11,14 @@ use tracedecay_domain::WorkProductEventV1;
 
 use super::{fold_graph, load_journal, owner_params, recovered_graph_digest, selection_covers};
 use crate::exact_sql::ExactSqlValue;
-use crate::work::{exact_sql_statement, exact_sql_text, registered_work_query};
+use crate::work::{
+    RegisteredWorkWrite, exact_sql_statement, exact_sql_text, registered_work_query,
+};
 
 type PortError = WorkProductEventPortErrorV1;
 
 pub(super) fn publish_in_transaction(
-    transaction: &crate::exact_sql::ExactSqlTransaction,
+    transaction: &impl RegisteredWorkWrite,
     context: &WorkProductPortContextV1,
     event: &WorkProductEventV1,
 ) -> Result<VerifiedWorkGraphVersionV1, PortError> {
@@ -75,7 +77,7 @@ pub(super) fn publish_in_transaction(
     }
 
     transaction
-        .execute(
+        .work_execute(
             exact_sql_statement(
                 "INSERT INTO work_product_graph_versions_v1 (
                     owner_brain_id, owner_profile_id, graph_version, event_sequence,

@@ -7,10 +7,9 @@ use tracedecay_domain::{
 };
 
 use crate::{
-    ApplicationProblem, RequestContext, WorkGraphReadPortV1, WorkProductAttemptAdmissionPortV1,
-    WorkProductAttemptAdmissionV1, WorkProductBindingV1, WorkProductOwnerAuthorizationPortV1,
-    WorkProductRevisionPinsV1, WorkProductSynthesisAdmissionV1, WorkSynthesisAdmissionRecordV1,
-    WorkSynthesisAdmissionV1,
+    ApplicationProblem, RequestContext, WorkGraphReadPortV1, WorkProductAttemptAdmissionV1,
+    WorkProductBindingV1, WorkProductOwnerAuthorizationPortV1, WorkProductRevisionPinsV1,
+    WorkProductSynthesisAdmissionV1, WorkSynthesisAdmissionRecordV1, WorkSynthesisAdmissionV1,
 };
 
 use super::{
@@ -39,8 +38,7 @@ impl<S> WorkProductSynthesisAttemptServiceV1<S>
 where
     S: WorkSynthesisAdmissionStoragePort
         + WorkGraphReadPortV1
-        + WorkProductOwnerAuthorizationPortV1
-        + WorkProductAttemptAdmissionPortV1,
+        + WorkProductOwnerAuthorizationPortV1,
 {
     pub const fn new(storage: S) -> Self {
         Self { storage }
