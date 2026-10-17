@@ -144,7 +144,10 @@ impl WorkProductEventCommitV1 {
 ///
 /// A successful call commits both records in one transaction. There is no
 /// intermediate appended-but-unpublished state for a restart to reconcile.
-pub trait WorkProductEventPortV1: Send + Sync {
+///
+/// It carries no `Send + Sync` bound so a storage scoped to one writer
+/// transaction can implement it.
+pub trait WorkProductEventPortV1 {
     fn replay(
         &self,
         context: &WorkProductPortContextV1,
@@ -422,6 +425,21 @@ impl WorkProductMutationRequestV1 {
             Self::AdmitExecution(request) => &request.mutation,
             Self::LinkAcceptedAttempt(request) => &request.mutation,
             Self::RecordHandoff(request) => &request.mutation,
+        }
+    }
+
+    pub const fn selection(&self) -> &WorkProductSelectionScopeV1 {
+        match self {
+            Self::Create(request) => &request.selection,
+            Self::AddTask(request) => &request.selection,
+            Self::CreateTask(request) => &request.selection,
+            Self::DecideProposal(request) => &request.selection,
+            Self::DecideRelationReplan(request) => &request.selection,
+            Self::ApplyRelationReplan(request) => &request.selection,
+            Self::AcceptTask(request) => &request.selection,
+            Self::AdmitExecution(request) => &request.selection,
+            Self::LinkAcceptedAttempt(request) => &request.selection,
+            Self::RecordHandoff(request) => &request.selection,
         }
     }
 }

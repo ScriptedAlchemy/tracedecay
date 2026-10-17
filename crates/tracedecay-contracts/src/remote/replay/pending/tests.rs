@@ -37,7 +37,7 @@ use crate::remote::replay::{
     RemoteReplayPolicyEvidenceV1, RemoteReplayPolicyPortV1, RemoteReplayProtocolAdapterV1,
     RemoteReplayRefusalV1, RemoteReplayRequestV1, RemoteReplayServiceErrorV1,
     RemoteReplayServiceV1, RemoteReplaySpoolPortV1, RemoteReplaySpoolStateV1, RemoteReplayStateV1,
-    RemoteReplayTransactionErrorV1, RemoteReplayTransactionOutcomeV1,
+    RemoteReplayTransactionFutureV1, RemoteReplayTransactionOutcomeV1,
     RemoteReplayTransactionPortV1, RemoteReplayTransitionReceiptV1, RemoteReplayTransitionV1,
     canonical_remote_event_id_v1, replay_protocol_failure,
 };
@@ -436,24 +436,26 @@ impl RemoteReplayPolicyEvidencePortV1 for FakeAuthority {
 }
 
 impl RemoteReplayTransactionPortV1 for FakeAuthority {
-    fn commit(
-        &self,
-        frame: &RemoteReplayFrameV1,
-        current_writer: &RemoteWriterAuthorityV1,
-    ) -> Result<RemoteReplayTransactionOutcomeV1, RemoteReplayTransactionErrorV1> {
+    fn commit<'a>(
+        &'a self,
+        frame: &'a RemoteReplayFrameV1,
+        current_writer: &'a RemoteWriterAuthorityV1,
+    ) -> RemoteReplayTransactionFutureV1<'a> {
         let commit_sequence = self.commits.fetch_add(1, Ordering::SeqCst) + 1;
         if self.refused.contains(&frame.event_id) {
-            return Ok(RemoteReplayTransactionOutcomeV1::Refused);
+            return Box::pin(std::future::ready(Ok(
+                RemoteReplayTransactionOutcomeV1::Refused,
+            )));
         }
-        Ok(RemoteReplayTransactionOutcomeV1::Admitted(
-            RemoteReplayCommitReceiptV1 {
+        Box::pin(std::future::ready(Ok(
+            RemoteReplayTransactionOutcomeV1::Admitted(RemoteReplayCommitReceiptV1 {
                 event_id: frame.event_id.clone(),
                 writer_fence: current_writer.authority.fence.clone(),
                 commit_sequence: u64::try_from(commit_sequence).unwrap(),
                 committed_at: self.tick(),
                 budget: budget(),
-            },
-        ))
+            }),
+        )))
     }
 }
 
@@ -579,7 +581,7 @@ fn request(
     .unwrap()
 }
 
-fn replay_pending(
+async fn replay_pending(
     authority: &Arc<FakeAuthority>,
     request_id: &str,
 ) -> Result<RemoteReplayPendingReceiptV1, RemoteReplayServiceErrorV1> {
@@ -589,6 +591,7 @@ fn replay_pending(
             &request(request_id, Some(fence(1))),
             &OpaqueRemoteCredential::new(SECRET.to_vec()).unwrap(),
         )
+        .await
         .map(|outcome| outcome.receipt)
 }
 
@@ -600,12 +603,14 @@ fn committed(receipt: &RemoteReplayPendingReceiptV1) -> Vec<&RemoteReplayCommitR
         .collect()
 }
 
-#[test]
-fn a_resend_after_every_frame_is_acknowledged_commits_nothing() {
+#[asupersync::test]
+async fn a_resend_after_every_frame_is_acknowledged_commits_nothing() {
     let frames = frames(2);
     let authority = FakeAuthority::new(frames.clone(), BTreeSet::new());
 
-    let first = replay_pending(&authority, "request.remote-replay-pending").unwrap();
+    let first = replay_pending(&authority, "request.remote-replay-pending")
+        .await
+        .unwrap();
     assert_eq!(
         first
             .acknowledged
@@ -625,7 +630,9 @@ fn a_resend_after_every_frame_is_acknowledged_commits_nothing() {
     assert_eq!(first.stopped_at, None);
     assert_eq!(authority.commits(), 2);
 
-    let again = replay_pending(&authority, "request.remote-replay-pending-again").unwrap();
+    let again = replay_pending(&authority, "request.remote-replay-pending-again")
+        .await
+        .unwrap();
     assert_eq!(committed(&again), committed(&first));
     assert!(
         again
@@ -638,8 +645,8 @@ fn a_resend_after_every_frame_is_acknowledged_commits_nothing() {
     assert_eq!(authority.commits(), 2, "a resend never commits again");
 }
 
-#[test]
-fn a_frame_whose_acknowledgement_was_lost_acknowledges_without_a_commit() {
+#[asupersync::test]
+async fn a_frame_whose_acknowledgement_was_lost_acknowledges_without_a_commit() {
     let frames = frames(2);
     let authority = FakeAuthority::new(frames.clone(), BTreeSet::new());
     let lost = RemoteReplayCommitReceiptV1 {
@@ -656,7 +663,9 @@ fn a_frame_whose_acknowledgement_was_lost_acknowledges_without_a_commit() {
         row.receipt = Some(lost.clone());
     }
 
-    let receipt = replay_pending(&authority, "request.remote-replay-pending").unwrap();
+    let receipt = replay_pending(&authority, "request.remote-replay-pending")
+        .await
+        .unwrap();
     assert_eq!(
         receipt.acknowledged.first(),
         Some(&RemoteReplayPendingFrameV1 {
@@ -674,10 +683,12 @@ fn a_frame_whose_acknowledgement_was_lost_acknowledges_without_a_commit() {
     );
 }
 
-#[test]
-fn a_stale_fence_refuses_even_when_every_frame_is_settled() {
+#[asupersync::test]
+async fn a_stale_fence_refuses_even_when_every_frame_is_settled() {
     let authority = FakeAuthority::new(frames(2), BTreeSet::new());
-    replay_pending(&authority, "request.remote-replay-pending").unwrap();
+    replay_pending(&authority, "request.remote-replay-pending")
+        .await
+        .unwrap();
     let credential = OpaqueRemoteCredential::new(SECRET.to_vec()).unwrap();
 
     for expected in [Some(fence(2)), None] {
@@ -687,6 +698,7 @@ fn a_stale_fence_refuses_even_when_every_frame_is_settled() {
                 &request("request.remote-replay-pending-stale", expected.clone()),
                 &credential,
             )
+            .await
             .map(|outcome| outcome.receipt)
             .expect_err("a guided replay checks the fence before it reports anything");
         assert!(
@@ -704,13 +716,15 @@ fn a_stale_fence_refuses_even_when_every_frame_is_settled() {
     assert_eq!(authority.commits(), 2);
 }
 
-#[test]
-fn a_store_refusal_stops_the_walk_and_a_resend_repeats_the_stop() {
+#[asupersync::test]
+async fn a_store_refusal_stops_the_walk_and_a_resend_repeats_the_stop() {
     let frames = frames(3);
     let authority =
         FakeAuthority::new(frames.clone(), BTreeSet::from([frames[1].event_id.clone()]));
 
-    let first = replay_pending(&authority, "request.remote-replay-pending").unwrap();
+    let first = replay_pending(&authority, "request.remote-replay-pending")
+        .await
+        .unwrap();
     assert_eq!(
         first
             .acknowledged
@@ -746,7 +760,9 @@ fn a_store_refusal_stops_the_walk_and_a_resend_repeats_the_stop() {
     );
     assert_eq!(authority.commits(), 2);
 
-    let again = replay_pending(&authority, "request.remote-replay-pending-again").unwrap();
+    let again = replay_pending(&authority, "request.remote-replay-pending-again")
+        .await
+        .unwrap();
     assert_eq!(committed(&again), committed(&first));
     assert!(again.acknowledged[0].replayed.is_none());
     assert_eq!(
@@ -783,12 +799,14 @@ fn single_request(
     .unwrap()
 }
 
-#[test]
-fn a_single_replay_of_an_acknowledged_frame_reports_its_stored_receipt() {
+#[asupersync::test]
+async fn a_single_replay_of_an_acknowledged_frame_reports_its_stored_receipt() {
     let frames = frames(2);
     let authority = FakeAuthority::new(frames.clone(), BTreeSet::new());
     let credential = OpaqueRemoteCredential::new(SECRET.to_vec()).unwrap();
-    let first = replay_pending(&authority, "request.remote-replay-pending").unwrap();
+    let first = replay_pending(&authority, "request.remote-replay-pending")
+        .await
+        .unwrap();
     let stored = first.acknowledged[0].receipt.clone();
     let expected = json!({"outcome": "already_acknowledged", "receipt": stored});
 
@@ -802,6 +820,7 @@ fn a_single_replay_of_an_acknowledged_frame_reports_its_stored_receipt() {
                 &single_request(request_id, Some(fence(1)), &frames[0].event_id),
                 &credential,
             )
+            .await
             .expect("a single replay of an acknowledged frame answers with its receipt")
             .outcome;
         assert_eq!(
@@ -820,6 +839,7 @@ fn a_single_replay_of_an_acknowledged_frame_reports_its_stored_receipt() {
             ),
             OpaqueRemoteCredential::new(SECRET.to_vec()).unwrap(),
         )
+        .await
         .unwrap();
     let envelope = response
         .result
@@ -870,17 +890,20 @@ fn a_single_replay_of_an_acknowledged_frame_reports_its_stored_receipt() {
             ),
             &credential,
         )
+        .await
         .expect("a collectable frame still answers with its receipt")
         .outcome;
     assert_eq!(serde_json::to_value(&outcome).unwrap(), expected);
     assert_eq!(authority.commits(), 2);
 }
 
-#[test]
-fn a_single_replay_of_an_acknowledged_frame_still_checks_the_fence_and_credential() {
+#[asupersync::test]
+async fn a_single_replay_of_an_acknowledged_frame_still_checks_the_fence_and_credential() {
     let frames = frames(1);
     let authority = FakeAuthority::new(frames.clone(), BTreeSet::new());
-    replay_pending(&authority, "request.remote-replay-pending").unwrap();
+    replay_pending(&authority, "request.remote-replay-pending")
+        .await
+        .unwrap();
     let credential = OpaqueRemoteCredential::new(SECRET.to_vec()).unwrap();
 
     let stale = authority
@@ -893,6 +916,7 @@ fn a_single_replay_of_an_acknowledged_frame_still_checks_the_fence_and_credentia
             ),
             &credential,
         )
+        .await
         .expect_err("a stale fence refuses before the stored receipt is reported");
     assert!(
         matches!(
@@ -912,6 +936,7 @@ fn a_single_replay_of_an_acknowledged_frame_still_checks_the_fence_and_credentia
             ),
             &OpaqueRemoteCredential::new([b'x'; 32].to_vec()).unwrap(),
         )
+        .await
         .expect_err("an unauthenticated caller never reads the stored receipt");
     assert_eq!(
         impostor,
@@ -926,13 +951,15 @@ fn a_single_replay_of_an_acknowledged_frame_still_checks_the_fence_and_credentia
     );
 }
 
-#[test]
-fn a_single_replay_of_a_refused_frame_reports_its_stored_finding() {
+#[asupersync::test]
+async fn a_single_replay_of_a_refused_frame_reports_its_stored_finding() {
     let frames = frames(2);
     let authority =
         FakeAuthority::new(frames.clone(), BTreeSet::from([frames[0].event_id.clone()]));
     let credential = OpaqueRemoteCredential::new(SECRET.to_vec()).unwrap();
-    replay_pending(&authority, "request.remote-replay-pending").unwrap();
+    replay_pending(&authority, "request.remote-replay-pending")
+        .await
+        .unwrap();
     {
         let mut rows = authority.rows.lock().unwrap();
         let row = rows.get_mut(&frames[1].event_id).unwrap();
@@ -966,6 +993,7 @@ fn a_single_replay_of_a_refused_frame_reports_its_stored_finding() {
                     &single_request(request_id, Some(fence(1)), &frame.event_id),
                     &credential,
                 )
+                .await
                 .expect("a single replay of a refused frame answers with its finding")
                 .outcome;
             assert_eq!(
@@ -983,6 +1011,7 @@ fn a_single_replay_of_a_refused_frame_reports_its_stored_finding() {
                 ),
                 OpaqueRemoteCredential::new(SECRET.to_vec()).unwrap(),
             )
+            .await
             .unwrap();
         let envelope = response
             .result
@@ -1009,12 +1038,14 @@ fn a_single_replay_of_a_refused_frame_reports_its_stored_finding() {
     );
 }
 
-#[test]
-fn a_single_replay_of_a_refused_frame_authenticates_before_it_reports_the_finding() {
+#[asupersync::test]
+async fn a_single_replay_of_a_refused_frame_authenticates_before_it_reports_the_finding() {
     let frames = frames(1);
     let authority =
         FakeAuthority::new(frames.clone(), BTreeSet::from([frames[0].event_id.clone()]));
-    replay_pending(&authority, "request.remote-replay-pending").unwrap();
+    replay_pending(&authority, "request.remote-replay-pending")
+        .await
+        .unwrap();
 
     let impostor = authority
         .service()
@@ -1026,6 +1057,7 @@ fn a_single_replay_of_a_refused_frame_authenticates_before_it_reports_the_findin
             ),
             &OpaqueRemoteCredential::new([b'x'; 32].to_vec()).unwrap(),
         )
+        .await
         .expect_err("an unauthenticated caller never reads the stored finding");
     assert_eq!(
         impostor,
@@ -1043,6 +1075,7 @@ fn a_single_replay_of_a_refused_frame_authenticates_before_it_reports_the_findin
             ),
             &OpaqueRemoteCredential::new(SECRET.to_vec()).unwrap(),
         )
+        .await
         .expect_err("a stale fence refuses before the stored finding is reported");
     assert!(
         matches!(

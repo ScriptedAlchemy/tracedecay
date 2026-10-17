@@ -16,7 +16,7 @@ use std::collections::BTreeSet;
 
 use tracedecay_contracts::{
     WorkAttemptStorageError, WorkAttemptStoragePort, WorkRunControlStorageError,
-    WorkRunControlStoragePort, WorkRunControlTransitionPort,
+    WorkRunControlStoragePort, WorkRunControlTransitionPort, WorkRunReservationPort,
 };
 use tracedecay_domain::{
     ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ProjectId,
