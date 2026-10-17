@@ -1340,10 +1340,8 @@ async fn remote_protocol_mount_authenticates_before_json_and_outside_local_admis
             UserProfileId::new("profile.remote-http").expect("remote profile identity"),
         ),
     );
-    let transaction = Arc::new(
-        tracedecay_store_runtime::DaemonRemoteReplayTransactionAuthorityV1::new()
-            .expect("remote replay transaction authority"),
-    );
+    let transaction =
+        Arc::new(tracedecay_store_runtime::DaemonRemoteReplayTransactionAuthorityV1::new());
     let router = tracedecay_daemon_service::build_daemon_remote_protocol_router(
         Arc::clone(&credentials),
         transaction,
